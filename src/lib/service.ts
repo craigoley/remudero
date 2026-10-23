@@ -99,6 +99,8 @@ export interface Route {
    *  needs a synchronous, request-only `grant`. Bypasses scope/tier/sensitivity dispatch entirely —
    *  the handler alone must verify first, fail closed, and use {@link readBoundedRawBody}. */
   selfAuthenticated?: boolean;
+  /** Selected approval operations need bounded bytes and genuine dispatcher provenance, not generic HIGH credentials. */
+  newPathApproval?: true;
 }
 
 /** Push one SSE event or comment. The optional id is a transport field, never JSON data. */
@@ -197,6 +199,40 @@ const VERIFIED_ACTOR = Symbol.for("remudero.service.verifiedActor");
 export function verifiedActor(req: IncomingMessage): string | undefined {
   const actor = (req as unknown as Record<symbol, unknown>)[VERIFIED_ACTOR];
   return typeof actor === "string" ? actor : undefined;
+}
+
+export const NEW_PATH_APPROVAL_BODY_MAX_BYTES = 128 * 1024;
+
+interface OperatorConfirmationEvidence {
+  actor: string;
+  verifiedAt: number;
+  expiresAt: number;
+  highUntil?: number;
+  clock: Clock;
+}
+interface OperatorRequestEvidence extends OperatorConfirmationEvidence { request: IncomingMessage }
+interface NewPathApprovalActionEvidence { proof: OperatorRequestEvidence; route: Route; confirmedPayload?: string }
+
+const operatorSessionEvidence = new WeakMap<object, OperatorConfirmationEvidence>();
+const operatorResolutionEvidence = new WeakMap<IdentityResolution, OperatorRequestEvidence>();
+const operatorGrantEvidence = new WeakMap<IdentityGrant, OperatorRequestEvidence>();
+const newPathApprovalActions = new WeakMap<IncomingMessage, NewPathApprovalActionEvidence>();
+
+/** Display facts only. Authority comes from this request's private verified dispatcher entry, never copied JSON. */
+export function verifiedNewPathApprovalAction(req: IncomingMessage, requireConfirmation: boolean): { actor: string } | undefined {
+  try {
+    const action = newPathApprovalActions.get(req);
+    if (!action || action.proof.request !== req || req.method !== action.route.method ||
+      new URL(req.url ?? "", "http://localhost").pathname !== action.route.path) return undefined;
+    const { proof } = action, now = proof.clock.now();
+    if (!Number.isFinite(now) || now < proof.verifiedAt || now - proof.verifiedAt > 30_000 || now >= proof.expiresAt) return undefined;
+    if (requireConfirmation && (proof.highUntil === undefined || now > proof.highUntil || action.confirmedPayload === undefined ||
+      (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE] !== action.confirmedPayload)) return undefined;
+    return { actor: proof.actor };
+  } catch {
+    // Unreadable clocks, changed request identity and unsupported proof entries cannot confirm an action.
+    return undefined;
+  }
 }
 
 export interface ServiceOptions {
@@ -867,7 +903,18 @@ export async function verifyOperatorSession(
   if (typeof claims.sub !== "string" || !opts.operatorUserIds.includes(claims.sub)) return { ok: false, reason: "unknown_user" };
   const window = opts.stepUpWindowMinutes ?? DEFAULT_OPERATOR_STEP_UP_WINDOW_MINUTES;
   const tier: WriteTier = operatorStepUpIsFresh(claims.fva, claims.iat, nowMs, window) ? "high" : "middle";
-  return { ok: true, sub: claims.sub, tier };
+  const verdict = { ok: true as const, sub: claims.sub, tier };
+  const factors = Array.isArray(claims.fva) && claims.fva.length === 2 &&
+    claims.fva.every(value => typeof value === "number" && Number.isFinite(value) && value >= -1)
+    ? (claims.fva as number[]).filter(value => value >= 0) : [];
+  const issuedAt = typeof claims.iat === "number" && Number.isFinite(claims.iat) ? claims.iat * 1_000 : undefined;
+  const highUntil = tier === "high" && issuedAt !== undefined && issuedAt <= nowMs && factors.length > 0 &&
+    Number.isFinite(window) && window > 0 ? issuedAt + (window - Math.min(...factors)) * 60_000 : undefined;
+  if (Number.isFinite(claims.exp) && (claims.nbf === undefined || (typeof claims.nbf === "number" && claims.nbf * 1_000 <= nowMs))) {
+    operatorSessionEvidence.set(verdict, Object.freeze({ actor: `operator:${claims.sub}`, verifiedAt: nowMs,
+      expiresAt: claims.exp * 1_000, highUntil, clock: opts.clock ?? systemClock }));
+  }
+  return verdict;
 }
 
 /** The operator-session grantor (W1-T4244), via `authorize` only. A failed check is "not mine" (the
@@ -882,18 +929,21 @@ export function operatorSessionIdentityProvider(opts: OperatorSessionOptions): I
       const raw = req.headers[OPERATOR_SESSION_HEADER];
       const token = Array.isArray(raw) ? raw[0] : raw;
       if (!token) return undefined; // not my credential -- answered synchronously, see grantedScopes.
-      return verifyAndResolve(token);
+      return verifyAndResolve(token, req);
     },
   };
 
-  async function verifyAndResolve(token: string): Promise<IdentityResolution | undefined> {
+  async function verifyAndResolve(token: string, req: IncomingMessage): Promise<IdentityResolution | undefined> {
     try {
       const verdict = await verifyOperatorSession(token, opts, clock.now());
       if (!verdict.ok) {
         log("service.operator_session_refused", { reason: verdict.reason });
         return undefined;
       }
-      return { scopes: READ_WRITE, tier: verdict.tier, actor: `operator:${verdict.sub}` };
+      const resolution: IdentityResolution = { scopes: READ_WRITE, tier: verdict.tier, actor: `operator:${verdict.sub}` };
+      const evidence = operatorSessionEvidence.get(verdict);
+      if (evidence) operatorResolutionEvidence.set(resolution, Object.freeze({ ...evidence, request: req }));
+      return resolution;
     } catch (e) {
       // A token that cannot even be decoded is refused and recorded, never thrown into dispatch.
       log("service.operator_session_refused", { reason: "malformed", error: String((e as Error)?.message ?? e) });
@@ -932,7 +982,10 @@ function grantedScopes(
 }
 
 function toGrant(provider: IdentityProvider, resolved: IdentityResolution): IdentityGrant {
-  return { scopes: resolved.scopes, provider: provider.name, tier: resolved.tier, readSensitivity: provider.readSensitivity, actor: resolved.actor };
+  const grant: IdentityGrant = { scopes: resolved.scopes, provider: provider.name, tier: resolved.tier, readSensitivity: provider.readSensitivity, actor: resolved.actor };
+  const evidence = operatorResolutionEvidence.get(resolved);
+  if (evidence) operatorGrantEvidence.set(grant, evidence);
+  return grant;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -1077,6 +1130,18 @@ export function createService(opts: ServiceOptions): Server {
         return;
       }
 
+      if (route?.newPathApproval) {
+        try {
+          await readBoundedRawBody(req, NEW_PATH_APPROVAL_BODY_MAX_BYTES);
+        } catch (error) {
+          if (!(error instanceof RawBodyTooLargeError)) throw error;
+          sendJson(res, 413, { error: "request_body_too_large" });
+          return;
+        }
+        const proof = operatorGrantEvidence.get(granted);
+        if (enforceWriteTiers && route.scope === "write" && proof?.request === req) newPathApprovalActions.set(req, { proof, route });
+      }
+
       // The tier + second-factor gate (W1-T404), additive to the scope check above, a no-op
       // unless BOTH `enforceWriteTiers` is on AND the route declared a tier — OFF by default
       // here, ON in `rmd serve`'s own wiring.
@@ -1098,6 +1163,8 @@ export function createService(opts: ServiceOptions): Server {
             sendJson(res, 403, { error: "confirm_nonce_required" });
             return;
           }
+          const selectedAction = newPathApprovalActions.get(req);
+          if (selectedAction) selectedAction.confirmedPayload = await readRawBody(req);
         }
       }
 
@@ -1111,6 +1178,8 @@ export function createService(opts: ServiceOptions): Server {
       } catch (e) {
         log("service.error", { method, path, error: String((e as Error)?.message ?? e) });
         if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
+      } finally {
+        newPathApprovalActions.delete(req);
       }
       // `.catch`, not a wrapping `try`: the body is an ASYNC function, so a synchronous throw in
       // it rejects this promise exactly as an awaited failure would.
