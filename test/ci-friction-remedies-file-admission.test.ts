@@ -178,13 +178,15 @@ test("new path admission agrees between the real filing precheck and plan lint t
   try {
     mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
     const planPath = join(repo.dir, "plan", "tasks.yaml");writeFileSync(planPath, "[]\n");
-    mkdirSync(join(repo.dir, "src"));writeFileSync(join(repo.dir, "src", "consumer.ts"), "export function consume(approvedFixture: () => void) { return approvedFixture(); }\n");
+    mkdirSync(join(repo.dir, "src"));writeFileSync(join(repo.dir, "src", "consumer.ts"), "export function consume(approvedFixture: () => void) { return; }\n");
     repo.git("add", "plan", "src");repo.git("commit", "-m", "chore(plan): seed lint fixture");const base = repo.git("rev-parse", "HEAD");
-    const { task, facts, context } = approvalFixture("auto");
+    const { task, facts, context } = approvalFixture("auto", { risk: "high", band_meaning: "span", budget_usd: 5 });
+    task.files = [...task.files!, "src/consumer.ts"];
     task.acceptance = [{ claim: "The approved fixture is created", proof: "grep: approved fixture behavior in src/lib/operator-approved-fixture.ts" },
       { claim: "The helper has an existing consumer", proof: "grep: approvedFixture( in src/consumer.ts" }];
     task.risk_ruling!.pin = taskRulingPin(task);
-    const record = { ...facts.record, intentDigest: newPathApprovalIntentDigest(task, APPROVAL_RECORD_PATH)! };
+    const record = { ...facts.record, declaredPaths: [...task.files], intentDigest: newPathApprovalIntentDigest(task, APPROVAL_RECORD_PATH)! };
+    const paths = { ...facts.paths, "src/consumer.ts": { checkout: "present" as const, base: "present" as const } };
     const raw = JSON.parse(JSON.stringify(task));delete raw.sourcePath;
     writeFileSync(join(repo.dir, APPROVAL_RECORD_PATH), JSON.stringify([raw]));repo.git("add", "plan");repo.git("commit", "-m", "chore(plan): file selected fixture");
     let reads = 0;
@@ -194,7 +196,7 @@ test("new path admission agrees between the real filing precheck and plan lint t
       projectPlan: ((plan: { tasks: Task[] }) => new Map(plan.tasks.map(candidate => [candidate.id, { merged: false }]))) as never,
       openPlanShardSlugs: () => [],
       newPathApproval: { clock: context.clock, prepareFacts: async selected => {
-        reads++;return { ...facts, record, currentSourcePath: selected.sourcePath! };
+        reads++;return { ...facts, record, paths, currentSourcePath: selected.sourcePath! };
       } },
     };
     const code = await runTask.lintPlanCommand(["--plan", planPath, "--base", base], deps);
