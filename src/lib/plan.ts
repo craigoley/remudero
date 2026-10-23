@@ -1,4 +1,5 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstat, opendir, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -917,6 +918,117 @@ export function parseNewPathApprovalDraft(text: string, recordPath: string): Tas
   }
   delete task.new_path_approval_ref;
   return task;
+}
+
+export function awaitNewPathApprovalRead<T>(signal: AbortSignal, pending: Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(new Error("selected approval read cancelled"));
+    signal.addEventListener("abort", abort, { once: true });
+    pending.then(value => { signal.removeEventListener("abort", abort);resolve(value); }, error => {
+      signal.removeEventListener("abort", abort);reject(error);
+    });
+    if (signal.aborted) { signal.removeEventListener("abort", abort);abort(); }
+  });
+}
+
+export interface NewPathApprovalCheckout {
+  repoRoot: string;
+  base: string;
+  binding: NewPathApprovalBinding;
+}
+
+function newPathApprovalGit(root: string, args: string[], signal: AbortSignal): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("git", ["--literal-pathspecs", ...args], { cwd: root, encoding: "utf8", signal, timeout: 5_000, maxBuffer: 256 * 1024 },
+      (error, stdout) => error ? reject(error) : resolve(stdout));
+  });
+}
+
+/** Selected directories only; exact case, regular files, symlink ancestors and failed Git reads stay distinct. */
+export async function readNewPathApprovalPaths(task: Task, context: NewPathApprovalCheckout, signal: AbortSignal): Promise<Readonly<Record<string, NewPathApprovalPathEvidence>> | undefined> {
+  try {
+    signal.throwIfAborted();
+    if (newPathApprovalBindingError(context.binding) || !/^[a-f0-9]{40}$/.test(context.base) || !task.files?.length ||
+      task.files.length > 128 || !task.files.every(isCanonicalApprovalPath) || new Set(task.files).size !== task.files.length) return undefined;
+    const root = await awaitNewPathApprovalRead(signal, realpath(context.repoRoot));
+    const origin = (await newPathApprovalGit(root, ["remote", "get-url", "origin"], signal)).trim();
+    const repository = /^(?:https:\/\/github[.]com\/|git@github[.]com:)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:[.]git)?$/.exec(origin)?.[1];
+    if (repository !== context.binding.repository) return undefined;
+    await newPathApprovalGit(root, ["cat-file", "-e", `${context.base}^{tree}`], signal);
+    type State = "present" | "missing" | "unknown";
+    interface Entry { mode: string; type: string; oid: string }
+    const trees = new Map<string, Promise<Map<string, Entry>>>();
+    const baseDirectory = (tree: string): Promise<Map<string, Entry>> => {
+      let pending = trees.get(tree);
+      if (!pending) {
+        pending = newPathApprovalGit(root, ["ls-tree", "-z", tree], signal).then(raw => {
+          const entries = raw.split("\0").filter(Boolean), result = new Map<string, Entry>();
+          if (entries.length > 4_096) throw new Error("selected base directory exceeds its bound");
+          for (const entry of entries) {
+            const match = /^(\d{6}) (blob|tree|commit) ([a-f0-9]{40})\t([^/\0]+)$/.exec(entry);
+            if (!match || result.has(match[4]!)) throw new Error("unreadable selected tree entry");
+            result.set(match[4]!, { mode: match[1]!, type: match[2]!, oid: match[3]! });
+          }
+          return result;
+        });
+        trees.set(tree, pending);
+      }
+      return pending;
+    };
+    const disk = new Map<string, Promise<Set<string>>>();
+    const checkoutDirectory = (path: string): Promise<Set<string>> => {
+      let pending = disk.get(path);
+      if (!pending) {
+        pending = (async () => {
+          const names = new Set<string>();
+          const directory = await opendir(path);
+          for await (const entry of directory) {
+            signal.throwIfAborted();
+            names.add(entry.name);
+            if (names.size > 4_096) throw new Error("selected checkout directory exceeds its bound");
+          }
+          return names;
+        })();
+        disk.set(path, pending);
+      }
+      return pending;
+    };
+    const checkoutState = async (path: string): Promise<State> => {
+      let directory = root;
+      const parts = path.split("/");
+      for (let index = 0; index < parts.length; index++) {
+        const part = parts[index]!, names = await awaitNewPathApprovalRead(signal, checkoutDirectory(directory));
+        if (!names.has(part)) return [...names].some(name => name.toLowerCase() === part.toLowerCase()) ? "unknown" : "missing";
+        const selected = join(directory, part), info = await awaitNewPathApprovalRead(signal, lstat(selected));
+        if (info.isSymbolicLink()) return "unknown";
+        if (index === parts.length - 1) return info.isFile() ? "present" : "unknown";
+        if (!info.isDirectory()) return "unknown";
+        directory = selected;
+      }
+      return "unknown";
+    };
+    const baseState = async (path: string): Promise<State> => {
+      let tree = context.base;
+      const parts = path.split("/");
+      for (let index = 0; index < parts.length; index++) {
+        const part = parts[index]!, entries = await baseDirectory(tree), entry = entries.get(part);
+        if (!entry) return [...entries.keys()].some(name => name.toLowerCase() === part.toLowerCase()) ? "unknown" : "missing";
+        if (index === parts.length - 1) return entry.type === "blob" && ["100644", "100755"].includes(entry.mode) ? "present" : "unknown";
+        if (entry.type !== "tree" || entry.mode !== "040000") return "unknown";
+        tree = entry.oid;
+      }
+      return "unknown";
+    };
+    const paths: Record<string, NewPathApprovalPathEvidence> = Object.create(null);
+    for (const path of task.files) {
+      signal.throwIfAborted();
+      paths[path] = Object.freeze({ checkout: await checkoutState(path), base: await baseState(path) });
+    }
+    return Object.freeze(paths);
+  } catch {
+    // Unknown checkout, identity, cancelled I/O or unsuccessful Git is not proof every path is absent.
+    return undefined;
+  }
 }
 
 /**
