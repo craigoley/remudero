@@ -20,7 +20,7 @@ import { issueRevalidationRunTaskPorts } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { benchmarkNonDispatchSpawn, receiptIdentity } from "#src/lib/benchmark-run.js";
 import type { Config } from "#src/lib/config.js";
-import { readLedgerLines } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
 
 const HOUR = 3_600_000;

@@ -97,9 +97,9 @@ test("W1-T10287: exact-parent collector counts issue revalidation money once and
     assert.equal(spend.pricedSubtotalUsd, 0.25, "only the separately archived valid pass remains priced");
     assert.equal(spend.counts.unlinked, 1);
   }
-  const ambiguous = await read([{ ...owned, passId: otherPass }, { ...owned, passId: otherPass, daemon_run_id: "other" },
+  const ambiguous = await read([{ ...owned, passId: otherPass }, { ...owned, passId: otherPass, phase: "cancelled", exit: null },
     { ...producer, gardener_origin: { ...producer.gardener_origin, passId: otherPass } }]);
-  assert.equal(ambiguous.pricedSubtotalUsd, 0.25);assert.equal(ambiguous.counts.unlinked, 1);
+  assert.equal(ambiguous.pricedSubtotalUsd, 0.5);assert.equal(ambiguous.totalUsd, null, "conflicting completion retains reported money but cannot establish a complete total");
 });
 
 test("W1-T9658: default gardener capture observes unpriced assigned calls", async t => {
