@@ -673,6 +673,7 @@ test("new path admission preserves legacy proposals and independent owner holds"
 test("new path admission refuses missing drifted and unsupported authority before staging", async (t) => {
   await t.test("missing or expired prepared evidence never reaches the staging effect", () => {
     const { task, context, facts, record } = approvalFixture();
+    assert.deepEqual(machineFilingAdmissionViolations(task, context), [], "a refusal control must first admit the genuinely qualified same-task fixture");
     let staged = 0;
     for (const evidence of [undefined, { state: "unknown" as const, reason: "issuer unavailable" },
       { ...facts, record: { ...record, expiresAt: 1_100 } },
