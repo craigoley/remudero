@@ -52,6 +52,25 @@ class RemovedUnverified(Hold):
     """Generated deletion completed, but its final evidence is unavailable."""
 
 
+class NamespaceChanged(Hold):
+    """The same physical directory gained or lost entries while it was read.
+
+    Only the reference scan reads such a directory again (NAMESPACE_RETRIES), and
+    only a whole enumeration that saw no change counts. Everywhere else it is the
+    plain hold its message names.
+    """
+
+
+NAMESPACE_RETRIES = 3
+
+
+def changed(expected, observed, reason="scan-directory-changed"):
+    """dev, inode, type/permissions and owner name the directory; size, times and
+    link count move whenever a sibling is created or removed. Anything beyond the
+    latter is a different or re-permissioned directory and stays a plain hold."""
+    return NamespaceChanged(reason) if observed[:4] == expected[:4] else Hold(reason)
+
+
 class Budget:
     def __init__(self):
         self.started = time.monotonic()
@@ -68,7 +87,8 @@ class Budget:
         self.stage, self.root = stage, str(root)
         self.current = {"stage": stage, "root": str(root), "elapsedMs": 0,
                         "entriesInspected": 0, "childrenEnumerated": 0,
-                        "directoriesEnumerated": 0, "symlinksSeen": 0, "complete": False}
+                        "directoriesEnumerated": 0, "symlinksSeen": 0, "namespaceRetries": 0,
+                        "complete": False}
         self.scans.append(self.current)
 
     def finish_interval(self):
@@ -108,17 +128,21 @@ def checked_directory(path, budget, parent_fd=None, name=None, expected=None):
     budget.check(entries=1)
     operand = path if parent_fd is None else name
     before = os.stat(operand, dir_fd=parent_fd, follow_symlinks=False)
-    if not stat.S_ISDIR(before.st_mode) or expected is not None and identity(before) != expected:
+    if not stat.S_ISDIR(before.st_mode):
         raise Hold("scan-directory-changed")
+    if expected is not None and identity(before) != expected:
+        raise changed(expected, identity(before))
     fd = os.open(operand, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
     try:
         if identity(os.fstat(fd)) != identity(before):
-            raise Hold("scan-directory-changed")
+            raise changed(identity(before), identity(os.fstat(fd)))
         yield fd
         budget.check()
-        if (identity(os.fstat(fd)) != identity(before)
-                or identity(os.stat(operand, dir_fd=parent_fd, follow_symlinks=False)) != identity(before)):
-            raise Hold("scan-directory-changed")
+        after = identity(os.fstat(fd))
+        if after == identity(before):
+            after = identity(os.stat(operand, dir_fd=parent_fd, follow_symlinks=False))
+        if after != identity(before):
+            raise changed(identity(before), after)
     finally:
         os.close(fd)
 
@@ -1036,7 +1060,7 @@ def delegated_references(home, path, depth, expected, candidates, budget):
                 raise ValueError()
             matching_reference(resolved_reference(Path(parent), raw, budget), candidates, budget, shared)
         if identity(path.lstat()) != expected:
-            raise Hold("reference-peer-root-changed")
+            raise changed(expected, identity(path.lstat()), "reference-peer-root-changed")
         budget.peer_probes = getattr(budget, "peer_probes", 0) + 1
         return shared
     except (KeyError, TypeError, ValueError) as error:
@@ -1045,6 +1069,35 @@ def delegated_references(home, path, depth, expected, candidates, budget):
 
 def scan_reference_tree(home, path, depth, candidates, budget, shared, parent_fd=None,
                         name=None, expected=None, allow_peer=True):
+    """Read a churning directory again rather than hold the whole pass.
+
+    Shared temp roots gain and lose siblings constantly. A namespace that moved,
+    or a child that vanished between listing and stat, re-reads this directory
+    from scratch, bounded; only an attempt that saw no change completes, the same
+    proof a first-try success gives. The directory itself vanishing or being
+    is its parent's namespace change; a replaced directory, or a type, permission
+    or owner change, stays a plain hold.
+    """
+    for attempt in range(NAMESPACE_RETRIES + 1):
+        try:
+            return reference_namespace(home, path, depth, candidates, budget, shared,
+                                       parent_fd, name, expected, allow_peer)
+        except NamespaceChanged as error:
+            if attempt == NAMESPACE_RETRIES:
+                raise Hold(str(error)) from error
+            budget.count("namespaceRetries")
+            if expected is not None:
+                try:
+                    current = identity(os.stat(path if parent_fd is None else name,
+                                               dir_fd=parent_fd, follow_symlinks=False))
+                except FileNotFoundError:
+                    raise NamespaceChanged(str(error)) from None
+                if current[:4] != expected[:4]:
+                    raise Hold(str(error)) from error
+                expected = current
+
+
+def reference_namespace(home, path, depth, candidates, budget, shared, parent_fd, name, expected, allow_peer):
     try:
         for entry, child, fd in directory_entries(path, budget, parent_fd, name, expected, progress=budget.progress):
             if entry.is_symlink():
@@ -1073,6 +1126,9 @@ def scan_reference_tree(home, path, depth, candidates, budget, shared, parent_fd
             elif entry.is_dir(follow_symlinks=False) and depth < 8 and entry.name not in PRUNE and not entry.name.endswith(".git"):
                 scan_reference_tree(home, child, depth + 1, candidates, budget, shared,
                                     fd, entry.name, identity(entry.stat(follow_symlinks=False)), allow_peer)
+    except FileNotFoundError as error:
+        # An entry listed a moment ago is gone: this namespace moved under the scan.
+        raise NamespaceChanged("scan-directory-changed") from error
     except PermissionError:
         # A sealed peer census replaces only this unreadable physical subtree,
         # never the rest of the local census, liveness or deletion guards.

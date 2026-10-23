@@ -38,7 +38,7 @@ import { placeTest } from "./test-placement.js";
 import { readInstanceRegistryText } from "./instance-mode.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
 import { loadManagedRepos } from "./managed-repos.js";
-import { workerLedgerFields, type WorkerResult } from "./worker.js";
+import { workerLedgerFields, workerTranscript, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
 import { isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -2547,7 +2547,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           subtype: worker.subtype,
           ...workerLedgerFields(worker),
         });
-        parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"), proposal, currentPlanText);
+        parsed = parseDraftedCandidate(workerTranscript(worker), proposal, currentPlanText);
         if (!parsed) break; // no markers — nothing to lint or usefully retry (handled below)
         parsed = composeDraftStamp(proposal.id, parsed, deps.clock);
         violations = parsed.releaseTaskId ? [] : lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine,
@@ -2584,7 +2584,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
               ...workerLedgerFields(escalated),
             });
             lastWorker = escalated;
-            const candidate = parseDraftedCandidate([escalated.text, escalated.blocks.join("\n")].join("\n"), proposal, currentPlanText);
+            const candidate = parseDraftedCandidate(workerTranscript(escalated), proposal, currentPlanText);
             if (candidate) {
               parsed = composeDraftStamp(proposal.id, candidate, deps.clock);
               violations = parsed.releaseTaskId ? [] : lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine,
@@ -2602,7 +2602,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         const refusal = lastWorker?.usageRefusal;
         // W1-T3350: the four ways a parse can fail are FOUR reasons, not one string, and the
         // counts ride alongside so a rate spike has a shape a reader can act on.
-        const failure = describeDraftParseFailure([lastWorker?.text ?? "", (lastWorker?.blocks ?? []).join("\n")].filter(Boolean).join("\n"));
+        const failure = describeDraftParseFailure(lastWorker ? workerTranscript(lastWorker) : "");
         const error = refusal
           ? `refused by the account before any output: ${refusal.matched}`
           : (failure.reason ?? "no FRAGMENT/STAMP markers in worker output");

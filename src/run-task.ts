@@ -297,7 +297,7 @@ import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueReva
 import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
 import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
-import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
+import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { scoutGardenSpec } from "./lib/scout-gardener.js";
@@ -33261,11 +33261,17 @@ export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: Garden
   return () => (probe ? probe() : true);
 }
 
-/** Build the named garden and run ONE pass of it; resolves 0 once the pass has run (it logs its own failures). */
+/** Run one garden pass; handled domain failures remain failures at the child-process boundary. */
 export function runRegisteredGardenPass(name: RegisteredGardenName, args: readonly string[], ctx: GardenBuildContext, signal: { readonly stopped: boolean } = { stopped: false }): Promise<number> {
-  const run = (pass: RegisteredGardenPass): Promise<number> => Promise.resolve(pass()).then(() => 0);
-  const built = buildRegisteredGarden(name, ctx, { hourly: args.includes(GARDEN_HOURLY_FLAG) });
-  return built instanceof Promise ? built.then((pass) => (signal.stopped ? 0 : run(pass))) : run(built);
+  let failed = false;
+  const observed: GardenBuildContext = { ...ctx, log: (step, extra) => {
+    const kind = classifyGardenerStep(step)?.kind;
+    if (kind === "failed" || kind === "filing_failed" || step === "gardener_overseer.overseer_failed") failed = true;
+    ctx.log(step, extra);
+  } };
+  const run = (pass: RegisteredGardenPass): Promise<number> => Promise.resolve(pass()).then(() => failed ? 1 : 0);
+  const built = buildRegisteredGarden(name, observed, { hourly: args.includes(GARDEN_HOURLY_FLAG) });
+  return Promise.resolve(built).then((pass) => signal.stopped ? 0 : run(pass));
 }
 
 export const GARDEN_REPLAY_DAYS_FLAG = "--days";
@@ -41354,7 +41360,7 @@ export function buildInboxDraftSpawnArgs(args: {
       log: registryRecord,
       readStats: args.draftRoutingReadStats,
       evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
-        const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"), args.proposal, args.currentPlanText);
+        const parsed = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
         const facts = checkoutRepoFacts(args.cwd);
         return { contractFailed: parsed === null,
           clean: parsed !== null && (parsed.releaseTaskId !== undefined || lintDraftedFragment(parsed.fragmentYaml,

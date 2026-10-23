@@ -36,14 +36,20 @@ export function configuredDependencySeedRoot(home = homedir(), env = process.env
   if (override === "") return undefined; // Explicitly disable account preferences for isolated test fixtures.
   if (override) {
     if (!isAbsolute(override)) throw new Error("RMD_DEPENDENCY_SEED_ROOT must be absolute");
-    return override;
+    return plainSeedRoot(override);
   }
   const file = dependencySeedConfigPath(home);
   if (!existsSync(file)) return undefined;
   const config = JSON.parse(readFileSync(file, "utf8")) as { enabled?: boolean; root?: string };
   if (!config.enabled) return undefined;
   if (!config.root || !isAbsolute(config.root)) throw new Error("dependency seed config requires an absolute root");
-  return config.root;
+  return plainSeedRoot(config.root);
+}
+
+/** A URL-encoded root ("Application%20Support") silently starts a second store nothing sweeps. */
+function plainSeedRoot(root: string): string {
+  if (/%[0-9A-Fa-f]{2}/.test(root)) throw new Error(`dependency seed root ${root} is URL-encoded; use the plain file path`);
+  return root;
 }
 
 export function defaultDependencySeedRoot(home = homedir(), platform: NodeJS.Platform = process.platform): string {

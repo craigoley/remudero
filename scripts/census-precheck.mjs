@@ -1151,6 +1151,10 @@ export const PRECHECK_TRIGGERED_SUITES = [
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
+  { testFile: "test/rules/the-root-scratch-ignore-stays-root-only.test.ts",
+    trigger: ({ changed }) => changed.some((p) => [".gitignore", "scripts/census-precheck.mjs",
+      "test/rules/the-root-scratch-ignore-stays-root-only.test.ts"].includes(p)),
+    remedy: "preserve the operator-approved root-only scratch ignore and existing or tracked contents" },
   { testFile: "test/every-ci-census-is-asked-before-the-push.test.ts",
     trigger: ({ changed, readHead, readBase }) => changed.some((p) => [
       "scripts/census-precheck.mjs", "scripts/census-precheck-parity-baseline.json",
