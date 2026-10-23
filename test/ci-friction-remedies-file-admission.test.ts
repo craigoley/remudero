@@ -190,7 +190,7 @@ test("new path admission agrees between the real filing precheck and plan lint t
       loadConfig: (() => ({ root: repo.dir, serve: { newPathApproval: facts.binding } })) as never,
       resolveOwnerRepo: () => ({ owner: "acme", repo: "remudero" }), ghGateway: () => fakeGitHub(),
       projectPlan: ((plan: { tasks: Task[] }) => new Map(plan.tasks.map(candidate => [candidate.id, { merged: false }]))) as never,
-      openPlanShardSlugs: (() => ({ slugs: new Set(), titles: [], unavailable: [] })) as never,
+      openPlanShardSlugs: () => [],
       newPathApproval: { clock: context.clock, prepareFacts: async selected => {
         reads++;return { ...facts, record, currentSourcePath: selected.sourcePath! };
       } },
