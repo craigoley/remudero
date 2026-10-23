@@ -19,6 +19,8 @@ import { assertLintClean, lintTask, sizingViolation, taskRulingPin } from "#src/
 import { loadPlanFromYaml, machineFilingAdmissionViolations, newPathApprovalIntentDigest, newTestPath, type NewPathApprovalBinding, type NewPathApprovalFacts, type NewPathApprovalRecord, type Task } from "#src/lib/plan.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
 import * as approvalPlan from "#src/lib/plan.js";
 import * as service from "#src/lib/service.js";
 import type { IncomingMessage } from "node:http";
@@ -169,6 +171,31 @@ test("a drafted remedy passes the base linter's sizing and admission checks with
 
 const APPROVAL_RECORD_PATH = "plan/tasks.d/W1-T99001-approved-new-path.yaml";
 const APPROVAL_REFERENCE = `npa1_${"A".repeat(43)}`;
+
+test("new path admission preserves legacy proposals and independent owner holds when actual serve routes assemble", async () => {
+  const repo = gitRepo({ kind: "approval-serve-assembly" });
+  try {
+    const { facts } = approvalFixture(), ledgerPath = join(repo.dir, "state", "ledger.ndjson"), planPath = join(repo.dir, "plan", "tasks.yaml");
+    mkdirSync(join(repo.dir, "state"), { recursive: true });mkdirSync(join(repo.dir, "plan"), { recursive: true });
+    writeFileSync(planPath, "[]\n");writeFileSync(ledgerPath, "");
+    const plan = { tasks: [], byId: new Map() };
+    let current: NewPathApprovalBinding | undefined;
+    const deps: ServeDeps = { board: { plan, ledgerPath, github: fakeGitHub() },
+      panelGraph: { root: repo.dir, planPath, ledgerPath, github: { prView: () => null }, statusGithub: fakeGitHub(), ratify: { approve: () => {}, reframe: () => {} } },
+      ledgerPath, issues: { close: () => {} }, fleetControlRoot: repo.dir, questionsRoot: repo.dir,
+      assistantRepository: facts.binding.repository, instances: { coreInstance: facts.binding.instance },
+      githubAppRefresh: { env: {} }, tokens: { read: "fixture-read", write: "fixture-write" }, newPathApprovalConfig: () => current };
+    assert.deepEqual(buildServeRoutes(deps).filter(route => route.path.startsWith("/v1/new-path-approvals/")), []);
+    current = { ...facts.binding };
+    const selected = buildServeRoutes(deps).filter(route => route.path.startsWith("/v1/new-path-approvals/"));
+    assert.equal(selected.length, 4, "the opted-in real assembled table, not an unused issuer factory");
+    assert.equal(existsSync(join(repo.dir, "state", "new-path-approvals-v1")), false, "assembly issues no grant and creates no audit");
+    for (const key of ["instance", "repository"] as const) {
+      current = { ...facts.binding, [key]: "wrong-context" };
+      assert.deepEqual(buildServeRoutes(deps).filter(route => route.path.startsWith("/v1/new-path-approvals/")), []);
+    }
+  } finally { repo.cleanup(); }
+});
 
 test("new path admission refuses missing drifted and unsupported authority before staging with real checkout and pinned-base path reads", async () => {
   const read = (approvalPlan as unknown as { readNewPathApprovalPaths?: typeof approvalPlan.readNewPathApprovalPaths }).readNewPathApprovalPaths;
