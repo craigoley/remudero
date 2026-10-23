@@ -56,7 +56,7 @@ test("test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts: a
   );
   assert.deepEqual(
     evaluate(["src/run-task.ts"], { "src/run-task.ts": 'import { r } from "./cli/registry.js";' }, { "src/run-task.ts": "" }).runs,
-    [[CYCLE]],
+    [["test/rules/scout-config-gardener-failed.test.ts"], [CYCLE]],
   );
 
   // A diff touching neither starts no structural child: no new import, removed imports, or a non-source file.
