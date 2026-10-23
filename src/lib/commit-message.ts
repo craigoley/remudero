@@ -564,7 +564,8 @@ export function commitlintStep(
         : `commitlint: FAIL — ${range.from}..${range.to}\n${(res.stdout + res.stderr).trim()}`,
     };
   } catch (e) {
-    return { name: "commitlint", ok: false, detail: `commitlint: FAIL — ${String((e as Error)?.message ?? e)}` };
+    const detail = String((e as Error)?.message ?? e);
+    return { name: "commitlint", ok: false, detail: detail.startsWith("commitlint: ") ? detail : `commitlint: FAIL — ${detail}` };
   }
 }
 

@@ -91,6 +91,29 @@ test("checkpoint filtering preserves commitlint configuration and names failed e
   assert.match(thrown.detail, /fixture lint execution threw/);
 });
 
+test("checkpoint range read failures retain their diagnostic and never run commitlint", () => {
+  for (const result of [
+    { status: null, stdout: "", stderr: "", error: "spawn git ENOENT" },
+    { status: 128, stdout: "", stderr: "fatal: bad revision fixture-range" },
+  ]) {
+    let reads = 0;
+    const checked = commitlintStep(REPO_ROOT, undefined, (file, args) => {
+      assert.equal(file, "git", "an unreadable range must not reach the lint binary");
+      assert.equal(args[0], "log");
+      reads++;
+      return result;
+    });
+    assert.equal(reads, 1);
+    assert.equal(checked.ok, false);
+    if (result.status === null) {
+      assert.match(checked.detail, /^commitlint: SPAWN FAILURE.*spawn git ENOENT/);
+      assert.doesNotMatch(checked.detail, /FAIL —/);
+    } else {
+      assert.match(checked.detail, /Git range read FAILED \(exit 128\); fatal: bad revision fixture-range/);
+    }
+  }
+});
+
 async function repairRun(t: TestContext, second: PreopenGateResult, repairError = false, initiallyPasses = false) {
   const root = gitRepo({ scope: t });
   const origin = gitRepo({ bare: true, scope: t });
