@@ -889,6 +889,19 @@ test("W1-T10461: gardener source freshness compatibility and fleet budgets remai
   assert.equal(w.body().data.instances[0]!.gardenerSpend!.materializedAt, source.observedAt);
   assert.equal(w.body().sources.find(s => s.name === "analytics:core")!.asOf, historical.asOf);
   assert.equal(w.body().sources.find(s => s.name === "gardener-spend:core")!.state, "fresh");
+  const db = attachReadModel(currentReadModelPath(w.stateDir, "core", LEDGER_PROJECTOR_SCHEMA_VERSION));
+  try {
+    for (const [body, reason] of [["{", "not valid JSON"], [JSON.stringify({ repository: "fixture/recent", source: { ...source, corpusComplete: false } }), "unsupported or incomplete"]]) {
+      db.prepare("UPDATE source_snapshot SET body = ? WHERE instance = ? AND name = ?").run(body, "core", GARDENER_SPEND_SOURCE_NAME);
+      const [reloaded] = createAnalyticsView().materialize({ now: clock.now(), instances: [{ state: { instance: "core" }, db }] });
+      assert.ok(reloaded);
+      assert.equal(reloaded.data.instances[0]!.gardenerSpend!.totalUsd, null, "bad persisted evidence never revives embedded money");
+      const reading = reloaded.sources.find(s => s.name === "gardener-spend:core")!;
+      assert.equal(reading.phase, "failed"); assert.ok(reading.reason!.includes(reason!));
+    }
+    db.prepare("UPDATE source_snapshot SET body = ? WHERE instance = ? AND name = ?")
+      .run(JSON.stringify({ repository: "fixture/recent", source }), "core", GARDENER_SPEND_SOURCE_NAME);
+  } finally { db.close(); }
   const cold = world(t, clock, { names: ["cold"] });
   cold.ticker.acceptSnapshot({ ...fresh, instance: "cold" }); cold.ticker.tick();
   assert.equal(cold.body().data.coverage.counted, 0);

@@ -370,7 +370,7 @@ export function createAnalyticsView(opts: { modelApprovalConfig?: HostModelAppro
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: { instance: string }; db?: ReadModelDb }> }): Array<{ key: string; data: AnalyticsViewData; sources: ViewSource[] }>;
 } {
   const parsed = new WeakMap<ReadModelDb, Map<string, { asOf: string; console: AnalyticsConsoleSource; detailsKey?: string; details?: AnalyticsDetails }>>();
-  const gardenerParsed = new WeakMap<ReadModelDb, Map<string, { asOf: string; repository?: string; source?: GardenerSpendSource; invalid?: true }>>();
+  const gardenerParsed = new WeakMap<ReadModelDb, Map<string, { asOf: string; repository?: string; source?: GardenerSpendSource; error?: string }>>();
   return {
     name: ANALYTICS_VIEW_NAME,
     version: ANALYTICS_VIEW_VERSION,
@@ -428,25 +428,26 @@ export function createAnalyticsView(opts: { modelApprovalConfig?: HostModelAppro
               body.source.observedAt === row.asOf && body.source.corpusComplete === true;
             gardenerHeld.set(instance.instanceId, valid
               ? { asOf: row.asOf, repository: repositoryName(body.repository), source: body.source as GardenerSpendSource }
-              : { asOf: row.asOf, invalid: true });
-          } catch {
-            gardenerHeld.set(instance.instanceId, { asOf: row.asOf, invalid: true });
+              : { asOf: row.asOf, error: "stored independent gardener evidence is unsupported or incomplete" });
+          } catch (error) {
+            gardenerHeld.set(instance.instanceId, { asOf: row.asOf, error: error instanceof SyntaxError
+              ? "stored independent gardener evidence is not valid JSON" : "stored independent gardener evidence could not be read" });
           }
         }
         const captured = row?.asOf ? gardenerHeld.get(instance.instanceId) : undefined;
         if (row) {
           const lagMs = row.asOf ? now - Date.parse(row.asOf) : undefined;
-          const failed = !!row.error || captured?.invalid === true || lagMs !== undefined && (!Number.isFinite(lagMs) || lagMs < 0);
+          const failed = !!row.error || captured?.error !== undefined || lagMs !== undefined && (!Number.isFinite(lagMs) || lagMs < 0);
           const behind = lagMs !== undefined && lagMs > ANALYTICS_STALE_AFTER_MS;
           merged.sources.push({ name: `gardener-spend:${instance.instanceId}`, kind: "analytics", instance: instance.instanceId,
             asOf: row.asOf, budgetMs: ANALYTICS_STALE_AFTER_MS, ...(lagMs !== undefined ? { lagMs: Math.max(0, lagMs) } : {}),
             state: row.asOf ? failed || behind ? "stale" : "fresh" : "unavailable",
-            ...(failed ? { phase: "failed", reason: row.error ?? "independent gardener evidence is invalid" }
+            ...(failed ? { phase: "failed", reason: row.error ?? captured?.error ?? "independent gardener evidence is invalid" }
               : behind ? { phase: "behind", reason: "independent gardener evidence is past its refresh bound" } : {}) });
         }
         // Once an independent row exists, even a failed first capture forbids embedded fallback.
         // Old pre-upgrade rows keep their historical clock; a cold history may still show recent money.
-        const source = row ? captured?.invalid ? { reason: "invalid_registry" as const } : captured?.source ?? { reason: "ledger_unavailable" as const }
+        const source = row ? captured?.error ? { reason: "invalid_registry" as const } : captured?.source ?? { reason: "ledger_unavailable" as const }
           : snapshot?.console.gardenerSpendSource;
         if (source === undefined) return instance;
         const repository = instance.repository ?? captured?.repository;
