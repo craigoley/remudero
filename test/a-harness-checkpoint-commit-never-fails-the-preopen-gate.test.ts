@@ -3,7 +3,7 @@ import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync,
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
-import { commitlintStep, emitterChecksStep } from "#src/lib/commit-message.js";
+import { commitlintStep, emitterChecksStep, stripWipMarker } from "#src/lib/commit-message.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import type { PreopenGateResult } from "#src/lib/preopen-gate.js";
 import type { WorkerResult } from "#src/lib/worker.js";
@@ -11,6 +11,22 @@ import { runTask } from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+test("checkpoint markers become final conventional subjects without losing scope or breaking changes", () => {
+  for (const [subject, expected] of [
+    ["  chore(checkpoint): retained work  ", "chore: retained work"],
+    ["chore(checkpoint)!: retained work", "chore!: retained work"],
+    ["wip: legacy work", "chore: legacy work"],
+    ["wip(worker): scoped legacy work", "chore(worker): scoped legacy work"],
+    ["wip(worker)!: breaking legacy work", "chore(worker)!: breaking legacy work"],
+    ["feat(wip): unfinished feature", "feat: unfinished feature"],
+    ["FIX(wip)!: breaking repair", "fix!: breaking repair"],
+    ["  fix(checkpoint): finished repair  ", "fix(checkpoint): finished repair"],
+    ["ordinary subject", "ordinary subject"],
+  ] as const) {
+    assert.equal(stripWipMarker(subject), expected, subject);
+  }
+});
 
 function fixture(t: { after: (fn: () => void) => void }) {
   const repo = gitRepo();
