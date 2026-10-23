@@ -7,8 +7,10 @@
  * resume the worker to finish, and never title a PR after a checkpoint. The first stop always
  * resumes; whether a later stop resumes again is the W1-T7096 progress judge's call.
  */
-import { checkCommitMessage, CONVENTIONAL_LIMITS, fitConventionalTitle, normalizeSubjectCase } from "./commit-message.js";
+import { checkCommitMessage, CONVENTIONAL_LIMITS, fitConventionalTitle, isWipSubject, normalizeSubjectCase, stripWipMarker } from "./commit-message.js";
 import type { FixProgressInput, FixProgressJudge } from "./fix-progress-judge.js";
+
+export { isWipSubject, stripWipMarker };
 
 /** One stop on a checkpoint tip: its 1-based ordinal, the checkpoint subject and its `remaining` line.
  *  `workingTree` is the round's uncommitted diff stat (W1-T9030): a harness-owned build never commits, so
@@ -106,31 +108,10 @@ export async function judgeCheckpointStop(
   return decideCheckpointResume(stops, head, stops.length > 1 ? seams.makeJudge() : undefined);
 }
 
-const WIP_HEAD = /^(?:wip(\([^)]*\))?|([a-z]+)\(wip\))(!?):\s*/i;
-const CHECKPOINT_HEAD = /^chore\(checkpoint\)(!?):\s*/i;
-
 /** A conventional header for unfinished work; the body/context/trailers remain the caller's. */
 export function checkpointCommitSubject(reason: string): string {
   const subject = normalizeSubjectCase(reason.replace(/\s+/g, " ").trim().replace(/\.+$/, "")) || "retain unfinished work";
   return fitConventionalTitle(`chore(checkpoint): ${subject}`).header;
-}
-
-/** Only `chore(checkpoint)` is reserved; `fix(checkpoint)` is final. Legacy wip markers still resume. */
-export function isWipSubject(subject: string): boolean {
-  return CHECKPOINT_HEAD.test(subject.trim()) || WIP_HEAD.test(subject.trim());
-}
-
-/** `chore(wip): x` -> `chore: x`; `wip: x` -> `chore: x`; `wip(s): x` -> `chore(s): x`. */
-export function stripWipMarker(subject: string): string {
-  const trimmed = subject.trim();
-  const checkpoint = CHECKPOINT_HEAD.exec(trimmed);
-  if (checkpoint) return `chore${checkpoint[1]}: ${trimmed.slice(checkpoint[0].length)}`;
-  const match = WIP_HEAD.exec(trimmed);
-  if (!match) return trimmed;
-  const rest = trimmed.slice(match[0].length);
-  const type = match[2] ?? "chore";
-  const scope = match[1] ?? "";
-  return `${type.toLowerCase()}${scope}${match[3]}: ${rest}`;
 }
 
 /** The `remaining` line of a checkpoint's `[remudero-context]` block, unless it says nothing is left. */
