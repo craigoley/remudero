@@ -29,3 +29,11 @@
       - "released by the operator with rmd approve"
     judged_at: "2026-10-23T18:24:21.805Z"
     pin: "9836a3460e8e5d99489943c6d8538dd437d2a47eb8ff20a475282bb3e7116b33"
+  amendment: |
+    Operator decisions, 2026-10-23: retain the 4096 identity backstop; replace only the original greater-than-5134 test precondition with an exact-4096 assertion.
+    The approved source companion is src/run-task.ts. Native repair retains ownership.
+    Preserve every original functional history assertion, including the original non-undefined history assertion,
+    and all added corpus, exact per-task tally and overflow UNKNOWN controls. A structural production repair
+    must satisfy the healthy 5134-start history while the 4096 constant remains fixed; merely increasing it
+    to 8192 is not approved. Preserve concurrent main functionality, including the existing retro exports.
+    No higher limit, weaker UNKNOWN refusal, gate or resource-policy change, restart or claim change is authorized.
