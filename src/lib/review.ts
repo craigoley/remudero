@@ -78,7 +78,7 @@ export type PostableReviewState = ReviewState;
  *  commits, provider choice and model sampling. Bumped to v2 (W1-T3580) because W1-T3564 changed proof-execution
  *  semantics (the closed console suite registry) without advancing this revision, so a v1 terminal cached before
  *  that change stayed an exact cache hit and replayed instead of executing the newly routable proofs. */
-export const REVIEW_ENGINE_REVISION = "promised-followups-snapshot-v3";
+export const REVIEW_ENGINE_REVISION = "explained-semantic-failures-v1";
 /** Changes both exact-head identities when the proof loader's verdict semantics change. */
 const PROOF_LOAD_REVISION = "cannot-load-v1";
 
