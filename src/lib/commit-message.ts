@@ -189,9 +189,7 @@ export function checkCommitMessage(
     });
   }
 
-  // `type(scope): subject`, split like commitlint's own parser. No `type:` prefix, or a
-  // capitalised type (`type-case`, see CONVENTIONAL_RULE_COVERAGE), falls back to type-empty
-  // plus checking the whole header as the subject.
+  // Split `type(scope): subject` like commitlint; a missing `type:` prefix or capitalised type (`type-case`, see CONVENTIONAL_RULE_COVERAGE) falls back to type-empty plus checking the whole header as the subject.
   const match = header.match(/^([a-z][a-z0-9-]*)(?:\([^)]*\))?!?:\s*(.*)$/);
   const type = match ? match[1] : "";
   const subject = (match ? match[2] : header).trim();

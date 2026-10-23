@@ -100,6 +100,7 @@
   "src/lib/ci-parity.ts": 1000,
   "src/lib/claude-model-health.ts": 20,
   "src/lib/cli-args.ts": 20,
+  "src/lib/commit-message.ts": 180,
   "src/lib/compaction.ts": 500,
   "src/lib/companion-paths.ts": 50,
   "src/lib/containment.ts": 750,
