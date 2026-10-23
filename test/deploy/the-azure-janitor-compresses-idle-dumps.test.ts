@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { gunzipSync } from "node:zlib";
+import { gunzipSync, zstdDecompressSync } from "node:zlib";
 
 import { age, run } from "#test/helpers/host-cleanup-fixture.js";
 import { ageDays, cloneAt, phaseFixture } from "#test/helpers/host-cleanup-phases.js";
@@ -61,6 +61,15 @@ test("outside any repository an idle dump is gzipped beside itself, an old one e
 
 test("Codex sessions are compressed to the resumable .jsonl.zst once idle and never deleted, however old", () => {
   const fx = phaseFixture();
+  // Supply a real codec even on review hosts without the zstd CLI; exercise both shell directions.
+  const bin = join(fx.root, "bin");
+  writeFileSync(join(bin, "zstd"), `#!${process.execPath}
+const { readFileSync } = require("node:fs");
+const { zstdCompressSync, zstdDecompressSync } = require("node:zlib");
+const args = process.argv.slice(2);
+const input = readFileSync(args.at(-1));
+process.stdout.write(args.includes("-dc") ? zstdDecompressSync(input) : zstdCompressSync(input));
+`, { mode: 0o755 });
   const sessions = join(fx.state, "agent-codex", "sessions", "2026", "09", "28");
   const bigOld = join(sessions, "rollout-2026-09-28T10-00-00-aaaa.jsonl");
   const body = dump(bigOld, 6 * MB);
@@ -73,19 +82,26 @@ test("Codex sessions are compressed to the resumable .jsonl.zst once idle and ne
   const mtime = statSync(bigOld).mtimeMs;
 
   // the default resumable root on the host layout is <state disk>/agent-codex/sessions
-  const r = run(fx, { ...fx.env, RMD_CLEANUP_PRESERVE_ROOTS: "", RMD_CLEANUP_DUMP_ROOTS: "" });
+  const env = { ...fx.env, PATH: `${bin}:${process.env.PATH}`, RMD_CLEANUP_PRESERVE_ROOTS: "", RMD_CLEANUP_DUMP_ROOTS: "" };
+  const r = run(fx, env);
   assert.equal(r.status, 0, r.stderr + r.stdout);
   const packed = `${bigOld}.zst`;
   assert.equal(existsSync(packed), true, r.stdout);
   assert.equal(existsSync(bigOld), false, r.stdout);
   assert.equal(existsSync(`${bigOld}.gz`), false, "a resumable root is never gzipped: Codex cannot resume .jsonl.gz");
   assert.match(packed, /rollout-[^/]+\.jsonl\.zst$/, "the name Codex resumes");
-  assert.deepEqual(execFileSync("zstd", ["-q", "-dc", packed], { maxBuffer: 64 * MB }), body, "the .zst reads back byte for byte");
+  assert.deepEqual(zstdDecompressSync(readFileSync(packed)), body, "the .zst reads back byte for byte");
   assert.equal(Math.round(statSync(packed).mtimeMs / 1000), Math.round(mtime / 1000), "its modification time is kept");
   assert.equal(existsSync(smallOld), true, `a resumable root never deletes a session:\n${r.stdout}`);
   assert.equal(existsSync(recent), true, "a session written within six hours is left as it is");
   assert.doesNotMatch(r.stdout, /REMOVE .*agent-codex/);
   assert.match(r.stdout, new RegExp(`reclaim-total dumps-zstd ${fx.state}/agent-codex/sessions: reclaimed`));
+
+  ageDays(packed, 100);
+  const again = run(fx, env);
+  assert.equal(again.status, 0, again.stderr + again.stdout);
+  assert.deepEqual(zstdDecompressSync(readFileSync(packed)), body, "an old compressed session remains resumable on later passes");
+  assert.equal(existsSync(smallOld), true, "later passes also retain old uncompressed sessions");
 });
 
 test("a dump whose compressed copy does not read back byte for byte is kept, and no partial copy is left", () => {
