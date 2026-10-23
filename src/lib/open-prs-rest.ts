@@ -1266,6 +1266,18 @@ function restJobObservation(x: { status?: string | null; name?: string | null; i
   };
 }
 
+export function activeCiRerunEvidence(raw: unknown, headSha: string): WorkflowRunObservation["activeCiRerun"] {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const run = raw as Record<string, unknown>;
+  if (!/^[a-f0-9]{40}$/.test(headSha) || run.head_sha !== headSha ||
+      run.path !== ".github/workflows/ci.yml" || run.status !== "in_progress" ||
+      (run.conclusion !== null && run.conclusion !== undefined && run.conclusion !== "") ||
+      typeof run.id !== "number" || !Number.isSafeInteger(run.id) || run.id <= 0 ||
+      typeof run.run_attempt !== "number" || !Number.isSafeInteger(run.run_attempt) || run.run_attempt <= 1 ||
+      typeof run.run_started_at !== "string" || !Number.isFinite(Date.parse(run.run_started_at))) return undefined;
+  return { headSha, runId: run.id, attempt: run.run_attempt, startedAt: run.run_started_at };
+}
+
 /** Observations for one head: every workflow run on it, with jobs attached to the runs that have
  *  already concluded. A run still in progress is reported without jobs, since the predicate cannot
  *  fire on it. Throws only if the run listing itself fails; a per-run jobs failure leaves that run's
@@ -1290,14 +1302,15 @@ function* workflowRunObservationSteps(
   suspects: StuckRunSuspects,
 ): GhReadSteps<WorkflowRunObservation[]> {
   const listing = (yield* ghRead(fetch, runsForHeadRestArgs(owner, repo, headSha))) as {
-    workflow_runs?: ReadonlyArray<{ id?: number; run_attempt?: number; conclusion?: string | null }>;
+    workflow_runs?: ReadonlyArray<Record<string, unknown> & { id?: number; run_attempt?: number; conclusion?: string | null }>;
   };
   const runs = listing?.workflow_runs ?? [];
   const out: WorkflowRunObservation[] = [];
   for (const run of runs) {
     const conclusion = typeof run.conclusion === "string" ? run.conclusion : undefined;
     if (!runHasConcluded(conclusion) || typeof run.id !== "number") {
-      out.push({ conclusion });
+      const activeCiRerun = activeCiRerunEvidence(run, headSha);
+      out.push({ conclusion, ...(activeCiRerun ? { activeCiRerun } : {}) });
       continue;
     }
     const key = typeof run.run_attempt === "number" ? `${owner}/${repo}#${run.id}@${run.run_attempt}` : undefined;

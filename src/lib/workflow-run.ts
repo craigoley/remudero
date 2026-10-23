@@ -23,6 +23,7 @@ export interface WorkflowRunJobObservation {
 
 /** One workflow RUN plus its jobs' OWN statuses — the raw input the stalled-run predicate reads. */
 export interface WorkflowRunObservation {
+  activeCiRerun?: { headSha: string; runId: number; attempt: number; startedAt: string };
   /** The run's OWN conclusion — GitHub populates this ONLY once the run itself has concluded
    *  (`"success"`, `"failure"`, `"cancelled"`, `"startup_failure"`, ...). `undefined`/empty means
    *  the run has not concluded — still queued or in progress. */
@@ -33,3 +34,4 @@ export interface WorkflowRunObservation {
    *  "GitHub scheduled nothing" instead of "we did not check". */
   jobs?: ReadonlyArray<WorkflowRunJobObservation>;
 }
+

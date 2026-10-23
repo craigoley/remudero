@@ -7037,22 +7037,30 @@ function requiredCheckGate(
   return { all, knownRequired, gate };
 }
 
-/** W1-T4054 — when checks began pending on this head: the EARLIEST start among the entries that keep
- *  {@link checksStateFromRollup} at "pending", over the same gate. A push, comment or label moves the
- *  PR's `updated_at` but not a check's start, so this is the age of the CI itself. `undefined` when the
- *  gate is red or green, or no pending entry carries a start, so `pendingAgeMinutes` keeps its fallback. */
+/** W1-T4054 — earliest pending required start, so PR activity cannot reset the CI clock.
+ * A missing ci-gate may use a unique verified same-head CI rerun; ambiguity keeps the fallback.
+ * Red/green gates date no pending state. Without rerun evidence the original fallback remains. */
 export function checksPendingSinceFromRollup(
   rollup: RollupCheckEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined,
+  context?: { headSha: string; workflowRuns?: readonly WorkflowRunObservation[] },
 ): string | undefined {
+  const required = requiredContexts === undefined ? undefined : [...requiredContexts];
+  const gate = requiredCheckGate(rollup, required).gate;
   let earliest: string | undefined;
-  for (const c of requiredCheckGate(rollup, requiredContexts).gate) {
+  for (const c of gate) {
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
     if (REQUIRED_CHECK_FAIL.has(s)) return undefined;
     if (REQUIRED_CHECK_OK.has(s) || !c.startedAt) continue;
     if (earliest === undefined || Date.parse(c.startedAt) < Date.parse(earliest)) earliest = c.startedAt;
   }
-  return earliest;
+  if (earliest !== undefined || !context || required === undefined || !required.includes(CI_GATE_CHECK_NAME) ||
+      gate.some((check) => (check.name ?? check.context) === CI_GATE_CHECK_NAME) ||
+      required.some((name) => name !== CI_GATE_CHECK_NAME && name !== REVIEW_CONTEXT) ||
+      checksStateFromRollup(rollup, required) !== "pending") return earliest;
+  const unresolved = (context.workflowRuns ?? []).filter((run) => !run.conclusion);
+  const evidence = unresolved.length === 1 ? unresolved[0]?.activeCiRerun : undefined;
+  return evidence?.headSha === context.headSha ? evidence.startedAt : undefined;
 }
 
 /** W1-T1223 — one required check whose LATEST attempt is CANCELLED. `checksState` stays "red"

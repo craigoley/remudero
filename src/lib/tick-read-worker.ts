@@ -2463,7 +2463,8 @@ export function* openPrViewSteps(
       reviewVerdictPostedAt,
       checksState,
       // W1-T4054: the pending check's own start, so a push, comment or label never resets the age.
-      checksPendingSince: checksPendingSinceFromRollup(pr.statusCheckRollup, requiredContexts),
+      checksPendingSince: checksPendingSinceFromRollup(pr.statusCheckRollup, requiredContexts,
+        { headSha: pr.headRefOid, workflowRuns: workflowRuns.get(pr.number) }),
       unmetCriteria: reviewState === "failure" ? unmetFromLedger(ledger, unmetKey, pr.url) : [],
       // W1-T440: whether a `Remudero-Task:` trailer resolved a task id AT ALL — i.e. whether
       // `unmetCriteria` above is attributable to a plan task. The synthetic key can populate it
