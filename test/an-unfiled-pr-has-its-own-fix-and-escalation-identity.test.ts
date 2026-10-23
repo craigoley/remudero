@@ -55,7 +55,7 @@ test("unit test: test/an-unfiled-pr-has-its-own-fix-and-escalation-identity.test
   assert.equal(fixLedgerTaskIdFor(second), "PR-9306");
   assert.equal(fixRoundTally(ledger, fixLedgerTaskIdFor(first), HEAD_A).strikes, 2);
   assert.equal(fixRoundTally(ledger, fixLedgerTaskIdFor(second), HEAD_A).strikes, 0, "the second PR inherits none of the first's strikes");
-  assert.equal(fixLedgerTaskIdFor({ prNumber: 1 }), undefined, "a PR with no id has no strike history to read");
+  assert.equal(fixLedgerTaskIdFor({ prNumber: 1 }), "PR-1", "a taskless PR reads the key its fix rows carry");
 });
 
 test("unit test: test/an-unfiled-pr-has-its-own-fix-and-escalation-identity.test.ts — a PR with a real task id keeps its task-keyed strikes", () => {
