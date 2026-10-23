@@ -5435,10 +5435,10 @@ export async function runDaemon(
       log("daemon.retro_trigger.deferral_persisting", {
         reason,
         reason_class: reasonClass,
-        first_deferred_at: new Date(episode.firstAtMs).toISOString(),
+        first_deferred_at: fixedClock(episode.firstAtMs).iso(),
         observations: episode.observations,
         expected_interval_ms: expectedMs,
-        last_retro_at: at.length > 0 ? new Date(at[at.length - 1]!).toISOString() : null,
+        last_retro_at: at.length > 0 ? fixedClock(at[at.length - 1]!).iso() : null,
       });
     } catch (e) {
       log("daemon.retro_trigger.deferral_persisting_unread", { error: String((e as Error)?.message ?? e) });
