@@ -304,7 +304,9 @@ the full state disk. A folder of units that is held only because a child is live
 open, mounted or otherwise held is descended, so each child is judged on its own.
 A folder holding an instance's protected checkout (`rmd/<key>/remudero` or `serve-repo`)
 is held whole. The 6-hourly service-user pass judges only what that user owns;
-the hourly root pass runs retention only. Dump housekeeping follows the Mac rule
+the hourly root pass sweeps temporary/scratch roots and also runs retention.
+Docker and containerd stores are held by name even when idle; nested coverage and
+dump housekeeping leave their data intact. Dump housekeeping follows the Mac rule
 below: only a file of at least `dump_min_mb` is a dump, and only a `.gz` or `.zst` the
 janitor wrote (its receipt `janitor-compressed.tsv`) expires in compressed form. Nothing
 in a repository or an installed package or toolchain tree is touched: a venv (`pyvenv.cfg`),

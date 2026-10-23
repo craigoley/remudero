@@ -707,7 +707,7 @@ ruling_namespace() {   # true when $1 is, or is inside, a namespace under an ope
 scratch_guard() {
   local p="$1" protected parent
   case "${p##*/}" in
-    swapfile|lost+found|rmd|worktrees|tmp|npm-cache|node-compile-cache|node-v*-linux-x64*|tsx-*|.remudero-coverage|state)
+    swapfile|lost+found|rmd|worktrees|tmp|npm-cache|node-compile-cache|node-v*-linux-x64*|tsx-*|.remudero-coverage|state|docker|containerd)
       log "KEEP $p: protected scratch name"; return 1 ;;
   esac
   if [ -L "$p" ]; then log "KEEP $p: symbolic link"; return 1; fi
@@ -1137,7 +1137,7 @@ sweep_nested_coverage() {
     bytes="$(du -sk -- "$p" 2>/dev/null | awk '{print $1 * 1024}')"
     log "REMOVE $p: nested coverage scratch with no lock, ${bytes:-unknown} bytes"
     act rm -rf -- "$p" && tally "coverage $root" "$bytes"
-  done < <(find "$root" -xdev -maxdepth 6 \( -name .git -o -name node_modules \) -prune -o \
+  done < <(find "$root" -xdev -maxdepth 6 \( -name .git -o -name node_modules -o -name docker -o -name containerd \) -prune -o \
              -type d -name 'rmd-c-*' -print -prune 2>/dev/null)
 }
 ARCHIVE_OK=0
@@ -1645,7 +1645,7 @@ dump_excluded() {   # dump_excluded <file> <root>
   local d="${1%/*}" stop="$2" x
   while :; do
     if [ -e "$d/.git" ] || [ -e "$d/pyvenv.cfg" ] || { [ -f "$d/HEAD" ] && [ -d "$d/objects" ] && [ -d "$d/refs" ]; }; then return 0; fi
-    case "${d##*/}" in node_modules|site-packages|dist-packages|*.dist-info|*.egg-info|.cargo|.rustup|.venv|venv) return 0 ;; esac
+    case "${d##*/}" in docker|containerd|node_modules|site-packages|dist-packages|*.dist-info|*.egg-info|.cargo|.rustup|.venv|venv) return 0 ;; esac
     case "$d/" in */lib/python[0-9]*/*|*/pkg/mod/*) return 0 ;; esac
     for x in "$d"/lib/python[0-9]*; do [ -d "$x" ] && return 0; done
     [ "$d" = "$stop" ] && return 1
@@ -1658,7 +1658,7 @@ dump_walk() {   # dump_walk <root> <unit> <resumable 0|1>
   local root="$1" unit="$2" only="$3" f bytes idle_m="$IDLE_MINUTES" keep_m=$(( DUMP_RETAIN_DAYS * 1440 ))
   local min_c=$(( DUMP_MIN_MB * 1048576 - 1 ))
   local -a plain=(-name "*.json") packed=(-name "*.json.gz" -o -name "*.json.zst")
-  local -a prune=(\( -name node_modules -o -name .git -o -name site-packages -o -name dist-packages -o -name .venv -o -name venv
+  local -a prune=(\( -name docker -o -name containerd -o -name node_modules -o -name .git -o -name site-packages -o -name dist-packages -o -name .venv -o -name venv
                      -o -name '*.dist-info' -o -name '*.egg-info' -o -name .cargo -o -name .rustup -o -path '*/lib/python[0-9]*'
                      -o -path '*/pkg/mod' \) -prune)
   local s

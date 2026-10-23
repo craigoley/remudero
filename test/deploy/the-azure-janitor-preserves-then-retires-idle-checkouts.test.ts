@@ -11,7 +11,7 @@ import { chmodSync, existsSync, lutimesSync, mkdirSync, readFileSync, readdirSyn
 import { join } from "node:path";
 
 import { age, git, run } from "#test/helpers/host-cleanup-fixture.js";
-import { ageDays, cloneAt, commitFile, phaseFixture, type PhaseFixture } from "#test/helpers/host-cleanup-phases.js";
+import { ageDays, cloneAt, commitFile, phaseFixture, treeSnapshot, type PhaseFixture } from "#test/helpers/host-cleanup-phases.js";
 
 function units(fx: PhaseFixture): string {
   const dir = join(fx.root, "units");
@@ -385,4 +385,42 @@ test("under the operator ruling of 2026-10-23 only idle operator/wt-* worktrees 
   for (const kept of [liveWt, buildOut, repair, home, bundle, dumpFile]) assert.equal(existsSync(kept), true, `${kept}\n${r.stdout}`);
   assert.equal(existsSync(`${dumpFile}.gz`), false, "no dump action anywhere inside the namespace");
   assert.doesNotMatch(r.stdout, new RegExp(`(PRUNE|REMOVE) ${ns}/(issue-repairs-oct6|a-home|operator/build-out|operator/logs)`));
+});
+
+
+test("Docker and containerd stores stay intact when idle in full and temp-only passes", () => {
+  for (const onlyTmp of ["0", "1"]) {
+    const fx = phaseFixture();
+    const stores = ["docker", "containerd"].map(name => join(fx.disk, name));
+    for (const store of stores) {
+      const payload = join(store, "data");
+      mkdirSync(join(payload, "rmd-c-0123456789ab"), { recursive: true });
+      writeFileSync(join(payload, "rmd-c-0123456789ab", "cache"), "runtime data\n");
+      writeFileSync(join(payload, "old.json"), Buffer.alloc(6 * 1024 * 1024, 120));
+      ageDays(store, 20);
+    }
+    const before = stores.map(treeSnapshot);
+    const disposable = join(fx.disk, "rmd-disposable");
+    mkdirSync(disposable);
+    writeFileSync(join(disposable, "data"), "idle scratch\n");
+    ageDays(disposable, 20);
+    const r = run(fx, {
+      ...fx.env, RMD_CLEANUP_ONLY_TMP: onlyTmp,
+      RMD_CLEANUP_SCRATCH_ROOTS: fx.disk, RMD_CLEANUP_SCRATCH_PARENTS: "",
+      RMD_CLEANUP_NESTED_COVERAGE_ROOTS: fx.disk,
+      RMD_CLEANUP_PRESERVE_ROOTS: fx.disk, RMD_CLEANUP_DUMP_ROOTS: stores.join(":"),
+      RMD_CLEANUP_DUMP_RESUMABLE_ROOTS: "",
+    });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(disposable), false, `positive control: the idle scratch unit was swept
+${r.stdout}`);
+    for (const [i, store] of stores.entries()) {
+      assert.equal(existsSync(store), true, `${store} must remain
+${r.stdout}`);
+      assert.deepEqual(treeSnapshot(store), before[i], `${store} unchanged in temp-only=${onlyTmp}
+${r.stdout}`);
+      assert.match(r.stdout, new RegExp(`KEEP ${store}: protected scratch name`));
+      assert.equal(copiesOf(fx, store).length, 0, "runtime stores are never preserved for retirement");
+    }
+  }
 });
