@@ -211,9 +211,14 @@ test("W1-T7719: the owner state is saved and verified before removal", () => {
     const saved = preserveStaleDirtyFixOwner(f.root, f.repo.dir, f.ownerPath, BRANCH, f.localSha);
     assert.equal(git(f.ownerPath, "status", "--porcelain=v1"), before, "preservation alone never resets");
     const restored = f.repo.addWorktree(join(f.worktreesRoot, "restore"), "restored", f.localSha);
-    restored.git("apply", "--index", join(saved, "index.patch"));
-    restored.git("apply", join(saved, "worktree.patch"));
-    restored.git("apply", "--whitespace=nowarn", join(saved, "untracked.patch"));
+    // Git applies executable modes through its caller's umask. Keep the fixture's
+    // restoration policy in a child; private author jobs retain their own077 mask.
+    execFileSync(process.execPath, ["--input-type=module", "-e",
+      'import{execFileSync}from"node:child_process";import{join}from"node:path";' +
+      'process.umask(0o022);const[root,saved]=process.argv.slice(1);' +
+      'for(const args of [["apply","--index",join(saved,"index.patch")],["apply",join(saved,"worktree.patch")],' +
+      '["apply","--whitespace=nowarn",join(saved,"untracked.patch")]])execFileSync("git",["-C",root,...args]);',
+      restored.dir, saved]);
     assert.equal(git(restored.dir, "status", "--porcelain=v1"), before);
     assert.equal(readFileSync(join(restored.dir, FILE), "utf8"), "untracked replacement\n");
     assert.equal(readFileSync(join(restored.dir, "tracked.txt"), "utf8"), "working edit\n");
