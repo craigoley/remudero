@@ -5,9 +5,11 @@ import { runPreflight, type PreflightSpawn } from "#src/lib/commit-message.js";
 test("preflight phase progress starts before each original check and preserves its result", () => {
   const order: string[] = [];
   const spawn: PreflightSpawn = (_file, args) => {
-    const name = args.some(a => a.includes("commitlint")) ? "commitlint" : args[0] === "log" ? "emitter-checks" : "typecheck";
+    const name = args.some(a => a.includes("commitlint")) || (args[0] === "log" && !args.includes("--no-merges"))
+      ? "commitlint" : args[0] === "log" ? "emitter-checks" : "typecheck";
     order.push(`body:${name}`);
-    return { status: name === "commitlint" ? 7 : 0, stdout: "\0fix(preflight): preserve the verdict\n", stderr: "original failure" };
+    return { status: name === "commitlint" && args[0] !== "log" ? 7 : 0,
+      stdout: args[0] === "log" ? "\0fix(preflight): preserve the verdict\n" : "", stderr: "original failure" };
   };
   const baseline = runPreflight("/fixture", { spawn });
   order.length = 0;
@@ -27,13 +29,17 @@ test("preflight phase progress starts before each original check and preserves i
   }
   assert.equal(new Set(events.map(event => event.phaseId)).size, 3);
   assert.equal(observed.ok, false);
+  assert.match(observed.steps[0].detail, /original failure/);
 });
 
 test("preflight phase progress cannot skip checks when its reporter throws", () => {
-  let calls = 0;
-  const spawn: PreflightSpawn = () => { calls++; return {status: 0, stdout: "\0fix(preflight): retained checks\n", stderr: ""}; };
+  const calls: string[] = [];
+  const spawn: PreflightSpawn = (file, args) => {
+    calls.push(file === "git" ? "range" : args.some(arg => arg.includes("commitlint")) ? "commitlint" : "typecheck");
+    return {status: 0, stdout: "\0fix(preflight): retained checks\n", stderr: ""};
+  };
   const result = runPreflight("/fixture", {spawn, onPhase: () => { throw new Error("diagnostic unavailable"); }});
-  assert.equal(calls, 3);
+  assert.deepEqual(calls, ["range", "commitlint", "typecheck", "range"]);
   assert.equal(result.steps.length, 3);
   assert.equal(result.ok, true);
 });
@@ -41,15 +47,17 @@ test("preflight phase progress cannot skip checks when its reporter throws", () 
 test("preflight command connects the data observer without replacing its executor", async () => {
   const {preflightCommand} = await import("#src/run-task.js");
   const phases: string[] = [];
-  let calls = 0;
+  const calls: string[] = [];
   const spawn: PreflightSpawn = (file, args) => {
     // Run-context Git reads are additional observations, not one of the three checks.
-    if (file.endsWith("tsc") || args.some(arg => arg.includes("commitlint")) || args[0] === "log") calls++;
+    if (file.endsWith("tsc")) calls.push("typecheck");
+    else if (args.some(arg => arg.includes("commitlint"))) calls.push("commitlint");
+    else if (args[0] === "log") calls.push("range");
     return {status: 0, stdout: "\0fix(preflight): original executor\n", stderr: ""};
   };
   const code = await preflightCommand(["--no-fast"], {spawn, loadavg: () => [0, 0, 0], cpuCount: 1,
     onPhase: event => { if (event.event === "started") phases.push(event.phase); }});
   assert.equal(code, 0);
   assert.deepEqual(phases, ["default", "commitlint", "typecheck", "emitter-checks"]);
-  assert.equal(calls, 3);
+  assert.deepEqual(calls, ["range", "commitlint", "typecheck", "range"]);
 });

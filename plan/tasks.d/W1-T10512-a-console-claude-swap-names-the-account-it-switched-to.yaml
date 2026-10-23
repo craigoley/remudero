@@ -1,0 +1,127 @@
+- id: W1-T10512
+  title: "A CONSOLE CLAUDE SWAP NAMES THE ACCOUNT IT SWITCHED TO — replaceClaudeFleetCredential renames only `.credentials.json`, so the fleet store's `.claude.json` keeps the previous account's `oauthAccount` (measured live 2026-10-23: the new token's profile is craigoleyagent, the store still says craigoley, and a later `claude -p` on the store did not fix it); and the completed login's label is `c***@gmail.com` for both accounts, so the operator cannot tell which one the swap chose"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, the identity a console Claude swap leaves behind (the store's oauthAccount and the redacted label); the credential write, its locks and the projection's shape are unchanged
+  band_meaning: blast-radius
+  priority: 1  # completes W1-T10380 (the operator's 2026-10-22 P0)
+  status: queued
+  attempts: 0
+  origin: "operator session measurement 2026-10-23 ~18:20Z; re-verified by the filing agent the same day on origin/main a85543a73 and read-only on `ssh remudero`"
+  plan_refs: [W1-T10380, W1-T10381, W1-T10511, W1-T6252, "PR #13602 (W1-T10380)", "PR #13593 (W1-T10381)"]
+  files:
+    - src/lib/worker-home.ts
+    - src/lib/provider-auth-sessions.ts
+    - src/lib/account-usage.ts
+    - test/routing/the-console-signs-the-fleet-into-claude.test.ts
+    - test/routing/a-console-claude-swap-names-the-account-it-switched-to.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-23 on origin/main a85543a73 and on `ssh remudero` (read-only: `stat`, and a node
+    one-liner that printed only a redacted email, its local-part length and key names).
+
+    DEFECT 1: THE SWAP MOVES THE TOKEN AND LEAVES THE IDENTITY BEHIND.
+    - src/lib/worker-home.ts:239-282 `replaceClaudeFleetCredential` reads only the staged `.credentials.json`,
+      and its one write is :278 `renameSync(temp, join(store, ".credentials.json"))`. The staged `.claude.json`
+      the CLI wrote is never carried into the store. W1-T10380's design item 4 says "The account identity the
+      CLI wrote travels with it". The shipped code does not do that.
+    - Host, /home/craigoleyagent/.claude/fleet-auth/claude: `.credentials.json` mtime 2026-10-23 18:18:39Z
+      (the swap). `.claude.json` mtime 18:22:05Z, so a CLI rewrote it AFTER the swap, yet its
+      `oauthAccount.emailAddress` is still `cr***ey@gmail.com` (local part 9 characters, the previous
+      account). The operator measured the new token's `GET https://api.anthropic.com/api/oauth/profile` as
+      the new account (craigoleyagent, Max). The CLI therefore keeps `oauthAccount` from its config file and
+      does not re-derive it from the token. Only the swap can carry it.
+    - The store's `oauthAccount` holds 20 keys, including `accountUuid`, `organizationUuid`,
+      `userRateLimitTier`, `organizationRateLimitTier` and `billingType`. A partial key merge would leave the
+      old account's tier and uuids beside the new email.
+    - WHO READS IT. src/lib/account-usage.ts:654 `readFleetAccountPair` reads the store's `.claude.json`
+      through `readAccountUsageFile` (:596). Its store identity names the fleet account in the daemon's
+      headroom row (src/lib/daemon.ts:6213 `redactedAccountLabel(pair?.store)`) and keys W1-T10381's
+      divergence episode by store and host `accountUuid` (account-usage.ts:700-716). The Claude CLI on the
+      store reads `oauthAccount` for its own account display and tier. After a swap all of them name the old
+      account.
+
+    DEFECT 2: THE LABEL CANNOT TELL THE TWO ACCOUNTS APART.
+    - src/lib/provider-auth-sessions.ts:281-293 `redactedClaudeAccount` returns `${email[0]}***${domain}`.
+      craigoley@gmail.com and craigoleyagent@gmail.com both render `c***@gmail.com`, so a completed login
+      does not tell the operator which account it switched to.
+    - account-usage.ts:629-644 already has `redactedAccountLabel` (W1-T10381): first two and last two
+      characters of a local part longer than 4, one character otherwise. It renders `cr***ey@gmail.com`
+      and `cr***nt@gmail.com` for these two accounts. The two surfaces use two different rules for one
+      account.
+
+    WHY ONE SHARD. Both defects are about naming the account after a swap, and the label is read from the
+    same staged `.claude.json` the store fix carries over.
+
+    MERGE ORDER. W1-T10511 (filed the same day) changes the same function in worker-home.ts (it stops
+    replaceClaudeFleetCredential from creating fleet-auth) and the same start path in
+    provider-auth-sessions.ts. Its filing PR (#13799) was not on main when this was filed, so depends_on
+    cannot name it yet (lint-plan refuses an unknown id). The build therefore checks first: if W1-T10511
+    has merged, build on it; if its run branch is open, merge origin/main after it lands and keep both
+    changes in replaceClaudeFleetCredential (no creating fleet-auth, and the identity write).
+
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d on origin/main and the 7 open PR heads at 18:22Z for
+    oauthAccount, redactedClaudeAccount and replaceClaudeFleetCredential: only W1-T10380 and W1-T10381
+    (both merged).
+  design: |
+    1. CARRY THE IDENTITY UNDER THE SAME LOCKS. In replaceClaudeFleetCredential, while both refresh locks are
+       held and after the credential rename, read the staged `.claude.json`. When it parses and holds an
+       `oauthAccount` object, write the store's `.claude.json` with that key REPLACED WHOLE by the staged
+       object, and every other key byte-for-byte as the store had it (its project history, usage cache,
+       settings and onboarding flags). Write a 0600 temp in the store with `wx` and rename it over, as the
+       credential write does. A store with no `.claude.json` gets one holding only `oauthAccount`.
+    2. NEVER TRADE A GOOD STORE FILE FOR A GUESS. A staged file that is absent, unparseable or has no
+       `oauthAccount` object leaves the store's `.claude.json` byte-identical. A store `.claude.json` that
+       does not parse as a JSON object is left byte-identical too. In both cases the credential swap still
+       stands (it is already renamed in, and it is the part that runs work). The result reports which
+       happened, for example `{ kind: "replaced", identity: "carried" | "staged-identity-missing" |
+       "store-config-unreadable" }`, and the session log names it. It never reports a bare success.
+    3. ONE LABEL RULE. The completed session's `accountLabel` comes from `redactedAccountLabel`
+       (account-usage.ts), applied to the identity that is now in the store, and replaces
+       `redactedClaudeAccount`'s first-character rule. It shows no full address, token or path. If importing
+       account-usage.ts into provider-auth-sessions.ts adds an import cycle (`npm run cycle-ratchet`), move
+       the pure label function to a leaf module both import. Never duplicate it.
+    4. Unchanged: which bytes the credential swap writes and when, both refresh locks, the `proceed` re-check,
+       the staging dir's removal on every path, and the projection's key set.
+    5. Known residual, to measure and report, not to fix here: a CLI process spawned before the swap holds
+       its own in-memory config and may later write the old `oauthAccount` back (the 19 stray
+       `.claude.json.tmp.*` files in the store show the CLI rewrites this file via temp and rename). From the
+       pinned CLI, check whether it re-reads `.claude.json` before each write. Put the answer in the PR body.
+  prompt: |
+    Write the NEW test file first, in test/routing/ (the folder `rmd test-place` computes for a suite that
+    imports provider-auth-sessions, worker-home and account-usage), and watch each new test fail at base.
+    Restore base code with `git show origin/main:<path>`, never stash. Every new test title starts with
+    `W1-T10512: ` exactly as in the acceptance proofs. Use temp homes and fixture `.claude.json` files only,
+    never a real home. Give the store fixture a `.claude.json` with several keys besides `oauthAccount`, and
+    give the old and new `oauthAccount` objects different `accountUuid`, tier and email, so a partial merge or
+    a whole-file overwrite fails. Use two emails that share an initial and a domain (for example
+    `alexsmith@example.com` and `alexsmithwork@example.com`) for the label case. Amend the existing
+    W1-T10380 assertion (test/routing/the-console-signs-the-fleet-into-claude.test.ts:148, `o***@example.com`)
+    to the shared rule's output; this is the label rule changing on purpose, not a weakened assertion. Run the
+    targeted suites, test/daemon/a-fleet-store-on-an-exhausted-account-is-named-and-escalated.test.ts, `npm run
+    cycle-ratchet` and `rmd preflight --fast` on the committed tree before the first push.
+  acceptance:
+    - claim: "a console Claude swap replaces the store's oauthAccount with the staged one, whole, under the refresh locks, and keeps every other key of the store's .claude.json"
+      proof: 'grep: test("W1-T10512: a console Claude swap carries the new account into the fleet store and keeps the rest of its config" in test/routing/a-console-claude-swap-names-the-account-it-switched-to.test.ts'
+    - claim: "a staged file without an oauthAccount, or a store .claude.json that does not parse, is left byte-identical while the credential swap stands, and the result names which happened"
+      proof: 'grep: test("W1-T10512: a swap that cannot carry the identity leaves the store config byte-identical and says so" in test/routing/a-console-claude-swap-names-the-account-it-switched-to.test.ts'
+    - claim: "two accounts that share an initial and a domain get different completed-login labels, and neither label shows the full address"
+      proof: 'grep: test("W1-T10512: a completed Claude login labels two accounts with one initial and one domain apart" in test/routing/a-console-claude-swap-names-the-account-it-switched-to.test.ts'
+  falsifier: |
+    Remove the identity write from replaceClaudeFleetCredential: the carry case fails on the new email and
+    uuid. Merge oauthAccount key by key instead of replacing it: the carry case fails on the old tier key that
+    survives. Overwrite the whole store `.claude.json` with the staged one: the carry case fails on the lost
+    keys. Write the identity when the staged file has no oauthAccount, or rewrite an unparseable store file:
+    the cannot-carry case fails on the bytes. Restore the first-character label: the label case fails.
+    GUARDS that held at base and must still hold: a staged credential that is not `usable` leaves the store
+    byte-identical, an ended session writes nothing, and the host's own `.credentials.json` and `.claude.json`
+    are never touched (the W1-T10380 suite); W1-T10381's labels and episode keys are unchanged
+    (test/daemon/a-fleet-store-on-an-exhausted-account-is-named-and-escalated.test.ts). Remove each guard's
+    production branch in turn: its case must fail. Restore and require zero failures.
+  note: |
+    Reservation refs/rmd-id/W1-T10512 is held by filing branch plan-file-1792780003000.
+    Observed, not in scope: 19 stray `.claude.json.tmp.<pid>.<hex>` files sit in the host store, which look
+    like the CLI's atomic-write leftovers from killed workers.

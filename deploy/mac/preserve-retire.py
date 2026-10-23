@@ -425,6 +425,12 @@ class Published:
         return list(dict.fromkeys(shas))
 
 
+def git_reason(out):
+    """Git's last stderr line, so a hold says why without a rerun."""
+    lines = out.stderr.decode(errors="replace").strip().split("\n")
+    return lines[-1][:120] or f"exit {out.returncode}"
+
+
 def save_tar(path, members, dest):
     with tarfile.open(dest, "w:gz") as t:
         for rel in members:
@@ -469,8 +475,9 @@ def preserve(repo, published, cfg, home, now):
         summary["published_base"] = excl
         if summary["unpublished_commits"]:
             bundle = os.path.join(work, "unpublished.bundle")
-            if repo.git("bundle", "create", bundle, *revs).returncode != 0:
-                raise Hold("bundle-create-failed")
+            made = repo.git("bundle", "create", bundle, *revs)
+            if made.returncode != 0:
+                raise Hold(f"bundle-create-failed ({git_reason(made)})")
             checks = [repo.git("bundle", "verify", bundle)] + [
                 run(["git", "--git-dir", b, "bundle", "verify", bundle]) for b in published.bases]
             if not any(c.returncode == 0 for c in checks):

@@ -136,7 +136,7 @@ import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStri
 import { boundChildByLoopTime, execFileLoopBounded, type LoopBound } from "./lib/loop-bounded-child.js";
 import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
-import { access as accessAsync, mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
+import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger, type ImportClosureRead } from "./lib/base-reproduction.js";
 import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
@@ -1222,7 +1222,7 @@ import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, with
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -3112,6 +3112,7 @@ import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type Inb
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
+import { withManagedGardenTokenRefresh } from "./lib/managed-garden-token.js";
 import { runChildCredentialSocket } from "./lib/secret-boundary.js";
 import { automaticBranchReapStateFileName, branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, pruneDeletableBranches, pruneDeletableBranchesSteps, readAutomaticBranchReapState, readNamedInSource, readNamedInSourceSteps, readRemoteBranchTips, readRemoteBranchTipsSteps, readTipInMainMembership, readTipInMainMembershipSteps, remoteBranchNames, remoteBranchNamesSteps, tipInMainFor, writeAutomaticBranchReapState, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
@@ -26142,23 +26143,30 @@ export function rotationDigestFile(stateDir: string, holder: string, name: strin
  *  as undigested at zero bytes and NAMED in `unreadable`, so an unreadable corpus never blocks the check by itself. */
 export async function projectRetroReadCost(stateDir: string, holder: string = RETRO_TRIGGER_RUN_SLICE.holder): Promise<RetroReadProjection> {
   const entries = ledgerRotationEntries(await readdirAsync(stateDir), stateDir);
+  const reducerVersion = `${RETRO_TRIGGER_RUN_SLICE.version ?? "1"}:${RETRO_TRIGGER_RUN_SLICE.steps.join(",")}`;
   let projectedBytes = 0;
   let undigested = 0;
   const unreadable: string[] = [];
   for (const entry of entries) {
     const name = basename(entry.path);
-    let digested = true;
+    let size: number;
+    let key: string;
     try {
-      await accessAsync(rotationDigestFile(stateDir, holder, name));
+      const stat = await statAsync(entry.path);
+      size = stat.size;
+      key = `${stat.size}:${stat.mtimeMs}`;
     } catch (error) {
-      // No digest file is the measurement itself: this rotation is read in full. Any other failure is carried too.
-      digested = false;
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") unreadable.push(`${name}: ${String(error)}`);
+      undigested++;
+      const reason = `${name}: ${String(error)}`;
+      unreadable.push(reason);
+      continue;
     }
-    if (digested) continue;
+    const digest = await readValidatedRotationDigest(rotationDigestFile(stateDir, holder, name), {holder, archive: name, key, reducerVersion});
+    if (digest.kind === "hit") continue;
     undigested++;
+    if (digest.kind === "unreadable") unreadable.push(`${name}: ${digest.error}`);
     try {
-      projectedBytes += await rotationDecompressedBytes(entry.path, (await statAsync(entry.path)).size);
+      projectedBytes += await rotationDecompressedBytes(entry.path, size);
     } catch (error) {
       // An unstattable rotation adds no bytes; the slice reader reports it unread on the read itself.
       unreadable.push(`${name}: ${String(error)}`);
@@ -33357,15 +33365,18 @@ export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: Garden
 
 /** Run one garden pass; handled domain failures remain failures at the child-process boundary. */
 export function runRegisteredGardenPass(name: RegisteredGardenName, args: readonly string[], ctx: GardenBuildContext, signal: { readonly stopped: boolean } = { stopped: false }): Promise<number> {
-  let failed = false;
-  const observed: GardenBuildContext = { ...ctx, log: (step, extra) => {
-    const kind = classifyGardenerStep(step)?.kind;
-    if (kind === "failed" || kind === "filing_failed" || step === "gardener_overseer.overseer_failed") failed = true;
-    ctx.log(step, extra);
-  } };
-  const run = (pass: RegisteredGardenPass): Promise<number> => Promise.resolve(pass()).then(() => failed ? 1 : 0);
-  const built = buildRegisteredGarden(name, observed, { hourly: args.includes(GARDEN_HOURLY_FLAG) });
-  return Promise.resolve(built).then((pass) => signal.stopped ? 0 : run(pass));
+  if (signal.stopped) return Promise.resolve(0);
+  return withManagedGardenTokenRefresh(name, ctx.log, async () => {
+    let failed = false;
+    const observed: GardenBuildContext = { ...ctx, log: (step, extra) => {
+      const kind = classifyGardenerStep(step)?.kind;
+      if (kind === "failed" || kind === "filing_failed" || step === "gardener_overseer.overseer_failed") failed = true;
+      ctx.log(step, extra);
+    } };
+    const run = (pass: RegisteredGardenPass): Promise<number> => Promise.resolve(pass()).then(() => failed ? 1 : 0);
+    const built = buildRegisteredGarden(name, observed, { hourly: args.includes(GARDEN_HOURLY_FLAG) });
+    return Promise.resolve(built).then((pass) => signal.stopped ? 0 : run(pass));
+  }, { refresh: refreshInstallationToken });
 }
 
 export const GARDEN_REPLAY_DAYS_FLAG = "--days";

@@ -6776,6 +6776,11 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         log("implement.preopen_continued", { session_id: impl.sessionId, cost_usd: impl.costUsd, num_turns: impl.numTurns, subtype: impl.subtype, ...workerLedgerFields(impl) });
         const gateFail = failOnWorkerError(impl, "implement.preopen_continued");
         if (gateFail) return gateFail;
+        const repairedGate = await preopenGate(worktreePath);
+        log(PREOPEN_GATE_STEP, { after_repair: true, result: repairedGate.kind,
+          failed: repairedGate.kind === "fail" ? repairedGate.failedSteps : [], duration_ms: repairedGate.durationMs,
+          ...(repairedGate.kind === "unmeasured" ? { reason: repairedGate.reason } : {}), ...preopenGateLedgerFields(repairedGate) });
+        updatePreopenGateAlert({ stateDir: dirname(ledgerPath), readRows: () => readLedgerLines(ledgerPath), log });
       }
     }
 

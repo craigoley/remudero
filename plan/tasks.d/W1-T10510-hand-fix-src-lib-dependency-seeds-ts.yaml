@@ -1,0 +1,32 @@
+- id: W1-T10510
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — hand_fix:src/lib/dependency-seeds.ts cost 10.7 PR minute(s) across 2 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.42
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:hand_fix:src/lib/dependency-seeds.ts"
+  files:
+    - src/lib/dependency-seeds.ts
+    - test/review/hand-fix-src-lib-dependency-seeds-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on hand_fix:src/lib/dependency-seeds.ts"
+      proof: "grep: test(\"W1-T10510: hand_fix:src/lib/dependency-seeds.ts is prevented, not retried\" in test/review/hand-fix-src-lib-dependency-seeds-ts.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures hand_fix:src/lib/dependency-seeds.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: hand_fix:src/lib/dependency-seeds.ts cost 10.7 PR minute(s) across 2 red run(s) within the measured window on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/dependency-seeds.ts: repaired by hand in multiple distinct merged PRs
+
+    RECENT ROUNDS (newest first):
+    - PR #13765 at 2026-10-23T17:02:38Z: hand fix PR #13765: src/lib/dependency-seeds.ts; minutes are the pass median proxy (5.8270333333333335), not measured repair time
+    - PR #13424 at 2026-10-21T21:33:54Z: hand fix PR #13424: scripts/dependency-seeds.mjs, src/lib/dependency-seeds.ts; minutes are the pass median proxy (5.8270333333333335), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
