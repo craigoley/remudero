@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { materializeDependencySeed, observeDependencySeedReuse } from '#src/lib/dependency-seeds.js';
-import { ensureDeps, ensureDepsAsync, proofDependencyProvisioning, proofInstallEnv, refreshProofToolchain, refreshProofToolchainAsync, registerReviewerCheckout } from '#src/lib/review.js';
+import { defaultProofSpawner, ensureDeps, ensureDepsAsync, proofDependencyProvisioning, proofInstallEnv, refreshProofToolchain, refreshProofToolchainAsync, registerReviewerCheckout } from '#src/lib/review.js';
 // @ts-expect-error -- the standalone CLI has no declaration file.
 import { main } from '#scripts/dependency-seeds.mjs';
 
@@ -133,6 +133,8 @@ test('real sync and async proof provisioning reuse explicit inputs without invok
   process.env.PATH=bin+':'+process.env.PATH;process.env.RMD_DEPENDENCY_SEED_ROOT=f.store;process.env.RMD_PROOF_DEPENDENCY_SEED=f.seed.seed;process.env.NODE_OPTIONS='--max-old-space-size=128';
   assert.equal(proofInstallEnv({...process.env,GH_TOKEN:'fixture-secret'}).GH_TOKEN,undefined);
   assert.throws(()=>proofInstallEnv({...process.env,NODE_OPTIONS:'--max-old-space-size=128 --require=untrusted'}),/mixed or unmodelled heap/);
+  const child=JSON.parse(defaultProofSpawner(process.execPath,['-e','console.log(JSON.stringify({nodeOptions:process.env.NODE_OPTIONS,token:process.env.GH_TOKEN??null}))'],f.root,5000));
+  assert.deepEqual(child,{nodeOptions:'--max-old-space-size=128',token:null});
   for(const [name,asyncMode]of [['sync',false],['async',true]] as const){
     const target=f.checkout(name);registerReviewerCheckout(target);
     assert.equal(asyncMode?await ensureDepsAsync(target):ensureDeps(target),true);
@@ -146,11 +148,16 @@ test('real sync and async proof provisioning reuse explicit inputs without invok
 });
 
 test('existing-input proof refusals retain unknown qualification and never fall back to installation',async t=>{
-  const f=existingProofInputs(t),prior={RMD_DEPENDENCY_SEED_ROOT:process.env.RMD_DEPENDENCY_SEED_ROOT,RMD_PROOF_DEPENDENCY_SEED:process.env.RMD_PROOF_DEPENDENCY_SEED};
+  const f=existingProofInputs(t),prior={NODE_OPTIONS:process.env.NODE_OPTIONS,RMD_DEPENDENCY_SEED_ROOT:process.env.RMD_DEPENDENCY_SEED_ROOT,RMD_PROOF_DEPENDENCY_SEED:process.env.RMD_PROOF_DEPENDENCY_SEED};
   t.after(()=>{for(const [key,value]of Object.entries(prior)){if(value===undefined)delete process.env[key];else process.env[key]=value;}});
   assert.throws(()=>proofDependencyProvisioning(f.root,{RMD_PROOF_DEPENDENCY_SEED:'relative',RMD_DEPENDENCY_SEED_ROOT:f.store}),/absolute source seed/);
   assert.throws(()=>proofDependencyProvisioning(f.root,{RMD_PROOF_DEPENDENCY_SEED:f.seed.seed,RMD_DEPENDENCY_SEED_ROOT:''}),/configured store/);
   process.env.RMD_DEPENDENCY_SEED_ROOT=f.store;process.env.RMD_PROOF_DEPENDENCY_SEED=join(f.store,'missing');
+  const homes=()=>readdirSync(tmpdir()).filter(name=>name.startsWith('rmd-proof-home-')).sort();
+  const before=homes();process.env.NODE_OPTIONS='--max-old-space-size=128 --require=untrusted';
+  assert.throws(()=>defaultProofSpawner(process.execPath,['-e','process.exit(99)'],f.root,5000),/mixed or unmodelled heap/);
+  assert.deepEqual(homes(),before);
+  if(prior.NODE_OPTIONS===undefined)delete process.env.NODE_OPTIONS;else process.env.NODE_OPTIONS=prior.NODE_OPTIONS;
   const sync=f.checkout('refuse-sync'),async=f.checkout('refuse-async');
   assert.throws(()=>ensureDeps(sync),/installation refused/);
   assert.throws(()=>ensureDeps(sync),/installation refused/);

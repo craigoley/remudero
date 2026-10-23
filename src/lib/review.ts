@@ -2134,7 +2134,7 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
  *  cache pinned to where the reviewer installed it (that path used to be derived from the real HOME). */
 export function proofChildEnv(home: string, parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   return {
-    ...buildProofEnv(parent),
+    ...proofInstallEnv(parent),
     HOME: home,
     PLAYWRIGHT_BROWSERS_PATH: playwrightCacheRoot(parent, process.platform, parent.HOME ?? homedir()),
   };
@@ -2155,8 +2155,8 @@ function prepareProofChild(command: string, args: readonly string[], cwd: string
   const child = proofChildCommand(command, args);
   const home = makeTempDir("proof-home");
   const cleanup = () => rmSync(home, { recursive: true, force: true });
-  const env = proofChildEnv(home);
   try {
+    const env = proofChildEnv(home);
     const status = proofSandboxStatus();
     if (status.mode === "unavailable") throw new ProofSandboxUnavailableError(status.reason);
     if (status.mode !== "bwrap") {
