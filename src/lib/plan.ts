@@ -892,6 +892,33 @@ function validateSelectedApprovalInput(text: string): void {
   }
 }
 
+/** JSON syntax plus decoded-key uniqueness: escaped spellings cannot hide a second authority field. */
+export function parseNewPathApprovalJson(text: string): unknown {
+  if (Buffer.byteLength(text, "utf8") > 2 * NEW_PATH_APPROVAL_MAX_TASK_BYTES) throw new PlanError("approval JSON exceeds its byte bound");
+  const value: unknown = JSON.parse(text);
+  const document = parseDocument(text, { strict: true, uniqueKeys: true });
+  if (document.errors.length || document.warnings.length) throw new PlanError("ambiguous approval JSON");
+  document.toJS({ maxAliasCount: 0 });
+  canonicalApprovalJson(value);
+  return value;
+}
+
+export function parseNewPathApprovalDraft(text: string, recordPath: string): Task {
+  validateSelectedApprovalInput(text);
+  const raw = parseDocument(text, { strict: true, uniqueKeys: true }).toJS({ maxAliasCount: 0 }) as Record<string, unknown>[];
+  // A fixed parsing sentinel selects the strict loader; it is excluded from the intent and never issued.
+  const selected = JSON.stringify([{ ...raw[0], new_path_approval_ref: `npa1_${"A".repeat(43)}` }]);
+  const task = parseTasksFromYaml(selected, recordPath)[0]!;
+  if (!isCanonicalApprovalPath(recordPath) || !recordPath.startsWith(`plan/tasks.d/${task.id}-`) ||
+    !/^[^/]+[.]ya?ml$/.test(recordPath.slice("plan/tasks.d/".length)) ||
+    !task.files?.length || task.files.length > 128 || !task.files.every(isCanonicalApprovalPath) ||
+    new Set(task.files).size !== task.files.length || newPathApprovalIntentDigest(task, recordPath) === undefined) {
+    throw new PlanError("unsupported approval task, destination or declared paths");
+  }
+  delete task.new_path_approval_ref;
+  return task;
+}
+
 /**
  * Parse and field-validate a YAML task-list blob into {@link Task}s (schema v1), without checking
  * that every `depends_on` id resolves. Split out of {@link loadPlanFromYaml} so a caller validating

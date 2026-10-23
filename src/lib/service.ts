@@ -17,6 +17,9 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createPublicKey, randomBytes, timingSafeEqual, verify as verifySignature } from "node:crypto";
 import { systemClock, type Clock } from "./clock.js";
+import { NEW_PATH_APPROVAL_PROTOCOL, NEW_PATH_APPROVAL_MAX_LIFETIME_MS, isNewPathApprovalReference,
+  newPathApprovalBindingError, newPathApprovalIntentDigest, parseNewPathApprovalDraft, parseNewPathApprovalJson,
+  type NewPathApprovalBinding, type NewPathApprovalPathEvidence, type NewPathApprovalRecord, type Task } from "./plan.js";
 
 /** Bearer scope a route (or SSE stream) requires. `write` implies `read`. */
 export type Scope = "read" | "write";
@@ -233,6 +236,156 @@ export function verifiedNewPathApprovalAction(req: IncomingMessage, requireConfi
     // Unreadable clocks, changed request identity and unsupported proof entries cannot confirm an action.
     return undefined;
   }
+}
+
+export interface NewPathApprovalAudit {
+  write(record: Readonly<NewPathApprovalRecord>, bytes: string, signal: AbortSignal): Promise<void>;
+  read(reference: string, signal: AbortSignal): Promise<string | undefined>;
+}
+
+export interface NewPathApprovalIssuerIO {
+  clock: Clock;
+  binding(signal: AbortSignal): Promise<NewPathApprovalBinding | undefined>;
+  paths(task: Task, recordPath: string, signal: AbortSignal): Promise<Readonly<Record<string, NewPathApprovalPathEvidence>> | undefined>;
+  audit: NewPathApprovalAudit;
+}
+
+interface NewPathApprovalPreview {
+  actor: string;
+  createdAt: number;
+  expiresAt: number;
+  draftYaml: string;
+  recordPath: string;
+  lifetimeMs: number;
+  intentDigest: string;
+  binding: NewPathApprovalBinding;
+  task: Task;
+  paths: Readonly<Record<string, NewPathApprovalPathEvidence>>;
+  approvedMissingPaths: string[];
+}
+
+interface IssuedNewPathApproval { record: NewPathApprovalRecord; bytes: string }
+
+/** Opt-in issuer. Only this process's genuine confirmations create authority; audit copies never hydrate it. */
+export function createNewPathApprovalIssuer(io: NewPathApprovalIssuerIO): { routes: Route[] } {
+  const previews = new Map<string, NewPathApprovalPreview>();
+  const issued = new Map<string, IssuedNewPathApproval>();
+  const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+  const fields = (value: unknown, allowed: string[], required = allowed): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).every(key => allowed.includes(key)) && required.every(key => Object.hasOwn(value, key));
+  const now = (): number => {
+    const value = io.clock.now();
+    if (!Number.isFinite(value)) throw new Error("unknown issuer clock");
+    return value;
+  };
+  const binding = async (signal: AbortSignal): Promise<NewPathApprovalBinding> => {
+    const current = await io.binding(signal);
+    if (!current || newPathApprovalBindingError(current)) throw new Error("unknown issuer binding");
+    return Object.freeze({ ...current });
+  };
+  const prune = (): void => {
+    const time = now();
+    for (const [id, preview] of previews) if (time >= preview.expiresAt || time < preview.createdAt) previews.delete(id);
+    for (const [ref, value] of issued) if (time >= value.record.expiresAt || time < value.record.issuedAt) issued.delete(ref);
+  };
+  const currentDraft = async (draftYaml: string, recordPath: string, signal: AbortSignal) => {
+    const task = parseNewPathApprovalDraft(draftYaml, recordPath), current = await binding(signal);
+    if (current.repository.split("/")[1] !== task.repo) throw new Error("repository does not match the server binding");
+    const observed = await io.paths(task, recordPath, signal);
+    if (!observed || !equal(Object.keys(observed).sort(), [...task.files!].sort()) || task.files!.some(path =>
+      !fields(observed[path], ["checkout", "base"]) || !["present", "missing"].includes(observed[path]!.checkout) ||
+      !["present", "missing"].includes(observed[path]!.base))) throw new Error("unknown current path evidence");
+    const paths = Object.fromEntries(Object.keys(observed).sort().map(path => [path, Object.freeze({ ...observed[path]! })]));
+    const intentDigest = newPathApprovalIntentDigest(task, recordPath)!;
+    return { task, binding: current, paths: Object.freeze(paths), intentDigest };
+  };
+  const post = (operation: "preview" | "confirm" | "revoke", confirmed: boolean): Route => ({
+    method: "POST", path: `/v1/new-path-approvals/${operation}`, scope: "write",
+    tier: confirmed ? "high" : "middle", newPathApproval: true,
+    handler: async (req, res) => {
+      const action = verifiedNewPathApprovalAction(req, confirmed);
+      if (!action) { sendJson(res, 403, { state: "unknown", reason: "verified_operator_confirmation_required" });return; }
+      const controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort(), 5_000);
+      const disconnected = () => controller.abort();
+      res.once("close", disconnected);
+      try {
+        prune();
+        const input = parseNewPathApprovalJson(await readBoundedRawBody(req, NEW_PATH_APPROVAL_BODY_MAX_BYTES));
+        const check = (): void => {
+          if (controller.signal.aborted || !verifiedNewPathApprovalAction(req, confirmed)) throw new Error("expired or cancelled confirmation");
+        };
+        if (operation === "preview") {
+          if (!fields(input, ["draftYaml", "recordPath", "approvedMissingPaths", "lifetimeMs"], ["draftYaml", "recordPath", "approvedMissingPaths"]) ||
+            typeof input.draftYaml !== "string" || typeof input.recordPath !== "string" || !Array.isArray(input.approvedMissingPaths)) throw new Error("unsupported preview");
+          const lifetimeMs = input.lifetimeMs ?? 60 * 60 * 1_000;
+          if (typeof lifetimeMs !== "number" || !Number.isSafeInteger(lifetimeMs) || lifetimeMs <= 0 || lifetimeMs > NEW_PATH_APPROVAL_MAX_LIFETIME_MS) throw new Error("unsupported lifetime");
+          const prepared = await currentDraft(input.draftYaml, input.recordPath, controller.signal);
+          const missing = input.approvedMissingPaths;
+          if (!missing.length || missing.length > 128 || new Set(missing).size !== missing.length || missing.some(path =>
+            typeof path !== "string" || !prepared.task.files!.includes(path) || prepared.paths[path]?.checkout !== "missing" || prepared.paths[path]?.base !== "missing")) throw new Error("unapproved missing-path scope");
+          check();
+          if (previews.size >= 128 || issued.size >= 256) throw new Error("issuer capacity reached");
+          const previewId = `npp1_${randomBytes(32).toString("base64url")}`, createdAt = now();
+          const preview: NewPathApprovalPreview = { ...prepared, actor: action.actor, createdAt, expiresAt: createdAt + 120_000,
+            draftYaml: input.draftYaml, recordPath: input.recordPath, lifetimeMs, approvedMissingPaths: [...missing as string[]].sort() };
+          previews.set(previewId, preview);
+          sendJson(res, 200, { previewId, binding: preview.binding, taskId: preview.task.id, intentDigest: preview.intentDigest,
+            recordPath: preview.recordPath, declaredPaths: preview.task.files, approvedMissingPaths: preview.approvedMissingPaths,
+            previewExpiresAt: preview.expiresAt, lifetimeMs });
+        } else if (operation === "confirm") {
+          if (!fields(input, ["previewId"]) || typeof input.previewId !== "string") throw new Error("unsupported confirmation");
+          const preview = previews.get(input.previewId);
+          if (!preview || preview.actor !== action.actor) throw new Error("missing same-actor preview");
+          previews.delete(input.previewId);
+          const prepared = await currentDraft(preview.draftYaml, preview.recordPath, controller.signal);
+          if (!equal(prepared.binding, preview.binding) || !equal(prepared.paths, preview.paths) || prepared.intentDigest !== preview.intentDigest ||
+            now() >= preview.expiresAt || now() < preview.createdAt || issued.size >= 256) throw new Error("preview intent, paths or policy changed");
+          check();
+          const issuedAt = now(), reference = `npa1_${randomBytes(32).toString("base64url")}`;
+          const record: NewPathApprovalRecord = { protocol: NEW_PATH_APPROVAL_PROTOCOL, reference, binding: prepared.binding,
+            taskId: prepared.task.id, taskRepo: prepared.task.repo, intentDigest: prepared.intentDigest, recordPath: preview.recordPath,
+            declaredPaths: Object.freeze([...prepared.task.files!]), approvedMissingPaths: Object.freeze([...preview.approvedMissingPaths]),
+            operatorId: action.actor, confirmationId: `npc1_${randomBytes(32).toString("base64url")}`, issuedAt, expiresAt: issuedAt + preview.lifetimeMs };
+          Object.freeze(record);
+          const bytes = `${JSON.stringify(record)}\n`;
+          await io.audit.write(record, bytes, controller.signal);
+          if (await io.audit.read(reference, controller.signal) !== bytes || !equal(await binding(controller.signal), prepared.binding)) throw new Error("audit or current binding not retained");
+          check();
+          if (now() >= record.expiresAt) throw new Error("approval expired during confirmation");
+          issued.set(reference, { record, bytes });
+          sendJson(res, 200, { state: "verified", reference, record, observedAt: now() });
+        } else {
+          if (!fields(input, ["reference"]) || !isNewPathApprovalReference(input.reference)) throw new Error("unsupported revocation");
+          check();issued.delete(input.reference);
+          sendJson(res, 200, { state: "revoked", reference: input.reference });
+        }
+      } catch {
+        // Parse, path, audit, policy and confirmation failures cannot establish canonical authority.
+        if (!res.headersSent) sendJson(res, 409, { state: "unknown", reason: "approval_not_established" });
+      } finally { clearTimeout(deadline);res.off("close", disconnected); }
+    },
+  });
+  return { routes: [post("preview", false), post("confirm", true), post("revoke", true), {
+    method: "GET", path: "/v1/new-path-approvals/verify", scope: "read",
+    handler: async (req, res) => {
+      const controller = new AbortController(), deadline = setTimeout(() => controller.abort(), 5_000);
+      try {
+        prune();
+        const url = new URL(req.url ?? "", "http://localhost"), references = url.searchParams.getAll("reference");
+        if (references.length !== 1 || [...url.searchParams.keys()].some(key => key !== "reference") || !isNewPathApprovalReference(references[0])) throw new Error("unsupported reference");
+        const value = issued.get(references[0]);
+        if (!value || !equal(await binding(controller.signal), value.record.binding) ||
+          await io.audit.read(references[0], controller.signal) !== value.bytes || controller.signal.aborted ||
+          issued.get(references[0]) !== value || now() < value.record.issuedAt || now() >= value.record.expiresAt) throw new Error("unknown current approval");
+        sendJson(res, 200, { state: "verified", reference: references[0], record: value.record, observedAt: now() });
+      } catch {
+        // An absent in-process confirmation, lost audit, revocation, expiry or read failure stays UNKNOWN.
+        sendJson(res, 200, { state: "unknown", reason: "current_approval_unavailable" });
+      } finally { clearTimeout(deadline); }
+    },
+  }] };
 }
 
 export interface ServiceOptions {
