@@ -279,9 +279,12 @@ function failureExcerpt(output: string, buffer: Buffer, budget: number, failingT
   const blocks: string[] = [];
   const retained = new Set<string>();
   for (const match of output.matchAll(/^not ok \d+ - (.+)\r?\n(?:[ \t].*(?:\r?\n|$))*/gm)) {
-    // Prefer an exact name: e.g. failure-1 must not consume failure-10's block.
-    const name = failingTests.find((candidate) => candidate === match[1])
-      ?? failingTests.find((candidate) => match[1].startsWith(candidate));
+    // Use the classifier's exact byte-capped identity, not an arbitrary prefix: a
+    // cancelled prefix-sibling must never consume the real failure's evidence.
+    const fullName = match[1].trim();
+    const boundedName = Buffer.from(fullName, "utf8").subarray(0, MAX_FAILING_TEST_NAME_BYTES).toString("utf8");
+    const name = failingTests.find((candidate) => candidate === fullName)
+      ?? failingTests.find((candidate) => candidate === boundedName);
     if (name !== undefined && !retained.has(name)) {
       retained.add(name);
       blocks.push(match[0]);
