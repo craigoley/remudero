@@ -1,0 +1,48 @@
+- id: W1-T10471
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:lint-plan cost 8.4 PR minute(s) across 23 round(s) on 21 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.62
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:lint-plan"
+  files:
+    - .github/workflows/ci.yml
+    - test/gardeners/check-ci-log-lint-plan.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:lint-plan"
+      proof: "grep: test(\"W1-T10471: check:ci-log:lint-plan is prevented, not retried\" in test/gardeners/check-ci-log-lint-plan.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:lint-plan's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:lint-plan cost 8.4 PR minute(s) (seven-day half-life) across 23 fix round(s) on 21 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/ci.yml: declares job lint-plan for lint-plan
+
+    RECENT ROUNDS (newest first):
+    - PR #11978 (https://github.com/craigoley/remudero/pull/11978) at 2026-10-15T23:46:07.713Z: ci-log round — lint-plan; ci-shard (3/8): test/ci-parity.test.ts
+        failing tests: reads only the plan and the merge-base diff, never the network"]; lint-plan:fast (the fast-gate's own script): runs for real, unmocked, on this checkout — reads only the plan and the merge-base diff, never the network
+        log excerpt:
+          | ✗ W1-T9626: 1 violation(s) (0 pre-existing on base HEAD^1)
+          |     [machine-filing-admission] task W1-T9626 declares file path(s) that exist in neither the checkout nor the base tree: learnings/ci.d/ci-learning-11660-security-merge-policy.yaml
+          | ✗ W1-T9628: 1 violation(s) (0 pre-existing on base HEAD^1)
+          |     [machine-filing-admission] task W1-T9628 declares file path(s) that exist in neither the checkout nor the base tree: learnings/ci.d/ci-learning-11896-clock-sweep-report-merge-the-shards-classify-deliver.yaml
+          | 
+          | rmd lint-plan: 2 task(s) checked (2 new/changed vs HEAD^1) — 2 failing, 0 warning(s)
+          |   r
+    - PR #10395 at 2026-10-09T19:23:53.328Z: ci-log round — lint-plan; ci-shard (6/8): test/ci-parity.test.ts
+    - PR #10398 at 2026-10-09T17:22:31.310Z: ci-log round — lint-plan; ci-shard (6/8): test/ci-parity.test.ts
+    - PR #9657 at 2026-10-06T22:04:34.827Z: ci-log round — lint-plan; ci-shard (6/8): test/ci-parity.test.ts
+    - PR #9505 at 2026-10-06T13:36:00.962Z: ci-log round — lint-plan; ci-shard (6/8): test/ci-parity.test.ts; remudero-review
+
+    WHAT THE LAST RUNG TRIED: W1-T5110 (a docs-only record, which changed no code path; its advice is under ci-friction:check:ci-log:lint-plan in docs/ci-friction-remedies.md).
+    Do something structurally different from it.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
