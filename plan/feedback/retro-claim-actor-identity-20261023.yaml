@@ -1,0 +1,56 @@
+id: retro-claim-actor-identity-20261023
+ts: 2026-10-23T13:57:00.000Z
+origin: cli
+status: new
+attachments: []
+proposal_pr: null
+contribution: null
+raw: |
+  Machine-authored investigation from the operator-authorized three-daemon recovery. This is evidence and a
+  proposed bounded repair, NOT an operator ruling, release, native gardener receipt or permission to clear claims.
+  Route through normal triage and the machine-filing judge. Preserve ownership and normal protected gates.
+
+  CLAIM: the existing recycled-container claim cleanup misses daemon-owned run_child mint rows. Before extending
+  it, bind the death evidence and deletion to the SAME observed claim SHA, in both sync and async release paths.
+
+  OBSERVED at source dispatch-claim blob 1097810c823cfb89d3e24370fa26aa6922452513 on 2026-10-23:
+  W1-T9119's held ref is 59e5e913608d947d237124d9b9a30323c587fcdb. Its anchor names 4001@f9e959f2f960,
+  minted 2026-10-19T11:12:09.444Z. The CURRENT findClaimMintRow corpus (first3 eligible rotations ascending,
+  plus live) contains its exact created row at11:12:11.208Z, actor run_child, host f9e959f2f960,
+  run W1-T9119-1792408080502. Four physical files,35,630,081bytes,50,007rows,212dispatch.claim controls,
+  zero malformed. Exact old container absent, current Core container running as positive control. Later W9119
+  attempts remain taken/blocked through12:37Z Oct23. The retro marker remains Oct6; W9119 owns its archive gate.
+  markRunChildProcessActor deliberately changes the child's actor; decideDispatchClaimRelease still accepts
+  only daemon in its replaced-container arm. reclaimSilentDispatchClaim intentionally excludes own-instance
+  mint rows. The boot caller IS wired; this is not a missing reader or a reason to build another sweeper.
+
+  OBSERVED SOURCE ORDER, not an observed production race: releaseDispatchClaim and releaseDispatchClaimAsync
+  read anchorMessage and decide death before obtaining the holder used as drop.expect. The real adapter also
+  reads holder inside anchorMessage. A replacement between those reads can pair old proof with a new SHA.
+  A lease protects only the supplied SHA. Prove this with real bare-Git replay before changing the actor arm.
+
+  PROPOSED SCOPE: src/lib/dispatch-claim.ts plus a correctly computed test/dispatch/ regression. No new module,
+  supervisor, projection, timeout/expiry, cap, policy or new sweeper. Keep own-instance created mint evidence,
+  matching old host, DIFFERENT current host, newer held drain.lock and exact-SHA evidence/deletion binding.
+  A SAME-container freshness restart intentionally adopts live children (W9086): keep their claims held.
+  Name the actual run_child actor in the reason, not daemon. Preserve legacy daemon and operator/worker/unknown,
+  absent/unreadable/mismatched mint, post-lock mint and changed-holder refusals. Reuse existing instance and
+  container-generation semantics, never arbitrary foreign PID absence or age as a death proof.
+
+  FALSIFIERS FOR THE EVENTUAL BUILD: remove only run_child recognition; the identical positive actor test must
+  become functionally red. Restore only daemon reason wording; actual-actor assertion must fail. Remove only
+  initial-SHA binding; real-Git sync AND async replacement-after-message tests must lose the replacement claim.
+  Restored fix must pass complete real tallies. Setup/import/permission/zero-test errors are not falsifiers.
+  Full hosted checks, native review, protected merge, natural adoption, genuine boot release, W9119 progress
+  and later retro publication/marker advancement are SEPARATE observations. No production intervention here.
+
+  DEDUP/OWNERSHIP at main2d923a8,13:43Z Oct23: all7 open PR head trees pinned against454actual heads; actor+claim
+  candidates3on main/every head, identity candidates25on main/every head, no introduced/changed candidate and no
+  dispatch-claim product overlap. Read W5047/W2784/W8616/W8176/W9432/W10001 contracts before designing; existing
+  same-host reap, landed-evidence sweep and W9119's own archive repair are not this work. Refresh before filing.
+
+  A direct generic machine-shard draft was correctly refused by existing filing admission (verify:human and
+  a new test path outside a recognized proposal family). It was NOT submitted as a PR or relabelled as operator
+  or gardener work. It is retained privately; W1-T10496's ID reservation5c805ace591f9c076bdaa902e11fbd10e69b66ab
+  remains HELD and must NOT be reused/released. Let normal intake reserve its own task ID; do not blindly mint
+  W10496 or copy an unjudged verify:auto/risk pin. The operator approved normal repair/filing, not claim clearing.

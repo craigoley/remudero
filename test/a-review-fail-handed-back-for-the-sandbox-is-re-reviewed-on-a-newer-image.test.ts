@@ -93,10 +93,14 @@ test("W1-T9970: the same image never re-reviews twice and an un-handed-back fail
   const again = await runSweep([openPr()], h.deps);
   assert.equal(requeues(h.rows).length, 1, "one re-review per (head, running image)");
   assert.notEqual(again.actions[0]!.reason.includes("re-reviewing the unchanged head"), true);
-  // The re-review failed again on the new image: an ordinary failure, the fix route takes it.
+  // The re-review failed again on the new image. Its legacy hand-back lacks a bound round receipt;
+  // W1-T9955 makes taskless PRs read that uncertainty just as task-keyed PRs do.
   h.rows.push(failure(1, NEW_IMAGE));
   const failedAgain = await runSweep([openPr()], { ...h.deps, readLedger: () => h.rows.filter((r) => r.step !== REVIEW_REQUEUED_STEP) });
-  assert.equal(failedAgain.actions[0]!.disposition, "blocked-fixable");
+  assert.equal(failedAgain.actions[0]!.disposition, "wait");
+  assert.match(failedAgain.actions[0]!.reason, /terminal design handoff context unavailable/);
+  assert.equal(failedAgain.actions[0]!.acted, false);
+  assert.equal(h.effects.includes("fix"), false, "an unbound design hand-back cannot admit a fix");
   assert.equal(requeues(h.rows).length, 1, "the failure's own image is the running one");
   // A later image earns its own re-review.
   const later = harness([...h.rows], "c0ffee".padEnd(40, "1"));
@@ -111,7 +115,11 @@ test("W1-T9970: the same image never re-reviews twice and an un-handed-back fail
   assert.equal(plain.effects.includes("review:12409"), false);
   // An unknown running image (off-container) is never a change.
   const unknown = harness([failure(330, OLD_IMAGE), needsDesign(293)], undefined);
-  assert.equal((await runSweep([openPr()], unknown.deps)).actions[0]!.disposition, "blocked-fixable");
+  const unknownAction = (await runSweep([openPr()], unknown.deps)).actions[0]!;
+  assert.equal(unknownAction.disposition, "wait");
+  assert.match(unknownAction.reason, /terminal design handoff context unavailable/);
+  assert.equal(unknownAction.acted, false);
+  assert.deepEqual(unknown.effects, []);
   assert.deepEqual(requeues(unknown.rows), []);
   // A hand-off at another head is not this head's.
   const otherHead = harness([failure(330, OLD_IMAGE), { ...needsDesign(293), head_sha: "f".repeat(40) }], NEW_IMAGE);
