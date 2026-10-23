@@ -205,6 +205,8 @@ export function verifiedActor(req: IncomingMessage): string | undefined {
 }
 
 export const NEW_PATH_APPROVAL_BODY_MAX_BYTES = 128 * 1024;
+export const NEW_PATH_APPROVAL_REQUEST_TIMEOUT_MS = 5_000;
+export const NEW_PATH_APPROVAL_MAX_REQUESTS = 8;
 
 interface OperatorConfirmationEvidence {
   actor: string;
@@ -220,12 +222,14 @@ const operatorSessionEvidence = new WeakMap<object, OperatorConfirmationEvidence
 const operatorResolutionEvidence = new WeakMap<IdentityResolution, OperatorRequestEvidence>();
 const operatorGrantEvidence = new WeakMap<IdentityGrant, OperatorRequestEvidence>();
 const newPathApprovalActions = new WeakMap<IncomingMessage, NewPathApprovalActionEvidence>();
+const newPathApprovalRequestSignals = new WeakMap<IncomingMessage, AbortSignal>();
 
 /** Display facts only. Authority comes from this request's private verified dispatcher entry, never copied JSON. */
 export function verifiedNewPathApprovalAction(req: IncomingMessage, requireConfirmation: boolean): { actor: string } | undefined {
   try {
     const action = newPathApprovalActions.get(req);
-    if (!action || action.proof.request !== req || req.method !== action.route.method ||
+    if (!action || !newPathApprovalRequestSignals.has(req) || newPathApprovalRequestSignals.get(req)!.aborted ||
+      action.proof.request !== req || req.method !== action.route.method ||
       new URL(req.url ?? "", "http://localhost").pathname !== action.route.path) return undefined;
     const { proof } = action, now = proof.clock.now();
     if (!Number.isFinite(now) || now < proof.verifiedAt || now - proof.verifiedAt > 30_000 || now >= proof.expiresAt) return undefined;
@@ -307,11 +311,13 @@ export function createNewPathApprovalIssuer(io: NewPathApprovalIssuerIO): { rout
     handler: async (req, res) => {
       const action = verifiedNewPathApprovalAction(req, confirmed);
       if (!action) { sendJson(res, 403, { state: "unknown", reason: "verified_operator_confirmation_required" });return; }
-      if (inFlight >= 8) { sendJson(res, 409, { state: "unknown", reason: "issuer_busy" });return; }
+      if (inFlight >= NEW_PATH_APPROVAL_MAX_REQUESTS) { sendJson(res, 409, { state: "unknown", reason: "issuer_busy" });return; }
       inFlight++;
       const controller = new AbortController();
-      const deadline = setTimeout(() => controller.abort(), 5_000);
+      const deadline = setTimeout(() => controller.abort(), NEW_PATH_APPROVAL_REQUEST_TIMEOUT_MS);
       const disconnected = () => controller.abort();
+      const parent = newPathApprovalRequestSignals.get(req);
+      parent?.addEventListener("abort", disconnected, { once: true });
       res.once("close", disconnected);
       try {
         prune();
@@ -370,15 +376,15 @@ export function createNewPathApprovalIssuer(io: NewPathApprovalIssuerIO): { rout
       } catch {
         // Parse, path, audit, policy and confirmation failures cannot establish canonical authority.
         if (!res.headersSent) sendJson(res, 409, { state: "unknown", reason: "approval_not_established" });
-      } finally { inFlight--;clearTimeout(deadline);res.off("close", disconnected); }
+      } finally { inFlight--;clearTimeout(deadline);res.off("close", disconnected);parent?.removeEventListener("abort", disconnected); }
     },
   });
   return { routes: [post("preview", false), post("confirm", true), post("revoke", true), {
     method: "GET", path: "/v1/new-path-approvals/verify", scope: "read",
     handler: async (req, res) => {
-      if (inFlight >= 8) { sendJson(res, 200, { state: "unknown", reason: "issuer_busy" });return; }
+      if (inFlight >= NEW_PATH_APPROVAL_MAX_REQUESTS) { sendJson(res, 200, { state: "unknown", reason: "issuer_busy" });return; }
       inFlight++;
-      const controller = new AbortController(), deadline = setTimeout(() => controller.abort(), 5_000);
+      const controller = new AbortController(), deadline = setTimeout(() => controller.abort(), NEW_PATH_APPROVAL_REQUEST_TIMEOUT_MS);
       const disconnected = () => controller.abort();res.once("close", disconnected);
       try {
         prune();
@@ -585,7 +591,8 @@ export class RawBodyTooLargeError extends Error {
  * `maxBytes` rejects with {@link RawBodyTooLargeError} and drains later chunks unretained.
  * Exported for any `selfAuthenticated` handler; github-event-wake.ts's webhook is the first caller.
  */
-export function readBoundedRawBody(req: IncomingMessage, maxBytes: number): Promise<string> {
+export function readBoundedRawBody(req: IncomingMessage, maxBytes: number, signal?: AbortSignal): Promise<string> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
   const cached = (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE];
   if (typeof cached === "string") {
     if (Buffer.byteLength(cached, "utf8") > maxBytes) return Promise.reject(new RawBodyTooLargeError(maxBytes));
@@ -595,28 +602,38 @@ export function readBoundedRawBody(req: IncomingMessage, maxBytes: number): Prom
     let receivedBytes = 0;
     let settled = false;
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => {
+    const finish = (error: unknown, raw = ""): void => {
+      if (settled) return;
+      settled = true;
+      if (signal) {
+        req.off("data", onData);req.off("end", onEnd);req.off("aborted", disconnected);req.off("close", closed);
+        signal.removeEventListener("abort", cancelled);chunks.length = 0;
+      }
+      if (error !== undefined) reject(error);else resolve(raw);
+    };
+    const onData = (chunk: Buffer): void => {
       if (settled) return;
       receivedBytes += chunk.length;
       if (receivedBytes > maxBytes) {
-        settled = true;
-        reject(new RawBodyTooLargeError(maxBytes));
+        finish(new RawBodyTooLargeError(maxBytes));req.resume();
         return;
       }
       chunks.push(chunk);
-    });
-    req.on("end", () => {
+    };
+    const onEnd = (): void => {
       if (settled) return;
-      settled = true;
       const raw = Buffer.concat(chunks).toString("utf8");
       (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE] = raw;
-      resolve(raw);
-    });
-    req.on("error", (e) => {
-      if (settled) return;
-      settled = true;
-      reject(e);
-    });
+      finish(undefined, raw);
+    };
+    const cancelled = (): void => finish(signal?.reason ?? new Error("selected body cancelled"));
+    const disconnected = (): void => finish(new Error("selected body disconnected"));
+    const closed = (): void => { if (!req.complete && !req.readableEnded) disconnected(); };
+    req.on("data", onData);req.on("end", onEnd);req.on("error", error => finish(error));
+    if (signal) {
+      req.once("aborted", disconnected);req.once("close", closed);signal.addEventListener("abort", cancelled, { once: true });
+      if (signal.aborted) cancelled();
+    }
   });
 }
 
@@ -1239,8 +1256,10 @@ export function createService(opts: ServiceOptions): Server {
   // OFF by default (W1-T495) — labeling sensitivity alone must not change what a route accepts.
   const enforceReadSensitivity = opts.enforceReadSensitivity ?? false;
   const confirmNonces = opts.confirmNonces ?? createConfirmNonceStore();
+  let activeNewPathApprovalRequests = 0;
 
   return createServer((req, res) => {
+    let releaseNewPathRequest: (() => void) | undefined;
     void (async () => {
       const method = (req.method ?? "GET").toUpperCase() as Method;
       const path = new URL(req.url ?? "/", "http://localhost").pathname;
@@ -1252,6 +1271,20 @@ export function createService(opts: ServiceOptions): Server {
         sendJson(res, 404, { error: "not_found" });
         return;
       }
+      if (route?.newPathApproval) {
+        if (activeNewPathApprovalRequests >= NEW_PATH_APPROVAL_MAX_REQUESTS) {
+          sendJson(res, 409, { state: "unknown", reason: "issuer_busy" });return;
+        }
+        activeNewPathApprovalRequests++;
+        const controller = new AbortController(), cancel = () => controller.abort(new Error("selected approval deadline or disconnect"));
+        const deadline = setTimeout(cancel, NEW_PATH_APPROVAL_REQUEST_TIMEOUT_MS);
+        req.once("aborted", cancel);res.once("close", cancel);newPathApprovalRequestSignals.set(req, controller.signal);
+        releaseNewPathRequest = () => {
+          clearTimeout(deadline);req.off("aborted", cancel);res.off("close", cancel);
+          newPathApprovalRequestSignals.delete(req);newPathApprovalActions.delete(req);activeNewPathApprovalRequests--;
+        };
+      }
+      const approvalSignal = newPathApprovalRequestSignals.get(req);
       // A SELF-AUTHENTICATED route (Route.selfAuthenticated) skips scope/tier/sensitivity
       // dispatch ENTIRELY; checked first, so it's never logged `service.unauthorized` for
       // lacking a bearer token it was never meant to carry.
@@ -1271,7 +1304,7 @@ export function createService(opts: ServiceOptions): Server {
       // for an SSE stream or an API route, where a `?token=` would leak via Referer/logs.
       const allowQuery = !sseRoute && (route?.allowQueryToken ?? false);
       const pending = grantedScopes(providers, req, allowQuery);
-      const granted = pending instanceof Promise ? await pending : pending;
+      const granted = pending instanceof Promise ? approvalSignal ? await awaitNewPathApprovalRead(approvalSignal, pending) : await pending : pending;
       if (!granted) {
         log("service.unauthorized", { method, path });
         sendJson(res, 401, { error: "unauthorized" });
@@ -1296,15 +1329,18 @@ export function createService(opts: ServiceOptions): Server {
       let selectedApprovalProof: OperatorRequestEvidence | undefined;
       let selectedApprovalPayload: string | undefined;
       if (route?.newPathApproval) {
+        const proof = operatorGrantEvidence.get(granted);
+        if (!enforceWriteTiers || route.scope !== "write" || proof?.request !== req) {
+          sendJson(res, 403, { state: "unknown", reason: "verified_operator_confirmation_required" });return;
+        }
         try {
-          await readBoundedRawBody(req, NEW_PATH_APPROVAL_BODY_MAX_BYTES);
+          await readBoundedRawBody(req, NEW_PATH_APPROVAL_BODY_MAX_BYTES, approvalSignal);
         } catch (error) {
           if (!(error instanceof RawBodyTooLargeError)) throw error;
           sendJson(res, 413, { error: "request_body_too_large" });
           return;
         }
-        const proof = operatorGrantEvidence.get(granted);
-        if (enforceWriteTiers && route.scope === "write" && proof?.request === req) selectedApprovalProof = proof;
+        selectedApprovalProof = proof;
       }
 
       // The tier + second-factor gate (W1-T404), additive to the scope check above, a no-op
@@ -1342,10 +1378,16 @@ export function createService(opts: ServiceOptions): Server {
       });
 
       try {
-        await route!.handler(req, res, { params: {} });
+        if (approvalSignal) {
+          approvalSignal.throwIfAborted();await awaitNewPathApprovalRead(approvalSignal, Promise.resolve(route!.handler(req, res, { params: {} })));
+        } else await route!.handler(req, res, { params: {} });
       } catch (e) {
-        log("service.error", { method, path, error: String((e as Error)?.message ?? e) });
-        if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
+        if (approvalSignal?.aborted) {
+          if (!res.headersSent && !res.destroyed) sendJson(res, 409, { state: "unknown", reason: "approval_request_cancelled" });
+        } else {
+          log("service.error", { method, path, error: String((e as Error)?.message ?? e) });
+          if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
+        }
       } finally {
         newPathApprovalActions.delete(req);
       }
@@ -1354,7 +1396,9 @@ export function createService(opts: ServiceOptions): Server {
     })().catch((e: unknown) => {
       // NOT an erasure — every failure here is logged and answered by
       // {@link respondToRequestFailure}, which absorbs nothing silently.
-      respondToRequestFailure(res, log, req, e);
-    });
+      if (newPathApprovalRequestSignals.get(req)?.aborted) {
+        if (!res.headersSent && !res.destroyed) sendJson(res, 409, { state: "unknown", reason: "approval_request_cancelled" });
+      } else respondToRequestFailure(res, log, req, e);
+    }).finally(() => releaseNewPathRequest?.());
   });
 }
