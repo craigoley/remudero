@@ -85,3 +85,35 @@ test('native low-footprint command refuses failing and ghost suites without fall
     assert.equal(receipt.verdict, 'refused'); assert.equal(receipt.tests.judge.failed, 1);
     assert.equal(receipt.cleanup, 'closed-and-removed');
   });
+
+test('native low-footprint default admission observes the host or records an explicit capacity refusal',
+  {skip: process.platform !== 'darwin'}, async t => {
+    const {makeRuntimeFixture} = await import('#test/helpers/native-runtime-fixture.js');
+    const f = makeRuntimeFixture(); t.after(() => f.cleanup());
+    const authorPath = '#scripts/preflight-author.mjs';
+    const author = await import(authorPath) as {authorPublicationIdentity: Function; authorEnvironment: Function; completeTestResult: Function};
+    const low = await import(subject) as {runLowFootprintAuthor: (args: string[], deps: object) => Promise<number>};
+    const reports: string[] = [];
+    t.mock.method(console, 'log', (value: string) => {reports.push(value);});
+    // No fake admission: the actual sysctl/vm_stat and disk probes execute.
+    const status = await low.runLowFootprintAuthor(['--low-footprint', '--scratch-mib', '64', '--timeout-ms', '30000',
+      '--head-ref', 'run-unfiled-1234567890123', '--test', 'test/a.test.ts'], {root: f.dir, ...author,
+      publicationIdentity: author.authorPublicationIdentity});
+    const row = JSON.parse(reports.at(-1)!);
+    assert.equal(row.fullAuthorValidation, 'not-run');
+    if (status === 0) {
+      assert.equal(row.verdict, 'scoped-pass');
+      for (const observation of [row.entryAdmission, row.freshAdmission, row.testAdmission]) {
+        assert.equal(observation.platform, 'darwin'); assert.equal(observation.state, 'admitted');
+        assert.ok(['normal', 'warning'].includes(observation.pressure));
+      }
+      assert.equal(row.tests.judge.complete, true);
+    } else {
+      assert.equal(status, 3); assert.equal(row.verdict, 'refused');
+      assert.match(row.error, /^low-footprint capacity NOT_RUN: /);
+      const observed = JSON.parse(row.error.slice('low-footprint capacity NOT_RUN: '.length));
+      assert.equal(observed.platform, 'darwin'); assert.equal(observed.state, 'not-run');
+      assert.ok(observed.reasons.length > 0);
+      assert.equal(row.tests, undefined, 'refused phase starts no test child');
+    }
+  });
