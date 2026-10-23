@@ -197,6 +197,49 @@ test("new path admission refuses missing drifted and unsupported authority befor
   } finally { repo.cleanup(); }
 });
 
+test("new path admission agrees between the real filing precheck and plan lint with current asynchronous issuer facts", async () => {
+  const prepare = (approvalPlan as unknown as { prepareNewPathApprovalFacts?: typeof approvalPlan.prepareNewPathApprovalFacts }).prepareNewPathApprovalFacts;
+  assert.equal(typeof prepare, "function", "selected callers need a current bounded reader, not stored trusted receipt text");
+  const repo = gitRepo({ kind: "selected-approval-reader" });
+  try {
+    repo.addRemote("origin", "https://github.com/acme/remudero.git");
+    const { task, facts, context } = approvalFixture("auto"), base = repo.git("rev-parse", "HEAD");
+    const tokenFile = join(repo.dir, "fixture-service-tokens.json");
+    writeFileSync(tokenFile, JSON.stringify({ read: "fixture-read", write: "must-not-be-sent" }), { mode: 0o600 });
+    let current: NewPathApprovalBinding | undefined = { ...facts.binding }, calls = 0, mode = "healthy", eventLoop = false;
+    const fetchImpl: typeof fetch = async (url, init) => {
+      calls++;assert.equal(new URL(String(url)).origin, facts.binding.origin);assert.equal(init?.redirect, "manual");
+      assert.equal(new Headers(init?.headers).get("authorization"), "Bearer fixture-read");
+      await new Promise<void>(resolve => setImmediate(() => { eventLoop = true;resolve(); }));
+      if (mode === "outage") throw new Error("fixture transport outage");
+      if (mode === "redirect") return new Response(null, { status: 302, headers: { location: "https://other.invalid" } });
+      if (mode === "oversized") return new Response(" ".repeat(256 * 1_024), { status: 200 });
+      if (mode === "policy-drift") current = { ...facts.binding, epoch: "replacement" };
+      return new Response(mode === "malformed" ? "{" : JSON.stringify({ state: "verified", reference: task.new_path_approval_ref,
+        record: facts.record, observedAt: 1_200 }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const readerContext = { repoRoot: repo.dir, base, readTokenFile: tokenFile, currentBinding: () => current };
+    const io = { fetch: fetchImpl, clock: context.clock };
+    const observed = await prepare!(task, APPROVAL_RECORD_PATH, readerContext, AbortSignal.timeout(2_000), io);
+    assert.equal(observed?.state, "verified");assert.equal(eventLoop, true);assert.equal(calls, 2, "recheck the current origin after path reads");
+    assert.ok(Object.isFrozen(observed));assert.ok(observed?.state === "verified" && Object.isFrozen(observed.record.binding));
+    const raw = JSON.parse(JSON.stringify(task));delete raw.sourcePath;
+    const text = JSON.stringify([raw]);
+    assert.equal(machineShardFilingRefusal(text, APPROVAL_RECORD_PATH, { pathExists: () => false, pathExistsAtBase: () => false,
+      clock: context.clock, newPathApprovals: new Map([[task.id, observed!]]) }), undefined);
+    assert.deepEqual(lintTask(task, { machineFilingAdmission: { ...context, newPathApproval: observed } }).violations.filter(v => v.severity === "block"), []);
+    for (mode of ["outage", "redirect", "oversized", "malformed", "policy-drift"]) {
+      current = { ...facts.binding };
+      assert.equal((await prepare!(task, APPROVAL_RECORD_PATH, readerContext, AbortSignal.timeout(2_000), io))?.state, "unknown", mode);
+    }
+    const before = calls, legacy = { ...task };delete legacy.new_path_approval_ref;
+    assert.equal(await prepare!(legacy, APPROVAL_RECORD_PATH, readerContext, AbortSignal.timeout(2_000), io), undefined);
+    current = undefined;
+    assert.equal((await prepare!(task, APPROVAL_RECORD_PATH, readerContext, AbortSignal.timeout(2_000), io))?.state, "unknown");
+    assert.equal(calls, before, "absent reference or binding means zero approval transport calls");
+  } finally { repo.cleanup(); }
+});
+
 function approvalFixture(mode: "human" | "auto" = "human", overrides: Partial<Task> = {}) {
   const plan = loadPlanFromYaml([
     "- id: W1-T99001", "  title: Create the explicitly approved fixture module", "  repo: remudero",
