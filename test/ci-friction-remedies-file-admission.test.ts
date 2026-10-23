@@ -6,16 +6,16 @@
  * exist yet — and admission must take it as a parked proposal, as it does the legacy shape.
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
-import { CI_FRICTION_REMEDIES_FILE, ciFrictionRemedyTestTitle, ciFrictionShardStem, ciFrictionShardYaml } from "../src/lib/ci-friction-gardener.js";
-import { lintTask, sizingViolation } from "../src/lib/task-linter.js";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, newTestPath } from "../src/lib/plan.js";
-
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+import { CI_FRICTION_REMEDIES_FILE, ciFrictionRemedyTestTitle, ciFrictionShardStem, ciFrictionShardYaml } from "#src/lib/ci-friction-gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { lintTask, sizingViolation } from "#src/lib/task-linter.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, newTestPath } from "#src/lib/plan.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function admit(yaml: string, pathExists = (p: string) => existsSync(join(REPO_ROOT, p))): string[] {
   const plan = loadPlanFromYaml(yaml, "ci-friction-fixture");
@@ -72,4 +72,61 @@ test("a drafted remedy passes the base linter's sizing and admission checks with
   assert.equal(ciFrictionRemedyTestTitle("W1-T1", "check:pass in ci"), "W1-T1: check:pass within ci is prevented, not retried");
   const lint = lintTask(task, { duplicateSlug: stem, machineFilingAdmission: { plan, releasedIds: new Set(), pathExists: (p) => existsSync(join(REPO_ROOT, p)) } });
   assert.deepEqual(lint.violations.filter((v) => v.severity === "block"), []);
+});
+
+const APPROVAL_RECORD_PATH = "plan/tasks.d/W1-T99001-approved-new-path.yaml";
+const APPROVAL_REFERENCE = `npa1_${"A".repeat(43)}`;
+
+function approvalFixture() {
+  const plan = loadPlanFromYaml([
+    "- id: W1-T99001", "  title: Create the explicitly approved fixture module", "  repo: remudero",
+    "  depends_on: []", "  type: implement", "  verify: human", "  risk: medium", "  status: queued",
+    "  attempts: 0", "  author_class: machine", "  files: [src/lib/operator-approved-fixture.ts]",
+    "  design: Exact approved fixture behavior", "  rationale: A fixture, not an issued approval",
+  ].join("\n"), APPROVAL_RECORD_PATH);
+  const task = Object.assign(plan.tasks[0]!, { new_path_approval_ref: APPROVAL_REFERENCE });
+  const binding = {
+    issuerId: "fixture-issuer", origin: "https://fixture.invalid", epoch: "fixture-epoch-1", policy: "new-path-approval-v1",
+    repositoryId: 7, repository: "acme/remudero", instance: "fixture-core", audience: "fixture-filer",
+  };
+  // Independent protocol fixture: sourcePath binds the canonical destination, not a host's
+  // temporary checkout prefix. The reference alone is excluded to avoid signing itself.
+  const canonicalTask = JSON.parse(JSON.stringify(task)) as Record<string, unknown>;
+  delete canonicalTask.new_path_approval_ref;
+  const stable = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
+    if (value !== null && typeof value === "object") return `{${Object.keys(value).sort().map(key =>
+      `${JSON.stringify(key)}:${stable((value as Record<string, unknown>)[key])}`).join(",")}}`;
+    const serialized = JSON.stringify(value);
+    assert.ok(serialized !== undefined, "the protocol fixture contains only JSON values");
+    return serialized;
+  };
+  const intentDigest = createHash("sha256").update("remudero:new-path-approval-v1:task-intent\0").update(
+    stable({ protocol: "new-path-approval-v1", recordPath: APPROVAL_RECORD_PATH, task: canonicalTask }),
+  ).digest("hex");
+  const record = {
+    protocol: "new-path-approval-v1" as const, reference: APPROVAL_REFERENCE, binding, taskId: task.id, taskRepo: task.repo,
+    intentDigest, recordPath: APPROVAL_RECORD_PATH, declaredPaths: [...task.files!], approvedMissingPaths: [...task.files!],
+    operatorId: "operator:fixture-user", confirmationId: "fixture-confirmation", issuedAt: 1_000, expiresAt: 2_000,
+  };
+  const facts = {
+    state: "verified" as const, reference: APPROVAL_REFERENCE, binding, record, observedAt: 1_200,
+    currentSourcePath: task.sourcePath!, recordPath: APPROVAL_RECORD_PATH,
+    paths: { "src/lib/operator-approved-fixture.ts": { checkout: "missing" as const, base: "missing" as const } },
+  };
+  const context = {
+    plan, releasedIds: new Set([task.id]), pathExists: () => false, pathExistsAtBase: () => false,
+    clock: fixedClock(1_200), newPathApproval: facts,
+  };
+  return { plan, task, context, facts, record };
+}
+
+test("new path admission binds the explicit approval to the exact task and declared paths", () => {
+  const { task, context } = approvalFixture();
+  assert.deepEqual(machineFilingAdmissionViolations(task, context), [], "qualified facts admit only the explicitly approved missing path");
+  for (const changed of [
+    { ...task, id: "W1-T99002" }, { ...task, repo: "other-repo" },
+    { ...task, design: "Different requested behavior" }, { ...task, rationale: "A different justification" },
+    { ...task, files: [...task.files!, "src/lib/unapproved-extra.ts"] },
+  ]) assert.notDeepEqual(machineFilingAdmissionViolations(changed, context), [], "task or full intent drift must not inherit permission");
 });
