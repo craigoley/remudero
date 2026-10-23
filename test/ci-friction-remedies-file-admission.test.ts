@@ -16,7 +16,7 @@ import { fixedClock } from "#src/lib/clock.js";
 import { runnableCandidates } from "#src/lib/drain.js";
 import { machineShardFilingRefusal } from "#src/lib/machine-filing.js";
 import { assertLintClean, lintTask, sizingViolation, taskRulingPin } from "#src/lib/task-linter.js";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, newPathApprovalIntentDigest, newTestPath, type NewPathApprovalFacts, type Task } from "#src/lib/plan.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, newPathApprovalIntentDigest, newTestPath, type NewPathApprovalBinding, type NewPathApprovalFacts, type NewPathApprovalRecord, type Task } from "#src/lib/plan.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import * as service from "#src/lib/service.js";
 import type { IncomingMessage } from "node:http";
@@ -36,6 +36,90 @@ test("a ci-friction remedy naming its owning code and a new regression test is a
   assert.deepEqual(files, ["src/run-task.ts", newTestPath("check-fixture-never-built", ["src/run-task.ts"], "ci-friction-gardener")]);
   assert.equal(existsSync(join(REPO_ROOT, files[1]!)), false, "the regression test does not exist before the build writes it");
   assert.deepEqual(admit(yaml), []);
+});
+
+test("new path admission binds the explicit approval to the exact task and declared paths through genuine issuer confirmation", async () => {
+  const createIssuer = (service as unknown as { createNewPathApprovalIssuer?: typeof service.createNewPathApprovalIssuer }).createNewPathApprovalIssuer;
+  assert.equal(typeof createIssuer, "function", "a fixture receipt is not a production confirmation lifecycle");
+  let now = Date.UTC(2026, 9, 23, 12);
+  const clock = { ...fixedClock(now), now: () => now };
+  const { task, facts } = approvalFixture("auto");
+  const rawTask = JSON.parse(JSON.stringify(task));
+  delete rawTask.sourcePath;delete rawTask.new_path_approval_ref;
+  const draftYaml = JSON.stringify([rawTask]);
+  let binding: NewPathApprovalBinding | undefined = { ...facts.binding };
+  const audit = new Map<string, string>();
+  let writeFailure = false, readFailure = false, pathUnknown = false, writes = 0;
+  const io: service.NewPathApprovalIssuerIO = { clock,
+    binding: async () => binding,
+    paths: async () => pathUnknown ? undefined : structuredClone(facts.paths),
+    audit: { write: async (record: Readonly<NewPathApprovalRecord>, bytes: string) => {
+      writes++;if (writeFailure) throw new Error("fixture durable write lost");audit.set(record.reference, bytes);
+    }, read: async reference => { if (readFailure) throw new Error("fixture durable read unavailable");return audit.get(reference); } },
+  };
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwk = { ...publicKey.export({ format: "jwk" }), kid: "issuer-key", kty: "RSA" } as service.OperatorJwk;
+  const token = (sub = "fixture-user") => {
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const head = encode({ alg: "RS256", kid: jwk.kid });
+    const body = encode({ iss: "https://session.fixture.invalid", sub, azp: "https://ui.fixture.invalid",
+      iat: now / 1_000 - 1, exp: now / 1_000 + 60, fva: [0, -1] });
+    return `${head}.${body}.${sign("RSA-SHA256", Buffer.from(`${head}.${body}`), privateKey).toString("base64url")}`;
+  };
+  const operatorSession = service.operatorSessionIdentityProvider({ issuer: "https://session.fixture.invalid",
+    allowedOrigins: ["https://ui.fixture.invalid"], operatorUserIds: ["fixture-user", "other-user"], keys: { key: async () => jwk }, clock });
+  let sequence = 0;
+  const store = service.createConfirmNonceStore(() => `issuer-nonce-${++sequence}`, clock.now);
+  let issuer = createIssuer!(io);
+  const routes = issuer.routes.map(route => ({ ...route, handler: (req: IncomingMessage, res: import("node:http").ServerResponse, ctx: service.RouteContext) =>
+    issuer.routes.find(current => current.path === route.path)!.handler(req, res, ctx) }));
+  const server = service.createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession,
+    enforceWriteTiers: true, confirmNonces: store, routes });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const post = async (operation: string, input: unknown, actor = "fixture-user") => {
+    const path = `/v1/new-path-approvals/${operation}`, payload = typeof input === "string" ? input : JSON.stringify(input);
+    const nonce = store.issue({ method: "POST", path, payload });
+    const response = await fetch(origin + path, { method: "POST", body: payload,
+      headers: { [service.OPERATOR_SESSION_HEADER]: token(actor), "x-confirm-nonce": nonce }, signal: AbortSignal.timeout(2_000) });
+    return { status: response.status, body: await response.json() as Record<string, any> };
+  };
+  const preview = () => post("preview", { draftYaml, recordPath: APPROVAL_RECORD_PATH, approvedMissingPaths: task.files, lifetimeMs: 60_000 });
+  const verify = async (reference: string) => {
+    const response = await fetch(`${origin}/v1/new-path-approvals/verify?reference=${reference}`, {
+      headers: { authorization: "Bearer fixture-read" }, signal: AbortSignal.timeout(2_000) });
+    assert.equal(response.status, 200);return await response.json() as Record<string, any>;
+  };
+  try {
+    const first = await preview();assert.equal(first.status, 200);assert.match(first.body.previewId, /^npp1_/);
+    assert.equal((await post("confirm", { previewId: first.body.previewId }, "other-user")).status, 409, "a different signed operator cannot adopt the preview");
+    const confirmed = await post("confirm", { previewId: first.body.previewId });assert.equal(confirmed.status, 200);
+    const reference = confirmed.body.reference;assert.match(reference, /^npa1_[A-Za-z0-9_-]{43}$/);
+    assert.equal(confirmed.body.record.operatorId, "operator:fixture-user");
+    assert.equal(confirmed.body.record.intentDigest, newPathApprovalIntentDigest(task, APPROVAL_RECORD_PATH));
+    assert.equal((await verify(reference)).state, "verified");assert.equal((await verify(reference)).state, "verified");
+    assert.equal((await post("confirm", { previewId: first.body.previewId })).status, 409);
+    assert.equal(writes, 1, "verification and replay never issue a second approval");
+    const parallel = await preview();
+    const concurrent = await Promise.all([post("confirm", { previewId: parallel.body.previewId }), post("confirm", { previewId: parallel.body.previewId })]);
+    assert.deepEqual(concurrent.map(result => result.status).sort(), [200, 409]);assert.equal(writes, 2);
+    const bytes = audit.get(reference)!;audit.delete(reference);assert.equal((await verify(reference)).state, "unknown");
+    audit.set(reference, bytes + " ");assert.equal((await verify(reference)).state, "unknown", "replacement bytes are not the retained audit");
+    audit.set(reference, bytes);readFailure = true;assert.equal((await verify(reference)).state, "unknown");readFailure = false;
+    binding = { ...facts.binding, epoch: "replacement-epoch" };assert.equal((await verify(reference)).state, "unknown");binding = { ...facts.binding };
+    const drift = await preview();pathUnknown = true;assert.equal((await post("confirm", { previewId: drift.body.previewId })).status, 409);pathUnknown = false;
+    const lost = await preview();writeFailure = true;assert.equal((await post("confirm", { previewId: lost.body.previewId })).status, 409);writeFailure = false;
+    assert.equal((await post("confirm", { previewId: lost.body.previewId })).status, 409, "a failed durable write spends the preview, never silently retries");
+    const ambiguous = '{"draftYaml":' + JSON.stringify(draftYaml) + ',"recordPath":' + JSON.stringify(APPROVAL_RECORD_PATH) + ',"\\u0072ecordPath":"plan/tasks.d/substitute.yaml","approvedMissingPaths":' + JSON.stringify(task.files) + '}';
+    assert.equal((await post("preview", ambiguous)).status, 409, "decoded duplicate keys are ambiguous even when spelled differently");
+    assert.equal((await post("revoke", { reference })).status, 200);assert.equal((await verify(reference)).state, "unknown");
+    const expiring = await preview();const issued = await post("confirm", { previewId: expiring.body.previewId });
+    now += 60_001;assert.equal((await verify(issued.body.reference)).state, "unknown");
+    issuer = createIssuer!(io);assert.equal((await verify(concurrent.find(result => result.status === 200)!.body.reference)).state, "unknown",
+      "restart does not restore canonical authority from audit JSON");
+  } finally {
+    server.closeAllConnections();await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 });
 
 test("an invented source path is still refused, and a remedy with no owning code is not a parked shape", () => {
