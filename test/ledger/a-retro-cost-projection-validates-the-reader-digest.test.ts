@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import {mkdirSync, readFileSync, rmSync, writeFileSync} from "node:fs";
+import {mkdirSync, readFileSync, rmSync, statSync, writeFileSync} from "node:fs";
 import {join} from "node:path";
 import {gzipSync} from "node:zlib";
 import {test, type TestContext} from "node:test";
 import {createEscalationTriageHistoryReader} from "#src/lib/sweep.js";
+import {createLedgerRotationMemo, ledgerRotationEntries} from "#src/lib/ledger-union.js";
 import {projectRetroReadCost, RETRO_TRIGGER_RUN_SLICE, rotationDigestFile} from "#src/run-task.js";
 import {writeLedger} from "#test/helpers/ledger-fixture.js";
 
@@ -75,4 +76,20 @@ test("retro cost projection preserves genuine current hits and cold archive read
   assert.equal((await restarted(f.dir)).ok, true);
   assert.equal(restarted.lastLoad().digestHits, 1, "REAL restarted-reader hit is the positive control");
   assert.equal(restarted.lastLoad().digestMisses, 0);
+});
+
+test("the real async memo retains its cold and restored digest records and accounting", async t => {
+  const f = fixture(t), entries = ledgerRotationEntries([name], f.dir);
+  const make = () => createLedgerRotationMemo(rows => rows, {holder: "fixture.memo", durableDigest: {reducerVersion: "fixture-v1"}});
+  const cold = make();
+  await cold.load(entries);
+  const stat = statSync(f.archive), key = `${stat.size}:${stat.mtimeMs}`;
+  assert.deepEqual(cold.kept(f.archive, key)?.rows, [row]);
+  assert.equal(cold.retention().digestMisses, 1);
+  assert.equal(cold.retention().digestOutcomes?.missing, 1);
+  const restored = make();
+  await restored.load(entries);
+  assert.equal(restored.retention().digestHits, 1);
+  assert.equal(restored.retention().digestMisses, 0);
+  assert.deepEqual(restored.kept(f.archive, key), cold.kept(f.archive, key));
 });
