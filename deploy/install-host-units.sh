@@ -27,6 +27,8 @@
 #                              dead for three hours while PRs piled up green and unreviewed.
 #   rmd-reap-stray.*           a leaked ad-hoc container spawned 158 nested daemons and held ~90% of
 #                              a core; load hit 9.5 and sshd could not complete a handshake.
+#   rmd-session-reaper.*       logind stopped finalising sessions on 2026-10-20 (3,000+ orphans
+#                              toward SessionsMax) and closed sessions leaked processes for days.
 #
 # THE LAUNCHER'S FOUR GUARDS ARE LOAD-BEARING AND A PORT THAT DROPS ANY OF THEM IS WORSE THAN NONE:
 #   * refuses when state/STOP exists            — no timer or boot unit may undo a deliberate stop
@@ -1790,6 +1792,40 @@ effective_directives() {
   printf '%s\n' "$1" | sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d'
 }
 
+render_session_reaper_bin() { cat "${SCRIPT_DIR}/rmd-session-reaper.sh"; }
+
+# The hourly session and process reaper (deploy/rmd-session-reaper.sh) runs as root. Its log sits
+# beside the janitor's host-cleanup.log; StateDirectory holds its CPU observations.
+render_session_reaper_service() {
+  cat <<EOF
+[Unit]
+Description=Finalise orphan logind sessions and stop processes leaked from closed sessions
+
+[Service]
+Type=oneshot
+ExecStart=${BIN_DIR}/rmd-session-reaper
+StateDirectory=rmd-session-reaper
+StandardOutput=append:/home/${SERVICE_USER}/session-reaper.log
+StandardError=append:/home/${SERVICE_USER}/session-reaper.log
+Nice=10
+IOSchedulingClass=idle
+EOF
+}
+
+render_session_reaper_timer() {
+  cat <<'EOF'
+[Unit]
+Description=Hourly session and process reaper
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
 render_scratch_lib() { cat "${SCRIPT_DIR}/scratch-mounts.sh"; }
 render_resource_policy_lib() { cat "${SCRIPT_DIR}/resource-policy.sh"; }
 
@@ -1810,6 +1846,9 @@ ${UNIT_DIR}/rmd-acr-login.timer:render_acr_login_timer:0644
 ${BIN_DIR}/rmd-reap-stray-containers:render_reaper_bin:0755
 ${UNIT_DIR}/rmd-reap-stray.service:render_reaper_service:0644
 ${UNIT_DIR}/rmd-reap-stray.timer:render_reaper_timer:0644
+${BIN_DIR}/rmd-session-reaper:render_session_reaper_bin:0755
+${UNIT_DIR}/rmd-session-reaper.service:render_session_reaper_service:0644
+${UNIT_DIR}/rmd-session-reaper.timer:render_session_reaper_timer:0644
 "
 fi
 
@@ -2156,7 +2195,8 @@ if [ "$UNIT_DIR" = "/etc/systemd/system" ] && command -v systemctl >/dev/null 2>
   if [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; then
     systemctl enable --now rmd-acr-login.timer >/dev/null
     systemctl enable --now rmd-reap-stray.timer >/dev/null
-    echo "install-host-units: reloaded systemd and enabled ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME}, rmd-reap-stray.timer"
+    systemctl enable --now rmd-session-reaper.timer >/dev/null
+    echo "install-host-units: reloaded systemd and enabled ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME}, rmd-reap-stray.timer, rmd-session-reaper.timer"
   else
     echo "install-host-units: reloaded systemd and enabled ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME}"
   fi

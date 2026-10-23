@@ -1,0 +1,54 @@
+id: retro-projection-digest-validity-20261023
+ts: 2026-10-23T16:51:40.000Z
+origin: cli
+status: new
+attachments: []
+proposal_pr: null
+contribution: null
+raw: |
+  Machine-authored contained diagnostic during the operator-approved three-daemon recovery. This is evidence,
+  not an operator ruling, manual review/PASS, permission for production trials or a second implementation claim.
+  First follow existing W1-T9119 / PR13776 and its normal fleet fix ownership; do NOT mint a duplicate task if
+  that owner or a later head has addressed this finding. Reconcile exact current code and credit before acting.
+
+  OBSERVED at PR13776 head860bfb9940c03ba6898f005d24f77f274156f37c:
+  projectRetroReadCost treats accessAsync(rotationDigestFile(...)) success as a zero-decompression hit.
+  The actual createLedgerRotationMemo/readDigest validates JSON parse, holder/archive/stat key/reducerVersion.
+  Mere existence is not its cache-hit predicate. An existing corrupt or obsolete-version digest is rejected
+  by the REAL createEscalationTriageHistoryReader, which decompresses the archive the projection counted as free.
+
+  REPLAY, with all three product paths byte-identical to that head and two private cases appended to its suite:
+  1. Existing windowFixture(1), actual cold projectRetroReadCost gives2105 decompressed bytes. Write {corrupt
+     at rotationDigestFile(stateDir,RETRO_TRIGGER_RUN_SLICE.holder,ledger.2026-10-01T00-00-00-000Z.ndjson.gz).
+     Capture projection, then call a NEW real reader and inspect lastLoad().
+  2. Start with a genuinely reader-generated digest: projection0 is the positive current-cache control.
+     Change only its parsed JSON reducerVersion to obsolete-diagnostic-version; capture projection then call
+     a NEW real reader over the same fixture. No reader/projection verdict fake is injected.
+  BOTH: projectedBytes0,rotations1,undigested0 versus actual digestMisses1,digestHits0,coldArchiveBytes2105.
+  Both actual assertions projected.projectedBytes >= cold.projectedBytes fail functionally (ERR_ASSERTION).
+  Complete TAP12tests:10original controls pass,2new functional failures,0skip/cancel/todo, no setup/import errors.
+  Maintained native scoped path correctly REFUSED the red run; normal pressure at entry/fresh/test, genuine
+  slot1, sealed256MiB scratch,120s, no child network/dependency writes, cleanup closed-and-removed.
+  Private diagnostic commit01c43b7c2418e5aa69db63a99945d4c3bfdbc544 was not pushed or claimed as built work.
+
+  PUBLIC EVIDENCE: PR13776 issuecomment6370113421 contains the exact reproduction/results, and
+  issuecomment6370184236 names the DISTINCT hosted coverage failure: actual job120537258414 diff-coverage
+  refused src/lib/daemon.ts:5444, noteRetroDeferral's readRetroHistory catch. Do not conflate these causes.
+  Native PASS and automatic arm on the old head do not prove this untested semantic validity boundary.
+
+  PROPOSED REPAIR, only if not already owned/fixed: make cost projection use the SAME actual digest-validity
+  semantics as the reader, not a second codec or independent store. A corrupt, stale-version or changed
+  archive/stat-identity digest must include the archive's cost; genuine current validated hits may cost zero.
+  Preserve existing resource guards, unknown/error visibility, one module concern and normal full hosted/
+  native/protected-merge flow. No new supervisor/projection architecture, threshold tuning, cap or policy change.
+  Keep the quoted real-reader miss/hit controls. Prove the fix load-bearing by reverting just the validity
+  repair with identical assertions; it must restore the two functional failures, then restored head passes.
+  A fake returning digestMisses1 cannot substitute for the real default. Actual production stale/corrupt-cache
+  population and any resulting memory harm are UNMEASURED: do not claim an observed OOM cause from this replay.
+
+  DEDUP/OWNERSHIP at mainb7e4dfb6b,2026-10-23T17:02:20Z: all5openPRheadtrees pinned against453actualheads.
+  Nine broad digest-validity candidate records per tree; W10461 changed only on newer main with unrelated
+  gardener fixture authority, not this retro consumer. Read W6263's existing default digest-validity contract
+  and W6337's off-loop digest codec contract: reuse them, do not rebuild their already-present mechanisms.
+  PR13776 already owns the projection and now has a REAL Codex ci-log fix in flight, assigned17:00:07Z.
+  Do not race it, hand-push its branch, change acceptance, manually review/arm/merge or force a production read.

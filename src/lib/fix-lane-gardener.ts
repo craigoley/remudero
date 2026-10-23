@@ -305,7 +305,12 @@ export async function readFixLaneEvidence(
       sourceCache.set(key, source);
       return source;
     }
-    const body = await ghJsonAsync(contentRestArgs(sources.owner, sources.repo, file, head)) as { encoding?: string; content?: string };
+    let body = await ghJsonAsync(contentRestArgs(sources.owner, sources.repo, file, head)) as { encoding?: string; content?: string; sha?: string };
+    if (body.encoding === "none" && typeof body.sha === "string" && /^[a-f0-9]{40}$/.test(body.sha)) {
+      const sha = body.sha;
+      body = await ghJsonAsync(["api", `repos/${sources.owner}/${sources.repo}/git/blobs/${sha}`]) as typeof body;
+      if (body.sha !== sha) throw new Error(`fix-lane source blob identity mismatch: ${file}@${head}`);
+    }
     if (body.encoding !== "base64" || typeof body.content !== "string") throw new Error(`fix-lane source unreadable: ${file}@${head}`);
     const source = Buffer.from(body.content, "base64").toString("utf8");
     sourceCache.set(key, source);

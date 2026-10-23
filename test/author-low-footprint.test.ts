@@ -153,6 +153,8 @@ test('low-footprint portable workflow keeps native test failures and incomplete 
       makeScratch: () => ({dir: volume, volume, imageBytes: 0, writableCapacityBytes: 32 * 1024 ** 2,
         release: () => {if (kind === 'cleanup-failed') throw new Error('fixture detach refused'); rmSync(volume, {recursive: true});}}),
       capture: (_file: string, argv: string[], opts: object) => {
+        assert.ok(argv.includes('--max-old-space-size=512'));
+        assert.equal((opts as {env: {NODE_OPTIONS: string}}).env.NODE_OPTIONS, '--max-old-space-size=512');
         if (kind === 'capture-threw') throw new Error('fixture capture unavailable');
         const result = captureStepSync(argv[2]!, argv.slice(3), opts) as {stdout: string};
         if (kind === 'changed') {

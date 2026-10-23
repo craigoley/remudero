@@ -75,10 +75,11 @@ test("W1-T2877: check mode reports missing units and changes nothing, including 
     assert.equal(install.status, 0, `install failed: ${install.stderr}`);
     const dropinRelative = `systemd/user-${SESSION_UID}.slice.d/50-rmd-cap.conf`;
     assert.deepEqual(filesUnder(root), [
-      "bin/acr-login.sh", "bin/rmd-reap-stray-containers", "bin/rmd-resource-policy", "bin/rmd-scratch-mounts", "rmd-relaunch.sh",
+      "bin/acr-login.sh", "bin/rmd-reap-stray-containers", "bin/rmd-resource-policy", "bin/rmd-scratch-mounts", "bin/rmd-session-reaper", "rmd-relaunch.sh",
       "systemd/rmd-acr-login.service", "systemd/rmd-acr-login.timer",
       "systemd/rmd-fleet-watchdog.service", "systemd/rmd-fleet-watchdog.timer", "systemd/rmd-fleet.service",
-      "systemd/rmd-reap-stray.service", "systemd/rmd-reap-stray.timer", dropinRelative,
+      "systemd/rmd-reap-stray.service", "systemd/rmd-reap-stray.timer",
+      "systemd/rmd-session-reaper.service", "systemd/rmd-session-reaper.timer", dropinRelative,
     ].sort(), "install renders the exact units, helpers, launcher, and session slice drop-in");
     const dropin = join(root, dropinRelative);
     const cap = readFileSync(dropin, "utf8");
@@ -556,6 +557,7 @@ test("W1-T3245: the watchdog tick evaluates a recycle and no second timer exists
     assert.deepEqual(entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort(), [
       "rmd-acr-login.service", "rmd-acr-login.timer", "rmd-fleet-watchdog.service",
       "rmd-fleet-watchdog.timer", "rmd-fleet.service", "rmd-reap-stray.service", "rmd-reap-stray.timer",
+      "rmd-session-reaper.service", "rmd-session-reaper.timer",
     ], "registry refresh adds only its service and timer to the existing units");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1305,4 +1307,34 @@ test("lifecycle mode grammar falsifiers exercise the real script arms: installer
   }
   writeFileSync(script, source);
   assert.equal(f.invoke(["mode: live"], script).status, 0);
+});
+
+test("the installer renders the hourly root session reaper as a service and timer, and check names its drift", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-session-reaper-"));
+  try {
+    assert.equal(renderAsAzure(root).status, 0);
+    const bin = join(root, "bin", "rmd-session-reaper");
+    assert.equal(readFileSync(bin, "utf8"), readFileSync("deploy/rmd-session-reaper.sh", "utf8"), "the reaper is installed verbatim");
+    assert.equal(statSync(bin).mode & 0o777, 0o755);
+    const service = readFileSync(join(root, "systemd", "rmd-session-reaper.service"), "utf8");
+    assert.match(service, new RegExp(`^ExecStart=${join(root, "bin")}/rmd-session-reaper$`, "m"));
+    assert.match(service, /^Type=oneshot$/m);
+    assert.match(service, /^StateDirectory=rmd-session-reaper$/m);
+    assert.match(service, /^StandardOutput=append:\/home\/craigoleyagent\/session-reaper\.log$/m);
+    assert.doesNotMatch(service, /^User=/m, "it runs as root: only root sees every process's fds");
+    const timer = readFileSync(join(root, "systemd", "rmd-session-reaper.timer"), "utf8");
+    assert.match(timer, /^OnUnitActiveSec=1h$/m);
+    assert.match(timer, /^WantedBy=timers\.target$/m);
+
+    const env = { RMD_SERVICE_USER: "craigoleyagent", RMD_STATE_DIR: "/home/craigoleyagent/rmd-state2", RMD_REVIVAL_LOG: "/home/craigoleyagent/rmd-revivals.log" };
+    assert.equal(run([], env, root).status, 0, "a fresh render checks clean");
+    writeFileSync(bin, "#!/bin/sh\nexit 0\n");
+    const drifted = run([], env, root);
+    assert.equal(drifted.status, 1);
+    assert.match(drifted.stdout, /DRIFTED .*bin\/rmd-session-reaper /);
+    rmSync(join(root, "systemd", "rmd-session-reaper.timer"));
+    assert.match(run([], env, root).stdout, /MISSING .*rmd-session-reaper\.timer/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

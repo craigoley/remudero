@@ -1496,14 +1496,23 @@ fi
 # helper reports "disabled" and changes nothing; a dry run only plans.
 # Dependency seed generations nothing references any more; the sweeper proves idle, unreferenced
 # and unopened per generation, and keeps anything it cannot prove (deploy/DEPENDENCY-SEEDS.md).
+# A store written under a URL-encoded root (2026-10-22: "Application%20Support") is swept too.
 seed_tool="$USER_HOME/.local/bin/remudero-dependencies"
-if [ "$APPLY" = 1 ] && [ -x "$seed_tool" ] && [ ! -L "$seed_tool" ] && [ -O "$seed_tool" ]; then
-  if seed_output=$("$seed_tool" sweep --apply 2>&1); then
-    log "dependency-seeds: $(printf '%s' "$seed_output" | python3 -I -c 'import json, sys
+seed_stray="$USER_HOME/Library/Application%20Support/Remudero/dependencies"
+sweep_seeds() { # $1 = label, $2 = seed root override ("" for the account's own root)
+  local seed_output
+  if seed_output=$(if [ -n "$2" ]; then RMD_DEPENDENCY_SEED_ROOT="$2" "$seed_tool" sweep --apply; else "$seed_tool" sweep --apply; fi 2>&1); then
+    log "$1: $(printf '%s' "$seed_output" | python3 -I -c 'import json, sys
 rows = json.load(sys.stdin)
 print("removed=%d kept=%d" % (sum(r["action"] == "remove" for r in rows), sum(r["action"] == "keep" for r in rows)))' 2>/dev/null || echo 'sweep output unreadable')"
   else
-    log "dependency-seeds: sweep failed: $(printf '%s' "$seed_output" | tail -n 1)"
+    log "$1: sweep failed: $(printf '%s' "$seed_output" | tail -n 1)"
+  fi
+}
+if [ "$APPLY" = 1 ] && [ -x "$seed_tool" ] && [ ! -L "$seed_tool" ] && [ -O "$seed_tool" ]; then
+  sweep_seeds dependency-seeds ""
+  if [ -d "$seed_stray" ] && [ ! -L "$seed_stray" ] && [ -O "$seed_stray" ] && [ -f "$seed_stray/.rmd-dependency-seed-root.json" ]; then
+    sweep_seeds dependency-seeds-stray "$seed_stray"
   fi
 fi
 

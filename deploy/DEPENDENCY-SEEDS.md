@@ -32,7 +32,9 @@ The installers copy the guard before the janitor. No emergency mode reduces the 
 no recorded checkout reference, no installer/collector lock, and a successful open-file scan by
 an administrator, or on macOS by the owner when the store is inside a home no other account can
 enter (mode and ACL). Missing or unreadable evidence keeps the generation. `--apply` is explicit;
-the Mac janitor passes it on every apply pass.
+the Mac janitor passes it on every apply pass. A root that is URL-encoded (`%20` for a space) is
+refused: on 2026-10-22 one wrote a 506 MiB store to `Library/Application%20Support` that no sweep
+saw. The Mac janitor also sweeps that exact stray root when it holds a seed store marker.
 Consumer records bind the mount namespace too: a host collector must not mistake
 a container's invisible checkout paths for deleted checkouts. Foreign namespaces are retained
 for operator review, and so are older records without namespace evidence, except on macOS for

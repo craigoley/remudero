@@ -99,8 +99,8 @@ test("W1-T5361: a machine-judge child pass that throws still ledgers machine_jud
     raiseDuplicate: () => "",
   };
   // The child's whole job (`rmd garden run machine-judge`): build the pass and run it once. A checkout with
-  // no plan makes the judge throw on its first read; the pass records it and the child still exits 0.
-  assert.equal(await runTask.runRegisteredGardenPass(JUDGE as registry.RegisteredGardenName, [], ctx), 0);
+  // no plan makes the judge throw on its first read; the pass records it and the child exits nonzero.
+  assert.equal(await runTask.runRegisteredGardenPass(JUDGE as registry.RegisteredGardenName, [], ctx), 1);
   const failed = out.filter((r) => r.step === "machine_judge.failed");
   assert.equal(failed.length, 1, `machine_judge.failed is ledgered (saw ${out.map((r) => r.step).join(", ")})`);
   assert.match(String(failed[0]!.extra.error), /\S/);

@@ -2471,7 +2471,13 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: Snaps
     copy(stateDir, tmpDir, liveCopyOrder(sourceEntries.filter((rel) => !linkPaths.has(rel))));
     for (let pass = 1; ; pass++) {
       const have = new Set([...listStateFiles(tmpDir), ...report.vanished]);
-      const late = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS).filter((rel) => isLedgerArchiveRelPath(rel) && !have.has(rel));
+      // Only root-level ledger archives are eligible for catch-up. The complete
+      // initial inventory is already copied; walking live engines again races pruning.
+      // Preserve the old file-link/error semantics for archive-shaped entries.
+      const late = readdirSync(stateDir, { withFileTypes: true })
+        .filter((entry) => isLedgerArchiveRelPath(entry.name) && (entry.isFile() ||
+          (entry.isSymbolicLink() && statSync(join(stateDir, entry.name)).isFile())))
+        .map((entry) => entry.name).filter((rel) => !have.has(rel));
       if (late.length === 0) break;
       if (pass >= attempts) {
         throw new StateBackupError(
