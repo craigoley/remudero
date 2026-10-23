@@ -26139,27 +26139,32 @@ export function rotationDigestFile(stateDir: string, holder: string, name: strin
 
 /** W1-T9119: what the retro check's ledger read would decompress NOW: the rotations `holder` holds no durable digest
  *  for (a digest hit decompresses nothing), at their decompressed size. A rotation that cannot be statted is counted
- *  as undigested at zero bytes, so an unreadable corpus never blocks the check by itself. */
+ *  as undigested at zero bytes and NAMED in `unreadable`, so an unreadable corpus never blocks the check by itself. */
 export async function projectRetroReadCost(stateDir: string, holder: string = RETRO_TRIGGER_RUN_SLICE.holder): Promise<RetroReadProjection> {
   const entries = ledgerRotationEntries(await readdirAsync(stateDir), stateDir);
   let projectedBytes = 0;
   let undigested = 0;
+  const unreadable: string[] = [];
   for (const entry of entries) {
     const name = basename(entry.path);
+    let digested = true;
     try {
       await accessAsync(rotationDigestFile(stateDir, holder, name));
-      continue;
-    } catch {
-      // Reason: no digest file is the measurement itself — this rotation is read in full.
+    } catch (error) {
+      // No digest file is the measurement itself: this rotation is read in full. Any other failure is carried too.
+      digested = false;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") unreadable.push(`${name}: ${String(error)}`);
     }
+    if (digested) continue;
     undigested++;
     try {
       projectedBytes += await rotationDecompressedBytes(entry.path, (await statAsync(entry.path)).size);
-    } catch {
-      // Reason: an unstattable rotation adds no bytes; the slice reader reports it unread on the read itself.
+    } catch (error) {
+      // An unstattable rotation adds no bytes; the slice reader reports it unread on the read itself.
+      unreadable.push(`${name}: ${String(error)}`);
     }
   }
-  return { projectedBytes, rotations: entries.length, undigested };
+  return { projectedBytes, rotations: entries.length, undigested, ...(unreadable.length > 0 ? { unreadable } : {}) };
 }
 
 /** The `retro_triggered` times, from the same durable-digest slice reader kind the check's run read uses. */
@@ -26173,14 +26178,14 @@ let retroCadenceReader: EscalationTriageHistoryReader | undefined;
 export async function readRetroCadenceHistory(
   config: Config,
   reader: EscalationTriageHistoryReader = (retroCadenceReader ??= createEscalationTriageHistoryReader({ slice: RETRO_CADENCE_SLICE })),
-  policy: Pick<Policy["values"]["retro"], "daysThreshold"> = loadPolicy(policyPath(repoRoot)).values.retro,
+  policy?: Pick<Policy["values"]["retro"], "daysThreshold">,
 ): Promise<{ retroTriggeredAtMs: number[]; fallbackIntervalMs: number }> {
   const read = await reader(join(config.root, "state"));
   const retroTriggeredAtMs = read.rows
     .filter((row) => row.step === "retro_triggered" && typeof row.ts === "string")
     .map((row) => Date.parse(row.ts as string))
     .filter((ms) => Number.isFinite(ms));
-  return { retroTriggeredAtMs, fallbackIntervalMs: policy.daysThreshold * 86_400_000 };
+  return { retroTriggeredAtMs, fallbackIntervalMs: (policy ?? loadPolicy(policyPath(repoRoot)).values.retro).daysThreshold * 86_400_000 };
 }
 
 /** The run slice from `reader`, else (a rotation unread, or none yet) the whole live file, as the sync read falls back.
@@ -26195,11 +26200,12 @@ export async function readRetroTriggerRunsAsync(
   const startedMs = performance.now();
   const ledgerPath = ledgerPathFor(config);
   const stateDir = join(config.root, "state");
-  let projection: { bytes_decompressed: number; undigested_rotations: number } | { projection_error: string };
+  let projection: { bytes_decompressed: number; undigested_rotations: number; unreadable_rotations: number } | { projection_error: string };
   try {
     const projected = await project(stateDir);
-    projection = { bytes_decompressed: projected.projectedBytes, undigested_rotations: projected.undigested };
+    projection = { bytes_decompressed: projected.projectedBytes, undigested_rotations: projected.undigested, unreadable_rotations: projected.unreadable?.length ?? 0 };
   } catch (e) {
+    // Carried onto the row as `projection_error`: a read that cannot be sized still proceeds, visibly.
     projection = { projection_error: String((e as Error)?.message ?? e) };
   }
   const heap = getHeapStatistics();

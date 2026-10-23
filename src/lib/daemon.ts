@@ -514,7 +514,7 @@ export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[stri
 export const BOOT_CADENCE_GATE_BOUND_MS = 10 * 60_000;
 
 /** W1-T9119: the decompressed bytes the retro check's ledger read would open, and the rotations behind the figure. */
-export interface RetroReadProjection { projectedBytes: number; rotations: number; undigested: number }
+export interface RetroReadProjection { projectedBytes: number; rotations: number; undigested: number; unreadable?: string[] }
 
 /** W1-T9119: the reads a `checkRetroTrigger` may carry as properties (see buildRetroDaemonHooks); `deps` fields win. */
 export interface RetroCheckCompanions {

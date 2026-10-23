@@ -17,7 +17,7 @@ import { writeLedger } from "#test/helpers/ledger-fixture.js";
 const HOUR = 3_600_000;
 const BASE = Date.parse("2026-10-13T00:00:00.000Z");
 const HEAP_8GB = { used_heap_size: 1_000_000_000, heap_size_limit: 8_000_000_000 };
-const FIRE = { fire: true as const, reason: "merges", mergesSinceMarker: 25, daysSinceMarker: 0 };
+const FIRE = { fire: true as const, reason: "merges" as const, mergesSinceMarker: 25, daysSinceMarker: 0 };
 const OVER_BOUND = { fire: false as const, overBound: true, reason: "514 archive(s) > 400" };
 
 type Row = { step: string; extra?: Record<string, unknown> };
@@ -158,6 +158,18 @@ test("W1-T9119: an unreadable state dir surfaces on the ledger_read row, not as 
       ((_p: string, _r: string, row: Record<string, unknown>) => { rows.push(row); }) as never);
     assert.match(String(rows[0]?.projection_error), /ENOENT/);
     assert.equal(rows[0]?.source, "live-file");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T9119: a rotation the projection cannot size is named, not silently counted as free", async () => {
+  const { root, stateDir } = windowFixture(1);
+  try {
+    mkdirSync(join(stateDir, "ledger.2026-10-09T00-00-00-000Z.ndjson.gz"));
+    const projection = await projectRetroReadCost(stateDir);
+    assert.equal(projection.undigested, 2);
+    assert.match(String(projection.unreadable?.[0]), /ledger\.2026-10-09T00-00-00-000Z\.ndjson\.gz: .*EISDIR/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
