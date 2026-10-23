@@ -761,32 +761,36 @@ test("W1-T9523: bounded analytics retains timeout and completed-source semantics
 });
 
 /** Current-generation files, including exact replay in gzip, plain and live forms. */
-function recentGarden(dir: string, repository = "fixture/recent") {
+function recentGarden(dir: string, repository = "fixture/recent", atMs = T0) {
   const runtime = { version: 1, repository, daemonRunId: "recent-generation", codeSha: null,
-    configuredAt: iso(T0), observedAt: iso(T0), gardens: [{ name: "config", enabled: true, scope: "repository",
-      cadenceMs: 1000, phase: "completed", observedAt: iso(T0), passId: null, nextDueAt: null,
+    configuredAt: iso(atMs), observedAt: iso(atMs), gardens: [{ name: "config", enabled: true, scope: "repository",
+      cadenceMs: 1000, phase: "completed", observedAt: iso(atMs), passId: null, nextDueAt: null,
       queueMs: null, executionMs: null, exit: 0, reason: null, attempts: 1, completions: 1, failures: 0,
-      lastCompletedAt: iso(T0), lastSuccessAt: iso(T0), lastFailureAt: null }] };
+      lastCompletedAt: iso(atMs), lastSuccessAt: iso(atMs), lastFailureAt: null }] };
   const passId = "12345678-1234-4123-8123-123456789abc";
-  const rows = [{ ts: iso(T0), step: "garden.lifecycle", name: "config", passId, repository,
+  const rows = [{ ts: iso(atMs), step: "garden.lifecycle", name: "config", passId, repository,
     daemon_run_id: runtime.daemonRunId, phase: "completed", exit: 0 },
-  { ts: iso(T0), step: "machine_judge.attempt_spend", run_id: "recent-child", task_id: "fixture-task",
+  { ts: iso(atMs), step: "machine_judge.attempt_spend", run_id: "recent-child", task_id: "fixture-task",
     billing_mode: "api", total_cost_usd: 2, gardener_origin: { state: "linked", version: 1, name: "config", passId } }];
   const text = rows.map(row => JSON.stringify(row)).join("\n") + "\n";
+  const rotation = (ms: number) => iso(ms).replace(/[:.]/g, "-");
   writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify(runtime));
-  writeFileSync(join(dir, "ledger.2026-10-05T12-00-00-000Z.ndjson.gz"), gzipSync(text));
-  writeFileSync(join(dir, "ledger.2026-10-05T12-00-01-000Z.ndjson"), text);
+  writeFileSync(join(dir, `ledger.${rotation(atMs)}.ndjson.gz`), gzipSync(text));
+  writeFileSync(join(dir, `ledger.${rotation(atMs + 1000)}.ndjson`), text);
   writeFileSync(join(dir, "ledger.ndjson"), text);
   return { runtime, rows, text };
 }
 
 test("W1-T10461: recent gardener telemetry refreshes while historical analytics remains incomplete", async t => {
-  const { clock } = handClock(T0 + MINUTE);
+  // The real worker uses system time. Keep its seeded historical source inside the freshness
+  // window so the later failure changes the cached body's stale bit and emits a new body.
+  const now = Date.now();
+  const { clock } = handClock(now);
   const stateDir = scratch(t, "independent-worker-history");
   const ledgerDir = join(stateDir, "core");
-  mkdirSync(ledgerDir); recentGarden(ledgerDir);
+  mkdirSync(ledgerDir); recentGarden(ledgerDir, "fixture/recent", now);
   switchViewsOn(stateDir, [ANALYTICS_VIEW_NAME]);
-  const oldAsOf = iso(T0 - MINUTE);
+  const oldAsOf = iso(now - MINUTE);
   const damaged = join(ledgerDir, "ledger.2026-10-04T00-00-00-000Z.ndjson.gz");
   const damagedBytes = gzipSync('{"invalid historical row"\n');
   writeFileSync(damaged, damagedBytes);
@@ -796,7 +800,7 @@ test("W1-T10461: recent gardener telemetry refreshes while historical analytics 
     clock, holder: "independent-fixture-seed", oracle: "off", post() {} });
   try {
     initial.start(); initial.tick();
-    initial.acceptSnapshot(written("core", snapshotOf(CORE_LINES, T0 - MINUTE), "fixture/recent")); initial.tick();
+    initial.acceptSnapshot(written("core", snapshotOf(CORE_LINES, now - MINUTE), "fixture/recent")); initial.tick();
   } finally { initial.release(); }
   const posted: ReadModelWorkerMessage[] = [];
   let onMessage: ((msg: { type?: string }) => void) | undefined;
