@@ -43,8 +43,9 @@ async function loadOwnerImplementation() {
   // @ts-ignore executable fixture module.
   ({ruleSuites, runRuleSuites} = await import('#scripts/list-rule-suites.mjs'));
   // @ts-ignore executable fixture module.
+  const loadedOwner = await import('#scripts/lib/author-rule-owner.mjs');
   ({AUTHOR_RULE_OWNER_ENV, createAuthorRuleOwner, qualifiedAffectedRules, admittedAffectedRules, beginOwnedRuleResults, certifyRuleNativeSummary, dependencyGraphDigest,
-    ownedPreflightBudgetResult, readOwnedStaticBudgetResult, executeOwnedStaticPhases, ownedStaticPhaseCommands} = await import('#scripts/lib/author-rule-owner.mjs'));
+    ownedPreflightBudgetResult, readOwnedStaticBudgetResult, executeOwnedStaticPhases, ownedStaticPhaseCommands} = loadedOwner);
   ownerLoaded = true;
 }
 
@@ -770,7 +771,7 @@ test('bounded rules defer only unstarted physical files and retain genuine posit
   assert.equal(owner.phase, 'over-capacity'); assert.deepEqual(owner.budget.completed, [rules[0]]);
   assert.deepEqual(owner.budget.deferred, [rules[1]]); assert.deepEqual(owner.budget.failed, []); assert.deepEqual(owner.budget.unknown, []);
   assert.equal(owner.results.length, 1); assert.equal(owner.results[0].nativeCounts.passed, 1);
-  assert.deepEqual(qualifiedAffectedRules(handle, f.repo.dir, handle.childEnvironment, affected).reused.map(row => row.suite), [rules[0]]);
+  assert.deepEqual(qualifiedAffectedRules(handle, f.repo.dir, handle.childEnvironment, affected).reused.map((row: {suite: string}) => row.suite), [rules[0]]);
   withRealOwnerEnvironment(f, handle, () => {
     assert.equal(ownedPreflightBudgetResult(f.repo.dir, 'rules').state, 'over-capacity');
     assert.equal(ownedPreflightBudgetResult(f.repo.dir, 'census').state, 'over-capacity');
@@ -888,27 +889,29 @@ test('an actual timeout of a started bounded rule remains incomplete and cannot 
   assert.throws(() => qualifiedAffectedRules(handle, f.repo.dir, handle.childEnvironment, affected), /failed or incomplete/);
 });
 
+type StaticPhaseSpec = {name: string; args: string[]; phase?: string; summary?: string};
+
 test('separate bounded static tiers retain every maintained obligation and stop on each native failure', async t => {
   await loadOwnerImplementation();
   const f = fixture(t); slowRule(f); const handle = budgetHandle(f);
   assert.equal(runBudgetRules(f, handle).status, 3);
   const names = ['static-default', 'static-rules', 'static-fast', 'static-ci-checks', 'static-scoped-coverage'];
   const specs = ownedStaticPhaseCommands(f.repo.dir, f.owner().head, dirname(handle.file));
-  assert.deepEqual(specs.map(row => row.name), names);
-  assert.ok(specs[0].args.includes('--no-fast')); assert.ok(specs[1].args.some(arg => arg.endsWith('scripts/list-rule-suites.mjs')));
+  assert.deepEqual(specs.map((row: StaticPhaseSpec) => row.name), names);
+  assert.ok(specs[0].args.includes('--no-fast')); assert.ok(specs[1].args.some((arg: string) => arg.endsWith('scripts/list-rule-suites.mjs')));
   const head = JSON.parse(readFileSync(handle.file, 'utf8')).head;
-  const writeSummary = phase => {
+  const writeSummary = (phase: StaticPhaseSpec) => {
     if (!phase.summary) return;
     const partial = phase.phase === 'fast';
     writeFileSync(phase.summary, JSON.stringify({headSha: head, phase: phase.phase, ok: !partial, failed: 0,
       steps: partial ? [{name: 'rule-checks', ok: false}, {name: 'census-precheck', ok: false}] : [{name: phase.name, ok: true}],
       ...(partial ? {disposition: 'over-capacity', deferred: ['rule-checks', 'census-precheck']} : {})}));
   };
-  const success = phase => {writeSummary(phase); return {status: ['static-rules', 'static-fast'].includes(phase.name) ? 3 : 0, outputComplete: true};};
+  const success = (phase: StaticPhaseSpec) => {writeSummary(phase); return {status: ['static-rules', 'static-fast'].includes(phase.name) ? 3 : 0, outputComplete: true};};
   const seen: string[] = [], reported: {name: string; ok: boolean}[] = [];
   const result = executeOwnedStaticPhases({root: f.repo.dir, base: head, owner: handle,
-    run: phase => {seen.push(phase.name);return success(phase);},
-    report: (phase, _native, ok) => reported.push({name: phase.name, ok})});
+    run: (phase: StaticPhaseSpec) => {seen.push(phase.name);return success(phase);},
+    report: (phase: StaticPhaseSpec, _native: unknown, ok: boolean) => reported.push({name: phase.name, ok})});
   assert.equal(result.ok, true); assert.equal(result.partial, true); assert.deepEqual(seen, names);
   assert.equal(reported.length, 5); assert.ok(reported.every(row => row.ok));
   for (const [index, name] of names.entries()) for (const bad of [
@@ -916,7 +919,7 @@ test('separate bounded static tiers retain every maintained obligation and stop 
     {status: 3, outputComplete: true, error: {code: 'ETIMEDOUT'}}, {status: 0, outputComplete: false}]) {
     const calls: string[] = [];
     const failed = executeOwnedStaticPhases({root: f.repo.dir, base: head, owner: handle,
-      run: phase => {calls.push(phase.name);return phase.name === name ? bad : success(phase);}, report: () => {}});
+      run: (phase: StaticPhaseSpec) => {calls.push(phase.name);return phase.name === name ? bad : success(phase);}, report: () => {}});
     assert.equal(failed.ok, false, JSON.stringify({name,bad})); assert.deepEqual(calls, names.slice(0,index+1));
   }
   const directory = join(f.repo.dir, 'coverage/prepared-but-unmeasured'); mkdirSync(directory);
@@ -925,7 +928,7 @@ test('separate bounded static tiers retain every maintained obligation and stop 
     parentCensus:{root:f.repo.dir, head, base:head, state:'over-capacity'}});
   const calls: string[] = [];
   const missing = executeOwnedStaticPhases({root:f.repo.dir, base:head, owner:unmeasured,
-    run:phase=>{calls.push(phase.name);writeSummary(phase);return {status:0,outputComplete:true};}, report:()=>{}});
+    run:(phase: StaticPhaseSpec)=>{calls.push(phase.name);writeSummary(phase);return {status:0,outputComplete:true};}, report:()=>{}});
   assert.equal(missing.ok, false); assert.deepEqual(calls, names.slice(0,2));
   assert.match(missing.phases[1].refusal, /no qualified completion/);
 });
@@ -940,7 +943,7 @@ test('the bounded static phase entry runs the real CI-check default and preserve
   assert.equal(code, 1, 'missing physical native CI fixtures must remain a real failed default');
   const summary = JSON.parse(readFileSync(target, 'utf8'));
   assert.equal(summary.ok, false); assert.ok(summary.failed > 0); assert.equal(summary.phase, 'ci-checks');
-  assert.ok(summary.steps.some(step => /FAIL/.test(step.detail)));
+  assert.ok(summary.steps.some((step: {detail: string}) => /FAIL/.test(step.detail)));
   const thrown = join(dirname(handle.file), 'throw.summary.json');
   const refusal = withRealOwnerEnvironment(f, handle, () => main(['--phase','ci-checks','--summary-file',thrown],
     {root:f.repo.dir, ciChecks:()=>{throw Error('actual bounded leaf invocation refused');}}));
