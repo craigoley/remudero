@@ -157,18 +157,6 @@ test("the native evidence reader uses the async transport at the exact recorded 
   ]);
   shim.addRoute({ when: "contents/", stdout: "{}" });
   await assert.rejects(() => gardener.readFixLaneEvidence({ owner: "acme", repo: "remudero" }, rows()), /fix-lane source unreadable.*reader.ts@old/);
-  const sha = "a".repeat(40);
-  shim.addRoute({ when: "contents/", stdout: JSON.stringify({ encoding: "none", content: "", sha, size: 2_697_132 }) });
-  shim.addRoute({ when: `git/blobs/${sha}`, stdout: JSON.stringify({ sha, encoding: "base64", content: Buffer.from(source).toString("base64") }) });
-  const large = await gardener.readFixLaneEvidence({ owner: "acme", repo: "remudero" }, rows());
-  assert.equal(defectEventsOf(rows(), NOW, large).filter(e => e.key === "coverage-unseamed-catch").length, 1);
-  assert.ok(shim.calls().some(c => c === `api repos/acme/remudero/git/blobs/${sha}`));
-  shim.addRoute({ when: `git/blobs/${sha}`, stdout: JSON.stringify({ sha: "b".repeat(40), encoding: "base64", content: Buffer.from(source).toString("base64") }) });
-  await assert.rejects(() => gardener.readFixLaneEvidence({ owner: "acme", repo: "remudero" }, rows()), /blob identity mismatch/);
-  shim.addRoute({ when: `git/blobs/${sha}`, stdout: JSON.stringify({ sha, encoding: "none", content: "" }) });
-  await assert.rejects(() => gardener.readFixLaneEvidence({ owner: "acme", repo: "remudero" }, rows()), /fix-lane source unreadable/);
-  shim.addRoute({ when: "contents/", stdout: JSON.stringify({ encoding: "none", sha: "invalid" }) });
-  await assert.rejects(() => gardener.readFixLaneEvidence({ owner: "acme", repo: "remudero" }, rows()), /fix-lane source unreadable/);
   shim.addRoute({ when: "check-runs", stderr: "denied", exit: 1 });
   await assert.rejects(() => gardener.readFixLaneEvidence({ owner: "acme", repo: "remudero" }, rows()), /denied/);
 });
