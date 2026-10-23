@@ -471,6 +471,28 @@ until then the console reads `/v1/incidents`, each instance's emergency status a
 
 ## `instances` (version 1)
 
+W1-T10430 adds optional per-entry `inboxCapabilityEvidence`. Its exact registered repository,
+instance, prefix, qualification generation and owned projector generation bind a real bounded
+conversation-contract observation. The matching `inbox-capability:<instance>` source is explicitly
+kind `inbox-store` and uses that existing 180-second budget. The worker revalidates the registry,
+contract file, mount, generation and live lease before publishing. A missing, malformed, unreadable,
+foreign, changed or unowned source is unavailable, never last-good positive evidence. Empty legacy
+registries (`[]` and `{ "proposals": [] }`) remain compatible, not a revoked capability set.
+
+This is separate from ledger/liveness health: both source readings remain visible, and the root
+envelope retains its conservative worst-source semantics. New consumers must require the exact
+supported evidence version, qualification identity, repository/instance/prefix and matching current
+source before considering contract support independently of unrelated ledger clocks. Old v1 readers
+keep their existing conservative behavior; missing new evidence is not a reason to ignore health.
+Observation time lives in `sources`, not `data`, so repeated real reads update freshness without
+changing content identity. Warm persisted auto-mode qualification from before this generation cannot
+authorize the new producer. No switch or service setting changes here.
+
+**Contract support is not reply authorization.** The existing server rechecks the mounted route,
+current contract, exact request scope, session/operator, current executable option and stable intent
+at write time. No action endpoint or permission is added; the Console consumer and live acceptance
+remain separately gated. No request-time ledger scan is introduced.
+
 `GET /v1/views/instances`: one instance list, saying what this serve actually serves (arch Phase 4 §4,
 W1-T5056, `src/lib/instances-view.ts`). Schema: `InstancesView` in `openapi/daemon.yaml`. Dark until
 `switches.json` sets `instances` to `serve`; until then it answers 404 (`view_disabled`, or `view_shadow`

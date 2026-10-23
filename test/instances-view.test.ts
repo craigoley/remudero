@@ -22,6 +22,9 @@ import type { Route } from "../src/lib/service.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { diffViewData } from "../src/lib/view-shadow.js";
 import type { ViewBodyEntry } from "../src/lib/views.js";
+import { observeInstanceInboxContract, mountInstanceInboxRoutes } from "#src/lib/instance-inbox-contract.js";
+import { judgeSource, SLOW_LANE_STORE_BUDGET_MS } from "#src/lib/view-freshness.js";
+import { RAW_BODY_CACHE } from "#src/lib/service.js";
 
 const NOW = Date.parse("2026-10-01T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
@@ -183,4 +186,97 @@ test("W1-T5056: a store without a projected daemon row reads liveness unknown, n
   assert.deepEqual(instanceLiveness(throwing, NOW), { state: "unknown" });
   const empty = { prepare: () => ({ get: () => undefined }) } as unknown as ReadModelDb;
   assert.deepEqual(instanceLiveness(empty, NOW), { state: "unknown" });
+});
+
+test("W1-T10430: capability evidence is current while independent ledger health is stale", (t) => {
+  const f = fixture(t, { heartbeatAgoMs: INSTANCE_LIVENESS_BOUND_MS + 60_000 });
+  writeFileSync(join(f.stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [] }));
+  const entry = materialize(f);
+  const core = (entry.body.data as InstancesData).instances.find(i => i.id === "core")!;
+  const source = entry.body.sources.find(s => s.name === core.inboxCapabilityEvidence?.source)!;
+  assert.equal(core.liveness.state, "down", "real stale heartbeat is retained");
+  assert.equal(source.state, "fresh", "real current filesystem observation, not a fake capability array");
+  assert.equal(core.inboxCapabilityEvidence?.state, "observed");
+  assert.equal(core.inboxCapabilityEvidence?.repository, "craigoley/remudero");
+  assert.equal(core.inboxCapabilityEvidence?.instance, "core");
+  assert.equal(core.inboxCapabilityEvidence?.prefix, "/v1/i/core");
+  assert.equal(core.inboxCapabilityEvidence?.generation, entry.generation);
+  assert.equal(source.asOf, new Date(NOW).toISOString());
+  assert.equal(judgeSource(source, NOW + SLOW_LANE_STORE_BUDGET_MS + 1).state, "stale", "a frozen positive expires under the existing source budget");
+  assert.ok(entry.body.sources.some(s => s.name === "ledger:core"), "ledger health was not removed or restamped");
+});
+
+test("W1-T10430: missing revoked malformed or foreign capability sources cannot authorize writes", async (t) => {
+  const f = fixture(t), marker = join(f.stateDir, "inbox-proposals.json");
+  writeFileSync(marker, "[]");
+  assert.equal(observeInstanceInboxContract(f.stateDir, { instance: "core", repository: "craigoley/remudero" }).state.mode, "read-write", "legacy empty list is compatible, not a revocation");
+  const evidence = () => (materialize(f).body.data as InstancesData).instances.find(i => i.id === "core")!.inboxCapabilityEvidence!;
+  assert.equal(evidence().state, "observed", "positive control before each refusal class");
+  for (const content of ["{torn", "null", "42", JSON.stringify({ proposals: [], repository: "foreign/repo" }), JSON.stringify({ proposals: [], instance: "other" })]) {
+    writeFileSync(marker, content);
+    assert.equal(evidence().state, "unavailable", content);
+    writeFileSync(marker, "[]");
+    assert.equal(evidence().state, "observed", "restored real source recovers");
+  }
+  rmSync(marker);
+  assert.equal(evidence().state, "unavailable", "revoked marker replaces the previous positive");
+  mkdirSync(marker);
+  assert.equal(observeInstanceInboxContract(f.stateDir, { instance: "core", repository: "craigoley/remudero" }).state.mode, "read-only", "non-regular/unreadable source refuses");
+  rmSync(marker, { recursive: true });
+  writeFileSync(marker, "[]");
+  const all = materialize(f).body.data as InstancesData;
+  assert.equal(all.instances.find(i => i.id === "site")!.inboxCapabilityEvidence?.state, "unavailable", "unmounted instance cannot borrow core evidence");
+  rmSync(f.repoPath);
+  assert.equal(evidence().state, "unavailable", "missing registry never reuses a last-good binding");
+
+  let calls = 0;
+  const source: Route = { method: "POST", path: "/v1/inbox/thread/reply", scope: "write", handler: (_req, res) => { calls++; res.end("{}"); } };
+  const route = mountInstanceInboxRoutes({ instance: "core", repository: "craigoley/remudero", stateDir: f.stateDir, routes: [source] })[0];
+  let status = 0, text = "";
+  const res = { writeHead(code: number) { status = code; return res; }, setHeader() {}, end(value?: string) { text = value ?? ""; } };
+  const req = { url: route.path, [RAW_BODY_CACHE]: JSON.stringify({ repository: "foreign/repo", instance: "core", threadId: "irrelevant", intentId: "valid-intent", text: "never send" }) };
+  await route.handler(req as never, res as never, { params: {} });
+  assert.equal(status, 409, "actual scoped handler still refuses a foreign request");
+  assert.equal(JSON.parse(text).error, "inbox_scope_mismatch");
+  assert.equal(calls, 0, "no side effect or synthetic business reply");
+});
+
+test("W1-T10430: capability evidence follows owned generation and revalidation without request-time scans", (t) => {
+  const f = fixture(t), marker = join(f.stateDir, "inbox-proposals.json");
+  writeFileSync(marker, "[]");
+  const state = { instance: "core", lease: "held" as "held" | "elsewhere" | "none", generation: 4 };
+  let invalidate = false;
+  const view = createInstancesView({ instances: [{ name: "core", ledgerDir: f.stateDir }], repoPath: f.repoPath, hostPath: f.hostPath,
+    mounted: () => { if (invalidate) state.generation++; return true; }, ledgerSource: () => ({ name: "ledger:core", asOf: null, state: "stale" }) });
+  const ctx = { now: NOW, instances: [{ state, lease: {} }] };
+  const read = () => view.materialize(ctx)[0].data.instances.find(i => i.id === "core")!.inboxCapabilityEvidence!;
+  assert.equal(read().state, "observed");
+  state.lease = "elsewhere";
+  assert.equal(read().state, "unavailable", "a lost owner cannot refresh positive evidence");
+  state.lease = "held";
+  assert.equal(view.materialize({ ...ctx, instances: [{ state }] })[0].data.instances[0].inboxCapabilityEvidence?.state, "unavailable", "a stale held label without its live lease is not ownership");
+  invalidate = true;
+  assert.equal(read().state, "unavailable", "generation changes during observation refuse");
+  invalidate = false;
+  const observed = observeInstanceInboxContract(f.stateDir, { instance: "core", repository: "craigoley/remudero" });
+  assert.equal(observed.current(), true);
+  rmSync(marker);
+  assert.equal(observed.current(), false, "file disappearance is caught before publication");
+  // Existing registry route consumes only the already-materialized body; no ledger scan or model call.
+  assert.equal(registryFromInstances(view.materialize(ctx)[0].data).status, 200);
+});
+
+test("W1-T10430: legacy instances remain conservative and new capability clocks do not churn data", (t) => {
+  const f = fixture(t);
+  writeFileSync(join(f.stateDir, "inbox-proposals.json"), "[]");
+  const first = materialize(f), later = materialize(f, NOW + 60_000);
+  assert.equal(first.body.version, 1, "additive contract retains version-one consumers");
+  assert.deepEqual(first.body.data, later.body.data, "observation clock is outside content identity");
+  assert.equal(first.etag, later.etag);
+  const a = first.body.sources.find(s => s.name === "inbox-capability:core")!, b = later.body.sources.find(s => s.name === a.name)!;
+  assert.equal(a.state, "fresh"); assert.equal(b.state, "fresh"); assert.notEqual(a.asOf, b.asOf, "each clock follows a real observation");
+  assert.equal((first.body.data as InstancesData).instances.find(i => i.id === "console")!.capabilities.inbox?.mode, "read-only", "missing old-daemon contract remains read-only");
+  const legacy = structuredClone(first.body.data) as InstancesData;
+  for (const entry of legacy.instances) delete entry.inboxCapabilityEvidence;
+  assert.deepEqual(registryFromInstances(legacy), registryFromInstances(first.body.data as InstancesData), "old registry projection does not invent capability evidence");
 });

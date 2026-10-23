@@ -32,7 +32,8 @@ import {
   type RegistryDrift,
   type RegistryProjection,
 } from "./instance-registry.js";
-import { instanceInboxCapabilities } from "./instance-inbox-contract.js";
+import { instanceInboxCapabilities, observeInstanceInboxContract, type InstanceInboxContractState } from "./instance-inbox-contract.js";
+import { SLOW_LANE_STORE_BUDGET_MS } from "./view-freshness.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import type { ReadModelDb } from "./read-model-db.js";
 import type { ShadowLegacy } from "./view-shadow.js";
@@ -40,6 +41,7 @@ import type { ViewSource } from "./views.js";
 
 export const INSTANCES_VIEW_NAME = "instances";
 export const INSTANCES_VIEW_VERSION = 1;
+export const INSTANCES_QUALIFICATION_GENERATION = "W1-T10430.inbox-capability.v1";
 /** The views serve answers for every instance it projects. */
 export const INSTANCE_VIEWS: readonly string[] = ["now", "repositories", "read-model", INSTANCES_VIEW_NAME];
 /** The writes each served instance answers under its prefix (`instanceRouteSet`'s controls and the answers `now` names). */
@@ -66,6 +68,17 @@ export interface InstanceEntry {
   readModel: { lease: "held" | "elsewhere" | "none" };
   /** `inbox` says whether the conversation writes are usable; read-only names why (an old daemon). */
   capabilities: { views: string[]; writes: string[]; coreOnly?: string[]; inbox?: { mode: "read-write" | "read-only"; reason?: string } };
+  /** Optional additive v1 evidence. Advertised support never authorizes an individual request. */
+  inboxCapabilityEvidence?: {
+    version: 1;
+    qualificationGeneration: string;
+    source: string;
+    state: "observed" | "unavailable";
+    instance: string;
+    repository?: string;
+    prefix: string;
+    generation?: number;
+  };
 }
 
 export interface InstancesData {
@@ -158,6 +171,7 @@ export function instanceLiveness(db: ReadModelDb | undefined, now: number): Inst
 interface ProjectedState {
   instance: string;
   lease: "held" | "elsewhere" | "none";
+  generation?: number;
 }
 
 export interface InstancesViewOptions<S extends ProjectedState> {
@@ -173,8 +187,8 @@ export interface InstancesViewOptions<S extends ProjectedState> {
 }
 
 /** What serve answers for one served instance: its fixed views and writes, plus the conversation routes it can use. */
-function servedCapabilities(stateDir: string, core: boolean): InstanceEntry["capabilities"] {
-  const inbox = instanceInboxCapabilities(stateDir);
+function servedCapabilities(stateDir: string, core: boolean, contract?: InstanceInboxContractState): InstanceEntry["capabilities"] {
+  const inbox = instanceInboxCapabilities(stateDir, contract);
   return {
     views: [...INSTANCE_VIEWS, ...inbox.views], writes: [...INSTANCE_WRITES, ...inbox.writes],
     ...(core ? { coreOnly: [...CORE_ONLY_ROUTES] } : {}), inbox: inbox.inbox,
@@ -185,8 +199,9 @@ function servedCapabilities(stateDir: string, core: boolean): InstanceEntry["cap
 export function createInstancesView<S extends ProjectedState>(opts: InstancesViewOptions<S>): {
   name: string;
   version: number;
+  qualificationGeneration: string;
   ledgerReads(db: ReadModelDb): string | null;
-  materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: InstancesData; sources: ViewSource[] }>;
+  materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: unknown }> }): Array<{ key: string; data: InstancesData; sources: ViewSource[] }>;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
 } {
   const mounted = opts.mounted ?? existsSync;
@@ -203,6 +218,7 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
   return {
     name: INSTANCES_VIEW_NAME,
     version: INSTANCES_VIEW_VERSION,
+    qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION,
     ledgerReads: (db) => {
       const beat = db.prepare("SELECT last_ms FROM instance_heartbeat WHERE k = 'daemon'").get();
       return beat ? fixedClock(Number(beat.last_ms)).iso() : null;
@@ -213,17 +229,36 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
       const live = "registry" in parsed ? parsed.registry.instances.filter((i) => i.live) : [];
       const { hostRegistry, drift } = hostRegistryDrift(live.map((i) => i.name), hostText());
       const projected = new Map(opts.instances.map((i) => [i.name, i]));
+      const capabilitySources: ViewSource[] = [];
+      const revalidate: Array<() => void> = [];
       const entry = (id: string, registered: (typeof live)[number] | undefined): InstanceEntry => {
         const slot = instances.find((candidate) => candidate.state.instance === id);
         const dir = projected.get(id)?.ledgerDir;
         const served = slot !== undefined && dir !== undefined && mounted(dir);
+        const prefix = `/v1/i/${id}`;
+        const generation = slot?.state.generation;
+        const owned = slot?.state.lease === "held" && slot.lease !== undefined && Number.isSafeInteger(generation) && generation! >= 0;
+        const observation = registered && served ? observeInstanceInboxContract(dir, { instance: id, repository: registered.repo }) : undefined;
+        const source = `inbox-capability:${id}`;
+        const evidence: NonNullable<InstanceEntry["inboxCapabilityEvidence"]> = { version: 1, qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION, source, state: "unavailable", instance: id, ...(registered ? { repository: registered.repo } : {}), prefix, ...(Number.isSafeInteger(generation) && generation! >= 0 ? { generation } : {}) };
+        const reading: ViewSource = { name: source, kind: "inbox-store", instance: id, budgetMs: SLOW_LANE_STORE_BUDGET_MS, asOf: fixedClock(now).iso(), state: "unavailable", phase: "failed", reason: "current registered mounted owned conversation contract could not be verified" };
+        capabilitySources.push(reading);
+        revalidate.push(() => {
+          if (owned && observation?.state.mode === "read-write" && observation.current() && slot?.state.lease === "held" && slot.state.generation === generation && mounted(dir!)) {
+            evidence.state = "observed";
+            reading.state = "fresh";
+            delete reading.phase;
+            delete reading.reason;
+          }
+        });
         return {
           id, registered: registered !== undefined,
           ...(registered ? { project: registered.project, repo: registered.repo, mode: registered.mode ?? "live" } : {}),
-          prefix: `/v1/i/${id}`, served,
+          prefix, served,
           liveness: served ? instanceLiveness(slot.db, now) : { state: "unknown" },
           readModel: { lease: slot?.state.lease ?? "none" },
-          capabilities: served ? servedCapabilities(dir, id === core) : { views: [], writes: [] },
+          capabilities: served ? servedCapabilities(dir, id === core, observation?.state) : { views: [], writes: [] },
+          inboxCapabilityEvidence: evidence,
         };
       };
       const entries = live.map((i) => entry(i.name, i));
@@ -239,7 +274,9 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
         ...(hostOnly.length + repoOnly.length + unmounted.length + unregistered.length > 0 ? { drift: { hostOnly, repoOnly, unmounted, unregistered } } : {}),
         ...("code" in parsed ? { registryError: parsed.code } : {}),
       };
-      return [{ key: "", data, sources: [registrySource(read, parsed), ...instances.map(({ state }) => opts.ledgerSource(state, now))] }];
+      const again = readFile(opts.repoPath);
+      if (read.ok && again.ok && again.text === read.text) for (const check of revalidate) check();
+      return [{ key: "", data, sources: [registrySource(read, parsed), ...instances.map(({ state }) => opts.ledgerSource(state, now)), ...capabilitySources] }];
     },
     /** The shadow side: the legacy registry route's fields over the view's own, so only what `/v1/registry` answers can differ. */
     legacy: (_key, now, data) => {

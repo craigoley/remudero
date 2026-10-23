@@ -8822,6 +8822,24 @@ components:
                     required: [lease]
                     properties:
                       lease: {type: string, enum: [held, elsewhere, none]}
+                  inboxCapabilityEvidence:
+                    type: object
+                    description: >
+                      Optional version-one current contract observation (W1-T10430), bound to this registered
+                      repository, instance, prefix and owned projector generation. The matching named source
+                      has its own observation clock and existing inbox-store freshness budget, independent of
+                      ledger health. Missing or unavailable evidence is not write readiness; neither is
+                      observed evidence permission for an individual reply. Server checks remain authoritative.
+                    required: [version, qualificationGeneration, source, state, instance, prefix]
+                    properties:
+                      version: {type: integer, enum: [1]}
+                      qualificationGeneration: {type: string}
+                      source: {type: string}
+                      state: {type: string, enum: [observed, unavailable]}
+                      instance: {type: string}
+                      repository: {type: string}
+                      prefix: {type: string}
+                      generation: {type: integer, minimum: 0}
                   capabilities:
                     type: object
                     required: [views, writes]
