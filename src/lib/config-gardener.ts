@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
+import { tsImport } from "tsx/esm/api";
 import { bundledWorkerUrl } from "./child-entry-argv.js";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -397,7 +398,7 @@ export async function serveConfigMeasurement(input: ConfigMeasurement, port: { p
     let value: ConfigInventory | MountSweep;
     if (input.kind === "inventory") value = buildConfigInventory(input);
     else {
-      const m = await import(pathToFileURL(input.sweepScript).href) as { buildMountHeadroomSweep: (stateDir: string) => MountSweep };
+      const m = await tsImport(pathToFileURL(input.sweepScript).href, import.meta.url) as { buildMountHeadroomSweep: (stateDir: string) => MountSweep };
       value = await cachedMountHeadroomSweep(input.stateDir, input.sweepScript, m.buildMountHeadroomSweep);
     }
     port.postMessage({ ok: true, value });

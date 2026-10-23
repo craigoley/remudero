@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.38
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts"

@@ -1150,6 +1150,12 @@ export const PRECHECK_TRIGGERED_SUITES = [
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
+  { testFile: "test/rules/scout-config-gardener-failed.test.ts", gitFree: true,
+    trigger: ({ changed }) => changed.some((p) => [
+      "src/run-task.ts", "src/lib/config-gardener.ts", "scripts/build-child-entries.mjs",
+      "test/rules/scout-config-gardener-failed.test.ts",
+    ].includes(p)),
+    remedy: "load the config garden and bundled measurement worker with the TypeScript loader" },
   { testFile: "test/ci/a-rejected-census-measurement-retains-its-complete-capture.test.ts",
     trigger: ({ changed }) => changed.some((p) => [
       "scripts/census-precheck.mjs", "scripts/lib/author-step-capture.mjs", "scripts/lib/retained-fixtures.mjs",
