@@ -7,6 +7,33 @@ import {performance} from 'node:perf_hooks';
 // Matches ci-parity's existing local coverage scratch reserve; this does not lower that gate.
 export const MAC_AUTHOR_FREE_RESERVE_BYTES = 20 * 1024 ** 3;
 
+/** Opt-in ordinary author budget. These are declared limits, not learned peak
+ * measurements. Each phase is bounded and fixtures use a fixed native volume;
+ * workspace diagnostics are separately bounded by phase count and output size.
+ * Full ci-parity coverage retains its own independent 20-GiB admission policy. */
+export function boundedAuthorWorkload(scratchMiB) {
+  if (!Number.isSafeInteger(scratchMiB) || scratchMiB < 16 || scratchMiB > 256)
+    throw new TypeError('bounded author scratch must be an integer from 16 through 256 MiB');
+  const scratchBytes = scratchMiB * 1024 ** 2;
+  const stepOutputBytes = 8 * 1024 ** 2, maximumPhases = 32;
+  return Object.freeze({kind: 'bounded-ordinary-mac-author', workers: 1, heapMiB: 1024,
+    scratchBytes, stepOutputBytes, stepRuntimeMs: 120_000, maximumPhases,
+    systemReserveBytes: 4 * 1024 ** 3, metadataReserveBytes: 16 * 1024 ** 2,
+    minimumFreeBytes: 4 * 1024 ** 3 + 2 * scratchBytes + maximumPhases * stepOutputBytes + 16 * 1024 ** 2});
+}
+
+/** Parse both Node CLI spellings once, before choosing the real admission seam.
+ * A duplicate never lets the admitted budget differ from the executing budget. */
+export function boundedAuthorWorkloadFromArgv(argv) {
+  const beforeSeparator = argv.slice(0, argv.includes('--') ? argv.indexOf('--') : argv.length);
+  const flags = beforeSeparator.flatMap((value, i) => value === '--bounded-scratch-mib'
+    ? [{value: beforeSeparator[i + 1]}] : value.startsWith('--bounded-scratch-mib=')
+      ? [{value: value.slice('--bounded-scratch-mib='.length)}] : []);
+  if (!flags.length) return undefined;
+  if (flags.length !== 1) throw new TypeError('bounded author scratch may be declared only once');
+  return boundedAuthorWorkload(Number(flags[0].value));
+}
+
 /** XNU's sysctl returns DISPATCH/NOTE flags (1,2,4), NOT its internal 0..4 pressure enum.
  * See apple-oss-distributions/xnu/bsd/kern/kern_memorystatus_notify.c. */
 export function macPressureState(text) {

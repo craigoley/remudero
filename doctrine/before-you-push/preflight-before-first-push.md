@@ -100,6 +100,32 @@ and `--coverage` remain available for full local reproduction; infrastructure, c
 and test-selector changes should use that full reproduction before their first push. The default
 static preflight's small scoped coverage check is also retained, not silently removed.
 
+### Bounded ordinary author feedback
+
+Operator-approved 2026-10-23: the ordinary author entry point can price a declared, bounded
+workload instead of requiring the full coverage job's 20-GiB reserve:
+
+```sh
+node --max-old-space-size=1024 --import tsx scripts/preflight-author.mjs --bounded-scratch-mib 128 --head-ref run-unfiled-<epochMs>
+```
+
+This mode keeps ordinary selection, identity, static checks, native judgments and verdicts.
+It uses one worker, an inherited 1-GiB V8 old-space ceiling, at most 32 native phases, 120 seconds
+and 8 MiB of combined output per phase, and a fixed native scratch volume between 16 and 256 MiB.
+Disk admission includes a 4-GiB system reserve, twice the declared scratch size, all 32 output
+allowances and 16 MiB of metadata. These are declared bounds, not measured production peaks;
+the V8 ceiling does not bound process-tree RSS. Only temporary fixtures are capacity bounded:
+this mode does not sandbox trusted tests or bound every workspace write. A native capture whose
+process group cannot be proven closed retains scratch and its lease; a failed normal detach
+retains the volume and refuses the receipt. Existing memory-pressure and serial-slot checks remain.
+
+The smaller runtime budget may select a subset or no affected suites. An `over-capacity` receipt
+is partial feedback, never author PASS. Failed phases remain failed. Required isolated full
+assurance and hosted checks, coverage, security and native review remain separate merge gates.
+The default author invocation and full coverage job retain their existing 20-GiB policy;
+Linux admission is unchanged. No quiet window is required merely because this bounded job has
+less than 20 GiB free.
+
 ### Explicit low-footprint local checks
 
 Operator-approved 2026-10-17: the Mac may run an explicitly scoped check below the ordinary

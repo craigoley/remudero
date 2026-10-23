@@ -47,9 +47,10 @@ export function lowFootprintSandbox(volume) {
     (allow file-write* (require-all (subpath ${path}) (require-not (regex #"/node_modules/"))))`;
 }
 
-export function createBoundedAuthorScratch(bytes, {parent = tmpdir(), command = nativeAuthorCommand} = {}) {
+export function createBoundedAuthorScratch(bytes, {parent = tmpdir(), command = nativeAuthorCommand, shortPath = false} = {}) {
   if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes % MIB !== 0) throw new Error('invalid bounded scratch capacity');
-  const dir = realpathSync(mkdtempSync(join(parent, 'rmd-author-'))), identity = lstatSync(dir);
+  if (typeof shortPath !== 'boolean') throw new Error('invalid short scratch path option');
+  const dir = realpathSync(mkdtempSync(join(parent, shortPath ? 'ra' : 'rmd-author-'))), identity = lstatSync(dir);
   const image = join(dir, 'scratch.dmg'), volume = join(dir, 'v');
   mkdirSync(volume);
   let attached = false;
