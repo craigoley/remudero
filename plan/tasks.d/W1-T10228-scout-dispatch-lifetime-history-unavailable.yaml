@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   risk: low
   priority: 1.43
   status: queued
@@ -11,6 +11,7 @@
   author_class: machine
   origin: "scout:dispatch.lifetime_history_unavailable"
   files:
+    - "src/run-task.ts"
     - test/gardeners/scout-dispatch-lifetime-history-unavailable.test.ts
   acceptance:
     - claim: "dispatch.lifetime_history_unavailable stops recurring: its cause is fixed rather than its rows hidden"
@@ -20,11 +21,3 @@
     The ledger step dispatch.lifetime_history_unavailable carries a failure shape and landed rows in both halves of the trailing 7 days: 12 in the older half, 58 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
-  risk_ruling:
-    verdict: "operator"
-    action: proceed
-    confidence: 1
-    reasons:
-      - "released by the operator with rmd approve"
-    judged_at: "2026-10-22T03:29:10.222Z"
-    pin: "6d30adb268f36da15bf50da80e1a943f72255c1731835956e18cebfdda345904"
