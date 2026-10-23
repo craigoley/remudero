@@ -48,6 +48,9 @@ test('native low-footprint command runs the exact committed files and reports sc
     const low = await import(subject) as {runLowFootprintAuthor: (args: string[], deps: object) => Promise<number>};
     const status = await low.runLowFootprintAuthor(['--low-footprint', '--scratch-mib', '64', '--timeout-ms', '30000',
       '--head-ref', 'run-unfiled-1234567890123', '--test', 'test/a.test.ts'], {root: f.dir, ...author,
+      // This native test qualifies containment and execution, not the fluctuating host.
+      // Real default admission has its own native-probe and fail-closed controls.
+      admit: () => ({state: 'admitted', fixtureOnly: true}),
       publicationIdentity: author.authorPublicationIdentity});
     assert.equal(status, 0);
     const dirs = readdirSync(join(f.dir, 'coverage')).filter(name => name.startsWith('author-low-footprint-'));
@@ -73,6 +76,7 @@ test('native low-footprint command refuses failing and ghost suites without fall
       '--head-ref', 'run-unfiled-1234567890123', '--test'];
     for (const file of ['test/ghost.test.ts', 'test/b.test.ts']) {
       assert.equal(await low.runLowFootprintAuthor([...base, file], {root: f.dir, ...author,
+        admit: () => ({state: 'admitted', fixtureOnly: true}),
         publicationIdentity: author.authorPublicationIdentity}), 3);
     }
     const dirs = readdirSync(join(f.dir, 'coverage')).filter(name => name.startsWith('author-low-footprint-'));
