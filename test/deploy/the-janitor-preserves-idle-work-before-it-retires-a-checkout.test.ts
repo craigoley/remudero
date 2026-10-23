@@ -563,7 +563,7 @@ test("codex session logs idle past codex_session_days are removed; recent, open 
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
-test("the janitor sweeps unreferenced dependency seeds with the account's sweeper", () => {
+test("the janitor sweeps unreferenced dependency seeds, and a stray URL-encoded store, with the account's sweeper", () => {
   const fx = setup();
   try {
     mkdirSync(join(fx.home, ".local/bin"), { recursive: true });
