@@ -1055,6 +1055,7 @@ test("retroCommand refuses absent inconsistent and foreign continuation receipts
       continuation: { ...fresh, mode: "resumed", reason: "same-provider" } } },
     { name: "fresh reuses old identity", provider: "codex", result: { sessionId: "s-retro-fixture" } },
     { name: "missing fresh identity", provider: "codex", result: { sessionId: "" } },
+    { name: "blank fresh identity", provider: "codex", result: { sessionId: "  " } },
     { name: "missing provider", provider: "codex", result: { provider: undefined } },
     { name: "foreign provider", provider: "codex", result: { provider: "claude" } },
     { name: "failed fresh worker", provider: "codex", result: { isError: true, subtype: "error_during_execution" } },

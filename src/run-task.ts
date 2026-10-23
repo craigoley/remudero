@@ -29031,7 +29031,7 @@ async function retroCommand(
           ...workerLedgerFields(repaired),
         });
         if (!worker.provider || !repaired.provider || repaired.provider !== worker.provider) {
-          throw new Error(`retro preflight repair switched provider from ${worker.provider} to ${repaired.provider}`);
+          throw new Error(`retro preflight repair has missing or different provider provenance (expected ${worker.provider ?? "missing"}, got ${repaired.provider ?? "missing"})`);
         }
         // Validate against the producer's policy, not another handwritten policy table.
         // Codex writers deliberately cannot resume their original sandbox. Only that
@@ -29045,7 +29045,7 @@ async function retroCommand(
         const resumed = expected.mode === "resumed" && expected.reason === "same-provider";
         const freshWriter = worker.provider === "codex" && expected.mode === "fresh-handoff" &&
           expected.reason === "provider-fresh-only";
-        if (!worker.sessionId || !repaired.sessionId ||
+        if (!worker.sessionId?.trim() || !repaired.sessionId?.trim() ||
             (resumed ? repaired.sessionId !== worker.sessionId : !freshWriter || repaired.sessionId === worker.sessionId)) {
           throw new Error("retro preflight repair returned an inconsistent session identity");
         }
