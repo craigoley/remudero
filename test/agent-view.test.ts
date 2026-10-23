@@ -200,7 +200,7 @@ test("malformed nonnull signal rows are refused before agent publication and pre
 });
 
 test("committed source clock mismatch and failed refresh refuse complete records without touching the fold", async (t) => {
-  const { db, lease } = await projectedCorpus(t);
+  const { stateDir, db, lease } = await projectedCorpus(t);
   const view = createAgentView({ instances: [{ name: "core", ledgerDir: stateDir, repo: REPO }], ledgerSource });
   const materialize = (): AgentProposalsBody => bodies(view, db, lease).get(agentViewKey("core", "proposals"))!.body as AgentProposalsBody;
   writeSourceSnapshot(db, lease, { instance: "core", ok: true, asOf: ANALYTICS_AS_OF, bodies: analyticsSourceBodies(busySnapshot(), REPO) });
