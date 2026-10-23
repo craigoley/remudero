@@ -51,13 +51,14 @@ test("new path admission binds the explicit approval to the exact task and decla
   const draftYaml = JSON.stringify([rawTask]);
   let binding: NewPathApprovalBinding | undefined = { ...facts.binding };
   const audit = new Map<string, string>();
-  let writeFailure = false, readFailure = false, pathUnknown = false, writes = 0;
+  let writeFailure = false, readFailure = false, hangRead = false, pathUnknown = false, writes = 0;
   const io: service.NewPathApprovalIssuerIO = { clock,
     binding: async () => binding,
     paths: async () => pathUnknown ? undefined : structuredClone(facts.paths),
     audit: { write: async (record: Readonly<NewPathApprovalRecord>, bytes: string) => {
       writes++;if (writeFailure) throw new Error("fixture durable write lost");audit.set(record.reference, bytes);
-    }, read: async reference => { if (readFailure) throw new Error("fixture durable read unavailable");return audit.get(reference); } },
+    }, read: async reference => { if (readFailure) throw new Error("fixture durable read unavailable");
+      if (hangRead) return await new Promise<string | undefined>(() => {});return audit.get(reference); } },
   };
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const jwk = { ...publicKey.export({ format: "jwk" }), kid: "issuer-key", kty: "RSA" } as service.OperatorJwk;
@@ -89,7 +90,7 @@ test("new path admission binds the explicit approval to the exact task and decla
   const preview = () => post("preview", { draftYaml, recordPath: APPROVAL_RECORD_PATH, approvedMissingPaths: task.files, lifetimeMs: 60_000 });
   const verify = async (reference: string) => {
     const response = await fetch(`${origin}/v1/new-path-approvals/verify?reference=${reference}`, {
-      headers: { authorization: "Bearer fixture-read" }, signal: AbortSignal.timeout(2_000) });
+      headers: { authorization: "Bearer fixture-read" }, signal: AbortSignal.timeout(8_000) });
     assert.equal(response.status, 200);return await response.json() as Record<string, any>;
   };
   try {
@@ -108,6 +109,7 @@ test("new path admission binds the explicit approval to the exact task and decla
     const bytes = audit.get(reference)!;audit.delete(reference);assert.equal((await verify(reference)).state, "unknown");
     audit.set(reference, bytes + " ");assert.equal((await verify(reference)).state, "unknown", "replacement bytes are not the retained audit");
     audit.set(reference, bytes);readFailure = true;assert.equal((await verify(reference)).state, "unknown");readFailure = false;
+    hangRead = true;assert.equal((await verify(reference)).state, "unknown", "an unresponsive read port must not outlive the selected operation's deadline");hangRead = false;
     binding = { ...facts.binding, epoch: "replacement-epoch" };assert.equal((await verify(reference)).state, "unknown");binding = { ...facts.binding };
     const drift = await preview();pathUnknown = true;assert.equal((await post("confirm", { previewId: drift.body.previewId })).status, 409);pathUnknown = false;
     const lost = await preview();writeFailure = true;assert.equal((await post("confirm", { previewId: lost.body.previewId })).status, 409);writeFailure = false;
