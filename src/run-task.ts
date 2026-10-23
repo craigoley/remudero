@@ -3112,6 +3112,7 @@ import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type Inb
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
+import { withManagedGardenTokenRefresh } from "./lib/managed-garden-token.js";
 import { runChildCredentialSocket } from "./lib/secret-boundary.js";
 import { automaticBranchReapStateFileName, branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, pruneDeletableBranches, pruneDeletableBranchesSteps, readAutomaticBranchReapState, readNamedInSource, readNamedInSourceSteps, readRemoteBranchTips, readRemoteBranchTipsSteps, readTipInMainMembership, readTipInMainMembershipSteps, remoteBranchNames, remoteBranchNamesSteps, tipInMainFor, writeAutomaticBranchReapState, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
@@ -33263,15 +33264,18 @@ export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: Garden
 
 /** Run one garden pass; handled domain failures remain failures at the child-process boundary. */
 export function runRegisteredGardenPass(name: RegisteredGardenName, args: readonly string[], ctx: GardenBuildContext, signal: { readonly stopped: boolean } = { stopped: false }): Promise<number> {
-  let failed = false;
-  const observed: GardenBuildContext = { ...ctx, log: (step, extra) => {
-    const kind = classifyGardenerStep(step)?.kind;
-    if (kind === "failed" || kind === "filing_failed" || step === "gardener_overseer.overseer_failed") failed = true;
-    ctx.log(step, extra);
-  } };
-  const run = (pass: RegisteredGardenPass): Promise<number> => Promise.resolve(pass()).then(() => failed ? 1 : 0);
-  const built = buildRegisteredGarden(name, observed, { hourly: args.includes(GARDEN_HOURLY_FLAG) });
-  return Promise.resolve(built).then((pass) => signal.stopped ? 0 : run(pass));
+  if (signal.stopped) return Promise.resolve(0);
+  return withManagedGardenTokenRefresh(name, ctx.log, async () => {
+    let failed = false;
+    const observed: GardenBuildContext = { ...ctx, log: (step, extra) => {
+      const kind = classifyGardenerStep(step)?.kind;
+      if (kind === "failed" || kind === "filing_failed" || step === "gardener_overseer.overseer_failed") failed = true;
+      ctx.log(step, extra);
+    } };
+    const run = (pass: RegisteredGardenPass): Promise<number> => Promise.resolve(pass()).then(() => failed ? 1 : 0);
+    const built = buildRegisteredGarden(name, observed, { hourly: args.includes(GARDEN_HOURLY_FLAG) });
+    return Promise.resolve(built).then((pass) => signal.stopped ? 0 : run(pass));
+  }, { refresh: refreshInstallationToken });
 }
 
 export const GARDEN_REPLAY_DAYS_FLAG = "--days";
