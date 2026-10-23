@@ -16,7 +16,7 @@
     - .github/workflows/acr-build.yml
     - deploy/install-host-units.sh
     - src/lib/baked-runtime-inputs.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

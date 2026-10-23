@@ -12,7 +12,7 @@
     - src/lib/fix-test-scope.ts
     - src/run-task.ts
     - test/fix-rung-scope-standdown.test.ts
-  status: queued
+  status: merged
   attempts: 0
   origin: "Operator PR-queue recovery, W1-T10333 / PR #13631, 2026-10-22"
   plan_refs: [W1-T10333, W1-T5532, W1-T1227, W1-T5118, W1-T10070]

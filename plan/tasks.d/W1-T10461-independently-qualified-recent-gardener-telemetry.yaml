@@ -1,0 +1,54 @@
+- id: W1-T10461
+  title: "Refresh independently qualified recent gardener telemetry without refreshing incomplete historical analytics"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "console-followup:independent-recent-gardener-telemetry-20261022"
+  files:
+    - src/lib/read-model-slow-lane.ts
+    - src/lib/read-model-worker.ts
+    - src/lib/analytics-view.ts
+    - src/lib/gardener-spend.ts
+    - test/analytics-view.test.ts
+    - test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts
+    - docs/views.md
+  acceptance:
+    - claim: "The real complete current-generation collector and fenced cached view refresh gardener evidence while malformed historical analytics retains its old source clock and refusal"
+      proof: "unit test: W1-T10461: recent gardener telemetry refreshes while historical analytics remains incomplete"
+    - claim: "Missing unreadable malformed foreign ambiguous revoked interrupted and changed-generation current evidence cannot become an observed zero or reported monetary total"
+      proof: "unit test: W1-T10461: incomplete or changed-generation gardener evidence cannot refresh as verified"
+    - claim: "Independent capture remains off the projector and request paths and preserves bounded serial scheduling abort ownership switch lease and other-repository fairness"
+      proof: "unit test: W1-T10461: independent gardener capture obeys cancellation ownership and bounded cadence"
+    - claim: "Own source clocks conservative legacy fallback shadow pairing cached restart and monetary-first fleet payload bounds remain honest without advancing historical sources"
+      proof: "unit test: W1-T10461: gardener source freshness compatibility and fleet budgets remain independent"
+  note: "Direct operator answer call_7f61fd5db01a4778a50f0086d9a0cc7f: Approve independently qualified telemetry repair. Historical/benchmark evidence stays explicitly incomplete. Preserve the damaged archive, unknown prices, completed-scan and ownership guards and every normal test/review/CI gate. This is not approval for a deployment, service change, gardener activation, action authority, provider/spending change, archive repair, history deletion or source-quality waiver. Operator ruling is not a model verdict. A separately gated Console freshness consumer may be required before end-to-end live completion."
+  rationale: |
+    Grounded in CLAUDE.md, MASTER-PLAN.md, DECISIONS.md and LEARNINGS.md. The read model is a rebuildable projection, not a replacement source of truth; observation, freshness, complete coverage, price reporting and billed money remain separate facts.
+    Observed October22: core slow-lane analytics repeatedly failed ledger-source-malformed while site/console completed. A complete read-only audit of ledger.2026-09-20T23-59-59-117Z.ndjson.gz verified gzip/CRC, stable identity,81600physical lines,81599validobjects and one invalid-JSON row36871. Its491byte row digest is2e954cb5cc99a06fb286a47f49ac6b00b16376f4bda5bceb4ca2945d4388a048. Preserve the archive and finding; do not print raw rows, silently repair data or clear checkpoint quality.
+    A separate bounded native recent-window audit opened both selected gzip sources plus live,16398accepted rows/newest beyond the window, no unread/malformed findings, and positively observed seven failed core refreshes. That zero establishes only its recent window, not complete historical evidence. Stable startup-captured serve7174 returned cached core21:55snapshot and null money, with fresh site/console23:32source clocks.
+    At fresh audited main174cd8aa, captureGardenerSpendSource already scans from the actual registered configuredAt, joins exact repository/daemon generation/parent passes, deduplicates canonical identities and separates billing and reported prices. But read-model-worker invokes it only while enriching successful historical source messages; read-model-slow-lane rejects historical damage first. New receipt production therefore does not reach the cached view while old history remains damaged.
+    W4573 preserves historical corruption and limits benchmark/public completeness. W9523 preserves bounded complete scan/continuation, failure clocks and ownership. This task changes neither mechanism; a separately qualified recent source may advance only its own capture and source time. Prior W8484/W9658/W10160 code is present on this base and reused rather than rebuilt. This is a distinct pipeline-availability repair, not an archive repair or the CI owner clock work.
+    Subject sweep independently read all456advertised branches and main plus all8captured open PR head trees. All9trees had40controlled subject hits including W4573/W9523/W8484; no open head changed a plan record or declared this recent-source separation. That excludes neither unpublished nor later work; repeat the sweep before publication. Existing #13649 Inbox source/claim ownership and CI/Azure-memory ownership remain separate.
+
+    Design: give the existing generation-scoped gardener collector its own typed source_snapshot identity and capture cadence within the existing serial slow lane. Reuse the existing analytics interval, time budget, abort signal and actual native read-model lease/switch/publication fences. Never run the collector on the projector thread, in an HTTP request, on every continuation leg, or in a second unbounded task. Remove duplicate old success-only enrichment; unrelated repository-flow behavior is preserved.
+    The recent capture must finish its own complete declared window, prove registry/repository/generation stability before and after, preserve exact parent/attempt joins and bounded money-first serialization, and withhold or explicitly degrade missing/unreadable/malformed/over-budget/future/foreign/changed-generation evidence. A true observed zero requires the live/window positive control, not process exit or an empty partial corpus. No added provider/model calls, retries, invoices or billing assumptions.
+    Materialize the independently persisted source into the existing optional gardenerSpend payload with its own real materializedAt and public per-source freshness. Keep historical projection/details and analytics:<instance> failure/asOf untouched, including cold or absent historical snapshots. Preserve root stale semantics and benchmark refusal. A failure of the independent source must not fall back to an older embedded success and masquerade as current; pre-upgrade rows remain a conservative fallback only before an independent source is known.
+    Use the existing wire fields and generic ViewSource identity without widening permissions or modifying the shared Inbox/OpenAPI action schema. Preserve compatibility and validate the actual cached HTTP response against its existing contract. Keep legacy/shadow source pairing truthful; no mode switch or parity waiver. If a real additional contract path is needed, stop for a narrow scope amendment. A Console consumer must explicitly select the qualified per-metric source; do not claim an old whole-envelope consumer is recovered merely because backend payload exists.
+    Tests use private real gzip/plain/live ledgers, the default collector and scanner, actual worker/ticker SQLite fence and cached route. An old malformed archive and a valid current generation must produce recent correlated telemetry without changing archive bytes or old historical clock/quality. Cover unreadable/malformed current evidence, real zero versus unknown, duplicate receipts, unknown/subscription reported prices, repository/generation changes during capture, timeout/abort, lease/switch loss, two due repositories/Inbox fairness, cold and persisted reload, failed-independent-source fallback, twelve-repository64KiB monetary-first limits and legacy/shadow compatibility.
+    Falsifiers: remove only independent publication wiring and require the historical-bad/recent-good route assertion to fail; remove only generation/abort refusal and require the relevant control to fail; restore exact committed source. Retain all existing assertions, real physical TAP census, caller/census checks, same-head changed-source-positive lcov, actual literal canonical proofs, native author, actual stored acceptance, governed review and complete hosted/security checks. Source merge, qualified runtime adoption, fresh cached API and signed-in rendering are separate acceptance stages.
+    Research direction: OpenTelemetry metrics data model https://opentelemetry.io/docs/specs/otel/metrics/data-model/ describes explicit stream identity, collection windows, missing observations and one logical writer. Apply those semantics to the existing projection, not a new framework or telemetry backend. Prometheus exporter guidance https://prometheus.io/docs/instrumenting/writing_exporters/ requires expensive cached collection and its limits to be made visible. Neither source proves a particular local receipt is complete or priced.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Actual direct operator response call_7f61fd5db01a4778a50f0086d9a0cc7f: Approve independently qualified telemetry repair. Scope is the existing recent gardener collector, off-loop independent source publication/materialization, truthful per-source clocks and regression coverage. Preserve damaged historical archive/benchmark incompleteness, unknown prices, complete current-window scan, generation/lease/switch ownership and normal review/CI. No deployment/service/action/provider/spending/CI/memory authority or model verdict. High/span records this single cross-component pipeline breadth, not operational blast-radius approval."
+    judged_at: "2026-10-23T01:20:06.374Z"
+    pin: "0310b71e819a881ec762948ea5ff465761022774a157276a6f7f3209c50d348b"

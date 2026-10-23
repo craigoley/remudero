@@ -11,7 +11,7 @@
     - learnings/ci.yaml
   origin: "feedback#fb-1789601878740-3711ab"
   plan_refs: ["W1-T3709", "W1-T3712"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     Land the CI lessons after W1-T3709 restored headroom and W1-T3712's ruling required

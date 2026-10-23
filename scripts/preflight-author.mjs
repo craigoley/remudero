@@ -571,6 +571,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             receipt.capacity = verdict;
             let ranSuites = receipt.suites;
             let notRun = false;
+            let partialSentenceAfterRun;
             if (partial) {
               // Changed tests, then set-aside readers, then the modelled rest, each cheapest first, within the budget.
               const subset = fittingSubset(partial.suites, manifest, budget, { changed: partial.tiers.changed,
@@ -579,7 +580,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
               receipt.selection = 'over-capacity';
               const sentence = partialSentence(subset.ran.length, receipt.suites.length, partial.setAside);
               receipt.partial = { reasons: receipt.reasons, setAside: partial.setAside, tiers: partial.tiers,
-                ran: subset.ran, leftToCi: receipt.suites.length - subset.ran.length, costMs: subset.costMs,
+                planned: subset.ran, ran: [], leftToCi: receipt.suites.length, costMs: subset.costMs,
                 ...(partial.unavailable ? { unavailable: partial.unavailable } : {}) };
               if (subset.ran.length === 0) {
                 notRun = true;
@@ -587,8 +588,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
                 console.log(`affected-tests: NOT RUN — ${sentence}`);
               } else {
                 ranSuites = subset.ran;
-                receipt.tiered = { ran: subset.ran, skipped: subset.skipped, costMs: subset.costMs };
-                console.log(sentence);
+                receipt.tiered = { planned: subset.ran, ran: [], skipped: subset.skipped, costMs: subset.costMs };
+                partialSentenceAfterRun = sentence;
+                console.log(`full-fallback: SELECTED ${subset.ran.length} of ${receipt.suites.length} suite(s); execution pending`);
               }
             } else if (!verdict.fits) {
               const subset = fittingSubset(receipt.suites, manifest, budget, { changed: receipt.changedFiles,
@@ -602,8 +604,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
                 console.log(`affected-tests: NOT RUN — CI is the check (priced ${verdict.costMs}ms for ${verdict.suites} suite(s) > budget ${verdict.budgetMs}ms over ${verdict.workers} worker(s); inputs ${inputs})`);
               } else {
                 ranSuites = subset.ran;
-                receipt.tiered = { ran: subset.ran, skipped: subset.skipped, costMs: subset.costMs };
-                console.log(`affected-tests: over capacity (priced ${verdict.costMs}ms > budget ${verdict.budgetMs}ms; inputs ${inputs}); running the ${subset.ran.length} suite(s) that fit, skipping ${subset.skipped.length} — CI is the check for those: ${subset.skipped.slice(0, 20).join(', ')}${subset.skipped.length > 20 ? ', …' : ''}`);
+                receipt.tiered = { planned: subset.ran, ran: [], skipped: subset.skipped, costMs: subset.costMs };
+                console.log(`affected-tests: over capacity (priced ${verdict.costMs}ms > budget ${verdict.budgetMs}ms; inputs ${inputs}); selected ${subset.ran.length} suite(s) that fit; execution pending, leaving ${subset.skipped.length} to CI: ${subset.skipped.slice(0, 20).join(', ')}${subset.skipped.length > 20 ? ', …' : ''}`);
               }
             }
             if (!notRun && ranSuites.length === 0) {
@@ -627,6 +629,12 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const child = lowPriorityCommand(process.execPath, testRunArgv(judgedNodeTestArgs(['--test', '--test-reporter=tap', ...durationArgs,
               '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], judged.args), executionWorkers));
             const tests = runStep(testsName, child.args, child.file, judged.env, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
+            if (receipt.tiered) receipt.tiered.ran = [...ranSuites];
+            if (receipt.partial) {
+              receipt.partial.ran = [...ranSuites];
+              receipt.partial.leftToCi = receipt.suites.length - ranSuites.length;
+            }
+            if (partialSentenceAfterRun) console.log(partialSentenceAfterRun);
             const judge = closeJudgedRun(judged, ranSuites, { status: tests.status ?? 1, root, role: testsName, prefix: 'preflight-author' });
             const testsOk = completeTestResult(tests) && judge.verdict.complete;
             report(testsName, tests, testsOk, { judge: { complete: judge.verdict.complete, given: judge.verdict.given,

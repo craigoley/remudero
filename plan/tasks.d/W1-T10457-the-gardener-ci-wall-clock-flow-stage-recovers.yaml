@@ -1,0 +1,33 @@
+- id: W1-T10457
+  title: "THE GARDENER PR ci_wall_clock STAGE SLOWED — p50 16.6 min against a 8 min baseline over the last 24 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-regression:gardener:ci_wall_clock:all"
+  files:
+    - .github/workflows/ci.yml
+    - test/gardeners/the-gardener-ci-wall-clock-flow-stage-recovers.test.ts
+  acceptance:
+    - claim: "the gardener ci_wall_clock stage returns under 2x its baseline p50"
+      proof: "grep: test(\"the gardener ci_wall_clock stage recovers\" in test/gardeners/the-gardener-ci-wall-clock-flow-stage-recovers.test.ts"
+  note: "Filed by the flow gardener (W1-T5904). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not re-file this stage while this task is open."
+  rationale: |
+    gardener PRs, stage ci_wall_clock: p50 16.6 min against a 8 min baseline (rolling).
+    Last 24 h: n 34, p50 16.6, p90 19.6 min.
+    Slowest PRs: #13532 (29 min), #13617 (28.6 min), #13597 (22.8 min).
+    Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-23T02:18:52.716Z"
+    pin: "13f322a987ed0d040e7272838097934a5225595ab7a463bfcc7ce2956fdd43a4"
