@@ -301,6 +301,10 @@ function failureExcerpt(output: string, buffer: Buffer, budget: number, failingT
     tail = utf8Slice(bytes, Math.max(0, bytes.byteLength - tailBytes), bytes.byteLength);
   }
   let available = Math.max(0, budget - Buffer.byteLength(omission) - Buffer.byteLength(tail));
+  // Fair sharing is only needed when the retained diagnostic group itself is oversized.
+  if (blocks.reduce((bytes, block) => bytes + Buffer.byteLength(block), 0) <= available) {
+    return omission + blocks.join("") + tail;
+  }
   const excerpts = blocks.map((block, index) => {
     const share = Math.floor(available / (blocks.length - index));
     const bytes = Buffer.from(block, "utf8");
