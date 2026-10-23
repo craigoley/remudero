@@ -9,6 +9,7 @@ test("W1-T10228: lifetime history counts every identity through the approved bac
   const stateDir = mkdtempSync(join(tmpdir(), "rmd-lifetime-history-"));
   try {
     const count = MAX_LIFETIME_ARCHIVE_START_IDENTITIES;
+    assert.equal(count, 4_096);
     const rows = Array.from({ length: count }, (_, n) => ({
       ts: "2026-09-17T00:00:00.000Z", task_id: `W1-T${n % 50}`, run_id: `run-${n}`, step: "run.start",
     }));
