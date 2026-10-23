@@ -191,7 +191,20 @@ test("W1-T5056: a store without a projected daemon row reads liveness unknown, n
 test("W1-T10430: capability evidence is current while independent ledger health is stale", (t) => {
   const f = fixture(t, { heartbeatAgoMs: INSTANCE_LIVENESS_BOUND_MS + 60_000 });
   writeFileSync(join(f.stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [] }));
-  const entry = materialize(f);
+  writeFileSync(readModelSwitchesPath(f.stateDir), JSON.stringify({ views: { instances: "serve" } }));
+  const posted: ReadModelWorkerMessage[] = [];
+  const holder = "W10430-real-projector";
+  const projector = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [], clock: clockAt(NOW), holder, oracle: "off", post: m => posted.push(m) });
+  projector.start(); projector.tick();
+  const states = posted.filter(m => m.type === "state").at(-1)!.instances;
+  // A real projector has not ticked for 11 seconds, within its unchanged 20-second lease.
+  const observedAt = NOW + 11_000;
+  const view = createInstancesView<ReadModelInstanceState>({ instances: f.instances, repoPath: f.repoPath, hostPath: f.hostPath, ledgerSource });
+  const bodies: ViewBodyEntry[] = [];
+  const reader = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], viewsOnly: true, clock: clockAt(observedAt), holder, oracle: "off", post: m => { if (m.type === "body") bodies.push(m.entry); } });
+  try { reader.start(); reader.observe(states); reader.tick(); } finally { reader.release(); projector.release(); }
+  assert.equal(bodies.length, 1);
+  const entry = bodies[0];
   const core = (entry.body.data as InstancesData).instances.find(i => i.id === "core")!;
   const source = entry.body.sources.find(s => s.name === core.inboxCapabilityEvidence?.source)!;
   assert.equal(core.liveness.state, "down", "real stale heartbeat is retained");
@@ -200,10 +213,10 @@ test("W1-T10430: capability evidence is current while independent ledger health 
   assert.equal(core.inboxCapabilityEvidence?.repository, "craigoley/remudero");
   assert.equal(core.inboxCapabilityEvidence?.instance, "core");
   assert.equal(core.inboxCapabilityEvidence?.prefix, "/v1/i/core");
-  assert.equal(core.inboxCapabilityEvidence?.generation, entry.generation);
-  assert.equal(source.asOf, new Date(NOW).toISOString());
-  assert.equal(judgeSource(source, NOW + SLOW_LANE_STORE_BUDGET_MS + 1).state, "stale", "a frozen positive expires under the existing source budget");
-  assert.ok(entry.body.sources.some(s => s.name === "ledger:core"), "ledger health was not removed or restamped");
+  assert.equal(core.inboxCapabilityEvidence?.generation, states.find(s => s.instance === "core")!.generation, "bind core's generation, not the aggregate across repositories");
+  assert.equal(source.asOf, new Date(observedAt).toISOString());
+  assert.equal(judgeSource(source, observedAt + SLOW_LANE_STORE_BUDGET_MS + 1).state, "stale", "a frozen positive expires under the existing source budget");
+  assert.equal(entry.body.sources.find(s => s.name === "ledger:core")!.state, "stale", "actual native ledger health remains stale independently");
 });
 
 test("W1-T10430: missing revoked malformed or foreign capability sources cannot authorize writes", async (t) => {
@@ -251,6 +264,7 @@ test("W1-T10430: capability evidence follows owned generation and revalidation w
   const ctx = { now: NOW, instances: [{ state, lease: {} }] };
   const read = () => view.materialize(ctx)[0].data.instances.find(i => i.id === "core")!.inboxCapabilityEvidence!;
   assert.equal(read().state, "observed");
+  assert.equal(read().generation, 4);
   state.lease = "elsewhere";
   assert.equal(read().state, "unavailable", "a lost owner cannot refresh positive evidence");
   state.lease = "held";

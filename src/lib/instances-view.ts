@@ -244,7 +244,7 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
         const reading: ViewSource = { name: source, kind: "inbox-store", instance: id, budgetMs: SLOW_LANE_STORE_BUDGET_MS, asOf: fixedClock(now).iso(), state: "unavailable", phase: "failed", reason: "current registered mounted owned conversation contract could not be verified" };
         capabilitySources.push(reading);
         revalidate.push(() => {
-          if (owned && observation?.state.mode === "read-write" && observation.current() && slot?.state.lease === "held" && slot.state.generation === generation && mounted(dir!)) {
+          if (owned && observation?.state.mode === "read-write" && observation.current() && mounted(dir!) && slot?.state.lease === "held" && slot.state.generation === generation) {
             evidence.state = "observed";
             reading.state = "fresh";
             delete reading.phase;
