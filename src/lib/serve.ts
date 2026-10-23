@@ -3261,6 +3261,7 @@ function newPathApprovalServeRoutes(deps: ServeDeps): Route[] {
       return readNewPathApprovalPaths(task, { repoRoot: deps.questionsRoot, base, binding }, signal);
     }, audit: {
       write: async (record: Readonly<NewPathApprovalRecord>, bytes: string, signal: AbortSignal) => {
+        if (pins.size >= 256) throw new Error("approval audit identity capacity reached");
         await privateDirectory(true, signal);signal.throwIfAborted();
         const path = join(directory, `${record.reference}.json`);
         const handle = await fsPromises.open(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);

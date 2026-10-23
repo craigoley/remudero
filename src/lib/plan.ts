@@ -1034,7 +1034,11 @@ export async function readNewPathApprovalPaths(task: Task, context: NewPathAppro
 /** Private regular file, bounded reads and same descriptor/path identity; no token creation or symlink following. */
 export async function readNewPathApprovalFile(path: string, maxBytes: number, signal: AbortSignal): Promise<string> {
   signal.throwIfAborted();
-  const handle = await awaitNewPathApprovalRead(signal, open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW));
+  const opened = open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).then(async handle => {
+    if (signal.aborted) { await handle.close();throw new Error("approval file opened after cancellation"); }
+    return handle;
+  });
+  const handle = await awaitNewPathApprovalRead(signal, opened);
   try {
     const before = await handle.stat();
     if (!before.isFile() || (before.mode & 0o077) !== 0 || before.size > maxBytes ||
@@ -1096,7 +1100,10 @@ export async function prepareNewPathApprovalFacts(task: Task, recordPath: string
           if (received > 2 * NEW_PATH_APPROVAL_MAX_TASK_BYTES) throw new Error("issuer response exceeds its byte bound");
           chunks.push(chunk.value);
         }
-      } finally { if (!ended) void reader.cancel().catch(() => {});reader.releaseLock(); }
+      } finally {
+        try { if (!ended) await awaitNewPathApprovalRead(selected, reader.cancel()); }
+        finally { reader.releaseLock(); }
+      }
       const value: unknown = parseNewPathApprovalJson(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("unsupported issuer response shape");
       const result = value as Record<string, unknown>;

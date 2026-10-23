@@ -259,7 +259,7 @@ test("new path admission agrees between the real filing precheck and plan lint w
       current = { ...facts.binding };
       assert.equal((await prepare!(task, APPROVAL_RECORD_PATH, readerContext, AbortSignal.timeout(2_000), io))?.state, "unknown", mode);
     }
-    const before = calls, legacy = { ...task };delete legacy.new_path_approval_ref;
+    const before = calls;const legacy: Task = { ...task };delete legacy.new_path_approval_ref;
     assert.equal(await prepare!(legacy, APPROVAL_RECORD_PATH, readerContext, AbortSignal.timeout(2_000), io), undefined);
     current = undefined;
     assert.equal((await prepare!(task, APPROVAL_RECORD_PATH, readerContext, AbortSignal.timeout(2_000), io))?.state, "unknown");
