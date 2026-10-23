@@ -11,3 +11,12 @@ test("the memory tuner fixture keeps its rate assertions under the census contro
     assert.equal(result.pass, result.tests, "the shifted suite has no failures or skipped assertions");
   }
 });
+
+test("the heartbeat memory fixture keeps its interval assertions under the census control and future shift", () => {
+  for (const shift of [DEFUSE_CONTROL_SHIFT_DAYS, 2]) {
+    const result = runSuiteShiftedMeasured(repoRoot(), "test/the-beat-publishes-each-daemons-memory-high.test.ts", shift);
+    assert.ok(result.tests > 0, "the actual existing suite must report named tests");
+    assert.equal(result.passed, true, `existing interval assertions must pass at shift ${shift}: ${JSON.stringify(result)}`);
+    assert.equal(result.pass, result.tests, "the shifted suite has no failures or skipped assertions");
+  }
+});

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -70,8 +70,10 @@ function beatOnce(opts: { prevAgoS?: number; prevCoreId?: string; publish?: bool
     }
     const prevAgoS = opts.prevAgoS ?? 300;
     if (prevAgoS > 0) {
+      // The census shifts Node's clock; seed from the same shell clock the heartbeat reads.
+      const now = Number(execFileSync("date", ["-u", "+%s"], { encoding: "utf8" }).trim());
       writeFileSync(join(state, "heartbeat-mem.txt"), [
-        `epoch ${Math.floor(Date.now() / 1000) - prevAgoS}`,
+        `epoch ${now - prevAgoS}`,
         `cg remudero-daemon ${opts.prevCoreId ?? CORE_ID} 403000 12384706`,
         `cg remudero-console-daemon ${CONSOLE_ID} 0 14289`,
       ].join("\n") + "\n");
