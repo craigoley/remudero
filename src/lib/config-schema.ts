@@ -13,6 +13,8 @@
  * (never committed to git) may still carry the old spelling, and a rename that refuses it takes the fleet
  * down at the next boot. {@link canonicalWorkerProviderId} is the ONE read-boundary function that maps it
  * to "cash" — REMOVE "openweight" from this list once no live host config carries it any longer. */
+import type { NewPathApprovalBinding } from "./plan.js";
+
 export const WORKER_PROVIDER_IDS = ["claude", "codex", "cash", "openweight"] as const;
 export type WorkerProviderId = (typeof WORKER_PROVIDER_IDS)[number];
 
@@ -96,6 +98,7 @@ export interface Config {
     port?: number;
     identityCapability?: string;
     trustedProxy?: string;
+    newPathApproval?: NewPathApprovalBinding;
     /** W1-T4244: the console operator's Clerk session identity. Absent: the provider is off. */
     operatorIdentity?: {
       issuer: string;
@@ -374,6 +377,14 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
       configField("port", "number", true, undefined, "config.json", "Console bind port.", numberShape),
       configField("identityCapability", "string", true, undefined, "config.json", "Tailnet identity capability.", stringShape),
       configField("trustedProxy", "string", true, undefined, "config.json", "Trusted identity proxy kind.", stringShape),
+      configField("newPathApproval", "object", true, undefined, "config.json", "Explicit optional new-path issuer binding; no default authority or live activation.", {
+        kind: "object",
+        fields: [
+          ...["issuerId", "origin", "epoch", "policy", "repository", "instance", "audience"].map(name =>
+            configField(name, "string", false, undefined, "config.json", "Exact operator-qualified new-path issuer context.", stringShape)),
+          configField("repositoryId", "number", false, undefined, "config.json", "Actual positive numeric repository identity, separately qualified before use.", numberShape),
+        ],
+      }),
       configField("operatorIdentity", "object", true, undefined, "config.json", "Console operator Clerk session identity (W1-T4244).", {
         kind: "object",
         fields: [

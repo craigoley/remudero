@@ -33,7 +33,7 @@
  * everywhere else in this codebase).
  */
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import { promises as fsPromises } from "node:fs";
 import { execFile, execFileSync } from "node:child_process";
@@ -48,6 +48,7 @@ import {
   assertWriteTiersComplete,
   createConfirmNonceStore,
   createService,
+  createNewPathApprovalIssuer,
   makeConfirmNonceRoute,
   type ConfirmNonceStore,
   type Method,
@@ -67,6 +68,8 @@ import {
   type WriteTier,
   verifiedActor,
 } from "./service.js";
+import { awaitNewPathApprovalRead, newPathApprovalBindingError, readNewPathApprovalFile, readNewPathApprovalPaths,
+  type NewPathApprovalBinding, type NewPathApprovalRecord } from "./plan.js";
 import {
   buildIncidentEventsRoute,
   INCIDENT_INGEST_ROUTE_METHOD,
@@ -351,6 +354,7 @@ export interface ServeDeps {
   operatorIdentity?: OperatorIdentityConfig;
   /** The key-set fetch and clock the operator provider uses — injectable so a test is hermetic. */
   operatorIdentityIo?: { fetchImpl?: typeof fetch; clock?: Clock };
+  newPathApprovalConfig?: () => NewPathApprovalBinding | undefined;
   /** W1-T2562: re-resolve the CURRENT on-disk sha. Handed to {@link gateStaleCodeExit}, which
    *  compares {@link consoleSha} against it; absent, the gate calls {@link resolveConsoleSha}. */
   resolveCurrentSha?: () => string;
@@ -2953,6 +2957,7 @@ function assembleServeRoutes(
     legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
+    ...newPathApprovalServeRoutes(deps),
     withStatusNeedsYou(withFleetRuntimeHealth(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), readRuntimeHealth), needsYouGates),
     ...buildRepoDashboardRoutes({
       selectedRegistryObserver,
@@ -3217,6 +3222,71 @@ function escalationLinkRoutes(panelDeps: PanelActionDeps, configRoot: string, re
 
 export function buildServeRoutes(deps: ServeDeps): Route[] {
   return assembleServeRoutes(deps).routes;
+}
+
+function newPathApprovalServeRoutes(deps: ServeDeps): Route[] {
+  const read = deps.newPathApprovalConfig ?? (() => loadConfig().serve?.newPathApproval);
+  const currentBinding = (): NewPathApprovalBinding | undefined => {
+    const binding = read();
+    return binding && !newPathApprovalBindingError(binding) && binding.repository === deps.assistantRepository &&
+      binding.instance === (deps.instances?.coreInstance ?? CORE_INSTANCE) ? binding : undefined;
+  };
+  try { if (!currentBinding()) return []; }
+  catch {
+    // Absent or unreadable opt-in config mounts no issuer and creates no new authority or files.
+    return [];
+  }
+  const state = join(deps.fleetControlRoot, "state"), directory = join(state, "new-path-approvals-v1");
+  const pins = new Map<string, { dev: number; ino: number; uid: number; size: number; mtimeMs: number; ctimeMs: number }>();
+  const privateDirectory = async (create: boolean, signal: AbortSignal): Promise<void> => {
+    for (const [path, privateMode] of [[deps.fleetControlRoot, false], [state, false], [directory, true]] as const) {
+      signal.throwIfAborted();
+      if (create && path !== deps.fleetControlRoot) {
+        try { await fsPromises.mkdir(path, { mode: 0o700 }); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+      }
+      const info = await fsPromises.lstat(path);
+      if (!info.isDirectory() || info.isSymbolicLink() || (privateMode && (info.mode & 0o077) !== 0) ||
+        (typeof process.getuid === "function" && info.uid !== process.getuid())) throw new Error("unsupported approval audit directory");
+    }
+  };
+  const clock = deps.operatorIdentityIo?.clock ?? systemClock;
+  return createNewPathApprovalIssuer({ clock, binding: async () => currentBinding(),
+    paths: async (task, _recordPath, signal) => {
+      const binding = currentBinding();
+      if (!binding) return undefined;
+      const base = await new Promise<string>((resolve, reject) => execFile("git", ["rev-parse", "--verify", "HEAD^{commit}"],
+        { cwd: deps.questionsRoot, encoding: "utf8", signal, timeout: 5_000, maxBuffer: 4_096 },
+        (error, stdout) => error ? reject(error) : resolve(stdout.trim())));
+      return readNewPathApprovalPaths(task, { repoRoot: deps.questionsRoot, base, binding }, signal);
+    }, audit: {
+      write: async (record: Readonly<NewPathApprovalRecord>, bytes: string, signal: AbortSignal) => {
+        await privateDirectory(true, signal);signal.throwIfAborted();
+        const path = join(directory, `${record.reference}.json`);
+        const handle = await fsPromises.open(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+        try {
+          signal.throwIfAborted();
+          await handle.writeFile(bytes, "utf8");await handle.sync();
+          const info = await handle.stat();
+          pins.set(record.reference, { dev: info.dev, ino: info.ino, uid: info.uid, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs });
+          const parent = await fsPromises.open(directory, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+          try { await parent.sync(); } finally { await parent.close(); }
+          signal.throwIfAborted();
+        } finally { await handle.close(); }
+      },
+      read: async (reference, signal) => {
+        const pin = pins.get(reference);
+        if (!pin) return undefined;
+        await privateDirectory(false, signal);
+        const path = join(directory, `${reference}.json`);
+        const before = await fsPromises.lstat(path);
+        const matches = (info: typeof before) => info.isFile() && !info.isSymbolicLink() &&
+          ["dev", "ino", "uid", "size", "mtimeMs", "ctimeMs"].every(key => info[key as keyof typeof pin] === pin[key as keyof typeof pin]);
+        if (!matches(before)) return undefined;
+        const bytes = await awaitNewPathApprovalRead(signal, readNewPathApprovalFile(path, 128 * 1024, signal));
+        return matches(await fsPromises.lstat(path)) ? bytes : undefined;
+      },
+    } }).routes;
 }
 
 interface ServeServerAssembly {
