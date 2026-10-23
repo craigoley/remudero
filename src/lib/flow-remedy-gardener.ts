@@ -77,11 +77,15 @@ export interface LadderKind {
   shadowAdmission?: boolean;
 }
 
+function flowCauseLabel(cause: string): string {
+  return cause.replace(/ \(round DAEMON-<sha>:<n>:<sha>\)$/, "");
+}
+
 export const FLOW_LADDER: LadderKind = {
   name: "flow-remedy", prefix: "flow-blocker", receiptStep: "flow-remedy.scorecard", escalatedStep: "flow.remedy_escalated", stem: "flow",
   title: a => `THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — ${a.price.key} cost ${a.price.hours.toFixed(2)} PR-hours`,
   commitTitle: cause => `chore(plan): draft a flow remedy for ${cause}`,
-  claim: cause => `${cause} is cleared by its owner without manual intervention`,
+  claim: cause => `${flowCauseLabel(cause)} is cleared by its owner without manual intervention`,
   ownerLine: a => `Owner ${a.price.owners.includes("NONE") ? "NONE is absent" : a.price.owners.join(", ") + " failed to clear eligible episodes"}.`,
   evidenceLine: (pr, hours, reason) => `- PR #${pr}: ${hours.toFixed(2)} PR-hours — ${reason}`,
   escalationSummary: cause => `Flow blocker: ${cause} still costs PR-hours`,
@@ -388,7 +392,7 @@ export function draftShard(action: FlowAction, taskId: string, search: OwnerSear
   const files = (found.length ? found : (kind.fallbackFiles ?? []).filter(f => search.fileExists(f)).map(file => ({ file, hits: 0 })))
     .sort((a, b) => b.hits - a.hits || a.file.localeCompare(b.file));
   if (!files.length) throw new Error(`${kind.stem} gardener: no source owner found for ${action.price.key}`);
-  const stem = slug(action.price.key, 80);
+  const stem = slug(flowCauseLabel(action.price.key), 80);
   const testPath = newTestPath(`${kind.stem}-${stem}`, [files[0]!.file], "flow-remedy-gardener");
   const evidence = new Map<number, { hours: number; reason: string }>();
   for (const c of action.charges) {
@@ -472,7 +476,7 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
       const draftedPlan = loadPlanFromYaml(contents, `${kind.stem}:${id}`);
       if (draftedPlan.tasks.length !== 1) throw new Error(`${kind.stem} gardener: drafted shard must contain exactly one task (found ${draftedPlan.tasks.length})`);
       const dir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
-      const path = join(dir, `${id}-${kind.stem}-${slug(action.price.key, 80)}.yaml`);
+      const path = join(dir, `${id}-${kind.stem}-${slug(flowCauseLabel(action.price.key), 80)}.yaml`);
       // lint-plan's verdict before the draft reaches disk; the spec's `landingRefusal` re-reads the landing.
       const refused = machineShardFilingRefusal(contents, relative(ws.root, path), {
         pathExists: p => existsSync(join(ws.root, p)) || existsSync(join(deps.repoRoot, p)),

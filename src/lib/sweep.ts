@@ -191,6 +191,7 @@ import {
   postedArmFactsFromLedger,
   REVIEW_CONTEXT,
   reviewLedgerKeyFor,
+  reviewTaskNarrative,
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
 } from "./review.js";
@@ -749,6 +750,9 @@ type FixRungTask = {
   acceptance: AcceptanceCriterion[];
   budget_usd?: number;
   files: string[];
+  design?: string;
+  amendment?: string;
+  narrativeUnavailable?: true;
 };
 
 const NEVER_A_PLAN_TASK_ID = /^(?:PR-\d+|RETRO|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/;
@@ -819,7 +823,7 @@ export function fixRungWantsHeadContract(pr: { taskId?: string }): pr is { taskI
  * the round down, named — the snapshot is the very thing this task refuses to trust. A record the
  * head plan does not carry at all (a readable plan, no such id) is NOT unreadable: it leaves the
  * task exactly as `fixRungTaskWithPlanReload` resolved it. One the head DOES carry replaces
- * acceptance, files, risk and budget and is never synthetic, even when the snapshot lacked it.
+ * acceptance, files, risk, budget and narrative and is never synthetic, even when the snapshot lacked it.
  */
 export function fixRungTaskAtHead(
   current: { task: FixRungTask; synthetic: boolean },
@@ -831,8 +835,10 @@ export function fixRungTaskAtHead(
     const why = resolveError ?? resolved?.divergence?.reason ?? "no contract returned";
     return { standDown: `fix rung: PR-head task contract unreadable — ${why}` };
   }
+  const narrative = reviewTaskNarrative(resolved.taskNarrative ?? {});
+  if (narrative === undefined) return { standDown: "fix rung: PR-head task narrative unreadable" };
   const carried =
-    resolved.criteria.length > 0 || resolved.taskDeclaredFiles !== undefined || resolved.taskRisk !== undefined;
+    resolved.criteria.length > 0 || resolved.taskDeclaredFiles !== undefined || resolved.taskRisk !== undefined || resolved.taskNarrative !== undefined;
   if (!carried) return current;
   const { task } = current;
   return {
@@ -842,6 +848,9 @@ export function fixRungTaskAtHead(
       risk: resolved.taskRisk ?? task.risk,
       acceptance: resolved.criteria,
       files: resolved.taskDeclaredFiles ?? [],
+      design: narrative.design,
+      amendment: narrative.amendment,
+      narrativeUnavailable: undefined,
       ...(resolved.taskBudgetUsd !== undefined ? { budget_usd: resolved.taskBudgetUsd } : {}),
     },
     synthetic: false,

@@ -1,0 +1,62 @@
+id: cash-refusal-quality-evidence-20261023
+ts: 2026-10-23T18:49:16.000Z
+origin: cli
+status: new
+attachments: []
+proposal_pr: null
+contribution: null
+raw: |
+  Machine-authored bounded observation, not an operator ruling or permission to raise cash caps,
+  alter model routing, force model requests, remove reservations or weaken draft content checks.
+  Reconcile current code, all open heads and existing task ownership before proposing any repair.
+
+  OBSERVED after Core naturally adopted SDK transcript repair13775 at17:05:29:
+  Assignment3c05e724-b2c6-4c46-97aa-53c68d4570e6 for machine-judge:W1-T10500 selects cash/gpt-6-luna
+  at2026-10-23T17:45:24.600Z. Its worker result and inbox.draft_synthesized row say
+  cash_allowance_exhausted, session_id empty, input/output/cache tokens0, cost0, duration24ms.
+  The unchanged shared25USD cap correctly refused committed24.687243+reservation0.347530.
+  This is a pre-request availability refusal, not a sampled invalid model answer.
+  The same assignment's real draft.routing.outcome row at17:45:24.626Z says lane inbox-draft,
+  deployment gpt-6-luna, draft_cost_usd0, cleanfalse, contract_failedfalse, session_id empty.
+  Later inbox.draft_escalated calls the cause fragment-contract. Sonnet rescue did run afterward
+  but its parsed draft had actual missing-path/sizing/proof violations; the content linter rightly held it.
+
+  DETERMINISTIC REPLAY on committed sourcec667bc1adc0e22214df16a079ae38ae603d3bcf6:
+  Pass that ACTUAL saved routing row to real draftStatsFromRows([row], inbox-draft).
+  It yields gpt-6-luna attempts1,clean0,contractFailures0,costUsd0.
+  The empty-row control yields no measured attempt. Real chooseDraftDeployment with the same
+  single arm and deterministic random0.5 gives quality beta1 before and beta2 after the row;
+  alpha stays1. estimatedCostUsd1 is an EXPLICIT dimensional replay control, not measured pricing.
+  One arm isolates a posterior update; it does not predict a live model winner or population cost.
+  Receipt cash-refusal-router-replay-20261023.json retains the exact observed row and refusal join.
+  This calculation is not an author test, hosted assurance, an accepted draft or an invoice.
+
+  SOURCE: worker.ts skips output evaluation for budgetRefused but still records draft.routing.outcome;
+  draft-routing.ts counts every matching outcome as an attempt. inbox.ts selects escalation reason
+  from parsed-vs-unparsed content without preserving this budget refusal cause.
+  Thus this ONE observed pre-request refusal becomes negative model-quality evidence and a
+  misleading fragment-contract cause. Historical prevalence and actual routing harm remain UNMEASURED.
+
+  PROPOSED NEXT STEP, only if unowned: distinguish availability-refused from executed-content outcomes
+  in the existing outcome producer/reader and propagate the actual refusal cause. Keep raw refusal
+  evidence, legitimate rescue policy, all valid/invalid content outcomes and acceptance checks.
+  Before repair, replay real refusal and real clean/dirty controls. Any proposed exclusion must
+  prove old and new rows remain interpretable and avoid double-counting correlation identities.
+  Prove deletion makes the new functional assertions red and restored head green, then audit natural
+  post-adoption rows. No new telemetry store, supervisor, model mix, threshold or cap tuning is requested.
+  W1-T10040 preserves pinned-cash routing; W1-T4916 intentionally permits one Sonnet rescue;
+  W1-T10384 is a distinct Foundry-Claude subcap rescue. Do not silently change those policies.
+
+  OWNERSHIP CHECK2026-10-23T19:09:09Z atmain36a875fe8a85e50cebf9778c989ff3e9321ded4d:
+  All9APIopenheadtrees pinned against457actualremoteheads;11broad subject candidates onmain/everyhead,
+  zero introduced/changed candidate and zero dispatch-claim/draft-routing overlap. This is not a main-only
+  dedup claim. The existing actor feedback concerns another module; W10040/W10384/W10385 are routing,
+  rescue and reservation policies, not refusal-to-quality evidence. W10385's full investigation-first
+  upper-bound design was read; it must not be weakened to hide a valid cap refusal.
+  Current draft-routing blobef770d47ec547cf74decb5e1057554027685316b matches the replay's exactc667tree;
+  producer outcome/budget/refusal source regions also remain unchanged. This private finding is unfiled
+  until an ordinary separate feedback PR is actually published; no follow-up acknowledgment was written.
+  REFRESHED19:20:50Z atmain7b4fa6e84e24ee76735b6f5d4e4acc14bf2604af: all12APIopenheadtrees
+  pinned against459actualremoteheads. Six narrower quality/refusal candidates are unchanged across
+  allheads, with no worker/inbox/draft-routing overlap. W3095 exploration, W3958 benchmark-ready pools
+  and W4006 dispatch-value posteriors were read in full: none owns pre-request refusal quality evidence.

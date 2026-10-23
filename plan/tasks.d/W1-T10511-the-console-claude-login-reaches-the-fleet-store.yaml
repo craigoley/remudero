@@ -1,0 +1,144 @@
+- id: W1-T10511
+  title: "THE CONSOLE CLAUDE LOGIN REACHES THE FLEET STORE — `/v1/provider-auth` runs in remudero-serve, whose HOME=/home/node has no `.claude` at all, so a console Claude login (W1-T10380, #13602) creates `/home/node/.claude/fleet-auth/claude` in serve's own container layer, swaps a credential there that no daemon or worker reads, and still answers `complete`; serve must bind only the host's fleet-auth directory (store, CLI refresh locks, staging) and refuse a login when that directory is not there"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern, where serve's console Claude login writes; a credential write path, so the bind is the fleet-auth directory only, never the operator's whole ~/.claude
+  band_meaning: blast-radius
+  priority: 1  # W1-T10380 was the operator's P0 (2026-10-22); without this the console login is a silent no-op
+  status: queued
+  attempts: 0
+  origin: "operator session measurement 2026-10-23 ~18:20Z; re-verified by the filing agent the same day on origin/main 69522863e and read-only on `ssh remudero`"
+  plan_refs: [W1-T10380, W1-T6252, W1-T2434, W1-T2778, W1-T2834, W1-T6110, W1-T6125, "PR #13602 (W1-T10380)"]
+  files:
+    - deploy/serve-container.sh
+    - src/lib/worker-home.ts
+    - src/lib/provider-auth-sessions.ts
+    - src/lib/serve-policy-convergence.ts
+    - src/lib/deployer.ts
+    - test/routing/the-console-signs-the-fleet-into-claude.test.ts
+    - test/routing/the-console-claude-login-reaches-the-fleet-store.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-23 on origin/main 69522863e and on `ssh remudero` (read-only: mount tables printed
+    as Source/Destination/RW only, `ls -ld`, `stat`).
+
+    WHERE THE LOGIN RUNS.
+    - src/lib/serve.ts:2882-2885 builds the ONE `ProviderAuthSessionStore` for `/v1/provider-auth` with
+      `profiles` and `resolveClaudeBin` only, so `claudeRealHome` takes its default:
+      src/lib/provider-auth-sessions.ts:368 `this.claudeRealHome = deps.claudeRealHome ?? homedir();`.
+      No other construction exists in src/.
+    - provider-auth-sessions.ts:438 `createClaudeFleetLoginStagingDir(this.claudeRealHome)`, and :473
+      `replaceClaudeFleetCredential({ realHome: this.claudeRealHome, ... })`.
+    - src/lib/worker-home.ts:192-198: the staging helper runs
+      `mkdirSync(dirname(sharedClaudeCredentialDir(realHome)), { recursive: true })`, i.e. it CREATES
+      `<home>/.claude/fleet-auth` when it is missing. :253-254 `mkdirSync(store, { recursive: true })` creates
+      the store too. :255 takes two locks: `<store>/.oauth_refresh.lock` and the CLI's legacy
+      `${realpathSync(store)}.lock`, which is `<home>/.claude/fleet-auth/claude.lock`, a SIBLING of the store.
+      The staging dir (`fleet-auth/.claude-login-*`) is also a sibling. The store path is
+      worker-home.ts:1267-1268, and workers resolve the same path (workerClaudeCredentialDir, :1270-1282).
+
+    WHAT THE SERVE CONTAINER HAS (host, 2026-10-23 ~18:22Z).
+    - `docker exec remudero-serve`: HOME=/home/node, uid 1000, and `ls -ld /home/node/.claude` answers
+      "No such file or directory". `/usr/local/bin/claude` exists, so a Claude start does spawn the CLI.
+    - remudero-serve's 20 mounts include `/home/craigoleyagent/.claude.json -> /home/node/.claude.json` (ro,
+      W1-T2434) and `/home/craigoleyagent/.claude/rmd-app.pem -> /home/node/.rmd-github-app-private-key.pem`
+      (ro, W1-T2778). Nothing is mounted at or under /home/node/.claude.
+    - remudero-daemon and remudero-console-daemon both mount `/home/craigoleyagent/.claude ->
+      /home/node/.claude` (rw). The host store `/home/craigoleyagent/.claude/fleet-auth/claude` (uid 1000, 0700)
+      is what every worker reads.
+    - Therefore a console login through serve mkdirs `/home/node/.claude/fleet-auth/claude` inside serve's
+      container layer, renames the new `.credentials.json` there, takes refresh locks no daemon sees, and
+      completes with an `accountLabel`. The fleet keeps running on the old credential, and a serve replace
+      discards the new one.
+    - deploy/serve-container.sh was not touched by #13602 (`git log -- deploy/serve-container.sh`). Its docker
+      run (`RUN_ARGS`, :725-760) has no `.claude` bind. :140-141 and :517-520 bind only `~/.claude.json`.
+
+    THE HOST PATH CANNOT COME FROM THE REGISTRY ON THIS HOST. /etc/remudero/daemon-instances.yaml has rows for
+    `site` and `console` only (claude_dir /home/craigoleyagent/.claude at :17 and :35). It has no `core` row and
+    no `primary: true`, so install-host-units.sh's registry_primary_claude_dir (:117-127) prints nothing here.
+    The core daemon's `.claude` comes from deploy/recycle-container.sh:352
+    `CRED_DIR="${RMD_CLAUDE_DIR:-${HOME:-/root}/.claude}"`, mounted at :353 `/home/node/.claude`.
+    serve-container.sh already resolves one host path both ways: configuration first, and the daemon's
+    ACTUAL mount table as a fallback hint (`daemon_host_path_for`, :382-401, and the W1-T2834 note at
+    :405-422 that a one-shot inspect can race a daemon mid-create).
+
+    WHY A NEW BIND DOES NOT REACH THE LIVE SERVE BY ITSELF. Binds apply only at create. serve's convergence
+    pass compares only the scratch mount plan: src/lib/serve-policy-convergence.ts:13-14 and :349
+    `readMountPlanDrift(..., SERVE_POLICY_CONTAINER)`, and src/lib/deployer.ts:257-284 reads binds out of
+    deploy/scratch-mounts.sh's `scratch_plan` alone. A bind that is only in serve-container.sh would wait for
+    an operator's hand `--replace`.
+
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d on origin/main for provider-auth, fleet-auth,
+    replaceClaudeFleetCredential and serve-container .claude: only W1-T10380 (merged), W1-T10381 (merged) and
+    W1-T6252/W1-T6095 (daemon-side store and credential mounts, not serve). Checked the plan diffs of all 7 open
+    PR heads and every open run-/plan-file- branch at 18:22Z: none touches provider-auth, worker-home,
+    account-usage or serve-container.sh.
+  design: |
+    1. SERVE BINDS THE FLEET-AUTH DIRECTORY, AND ONLY IT. deploy/serve-container.sh gains one optional rw bind,
+       `<host claude dir>/fleet-auth -> /home/node/.claude/fleet-auth`. That directory holds the store, the CLI's
+       legacy `claude.lock` beside it and the login staging dirs, so serve and the daemons share both refresh
+       locks and the staging dir stays on the store's filesystem. The destination MUST equal the daemons'
+       path, because the legacy lock name is derived from `realpath(store)`. Never bind the whole `~/.claude`
+       (history, settings, the App key and the host's own `.credentials.json` stay out of serve).
+    2. RESOLVE THE HOST PATH AS THE OTHER LAUNCHERS DO, CONFIGURATION FIRST. In order:
+       a. an explicit override env (for example RMD_CLAUDE_FLEET_AUTH_HOST_DIR);
+       b. the same derivation the core daemon's launcher uses (`${RMD_CLAUDE_DIR:-$HOME/.claude}`,
+          recycle-container.sh:352) plus `/fleet-auth`. Share that one derivation rather than retyping it;
+       c. as a fallback hint only, `daemon_host_path_for /home/node/.claude/fleet-auth` through the daemon's
+          ACTUAL mounts.
+       When (b) and (c) both resolve and disagree, print the disagreement and bind neither. Bind only an
+       existing directory: docker would otherwise create a root-owned source and serve would "succeed" on an
+       empty store. An absent directory is not a refusal of serve. It prints a NOTE and the login answers
+       `unavailable` (item 3). Paths are metadata. Credential content is never read here.
+    3. A LOGIN THAT CANNOT REACH THE STORE NEVER STARTS. createClaudeFleetLoginStagingDir and
+       replaceClaudeFleetCredential stop creating `<realHome>/.claude/fleet-auth` (they may still create the
+       `claude` store inside an existing fleet-auth, which keeps first provisioning working). When fleet-auth is
+       absent, the Claude start answers `unavailable` with a reason that names no path (for example "The fleet
+       credential store is not reachable from this daemon."), spawns no CLI and creates nothing. This is the
+       in-process half: it also protects any other process that is not handed the bind.
+    4. THE LIVE SERVE CONVERGES ONTO THE BIND. The fleet-auth bind is part of the mount plan that serve's
+       convergence pass compares (W1-T6125), so a remudero-serve without it reads as mount drift and is
+       replaced under the existing holds, back-off and escalation. Do this by extending what
+       readMountPlanDrift compares for serve (or by one helper that feeds both the launcher and the plan),
+       not by a second reader. An unknown reading is still never drift.
+    5. Unchanged: the store's file lineage (W1-T6252), worker resolution (workerClaudeCredentialDir), the
+       `~/.claude.json` ro mount (W1-T2434) and the App key mount (W1-T2778).
+  prompt: |
+    Write the NEW test file first, in test/routing/ (the folder `rmd test-place` computes for a suite that
+    imports provider-auth-sessions, worker-home and deployer; keep all three cases in it), and watch each new
+    test fail at base. Restore base code with `git show origin/main:<path>`, never stash. Every new test
+    title starts with `W1-T10511: ` exactly as in the acceptance proofs.
+    Drive deploy/serve-container.sh through `--dry-run` in a temp tree with fake `docker` and `az` on PATH
+    (follow test/account-identity-is-readable.test.ts and test/a-changed-serve-policy-reaches-the-running-console.test.ts).
+    Never touch a real home or a real container. The launcher test must assert the printed docker run has the fleet-auth bind at
+    `/home/node/.claude/fleet-auth` AND has no bind whose destination is `/home/node/.claude` itself, so a
+    whole-directory bind fails it. The routing case uses a temp realHome with no `.claude/fleet-auth` and
+    asserts the start is `unavailable`, no spawn ran, and the directory still does not exist afterwards.
+    Keep the existing W1-T10380 suite green: if its fixture relies on the helper creating fleet-auth, make the
+    fixture create it, and do not weaken an assertion. Run the targeted suites, test/host-units-install.test.ts
+    and `rmd preflight --fast` on the committed tree before the first push.
+  acceptance:
+    - claim: "serve-container.sh binds the host's existing fleet-auth directory at /home/node/.claude/fleet-auth, resolved from configuration and cross-checked against the daemon's mounts, and never binds the whole ~/.claude"
+      proof: 'grep: test("W1-T10511: the serve launcher binds only the fleet-auth directory the daemons share" in test/routing/the-console-claude-login-reaches-the-fleet-store.test.ts'
+    - claim: "a Claude login whose fleet-auth directory is absent answers unavailable, spawns no CLI and creates nothing"
+      proof: 'grep: test("W1-T10511: a Claude login that cannot reach the fleet store answers unavailable and creates nothing" in test/routing/the-console-claude-login-reaches-the-fleet-store.test.ts'
+    - claim: "a live serve container without the fleet-auth bind reads as mount drift, so the convergence pass replaces it"
+      proof: 'grep: test("W1-T10511: a serve container without the fleet-auth bind is mount drift" in test/routing/the-console-claude-login-reaches-the-fleet-store.test.ts'
+  falsifier: |
+    Drop the bind from serve-container.sh: the launcher case fails. Bind `~/.claude` whole instead: the
+    launcher case fails on its no-whole-directory assertion. Restore the recursive mkdir of fleet-auth in
+    createClaudeFleetLoginStagingDir: the unavailable case fails, because the directory exists afterwards.
+    Leave the bind out of the plan readMountPlanDrift compares: the drift case fails. GUARDS that held at base
+    and must still hold: a store with a usable credential is replaced only under both refresh locks and the
+    host's own `.credentials.json` is never touched (the W1-T10380 suite); an unknown mount reading is never
+    drift (W1-T6125's cases); the ro `~/.claude.json` and App key binds are unchanged
+    (test/account-identity-is-readable.test.ts). Remove each guard's production branch in turn: its case must
+    fail. Restore and require zero failures.
+  note: |
+    Reservation refs/rmd-id/W1-T10511 is held by filing branch plan-file-1792779652000.
+    Companion filings the same day: the identity half of the swap (the store's `.claude.json` keeps the old
+    `oauthAccount`, and the redacted label cannot tell two accounts apart) is its own core shard, and the
+    console's code-paste step is filed in remudero-console. Neither is in scope here.
