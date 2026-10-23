@@ -18,8 +18,124 @@ import {
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { issueRevalidationRunTaskPorts } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { benchmarkNonDispatchSpawn, receiptIdentity } from "#src/lib/benchmark-run.js";
+import type { Config } from "#src/lib/config.js";
+import { readLedgerLines } from "#src/lib/ledger.js";
+import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
 
 const HOUR = 3_600_000;
+
+function revalidationMoneyResult(over: Partial<WorkerResult> = {}): WorkerResult {
+  return { sessionId: "private-session", costUsd: 0.25, numTurns: 1, text: "REVALIDATION_VERDICT: unknown",
+    blocks: [], stderr: "private-stderr", subtype: "success", isError: false, apiError: false,
+    permissionDenials: [], childEnvKeys: ["ANTHROPIC_API_KEY"], provider: "claude", model: "fixture",
+    servedModel: "fixture", effort: "low", tokens: { input: 10, output: 5, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {}, compactionEvents: [], qualitySuspect: false, ...over };
+}
+function revalidationMoneyFixture(t: { after(fn: () => void): void },
+  provider: (args: SpawnWorkerArgs, call: number) => Promise<WorkerResult>,
+  options: { select?: boolean; failSink?: boolean } = {}) {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}issue-money-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const config = { root, claudeBin: "/bin/false" } as Config, path = join(root, "state", "ledger.ndjson");
+  if (options.failSink) writeFileSync(join(root, "state"), "not a directory");
+  const requests: SpawnWorkerArgs[] = [];
+  const raw: typeof import("#src/lib/worker.js").spawnWorker = async args => {
+    requests.push(args);
+    const assignment: WorkerSelectionAssignment = { version: 1, id: `issue-assignment-${requests.length}`, phase: "pre-execution",
+      requested: { model: args.model ?? "fixture", effort: args.effort ?? "low", maxTurns: null },
+      selected: { provider: "claude", model: "fixture", effort: "low" },
+      routing: { mode: "claude-only", policy: { preference: "automatic", reservePercent: 5, provenance: "default" } }, candidates: [] };
+    if (options.select !== false) args.onSelectionAssignment?.(assignment);
+    const result = await provider(args, requests.length);
+    if (options.select !== false) result.selectionAssignmentId ??= assignment.id;
+    return result;
+  };
+  const benchmark = benchmarkNonDispatchSpawn("escalation-summary", raw);
+  const judge = issueRevalidationJudgeText({ mount: { model: "fixture", effort: "low", maxTurns: 1, provider: "claude" },
+    cwd: root, settingsFile: join(root, "settings.json"), config,
+    // Only external provider execution is fake. Real composition, benchmark receipts and default ledger append run.
+    spawn: args => benchmark({ ...args, config }) });
+  return { root, judge, requests, rows: () => existsSync(path) ? [...readLedgerLines(path)] as unknown as Record<string, unknown>[] : [],
+    money: () => existsSync(path) ? [...readLedgerLines(path)].filter(r => r.step === "issue_revalidation.attempt_spend") as unknown as Record<string, unknown>[] : [] };
+}
+
+test("W1-T10287: issue revalidation retains each actual attempt before verdict parsing", async t => {
+  const malformed = "private-malformed-result", failure = new Error("private-provider-failure");
+  const f = revalidationMoneyFixture(t, async () => revalidationMoneyResult({ text: malformed }));
+  assert.deepEqual(f.money(), [], "no execution is not a measured free call");
+  assert.equal(await f.judge("private-prompt", 7), malformed);
+  assert.equal(f.money()[0]?.total_cost_usd, 0.25);
+  assert.equal(parseIssueRevalidationVerdict(malformed).verdict, "unknown");
+  assert.equal(f.requests.length, 1, "telemetry adds no parse retry");
+  assert.deepEqual(f.requests[0]?.tools, []);
+  assert.equal(f.requests[0]?.permissionMode, "bypassPermissions");
+  assert.deepEqual(receiptIdentity(f.requests[0]!), { taskId: "ISSUE-REVALIDATION",
+    runId: "issue-revalidation-7-36cd785d911d" });
+  for (const interrupted of [false, true]) {
+    const g = revalidationMoneyFixture(t, async args => {
+      args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract", selectionAssignmentId: "fallback-a",
+        result: revalidationMoneyResult({ costUsd: 0.125, text: malformed, selectionAssignmentId: "fallback-a" }) });
+      if (interrupted) throw failure;
+      return revalidationMoneyResult({ costUsd: 0.5, subtype: "interrupted", isError: true });
+    });
+    if (interrupted) await assert.rejects(g.judge("private-prompt", 8), error => error === failure);
+    else assert.equal(await g.judge("private-prompt", 8), "REVALIDATION_VERDICT: unknown");
+    assert.deepEqual(g.money().filter(r => r.price_state === "reported").map(r => r.total_cost_usd), interrupted ? [0.125] : [0.125, 0.5]);
+    assert.equal(g.requests.length, 1);
+    assert.doesNotMatch(JSON.stringify(g.money()), /private-(?:prompt|malformed-result|provider-failure|stderr|session)|ANTHROPIC_API_KEY/);
+  }
+  const broken = revalidationMoneyFixture(t, async () => { throw failure; }, { failSink: true });
+  await assert.rejects(broken.judge("private-prompt", 9), error => error === failure);
+  const badFields = revalidationMoneyFixture(t, async () => {
+    const result = revalidationMoneyResult();Object.defineProperty(result, "tokens", { get() { throw new Error("private-fields"); } });return result;
+  });
+  assert.equal(await badFields.judge("p", 9), "REVALIDATION_VERDICT: unknown");
+  assert.equal(badFields.money()[0]?.price_state, "unknown");
+  const unstarted = revalidationMoneyFixture(t, async () => { throw failure; }, { select: false });
+  await assert.rejects(unstarted.judge("p", 10), error => error === failure);
+  assert.equal(unstarted.money()[0]?.attempt_state, "not-started");
+  assert.equal(unstarted.money()[0]?.total_cost_usd, undefined);
+});
+
+test("W1-T10287: issue revalidation monetary receipts deduplicate without merging distinct attempts", async t => {
+  for (const select of [false, true]) {
+    const f = revalidationMoneyFixture(t, async args => {
+      const result = revalidationMoneyResult();
+      for (let i = 0; i < 2; i++) args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract", result });
+      return result;
+    }, { select });
+    await f.judge("same prompt", 1);await f.judge("same prompt", 1);
+    assert.deepEqual(f.money().map(r => r.total_cost_usd), [0.25, 0.25], "one callback/final pair per actual invocation, not one per prompt");
+  }
+  const g = revalidationMoneyFixture(t, async args => {
+    const same = revalidationMoneyResult({ selectionAssignmentId: "a" });
+    args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract", selectionAssignmentId: "a", result: same });
+    args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract", selectionAssignmentId: "a", result: { ...same } });
+    args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract", selectionAssignmentId: "b", result: same });
+    return { ...same, selectionAssignmentId: "b" };
+  });
+  await g.judge("p", 1);
+  assert.deepEqual(g.money().map(r => r.selection_assignment_id), ["a", "b"], "immutable distinct attempts survive same-object or same-price aliases");
+  assert.deepEqual(g.money().map(r => r.total_cost_usd), [0.25, 0.25]);
+});
+
+test("W1-T10287: issue revalidation preserves reported zero unknown and subscription price semantics", async t => {
+  for (const [over, price, mode] of [
+    [{ provider: "cash", costUsd: 0 }, 0, "api"],
+    [{ costUsd: 0.5 }, 0.5, "api"],
+    [{ costUsd: undefined }, undefined, "api"],
+    [{ subtype: undefined }, undefined, "unknown"],
+    [{ provider: "codex", costUsd: 0, childEnvKeys: [], notionalCostUsd: 1.5 }, undefined, "subscription"],
+  ] as const) {
+    const f = revalidationMoneyFixture(t, async () => revalidationMoneyResult(over as Partial<WorkerResult>));
+    await f.judge("p", 1);
+    const row = f.money()[0];assert.ok(row);
+    assert.equal(row.total_cost_usd, price);assert.equal(row.billing_mode, mode);
+    assert.equal(row.price_state, price === undefined ? "unknown" : "reported");
+    if ("notionalCostUsd" in over) assert.equal(row.notional_cost_usd, over.notionalCostUsd);
+  }
+});
 const NOW = Date.UTC(2026, 9, 13, 12);
 const clock = fixedClock(NOW);
 const at = (hours: number) => fixedClock(NOW + hours * HOUR).iso();
