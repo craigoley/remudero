@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.61
   status: queued
@@ -31,3 +31,14 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.78
+    reasons:
+      - "The declared files are one application source file (src/lib/inbox-responder.ts) and one new test file. Neither is a secrets, auth, permissions, merge, deploy, infrastructure or review-policy path."
+      - "The plan record describes a code change to prevent a recurring hand-fix round. It does not describe deleting data, branches or history, and it names no irreversible action or operator-only decision."
+      - "The acceptance criterion is verifiable by grep for a named test in the new test file. The evidence cites 3 distinct PRs, and 1 of 2 declared files exists at the base, which is consistent with the new test file being yet to be created."
+      - "The ci-friction family's track record (39 merged, 58 declined) calls for some scrutiny, but it does not by itself show danger. The change still has to pass CI and review. No ACTUAL CHANGE view was supplied, so I cannot comment on its shape."
+    judged_at: "2026-10-23T02:45:18.021Z"
+    pin: "8b05ea4475672e62b5cb33a1cbe1b859c10a1ccf424a8536c4bea90ac764fdea"

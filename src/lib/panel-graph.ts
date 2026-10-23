@@ -133,7 +133,7 @@ import {
   createInboxThreadListView, readInboxThreadListView, warmInboxThreadListView, pageInboxThreads,
   type ThreadListClassification, type ThreadListRefreshSettled, type ThreadListSources,
 } from "./inbox-thread-list-view.js";
-import { appendThreadMessage, appendThreadReplyOnce, inboxThreadId, inboxThreadIdentity, proposalIdOfThread, readAllThreads, readThread } from "./inbox-thread.js";
+import { appendThreadMessage, appendThreadReplyOnce, captureInboxInput, verifiedInboxInput, inboxThreadId, inboxThreadIdentity, proposalIdOfThread, readAllThreads, readThread, type InboxCausalScope, type InboxInputReference } from "./inbox-thread.js";
 import {
   beginFragmentPass,
   cachedAnchorGrep,
@@ -2832,6 +2832,8 @@ function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan
     const proposal = proposals.find((p) => p.id === c.proposalId);
     if (!state || !proposal || inboxOwner(proposal) !== "operator" && !c.retirement) continue;
     items.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), state,
+      ...((deps.inboxSourceIdentity ?? deps.inboxAuditScope) ? { causalScope: deps.inboxSourceIdentity ?? deps.inboxAuditScope } : {}),
+      ...(proposal.reframeHistory ? { reframeHistory: proposal.reframeHistory } : {}),
       ...(c.retirement?.state === "restored_for_review" ? { requiresReview: true } : {}) });
   }
   return items;
@@ -3385,8 +3387,10 @@ export function buildInboxThreadReadRoute(deps: PanelGraphDeps): Route {
  */
 export interface RatifyCliGateway {
   approve(proposalId: string): void;
-  reframe(proposalId: string, feedback: string): void;
+  reframe(proposalId: string, feedback: string, input?: InboxInputReference): void;
 }
+
+export type RatifyCliHandoff = { outcome: "queued" | "refused" | "unknown" };
 
 /** The fleet lane's decision store for display. A store that cannot be read shows the ledger's rows
  *  alone rather than failing the whole inbox; the lane itself refuses to act on such a store. */
@@ -3401,13 +3405,14 @@ export function fleetLaneStoreForDisplay(stateDir: string): ReturnType<typeof re
 
 export type RatifyCliTree = {
   ledgerPath: string;
+  causalScope?: InboxCausalScope;
   freshTree: <T>(action: (tree: { path: string; sha: string }) => Promise<T>) => Promise<T>;
   spawn?: typeof spawn;
 };
 
 export interface RatifyCliHandle extends RatifyCliGateway {
   approve(proposalId: string): Promise<void> | undefined;
-  reframe(proposalId: string, feedback: string): Promise<void> | undefined;
+  reframe(proposalId: string, feedback: string, input?: InboxInputReference): Promise<void | RatifyCliHandoff> | undefined;
   inFlight(proposalId: string): boolean;
 }
 
@@ -3432,7 +3437,7 @@ export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: Ratif
     }
   };
   const running = new Map<string, number>();
-  const handOff = (s: RatifyCliTree, proposalId: string, args: string[], label: string): Promise<void> => {
+  const handOff = (s: RatifyCliTree, proposalId: string, args: string[], label: string): Promise<RatifyCliHandoff> => {
     running.set(proposalId, (running.get(proposalId) ?? 0) + 1);
     const record = (step: string, extra: Record<string, unknown>) => {
       try {
@@ -3441,7 +3446,7 @@ export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: Ratif
         process.stderr.write(`${JSON.stringify({ step, task_id: proposalId, verb: args[0], ...extra, ledger_error: String(err) })}\n`);
       }
     };
-    const runChild = (tree: { path: string; sha: string }) => new Promise<void>((resolve, reject) => {
+    const runChild = (tree: { path: string; sha: string }) => new Promise<RatifyCliHandoff>((resolve, reject) => {
       const log = openLog(label);
       let child: ReturnType<typeof spawn>;
       try {
@@ -3454,13 +3459,16 @@ export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: Ratif
       child.once("error", reject);
       child.once("exit", (code, signal) => {
         record("ratify.cli_exited", { code, signal, log: log.name, sha: tree.sha });
-        resolve();
+        resolve({ outcome: code === 0 && !signal ? "queued" : "refused" });
       });
       if (child.pid !== undefined) record("ratify.cli_started", { pid: child.pid, log: log.name, sha: tree.sha });
       child.unref();
     });
     return s.freshTree(runChild)
-      .catch((err: unknown) => record("ratify.handoff_failed", { reason: String((err as Error)?.message ?? err) }))
+      .catch((err: unknown): RatifyCliHandoff => {
+        record("ratify.handoff_failed", { reason: String((err as Error)?.message ?? err) });
+        return { outcome: "unknown" };
+      })
       .finally(() => {
         const left = (running.get(proposalId) ?? 1) - 1;
         if (left > 0) running.set(proposalId, left);
@@ -3469,12 +3477,18 @@ export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: Ratif
   };
   return {
     approve(proposalId) {
-      if (seams) return handOff(seams, proposalId, ["approve", proposalId], `approve-${proposalId}`);
+      if (seams) return handOff(seams, proposalId, ["approve", proposalId], `approve-${proposalId}`).then(() => undefined);
       spawnDetached(["approve", proposalId], `approve-${proposalId}`);
       return undefined;
     },
-    reframe(proposalId, feedback) {
-      if (seams) return handOff(seams, proposalId, ["reframe", proposalId, "--feedback", feedback], `reframe-${proposalId}`);
+    reframe(proposalId, feedback, input) {
+      const causalScope = seams?.causalScope;
+      if (input && (causalScope === undefined || typeof causalScope.instance !== "string" || causalScope.instance.length === 0 || !verifiedInboxInput(input, causalScope, proposalId, feedback))) return Promise.resolve<RatifyCliHandoff>({ outcome: "unknown" });
+      if (seams) {
+        const handedOff = handOff(seams, proposalId, ["reframe", proposalId, "--feedback", feedback,
+          ...(input ? ["--input-id", input.id, "--instance", seams.causalScope!.instance!] : [])], `reframe-${proposalId}`);
+        return input ? handedOff : handedOff.then(() => undefined);
+      }
       spawnDetached(["reframe", proposalId, "--feedback", feedback], `reframe-${proposalId}`);
       return undefined;
     },
@@ -3759,7 +3773,7 @@ export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: ()
   ];
 }
 
-export function buildInboxVerbActions(deps: PanelGraphDeps): InboxVerbActions {
+export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxCausalScope): InboxVerbActions {
   return {
     approve: validatedInboxAction(validateApproveProposal, async (input, actor, respond) => {
       const taskId = /^verify-human:([A-Za-z0-9-]+)$/.exec(input.proposalId)?.[1];
@@ -3871,13 +3885,16 @@ export function buildInboxVerbActions(deps: PanelGraphDeps): InboxVerbActions {
       const operator = caller.operator;
       const actor = caller.origin;
       const replyId = createHash("sha256").update(`${actor}\0${input.threadId}\0${input.intentId ?? randomUUID()}`).digest("hex");
+      const repository = causalScope?.repository ?? deps.inboxSourceIdentity?.repository ?? deps.inboxAuditScope?.repository;
+      const inputReference = repository ? captureInboxInput({ repository }, proposalId, input.text, replyId) : undefined;
       const store = { threadStorePath: inboxThreadStorePath(deps.inboxRoot) };
       const lockId = createHash("sha256").update(input.threadId).digest("hex");
       try {
         withInflightLock(join(dirname(store.threadStorePath), "reply-locks"), lockId, () => {
           let stored: { kind: "appended" | "existing" | "conflict"; seq: number; ts?: number };
           try {
-            stored = (deps.appendInboxReplyMessage ?? appendThreadReplyOnce)(inboxThreadIdentity(proposalId), input.text, replyId, store, operator ? { operator } : {});
+            stored = (deps.appendInboxReplyMessage ?? appendThreadReplyOnce)(inboxThreadIdentity(proposalId), input.text, replyId, store,
+              { ...(operator ? { operator } : {}), ...(inputReference ? { input: inputReference } : {}) });
           } catch {
             const check = readThread(input.threadId, store);
             const prior = check.status === "ok" ? check.messages.find((message) => message.role === "reply" && message.extra?.replyId === replyId) : undefined;
@@ -3900,7 +3917,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps): InboxVerbActions {
           if (priorAudit === "absent") {
             try {
               (deps.appendInboxReplyAudit ?? appendPanelLedger)(deps.ledgerPath, "inbox.thread_replied", proposalId, actor, {
-                thread_id: input.threadId, reply_id: replyId, message_seq: stored.seq,
+                thread_id: input.threadId, reply_id: replyId, message_seq: stored.seq, ...(inputReference ? { input: inputReference } : {}),
               });
             } catch {
               respond(200, { ok: true, delivery: "delivered", audit: "gap", replyId, threadId: input.threadId, waitingOn: "daemon", duplicate: stored.kind === "existing" });
@@ -3921,12 +3938,17 @@ function buildInboxVerbRoute(name: InboxVerbName, deps: PanelGraphDeps): Route {
   const spec = INBOX_VERBS.find(verb => verb.name === name)!;
   const actions = buildInboxVerbActions(deps);
   return { method: "POST", path: spec.path, scope: "write", tier: spec.tier,
-    handler: jsonAction(body => ({ body }), ({ body }, req, res) =>
-      spec.perform(actions, body, { origin: bearerTokenId(req), operator: operatorName(req) },
-        (status, result, headers) => {
-          for (const [key, value] of Object.entries(headers ?? {})) res.setHeader(key, value);
-          sendJson(res, status, result);
-        })),
+    handler: (req, res, ctx) => {
+      const scopedActions = ctx.params?.inboxThreadRepository === undefined ? actions : buildInboxVerbActions(deps, {
+        repository: ctx.params.inboxThreadRepository, instance: ctx.params.inboxThreadInstance,
+      });
+      return jsonAction(body => ({ body }), ({ body }, request, response) =>
+        spec.perform(scopedActions, body, { origin: bearerTokenId(request), operator: operatorName(request) },
+          (status, result, headers) => {
+            for (const [key, value] of Object.entries(headers ?? {})) response.setHeader(key, value);
+            sendJson(response, status, result);
+          }))(req, res);
+    },
   };
 }
 

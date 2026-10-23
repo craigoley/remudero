@@ -365,6 +365,18 @@ test("GOLDEN — CI SHARD SEVEN-EIGHT LESSON: the cited proof executes and task 
   }
 });
 
+test("GOLDEN — COVERAGE SHARD ONE-FOUR LESSON: the cited proof executes and task authors receive guidance", () => {
+  const { verdict, golden } = judgeCase("ci-coverage-shard-one-four-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const taskFile = "plan/tasks.d/W1-T3829.yaml";
+  const learningsDir = join(HERE, "..", "learnings");
+  const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+  const selected = selectLearnings(entries, [taskFile]).selected;
+  assert.ok(selected.some((entry) => entry.id === "coverage-shard-one-four-refusal-repair-lane"), taskFile);
+});
+
 test("GOLDEN — SCAN LESSON: the cited incident executes and the matched lane arms (W1-T7651)", () => {
   const { verdict, golden } = judgeCase("ci-scan-lesson");
   assert.equal(golden.violation, "none");

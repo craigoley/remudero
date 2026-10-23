@@ -124,7 +124,7 @@ usage:
   rmd verify-human-sweep [--dry-run] [--limit <n>]   # Judge the parked verify:human backlog and surface only the shards that still need you.
   rmd rule --task <W#-T#> --author <name> --title "<line>" --ruling "<text>" --evidence "<text>" [--evidence ...] --rollback "<text>" [--supersedes <anchor>]   # An agent records a ruling, behind an LLM judge that routes the risky ones to the operator.
   rmd note <id> <text...>   # Record an operator guidance note against a task or proposal, for the weekly feedback docket.
-  rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]   # The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.
+  rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>] [--instance <name> --input-id <id>]   # The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.
   rmd reply <threadId> --text "<text>" [--intent-id <id>]   # Reply on an operator inbox thread.
   rmd archive <proposalId> [--unarchive]   # Set an inbox item aside, or undo its archive.
   rmd snooze <proposalId> --until <RFC3339-UTC>|--wake   # Hide an inbox item until a UTC instant, or wake it now.
@@ -1239,10 +1239,10 @@ the operator's own words, into `plan/operator-notes.ndjson` — the feedback doc
 The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.
 
 ```
-rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]
+rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>] [--instance <name> --input-id <id>]
 ```
 
-the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range ("2-3"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range
+the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range ("2-3"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range. --input-id resumes one unique already-captured conversational input in this config root's verified instance binding; foreign, changed, ambiguous or absent input refuses before writing. It supplies no repository authority or approval.
 
 ### `rmd reply`
 

@@ -11093,10 +11093,41 @@ components:
         undo:
           type: string
 
+    InboxInputReference:
+      type: object
+      additionalProperties: false
+      description: A new source-captured input, scoped by the verified repository binding. A digest validates content, not identity or permission. Legacy records are not backfilled.
+      required: [id, repository, proposalId, threadId, contentSha256]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 256}
+        repository: {type: string}
+        proposalId: {type: string}
+        threadId: {type: string}
+        contentSha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+    InboxResponseReference:
+      type: object
+      additionalProperties: false
+      description: An explicit same-scope response to captured inputs. Queued verifies a handoff, not completed work. Unknown is not success and never authorizes replay.
+      required: [id, repository, proposalId, threadId, inputs, outcome]
+      properties:
+        id: {type: string, minLength: 1}
+        repository: {type: string}
+        proposalId: {type: string}
+        threadId: {type: string}
+        inputs:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: {$ref: "#/components/schemas/InboxInputReference"}
+        outcome: {type: string, enum: [queued, completed, unknown]}
     InboxThreadMessageExtra:
       type: object
       description: A stored thread message's structured extras (src/lib/inbox-thread.ts's `ThreadMessageExtra`).
       properties:
+        input:
+          $ref: "#/components/schemas/InboxInputReference"
+        response:
+          $ref: "#/components/schemas/InboxResponseReference"
         event:
           type: object
           required: [key, kind]
@@ -11154,6 +11185,30 @@ components:
         extra:
           $ref: "#/components/schemas/InboxThreadMessageExtra"
 
+    InboxThreadCorrespondence:
+      type: object
+      description: >
+        Exact captured-input correspondence within this source reading, not write authority or
+        proof of task/PR completion. Scope comes from the registered source, never stored input
+        labels or the selected account. Unknown or missing legacy correspondence is not zero.
+        Explicitly verified retraction removes pending work without deleting the input history.
+      required: [state, pendingInputs, pendingWork]
+      properties:
+        state:
+          type: string
+          enum: [linked, unknown]
+        repository:
+          type: string
+          description: Repository established by the source binding, if available.
+        pendingInputs:
+          type: [integer, "null"]
+          minimum: 0
+          description: Unacknowledged active captured inputs; null when correspondence is unknown.
+        pendingWork:
+          type: [integer, "null"]
+          minimum: 0
+          description: Active inputs queued but not completed; null when correspondence is unknown.
+
     InboxThreadSummary:
       type: object
       description: >
@@ -11183,7 +11238,7 @@ components:
           description: The latest message's first sentence, at most 160 characters.
         waitingOn:
           type: string
-          description: "Last-speaker direction only; use attention for an actionable count."
+          description: "Conversation direction, including exact pending input/work when linked; use attention for an actionable count."
           enum:
             - operator
             - daemon
@@ -11207,6 +11262,8 @@ components:
         unread:
           type: boolean
           description: The daemon wrote last and the read mark is behind that message.
+        correspondence:
+          $ref: "#/components/schemas/InboxThreadCorrespondence"
 
     InboxThreadListSource:
       type: object
@@ -11721,6 +11778,8 @@ components:
           type: integer
         unread:
           type: boolean
+        correspondence:
+          $ref: "#/components/schemas/InboxThreadCorrespondence"
         details:
           type: string
           description: The raw proposal summary, for the console's Details.

@@ -15,7 +15,7 @@
  * The body carries no clock, so an unchanged thread keeps its ETag across worker passes, and a reply,
  * which appends to the store, moves it. Source: `inbox-store:<instance>`.
  */
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Clock } from "./clock.js";
 import { readReadMarks, readMarksPath, threadDetailView, type InboxThreadItem, type ThreadDetailView } from "./inbox-responder.js";
@@ -26,6 +26,9 @@ import type { ViewSource } from "./views.js";
 import type { DemandBook } from "./view-demand.js";
 import type { InboxViewBody } from "./inbox-view.js";
 import { viewKey } from "./views.js";
+import { snapshotCursor } from "./read-page.js";
+import { persistedInboxPath, readPersistedInbox } from "./fleet-lane.js";
+import { inboxDraftGeneration, parseProposalRegistryResult } from "./inbox.js";
 
 export const INBOX_THREAD_VIEW_NAME = "inbox-thread";
 export const INBOX_THREAD_VIEW_VERSION = 1;
@@ -80,6 +83,7 @@ type ClassifiedItem = InboxViewBody["data"]["items"][number] & Pick<InboxThreadI
 type ClassifiedPage = Omit<InboxViewBody, "data"> & { data: Omit<InboxViewBody["data"], "items"> & { items: ClassifiedItem[] } };
 
 interface InboxPages {
+  snapshotKey?: string;
   /** The pages' ETags, in key order: the proposal's classification moves one of them. */
   signature: string;
   /** The classification's actual source age, never the thread materialization time. */
@@ -115,22 +119,50 @@ function inboxPages(db: ReadModelDb): InboxPages {
   const asOf = inboxSource.asOf;
   const sourceIdentity = (sources: ViewSource[]) => sources.map((evidence) => `${evidence.name}=${evidence.asOf}`).sort().join("|");
   const { of, total } = first.data.page;
+  const snapshotKey = first.data.snapshotKey;
+  if (snapshotKey !== undefined && !/^[a-f0-9]{64}$/.test(snapshotKey)) throw new Error("the inbox classification has no valid snapshot identity");
+  const cursor = (at: number) => snapshotKey ? snapshotCursor({ snapshotKey, section: "needsYou", offset: at }) : String(at);
   let offset = 0;
   const items: InboxPages["items"] = [];
+  const seen = new Set<string>();
   for (const [index, { key, body }] of pages.entries()) {
-    const params = new URLSearchParams(index === 0 ? { section: "needsYou" } : { section: "needsYou", cursor: String(offset) });
-    if (key !== viewKey(params) || body.data.page.index !== index || body.data.page.of !== of || body.data.page.total !== total || sourceIdentity(body.sources) !== sourceIdentity(first.sources)) {
+    const params = new URLSearchParams(index === 0 ? { section: "needsYou" } : { section: "needsYou", cursor: cursor(offset) });
+    if (key !== viewKey(params) || body.data.snapshotKey !== snapshotKey || body.data.page.index !== index || body.data.page.of !== of || body.data.page.total !== total || JSON.stringify(body.data.counts) !== JSON.stringify(first.data.counts) || sourceIdentity(body.sources) !== sourceIdentity(first.sources)) {
       throw new Error("the inbox classification pages do not form one complete snapshot");
     }
     offset += body.data.items.length;
-    if (body.data.page.next !== (index + 1 < of ? String(offset) : undefined)) throw new Error("the inbox classification has an incomplete cursor chain");
+    if (body.data.page.next !== (index + 1 < of ? cursor(offset) : undefined)) throw new Error("the inbox classification has an incomplete cursor chain");
+    for (const item of body.data.items) {
+      if (!item || typeof item.proposalId !== "string" || !item.proposalId.trim() || seen.has(item.proposalId)) throw new Error("the inbox classification has ambiguous proposal identity");
+      seen.add(item.proposalId);
+    }
     items.push(...body.data.items);
   }
   if (pages.length !== of || offset !== total) throw new Error("the inbox classification snapshot is incomplete");
   const sources = pages.flatMap(({ body }) => body.sources);
   const stale = sources.find((evidence) => evidence.name === inboxSource.name && evidence.state === "stale");
   const extraSources = first.sources.filter((evidence) => evidence.name !== inboxSource.name).map((evidence) => describeSource(sources.find((candidate) => candidate.name === evidence.name && candidate.state === "stale") ?? evidence));
-  return { signature: pages.map(({ key, etag }) => `${key}=${etag}`).join("|"), asOf, rows: pages.length, state: stale ? "stale" : "fresh", ...(stale?.reason ? { reason: stale.reason } : {}), items, extraSources };
+  return { snapshotKey, signature: pages.map(({ key, etag }) => `${key}=${etag}`).join("|"), asOf, rows: pages.length, state: stale ? "stale" : "fresh", ...(stale?.reason ? { reason: stale.reason } : {}), items, extraSources };
+}
+
+function correspondenceItem(item: InboxThreadItem, pages: InboxPages, root: string): { item: InboxThreadItem; reason?: string } {
+  const unknown = (reason: string) => ({ item, reason });
+  const stateDir = join(root, "state"), snapshot = readPersistedInbox(stateDir);
+  if (!pages.snapshotKey || !snapshot || snapshot.snapshotKey !== pages.snapshotKey || snapshot.generatedAt !== pages.asOf) return unknown("classification snapshot correspondence is unavailable");
+  const scope = snapshot.snapshotScope;
+  if (scope?.root !== root || scope.instance !== INBOX_STORE_INSTANCE || typeof scope.repository !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(scope.repository)) return unknown("classification source scope is unavailable");
+  let registry: ReturnType<typeof parseProposalRegistryResult>;
+  try { registry = parseProposalRegistryResult(readFileSync(join(stateDir, "inbox-proposals.json"), "utf8")); }
+  catch { return { item, reason: "current proposal registry is unreadable" }; }
+  if (registry.kind !== "ok") return unknown("current proposal registry is unavailable");
+  const classified = snapshot.proposals.filter(p => p && p.id === item.proposalId);
+  const current = registry.proposals.filter(p => p && p.id === item.proposalId);
+  if (classified.length !== 1 || current.length !== 1 || inboxDraftGeneration(classified[0]!) !== inboxDraftGeneration(current[0]!)) return unknown("proposal generation is missing, ambiguous or changed");
+  const classification = snapshot.classifications.filter(c => c.proposalId === item.proposalId);
+  if (classification.length !== 1) return unknown("proposal classification is ambiguous");
+  return { item: { ...item, causalScope: { instance: scope.instance, repository: scope.repository },
+    ...(classified[0]!.reframeHistory ? { reframeHistory: classified[0]!.reframeHistory } : {}),
+    ...(classification[0]!.retirement?.state === "restored_for_review" ? { requiresReview: true } : {}) } };
 }
 
 /** The proposal's item off the persisted `needsYou` pages: its lane is the thread's state. */
@@ -166,7 +198,7 @@ export function createInboxThreadView(opts: InboxThreadViewOptions): {
     if (pages.rows === 0) return unavailable("the inbox has not been classified yet");
     const storePath = inboxThreadStoreFile(opts.inboxRoot);
     const marksPath = readMarksPath(join(opts.inboxRoot, "state"));
-    const signature = `${pages.signature}#${pages.state}#${pages.asOf}#${pages.reason ?? ""}#${JSON.stringify(pages.extraSources)}#${fileFingerprint(storePath)}#${fileFingerprint(marksPath)}`;
+    const signature = `${pages.signature}#${pages.state}#${pages.asOf}#${pages.reason ?? ""}#${JSON.stringify(pages.extraSources)}#${fileFingerprint(storePath)}#${fileFingerprint(marksPath)}#${fileFingerprint(persistedInboxPath(join(opts.inboxRoot, "state")))}#${fileFingerprint(join(opts.inboxRoot, "state/inbox-proposals.json"))}`;
     const held = memo.get(key);
     if (held?.signature === signature) return { data: held.data, sources: [source(held.state, pages.asOf, held.reason), ...pages.extraSources] };
     let data: InboxThreadViewData;
@@ -181,7 +213,9 @@ export function createInboxThreadView(opts: InboxThreadViewOptions): {
     } else if (!item) {
       data = { threadId, found: false, reason: `no inbox thread "${threadId}"` };
     } else {
-      data = { threadId, found: true, thread: threadDetailView(item, new Map([[threadId, stored.messages]]), readReadMarks(marksPath)) };
+      const qualified = correspondenceItem(item, pages, opts.inboxRoot);
+      if (qualified.reason) log("read_model.inbox_thread_correspondence_unknown", { threadId, reason: qualified.reason });
+      data = { threadId, found: true, thread: threadDetailView(qualified.item, new Map([[threadId, stored.messages]]), readReadMarks(marksPath)) };
     }
     memo.set(key, { signature, data, state, ...(reason ? { reason } : {}) });
     return { data, sources: [source(state, pages.asOf, reason), ...pages.extraSources] };

@@ -1,0 +1,52 @@
+- id: W1-T10467
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/a-retired-index-line-keeps-its-frozen-bullet.test.ts cost 8.7 PR minute(s) across 2 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.62
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/a-retired-index-line-keeps-its-frozen-bullet.test.ts"
+  files:
+    - src/lib/doctrine-citation-facts.ts
+    - test/learning/check-test-test-a-retired-index-line-keeps-its-frozen-bullet-test-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/a-retired-index-line-keeps-its-frozen-bullet.test.ts"
+      proof: "grep: test(\"W1-T10467: check:test:test/a-retired-index-line-keeps-its-frozen-bullet.test.ts is prevented, not retried\" in test/learning/check-test-test-a-retired-index-line-keeps-its-frozen-bullet-test-ts.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/a-retired-index-line-keeps-its-frozen-bullet.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/a-retired-index-line-keeps-its-frozen-bullet.test.ts cost 8.7 PR minute(s) (seven-day half-life) across 2 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/doctrine-citation-facts.ts: test/a-retired-index-line-keeps-its-frozen-bullet.test.ts imports it
+    - test/a-retired-index-line-keeps-its-frozen-bullet.test.ts: named by the failing check
+    - the rounds name a failing test: test/a-retired-index-line-keeps-its-frozen-bullet.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12388 (https://github.com/craigoley/remudero/pull/12388) at 2026-10-16T19:54:27.627Z: ci-log round — Scan; coverage-shard (8/8): test/a-retired-index-line-keeps-its-frozen-bullet.test.ts
+        failing tests: on disk or through the merge registry; a doctrine path cited outside doctrine/ still reaches its rule — on disk or through the merge registry
+        log excerpt:
+          | Path does not exist: semgrep.sarif
+    - PR #12385 (https://github.com/craigoley/remudero/pull/12385) at 2026-10-16T19:24:54.764Z: ci-log round — coverage-shard (5/8): test/a-retired-index-line-keeps-its-frozen-bullet.test.ts; coverage-shard (4/8): test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts
+        failing tests: on disk or through the merge registry; a doctrine path cited outside doctrine/ still reaches its rule — on disk or through the merge registry; test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — a doctrine path cited outside doctrine/ still reaches its rule — on disk or through the merge registry
+          | not ok 6 - a doctrine path cited outside doctrine/ still reaches its rule — on disk or through the merge registry
+          |   ---
+          |   duration_ms: 282.157027
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-retired-index-line-keeps-its-frozen-bullet.test.ts:136:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     alias each old body path in doctrine/merged-rules.json
+          |     + actual - expected
+          | 
+          |     + [
+          |     +   'doctrine/plan-and-task-hygiene/new-tests
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
