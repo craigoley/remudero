@@ -1,10 +1,12 @@
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
 import { classificationSnapshotKey } from "./read-page.js";
 
 import { systemClock, type Clock } from "./clock.js";
 import { buildDecisionSummarySpawnArgs } from "./feedback.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
 import { proposalVerdictsWithReceipts, readVerdictReceipts } from "./inbox-verdict-receipts.js";
 import { deriveTaskReferent, parseProposalRegistry, recordRowThreadEvents, THREAD_EVENT_STEPS, type Proposal } from "./inbox.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
@@ -20,6 +22,10 @@ import {
   inboxThreadIdentity,
   proposalIdOfThread,
   readAllThreads,
+  causalThreadInputs,
+  verifiedInboxInput,
+  type InboxCausalScope,
+  type InboxInputReference,
   type InboxThreadAction,
   type ThreadMessage,
   type ThreadMessageExtra,
@@ -53,6 +59,8 @@ import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 /** One operator-owned inbox item, as the thread views need it. */
 export interface InboxThreadItem {
   requiresReview?: boolean;
+  causalScope?: InboxCausalScope;
+  reframeHistory?: Proposal["reframeHistory"];
   proposalId: string;
   summary: string;
   plain: PlainInboxMessage;
@@ -83,6 +91,7 @@ export interface ThreadSummaryView {
   lastActivity: number | null;
   messageCount: number;
   unread: boolean;
+  correspondence?: { state: "linked" | "unknown"; repository?: string; pendingInputs: number | null; pendingWork: number | null };
 }
 
 export interface ThreadDetailView extends ThreadSummaryView {
@@ -278,16 +287,22 @@ function detailFor(item: InboxThreadItem, stored: ThreadMessage[], marks: ReadMa
   const messages = [openingMessage(item), ...inTimeOrder(stored.map(storedMessageView))];
   const last = messages[messages.length - 1]!;
   const threadId = inboxThreadId(item.proposalId);
+  const scope = item.causalScope && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(item.causalScope.repository) ? item.causalScope : undefined;
+  const causal = scope ? causalThreadInputs(stored, scope, item.proposalId, item.reframeHistory) : undefined;
+  const linkedPending = causal !== undefined && (causal.pending.length > 0 || causal.pendingWork.length > 0);
   return {
     threadId,
     proposalId: item.proposalId,
     headline: item.plain.headline,
     snippet: last.text.split(/(?<=[.!?])\s/)[0]!.slice(0, 160),
-    waitingOn: last.from === "operator" ? "daemon" : "operator",
-    attention: attentionFor(item, last),
+    waitingOn: linkedPending || last.from === "operator" ? "daemon" : "operator",
+    attention: linkedPending && !item.requiresReview && item.state !== "retired" ? "awaiting_daemon" : attentionFor(item, last),
     lastActivity: last.ts,
     messageCount: messages.length,
     unread: last.from === "daemon" && (marks[threadId] ?? -1) < last.seq,
+    correspondence: { state: causal && !causal.unknown ? "linked" : "unknown", ...(scope ? { repository: scope.repository } : {}),
+      pendingInputs: causal && !causal.unknown ? causal.pending.length : null,
+      pendingWork: causal && !causal.unknown ? causal.pendingWork.length : null },
     details: item.summary,
     messages,
   };
@@ -422,12 +437,14 @@ function plainReplyFor(action: ThreadDecision["action"]): string {
 }
 
 export interface InboxResponderDeps {
+  /** Bound by the daemon composition, never inferred from a reply or the account selector. */
+  scope?: InboxCausalScope;
   threadStorePath: string;
   ledgerPath: string;
   /** The operator items as they stand now. */
   readItems: () => InboxThreadItem[];
   /** Hand a redraft to the existing reframe flow. */
-  reframe: (proposalId: string, feedback: string) => void;
+  reframe: (proposalId: string, feedback: string, input?: InboxInputReference) => void | { outcome: "queued" | "unknown" | "refused" } | Promise<void | { outcome: "queued" | "unknown" | "refused" }>;
   /** W1-T9252: mirror the ledger rows the fleet wrote since the last tick (a redraft, a filed task, a refusal)
    *  onto their items' threads. Returns how many events it wrote. */
   syncEvents?: () => number | Promise<number>;
@@ -455,7 +472,7 @@ async function decideFor(ctx: ThreadDecisionContext, deps: InboxResponderDeps): 
 
 /** Answer ONE thread whose last message is the operator's. Returns the action taken, or
  *  `undefined` when there was nothing to answer. */
-export async function answerThread(threadId: string, deps: InboxResponderDeps): Promise<ThreadDecision["action"] | undefined> {
+async function answerLegacyThread(threadId: string, deps: InboxResponderDeps): Promise<ThreadDecision["action"] | undefined> {
   const proposalId = proposalIdOfThread(threadId);
   if (!proposalId) return undefined;
   const all = readAllThreads({ threadStorePath: deps.threadStorePath });
@@ -510,6 +527,119 @@ export async function answerThread(threadId: string, deps: InboxResponderDeps): 
   return decision.action;
 }
 
+interface CausalAnswerReceipt {
+  version: 1;
+  input: InboxInputReference;
+  phase: "started" | "completed" | "unknown";
+  action: ThreadDecision["action"];
+  text: string;
+  outcome: "queued" | "completed" | "unknown";
+}
+
+function receiptExtra(receipt: CausalAnswerReceipt): ThreadMessageExtra {
+  const { input, action, outcome } = receipt;
+  const extra: ThreadMessageExtra = {
+    response: { id: `answer:${input.id}`, repository: input.repository, proposalId: input.proposalId,
+      threadId: input.threadId, inputs: [input], outcome },
+  };
+  if (outcome === "unknown") return extra;
+  if (action === "decline") extra.did = { action, undo: 'Reply "bring it back".' };
+  else if (action === "restore" || action === "edit") extra.did = { action };
+  else if (action === "approve") extra.suggestedAction = "approve";
+  else if (action === "question") extra.question = true;
+  return extra;
+}
+
+/** A persisted outcome precedes acknowledgement. An indeterminate effect is never replayed. */
+export async function answerThread(threadId: string, deps: InboxResponderDeps): Promise<ThreadDecision["action"] | undefined> {
+  if (!deps.scope) return answerLegacyThread(threadId, deps);
+  const scope = deps.scope, proposalId = proposalIdOfThread(threadId);
+  if (!proposalId) return undefined;
+  const key = createHash("sha256").update(JSON.stringify([scope.repository, threadId])).digest("hex");
+  let lock: ReturnType<typeof acquireInflightLock>;
+  try { lock = acquireInflightLock(join(dirname(deps.threadStorePath), "thread-answer-locks"), key, { run_id: `inbox-answer:${key}` }); }
+  catch (error) { if (error instanceof InflightLockError) return undefined; throw error; }
+  try {
+    const read = readAllThreads({ threadStorePath: deps.threadStorePath });
+    if (read.status === "unresolved") throw new Error(read.reason);
+    const stored = read.threads.get(threadId) ?? [];
+    const item = deps.readItems().find(candidate => candidate.proposalId === proposalId);
+    if (!item) return undefined;
+    const inputMessage = causalThreadInputs(stored, scope, proposalId, item.reframeHistory).pending.find(message => !hasThreadEvent(message.extra));
+    if (!inputMessage) return undefined; // Legacy, foreign and ambiguous inputs remain unlinked.
+    const input = { ...inputMessage.extra!.input! };
+    const receiptDir = join(dirname(deps.threadStorePath), "thread-answer-receipts");
+    const receiptPath = join(receiptDir, createHash("sha256").update(JSON.stringify([input.repository, input.proposalId, input.threadId, input.id])).digest("hex") + ".json");
+    let receipt: CausalAnswerReceipt | undefined;
+    try {
+      receipt = JSON.parse(readFileSync(receiptPath, "utf8")) as CausalAnswerReceipt;
+      if (receipt.version !== 1 || !["started", "completed", "unknown"].includes(receipt.phase) ||
+        !["queued", "completed", "unknown"].includes(receipt.outcome) || typeof receipt.text !== "string" || !validateDecision({ action: receipt.action, reply: receipt.text }) ||
+        !(receipt.phase === "started" && receipt.outcome === "completed" || receipt.phase === "unknown" && receipt.outcome === "unknown" ||
+          receipt.phase === "completed" && receipt.outcome === (receipt.action === "edit" ? "queued" : "completed")) ||
+        !verifiedInboxInput(receipt.input, scope, proposalId, inputMessage.body) || receipt.input.id !== input.id) {
+        throw new Error("causal action receipt is invalid; refusing replay or acknowledgement");
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const persist = (next: CausalAnswerReceipt) => {
+      mkdirSync(receiptDir, { recursive: true });
+      writeAtomic(receiptPath, JSON.stringify(next) + "\n");
+      return next;
+    };
+    if (!receipt) {
+      // Snapshot is taken before provider work; newer inputs are not part of this decision.
+      const detail = threadDetailView(item, new Map([[threadId, stored.filter(message => message.seq <= inputMessage.seq)]]), {});
+      let decision = await decideFor({ item, messages: detail.messages, replyText: inputMessage.body }, deps);
+      if ((decision.action === "question" && !decision.reply) || decision.action === "none") decision = { action: "edit", reply: "", note: inputMessage.body };
+      const questions = stored.filter(message => message.role === "escalation" && message.extra?.question).length;
+      if (decision.action === "question" && questions >= MAX_THREAD_QUESTIONS) decision = { action: "none", reply: "" };
+      const current = deps.readItems().find(candidate => candidate.proposalId === proposalId);
+      if (!current) return undefined;
+      const latest = readAllThreads({ threadStorePath: deps.threadStorePath });
+      if (latest.status === "unresolved") throw new Error(latest.reason);
+      const stillPending = causalThreadInputs(latest.threads.get(threadId) ?? [], scope, proposalId, current.reframeHistory).pending.some(message =>
+        !hasThreadEvent(message.extra) && message.extra!.input!.id === input.id && message.extra!.input!.contentSha256 === input.contentSha256);
+      if (!stillPending) return undefined;
+      if (decision.action !== "question" && decision.action !== "none" && !ACTIONS_BY_STATE[current.state].includes(decision.action)) {
+        decision = questions >= MAX_THREAD_QUESTIONS ? { action: "none", reply: "" } : { action: "question", reply: "" };
+      }
+      const text = decision.reply && machineTokens(decision.reply).length === 0 ? decision.reply : plainReplyFor(decision.action);
+      const planned: CausalAnswerReceipt = { version: 1, input, phase: "started", action: decision.action, text, outcome: "completed" };
+      receipt = persist(planned);
+      if (decision.action === "decline" || decision.action === "restore") {
+        appendPanelLedger(deps.ledgerPath, decision.action === "decline" ? "panel.proposal_declined" : "panel.proposal_restored", proposalId,
+          "inbox-responder", { reason: decision.note ?? inputMessage.body, input, completion_id: `answer:${input.id}` });
+      } else if (decision.action === "edit") {
+        appendPanelLedger(deps.ledgerPath, "panel.proposal_reframe_requested", proposalId, "inbox-responder",
+          { feedback: inputMessage.body, input, completion_id: `answer:${input.id}` });
+        const result = await deps.reframe(proposalId, inputMessage.body, input);
+        if (!result || result.outcome !== "queued") {
+          receipt = persist({ ...planned, phase: "unknown", outcome: "unknown", text: "Your direction is recorded, but its work handoff could not be verified. I will not repeat an uncertain action." });
+        } else receipt = persist({ ...planned, phase: "completed", outcome: "queued" });
+      }
+      if (receipt.phase === "started") receipt = persist({ ...planned, phase: "completed" });
+    } else if (receipt.phase === "started") {
+      receipt = persist({ ...receipt, phase: "unknown", outcome: "unknown", text: "The previous action's outcome is unknown. It has not been repeated; its recorded input remains available for reconciliation." });
+    }
+    const settled = receipt;
+    const extra = receiptExtra(settled);
+    // A failed acknowledgement is resumed from the durable receipt, without calling the provider/action.
+    if (stored.some(message => {
+      const prior = message.extra?.response;
+      return message.role === "escalation" && prior?.id === extra.response!.id && prior.repository === scope.repository &&
+        prior.proposalId === proposalId && prior.threadId === threadId && Array.isArray(prior.inputs) && prior.inputs.length === 1 &&
+        verifiedInboxInput(prior.inputs[0], scope, proposalId, inputMessage.body) && prior.inputs[0].id === input.id && prior.outcome === settled.outcome;
+    })) return undefined;
+    appendThreadMessage(inboxThreadIdentity(proposalId), "escalation", settled.text,
+      { threadStorePath: deps.threadStorePath, now: (deps.clock ?? systemClock).now }, extra);
+    appendPanelLedger(deps.ledgerPath, "inbox.thread_answered", proposalId, "inbox-responder",
+      { thread_id: threadId, action: settled.action, input, response: extra.response });
+    return settled.action;
+  } finally { lock.release(); }
+}
+
 /** Answer waiting threads on its own timer, one at a time, never two at once — the W1-T4077 pump
  *  pattern, so a busy daemon main loop never delays an answer. */
 export function startInboxResponder(
@@ -532,7 +662,7 @@ export function startInboxResponder(
       const all = readAllThreads({ threadStorePath: deps.threadStorePath });
       if (all.status === "unresolved") throw new Error(all.reason);
       for (const [threadId, messages] of all.threads) {
-        if (messages[messages.length - 1]?.role !== "reply" || !proposalIdOfThread(threadId)) continue;
+        if (!messages.some(message => message.role === "reply" && !hasThreadEvent(message.extra)) || !proposalIdOfThread(threadId)) continue;
         const action = await answerThread(threadId, deps);
         if (action) log("inbox.thread_answered", { thread_id: threadId, action });
       }
@@ -558,7 +688,7 @@ export function startInboxResponder(
  *  has the item declined. The console's routes use the full classification instead; the responder
  *  needs only open-or-declined, because an approve is only ever offered, and the approve route
  *  itself refuses an item that is not ready. */
-export function registryThreadItems(stateDir: string, ledgerPath: string): InboxThreadItem[] {
+export function registryThreadItems(stateDir: string, ledgerPath: string, causalScope?: InboxCausalScope): InboxThreadItem[] {
   const proposals = parseProposalRegistry(existsSync(`${stateDir}/inbox-proposals.json`) ? readFileSync(`${stateDir}/inbox-proposals.json`, "utf8") : undefined);
   const plainStore = readPlainStore(plainStorePath(stateDir));
   const lines = readLedgerLines(ledgerPath);
@@ -567,6 +697,8 @@ export function registryThreadItems(stateDir: string, ledgerPath: string): Inbox
     .filter((p) => inboxOwner(p) === "operator")
     .map((p) => ({
       proposalId: p.id,
+      ...(causalScope ? { causalScope } : {}),
+      ...(p.reframeHistory ? { reframeHistory: p.reframeHistory } : {}),
       summary: p.summary,
       plain: plainInboxMessage(p, plainStore),
       state: verdicts.isDeclined(p.id) !== undefined ? ("declined" as const) : ("ready" as const),

@@ -909,14 +909,12 @@ import {
   approvePrTitle,
   approveProposal,
   classifyProposal,
-  draftAttemptKey,
   draftsDueOnDaemon,
   resolvedInboxDraftLane,
   decideDraftDeferral,
   type ProposalVerdictKind,
   deferralFromOutcomes,
   parseDraftDeferralCache,
-  mergeDraftCaches,
   DAEMON_DRAFT_BATCH_CAP,
   evictRefusalPoisonedKeys,
   markReopened,
@@ -955,6 +953,8 @@ import {
   renderRatifyTelemetry,
   INBOX_DRAFT_DISALLOWED_TOOLS,
   runDraftRung,
+  captureInboxDraftSnapshot,
+  commitInboxDraftOutcomes,
   parseDraftedCandidate,
   lintDraftedFragment,
   stageBundleProposals,
@@ -1938,11 +1938,13 @@ export function fleetRatifyGateway(
   repoDir: string,
   logDir: string,
   ledgerPath: string,
-  overrides: Partial<FreshTreeTools> & Pick<RatifyCliTree, "spawn"> & { mainTip?: (repoDir: string) => Promise<string> } = {},
+  overrides: Partial<FreshTreeTools> & Pick<RatifyCliTree, "spawn"> & { mainTip?: (repoDir: string) => Promise<string>; stateRoot?: string } = {},
 ): RatifyCliHandle {
-  const { spawn: spawnChild, ...tree } = overrides;
+  const { spawn: spawnChild, stateRoot, ...tree } = overrides;
+  const causalScope = stateRoot ? reframeCausalScope({ root: stateRoot }, true) : undefined;
   return ratifyCliGateway(repoDir, logDir, {
     ledgerPath,
+    ...(causalScope ? { causalScope } : {}),
     freshTree: freshOriginMainTreeRunner(repoDir, {
       // inspectFreshReviewerWorktree passes `-C <dir>` first; the leaf takes the dir apart.
       git: (args) => hostWorktreeGit(args[1] ?? repoDir, args.slice(2)),
@@ -3105,6 +3107,8 @@ import {
 } from "./lib/live-write-guard.js";
 import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
+import { parseInstanceRegistry } from "./lib/instance-registry.js";
+import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type InboxCausalScope, type InboxInputReference } from "./lib/inbox-thread.js";
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
@@ -41457,6 +41461,8 @@ export async function draftProposalBatch(
   rawSpawn: typeof spawnWorker = spawnWorker,
 ): Promise<DraftRungOutcome[]> {
   if (toDraft.length === 0) return [];
+  const causalScope = { repository: `${owner}/${repo}` };
+  toDraft = toDraft.map(proposal => captureInboxDraftSnapshot(proposal, causalScope).proposal);
   const registryIntent = selectedRegistryIntentForConfig(config);
 
   // W1-T2559: the inbox-draft rung ships no code and supervises no worker, so G-17's Tier
@@ -41489,6 +41495,7 @@ export async function draftProposalBatch(
       planText,
       {
         repoFacts: checkoutRepoFacts(worktreePath),
+        causalScope,
         spawn: (proposal, prompt, ctx) =>
           benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({ ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
@@ -41675,6 +41682,8 @@ export function buildInboxDraftHook(
   return async () => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
+      const causalScope = { repository: `${owner}/${repo}` };
+      commitInboxDraftOutcomes({ stateDir: join(config.root, "state"), scope: causalScope, snapshots: [], outcomes: [], log });
       const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
       if (proposals.length === 0) return; // no active proposals — no spend
       const ledgerPath = ledgerPathFor(config);
@@ -41831,6 +41840,7 @@ export function buildInboxDraftHook(
       writeFileSync(inflightPath, JSON.stringify(Object.fromEntries(due.map((p) => [p.id, spawnedAt])), null, 2), "utf8");
 
       let outcomes: DraftRungOutcome[];
+      const snapshots = due.map(proposal => captureInboxDraftSnapshot(proposal, causalScope));
       try {
         outcomes = await draftBatch(due, config, owner, repo, runId, log);
       } finally {
@@ -41846,8 +41856,6 @@ export function buildInboxDraftHook(
         writeFileSync(inflightPath, JSON.stringify({}, null, 2), "utf8");
       }
 
-      const nextDrafts: DraftCache = { ...drafts };
-      const nextAttempts: DraftAttemptCache = { ...attempts };
       // W1-T2564: ids left unkeyed because the account refused them — ledgered below so a refusal
       // storm is visible as itself rather than as a run of malformed-output errors.
       const refusedThisBatch: string[] = [];
@@ -41863,12 +41871,9 @@ export function buildInboxDraftHook(
         // ran, permanently, because a routed follow-up's key is the literal `::0` and can never
         // change. This is the ONLY arm that skips the write; an ordinary failure still keys, so
         // W1-T192's throttle is untouched (its own test pins that).
-        if (outcome.ok || !outcome.refused) {
-          nextAttempts[outcome.proposalId] = draftAttemptKey(proposal, draftLane);
-        } else {
+        if (!outcome.ok && outcome.refused) {
           refusedThisBatch.push(outcome.proposalId);
         }
-        if (outcome.ok) nextDrafts[outcome.proposalId] = outcome.candidate;
       }
       // ATOMIC PAIR (W1-T241): see lib/inbox.ts's `writeDraftAttemptPair` doc for the
       // torn-file/wedged-idempotence hazard this closes and why drafts commits before
@@ -41889,19 +41894,10 @@ export function buildInboxDraftHook(
           matched: nextDeferral.matched,
         });
       }
-      // W1-T2569: RE-READ AND MERGE IMMEDIATELY BEFORE WRITING. The guard above makes overlap
-      // unlikely; this makes a lost update impossible if one happens anyway (a reclaimed-but-live
-      // lock, a second host). `nextDrafts`/`nextAttempts` were built from a snapshot taken up to
-      // ~950s ago — an eternity on this rung — so anything another writer committed in between
-      // would be silently reverted by a plain spread. See `mergeDraftCaches`' own doc.
-      const merged = mergeDraftCaches(
-        {
-          drafts: parseDraftCache(readFileIfExists(draftsPath)),
-          attempts: parseDraftAttemptCache(readFileIfExists(attemptsPath)),
-        },
-        { drafts: nextDrafts, attempts: nextAttempts },
-      );
-      writeDraftAttemptPair(draftsPath, attemptsPath, merged.drafts, merged.attempts);
+      // Re-read under the shared registry lock, adopt only this batch's unchanged generations,
+      // and persist completion before publication. Never spread an old whole-cache snapshot
+      // over unrelated writes or mark newer direction attempted when an older worker finishes.
+      commitInboxDraftOutcomes({ stateDir: join(config.root, "state"), scope: causalScope, snapshots, outcomes, lane: draftLane, log });
       } finally {
         draftLock.release();
       }
@@ -42027,12 +42023,14 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   const runId = `INBOX-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "inbox", step, lane: "inbox", ...extra });
 
+  if (!dryRun) commitInboxDraftOutcomes({ stateDir: join(config.root, "state"), scope: { repository: `${owner}/${repo}` }, snapshots: [], outcomes: [], log });
+
   if (needsDraft.length > 0 && !dryRun) {
+    const causalScope = { repository: `${owner}/${repo}` };
+    const snapshots = needsDraft.map(proposal => captureInboxDraftSnapshot(proposal, causalScope));
     const outcomes = await draftProposalBatch(needsDraft, config, owner, repo, runId, log);
-    for (const outcome of outcomes) {
-      if (outcome.ok) drafts[outcome.proposalId] = outcome.candidate;
-    }
-    writeFileSync(draftsPath, JSON.stringify(drafts, null, 2), "utf8");
+    commitInboxDraftOutcomes({ stateDir: join(config.root, "state"), scope: causalScope, snapshots, outcomes, log });
+    Object.assign(drafts, parseDraftCache(readFileIfExists(draftsPath)));
   }
 
   const deriveDeps: DeriveDeps = { ledgerPath, github: deps.github ?? buildBatchedGithub(owner, repo) };
@@ -43299,11 +43297,12 @@ export function readLedgerRawLines(path: string): readonly string[] {
 
 export async function inboxActionCliCommand(name: InboxVerbName, rest: string[], config: Config = loadConfig(), deps?: PanelGraphDeps): Promise<number> {
   const { owner, repo } = deps ? { owner: "", repo: "" } : resolveOwnerRepo();
+  const causalScope = deps?.inboxSourceIdentity ?? deps?.inboxAuditScope ?? reframeCausalScope(config, true);
   const actions = buildInboxVerbActions(deps ?? {
     root: repoRoot, inboxRoot: config.root, planPath: join(repoRoot, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
     github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
     ratify: ratifyCliGateway(repoRoot, join(config.root, "logs")),
-  });
+  }, causalScope);
   return inboxVerbCommand(name, rest, actions);
 }
 
@@ -44412,9 +44411,40 @@ export async function noteCommand(
   return 0;
 }
 
+/** A forwarded input requires the configured instance's existing root binding. A direct local
+ * command may instead use its explicit checkout context; no account-selected repository is read. */
+function explicitReframeTarget(instance: string) {
+  const registryPath = process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(repoRoot);
+  let registryText: string | undefined;
+  try { registryText = readFileSync(registryPath, "utf8"); }
+  catch { return { ok: false as const, refusal: "instance registry is unreadable; forwarded input scope is unverified" }; }
+  return resolvePauseTarget({ configRoot: "", instance, registryText, registryPath });
+}
+
+function reframeCausalScope(config: Pick<Config, "root">, forwarded: boolean): InboxCausalScope | undefined {
+  const registryPath = process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(repoRoot);
+  let registryText: string | undefined;
+  try { registryText = readFileSync(registryPath, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error("rmd reframe: instance registry is unreadable; repository scope is unverified");
+      return undefined;
+    }
+    registryText = undefined;
+  }
+  const bound = resolvePauseTarget({ configRoot: config.root, registryText, registryPath });
+  if (bound.ok && registryText) {
+    const instance = parseInstanceRegistry(registryText).instances.find(instance => instance.name === bound.target.instance && instance.live);
+    return instance ? { repository: instance.repo, instance: instance.name } : undefined;
+  }
+  if (forwarded) return undefined;
+  const { owner, repo } = resolveOwnerRepo();
+  return { repository: `${owner}/${repo}` };
+}
+
 export async function reframeCommand(rest: string[], deps: { config?: Config } = {}): Promise<number> {
   const proposalId = rest[0];
-  const badArg = unknownArgError("reframe", rest.slice(1), ["--feedback", "--supersedes"], []);
+  const badArg = unknownArgError("reframe", rest.slice(1), ["--feedback", "--supersedes", "--input-id", "--instance"], []);
   if (!proposalId || badArg) {
     console.error((badArg ?? `rmd reframe: <P##> is required — usage: ${commandSyntax("reframe")}`) + "\n" + USAGE);
     return 2;
@@ -44425,13 +44455,42 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
     return 2;
   }
 
-  const config = deps.config ?? loadConfig();
-  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const inputId = flagValue(rest, "--input-id");
+  const instance = flagValue(rest, "--instance");
+  if ((inputId === undefined) !== (instance === undefined)) {
+    console.error("rmd reframe: a forwarded input requires both --instance and --input-id — nothing was changed");
+    return 2;
+  }
+  let explicitRoot: string | undefined;
+  if (instance !== undefined) {
+    const selected = explicitReframeTarget(instance);
+    if (!selected.ok) { console.error(`rmd reframe: ${selected.refusal}`); return 2; }
+    explicitRoot = selected.target.root;
+  }
+  // Forwarded, state-only work uses the declared source. It neither opens the account config
+  // nor loads provider credentials, and cannot select an arbitrary path or repository label.
+  const config: Pick<Config, "root"> = explicitRoot !== undefined ? { root: explicitRoot } : deps.config ?? loadConfig();
+  const causalScope = reframeCausalScope(config, inputId !== undefined);
+  if (!causalScope || inputId !== undefined && !/^[A-Za-z0-9._:-]{1,256}$/.test(inputId)) {
+    console.error("rmd reframe: repository/input scope is unverified — nothing was changed");
+    return 2;
+  }
+  let input: InboxInputReference | undefined;
+  if (inputId !== undefined) {
+    const captured = readThread(inboxThreadId(proposalId), { threadStorePath: inboxThreadStorePath(config.root) });
+    const matches = captured.status === "ok" ? captured.messages.filter(message => message.role === "reply" && !hasThreadEvent(message.extra) && message.extra?.input?.id === inputId) : [];
+    const capturedInput = matches[0]?.extra?.input;
+    if (matches.length !== 1 || matches[0]!.body !== feedback || capturedInput === undefined || verifiedInboxInput(capturedInput, causalScope, proposalId, feedback) === false) {
+      console.error("rmd reframe: input is missing, ambiguous, foreign or changed — nothing was changed");
+      return 2;
+    }
+    input = capturedInput;
+  }
   const ledgerPath = ledgerPathFor(config);
-  const { owner, repo } = resolveOwnerRepo();
 
   const registryPath = join(config.root, "state", "inbox-proposals.json");
-  const { proposal, drafts, draftsPath } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
+  const proposal = parseProposalRegistry(readFileIfExists(registryPath)).find(proposal => proposal.id === proposalId);
+  const draftsPath = join(config.root, "state", "inbox-drafts.json");
   if (!proposal) {
     console.error(`rmd reframe: unknown proposal '${proposalId}' — not in the ACTIVE registry (${registryPath})`);
     return 2;
@@ -44463,14 +44522,15 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
   updateProposalRegistry(registryPath, (current) => {
     const freshProposal = current.find((p) => p.id === proposalId);
     if (!freshProposal) return null; // vanished concurrently — nothing left to reframe
-    reframed = reframeProposal(freshProposal, feedback, drafts, { ledgerPath, runId, threadStorePath: inboxThreadStorePath(config.root) }, supersedes);
+    const freshDrafts = parseDraftCache(readFileIfExists(draftsPath));
+    reframed = reframeProposal(freshProposal, feedback, freshDrafts, { ledgerPath, runId, threadStorePath: inboxThreadStorePath(config.root), causalScope, ...(input ? { input } : {}) }, supersedes);
+    writeAtomic(draftsPath, JSON.stringify(reframed.drafts, null, 2));
     return current.map((p) => (p.id === proposalId ? reframed!.proposal : p));
   });
   if (!reframed) {
     console.error(`rmd reframe: ${proposalId} was removed from the registry by a concurrent update — nothing to reframe`);
     return 2;
   }
-  writeFileSync(draftsPath, JSON.stringify(reframed.drafts, null, 2), "utf8");
 
   console.log(
     supersedes && supersedes.length > 0
@@ -47695,9 +47755,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "reframe",
-    syntax: "rmd reframe <P##> --feedback \"<text>\" [--supersedes <rounds>]",
+    syntax: "rmd reframe <P##> --feedback \"<text>\" [--supersedes <rounds>] [--instance <name> --input-id <id>]",
     summary: "The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.",
-    detail: "the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range (\"2-3\"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range",
+    detail: "the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range (\"2-3\"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range. --input-id resumes one unique already-captured conversational input in this config root's verified instance binding; foreign, changed, ambiguous or absent input refuses before writing. It supplies no repository authority or approval.",
   },
 
   {
@@ -48018,7 +48078,13 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
   try {
     // Do not create either HOME config or an override's state/ directory before deploy-run validates
     // the path. The supervisor's explicit-root path is intentionally not logged at this seam.
-    if (stateRootOverride !== undefined) return;
+    if (stateRootOverride !== undefined) {
+      if (cmd === "reframe" && stateRootOverride && existsSync(join(stateRootOverride, "state"))) {
+        appendLedger(ledgerPathFor({ root: stateRootOverride }), { run_id: `CLI-${systemClock.now()}`, task_id: "CLI", step: "cli.invoked", verb: cmd,
+          argv_shape: argv.map(argument => argument.startsWith("-") ? argument : "<arg>") });
+      }
+      return;
+    }
     const config = loadConfig();
     // A missing pause/resume root must reach target validation still missing. Invocation
     // telemetry must not recreate it and turn an unavailable state mount into a local target.
@@ -48632,7 +48698,12 @@ export async function main(
   // if-ladder this replaced is gone and this was its only remaining reader in main() itself.
   // W1-T477 signal (i): see logCliInvocation's own doc — first, unconditional, one row per
   // process regardless of which dispatch arm below (if any) ends up matching `cmd`.
-  const invocationStateRoot = cmd === "deploy-run" && rest.includes("--state-root") ? flagValue(rest, "--state-root") ?? "" : undefined;
+  let invocationStateRoot = cmd === "deploy-run" && rest.includes("--state-root") ? flagValue(rest, "--state-root") ?? "" : undefined;
+  if (cmd === "reframe" && (rest.includes("--input-id") || rest.includes("--instance"))) {
+    const instance = flagValue(rest, "--instance");
+    const selected = instance && flagValue(rest, "--input-id") ? explicitReframeTarget(instance) : undefined;
+    invocationStateRoot = selected?.ok ? selected.target.root : "";
+  }
   const registryObserver = logCliInvocation(cmd, rest, invocationStateRoot);
   if (cmd === "--help" || cmd === "-h" || cmd === "help") {
     console.log(USAGE);

@@ -52,7 +52,7 @@ export function buildInstanceProposalRoutes(source: Source): Route[] {
       sendJson(res, 200, { proposalId: proposal.id, summary: proposal.summary.slice(0, 4000), snapshotKey: proposalSnapshotKey(proposal),
         actions: [{ action: "reframe", tier: "low" }] });
     } },
-    { method: "POST", path: "/v1/inbox/reframe", scope: "write", tier: "low", handler: jsonAction(validate, (input, req, res) => {
+    { method: "POST", path: "/v1/inbox/reframe", scope: "write", tier: "low", handler: (req, res, ctx) => jsonAction(validate, (input, req, res) => {
       const result: { outcome: "missing" | "stale" | "written" } = { outcome: "missing" };
       try {
         proposals(source);
@@ -63,6 +63,9 @@ export function buildInstanceProposalRoutes(source: Source): Route[] {
           if (proposalSnapshotKey(proposal) !== input.snapshotKey) { result.outcome = "stale"; return null; }
           const reframed = reframeProposal(proposal, input.feedback, draftCache(source), {
             ledgerPath: source.ledgerPath, runId: `INSTANCE-REFRAME-${input.intentId}`,
+            ...(ctx.params?.inboxThreadRepository ? { causalScope: { repository: ctx.params.inboxThreadRepository,
+              instance: ctx.params.inboxThreadInstance }, inputId: createHash("sha256").update(`${bearerTokenId(req)}\0${input.intentId}`).digest("hex") } : {}),
+            threadStorePath: join(source.stateDir, "inbox-threads.jsonl"),
           });
           writeAtomic(join(source.stateDir, "inbox-drafts.json"), JSON.stringify(reframed.drafts));
           result.outcome = "written";
@@ -77,6 +80,6 @@ export function buildInstanceProposalRoutes(source: Source): Route[] {
       if (result.outcome === "missing") { sendJson(res, 404, { error: "not_found", delivery: "not_delivered" }); return; }
       if (result.outcome === "stale") { sendJson(res, 409, { error: "proposal_snapshot_changed", delivery: "not_delivered" }); return; }
       sendJson(res, 200, { ok: true, proposalId: input.proposalId, delivery: "delivered", draftInvalidated: true });
-    }) },
+    })(req, res) },
   ];
 }
