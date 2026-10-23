@@ -23,6 +23,7 @@ import {
 } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildOpenPrViews } from "../src/run-task.js";
+import { activeCiRerunEvidence } from "../src/lib/workflow-run.js";
 
 const OWNER = "o";
 const REPO = "r";
@@ -33,7 +34,8 @@ const REQUIRED = ["ci", "coverage-ratchet"];
 type CheckRun = { name: string; status: string; conclusion?: string; started_at?: string };
 
 /** The views `buildOpenPrViews` produces for one open PR last touched at `updatedAt`. */
-function viewsFor(checkRuns: CheckRun[], updatedAt: string) {
+function viewsFor(checkRuns: CheckRun[], updatedAt: string,
+  options: { required?: string[]; runs?: Record<string, unknown>[] } = {}) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t4054-`));
   const fetch = (args: string[]): unknown => {
     const path = args[args.length - 1] ?? "";
@@ -50,10 +52,12 @@ function viewsFor(checkRuns: CheckRun[], updatedAt: string) {
     }
     if (/check-runs/.test(path)) return { check_runs: checkRuns };
     if (/\/status/.test(path)) return { statuses: [] };
+    if (/\/actions\/runs\?/.test(path) && options.runs) return { workflow_runs: options.runs };
     return [];
   };
   try {
-    return buildOpenPrViews(OWNER, REPO, join(root, "ledger.ndjson"), { fetch, requiredContexts: () => REQUIRED });
+    return buildOpenPrViews(OWNER, REPO, join(root, "ledger.ndjson"),
+      { fetch, requiredContexts: () => options.required ?? REQUIRED });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -116,4 +120,41 @@ test("W1-T4054: a red or green rollup dates no pending state", () => {
 
 test("W1-T4054: checksPendingSince is no longer recorded as unwired", () => {
   assert.equal("checksPendingSince" in KNOWN_UNWIRED, false);
+});
+
+test("a unique verified CI rerun dates its missing required gate without resetting other waits", () => {
+  const headSha = "6612".padEnd(40, "0");
+  const required = ["remudero-review", "ci-gate"];
+  const checks: CheckRun[] = [
+    { name: "remudero-review", status: "completed", conclusion: "success", started_at: minutesAgo(90) },
+    { name: "test-slow-shard (1/2)", status: "in_progress", started_at: minutesAgo(5) },
+  ];
+  const run = { id: 123, head_sha: headSha, path: ".github/workflows/ci.yml", status: "in_progress",
+    conclusion: null, run_attempt: 2, run_started_at: minutesAgo(5) };
+  assert.equal(activeCiRerunEvidence(null, headSha), undefined);
+  assert.equal(activeCiRerunEvidence(run, "unbound"), undefined);
+  assert.equal(activeCiRerunEvidence(run, headSha)?.startedAt, minutesAgo(5));
+  const [view] = viewsFor(checks, minutesAgo(90), { required, runs: [run] });
+  assert.ok(view);
+  assert.equal(view.checksState, "pending");
+  assert.equal(view.checksPendingSince, minutesAgo(5), JSON.stringify(view.workflowRuns));
+  const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(disposition.disposition, "wait");
+  assert.match(disposition.reason, /^checks pending 5m/);
+  for (const changed of [
+    { head_sha: "a".repeat(40) }, { path: ".github/workflows/other.yml" }, { run_attempt: 1 },
+    { status: "completed" }, { conclusion: "failure" }, { run_started_at: "unreadable" }, { id: 0 },
+  ]) {
+    const [unproved] = viewsFor(checks, minutesAgo(90), { required, runs: [{ ...run, ...changed }] });
+    assert.equal(unproved.checksPendingSince, undefined, JSON.stringify(changed));
+    assert.equal(deriveDisposition(unproved, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
+  }
+  const [ambiguous] = viewsFor(checks, minutesAgo(90), { required, runs: [run, { id: 124, conclusion: null }] });
+  assert.equal(ambiguous.checksPendingSince, undefined, "an unresolved second run is not a unique proof");
+  const [otherMissing] = viewsFor(checks, minutesAgo(90), { required: [...required, "other-required"], runs: [run] });
+  assert.equal(otherMissing.checksPendingSince, undefined, "CI cannot date a different missing requirement");
+  const [datedGate] = viewsFor([...checks,
+    { name: "ci-gate", status: "in_progress", started_at: minutesAgo(90) }], minutesAgo(1), { required, runs: [run] });
+  assert.equal(datedGate.checksPendingSince, minutesAgo(90), "a dated required check retains its original clock");
+  assert.equal(deriveDisposition(datedGate, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
 });

@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto";
 import { contributionOriginFromRest, type ContributionOrigin, type RestContributionOrigin } from "./contributor-admission.js";
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState, RedundantRefixEvidence } from "./merge-state.js";
-import type { WorkflowRunJobObservation, WorkflowRunObservation } from "./workflow-run.js";
+import { activeCiRerunEvidence, type WorkflowRunJobObservation, type WorkflowRunObservation } from "./workflow-run.js";
 // W1-T2384: from the LEAF, never from sweep.js. dependency-cruiser reads a type-only import as
 // a dependency (MEASURED: importing this off sweep.js took it 13 -> 24 warnings), and sweep.ts
 // imports a VALUE back off this module — see supersession.ts's own header.
@@ -1290,14 +1290,15 @@ function* workflowRunObservationSteps(
   suspects: StuckRunSuspects,
 ): GhReadSteps<WorkflowRunObservation[]> {
   const listing = (yield* ghRead(fetch, runsForHeadRestArgs(owner, repo, headSha))) as {
-    workflow_runs?: ReadonlyArray<{ id?: number; run_attempt?: number; conclusion?: string | null }>;
+    workflow_runs?: ReadonlyArray<Record<string, unknown> & { id?: number; run_attempt?: number; conclusion?: string | null }>;
   };
   const runs = listing?.workflow_runs ?? [];
   const out: WorkflowRunObservation[] = [];
   for (const run of runs) {
     const conclusion = typeof run.conclusion === "string" ? run.conclusion : undefined;
     if (!runHasConcluded(conclusion) || typeof run.id !== "number") {
-      out.push({ conclusion });
+      const activeCiRerun = activeCiRerunEvidence(run, headSha);
+      out.push({ conclusion, ...(activeCiRerun ? { activeCiRerun } : {}) });
       continue;
     }
     const key = typeof run.run_attempt === "number" ? `${owner}/${repo}#${run.id}@${run.run_attempt}` : undefined;

@@ -23,6 +23,7 @@ export interface WorkflowRunJobObservation {
 
 /** One workflow RUN plus its jobs' OWN statuses — the raw input the stalled-run predicate reads. */
 export interface WorkflowRunObservation {
+  activeCiRerun?: { headSha: string; runId: number; attempt: number; startedAt: string };
   /** The run's OWN conclusion — GitHub populates this ONLY once the run itself has concluded
    *  (`"success"`, `"failure"`, `"cancelled"`, `"startup_failure"`, ...). `undefined`/empty means
    *  the run has not concluded — still queued or in progress. */
@@ -32,4 +33,16 @@ export interface WorkflowRunObservation {
    *  concluded, so they could not change the answer) — never degraded to `[]`, which would read as
    *  "GitHub scheduled nothing" instead of "we did not check". */
   jobs?: ReadonlyArray<WorkflowRunJobObservation>;
+}
+
+export function activeCiRerunEvidence(raw: unknown, headSha: string): WorkflowRunObservation["activeCiRerun"] {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const run = raw as Record<string, unknown>;
+  if (!/^[a-f0-9]{40}$/.test(headSha) || run.head_sha !== headSha ||
+      run.path !== ".github/workflows/ci.yml" || run.status !== "in_progress" ||
+      (run.conclusion !== null && run.conclusion !== undefined && run.conclusion !== "") ||
+      typeof run.id !== "number" || !Number.isSafeInteger(run.id) || run.id <= 0 ||
+      typeof run.run_attempt !== "number" || !Number.isSafeInteger(run.run_attempt) || run.run_attempt <= 1 ||
+      typeof run.run_started_at !== "string" || !Number.isFinite(Date.parse(run.run_started_at))) return undefined;
+  return { headSha, runId: run.id, attempt: run.run_attempt, startedAt: run.run_started_at };
 }
