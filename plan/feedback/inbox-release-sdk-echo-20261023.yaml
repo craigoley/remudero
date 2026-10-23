@@ -12,7 +12,7 @@ raw: |
 
   OBSERVED: the fallback draft parser can reject a valid single RELEASE because the harness repeats the
   SDK's final message. This is distinct from the cash endpoint's measured HTTP429 token-rate refusal.
-  On Oct23, all35 joined cash draft attempts failed;33 carried safe429 evidence, and all35 fell back to
+  In the Oct23 cohort read through13:41Z, all35 joined cash drafts failed;33 carried safe429 evidence and all35 fell back to
   subscription Sonnet.32 ended as fragment-contract errors,3 as lint-dirty. No accepted cash output or
   accepted-output-per-dollar denominator was observed. Do NOT infer all32 share this mechanism.
 
