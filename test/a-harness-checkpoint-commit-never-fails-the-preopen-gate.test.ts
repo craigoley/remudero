@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { pathToFileURL } from "node:url";
 import { commitlintStep, emitterChecksStep } from "#src/lib/commit-message.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import type { PreopenGateResult } from "#src/lib/preopen-gate.js";
@@ -151,7 +152,8 @@ async function repairRun(t: TestContext, second: PreopenGateResult, repairError 
     },
     preopenGate: async path => {
       order.push(`gate-${++gates}`);
-      assert.equal(readFileSync(join(path, "src/D.ts"), "utf8"), `export const value = ${gates + 1};\n`);
+      const implemented = await import(`${pathToFileURL(join(path, "src/D.ts")).href}?gate=${gates}`);
+      assert.equal(implemented.value, gates + 1);
       return gates === 1 && !initiallyPasses ? { kind: "fail", failedSteps: ["typecheck"], durationMs: 1 } : second;
     },
   }));
