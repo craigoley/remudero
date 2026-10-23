@@ -136,7 +136,7 @@ import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStri
 import { boundChildByLoopTime, execFileLoopBounded, type LoopBound } from "./lib/loop-bounded-child.js";
 import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
-import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
+import { access as accessAsync, mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger, type ImportClosureRead } from "./lib/base-reproduction.js";
 import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
@@ -529,7 +529,7 @@ import {
   resolveReleasedIds,
   type ReleaseReaders,
 } from "./lib/drain.js";
-import { daemonExitCode, readRestartHistoryLines, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
+import { daemonExitCode, readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProjection, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
@@ -26116,19 +26116,109 @@ function appendSliceReadRow(
   }
 }
 
-/** The run slice from `reader`, else (a rotation unread, or none yet) the whole live file, as the sync read falls back. */
+/** W1-T9119: the bytes `path` decompresses to. A gzip file's last four bytes (ISIZE, RFC 1952) say so exactly for a
+ *  single-member stream, so the figure is MEASURED, not an expansion ratio times the on-disk size. Never below the
+ *  on-disk size: a multi-member stream's ISIZE is only its last member's. */
+async function rotationDecompressedBytes(path: string, onDiskBytes: number): Promise<number> {
+  if (!path.endsWith(".gz") || onDiskBytes < 4) return onDiskBytes;
+  const handle = await openAsync(path, "r");
+  try {
+    const tail = Buffer.alloc(4);
+    await handle.read(tail, 0, 4, onDiskBytes - 4);
+    return Math.max(onDiskBytes, tail.readUInt32LE(0));
+  } finally {
+    await handle.close();
+  }
+}
+
+/** W1-T9119: where {@link createLedgerRotationMemo} keeps `holder`'s durable digest of rotation `name`.
+ *  test/the-retro-trigger-is-gated-on-its-own-read-cost.test.ts reads a real reader's digests through this path. */
+export function rotationDigestFile(stateDir: string, holder: string, name: string): string {
+  return join(stateDir, "cache", "rotation-digests", encodeURIComponent(holder).replaceAll(".", "%2E"), `${name}.json`);
+}
+
+/** W1-T9119: what the retro check's ledger read would decompress NOW: the rotations `holder` holds no durable digest
+ *  for (a digest hit decompresses nothing), at their decompressed size. A rotation that cannot be statted is counted
+ *  as undigested at zero bytes and NAMED in `unreadable`, so an unreadable corpus never blocks the check by itself. */
+export async function projectRetroReadCost(stateDir: string, holder: string = RETRO_TRIGGER_RUN_SLICE.holder): Promise<RetroReadProjection> {
+  const entries = ledgerRotationEntries(await readdirAsync(stateDir), stateDir);
+  let projectedBytes = 0;
+  let undigested = 0;
+  const unreadable: string[] = [];
+  for (const entry of entries) {
+    const name = basename(entry.path);
+    let digested = true;
+    try {
+      await accessAsync(rotationDigestFile(stateDir, holder, name));
+    } catch (error) {
+      // No digest file is the measurement itself: this rotation is read in full. Any other failure is carried too.
+      digested = false;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") unreadable.push(`${name}: ${String(error)}`);
+    }
+    if (digested) continue;
+    undigested++;
+    try {
+      projectedBytes += await rotationDecompressedBytes(entry.path, (await statAsync(entry.path)).size);
+    } catch (error) {
+      // An unstattable rotation adds no bytes; the slice reader reports it unread on the read itself.
+      unreadable.push(`${name}: ${String(error)}`);
+    }
+  }
+  return { projectedBytes, rotations: entries.length, undigested, ...(unreadable.length > 0 ? { unreadable } : {}) };
+}
+
+/** The `retro_triggered` times, from the same durable-digest slice reader kind the check's run read uses. */
+export const RETRO_CADENCE_SLICE: EscalationTriageSlice = {
+  holder: "run-task.retro-cadence", steps: ["retro_triggered"], version: "1",
+  project: (row) => ({ step: row.step, ts: row.ts }),
+};
+let retroCadenceReader: EscalationTriageHistoryReader | undefined;
+
+/** W1-T9119: when the retro has fired, and the policy's own cadence in ms (the interval before two retros exist). */
+export async function readRetroCadenceHistory(
+  config: Config,
+  reader: EscalationTriageHistoryReader = (retroCadenceReader ??= createEscalationTriageHistoryReader({ slice: RETRO_CADENCE_SLICE })),
+  policy?: Pick<Policy["values"]["retro"], "daysThreshold">,
+): Promise<{ retroTriggeredAtMs: number[]; fallbackIntervalMs: number }> {
+  const read = await reader(join(config.root, "state"));
+  const retroTriggeredAtMs = read.rows
+    .filter((row) => row.step === "retro_triggered" && typeof row.ts === "string")
+    .map((row) => Date.parse(row.ts as string))
+    .filter((ms) => Number.isFinite(ms));
+  return { retroTriggeredAtMs, fallbackIntervalMs: (policy ?? loadPolicy(policyPath(repoRoot)).values.retro).daysThreshold * 86_400_000 };
+}
+
+/** The run slice from `reader`, else (a rotation unread, or none yet) the whole live file, as the sync read falls back.
+ *  W1-T9119: the row also carries the marker `since` the read serves, the decompressed bytes the read opened
+ *  (`bytes_decompressed`, taken from the rotations holding no digest just before it) and the heap headroom then. */
 export async function readRetroTriggerRunsAsync(
   config: Config,
   reader: EscalationTriageHistoryReader,
   append?: typeof appendProducerLedger,
+  project: (stateDir: string) => Promise<RetroReadProjection> = projectRetroReadCost,
 ): Promise<ReturnType<typeof parseLedger>> {
   const startedMs = performance.now();
   const ledgerPath = ledgerPathFor(config);
-  const read = await reader(join(config.root, "state"));
+  const stateDir = join(config.root, "state");
+  let projection: { bytes_decompressed: number; undigested_rotations: number; unreadable_rotations: number } | { projection_error: string };
+  try {
+    const projected = await project(stateDir);
+    projection = { bytes_decompressed: projected.projectedBytes, undigested_rotations: projected.undigested, unreadable_rotations: projected.unreadable?.length ?? 0 };
+  } catch (e) {
+    // Carried onto the row as `projection_error`: a read that cannot be sized still proceeds, visibly.
+    projection = { projection_error: String((e as Error)?.message ?? e) };
+  }
+  const heap = getHeapStatistics();
+  const marker = resolveMarkerForGather(join(stateDir, "last-retro.json"));
+  const read = await reader(stateDir);
   const union = read.ok && read.archiveCount > 0;
   const records = union ? [...read.rows] : parseLedger(existsSync(ledgerPath) ? await readFileAsync(ledgerPath, "utf8") : "");
   appendSliceReadRow(ledgerPath, "RETRO-TRIGGER", "retro_trigger.ledger_read",
-    { source: union ? "union" : "live-file", rows: records.length, ...sliceReadCost(reader, read, startedMs) }, append);
+    {
+      source: union ? "union" : "live-file", rows: records.length, since: marker.kind === "ok" ? marker.marker.ts : null,
+      ...projection, heap_headroom_bytes: Math.max(0, heap.heap_size_limit - heap.used_heap_size),
+      ...sliceReadCost(reader, read, startedMs),
+    }, append);
   return records;
 }
 
@@ -26755,7 +26845,7 @@ export function buildRetroDaemonHooks(deps: {
   config?: Config;
   runSubprocess?: typeof runAutomatedRetroSubprocess;
 } = {}): {
-  checkRetroTrigger: () => RetroTriggerDecision | undefined | Promise<RetroTriggerDecision | undefined>;
+  checkRetroTrigger: (() => RetroTriggerDecision | undefined | Promise<RetroTriggerDecision | undefined>) & RetroCheckCompanions;
   // The optional `log` is supplied by the CALLER at invocation time (daemonCommand's own
   // per-boot ledger sink), never threaded through `deps` above — that keeps the
   // `buildRetroDaemonHooks()` construction call byte-identical to before W1-T2870 (see
@@ -26768,7 +26858,11 @@ export function buildRetroDaemonHooks(deps: {
 } {
   const check = deps.check ?? (() => retroTriggerCheckAsync());
   return {
-    checkRetroTrigger: () => check(),
+    // W1-T9119: the gate's two reads ride on the check itself, so the daemon's existing `checkRetroTrigger` wiring carries them.
+    checkRetroTrigger: Object.assign(() => check(), {
+      projectRetroReadCost: () => projectRetroReadCost(join((deps.config ?? loadConfig()).root, "state")),
+      readRetroHistory: () => readRetroCadenceHistory(deps.config ?? loadConfig()),
+    }),
     runRetroTrigger: async (decision, log) => {
       if (deps.runRetro) await deps.runRetro([], { automated: decision });
       else {
