@@ -1,0 +1,64 @@
+- id: W1-T10431
+  title: "Route age-only PR findings as readable fleet information without granting automatic work eligibility"
+  repo: remudero
+  depends_on: [W1-T10283]
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "console-followup:age-only-inbox-information-20261022"
+  files:
+    - src/lib/inbox-owner.ts
+    - src/lib/fleet-lane.ts
+    - src/lib/ask-classification.ts
+    - src/lib/inbox-plain.ts
+    - src/lib/inbox-recommendation.ts
+    - src/lib/inbox-responder.ts
+    - src/lib/nav-badge-view.ts
+    - src/lib/panel-graph.ts
+    - src/lib/inbox-thread-view.ts
+    - test/the-fleet-triages-its-own-findings.test.ts
+    - test/inbox-thread-view.test.ts
+    - test/every-inbox-page-shares-its-classification-snapshot.test.ts
+    - test/an-inbox-message-states-the-situation-in-the-fleets-terms.test.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+  acceptance:
+    - claim: "Only verified age-only findings stop claiming a human decision; explicit unreadable unknown and restored-for-review asks remain human-owned"
+      proof: "unit test: W1-T10431: age-only information preserves explicit unreadable and restored human asks"
+    - claim: "Informational ownership never admits new approval filing merging declining provider work or retry, while existing fleet eligibility is unchanged"
+      proof: "unit test: W1-T10431: informational routing grants no new fleet execution eligibility"
+    - claim: "Existing age conversations remain readable across legacy and persisted demand reads, cursors and reclassification, without acquiring reply or decision authority"
+      proof: "unit test: W1-T10431: reclassified age history remains readable without action authority"
+    - claim: "Badges source-owned classification recommendation and thread metadata agree without deleting history or inventing completed work"
+      proof: "unit test: W1-T10431: age-information classification agrees across badges lanes and thread history"
+  note: "Operator policy approved in this chat: fleet-owned information unless an explicit human decision is blocked. The machine-authored implementation record remains initially unjudged; do not fabricate a ruling or clear a hold from the wording. Depends on W1-T10283 for the shared causal responder/action-factory boundary. No bulk closure, synthetic production reply, automatic approval, gardener activation, provider/retry/permission/budget/service or CI/Azure-memory change."
+  rationale: |
+    October 22 operator scope decision: "Approve the two coordinated task scopes" as high / span. This records implementation breadth only. Native judgment, review and CI remain required; no proceed ruling, deployment, automatic action, permission, spending or guard change is authorized. The original shared low-band renderer refused sizing; the amended record is checked again by native whole-filing admission.
+    Grounded in CLAUDE.md, MASTER-PLAN.md, LEARNINGS.md and DECISIONS.md: the Inbox is the only front door for a genuine ask, not a mixed throughput/PR-age queue; observation is not execution authority.
+    At core d0a612fffd35c6d34d3161c4804e53da3285ae53, board-review produces separate stale and escalation findings. The stale producer measures open-PR age, not a pending human review deadline. W1-T10365/#13444 fixes that wording only; it does not implement ownership, history membership or fleet admission separation.
+    The current inboxOwner kind-only predicate keeps every board-review row human-owned. But fleet-lane also selects open fleet-owned findings and can merge or approve them. A classifier-only patch would therefore grant new automatic work, which the operator did not approve.
+    panel-graph operatorThreadItems excludes fleet-owned proposals without retirement, and the persisted demand materializer independently derives membership from needsYou pages. A classifier-only patch would also make retained conversations disappear or return not-found. Preserve both real read paths, not just the registry bytes.
+    Subject control at 19:06 UTC read current main and all four captured-open advertised core head trees with existing W1-T10076/W1-T10365 positive controls and equal per-head subject counts. The changed plan files are unrelated CI findings/scope. Unpublished and later work remain outside that evidence.
+
+    Design: recognize only the source-owned exact age-only subtype, never a summary keyword or the entire board-review family. Route it as RECORD/information, not a verified human obligation. Explicit escalation, unreadable/ambiguous/new kinds and restored_for_review overrides remain operator asks.
+    Separate display ownership from automatic execution admission. The real fleet-lane default selection must exclude new informational findings from approval/filing, merging, declining, retries, drafting, spawning and judgment. Preserve already-eligible fleet kinds and their normal pace, safety, existing policy and positive-control behavior.
+    Keep source-qualified legacy and persisted thread-list/detail/history membership for information, including old cursors and existing messages after reclassification. Never fabricate action authority from readable history, a partial snapshot or the account-selected repository. Retain current scope, source, session, receipt, stable reply intent and high-tier confirmation checks.
+    Align classification, human-gate and nav-badge counts, plain option authority, recommendation eligibility, responder selection and thread attention. Preserve source bytes, explicit holds, causal input/completion metadata and recorded-action exclusion. Do not label an informational item as a completed/archived task merely to remove it from the human queue.
+    Retain backward compatibility of existing Inbox/thread contracts. Console currently places drafting/notReady before RECORD when selecting folders; a separately gated Console companion may be required for exact FYI placement. Do not introduce an unknown attention value that an older consumer could misread as a decision, or claim core alone completes the visual rollout.
+    Use a real mixed private registry and default classification/fleet pass, with spies only on external action/provider ports. Age-only information must cause zero new action/model/judgment calls, while an existing eligible fleet finding still follows the unchanged path. Cover explicit/unreadable asks, restored review, partial/stale/foreign reads, historical and persisted demand detail/cursors, source badges and recommendations.
+    Delete the informational-execution exclusion and require the real mixed-registry assertion to fail, retaining the existing fleet positive control. Delete history membership wiring and require both legacy and persisted detail tests to fail. Restore source and retain literal canonical proofs, caller/census, exact-tree source-positive coverage, native author, stored body, review and hosted gates.
+    GitHub distinguishes review-requested notification reasons from ordinary subscribed activity: https://docs.github.com/en/subscriptions-and-notifications/concepts/about-notifications . Google SRE monitoring likewise distinguishes actionable alerts from general signals: https://sre.google/sre-book/monitoring-distributed-systems/ . These are design analogies, not evidence that any particular Remudero item is settled.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Explicit operator reply on October 22: \"Approve this exact operator release\" for the preservation-only age-information scope, after disclosure that the deterministic backstop matched \"without deleting history\". This is an operator ruling, not a model verdict."
+      - "Preserve all history and the W1-T10283 dependency; grant no new automatic action, deployment or spending. All native tests, review and CI remain required."
+    judged_at: "2026-10-22T19:38:26.983Z"
+    pin: "9dfee76ea3d053f64f2abe1d072f08950691937d22e6e21866bd5d322ddca070"
