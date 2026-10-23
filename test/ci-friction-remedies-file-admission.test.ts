@@ -22,6 +22,7 @@ import { gitRepo } from "#test/helpers/git-repo.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
 import * as approvalPlan from "#src/lib/plan.js";
+import * as runTask from "#src/run-task.js";
 import * as service from "#src/lib/service.js";
 import type { IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -171,6 +172,36 @@ test("a drafted remedy passes the base linter's sizing and admission checks with
 
 const APPROVAL_RECORD_PATH = "plan/tasks.d/W1-T99001-approved-new-path.yaml";
 const APPROVAL_REFERENCE = `npa1_${"A".repeat(43)}`;
+
+test("new path admission agrees between the real filing precheck and plan lint before the actual proposal commit", async () => {
+  const prepare = (runTask as unknown as { prepareNewPathPlanProposalCommit?: typeof runTask.prepareNewPathPlanProposalCommit }).prepareNewPathPlanProposalCommit;
+  assert.equal(typeof prepare, "function", "real plan and triage commit paths must await the selected precheck before staging");
+  const repo = gitRepo({ kind: "approval-before-staging" });
+  try {
+    repo.addRemote("origin", "https://github.com/acme/remudero.git");
+    mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
+    const { task, facts, context } = approvalFixture("auto"), raw = JSON.parse(JSON.stringify(task));delete raw.sourcePath;
+    const text = JSON.stringify([raw]), path = join(repo.dir, APPROVAL_RECORD_PATH);
+    writeFileSync(path, text);
+    let staged = 0, selectedReads = 0, selectedFacts: NewPathApprovalFacts = facts;
+    const io: runTask.NewPathProposalCommitIO = { clock: context.clock,
+      prepareFacts: async () => { selectedReads++;return selectedFacts; }, commit: () => { staged++; } };
+    const config = () => ({ root: repo.dir, serve: { newPathApproval: facts.binding } });
+    const ready = await prepare!(repo.dir, "chore(plan): fixture", () => {}, config, io);
+    assert.equal(staged, 0, "preparation is not staging");ready();assert.equal(staged, 1);assert.equal(selectedReads, 1);
+    selectedFacts = { state: "unknown", reason: "fixture current issuer unavailable" };
+    await assert.rejects(prepare!(repo.dir, "chore(plan): fixture", () => {}, config, io), /new.path approval UNKNOWN/);
+    assert.equal(staged, 1);
+    selectedFacts = facts;
+    const changed = await prepare!(repo.dir, "chore(plan): fixture", () => {}, config, io);
+    writeFileSync(path, text.replace("Exact approved fixture behavior", "Unapproved substituted behavior"));
+    assert.throws(changed, /changed before staging/);assert.equal(staged, 1);
+    const legacy = { ...raw };delete legacy.new_path_approval_ref;writeFileSync(path, JSON.stringify([legacy]));
+    const before = selectedReads;
+    const old = await prepare!(repo.dir, "chore(plan): fixture", () => {}, () => { throw new Error("legacy must not load approval config"); }, io);
+    old();assert.equal(staged, 2);assert.equal(selectedReads, before);
+  } finally { repo.cleanup(); }
+});
 
 test("new path admission preserves legacy proposals and independent owner holds when actual serve routes assemble", async () => {
   const repo = gitRepo({ kind: "approval-serve-assembly" });
