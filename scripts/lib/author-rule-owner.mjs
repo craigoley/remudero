@@ -8,7 +8,9 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { TEST_SLOT_DIR_ENV, TEST_SLOT_PARENT_ENV, testSlotHasAncestor, testSlotProcessFacts } from '../../src/lib/test-slot.ts';
-import { AUTHOR_CAPTURE_PARENT_ENV } from './author-step-capture.mjs';
+// Keep this cancellation marker byte-identical to author-step-capture.mjs. Importing its
+// executable spooler would make this synchronous reader depend on top-level await.
+const AUTHOR_CAPTURE_PARENT_ENV = 'RMD_AUTHOR_CAPTURE_PARENT_PID';
 
 export const AUTHOR_RULE_OWNER_ENV = 'RMD_AUTHOR_RULE_OWNER';
 export const AUTHOR_RULE_BUDGET_MAX_MS = 60_000;
