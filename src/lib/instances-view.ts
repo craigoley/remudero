@@ -231,13 +231,14 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
       const live = "registry" in parsed ? parsed.registry.instances.filter((i) => i.live) : [];
       const { hostRegistry, drift } = hostRegistryDrift(live.map((i) => i.name), hostText());
       const capabilitySources: ViewSource[] = [];
-      const revalidate: Array<() => void> = [];
+      const revalidate: Array<{ mounted(): boolean; qualify(): void }> = [];
       const entry = (id: string, registered: (typeof live)[number] | undefined): InstanceEntry => {
         const slot = instances.find((candidate) => candidate.state.instance === id);
         const dir = projected.get(id)?.ledgerDir;
         const served = slot !== undefined && dir !== undefined && mounted(dir);
         const prefix = `/v1/i/${id}`;
         const generation = slot?.state.generation;
+        const lease = slot?.lease;
         const scopeMatches = registered !== undefined && projected.get(id)?.repo === registered.repo && opts.instances.filter(i => i.name === id).length === 1;
         const owned = scopeMatches && slot?.state.lease === "held" && slot.lease !== undefined && Number.isSafeInteger(generation) && generation! >= 0;
         const observation = registered && served ? observeInstanceInboxContract(dir, { instance: id, repository: registered.repo }) : undefined;
@@ -245,14 +246,14 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
         const evidence: NonNullable<InstanceEntry["inboxCapabilityEvidence"]> = { version: 1, qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION, source, state: "unavailable", instance: id, ...(registered ? { repository: registered.repo } : {}), prefix, ...(Number.isSafeInteger(generation) && generation! >= 0 ? { generation } : {}) };
         const reading: ViewSource = { name: source, kind: "inbox-store", instance: id, budgetMs: SLOW_LANE_STORE_BUDGET_MS, asOf: fixedClock(now).iso(), state: "unavailable", phase: "failed", reason: "current registered mounted owned conversation contract could not be verified" };
         capabilitySources.push(reading);
-        revalidate.push(() => {
-          if (owned && observation?.state.mode === "read-write" && observation.current() && mounted(dir!) && slot?.state.lease === "held" && slot.state.generation === generation) {
+        revalidate.push({ mounted: () => dir !== undefined && mounted(dir), qualify: () => {
+          if (owned && observation?.state.mode === "read-write" && observation.current() && slot?.lease === lease && slot?.state.lease === "held" && slot.state.generation === generation) {
             evidence.state = "observed";
             reading.state = "fresh";
             delete reading.phase;
             delete reading.reason;
           }
-        });
+        } });
         return {
           id, registered: registered !== undefined,
           ...(registered ? { project: registered.project, repo: registered.repo, mode: registered.mode ?? "live" } : {}),
@@ -276,8 +277,9 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
         ...(hostOnly.length + repoOnly.length + unmounted.length + unregistered.length > 0 ? { drift: { hostOnly, repoOnly, unmounted, unregistered } } : {}),
         ...("code" in parsed ? { registryError: parsed.code } : {}),
       };
+      const mounts = revalidate.map(check => check.mounted());
       const again = readFile(opts.repoPath);
-      if (read.ok && again.ok && again.text === read.text) for (const check of revalidate) check();
+      if (read.ok && again.ok && again.text === read.text) for (const [index, check] of revalidate.entries()) if (mounts[index]) check.qualify();
       return [{ key: "", data, sources: [registrySource(read, parsed), ...instances.map(({ state }) => opts.ledgerSource(state, now)), ...capabilitySources] }];
     },
     /** The shadow side: the legacy registry route's fields over the view's own, so only what `/v1/registry` answers can differ. */

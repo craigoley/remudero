@@ -283,6 +283,21 @@ test("W1-T10430: capability evidence follows owned generation and revalidation w
   assert.equal(observed.current(), false, "file disappearance is caught before publication");
   // Existing registry route consumes only the already-materialized body; no ledger scan or model call.
   assert.equal(registryFromInstances(view.materialize(ctx)[0].data).status, 200);
+  for (const change of ["contract", "registry", "lease"] as const) {
+    writeFileSync(marker, "[]"); writeFileSync(f.repoPath, REPO_REGISTRY);
+    let reads = 0;
+    const slot = { state: { instance: "core", lease: "held" as const, generation: 9 }, lease: {} };
+    const changing = createInstancesView({ instances: [{ name: "core", ledgerDir: f.stateDir, repo: "craigoley/remudero" }], repoPath: f.repoPath, hostPath: f.hostPath, ledgerSource: () => ({ name: "ledger:core", asOf: null, state: "stale" }), mounted: () => {
+      if (++reads === 2) {
+        if (change === "contract") rmSync(marker);
+        if (change === "registry") writeFileSync(f.repoPath, REPO_REGISTRY.replace("craigoley/remudero\n", "foreign/repository\n"));
+        if (change === "lease") slot.lease = {};
+      }
+      return true;
+    } });
+    assert.equal(changing.materialize({ now: NOW, instances: [slot] })[0].data.instances[0].inboxCapabilityEvidence?.state, "unavailable", `${change} changing during mount revalidation refuses`);
+    assert.equal(reads, 2, "the mutation happened after the real first observation");
+  }
 });
 
 test("W1-T10430: legacy instances remain conservative and new capability clocks do not churn data", (t) => {
