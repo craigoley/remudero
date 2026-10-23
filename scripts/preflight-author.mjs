@@ -23,6 +23,7 @@ import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, autho
 import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
 import { boundedAuthorWorkloadFromArgv, guardedAuthorEntry, MacAuthorCapacityRefusal, readMacAuthorAdmission } from './lib/mac-author-admission.mjs';
 import { createBoundedAuthorScratch } from './lib/author-low-footprint.mjs';
+import {readCensusParentBudgetResult} from './lib/census-parent-budget.mjs';
 
 /** The exit status of a run whose selection the host cannot carry: distinct from pass (0) and fail (1). */
 export const OVER_CAPACITY_EXIT = 3;
@@ -557,10 +558,15 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       const dependencyBefore=authorDependencyProvenance(root);
       receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
       if(dependencyBefore.state!=='present')throw new Error(`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
-      const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha]);
+      const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha,
+        ...(resourceBudget ? ['--parent-budget-ms', '110000'] : [])]);
       const censusTimeBound = censusTimeBoundOnly(census);
-      const censusOk = (census.status === 0 || censusTimeBound) && !census.signal && !census.error;
-      report('census-precheck', census, censusOk, censusTimeBound ? { notMeasured: 'time-bound' } : {});
+      const censusPartial = resourceBudget && readCensusParentBudgetResult(census,
+        {root: resolve(root), head: receipt.headSha, requestedBase: receipt.baseSha, budgetMs: 110000});
+      const censusOk = (census.status === 0 || censusTimeBound || Boolean(censusPartial)) && !census.signal && !census.error;
+      report('census-precheck', census, censusOk, censusPartial ? {notMeasured: 'parent-budget', partial: true}
+        : censusTimeBound ? { notMeasured: 'time-bound' } : {});
+      if (censusPartial) receipt.censusParentBudget = censusPartial;
       if (censusTimeBound) {
         receipt.censusNotMeasured = { reason: 'time-bound', checkedBy: 'CI' };
         console.log('census suites NOT MEASURED (time bound) — CI runs them');
@@ -812,7 +818,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     }
     // An over-capacity run is never green: its tests were skipped, or only the subset that fits ran.
     receipt.verdict = values['dry-run'] ? 'not-run' : !receipt.steps.every((step) => step.ok) ? 'failed'
-      : receipt.selection === 'over-capacity' ? 'over-capacity' : 'passed';
+      : receipt.selection === 'over-capacity' || receipt.censusParentBudget ? 'over-capacity' : 'passed';
   } catch (error) {
     receipt.verdict = error instanceof MacAuthorCapacityRefusal ? 'over-capacity' : 'refused';
     if (error instanceof MacAuthorCapacityRefusal) {

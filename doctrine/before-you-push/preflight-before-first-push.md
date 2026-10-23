@@ -126,6 +126,16 @@ The default author invocation and full coverage job retain their existing 20-GiB
 Linux admission is unchanged. No quiet window is required merely because this bounded job has
 less than 20 GiB free.
 
+Operator-approved 2026-10-23: this opt-in mode gives the census producer a shared 110-second
+allowance inside its unchanged 120-second native backstop. Before each instrument, admission-table,
+calibration or qualification child, the producer requires room for that child's existing worst-case
+backstop plus shutdown reserve. It never shortens a child timeout. An unstarted child which cannot
+fit is deferred in a head/base/root-bound partial receipt. Only that complete, typed exit3 can let
+independent bounded checks continue; the author verdict remains `over-capacity`, never PASS.
+Actual timeouts, unknown measurements, incomplete/skipped child results and failed caused assertions
+retain their refusal/failure behavior. A failed head whose base cannot run stays unavailable, not a
+budget-only result. Default author and hosted/full census commands receive no parent-budget option.
+
 ### Explicit low-footprint local checks
 
 Operator-approved 2026-10-17: the Mac may run an explicitly scoped check below the ordinary

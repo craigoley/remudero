@@ -118,11 +118,8 @@ test('bounded author closure probes retain a live native group until that exact 
   assert.equal(boundedAuthorCaptureClosure(path).state, 'closed');
 });
 
-test('the ordinary bounded author uses its real fixed volume and records natural native child closure', t => {
-  if (process.platform !== 'darwin') {
-    assert.throws(() => requireBoundedAuthorHost(), /native Mac volume/);
-    return;
-  }
+test('the ordinary bounded author uses its real fixed volume and records natural native child closure',
+  {skip: process.platform !== 'darwin' ? 'native hdiutil qualification requires Mac; no Linux volume claim' : false}, t => {
   const fixture = makeRuntimeFixture(); t.after(() => fixture.cleanup());
   const packages = Object.fromEntries(['tsx', 'typescript', '@commitlint/cli'].map(name =>
     [`node_modules/${name}`, {version: JSON.parse(readFileSync(join(fixture.dir, 'node_modules', name, 'package.json'), 'utf8')).version}]));
@@ -148,11 +145,8 @@ test('the ordinary bounded author uses its real fixed volume and records natural
   assert.equal(existsSync(receipt.resourceBudget.scratch.dir), false);
 });
 
-test('a real failed ordinary bounded author keeps its failed verdict and closes only its own scratch', t => {
-  if (process.platform !== 'darwin') {
-    assert.throws(() => requireBoundedAuthorHost(), /native Mac volume/);
-    return;
-  }
+test('a real failed ordinary bounded author keeps its failed verdict and closes only its own scratch',
+  {skip: process.platform !== 'darwin' ? 'native hdiutil qualification requires Mac; no Linux volume claim' : false}, t => {
   const fixture = makeRuntimeFixture(true); t.after(() => fixture.cleanup());
   const packages = Object.fromEntries(['tsx', 'typescript', '@commitlint/cli'].map(name =>
     [`node_modules/${name}`, {version: JSON.parse(readFileSync(join(fixture.dir, 'node_modules', name, 'package.json'), 'utf8')).version}]));
@@ -169,8 +163,8 @@ test('a real failed ordinary bounded author keeps its failed verdict and closes 
   assert.equal(existsSync(receipt.resourceBudget.scratch.dir), false);
 });
 
-test('ordinary bounded author stops real oversized native output and preserves the failed phase', t => {
-  if (process.platform !== 'darwin') return;
+test('ordinary bounded author stops real oversized native output and preserves the failed phase',
+  {skip: process.platform !== 'darwin' ? 'native hdiutil qualification requires Mac; no Linux volume claim' : false}, t => {
   const fixture = makeRuntimeFixture(); t.after(() => fixture.cleanup());
   const packages = Object.fromEntries(['tsx', 'typescript', '@commitlint/cli'].map(name =>
     [`node_modules/${name}`, {version: JSON.parse(readFileSync(join(fixture.dir, 'node_modules', name, 'package.json'), 'utf8')).version}]));

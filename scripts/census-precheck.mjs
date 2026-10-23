@@ -36,6 +36,7 @@ import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdt
 import { loadavg, tmpdir } from "node:os";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import {censusParentBudget, CENSUS_PARENT_BUDGET_PREFIX} from './lib/census-parent-budget.mjs';
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -759,7 +760,8 @@ function censusReaderContext(root, child, options) {
  * signal, no `# tests` summary, zero tests, a non-zero exit its TAP does not explain): never `[]` for those.
  */
 export function runCensusSuitesViaChild({ root, files, run = runCensusChild, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs,
-  readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext, load1 = () => loadavg()[0] }) {
+  readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext, load1 = () => loadavg()[0],
+  parentBudget }) {
   const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
   const child = priority.wrap(process.execPath, args);
@@ -773,6 +775,8 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
   };
   try {
     const once = () => {
+      const operation = `census suites: ${files[0]}${files.length > 1 ? ` +${files.length - 1}` : ''}`;
+      parentBudget?.admit(operation, options.timeout, files);
       const startLoad = load1();
       const startedMs = now();
       const res = run(child.file, child.args, options);
@@ -808,6 +812,9 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
         return [key, matches.length === 1 ? Number(matches[0][1]) : null];
       }));
       const passed = summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
+      parentBudget?.complete(operation, {kind: 'native-observation', tests: Number(total[1]), passed, failing});
+      if (parentBudget && !passed && failing.length === 0)
+        throw new Error('budgeted census child has no complete unskipped native result');
       const identities = [...stdout.matchAll(/^( *)(?:not )?ok [0-9]+ - (.+)$/gm)]
         .map((match) => `${match[1].length}:${match[2]}`);
       return { failing, tests: Number(total[1]), identities, passed, elapsedMs: finishedMs - startedMs, finishedMs,
@@ -1579,13 +1586,17 @@ function runSnapshotSuites(snapshot, files, root) {
   return { failing, notMeasured };
 }
 
-export function main(argv, { measure = measureViaChild, admitted = listAdmittedCensusMembers, runSuites = runCensusSuitesViaChild } = {}) {
+export function main(argv, { measure = measureViaChild, admitted = listAdmittedCensusMembers, runSuites = runCensusSuitesViaChild,
+  now = () => performance.now() } = {}) {
   let values;
+  let parentBudget;
   try {
     ({ values } = parseArgs({
       args: argv,
-      options: { root: { type: "string", default: "." }, base: { type: "string", default: "origin/main" } },
+      options: { root: { type: "string", default: "." }, base: { type: "string", default: "origin/main" },
+        'parent-budget-ms': {type: 'string'} },
     }));
+    parentBudget = censusParentBudget(values['parent-budget-ms'], now);
   } catch (e) {
     console.error(`census-precheck: could not measure — ${String(e.message ?? e)}`);
     return 2;
@@ -1596,8 +1607,11 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
   const unmeasured = [];
   const snapshotUnmeasured = [];
   const suiteErrors = [];
+  const instrumentErrors = [];
+  let partialReceipt;
   try {
     const snapshot = readCensusSnapshot();
+    if (snapshot && parentBudget) throw new Error('parent census budgets are unavailable in snapshot mode');
     if (snapshot && resolve(snapshot.root) !== root) throw new Error("census snapshot belongs to another worktree");
     const mergeBase = snapshot?.mergeBase ?? gitOut(root, ["merge-base", "HEAD", values.base]).trim();
     changed = snapshot
@@ -1636,7 +1650,12 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
               snapshot.instrumentSurface, snapshot.instrumentExclusions),
           };
         }
-        return measure({ root, mergeBase });
+        try {
+          parentBudget?.admit('instrument-surface', INSTRUMENT_CHILD_TIME_BOUND_MS);
+          const result = measure({ root, mergeBase });
+          parentBudget?.complete('instrument-surface', {kind: 'metadata-read'});
+          return result;
+        } catch (error) { instrumentErrors.push(error); throw error; }
       },
     });
     violations.push(...instrument.violations);
@@ -1644,11 +1663,19 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     const suites = evaluateAdmittedCensusSuites({
       changed,
       ...readers,
-      loadMembers: () => admitted(root),
+      loadMembers: () => {
+        try {
+          parentBudget?.admit('admission-table', CENSUS_SUITE_CHILD_TIME_BOUND_MS);
+          const result = admitted(root);
+          parentBudget?.complete('admission-table', {kind: 'metadata-read'});
+          return result;
+        } catch (error) { suiteErrors.push(error); throw error; }
+      },
       runSuites: (files, options = {}) => {
         if (!snapshot) {
           try {
-            return runCausedCensusSuites({ root, files, mergeBase, runSuites, ...options });
+            return runCausedCensusSuites({ root, files, mergeBase, runSuites, ...options,
+              ...(parentBudget ? {parentBudget} : {}) });
           } catch (e) {
             suiteErrors.push(e);
             throw e;
@@ -1669,6 +1696,13 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     if (suiteReasons.length > 0) {
       unmeasured.push(`${timeBoundOnly ? CENSUS_TIME_BOUND_LABEL : "census suites NOT MEASURED"} - ${suiteReasons.join("; ")}`);
     }
+    const errors = [...instrumentErrors, ...suiteErrors];
+    if (parentBudget && unmeasured.length > 0 && errors.length > 0 && errors.every(error => parentBudget.owns(error)) &&
+        (instrument.unmeasured === null || instrumentErrors.length > 0) && snapshotUnmeasured.length === 0 &&
+        (suites.unmeasured === null || suiteErrors.length > 0)) {
+      partialReceipt = parentBudget.receipt({root, head: gitOut(root, ['rev-parse', 'HEAD']).trim(),
+        requestedBase: values.base, mergeBase});
+    }
   } catch (e) {
     console.error(`census-precheck: could not measure — ${String(e.message ?? e)}`);
     return 2;
@@ -1681,6 +1715,10 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     return 1;
   }
   if (unmeasured.length > 0) {
+    if (partialReceipt) {
+      console.error(CENSUS_PARENT_BUDGET_PREFIX + JSON.stringify(partialReceipt));
+      return 3;
+    }
     for (const u of unmeasured) console.error(`census-precheck: ${u}`);
     return 2;
   }
