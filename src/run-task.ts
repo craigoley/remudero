@@ -25444,6 +25444,11 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     (ciParity?.ok ?? true) &&
     (coverage?.ok ?? true) &&
     (proofs?.ok ?? true);
+  const deferred = fast?.deferred ?? [];
+  const budgetOnly = !ok && deferred.length > 0 && result.ok
+    && (fast?.steps.every(step => step.ok || deferred.includes(step.name)) ?? false)
+    && (ciChecks?.ok ?? true) && (scopedCoverage?.ok ?? true)
+    && (ciParity?.ok ?? true) && (coverage?.ok ?? true) && (proofs?.ok ?? true);
   // W1-T2810 — THE STAMP, ON BOTH BRANCHES AND ON THE LINE ITSELF.
   //
   // ON BOTH: a stale RED gets investigated anyway, because the reader is already suspicious. The
@@ -25491,7 +25496,8 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   ];
   console.log(
     "\n" +
-      preflightSummarySentence(ok, steps, tiers) +
+      (budgetOnly ? `### OVER-CAPACITY — ${deferred.length} local producer obligation(s) deferred; not PASS; full assurance required`
+        : preflightSummarySentence(ok, steps, tiers)) +
       `\n### ${runContextLine(runContext)}` +
       (treeAdvisory ? `\n### ${treeAdvisory}` : ""),
   );
@@ -25522,7 +25528,8 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     headSha,
     args: rest,
     runContext,
-  }), ...(metrics ? { sandboxMetrics: metrics.finish() } : {}) };
+  }), ...(budgetOnly ? { ok: false, disposition: "over-capacity", failed: 0, deferred } : {}),
+    ...(metrics ? { sandboxMetrics: metrics.finish() } : {}) };
   if (summaryPath === undefined) {
     console.log(
       `### summary NOT written: an injected spawn refuses the default path (${preflightSummaryPath(repoRoot)}) — pass --summary-file to write one anyway`,
@@ -25536,7 +25543,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
       console.error(`### summary NOT written to ${summaryPath}: ${String((e as Error)?.message ?? e)}`);
     }
   }
-  return ok ? 0 : 1;
+  return ok ? 0 : budgetOnly ? 3 : 1;
 }
 
 /**

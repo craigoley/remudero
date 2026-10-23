@@ -6,10 +6,12 @@ import { closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync,
 import { hostname } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { performance } from 'node:perf_hooks';
 import { TEST_SLOT_DIR_ENV, TEST_SLOT_PARENT_ENV, testSlotHasAncestor, testSlotProcessFacts } from '../../src/lib/test-slot.ts';
 import { AUTHOR_CAPTURE_PARENT_ENV } from './author-step-capture.mjs';
 
 export const AUTHOR_RULE_OWNER_ENV = 'RMD_AUTHOR_RULE_OWNER';
+export const AUTHOR_RULE_BUDGET_MAX_MS = 60_000;
 const KEYS = ['tests', 'passed', 'failed', 'cancelled', 'skipped', 'todo', 'suites', 'topLevel'];
 const REPORTER = fileURLToPath(new URL('./author-rule-native-reporter.mjs', import.meta.url));
 const ruleArgv = (concurrency) => ['--test', `--test-concurrency=${concurrency}`, '--experimental-test-isolation=process',
@@ -92,7 +94,7 @@ function manifest(root, files) {
   });
 }
 
-function context(root, environment, rules, affected, concurrency) {
+function context(root, environment, rules, affected, concurrency, policy) {
   if (git(root, ['status', '--porcelain', '--untracked-files=normal'])) throw new Error('rule-owner source is dirty');
   const head = git(root, ['rev-parse', 'HEAD']);
   if (!/^[a-f0-9]{40}$/.test(head)) throw new Error('rule-owner head unavailable');
@@ -103,7 +105,8 @@ function context(root, environment, rules, affected, concurrency) {
     nodeVersion: process.version, nodeSha256: digest(readFileSync(node)), environmentHash,
     nativeEnvironmentHash: hashEnvironment(authorRuleTestEnvironment(environment)),
     ruleArgvHash: jsonHash(ruleArgv(concurrency)), ruleManifest: manifest(root, rules),
-    affectedManifest: manifest(root, affected), dependencies: dependencyGraphDigest(root) };
+    affectedManifest: manifest(root, affected), dependencies: dependencyGraphDigest(root),
+    ...(policy ? { boundedPolicyHash: jsonHash(policy) } : {}) };
 }
 
 function save(file, value, initial = false) {
@@ -132,17 +135,23 @@ export function certifyRuleNativeSummary(file, events, exit) {
 
 /** Called after cheap census and real shared-slot admission. An unqualified graph keeps the
  * original full execution; once owned rules start, failure or mutation can never fall back green. */
-export function createAuthorRuleOwner({ root, directory, head, rules, affected, environment, concurrency }) {
+export function createAuthorRuleOwner({ root, directory, head, rules, affected, environment, concurrency, budgetMs, parentCensus }) {
   root = realpathSync(root);
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new Error('unqualified rule concurrency');
+  if (budgetMs !== undefined && (!Number.isSafeInteger(budgetMs) || budgetMs < 1 || budgetMs > AUTHOR_RULE_BUDGET_MAX_MS || concurrency !== 1))
+    throw new Error('bounded rule allowance requires 1..60000 ms and one worker');
+  if (parentCensus !== undefined && (budgetMs === undefined || parentCensus.root !== root || parentCensus.head !== head
+    || !['complete', 'over-capacity'].includes(parentCensus.state) || !/^[a-f0-9]{40}$/.test(parentCensus.base)))
+    throw new Error('parent census receipt does not belong to this bounded owner');
   const facts = testSlotProcessFacts(process.pid);
   if (!facts) throw new Error('author process start identity unavailable');
   const owner = { version: 1, root, head, pid: process.pid, start: facts.start, host: hostname(),
     nonce: randomUUID(), phase: 'prepared', rules, affected, concurrency, results: [] };
+  if (budgetMs !== undefined) owner.policy = { version: 'bounded-rule-v1', budgetMs, parentCensus };
   const file = join(directory, 'rule-owner.json');
   const descriptor = JSON.stringify({ file, pid: owner.pid, start: owner.start, nonce: owner.nonce });
   const childEnvironment = { ...environment, [AUTHOR_RULE_OWNER_ENV]: descriptor };
-  owner.context = context(root, childEnvironment, rules, affected, concurrency);
+  owner.context = context(root, childEnvironment, rules, affected, concurrency, owner.policy);
   if (owner.context.head !== head) throw new Error('rule-owner source head moved');
   save(file, owner, true);
   return { file, descriptor, childEnvironment };
@@ -173,12 +182,19 @@ export function beginOwnedRuleResults(root, rules) {
   const { owner, file } = read;
   if (owner.phase !== 'prepared') throw new Error('rule owner already started; refusing another execution');
   if (JSON.stringify(owner.rules) !== JSON.stringify(rules)) throw new Error('required rule manifest differs');
-  const actual = context(owner.root, process.env, owner.rules, owner.affected, owner.concurrency);
+  const actual = context(owner.root, process.env, owner.rules, owner.affected, owner.concurrency, owner.policy);
   if (jsonHash(actual) !== jsonHash(owner.context)) return undefined;
   owner.phase = 'running'; save(file, owner);
+  const started = performance.now();
+  let deferred = false;
   return {
     run(suite) {
       if (!rules.includes(suite) || owner.results.some((result) => result.suite === suite)) throw new Error('duplicate or foreign rule execution');
+      // Check only between physical files. A started child keeps its existing backstop;
+      // the unchanged outer static timeout still fails that phase.
+      if (owner.policy && (deferred || performance.now() - started >= owner.policy.budgetMs)) {
+        deferred = true; return 3;
+      }
       const eventFile = join(dirname(file), `rule-${owner.results.length}.ndjson`);
       const argv = [...ruleArgv(owner.concurrency), '--test-reporter=' + REPORTER, '--test-reporter-destination=' + eventFile, suite];
       const child = spawnSync(process.execPath, argv, { cwd: root, env: authorRuleTestEnvironment(process.env), stdio: 'inherit' });
@@ -195,11 +211,20 @@ export function beginOwnedRuleResults(root, rules) {
       return result.complete ? 0 : 1;
     },
     finish() {
-      const unchanged = jsonHash(context(owner.root, process.env, owner.rules, owner.affected, owner.concurrency)) === jsonHash(owner.context);
+      const unchanged = jsonHash(context(owner.root, process.env, owner.rules, owner.affected, owner.concurrency, owner.policy)) === jsonHash(owner.context);
+      if (owner.policy) {
+        const completed = owner.results.filter(row => row.complete).map(row => row.suite);
+        const failed = owner.results.filter(row => !row.complete && Number.isInteger(row.exit) && row.exit !== 0).map(row => row.suite);
+        const unknown = owner.results.filter(row => !row.complete && !failed.includes(row.suite)).map(row => row.suite);
+        owner.budget = { version: 'bounded-rule-v1', budgetMs: owner.policy.budgetMs,
+          elapsedMs: performance.now() - started, completed, failed, unknown,
+          deferred: deferred ? rules.filter(suite => !owner.results.some(row => row.suite === suite)) : [] };
+      }
       owner.phase = unchanged && owner.results.length === rules.length && owner.results.every((row) => row.complete)
-        ? 'complete' : 'failed';
+        ? 'complete' : unchanged && deferred && owner.budget.deferred.length > 0
+          && owner.budget.failed.length === 0 && owner.budget.unknown.length === 0 ? 'over-capacity' : 'failed';
       save(file, owner);
-      return owner.phase === 'complete' ? 0 : 1;
+      return owner.phase === 'complete' ? 0 : owner.phase === 'over-capacity' ? 3 : 1;
     },
   };
 }
@@ -218,10 +243,11 @@ export function qualifiedAffectedRules(handle, root, environment, affected) {
   if (!read || read.file !== handle.file) throw new Error('author rule owner unavailable');
   const { owner } = read;
   if (owner.phase === 'prepared') return { remaining: affected, reused: [], reason: 'rule context did not qualify' };
-  if (owner.phase !== 'complete') throw new Error('failed or incomplete rule owner');
+  if (owner.phase !== 'complete' && owner.phase !== 'over-capacity') throw new Error('failed or incomplete rule owner');
   if (JSON.stringify(owner.affected) !== JSON.stringify(affected)
-    || jsonHash(context(owner.root, environment, owner.rules, affected, owner.concurrency)) !== jsonHash(owner.context))
+    || jsonHash(context(owner.root, environment, owner.rules, affected, owner.concurrency, owner.policy)) !== jsonHash(owner.context))
     throw new Error('author rule-owner context changed');
+  validateRuleBudget(owner);
   for (const result of owner.results) {
     const bytes = readFileSync(result.eventFile);
     if (digest(bytes) !== result.eventSha256) throw new Error('native rule receipt changed');
@@ -237,6 +263,59 @@ export function qualifiedAffectedRules(handle, root, environment, affected) {
       reason: 'retain one real positive affected native run' };
   }
   return { remaining, reused, reason: 'actual same-author native rule completions' };
+}
+
+function validateRuleBudget(owner) {
+  if (owner.phase !== 'over-capacity') return;
+  const b = owner.budget;
+  if (owner.policy?.version !== 'bounded-rule-v1' || !Number.isSafeInteger(owner.policy.budgetMs)
+    || owner.policy.budgetMs < 1 || owner.policy.budgetMs > AUTHOR_RULE_BUDGET_MAX_MS || owner.concurrency !== 1
+    || b?.version !== 'bounded-rule-v1' || b.budgetMs !== owner.policy.budgetMs
+    || !Number.isFinite(b.elapsedMs) || b.elapsedMs < b.budgetMs || !b.deferred?.length
+    || b.failed?.length !== 0 || b.unknown?.length !== 0 || !owner.results.every(row => row.complete)
+    || JSON.stringify(b.completed) !== JSON.stringify(owner.results.map(row => row.suite))
+    || JSON.stringify(owner.rules) !== JSON.stringify([...b.completed, ...b.deferred]))
+    throw new Error('unqualified partial rule owner');
+}
+
+/** A live same-invocation receipt, not exit3 or printed text, authorizes partial continuation. */
+export function ownedPreflightBudgetResult(root, kind) {
+  const read = readOwner(root);
+  if (!read?.owner.policy) return undefined;
+  const { owner } = read;
+  if (!['complete', 'over-capacity'].includes(owner.phase)
+    || jsonHash(context(root, process.env, owner.rules, owner.affected, owner.concurrency, owner.policy)) !== jsonHash(owner.context))
+    throw new Error('bounded static owner failed, changed or incomplete');
+  validateRuleBudget(owner);
+  for (const result of owner.results) {
+    const bytes = readFileSync(result.eventFile);
+    if (digest(bytes) !== result.eventSha256) throw new Error('native rule receipt changed');
+    certifyRuleNativeSummary(resolve(root, result.suite), bytes.toString('utf8').trim().split('\n').map(JSON.parse), result.exit);
+  }
+  if (kind === 'rules') return { state: owner.phase, head: owner.head, root: owner.root, budget: owner.budget };
+  if (kind !== 'census') throw new Error('unknown owned preflight producer');
+  const census = owner.policy.parentCensus;
+  if (!census || census.root !== owner.root || census.head !== owner.head || !/^[a-f0-9]{40}$/.test(census.base)
+    || !['complete', 'over-capacity'].includes(census.state)) throw new Error('bounded parent census unavailable');
+  return census;
+}
+
+/** The real parent rechecks native closure, its live rule context and every independent step.
+ * A random exit3, stale summary, native error or actual failed step cannot be a partial result. */
+export function readOwnedStaticBudgetResult(handle, root, environment, result, summary) {
+  if (!handle || result.status !== 3 || result.signal || result.error || result.outputComplete !== true) return undefined;
+  const owner = JSON.parse(readFileSync(handle.file, 'utf8'));
+  if (!owner.policy) return undefined;
+  qualifiedAffectedRules(handle, root, environment, owner.affected);
+  const deferred = [...(owner.phase === 'over-capacity' ? ['rule-checks'] : []),
+    ...(owner.policy.parentCensus?.state === 'over-capacity' ? ['census-precheck'] : [])];
+  if (!deferred.length || summary?.headSha !== owner.head || summary.ok !== false
+    || summary.disposition !== 'over-capacity' || summary.failed !== 0
+    || JSON.stringify(summary.deferred) !== JSON.stringify(deferred) || !Array.isArray(summary.steps)
+    || deferred.some(name => summary.steps.filter(step => step.name === name && step.ok === false).length !== 1)
+    || summary.steps.some(step => step.ok !== true && !deferred.includes(step.name))) return undefined;
+  return { version: 'bounded-static-v1', state: 'over-capacity', head: owner.head, root: owner.root,
+    deferred, ruleBudget: owner.budget, parentCensus: owner.policy.parentCensus };
 }
 
 /** Restrict qualified work to the verified capacity selection, retaining an explicit native file. */

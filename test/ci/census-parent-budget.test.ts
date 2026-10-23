@@ -159,6 +159,20 @@ test('real census main defers unstarted expensive work with a context-bound part
   assert.ok(row); assert.equal((row.completed as unknown[]).length, 0);
 });
 
+test('a complete budgeted census keeps real native success instead of reporting partial', async t => {
+  await loadBudget();
+  const f = fixture(t);
+  writeFileSync(join(f.dir, 'test/a.test.ts'),
+    'import{test}from"node:test";import{writeFileSync}from"node:fs";test("completed child",()=>writeFileSync("completed-child","yes"));\n');
+  f.git('add', '.'); f.git('commit', '-m', 'test: positive native budget completion');
+  const result = capture(t, () => census.main(['--root', f.dir, '--base', 'main', '--parent-budget-ms', '110000'], {
+    admitted: () => [{testFile: 'test/a.test.ts', script: '', walks: ['lib/']}],
+  }));
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(f.dir, 'completed-child'), 'utf8'), 'yes');
+  assert.ok(!result.stderr.includes(prefix));
+});
+
 test('unbudgeted census keeps its original behavior and never reads the parent clock', async t => {
   await loadBudget();
   const f = fixture(t); let admitted = 0;

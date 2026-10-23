@@ -15,7 +15,8 @@ import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from './pure-tes
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
-import { authorRuleTestEnvironment, createAuthorRuleOwner, qualifiedAffectedRules, admittedAffectedRules } from './lib/author-rule-owner.mjs';
+import { authorRuleTestEnvironment, createAuthorRuleOwner, qualifiedAffectedRules, admittedAffectedRules,
+  AUTHOR_RULE_BUDGET_MAX_MS, readOwnedStaticBudgetResult } from './lib/author-rule-owner.mjs';
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
 import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
@@ -445,7 +446,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         mayBeIncomplete: Boolean(result.error || result.signal || result.outputComplete === false) } });
     progress();
     // Keep terminal feedback small even for thousands of suites. Never rerun to recover output.
-    console.log(`${name}: ${!ok ? 'FAIL' : metadata.notMeasured ? 'NOT MEASURED' : 'PASS'}; ${result.error || result.signal ? 'captured output (may be incomplete)' : 'complete output'}: ${relative(root, diagnosticsRoot)}`);
+    console.log(`${name}: ${!ok ? 'FAIL' : metadata.partial ? 'OVER-CAPACITY' : metadata.notMeasured ? 'NOT MEASURED' : 'PASS'}; ${result.error || result.signal ? 'captured output (may be incomplete)' : 'complete output'}: ${relative(root, diagnosticsRoot)}`);
     const failures = stdout.split('\n').filter((line) => /^\s*not ok [0-9]+/.test(line));
     const replay = (text, channel) => text.split('\n').map(line => `[author ${name} ${channel}] ${line}`).join('\n') + '\n';
     if (failures.length) console.log(replay(failures.slice(0, 40).join('\n').slice(0, 4096), 'failures'));
@@ -662,6 +663,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             try {
               ruleOwner = createAuthorRuleOwner({ root, directory: diagnosticsRoot, head: receipt.headSha,
                 rules: listRuleSuites(root), affected: receipt.suites, concurrency: Math.min(resourceBudget?.workers ?? 4, slot.concurrency),
+                ...(resourceBudget ? { budgetMs: AUTHOR_RULE_BUDGET_MAX_MS, parentCensus: {
+                  root: realpathSync(root), head: receipt.headSha, base: receipt.baseSha,
+                  state: censusPartial ? 'over-capacity' : 'complete' } } : {}),
                 environment: { ...authorEnvironment(process.env), ...slot.childEnvironment, ...temporaryEnvironment() } });
               receipt.ruleExecution = { state: 'prepared', receipt: relative(root, ruleOwner.file), reusedFiles: [] };
             } catch (error) {
@@ -669,13 +673,20 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
                 fallback: 'original rule and affected execution; no cached result qualifies' };
             }
           }
+          const staticSummary = join(diagnosticsRoot, 'static-summary.json');
           const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
             join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
-            '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
+            '--summary-file', staticSummary]);
           const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file,
             ruleOwner?.childEnvironment ?? slot.childEnvironment, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
-          const staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
-          report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
+          let staticPartial;
+          if (resourceBudget && ruleOwner && staticResult.status === 3 && existsSync(staticSummary))
+            staticPartial = readOwnedStaticBudgetResult(ruleOwner, root, ruleOwner.childEnvironment,
+              staticResult, JSON.parse(readFileSync(staticSummary, 'utf8')));
+          if (staticPartial) receipt.staticParentBudget = staticPartial;
+          const staticOk = (staticResult.status === 0 || Boolean(staticPartial)) && !staticResult.signal && !staticResult.error;
+          report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority,
+            ...(staticPartial ? { partial: true, summary: relative(root, staticSummary) } : {}) });
           // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
           // receipt and selected floor, but don't spend another full run on known-doomed tests.
           // W1-T7809: a plan-only selection is plan lint first; a failed lint is as unpublishable as a failed static gate.
@@ -835,7 +846,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     }
     // An over-capacity run is never green: its tests were skipped, or only the subset that fits ran.
     receipt.verdict = values['dry-run'] ? 'not-run' : !receipt.steps.every((step) => step.ok) ? 'failed'
-      : receipt.selection === 'over-capacity' || receipt.censusParentBudget ? 'over-capacity' : 'passed';
+      : receipt.selection === 'over-capacity' || receipt.censusParentBudget || receipt.staticParentBudget ? 'over-capacity' : 'passed';
   } catch (error) {
     receipt.verdict = error instanceof MacAuthorCapacityRefusal ? 'over-capacity' : 'refused';
     if (error instanceof MacAuthorCapacityRefusal) {

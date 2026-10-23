@@ -27,6 +27,8 @@ let admittedAffectedRules: OwnerModule['admittedAffectedRules'];
 let beginOwnedRuleResults: OwnerModule['beginOwnedRuleResults'];
 let certifyRuleNativeSummary: OwnerModule['certifyRuleNativeSummary'];
 let dependencyGraphDigest: OwnerModule['dependencyGraphDigest'];
+let ownedPreflightBudgetResult: OwnerModule['ownedPreflightBudgetResult'];
+let readOwnedStaticBudgetResult: OwnerModule['readOwnedStaticBudgetResult'];
 let ownerLoaded = false;
 async function loadOwnerImplementation() {
   assert.ok(existsSync(join(ROOT, 'scripts/lib/author-rule-owner.mjs')),
@@ -39,7 +41,8 @@ async function loadOwnerImplementation() {
   // @ts-ignore executable fixture module.
   ({ruleSuites, runRuleSuites} = await import('#scripts/list-rule-suites.mjs'));
   // @ts-ignore executable fixture module.
-  ({AUTHOR_RULE_OWNER_ENV, createAuthorRuleOwner, qualifiedAffectedRules, admittedAffectedRules, beginOwnedRuleResults, certifyRuleNativeSummary, dependencyGraphDigest} = await import('#scripts/lib/author-rule-owner.mjs'));
+  ({AUTHOR_RULE_OWNER_ENV, createAuthorRuleOwner, qualifiedAffectedRules, admittedAffectedRules, beginOwnedRuleResults, certifyRuleNativeSummary, dependencyGraphDigest,
+    ownedPreflightBudgetResult, readOwnedStaticBudgetResult} = await import('#scripts/lib/author-rule-owner.mjs'));
   ownerLoaded = true;
 }
 
@@ -730,4 +733,143 @@ test('the real rule runner reports unknown owner completion without fabricating 
     result.complete && result.exit === 0 && result.nativeCounts.passed > 0), 'every real native rule passed');
   assert.match(errors.join('\n'), /^rule-checks: owner completion unavailable$/m);
   assert.doesNotMatch(errors.join('\n'), /rule-checks: failed suites:/);
+});
+
+function budgetHandle(f: ReturnType<typeof fixture>, population = rules, budgetMs = 1000) {
+  const directory = join(f.repo.dir, 'coverage/bounded-rules'); mkdirSync(directory, { recursive: true });
+  const head = f.repo.git('rev-parse', 'HEAD');
+  return createAuthorRuleOwner({ root: f.repo.dir, directory, head, rules: population, affected,
+    environment: f.environment, concurrency: 1, budgetMs,
+    parentCensus: { root: f.repo.dir, head, base: head, state: 'over-capacity' } });
+}
+
+function slowRule(f: ReturnType<typeof fixture>, contents = '') {
+  writeFileSync(join(f.repo.dir, rules[0]!),
+    `import{test}from'node:test';import assert from'node:assert/strict';` +
+    `test('started real rule',()=>{Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1100);${contents}});\n`);
+  f.repo.git('add', '.'); f.repo.git('commit', '-qm', 'test: real bounded rule input');
+}
+
+function runBudgetRules(f: ReturnType<typeof fixture>, handle: ReturnType<typeof budgetHandle>) {
+  const program = `import{beginOwnedRuleResults}from${JSON.stringify(MODULE)};
+    const o=beginOwnedRuleResults(process.cwd(),${JSON.stringify(rules)});if(!o)process.exit(2);
+    let failed=false;for(const file of ${JSON.stringify(rules)}){const s=o.run(file);if(s===3)break;if(s!==0)failed=true;}
+    const status=o.finish();process.exit(failed?1:status);`;
+  return spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', program],
+    { cwd: f.repo.dir, env: handle.childEnvironment, encoding: 'utf8', timeout: 20_000, maxBuffer: 1024 * 1024 });
+}
+
+test('bounded rules defer only unstarted physical files and retain genuine positive native counts', async t => {
+  await loadOwnerImplementation();
+  const f = fixture(t); slowRule(f);
+  const handle = budgetHandle(f), native = runBudgetRules(f, handle);
+  assert.equal(native.status, 3, native.stderr); assert.equal(native.signal, null); assert.equal(native.error, undefined);
+  const owner = JSON.parse(readFileSync(handle.file, 'utf8'));
+  assert.equal(owner.phase, 'over-capacity'); assert.deepEqual(owner.budget.completed, [rules[0]]);
+  assert.deepEqual(owner.budget.deferred, [rules[1]]); assert.deepEqual(owner.budget.failed, []); assert.deepEqual(owner.budget.unknown, []);
+  assert.equal(owner.results.length, 1); assert.equal(owner.results[0].nativeCounts.passed, 1);
+  assert.deepEqual(qualifiedAffectedRules(handle, f.repo.dir, handle.childEnvironment, affected).reused.map(row => row.suite), [rules[0]]);
+  withRealOwnerEnvironment(f, handle, () => {
+    assert.equal(ownedPreflightBudgetResult(f.repo.dir, 'rules').state, 'over-capacity');
+    assert.equal(ownedPreflightBudgetResult(f.repo.dir, 'census').state, 'over-capacity');
+    assert.throws(() => ownedPreflightBudgetResult(f.repo.dir, 'foreign'), /unknown/);
+  });
+  const summary = { headSha: owner.head, ok: false, disposition: 'over-capacity', failed: 0,
+    deferred: ['rule-checks', 'census-precheck'], steps: [{ name: 'rule-checks', ok: false },
+      { name: 'independent', ok: true }, { name: 'census-precheck', ok: false }] };
+  const exit = { status: 3, outputComplete: true };
+  assert.equal(readOwnedStaticBudgetResult(handle, f.repo.dir, handle.childEnvironment, exit, summary).state, 'over-capacity');
+  for (const bad of [{ ...exit, status: 1 }, { ...exit, signal: 'SIGTERM' }, { ...exit, error: { code: 'ETIMEDOUT' } },
+    { ...exit, outputComplete: false }]) assert.equal(readOwnedStaticBudgetResult(handle, f.repo.dir, handle.childEnvironment, bad, summary), undefined);
+  for (const bad of [{ ...summary, headSha: '0'.repeat(40) }, { ...summary, ok: true }, { ...summary, failed: 1 },
+    { ...summary, deferred: ['rule-checks'] }, { ...summary, steps: [...summary.steps, { name: 'actual-failure', ok: false }] }])
+    assert.equal(readOwnedStaticBudgetResult(handle, f.repo.dir, handle.childEnvironment, exit, bad), undefined);
+  owner.budget.deferred = []; writeFileSync(handle.file, JSON.stringify(owner));
+  assert.throws(() => qualifiedAffectedRules(handle, f.repo.dir, handle.childEnvironment, affected), /unqualified partial/);
+});
+
+test('a real failed rule remains failed beside deferred work and preserves native error diagnostics', async t => {
+  await loadOwnerImplementation();
+  const f = fixture(t); slowRule(f, `assert.equal('observed','required','actual rule assertion');`);
+  const handle = budgetHandle(f), native = runBudgetRules(f, handle);
+  assert.equal(native.status, 1, native.stderr);
+  const owner = JSON.parse(readFileSync(handle.file, 'utf8'));
+  assert.equal(owner.phase, 'failed'); assert.deepEqual(owner.budget.failed, [rules[0]]);
+  assert.deepEqual(owner.budget.deferred, [rules[1]]); assert.equal(owner.results[0].complete, false);
+  const events = readFileSync(owner.results[0].eventFile, 'utf8');
+  assert.match(events, /test:fail/); assert.match(events, /actual rule assertion/);
+  assert.throws(() => qualifiedAffectedRules(handle, f.repo.dir, handle.childEnvironment, affected), /failed or incomplete/);
+  withRealOwnerEnvironment(f, handle, () => assert.throws(() => ownedPreflightBudgetResult(f.repo.dir, 'rules'), /failed, changed or incomplete/));
+});
+
+test('a started rule with no native completion remains unknown instead of budget-only', async t => {
+  await loadOwnerImplementation();
+  const f = fixture(t); slowRule(f, 'process.exit(0);');
+  const handle = budgetHandle(f), native = runBudgetRules(f, handle);
+  assert.equal(native.status, 1, native.stderr);
+  const owner = JSON.parse(readFileSync(handle.file, 'utf8'));
+  assert.equal(owner.phase, 'failed'); assert.deepEqual(owner.budget.unknown, [rules[0]]);
+  assert.equal(owner.results[0].complete, false);
+  assert.throws(() => qualifiedAffectedRules(handle, f.repo.dir, handle.childEnvironment, affected), /failed or incomplete/);
+});
+
+test('the real fast gate continues independent checks after partial rules and retains its partial parent census', async t => {
+  await loadOwnerImplementation();
+  const { runPreflightFast } = await import('#src/lib/ci-parity.js');
+  const f = fixture(t); mkdirSync(join(f.repo.dir, 'scripts'));
+  for (let index = 0; index < 18; index++) writeFileSync(join(f.repo.dir, `test/00-${index}-census.test.ts`), f.leaf(`native-${index}`));
+  const population = pathToFileURL(join(ROOT, 'scripts/list-rule-suites.mjs')).href;
+  writeFileSync(join(f.repo.dir, 'scripts/list-rule-suites.mjs'),
+    `import{runRuleSuites}from${JSON.stringify(population)};process.exitCode=runRuleSuites(process.cwd());\n`);
+  writeFileSync(join(f.repo.dir, 'scripts/census-precheck.mjs'), "throw Error('parent census must not run twice');\n");
+  writeFileSync(join(f.repo.dir, 'scripts/independent.mjs'), "import{writeFileSync}from'node:fs';writeFileSync('coverage/independent','actual independent native check');\n");
+  writeFileSync(join(f.repo.dir, 'package.json'), JSON.stringify({type: 'module', scripts: {independent: 'node scripts/independent.mjs'}}));
+  writeFileSync(join(f.repo.dir, 'test/00-0-census.test.ts'),
+    "import{test}from'node:test';test('real first rule',()=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1100));\n");
+  f.repo.git('add', '.'); f.repo.git('commit', '-qm', 'test: actual partial fast gate');
+  const required = ruleSuites(f.repo.dir); assert.equal(required.length, 20);
+  const handle = budgetHandle(f, required);
+  const result = withRealOwnerEnvironment(f, handle, () => runPreflightFast(f.repo.dir, { steps: [
+    { job: 'rule-checks', script: 'rules', runner: 'rule-checks', reason: 'native partial producer' },
+    { job: 'independent', script: 'independent', reason: 'real independent native check' },
+    { job: 'census-precheck', script: 'census-precheck', runner: 'census-precheck', reason: 'retain real parent disposition' },
+  ] }));
+  assert.equal(result.ok, false); assert.deepEqual(result.deferred, ['rule-checks', 'census-precheck']);
+  assert.equal(result.steps[1]!.ok, true, result.steps[1]!.detail);
+  assert.equal(readFileSync(join(f.repo.dir, 'coverage/independent'), 'utf8'), 'actual independent native check');
+  assert.ok(result.steps.filter(step => !step.ok).every(step => step.detail.includes('OVER-CAPACITY')));
+  const owner = JSON.parse(readFileSync(handle.file, 'utf8'));
+  assert.deepEqual(owner.budget.deferred, required.slice(1)); assert.equal(owner.results.length, 1);
+  writeFileSync(join(f.repo.dir, 'node_modules/changed-after-budget.mjs'), 'export const changed=true;');
+  withRealOwnerEnvironment(f, handle, () => assert.throws(() => ownedPreflightBudgetResult(f.repo.dir, 'census'), /changed/));
+});
+
+test('bounded rule policy refuses oversized time or parallelism without changing full-owner defaults', async t => {
+  await loadOwnerImplementation();
+  const f = fixture(t);
+  for (const budgetMs of [0, -1, 60001, NaN]) assert.throws(() => budgetHandle(f, rules, budgetMs), /allowance/);
+  assert.throws(() => createAuthorRuleOwner({ root: f.repo.dir, directory: join(f.repo.dir, 'coverage'),
+    head: f.owner().head, rules, affected, environment: f.environment, concurrency: 2, budgetMs: 1000 }), /allowance/);
+  const owner = f.owner(); assert.equal(owner.policy, undefined); assert.equal(f.runRules().status, 0);
+});
+
+test('an actual timeout of a started bounded rule remains incomplete and cannot become partial', async t => {
+  await loadOwnerImplementation();
+  // @ts-ignore executable production capture module.
+  const { captureStepSync } = await import('#scripts/lib/author-step-capture.mjs');
+  const f = fixture(t);
+  writeFileSync(join(f.repo.dir, rules[0]!), "import{test}from'node:test';import{writeFileSync}from'node:fs';" +
+    "test('started real timeout',()=>{writeFileSync('coverage/started-timeout','native');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10000);});\n");
+  f.repo.git('add', '.'); f.repo.git('commit', '-qm', 'test: real native timeout input');
+  const handle = budgetHandle(f), directory = join(f.repo.dir, 'coverage/timeout-capture'); mkdirSync(directory);
+  const program = `import{beginOwnedRuleResults}from${JSON.stringify(MODULE)};const o=beginOwnedRuleResults(process.cwd(),${JSON.stringify(rules)});if(!o)process.exit(2);o.run(${JSON.stringify(rules[0])});process.exit(o.finish());`;
+  const native = captureStepSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', program], {
+    cwd: f.repo.dir, env: handle.childEnvironment, runtimeMs: 2000, maxBytes: 1024 * 1024,
+    stdoutPath: join(directory, 'stdout'), stderrPath: join(directory, 'stderr'), resultPath: join(directory, 'native.json'),
+  });
+  assert.equal(readFileSync(join(f.repo.dir, 'coverage/started-timeout'), 'utf8'), 'native');
+  assert.ok(native.signal || native.error, JSON.stringify(native));
+  assert.equal(JSON.parse(readFileSync(handle.file, 'utf8')).phase, 'running');
+  assert.equal(readOwnedStaticBudgetResult(handle, f.repo.dir, handle.childEnvironment, native, {}), undefined);
+  assert.throws(() => qualifiedAffectedRules(handle, f.repo.dir, handle.childEnvironment, affected), /failed or incomplete/);
 });

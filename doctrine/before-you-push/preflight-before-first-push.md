@@ -148,6 +148,21 @@ baseline. Choose scratch from the actual tree footprint: a counted 10633-blob ba
 133 MiB of 4-KiB data blocks before directories and index, and the real 128-MiB checkout filled;
 256 MiB remains within the existing maximum. Neither a space refusal nor a truncated capture is PASS.
 
+Operator-approved 2026-10-23: bounded author also gives the serial rule sweep a 60-second soft
+producer allowance inside the unchanged 120-second static backstop. The allowance is checked
+between files; it does not promise that the next file finishes within it, shorten a started child's
+backstop, or hide an actual timeout. The live owner names completed, failed, unknown and deferred
+physical files separately. Only unstarted files are deferred. Any failure, missing native completion,
+changed source/dependency/runtime/environment, stale owner or truncated outer capture prevents a
+budget-only result. Bounded native failure diagnostics survive in the owner's event files.
+
+Independent static checks continue after a qualified partial rule result. That same invocation's
+already measured parent census is retained rather than run a second time; an earlier partial census
+stays partial. Static exit3 requires all other checks to succeed, a fresh head-bound summary and the
+live owner's verified native receipts. The author rechecks them and remains `over-capacity`, never
+PASS. Default/unbudgeted and hosted/full sweeps still execute every file. Required isolated full
+Linux assurance, hosted checks/coverage/security, native review and ordinary merge are unchanged.
+
 ### Explicit low-footprint local checks
 
 Operator-approved 2026-10-17: the Mac may run an explicitly scoped check below the ordinary
