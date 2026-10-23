@@ -445,15 +445,15 @@ test("new path admission actual serve and default HTTPS reader retain current Gi
   const preview = () => post("preview", { draftYaml, recordPath: APPROVAL_RECORD_PATH, approvedMissingPaths: original.files, lifetimeMs: 60_000 });
   const childScript = `import {prepareNewPathApprovalFacts} from "#src/lib/plan.js";
     const input=JSON.parse(process.argv[1]);let calls=0,ticks=0;const timer=setInterval(()=>ticks++,10);const bind=()=>{calls++;return input.absentBinding?undefined:input.binding;};
-    const facts=await prepareNewPathApprovalFacts(input.task,input.recordPath,{repoRoot:input.root,base:input.base,readTokenFile:input.tokenFile,currentBinding:bind},AbortSignal.timeout(8000));
-    clearInterval(timer);console.log(JSON.stringify({state:facts?.state??null,facts,calls,ticks}));`;
+    const started=performance.now();const facts=await prepareNewPathApprovalFacts(input.task,input.recordPath,{repoRoot:input.root,base:input.base,readTokenFile:input.tokenFile,currentBinding:bind},AbortSignal.timeout(8000));
+    clearInterval(timer);console.log(JSON.stringify({state:facts?.state??null,facts,calls,ticks,elapsedMs:performance.now()-started}));`;
   const read = async (task: Task, trust = true, absentBinding = false) => {
     const env = { ...process.env };delete env.NODE_TLS_REJECT_UNAUTHORIZED;delete env.NODE_EXTRA_CA_CERTS;
     if (trust) env.NODE_EXTRA_CA_CERTS = cert;
     const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", childScript,
       JSON.stringify({ task, binding: current, root: repo.dir, base, tokenFile, recordPath: APPROVAL_RECORD_PATH, absentBinding })],
       { cwd: REPO_ROOT, env, timeout: 12_000, maxBuffer: 128 * 1_024 });
-    return JSON.parse(stdout.trim()) as { state: string | null; facts?: NewPathApprovalFacts; calls: number; ticks: number };
+    return JSON.parse(stdout.trim()) as { state: string | null; facts?: NewPathApprovalFacts; calls: number; ticks: number; elapsedMs: number };
   };
   try {
     throwConfig = true;assert.deepEqual(assembled(), []);throwConfig = false;
@@ -484,6 +484,7 @@ test("new path admission actual serve and default HTTPS reader retain current Gi
     renameSync(tokenFile, tokenFile + ".retained-symlink");renameSync(tokenFile + ".preserved-original", tokenFile);
     stallBody = true;const timedOut = await read(task);stallBody = false;
     assert.equal(timedOut.state, "unknown");assert.ok(timedOut.ticks > 10, "the default body deadline does not block the child event loop");
+    assert.ok(timedOut.elapsedMs >= 4_000 && timedOut.elapsedMs < 7_000, "the real five-second deadline, not the outer eight-second fixture abort, ends the stalled read");
     assert.equal(verifyCalls - before, 1, "a stalled body never reaches a second verification");assert.equal(closedStalledBodies, 1, "default cancellation closes the stalled response");
     driftAfterFirstRead = true;assert.equal((await read(task)).state, "unknown");
     current = { ...facts.binding, origin };
