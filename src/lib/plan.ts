@@ -911,9 +911,11 @@ export function parseNewPathApprovalDraft(text: string, recordPath: string): Tas
   // A fixed parsing sentinel selects the strict loader; it is excluded from the intent and never issued.
   const selected = JSON.stringify([{ ...raw[0], new_path_approval_ref: `npa1_${"A".repeat(43)}` }]);
   const task = parseTasksFromYaml(selected, recordPath)[0]!;
+  if (task.files === undefined) throw new PlanError("selected approval draft has no declared paths");
+  if (task.files.length === 0) throw new PlanError("selected approval draft declares an empty path set");
   if (!isCanonicalApprovalPath(recordPath) || !recordPath.startsWith(`plan/tasks.d/${task.id}-`) ||
     !/^[^/]+[.]ya?ml$/.test(recordPath.slice("plan/tasks.d/".length)) ||
-    !task.files?.length || task.files.length > 128 || !task.files.every(isCanonicalApprovalPath) ||
+    task.files.length > 128 || !task.files.every(isCanonicalApprovalPath) ||
     new Set(task.files).size !== task.files.length || newPathApprovalIntentDigest(task, recordPath) === undefined) {
     throw new PlanError("unsupported approval task, destination or declared paths");
   }
@@ -948,7 +950,9 @@ function newPathApprovalGit(root: string, args: string[], signal: AbortSignal): 
 export async function readNewPathApprovalPaths(task: Task, context: NewPathApprovalCheckout, signal: AbortSignal): Promise<Readonly<Record<string, NewPathApprovalPathEvidence>> | undefined> {
   try {
     signal.throwIfAborted();
-    if (newPathApprovalBindingError(context.binding) || !/^[a-f0-9]{40}$/.test(context.base) || !task.files?.length ||
+    if (task.files === undefined) return undefined;
+    if (task.files.length === 0) return undefined;
+    if (newPathApprovalBindingError(context.binding) || !/^[a-f0-9]{40}$/.test(context.base) ||
       task.files.length > 128 || !task.files.every(isCanonicalApprovalPath) || new Set(task.files).size !== task.files.length) return undefined;
     const root = await awaitNewPathApprovalRead(signal, realpath(context.repoRoot));
     const origin = (await newPathApprovalGit(root, ["remote", "get-url", "origin"], signal)).trim();
