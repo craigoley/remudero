@@ -133,7 +133,19 @@ test("W1-T7812: control red blocks as control_failed without a shifted run", asy
   const result = await check(() => { calls++; return red; }, 0.5, true);
   assert.equal(result.code, 1);
   assert.equal(calls, 1);
-  assert.match(result.report, /control_failed.*red without any shift/);
+  assert.match(result.report, /control_failed.*clock control \(14\/15 pass\)/);
+});
+
+test("the census names its nonzero clock control and the measured failure counts", async () => {
+  const shifts: number[] = [];
+  const result = await check((_file, days) => {
+    shifts.push(days);
+    return { passed: false, pass: 3, tests: 4 };
+  }, 0.5, true);
+  assert.equal(result.code, 1, "the control still blocks");
+  assert.deepEqual(shifts, [gardener.DEFUSE_CONTROL_SHIFT_DAYS], "no future experiment ran after the control failed");
+  assert.match(result.report, /control_failed.*\+0\.001d clock control \(3\/4 pass\)/);
+  assert.doesNotMatch(result.report, /red without any shift/, "the nonzero control is not an ordinary unshifted run");
 });
 
 test("W1-T7812: a crossing beyond the 24 h tier runs no suite and keeps the attributed rule", async () => {
