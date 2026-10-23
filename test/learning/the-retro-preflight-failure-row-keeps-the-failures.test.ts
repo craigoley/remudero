@@ -57,7 +57,7 @@ test("W1-T10298: an oversized failing block is cut with a marker inside the exce
   const { out, prompts } = await retained(t, prelude + huge + block(4, "later-small") + summary);
   assert.match(out, /not ok 2 - oversized/);
   assert.match(out, /large-error/);
-  assert.match(out, /omitted/);
+  assert.match(out, /\[\.\.\. failure block omitted \.\.\.\]/);
   assert.match(out, /distinct-error-later-small/);
   assert.ok(out.endsWith(summary));
   assert.match(prompts[0], /large-error/);
@@ -102,5 +102,22 @@ test("retro excerpt retains every bounded named failure before the summary", asy
   const { out, failure } = await retained(t, prelude + names.map((name, i) => block(i + 1, name)).join("") + summary);
   assert.deepEqual(failure.failing_tests, names);
   for (const name of names) assert.ok(out.includes(`distinct-error-${name}`));
+  assert.ok(out.endsWith(summary));
+});
+
+test("retro excerpt deduplicates repeated names and retains bounded long-name evidence", async (t) => {
+  const longName = "long-name-" + "x".repeat(400);
+  const { out, failure } = await retained(t, prelude + block(1, "repeated") + block(1, "repeated") + block(2, longName) + summary);
+  assert.deepEqual(failure.failing_tests, ["repeated", longName.slice(0, 300)]);
+  assert.equal([...out.matchAll(/^not ok 1 - repeated$/gm)].length, 1);
+  assert.ok(out.includes(`distinct-error-${longName}`));
+  assert.ok(out.endsWith(summary));
+});
+
+test("retro excerpt trims an oversized untrusted UTF-8 summary without splitting characters", async (t) => {
+  const comment = `# duration_ms ${"🙂".repeat(700)}\n`;
+  const { out } = await retained(t, prelude + block(1, "summary-unicode") + comment + summary);
+  assert.match(out, /distinct-error-summary-unicode/);
+  assert.doesNotMatch(out, /\uFFFD/);
   assert.ok(out.endsWith(summary));
 });
