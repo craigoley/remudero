@@ -15,7 +15,7 @@
     - test/ci/hand-fix-scripts-lib-author-step-capture-mjs.test.ts
   acceptance:
     - claim: "the harness no longer spends a fix round on hand_fix:scripts/lib/author-step-capture.mjs"
-      proof: "grep: test(\"W1-T10500: hand_fix:scripts/lib/author-step-capture.mjs is prevented, not retried\" in test/ci/hand-fix-scripts-lib-author-step-capture-mjs.test.ts"
+      proof: "grep: test(\"W1-T10500: hand_fix:scripts/lib/author-step-capture\\.mjs is prevented, not retried\" in test/ci/hand-fix-scripts-lib-author-step-capture-mjs.test.ts"
   note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures hand_fix:scripts/lib/author-step-capture.mjs's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
   rationale: |
     MEASURED by the ci-friction gardener: hand_fix:scripts/lib/author-step-capture.mjs cost 6.8 PR minute(s) across 2 red run(s) within the measured window on 2 pull request(s).
