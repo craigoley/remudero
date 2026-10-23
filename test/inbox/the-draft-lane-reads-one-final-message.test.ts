@@ -83,3 +83,10 @@ test("a genuinely repeated release from the rescue is not turned into approval",
   assert.equal(outcome?.ok, false);
   assert.equal(escalations, 1);
 });
+
+test("draft rejection telemetry counts the same final message that the parser read", async () => {
+  const malformed = "No fragment or release markers.";
+  const {outcome, events} = await draft(worker(malformed));
+  assert.equal(outcome?.ok, false);
+  assert.equal(events.find(x => x.step === "inbox.draft_error")?.output_chars, malformed.length);
+});
