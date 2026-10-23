@@ -429,7 +429,7 @@ export function openPullRequestChecked(
     if (!runnableProof(proof, target)) {
       return reject(`${taskId} has a proof the local check-proof command cannot execute: ${proof || "(empty)"}`);
     }
-    const proofBase = criterion.kind === "guard" ? undefined : mergeBase;
+    const proofBase = (criterion as { kind?: unknown }).kind === "guard" ? undefined : mergeBase;
     const result = runProof(proof, proofBase, repoRoot, target);
     if (proofFailed(result)) {
       const detail = [result.error, result.stderr, result.stdout].filter(Boolean).join("\n").trim();
@@ -490,7 +490,7 @@ export async function prerunPullRequestProofs(
   for (const criterion of criteria) {
     const proof = criterion.proof.trim();
     if (!runnableProof(proof, target)) break;
-    const proofBase = criterion.kind === "guard" ? undefined : mergeBase;
+    const proofBase = (criterion as { kind?: unknown }).kind === "guard" ? undefined : mergeBase;
     const result = await runProofAsync(proof, proofBase, repoRoot, target);
     results.set(key(proof, proofBase), result);
     if (proofFailed(result)) break;
