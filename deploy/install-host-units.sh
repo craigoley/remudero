@@ -27,6 +27,8 @@
 #                              dead for three hours while PRs piled up green and unreviewed.
 #   rmd-reap-stray.*           a leaked ad-hoc container spawned 158 nested daemons and held ~90% of
 #                              a core; load hit 9.5 and sshd could not complete a handshake.
+#   rmd-session-reaper.*       logind stopped finalising sessions on 2026-10-20 (3,000+ orphans
+#                              toward SessionsMax) and closed sessions leaked processes for days.
 #
 # THE LAUNCHER'S FOUR GUARDS ARE LOAD-BEARING AND A PORT THAT DROPS ANY OF THEM IS WORSE THAN NONE:
 #   * refuses when state/STOP exists            — no timer or boot unit may undo a deliberate stop
@@ -53,6 +55,7 @@
 #   RMD_CLEANUP_PATH RMD_CLEANUP_LOG RMD_CRONTAB_CMD   (W1-T4770: root-disk janitor + cron)
 #   RMD_TMP_SWEEP_PATH RMD_TMP_SWEEP_CRON_PATH          (W1-T5036: guarded hourly temp sweep)
 #   RMD_LEGACY_USER_UNIT_DIR RMD_HOST_KERNEL            (W1-T5518: legacy user janitor is drift)
+#   RMD_SYSTEMCTL_CMD                                  (W1-T10501: systemctl seam; runs on a temp tree)
 set -euo pipefail
 
 MODE="check"
@@ -1790,6 +1793,40 @@ effective_directives() {
   printf '%s\n' "$1" | sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d'
 }
 
+render_session_reaper_bin() { cat "${SCRIPT_DIR}/rmd-session-reaper.sh"; }
+
+# The hourly session and process reaper (deploy/rmd-session-reaper.sh) runs as root. Its log sits
+# beside the janitor's host-cleanup.log; StateDirectory holds its CPU observations.
+render_session_reaper_service() {
+  cat <<EOF
+[Unit]
+Description=Finalise orphan logind sessions and stop processes leaked from closed sessions
+
+[Service]
+Type=oneshot
+ExecStart=${BIN_DIR}/rmd-session-reaper
+StateDirectory=rmd-session-reaper
+StandardOutput=append:/home/${SERVICE_USER}/session-reaper.log
+StandardError=append:/home/${SERVICE_USER}/session-reaper.log
+Nice=10
+IOSchedulingClass=idle
+EOF
+}
+
+render_session_reaper_timer() {
+  cat <<'EOF'
+[Unit]
+Description=Hourly session and process reaper
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
 render_scratch_lib() { cat "${SCRIPT_DIR}/scratch-mounts.sh"; }
 render_resource_policy_lib() { cat "${SCRIPT_DIR}/resource-policy.sh"; }
 
@@ -1810,6 +1847,9 @@ ${UNIT_DIR}/rmd-acr-login.timer:render_acr_login_timer:0644
 ${BIN_DIR}/rmd-reap-stray-containers:render_reaper_bin:0755
 ${UNIT_DIR}/rmd-reap-stray.service:render_reaper_service:0644
 ${UNIT_DIR}/rmd-reap-stray.timer:render_reaper_timer:0644
+${BIN_DIR}/rmd-session-reaper:render_session_reaper_bin:0755
+${UNIT_DIR}/rmd-session-reaper.service:render_session_reaper_service:0644
+${UNIT_DIR}/rmd-session-reaper.timer:render_session_reaper_timer:0644
 "
 fi
 
@@ -1900,6 +1940,20 @@ converge_host_node() {
   fi
 }
 
+# W1-T10501 — RELOAD ONLY WHEN SYSTEMD HAS SOMETHING NEW TO READ. Every --install used to rewrite
+# every row and run daemon-reload plus one implicitly-reloading `enable` per unit: 33 PID 1 reloads
+# in four days from three converges whose drift was only the launcher or a /usr/local/bin library,
+# which systemd never reads. One reload under memory pressure took 208 s and cost logind its bus
+# subscription. A file under UNIT_DIR counts as a unit change when it is created, unreadable, or its
+# effective directives differ; a comment-only rewrite does not.
+UNIT_CHANGED=0
+unit_file_changes() { # $1 = installed path, $2 = rendered text
+  local installed
+  case "$1" in "${UNIT_DIR}"/*) ;; *) return 1 ;; esac
+  installed="$(cat "$1" 2>/dev/null)" || return 0 # missing or unreadable: reload rather than guess
+  [ "$(effective_directives "$2")" != "$(effective_directives "$installed")" ]
+}
+
 drift=0
 converge_host_node
 for row in $UNITS; do
@@ -1916,7 +1970,10 @@ for row in $UNITS; do
     else
       echo "install-host-units: ok      $path"
     fi
+  elif [ -r "$path" ] && printf '%s\n' "$want" | cmp -s - "$path"; then
+    echo "install-host-units: ok      $path"
   else
+    if unit_file_changes "$path" "$want"; then UNIT_CHANGED=1; fi
     mkdir -p "$(dirname "$path")"
     tmp="${path}.tmp.$$"
     printf '%s\n' "$want" > "$tmp"
@@ -2108,6 +2165,7 @@ if [ -n "$SESSION_SLICE_DROPIN" ]; then
     chmod 0644 "$tmp"
     mv -f "$tmp" "$SESSION_SLICE_DROPIN"
     SESSION_SLICE_WRITTEN=1
+    UNIT_CHANGED=1
     echo "install-host-units: wrote   $SESSION_SLICE_DROPIN (${RP_SESSION_NOTE})"
   fi
 fi
@@ -2148,17 +2206,39 @@ if [ "$MODE" = "check" ]; then
   exit 0
 fi
 
-# Only touch systemd when it is really systemd — the test suite renders into a temp tree.
-if [ "$UNIT_DIR" = "/etc/systemd/system" ] && command -v systemctl >/dev/null 2>&1; then
-  systemctl daemon-reload
-  systemctl enable "${SERVICE_UNIT_NAME}" >/dev/null
-  systemctl enable --now "${WATCHDOG_TIMER_NAME}" >/dev/null
-  if [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; then
-    systemctl enable --now rmd-acr-login.timer >/dev/null
-    systemctl enable --now rmd-reap-stray.timer >/dev/null
-    echo "install-host-units: reloaded systemd and enabled ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME}, rmd-reap-stray.timer"
+# Only touch systemd when it is really systemd — the test suite renders into a temp tree, unless it
+# names a fake through RMD_SYSTEMCTL_CMD. No `enable` reloads implicitly (--no-reload), and one
+# already enabled is not re-enabled; the order stays write, reload if needed, then enable.
+SYSTEMCTL="${RMD_SYSTEMCTL_CMD:-systemctl}"
+SYSTEMD_LIVE=0
+if [ -n "${RMD_SYSTEMCTL_CMD:-}" ] || { [ "$UNIT_DIR" = "/etc/systemd/system" ] && command -v systemctl >/dev/null 2>&1; }; then
+  SYSTEMD_LIVE=1
+fi
+ensure_enabled() { # $1 = unit, $2 = "now" to start it too
+  if ! "$SYSTEMCTL" is-enabled --quiet "$1" 2>/dev/null; then
+    if [ "${2:-}" = now ]; then "$SYSTEMCTL" enable --no-reload --now "$1" >/dev/null
+    else "$SYSTEMCTL" enable --no-reload "$1" >/dev/null; fi
+  elif [ "${2:-}" = now ] && ! "$SYSTEMCTL" is-active --quiet "$1" 2>/dev/null; then
+    "$SYSTEMCTL" start "$1" >/dev/null
+  fi
+}
+if [ "$SYSTEMD_LIVE" = 1 ]; then
+  if [ "$UNIT_CHANGED" = 1 ]; then
+    "$SYSTEMCTL" daemon-reload
+    reload_note="reloaded systemd"
   else
-    echo "install-host-units: reloaded systemd and enabled ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME}"
+    echo "install-host-units: unit files unchanged; no daemon-reload ran"
+    reload_note="no daemon-reload"
+  fi
+  ensure_enabled "${SERVICE_UNIT_NAME}"
+  ensure_enabled "${WATCHDOG_TIMER_NAME}" now
+  if [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; then
+    ensure_enabled rmd-acr-login.timer now
+    ensure_enabled rmd-reap-stray.timer now
+    ensure_enabled rmd-session-reaper.timer now
+    echo "install-host-units: ${reload_note}; ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME}, rmd-acr-login.timer, rmd-reap-stray.timer, rmd-session-reaper.timer are enabled"
+  else
+    echo "install-host-units: ${reload_note}; ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME} are enabled"
   fi
   echo "install-host-units: NOTE — the daemon itself was not started or stopped; run ${LAUNCHER} to bring it up."
 fi
@@ -2166,12 +2246,12 @@ fi
 # A rewritten slice drop-in takes effect at the daemon-reload above. Confirm it from what systemd
 # holds. If systemd still holds the old value, apply the same values at runtime so the cap is live
 # now and not only after the next reboot.
-if [ "$SESSION_SLICE_WRITTEN" = 1 ] && [ "$UNIT_DIR" = "/etc/systemd/system" ] && command -v systemctl >/dev/null 2>&1; then
+if [ "$SESSION_SLICE_WRITTEN" = 1 ] && [ "$SYSTEMD_LIVE" = 1 ]; then
   session_slice="user-${SESSION_UID}.slice"
-  live_high="$(systemctl show "$session_slice" -p MemoryHigh --value 2>/dev/null || true)"
+  live_high="$("$SYSTEMCTL" show "$session_slice" -p MemoryHigh --value 2>/dev/null || true)"
   if [ "$live_high" = "$((RP_SESSION_HIGH_MIB * 1024 * 1024))" ]; then
     echo "install-host-units: ${session_slice} MemoryHigh confirmed live at ${RP_SESSION_HIGH_MIB} MiB"
-  elif systemctl set-property --runtime "$session_slice" "MemoryHigh=${RP_SESSION_HIGH_MIB}M" "CPUWeight=${RMD_SESSION_CPU_WEIGHT}" 2>/dev/null; then
+  elif "$SYSTEMCTL" set-property --runtime "$session_slice" "MemoryHigh=${RP_SESSION_HIGH_MIB}M" "CPUWeight=${RMD_SESSION_CPU_WEIGHT}" 2>/dev/null; then
     echo "install-host-units: ${session_slice} read MemoryHigh=${live_high:-unknown} after the reload; applied ${RP_SESSION_HIGH_MIB} MiB at runtime"
   else
     echo "install-host-units: WARNING ${session_slice} MemoryHigh reads ${live_high:-unknown}, not ${RP_SESSION_HIGH_MIB} MiB; the file takes effect at the next boot" >&2

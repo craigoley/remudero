@@ -11,6 +11,7 @@
   author_class: machine
   origin: "scout:dispatch.lifetime_history_unavailable"
   files:
+    - "src/run-task.ts"
     - test/gardeners/scout-dispatch-lifetime-history-unavailable.test.ts
   acceptance:
     - claim: "dispatch.lifetime_history_unavailable stops recurring: its cause is fixed rather than its rows hidden"
@@ -26,5 +27,5 @@
     confidence: 1
     reasons:
       - "released by the operator with rmd approve"
-    judged_at: "2026-10-22T03:29:10.222Z"
-    pin: "6d30adb268f36da15bf50da80e1a943f72255c1731835956e18cebfdda345904"
+    judged_at: "2026-10-23T18:24:21.805Z"
+    pin: "9836a3460e8e5d99489943c6d8538dd437d2a47eb8ff20a475282bb3e7116b33"

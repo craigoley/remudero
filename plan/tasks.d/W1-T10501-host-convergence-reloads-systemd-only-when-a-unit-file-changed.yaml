@@ -1,0 +1,133 @@
+- id: W1-T10501
+  title: "Host convergence reloads systemd only when a unit file it manages actually changed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 6.00
+  priority: 1
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-23: logind lost its systemd subscription after a 208 s PID 1 reload"
+  plan_refs: [ W1-T3269, W1-T2953, W1-T2877, W1-T9795 ]
+  files:
+    - deploy/install-host-units.sh
+    - test/host-units-install.test.ts
+  rationale: |
+    MEASURED 2026-10-23 on the fleet host with niced, bounded `sudo journalctl _PID=1` reads
+    (one boot, 2026-10-18 08:21 onward).
+
+    PID 1 ran `systemctl daemon-reload` 16-28 times a day: 28 on 10-19, 16 on 10-20, 16 on 10-22.
+    From 10-19 to 10-23 14:40 UTC there were 65 reload requests:
+      rmd-fleet-watchdog.service          15
+      rmd-site-fleet-watchdog.service      9
+      rmd-console-fleet-watchdog.service   9
+      enable_<uuid>.scope                 32  (Azure Monitor Agent extension, outside this repo)
+
+    THE REPO CALLER. Every watchdog reload is the units step of the rendered launcher
+    (deploy/install-host-units.sh render_launcher, the `units_check` block near line 1297). When
+    check mode reports any MISSING or DRIFTED line it runs `install-host-units.sh --install`
+    (line 1325 instanced, line 1328 core). --install then:
+      - rewrites every UNITS row unconditionally (the write loop ending at line 1924), unit files
+        included, whatever actually drifted;
+      - runs `systemctl daemon-reload` unconditionally (line 2153);
+      - runs `systemctl enable` once per unit (lines 2154-2158). `systemctl enable` reloads the
+        manager implicitly unless `--no-reload` is passed.
+    So one converge costs 5 reloads on core (1 explicit + 4 enables) and 3 on site and console
+    (1 + 2). The journal shows exactly these bursts, each within about 2 seconds:
+      10-19 12:20-12:23  console 3, site 3, core 5   at bac18d29
+      10-20 01:23        console 3, site 3, core 5   at 7ed0a9b1
+      10-22 01:49-01:52  console 3, site 3, core 5   at 4541d8de / ec9ec24b
+    That makes 33 reloads from three converges.
+
+    NONE OF THE THREE CHANGED A SYSTEMD UNIT. What drifted at each converge sha:
+      10-19  #12922 changed the launcher and added the /usr/local/bin/rmd-resource-policy row;
+      10-20  #12982 changed the launcher NODE_OPTIONS and deploy/resource-policy.sh;
+      10-22  #13317 changed only the launcher's DEPLOY_LOGIC_PATHS list.
+    The unit renderers (render_fleet_service, render_watchdog_service, render_watchdog_timer,
+    render_acr_login_service/timer, render_reaper_service/timer) are byte-identical, ignoring
+    comments, across all four shas. They last changed in #12339 on 10-16. The session slice
+    drop-in printed `ok`. Each drift was a launcher or a /usr/local/bin library, which systemd
+    never reads, yet each caused 11 reloads across the three instances.
+
+    WHY IT MATTERS. On 10-20 00:03 a reload under memory pressure took 208 s (others took 61 s
+    and 76 s; recent ones take under 1 s). At 00:06:33 PID 1 logged "systemd-logind.service:
+    Unexpected error response from GetNameOwner(): Connection terminated". logind then lost its
+    unit and job signal subscription and stopped finalising sessions. About 3,080 orphan
+    `closing` sessions built up in 3 days, heading toward SessionsMax 8192, which refuses SSH
+    logins. A separate session-reaper change mitigates the effect. This task removes the
+    repo-owned reload trigger. Every reload is a full manager re-serialisation, and each one that
+    runs under memory pressure is another chance for a slow reload that drops bus clients.
+
+    OUT OF SCOPE, AND REPORTED SEPARATELY. The 208 s, 76 s and 61 s reloads were requested by
+    enable_86d794b6-....scope. That is the Azure Monitor Agent 1.45.1 extension (`shim.sh
+    -enable`, a long-lived scope since 10-07), and it reloaded after metrics-extension.service
+    core-dumped. The other enable_<uuid>.scope bursts of 5 are the same extension re-enabling
+    (10-19 16:56, 17:49, 21:12; 10-22 06:28; 10-23 06:28). Nothing in this repo invokes it; this
+    task does not touch it.
+
+    EXPECTED REDUCTION. From the window above: the 33 repo-owned reloads (51% of the 65) drop
+    to 0. That is about 8 a day on this cadence, removed. A converge that really changes one
+    instance's unit files makes 1 reload for that instance, not 3 or 5. The only other repo
+    caller, deploy/install-container-runtime-mount-order.sh (daemon-reload at lines 349 and
+    382), runs only by hand and made no reload in this window, so it stays unchanged.
+
+    SHARED SURFACE. W1-T9795 (queued) also lists deploy/install-host-units.sh and
+    test/host-units-install.test.ts. It qualifies selected-registry shell consumers in shadow
+    mode, and its claims are about registry binding and heartbeat privacy. It never touches the
+    --install write loop, the systemctl block or reload behaviour. This task changes only those.
+    Whichever lands second merges, and neither supersedes the other.
+  design: |
+    In deploy/install-host-units.sh --install:
+    1. Compare before writing. For each UNITS row, and for the session slice drop-in, write only
+       when the rendered bytes differ from the installed file, or the file is missing. An
+       unchanged file is not rewritten and prints `ok`, not `wrote`.
+    2. Track whether any file under UNIT_DIR (a unit, timer or drop-in) was created or had its
+       effective directives changed. Use the same effective_directives comparison that check mode
+       uses, so a comment-only rewrite is not a systemd change. The launcher and the
+       /usr/local/bin libraries (rmd-scratch-mounts, rmd-resource-policy, acr-login.sh,
+       rmd-reap-stray-containers) are written when they differ but never count as a unit change.
+       If a comparison cannot be made (an unreadable installed file), count it as changed, so the
+       script falls back to reloading and never skips a reload it needs.
+    3. Run `systemctl daemon-reload` once, and only when step 2 found a unit change. Otherwise
+       print one line saying units are unchanged and no daemon-reload ran.
+    4. Never reload implicitly. Every `systemctl enable` carries `--no-reload`. Skip enabling a
+       unit that `systemctl is-enabled --quiet` already reports enabled; `--now` still starts a
+       timer that is enabled but not active. The order stays write, then reload if needed, then
+       enable, so a new unit file is loaded before it is enabled.
+    5. Add a systemctl seam with the same shape as the existing RMD_CRONTAB_CMD:
+       RMD_SYSTEMCTL_CMD names the systemctl binary, and when it is set the systemd block runs
+       even though UNIT_DIR is a temp tree. Without it, the existing real-systemd gate is
+       unchanged. The session-slice live-confirm block keeps running after a reload that wrote
+       the drop-in.
+    The launcher's units step (check, then --install on MISSING or DRIFTED) is unchanged. A no-op
+    pass never reaches --install, and a launcher-only or library-only drift now reaches --install
+    without reloading.
+  prompt: |
+    Amend test/host-units-install.test.ts only, using its existing temp-tree env helper. Add a
+    recording fake systemctl through RMD_SYSTEMCTL_CMD that appends each argv line to a file.
+    Every new test asserts the fake recorded at least one call (the first install of a fresh
+    tree), so a seam that is never invoked fails loudly instead of reading "zero reloads".
+    Each new test title starts with `W1-T10501: ` exactly as in the acceptance proofs. Do not
+    touch deploy/install-container-runtime-mount-order.sh or anything Azure-agent related.
+    Run the targeted suite and preflight on the committed tree before the first push.
+  acceptance:
+    - claim: a repeat --install over a tree whose unit files already match runs zero systemctl daemon-reloads and no implicit-reload enable, while the first install of the same fresh tree ran exactly one daemon-reload
+      proof: 'grep: test("W1-T10501: a repeat install whose unit files match runs no daemon-reload" in test/host-units-install.test.ts'
+    - claim: an install whose only drift is the launcher or a /usr/local/bin library rewrites that file and runs zero daemon-reloads (the 10-19, 10-20 and 10-22 host converges)
+      proof: 'grep: test("W1-T10501: a launcher-only drift rewrites the launcher without a daemon-reload" in test/host-units-install.test.ts'
+    - claim: an install whose unit file directives changed runs exactly one daemon-reload, and every systemctl enable it issues carries --no-reload
+      proof: 'grep: test("W1-T10501: a changed unit file runs exactly one daemon-reload and enables with --no-reload" in test/host-units-install.test.ts'
+  falsifier: |
+    Restore the unconditional `systemctl daemon-reload`: the repeat-install and launcher-only
+    cases must fail. Drop `--no-reload` from any enable: the changed-unit case must fail on the
+    recorded argv. Restore the unconditional write loop: the repeat-install case must fail on a
+    `wrote` line for an unchanged unit. GUARDS that held at base and must still hold: a rewritten
+    session slice drop-in still triggers exactly one reload and the live MemoryHigh confirm
+    still runs; a MISSING unit file is still created and reloaded; an unreadable installed unit
+    counts as changed and reloads; a comment-only unit rewrite runs no reload; with
+    RMD_SYSTEMCTL_CMD unset and UNIT_DIR a temp tree, no systemctl is invoked at all. Remove
+    each guard's production branch in turn: its case must fail. Restore and require zero failures.

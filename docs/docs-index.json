@@ -248,6 +248,12 @@
       "grepHint": "assertion-discrimination-check.mjs forensics"
     },
     {
+      "path": "docs/forensics/author-preflight-tests-fail-in-the-retro-container.md",
+      "title": "Author preflight failures in the retro container",
+      "summary": "The daemon-specific cause remains unproven: the checked code exposes a process-group closure lead, but this worker cannot read the live failure evidence or rep…",
+      "grepHint": "Author preflight failures in the retro container"
+    },
+    {
       "path": "docs/forensics/auto-triage.md",
       "title": "Forensics: src/lib/auto-triage.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/auto-triage.ts` used",

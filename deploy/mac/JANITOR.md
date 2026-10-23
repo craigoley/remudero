@@ -330,9 +330,17 @@ account writes an owner-private (0600) `~/.local/state/remudero/preserve-retire.
 below private parents, for example `{"enabled": true, "idle_hours": 24, "retain_days": 7}`.
 It scans `~/Remudero`, `~/rmd-work`, `~/.codex/work-artifacts`,
 `~/Developer/remudero-operator-worktrees`, every `~/Developer/remudero-operator-recovered-worktrees-*`
-and every `~/Downloads/remudero-*` folder (never other `Developer` or `Downloads` content or
-protected roots), at most once every `interval_hours` (default 6). A `roots` entry with `*`
-names every folder it matches.
+every `~/Downloads/remudero-*` folder and `~/.local/share/remudero/source-recovery` (never
+other `Developer` or `Downloads` content or protected roots), at most once every
+`interval_hours` (default 6). A `roots` entry with `*` names every folder it matches.
+
+`temp_roots` (default none) adds folders under `/private/tmp`, for example
+`["remudero-*", "rmd*"]`. macOS on this host has no periodic `/tmp` cleaner, so agent scratch
+there lasts until a reboot: on 2026-10-23 one `remudero-pr-queue-*` folder held 7.9 GiB, 5.6 GiB
+of it in 60 subfolders idle for over six hours. A match counts only when this account owns it
+and it is not a symlink. A worktree there is preserved and retired like any other; a clone or
+bare repository is held (`shared-temp-root`) unless other accounts cannot enter its root, since
+they could borrow its objects. Preserved copies are named `tmp__<path>@<UTC>`.
 
 A checkout, standalone clone or bare repository is a candidate when nothing in it
 (dependencies included, its own Git metadata excluded) changed in `idle_hours` by
@@ -348,7 +356,8 @@ steps. "Published" means the first-parent history of each published remote's cur
 Every candidate is preserved before any is deleted, and the keep set is recomputed
 afterwards, so a borrower whose copy failed keeps its object lender. A clone or bare
 repository is deleted only when no other account can enter the home (mode and ACL)
-and a complete borrower census of the home found no kept borrower. These are held
+and a complete borrower census of the home and both temp folders (`/private/tmp` and
+`$TMPDIR`) found no kept borrower; agent clones in `/private/tmp` borrow from each other. These are held
 for a person and never retired: unreadable history (missing worktree Git dir or
 alternate object store), a locked worktree, an untracked file over `max_untracked_mb`
 (default 50), a foreign owner, and any failed probe. Each candidate is checked again
@@ -367,10 +376,17 @@ to 111 MiB, and agents had left 16 GB of JSON and log dumps beside their checkou
 - Outside any repository, a `.json`, `.jsonl`, `.ndjson`, `.log`, `.lcov` or `.info`
   file of at least `dump_min_mb` (default 5) idle for `idle_hours` and not open is
   gzipped beside itself after a full read-back; its modification time is kept. A dump in
-  either form unchanged for `dump_retain_days` (default 14) is deleted.
+  either form unchanged for `dump_retain_days` (default 7) is deleted. A smaller plain file, any
+  file in a folder holding `package.json`, and anything inside an `.app`, `.framework`,
+  `.xcframework` or `.bundle` is never a dump (the first rule, 2026-10-21, would have expired
+  `package.json` files and a cached Chrome for Testing app).
 - Outside any repository, an idle, unopened `node_modules` is removed, and so are
   `coverage`, `.turbo` and `.next` beside a `package.json`; elsewhere those names may be
   fixture data. Symlinked folders are never followed.
+- With `codex_session_days` set (default 0, off), Codex session logs
+  (`~/.codex/sessions/**/rollout-*.jsonl` and `~/.codex/archived_sessions`) unchanged for that
+  many days and not open are deleted. Archiving a thread in Codex keeps its log on disk, and its
+  history database (`thread_history_*.sqlite`) is Codex's own and never touched.
 
 The janitor also runs `~/.local/bin/remudero-dependencies sweep --apply` on every apply
 pass when that tool is installed (see `deploy/DEPENDENCY-SEEDS.md`).
@@ -389,3 +405,61 @@ passes report zero retirements, with held repositories unknown because no scan r
 excludes the preservation phase. The `free=before->afterGiB` readings cover the
 whole pass and can also reflect concurrent writers. `planned` retains its legacy
 scope; `preservation-planned` is separate and can overlap with those dry-run plans.
+
+## Session and process reaper (Azure)
+
+`deploy/rmd-session-reaper.sh` runs hourly as root on the Azure host, from
+`rmd-session-reaper.timer`, which `deploy/install-host-units.sh` installs and checks for drift.
+It appends to `~/session-reaper.log` and keeps CPU observations in
+`/var/lib/rmd-session-reaper/`. `DRY_RUN=1` logs every decision and changes nothing:
+`ssh remudero 'sudo -n env DRY_RUN=1 bash -s' < deploy/rmd-session-reaper.sh`.
+
+**The incident.** At 2026-10-20 00:06:33Z a `systemctl daemon-reload` took 208 s under memory
+pressure, and PID 1 logged `systemd-logind.service: Unexpected error response from
+GetNameOwner(): Connection terminated`. logind lost its subscription to PID 1's unit and job
+signals. It had logged `Removed session` 2,152 times before then and never once after. Every SSH
+logout left a session in `State=closing` whose scope unit was already gone; `loginctl
+terminate-session` could not finish them. By 2026-10-23 there were 3,073 such sessions:
+`uptime` counted 3,056 users while `who` showed none. At about 650 a day, logind's default
+`SessionsMax=8192` would eventually have refused new SSH logins. A logind restart re-subscribes
+and drops every session whose scope is gone.
+
+The same host also held processes leaked from long-closed sessions, re-parented to PID 1: a
+forgotten `docker logs -f` pipeline (10 days old) and test `node` processes whose working
+directory was a deleted `rmd-reader-runtime-*` temp dir (6 days old).
+
+**What a pass does.**
+
+1. *Leaked processes.* It reads only processes in a `session-*.scope` cgroup. Builder
+   `run-*.scope` jobs, containers, services and `user@.service` are never read. It stops a
+   process (SIGTERM, then SIGKILL after a grace) only when all of these hold:
+   - its session is closing, unknown to logind, or has a dead leader;
+   - its parent is PID 1, or it descends from such a process in the same scope;
+   - it is not sshd, systemd or logind, and no terminal multiplexer (tmux, screen and the like)
+     sits above it, because a detached tmux is the operator's live work;
+   - its cwd is deleted, or it provably used no CPU for six hours.
+
+   The kernel's `se.exec_start` for every thread proves no CPU use on the first pass. Without
+   that record, the proof is utime+stime unchanged since the reaper's own observation six hours
+   earlier. Only comm and exe are logged, never a cmdline or environment.
+
+   A descendant of a root stopped in the same pass is stopped with it, even while it uses CPU,
+   when its stdout reaches nobody: a pipe or socket that no process outside the subtree holds, a
+   deleted file, or a tty that no longer exists. That is the measured `docker logs -f | tail`
+   pipeline, whose output pipe only its own bash and tail held. A descendant writing to an
+   existing file, or read by an outside process, is a deliberate watcher and stays.
+2. *Orphan sessions.* A session is a proven orphan when it is closing, its scope is gone, no
+   process is still in the scope's cgroup, and nothing but logind holds its
+   `/run/systemd/sessions/<id>.ref` fifo. One proven orphan is enough to restart logind, once per
+   pass. The pass then checks that logind is active and that the session count dropped. If
+   either check fails, it logs `REFUSE` and exits non-zero.
+
+Every pass also logs how long ago logind last logged `Removed session`. A growing age while people
+log in and out means logind has stopped finalising sessions again.
+
+**The alarm.** `scripts/fleet-heartbeat.sh` publishes `session_reaper_verdict` from the log's last
+pass and from `systemctl show rmd-session-reaper.service`. It reads `REFUSED` when the pass logged a
+REFUSE, `INCOMPLETE` when the pass never reached its summary line (or was already running at the
+previous beat), and `FAILED` when the unit's last result was not success. Any of the three raises
+the `REAPER_ALARM` arm in `fleet-heartbeat-watch.yml`, which files that host's needs-human issue.
+`ok`, `running` and `unknown` (no reaper on the host) are silent.

@@ -419,3 +419,66 @@ test("cache scan progress rotates candidate inspection without reusing eligibili
     for (const target of targets) assert.ok(existsSync(target), "the cursor must not cache an old age verdict");
   } finally { rmSync(f.home, { recursive: true, force: true }); }
 });
+
+// Agents create and delete siblings in the shared temp roots throughout a pass. The first `churn`
+// enumerations of the temp root each see a change; `vanish` makes the first change a listed entry
+// that disappears before it is statted.
+function churningTemp(churn: number, vanish = false) {
+  return String.raw`tmp=pathlib.Path(os.environ['HOME'])/'tmp';tmp_inode=tmp.stat().st_ino
+(tmp/'leaving').symlink_to(tmp/'nowhere')
+seen=[0];original_scandir=os.scandir
+class Listing:
+ def __init__(self,inner,fd):self.inner,self.fd,self.first=inner,fd,True
+ def __enter__(self):self.inner.__enter__();return self
+ def __exit__(self,*a):return self.inner.__exit__(*a)
+ def __iter__(self):return self
+ def __next__(self):
+  if self.first:
+   self.first=False
+   if seen[0]<=` + churn + String.raw`:
+    if ` + (vanish ? "True" : "False") + String.raw` and seen[0]==1:
+     entries=list(self.inner);os.unlink('leaving',dir_fd=self.fd);self.inner=iter(entries)
+    else:(tmp/('sibling-%d'%seen[0])).write_text('agent scratch')
+  return next(self.inner)
+def scandir(target='.'):
+ inner=original_scandir(target)
+ if isinstance(target,int) and os.fstat(target).st_ino==tmp_inode:
+  seen[0]+=1;return Listing(inner,target)
+ return inner
+os.scandir=scandir
+`;
+}
+
+test("cache scan progress re-reads a temp root that gains a sibling during the reference scan and completes the pass", () => {
+  const f = fixture();
+  try {
+    const report = f.run(true, 500_000, churningTemp(1));
+    const temp = report.inspection.scans.find((s: any) => s.stage === "references" && s.root === join(f.home, "tmp"));
+    assert.equal(report.inspection.referencesComplete, true, JSON.stringify(report.inspection));
+    assert.equal(temp.namespaceRetries, 1, JSON.stringify(temp));
+    assert.equal(existsSync(f.cache), false, JSON.stringify(report.decisions));
+    assert.equal(readFileSync(join(f.workspace, "private-unpublished.ts"), "utf8"), "preserve unpublished source\n");
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("cache scan progress retries a temp entry that vanishes between listing and stat instead of failing the pass", () => {
+  const f = fixture();
+  try {
+    const report = f.run(true, 500_000, churningTemp(1, true));
+    assert.equal(report.inspection.referencesComplete, true, JSON.stringify(report.inspection));
+    assert.equal(report.inspection.reason, undefined);
+    assert.equal(existsSync(f.cache), false, JSON.stringify(report.decisions));
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("cache scan progress still holds a temp root whose namespace keeps changing past the retry bound", () => {
+  const f = fixture();
+  try {
+    const report = f.run(true, 500_000, churningTemp(1000));
+    const temp = report.inspection.scans.find((s: any) => s.stage === "references" && s.root === join(f.home, "tmp"));
+    assert.equal(report.inspection.referencesComplete, false);
+    assert.equal(report.inspection.reason, "scan-directory-changed");
+    assert.equal(temp.namespaceRetries, 3, JSON.stringify(temp));
+    assert.ok(existsSync(f.cache), "an unproven reference corpus never grants removal");
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});

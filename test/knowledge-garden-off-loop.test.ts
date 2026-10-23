@@ -39,6 +39,8 @@ test("knowledge garden production wiring uses the off-loop registry", async (t) 
 
 test("knowledge garden slow child leaves the parent timer responsive", async (t) => {
   const f = fixture(t), entry = join(f.repo.dir, "slow-knowledge.mjs"), output = join(f.repo.dir, "child.json");
+  // The empty corpus still proposes refresh; keep this timing fixture from trying to open a PR.
+  writeFileSync(join(f.stateDir, "KNOWLEDGE_OFF-refresh"), "");
   const source = fileURLToPath(new URL("../src/run-task.ts", import.meta.url));
   writeFileSync(entry, [
     'import { runRegisteredGardenPass } from ' + JSON.stringify(source) + ';',
@@ -59,10 +61,14 @@ test("knowledge garden slow child leaves the parent timer responsive", async (t)
   try { exit = await spawn("knowledge", [], { stopped: false }); }
   finally { clearInterval(timer); }
   assert.equal(exit, 0, "the actual registry runs knowledge in the owned child");
-  const seen = JSON.parse(readFileSync(output, "utf8")) as { exit: number; pid: number; args: string[]; rows: Array<{ step: string }> };
+  const seen = JSON.parse(readFileSync(output, "utf8")) as { exit: number; pid: number; args: string[]; rows: Array<{ step: string; extra: Record<string, unknown> }> };
+  assert.equal(seen.exit, 0);
   assert.notEqual(seen.pid, process.pid);
   assert.deepEqual(seen.args, ["garden", "run", "knowledge"]);
-  assert.ok(seen.rows.some((row) => row.step === "knowledge.scorecard"), "the child executed the actual knowledge spec");
+  const scorecard = seen.rows.find((row) => row.step === "knowledge.scorecard");
+  assert.ok(scorecard, "the child executed the actual knowledge spec");
+  assert.equal(scorecard.extra.actions, 0, "the healthy timing fixture has no filing work");
+  assert.equal(seen.rows.some((row) => row.step === "knowledge.garden_filing_failed" || row.step === "knowledge.gardener_failed"), false);
   assert.ok(ticks >= 10, "parent timers advanced while the child did synchronous knowledge work");
 });
 
