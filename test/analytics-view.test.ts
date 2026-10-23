@@ -898,10 +898,19 @@ test("W1-T10461: gardener source freshness compatibility and fleet budgets remai
   const fleet = world(t, clock, { names });
   for (const name of names) {
     const repository = `fixture/${name}`;
-    const dir = scratch(t, "independent-fleet-source"), { runtime } = recentGarden(dir, repository);
+    const dir = scratch(t, "independent-fleet-source"), { runtime, rows } = recentGarden(dir, repository);
     runtime.gardens = Array.from({ length: 32 }, (_, i) => ({ ...runtime.gardens[0]!, name: i === 0 ? "config" : `garden-${i}` }));
     writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify(runtime));
+    // Every registered garden claims one completed attempt. Supply actual parent-linked zero
+    // prices for the other 31, rather than falsely calling their absent evidence complete money.
+    const zeroPrices = runtime.gardens.slice(1).flatMap(g => [
+      { ...rows[0]!, name: g.name },
+      { ...rows[1]!, run_id: `recent-${g.name}`, total_cost_usd: 0,
+        gardener_origin: { state: "linked", version: 1, name: g.name, passId: "12345678-1234-4123-8123-123456789abc" } },
+    ]);
+    writeFileSync(join(dir, "ledger.ndjson"), [...rows, ...zeroPrices].map(row => JSON.stringify(row)).join("\n") + "\n");
     const source = await captureGardenerSpendSource(dir, clock, { repository });
+    assert.equal(foldGardenerSpend(source, repository, source.observedAt!).totalUsd, 2, "complete source money is measured before fleet aggregation");
     fleet.ticker.acceptSnapshot({ instance: name, ok: true, asOf: source.observedAt!,
       bodies: [{ name: GARDENER_SPEND_SOURCE_NAME, body: { repository, source } }] });
   }
