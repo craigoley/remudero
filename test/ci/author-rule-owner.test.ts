@@ -919,6 +919,15 @@ test('separate bounded static tiers retain every maintained obligation and stop 
       run: phase => {calls.push(phase.name);return phase.name === name ? bad : success(phase);}, report: () => {}});
     assert.equal(failed.ok, false, JSON.stringify({name,bad})); assert.deepEqual(calls, names.slice(0,index+1));
   }
+  const directory = join(f.repo.dir, 'coverage/prepared-but-unmeasured'); mkdirSync(directory);
+  const unmeasured = createAuthorRuleOwner({root:f.repo.dir, directory, head, rules, affected,
+    environment:f.environment, concurrency:1, budgetMs:1000,
+    parentCensus:{root:f.repo.dir, head, base:head, state:'over-capacity'}});
+  const calls: string[] = [];
+  const missing = executeOwnedStaticPhases({root:f.repo.dir, base:head, owner:unmeasured,
+    run:phase=>{calls.push(phase.name);writeSummary(phase);return {status:0,outputComplete:true};}, report:()=>{}});
+  assert.equal(missing.ok, false); assert.deepEqual(calls, names.slice(0,2));
+  assert.match(missing.phases[1].refusal, /no qualified completion/);
 });
 
 test('the bounded static phase entry runs the real CI-check default and preserves a throwing leaf', async t => {

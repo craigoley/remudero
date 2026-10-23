@@ -335,6 +335,7 @@ export function executeOwnedStaticPhases({ root, base, owner, run, report }) {
       if (!ok) throw new Error('native static phase failed, timed out or has incomplete output');
       const owned = JSON.parse(readFileSync(owner.file, 'utf8'));
       if (phase.name === 'static-rules') {
+        if (!['complete', 'over-capacity'].includes(owned.phase)) throw new Error('native rule phase has no qualified completion');
         qualifiedAffectedRules(owner, root, owner.childEnvironment, owned.affected);
         partial = owned.phase === 'over-capacity';
         ok = native.status === (partial ? 3 : 0);
