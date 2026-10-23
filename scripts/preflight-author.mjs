@@ -690,7 +690,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
                 {...metadata, ...(phase.summary ? {summary: relative(root, phase.summary)} : {})}),
             });
             receipt.staticPhases = staticPhases;
-            if (staticPhases.partial) receipt.staticParentBudget = {state: 'over-capacity', phases: staticPhases.phases};
+            if (staticPhases.ok && staticPhases.partial) receipt.staticParentBudget = {state: 'over-capacity', phases: staticPhases.phases};
             staticOk = staticPhases.ok;
           } else {
           const staticSummary = join(diagnosticsRoot, 'static-summary.json');

@@ -941,3 +941,17 @@ test('the bounded static phase entry runs the real CI-check default and preserve
     assert.throws(() => main(['--phase','fast','--summary-file',join(f.repo.dir,'outside.json')], {root:f.repo.dir}), /owner directory/);
   });
 });
+
+test('a complete same-owner rule phase is reused without running a second native child', async t => {
+  await loadOwnerImplementation();
+  const {runPreflightFast} = await import('#src/lib/ci-parity.js');
+  const f = fixture(t), handle = budgetHandle(f, rules, 60000);
+  assert.equal(runBudgetRules(f, handle).status, 0);
+  const before = readFileSync(join(f.repo.dir, 'coverage/calls'), 'utf8');
+  const result = withRealOwnerEnvironment(f, handle, () => runPreflightFast(f.repo.dir, {steps: [
+    {job:'rule-checks', script:'rules', runner:'rule-checks', reason:'actual completed same-owner phase'},
+  ]}));
+  assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(result.deferred, undefined);
+  assert.equal(readFileSync(join(f.repo.dir, 'coverage/calls'), 'utf8'), before);
+  assert.equal(JSON.parse(readFileSync(handle.file, 'utf8')).results.length, 2);
+});
