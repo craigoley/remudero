@@ -281,10 +281,11 @@ function validateRuleBudget(owner) {
 }
 
 /** A live same-invocation receipt, not exit3 or printed text, authorizes partial continuation. */
-export function ownedPreflightBudgetResult(root, kind) {
+export function ownedPreflightBudgetResult(root, kind, allowPrepared = false) {
   const read = readOwner(root);
   if (!read?.owner.policy) return undefined;
   const { owner } = read;
+  if (allowPrepared && owner.phase === 'prepared') return undefined;
   if (!['complete', 'over-capacity'].includes(owner.phase)
     || jsonHash(context(root, process.env, owner.rules, owner.affected, owner.concurrency, owner.policy)) !== jsonHash(owner.context))
     throw new Error('bounded static owner failed, changed or incomplete');
@@ -300,6 +301,65 @@ export function ownedPreflightBudgetResult(root, kind) {
   if (!census || census.root !== owner.root || census.head !== owner.head || !/^[a-f0-9]{40}$/.test(census.base)
     || !['complete', 'over-capacity'].includes(census.state)) throw new Error('bounded parent census unavailable');
   return census;
+}
+
+/** A phase entry/exit binds the same live owner and complete installed dependency graph. */
+export function ownedStaticPhaseContext(root) {
+  const read = readOwner(root);
+  if (!read?.owner.policy || !['prepared', 'complete', 'over-capacity'].includes(read.owner.phase)
+    || jsonHash(context(root, process.env, read.owner.rules, read.owner.affected, read.owner.concurrency, read.owner.policy)) !== jsonHash(read.owner.context))
+    throw new Error('bounded static phase requires the unchanged live owner');
+  return { root: read.owner.root, head: read.owner.head, directory: dirname(read.file) };
+}
+
+/** Same maintained tiers, distinct native backstops; no tier other than approved producers defers. */
+export function ownedStaticPhaseCommands(root, base, directory) {
+  const summary = name => join(directory, name + '.summary.json');
+  return [
+    { name: 'static-default', summary: summary('static-default'), args: ['--import', 'tsx', join(root, 'src/run-task.ts'),
+      'preflight', '--no-fast', '--from', base, '--summary-file', summary('static-default')] },
+    { name: 'static-rules', args: ['--import', 'tsx', join(root, 'scripts/list-rule-suites.mjs'), '--run'] },
+    ...['fast', 'ci-checks', 'scoped-coverage'].map(phase => ({ name: 'static-' + phase, phase, summary: summary('static-' + phase),
+      args: ['--import', 'tsx', join(root, 'scripts/author-static-phase.mjs'), '--phase', phase,
+        '--summary-file', summary('static-' + phase)] })),
+  ];
+}
+
+export function executeOwnedStaticPhases({ root, base, owner, run, report }) {
+  const state = { ok: true, partial: false, phases: [] };
+  for (const phase of ownedStaticPhaseCommands(root, base, dirname(owner.file))) {
+    const native = run(phase);
+    let ok = !native.error && !native.signal && native.outputComplete === true;
+    let partial = false, refusal;
+    try {
+      if (!ok) throw new Error('native static phase failed, timed out or has incomplete output');
+      const owned = JSON.parse(readFileSync(owner.file, 'utf8'));
+      if (phase.name === 'static-rules') {
+        qualifiedAffectedRules(owner, root, owner.childEnvironment, owned.affected);
+        partial = owned.phase === 'over-capacity';
+        ok = native.status === (partial ? 3 : 0);
+      } else {
+        if (!lstatSync(phase.summary).isFile() || realpathSync(phase.summary) !== phase.summary
+          || lstatSync(phase.summary).size > 2 * 1024 ** 2) throw new Error('unverified static phase summary');
+        const summary = JSON.parse(readFileSync(phase.summary, 'utf8'));
+        if (phase.phase === 'fast' && native.status === 3) {
+          partial = Boolean(readOwnedStaticBudgetResult(owner, root, owner.childEnvironment, native, summary));
+          ok = partial;
+        } else ok = native.status === 0 && summary.headSha === owned.head && summary.ok === true
+          && summary.failed === 0 && Array.isArray(summary.steps) && summary.steps.length > 0 && summary.steps.every(step => step.ok === true);
+        if (phase.phase && summary.phase !== phase.phase) ok = false;
+      }
+    } catch (error) { ok = false; refusal = error.message; }
+    report(phase, native, ok, { partial, ...(refusal ? {refusal} : {}) });
+    state.phases.push({ name: phase.name, ok, partial, ...(refusal ? {refusal} : {}) });
+    state.partial ||= partial;
+    if (!ok) { state.ok = false; break; }
+  }
+  if (state.ok) {
+    const owned = JSON.parse(readFileSync(owner.file, 'utf8'));
+    qualifiedAffectedRules(owner, root, owner.childEnvironment, owned.affected);
+  }
+  return state;
 }
 
 /** Diagnostic only. Emit before a blocking leaf so a killed outer buffer still names it.

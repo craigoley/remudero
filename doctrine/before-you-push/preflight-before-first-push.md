@@ -165,6 +165,16 @@ live owner's verified native receipts. The author rechecks them and remains `ove
 PASS. Default/unbudgeted and hosted/full sweeps still execute every file. Required isolated full
 Linux assurance, hosted checks/coverage/security, native review and ordinary merge are unchanged.
 
+Operator-approved 2026-10-23: bounded author separates default compiler/commitlint/emitter checks,
+the rule sweep, the remaining maintained fast checks, CI checks and scoped coverage into five
+serial native phases. Each retains its 120-second backstop and 8-MiB output allowance; the same
+32-phase maximum, one-hour outer controller, heap, scratch, disk and live serial lease remain.
+This explicitly increases the combined static time allowance beyond the former shared120s.
+The later fast phase verifies the same owner's original rule receipts instead of rerunning them.
+No additional check becomes deferrable. A failed/unknown/timed-out phase stops affected tests;
+native summary identity, actual head, dependencies, environment and child closure remain required.
+Only a budgeted live owner receives this partition; default/full/hosted preflight remains unchanged.
+
 ### Explicit low-footprint local checks
 
 Operator-approved 2026-10-17: the Mac may run an explicitly scoped check below the ordinary

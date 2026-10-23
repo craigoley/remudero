@@ -17,6 +17,7 @@ import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
 import { authorRuleTestEnvironment, createAuthorRuleOwner, qualifiedAffectedRules, admittedAffectedRules,
   AUTHOR_RULE_BUDGET_MAX_MS, readOwnedStaticBudgetResult } from './lib/author-rule-owner.mjs';
+import {executeOwnedStaticPhases} from './lib/author-rule-owner.mjs';
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
 import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
@@ -673,6 +674,25 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
                 fallback: 'original rule and affected execution; no cached result qualifies' };
             }
           }
+          let staticOk;
+          if (resourceBudget && ruleOwner) {
+            const staticPhases = executeOwnedStaticPhases({root, base: receipt.baseSha, owner: ruleOwner,
+              run: phase => {
+                const capacity = admitHost(phase.name, {refresh: () => slot.refresh()});
+                if (capacity) (receipt.hostCapacity ??= []).push(capacity);
+                const command = lowPriorityCommand(process.execPath, phase.args);
+                const result = runStep(phase.name, command.args, command.file,
+                  ruleOwner.childEnvironment, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
+                if (boundedClosureUnproven) throw new Error('bounded static child closure unproven; no next phase started');
+                return result;
+              },
+              report: (phase, result, ok, metadata) => report(phase.name, result, ok,
+                {...metadata, ...(phase.summary ? {summary: relative(root, phase.summary)} : {})}),
+            });
+            receipt.staticPhases = staticPhases;
+            if (staticPhases.partial) receipt.staticParentBudget = {state: 'over-capacity', phases: staticPhases.phases};
+            staticOk = staticPhases.ok;
+          } else {
           const staticSummary = join(diagnosticsRoot, 'static-summary.json');
           const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
             join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
@@ -684,9 +704,10 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             staticPartial = readOwnedStaticBudgetResult(ruleOwner, root, ruleOwner.childEnvironment,
               staticResult, JSON.parse(readFileSync(staticSummary, 'utf8')));
           if (staticPartial) receipt.staticParentBudget = staticPartial;
-          const staticOk = (staticResult.status === 0 || Boolean(staticPartial)) && !staticResult.signal && !staticResult.error;
+          staticOk = (staticResult.status === 0 || Boolean(staticPartial)) && !staticResult.signal && !staticResult.error;
           report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority,
             ...(staticPartial ? { partial: true, summary: relative(root, staticSummary) } : {}) });
+          }
           // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
           // receipt and selected floor, but don't spend another full run on known-doomed tests.
           // W1-T7809: a plan-only selection is plan lint first; a failed lint is as unpublishable as a failed static gate.

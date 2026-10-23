@@ -3307,8 +3307,8 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const timingClock = deps.timingNow ? clockFromMillisFn(deps.timingNow) : undefined;
   const timings = gateSteps.map(() => createStaticCheckTiming(spawn, timingClock));
   const deferred: string[] = [];
-  const ownedBudget = (kind: string) => spawn === defaultPreflightSpawn
-    ? require("../../scripts/lib/author-rule-owner.mjs").ownedPreflightBudgetResult(repoRoot, kind)
+  const ownedBudget = (kind: string, allowPrepared = false) => spawn === defaultPreflightSpawn
+    ? require("../../scripts/lib/author-rule-owner.mjs").ownedPreflightBudgetResult(repoRoot, kind, allowPrepared)
     : undefined;
   const observeOwnedStep = (name: string, event: string, result?: CiParityStepResult) => {
     if (spawn === defaultPreflightSpawn)
@@ -3342,6 +3342,14 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       }
       if (runner === "rule-checks") {
         return withoutNodeTestContext(() => {
+          const prior = ownedBudget("rules", true);
+          if (prior) {
+            if (prior.state === "over-capacity") {
+              deferred.push(job);
+              return { ok: false, detail: "OVER-CAPACITY — verified same-author rules retained; unstarted files remain deferred" };
+            }
+            return { ok: true, detail: "PASS — verified same-author native rules retained; no second rule child" };
+          }
           const args = ["--import", "tsx", "scripts/list-rule-suites.mjs", "--run"];
           const result = spawn(process.execPath, args, { cwd: repoRoot });
           if (result.status === 3 && !result.signal && !result.error && ownedBudget("rules")?.state === "over-capacity") {
