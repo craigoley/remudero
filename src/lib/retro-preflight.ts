@@ -263,7 +263,49 @@ function normalizedOutput(value: unknown): string {
   return value === undefined || value === null ? "" : String(value);
 }
 
-function boundedOutputs(stdout: string, stderr: string): {
+/** Byte slicing must not decode a partial UTF-8 sequence into an expanding replacement character. */
+function utf8Slice(buffer: Buffer, start: number, end: number): string {
+  while (start < end && (buffer[start] & 0xc0) === 0x80) start += 1;
+  while (end > start && end < buffer.byteLength && (buffer[end] & 0xc0) === 0x80) end -= 1;
+  return buffer.subarray(start, end).toString("utf8");
+}
+
+/** W1-T10298: choose evidence for the EXISTING verdict, never reclassify an excerpt.
+ * TAP diagnostics are indented below their test point. Keep the blocks named by the classifier,
+ * sharing space so one oversized stack cannot crowd out every later failure, then the summary tail.
+ * This remains bounded diagnostic text, not a complete or independently executable TAP stream. */
+function failureExcerpt(output: string, buffer: Buffer, budget: number, failingTests: readonly string[]): string {
+  if (buffer.byteLength <= budget) return output;
+  const blocks: string[] = [];
+  const retained = new Set<string>();
+  for (const match of output.matchAll(/^not ok \d+ - (.+)\r?\n(?:[ \t].*(?:\r?\n|$))*/gm)) {
+    const name = failingTests.find((candidate) => match[1].startsWith(candidate));
+    if (name !== undefined && !retained.has(name)) {
+      retained.add(name);
+      blocks.push(match[0]);
+    }
+  }
+  // No parsed assertion (including spec-only output): preserve the existing head fallback.
+  if (blocks.length === 0) return utf8Slice(buffer, 0, budget);
+  const omission = "[... other output omitted ...]\n";
+  const tailBytes = Math.min(1024, Math.floor(budget / 4));
+  const tail = utf8Slice(buffer, buffer.byteLength - tailBytes, buffer.byteLength);
+  let available = Math.max(0, budget - Buffer.byteLength(omission) - Buffer.byteLength(tail));
+  const excerpts = blocks.map((block, index) => {
+    const share = Math.floor(available / (blocks.length - index));
+    const bytes = Buffer.from(block, "utf8");
+    const marker = "\n[... failure block omitted ...]\n";
+    const excerpt = bytes.byteLength <= share ? block
+      : share >= Buffer.byteLength(marker)
+        ? utf8Slice(bytes, 0, share - Buffer.byteLength(marker)) + marker
+        : utf8Slice(bytes, 0, share);
+    available -= Buffer.byteLength(excerpt);
+    return excerpt;
+  });
+  return omission + excerpts.join("") + tail;
+}
+
+function boundedOutputs(stdout: string, stderr: string, failingTests: readonly string[]): {
   stdoutExcerpt: string;
   stderrExcerpt: string;
   truncated: boolean;
@@ -277,8 +319,8 @@ function boundedOutputs(stdout: string, stderr: string): {
   const stderrBudget = Math.min(stderrBuffer.byteLength, Math.floor(RETRO_PREFLIGHT_CAPTURE_BYTES / 3));
   const stdoutBudget = RETRO_PREFLIGHT_CAPTURE_BYTES - stderrBudget;
   return {
-    stdoutExcerpt: stdoutBuffer.subarray(0, stdoutBudget).toString("utf8"),
-    stderrExcerpt: stderrBuffer.subarray(0, stderrBudget).toString("utf8"),
+    stdoutExcerpt: failureExcerpt(stdout, stdoutBuffer, stdoutBudget, failingTests),
+    stderrExcerpt: failureExcerpt(stderr, stderrBuffer, stderrBudget, failingTests),
     truncated: true,
   };
 }
@@ -590,7 +632,7 @@ function logAttempt(
     return;
   }
   const failure = result.failure!;
-  const bounded = boundedOutputs(failure.stdout, failure.stderr);
+  const bounded = boundedOutputs(failure.stdout, failure.stderr, failure.failingTests);
   opts.log("retro.preflight_failed", {
     ...common,
     exit_class: failure.exitClass,
@@ -607,7 +649,7 @@ function logAttempt(
 }
 
 function repairPrompt(failure: AttemptFailure): string {
-  const bounded = boundedOutputs(failure.stdout, failure.stderr);
+  const bounded = boundedOutputs(failure.stdout, failure.stderr, failure.failingTests);
   const failing = failure.failingTests.length > 0 ? failure.failingTests.join("\n- ") : "(no failing test name parsed)";
   return [
     "The harness stopped this retro before publication because its deterministic plan-reading preflight failed.",
