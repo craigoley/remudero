@@ -12,7 +12,7 @@
   band_meaning: span
   origin: "operator-approved:2026-10-21:separate-four-file-new-path-admission-repair"
   plan_refs: [W1-T10027, W1-T10041, W1-T8523, W1-T9062, W1-T10258]
-  files: [src/lib/plan.ts, src/lib/task-linter.ts, src/lib/machine-filing.ts, test/ci-friction-remedies-file-admission.test.ts, src/run-task.ts]
+  files: [src/lib/plan.ts, src/lib/task-linter.ts, src/lib/machine-filing.ts, test/ci-friction-remedies-file-admission.test.ts, src/run-task.ts, src/lib/service.ts, src/lib/serve.ts, src/lib/config-schema.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -123,6 +123,87 @@
        independent human owner/admin override and complete public Apache core.
        No worker stop/restart, schedule, production config/state/settings/infra/
        credential change, actual external closure or remudero-ops cutover.
+    10. Operator-approved scope-and-authority amendment, 2026-10-22: the five
+        already declared files plus service.ts, serve.ts and config-schema.ts
+        are exactly eight EXISTING files. Keep USD5/high/span, task identity,
+        all four acceptance criteria/proofs and baselines unchanged. Historic
+        four-file wording above records the original approval, not this scope.
+        Source work follows this amendment's actual normal merge and fresh
+        ownership. This plan approval is NOT a new-path approval receipt.
+    11. new-path-approval-v1 requires authenticated operator confirmation.
+        Use an opaque non-secret new_path_approval_ref resolved through an
+        explicitly bound trusted issuer, not copied receipt JSON or an issuer
+        URL from task data. Require genuine verified operator-session provider
+        provenance, fresh HIGH step-up, successfully consumed exact-action
+        nonce and same-actor server-owned preview. An actor string, nonce
+        header, static bearer, MCP/tailnet identity or generic HIGH credential
+        alone is not confirmation. Direct handlers without that verified
+        dispatcher provenance refuse. Do not reorder unrelated providers,
+        widen the fleet-only action-handoff allowlist or add signing keys.
+    12. Derive bounded draft intent server-side and bind protocol/ref, current
+        issuer identity/epoch/policy, numeric repository and exact repo,
+        instance/audience, task ID, full versioned task-intent digest, complete
+        declared path set, approved missing-path subset, verified operator,
+        confirmation identity, issued time, expiry and current revocation.
+        The independent domain-separated digest covers all acted-on task data,
+        including design/rationale/context/acceptance; exclude only its own
+        receipt reference to avoid a cycle. Preserve legacy taskRulingPin
+        semantics/bytes. A client hash is not server intent or authentication.
+        Reject duplicate/unsupported/ambiguous data and noncanonical paths:
+        traversal, absolute/dot aliases, globs, control bytes, duplicates,
+        case substitutions, wrong scope and extra missing paths never widen
+        authority. Recompute exact intent/policy before single-use confirmation.
+    13. Only actually verified confirmations establish canonical issuer state.
+        Durable audit JSON and hashes are evidence, not authority restoration.
+        Restarted/unverified copies stay UNKNOWN until genuine reconfirmation
+        or a separately qualified authenticated restore. Unknown/lost writes,
+        reads, transport, identity, policy epoch, revocation or expiry refuse;
+        never return success-shaped permission. Repeated read-only verification
+        is idempotent and does not re-consume the operator's confirmation.
+        No automatic renewal or portable/offline approval is authorized.
+    14. service.ts supplies actual verified confirmation provenance and bounds
+        this operation's request BEFORE nonce dispatch buffers the raw body,
+        including cached-body bytes via the existing bounded primitive.
+        serve.ts assembles the real opted-in issuer with server-owned repo and
+        instance. config-schema.ts defines an explicit OPTIONAL issuer binding;
+        absent binding/reference means no new authority and no network. Do not
+        promote consoleUrl, checkout state or task URLs into trust roots. No
+        installed config, new environment variable or live issuer enablement.
+    15. Prepare only selected current approval facts with bounded ASYNC default
+        transport, response bytes, waiting/cancellation and no redirects. Pass
+        immutable verified facts into ONE pure precheck/lint decision; never
+        introduce blocking daemon I/O, a global scanner or Promise returns to
+        old synchronous callers. Those callers retain exact no-reference
+        legacy behavior and conservatively refuse receipt-dependent exceptions
+        without prepared facts. Prove actual BEFORE-STAGING reachability and
+        lint-plan parity, not only a test wrapper or producer metadata. If a
+        consequential producer outside these eight files needs editing, STOP
+        for another normal scope amendment before touching it.
+    16. Extend the existing suite under its four unchanged literal proofs with
+        genuine signed-session/default-transport fixtures, forged/wrong-provider
+        and unenforced-handler controls, oversized/cached-body refusal before
+        buffering, same-actor preview, intent/path/policy drift, concurrent or
+        replayed confirmation, durable/read failure, restart/revocation/expiry,
+        legacy zero-network and responsive-event-loop cases. Keep real staging,
+        job, GitHub and worker effects trapped. Delete authentication/provenance
+        and exact binding independently, fail the named cases, restore and pass.
+        Verify every default/catch and all seven changed source SF records if
+        all seven source paths change. Existing operator/owner/dependency/hold
+        checks still decide separately on an otherwise healthy receipt.
+    17. All issuer origin/config, running capability boundary, operator UX,
+        restart restoration and hosted reachability remain separately qualified
+        before actual use. Do not waive hosted lint with a signed-looking
+        export or spend W10280's allowance qualifying this contract. This
+        source-plan amendment does not issue any real grant or clear W10313's
+        independent route-owner hold. config-schema.ts is a BAKED runtime input
+        and main-push ACR trigger: before SOURCE publication/merge qualify actual
+        build/refresh/recycle effects, source/image/config/capability/instance
+        and prior rollback tuple, obtaining any required human release first.
+        An absent issuer option does not prove all source-merge effects inert.
+        The PLAN-ONLY amendment needs no worker stop. Any later necessary
+        affected-instance/writer drain requires separate human approval; never
+        infer an all-worker stop. No live issuer, keys/settings, policy, runtime
+        worker stop/restart, schedule or remudero-ops cutover is approved.
   acceptance:
     - claim: Only a qualified exact-task and exact-path authorization admits an intentional new path
       proof: 'unit test: new path admission binds the explicit approval to the exact task and declared paths'
@@ -160,5 +241,6 @@
     confidence: 1
     reasons:
       - "Explicit same-chat operator approval of this separate USD5 high/span four-file admission repair and its four behavioral proofs, through normal gates only when ownership permits. Source-plan risk authority only: no live release ledger, gate waiver, source build before actual filing merge, hosted owner clearance, new W10280 attempt, worker stop, schedule or production activation."
-    judged_at: "2026-10-21T10:57:00Z"
-    pin: "5bb4f53f86a74be9cb443c9c43aa59be814f5d7072b0df53cfa5fa2c5c6012f0"
+      - "Explicit same-chat operator approval2026-10-22 of the exact eight-existing-file scope-and-authority amendment, retaining USD5/high/span and all four proofs. Authenticated issuer-backed exact-intent confirmation contract only; normal amendment merge before source work and fresh ownership. No actual path grant, dispatch release, hosted-route clearance, issuer enablement, worker stop, schedule or live cutover; qualify automatic source rollout effects separately."
+    judged_at: "2026-10-22T21:43:50Z"
+    pin: "31737a60a554f471ee717fba74d0b8c9d9f7173ee717bb5e46525a780f1db35c"
