@@ -156,7 +156,7 @@ test("a unique verified CI rerun dates its missing required gate without resetti
   const [otherSatisfied] = viewsFor([...checks,
     { name: "other-required", status: "completed", conclusion: "success" }], minutesAgo(90),
     { required: [...required, "other-required"], runs: [run] });
-  assert.equal(otherSatisfied.checksPendingSince, minutesAgo(5), "every other CI requirement is satisfied");
+  assert.equal(otherSatisfied.checksPendingSince, undefined, "other protected-context shapes keep their existing clock");
   const [undatedGate] = viewsFor([...checks, { name: "ci-gate", status: "queued" }], minutesAgo(90), { required, runs: [run] });
   assert.equal(undatedGate.checksPendingSince, undefined, "a registered undated gate is not treated as absent");
   const [datedGate] = viewsFor([...checks,

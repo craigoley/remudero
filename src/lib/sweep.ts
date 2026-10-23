@@ -7056,9 +7056,7 @@ export function checksPendingSinceFromRollup(
   }
   if (earliest !== undefined || !context || !required?.includes(CI_GATE_CHECK_NAME) ||
       gate.some((check) => (check.name ?? check.context) === CI_GATE_CHECK_NAME) ||
-      required.some((name) => name !== CI_GATE_CHECK_NAME && name !== REVIEW_CONTEXT && !gate.some((check) =>
-        (check.name ?? check.context) === name && REQUIRED_CHECK_OK.has(
-          (check.state ?? check.conclusion ?? check.status ?? "").toUpperCase()))) ||
+      required.some((name) => name !== CI_GATE_CHECK_NAME && name !== REVIEW_CONTEXT) ||
       checksStateFromRollup(rollup, required) !== "pending") return earliest;
   const unresolved = (context.workflowRuns ?? []).filter((run) => !run.conclusion);
   const evidence = unresolved.length === 1 ? unresolved[0]?.activeCiRerun : undefined;
