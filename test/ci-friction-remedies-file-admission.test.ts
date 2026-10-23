@@ -13,7 +13,8 @@ import { test } from "node:test";
 
 import { CI_FRICTION_REMEDIES_FILE, ciFrictionRemedyTestTitle, ciFrictionShardStem, ciFrictionShardYaml } from "#src/lib/ci-friction-gardener.js";
 import { fixedClock } from "#src/lib/clock.js";
-import { lintTask, sizingViolation } from "#src/lib/task-linter.js";
+import { machineShardFilingRefusal } from "#src/lib/machine-filing.js";
+import { assertLintClean, lintTask, sizingViolation, taskRulingPin } from "#src/lib/task-linter.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations, newPathApprovalIntentDigest, newTestPath, type NewPathApprovalFacts, type Task } from "#src/lib/plan.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -77,7 +78,7 @@ test("a drafted remedy passes the base linter's sizing and admission checks with
 const APPROVAL_RECORD_PATH = "plan/tasks.d/W1-T99001-approved-new-path.yaml";
 const APPROVAL_REFERENCE = `npa1_${"A".repeat(43)}`;
 
-function approvalFixture() {
+function approvalFixture(mode: "human" | "auto" = "human") {
   const plan = loadPlanFromYaml([
     "- id: W1-T99001", "  title: Create the explicitly approved fixture module", "  repo: remudero",
     "  depends_on: []", "  type: implement", "  verify: human", "  risk: medium", "  status: queued",
@@ -85,6 +86,12 @@ function approvalFixture() {
     "  design: Exact approved fixture behavior", "  rationale: A fixture, not an issued approval",
   ].join("\n"), APPROVAL_RECORD_PATH);
   const task = Object.assign(plan.tasks[0]!, { new_path_approval_ref: APPROVAL_REFERENCE });
+  if (mode === "auto") {
+    task.verify = "auto";
+    task.acceptance = [{ claim: "The approved fixture is created", proof: "unit test: approved fixture behavior" }];
+    task.risk_ruling = { verdict: "operator", action: "proceed", confidence: 1, reasons: ["fixture-only approval"],
+      judged_at: "2026-10-23T00:00:00Z", pin: taskRulingPin(task) };
+  }
   const binding = {
     issuerId: "fixture-issuer", origin: "https://fixture.invalid", epoch: "fixture-epoch-1", policy: "new-path-approval-v1",
     repositoryId: 7, repository: "acme/remudero", instance: "fixture-core", audience: "fixture-filer",
@@ -129,6 +136,45 @@ test("new path admission binds the explicit approval to the exact task and decla
     { ...task, design: "Different requested behavior" }, { ...task, rationale: "A different justification" },
     { ...task, files: [...task.files!, "src/lib/unapproved-extra.ts"] },
   ]) assert.notDeepEqual(machineFilingAdmissionViolations(changed, context), [], "task or full intent drift must not inherit permission");
+});
+
+test("new path admission agrees between the real filing precheck and plan lint", () => {
+  const { task, context, facts } = approvalFixture("auto");
+  const raw = JSON.parse(JSON.stringify(task));
+  delete raw.sourcePath;
+  const text = JSON.stringify([raw]);
+  const paths = { pathExists: () => false, pathExistsAtBase: () => false, clock: context.clock,
+    newPathApprovals: new Map([[task.id, facts]]) };
+  assert.equal(machineShardFilingRefusal(text, APPROVAL_RECORD_PATH, paths), undefined,
+    "the actual maintained precheck receives the same selected facts as plan lint");
+  assert.deepEqual(lintTask(task, { machineFilingAdmission: context }).violations.filter(v => v.severity === "block"), []);
+  assert.doesNotThrow(() => assertLintClean(task, { machineFilingAdmission: context }));
+  for (const approval of [undefined, { state: "unknown" as const, reason: "authority unavailable" },
+    { ...facts, record: { ...facts.record, taskId: "W1-T99002" } }]) {
+    const selected = new Map<string, NewPathApprovalFacts>();
+    if (approval) selected.set(task.id, approval);
+    assert.match(machineShardFilingRefusal(text, APPROVAL_RECORD_PATH, { ...paths, newPathApprovals: selected }) ?? "", /new-path approval UNKNOWN/);
+    assert.match(lintTask(task, { machineFilingAdmission: { ...context, newPathApproval: approval } }).violations
+      .filter(v => v.severity === "block").map(v => v.message).join(";"), /new-path approval UNKNOWN/);
+  }
+});
+
+test("new path admission preserves legacy proposals and independent owner holds", () => {
+  const { task, context } = approvalFixture("auto");
+  const pin = taskRulingPin(task);
+  assert.equal(taskRulingPin({ ...task, new_path_approval_ref: `npa1_${"B".repeat(43)}` }), pin,
+    "the independent receipt does not silently change the legacy ruling pin");
+  const withoutApproval = { ...task };
+  delete withoutApproval.new_path_approval_ref;
+  const legacyContext = { ...context, newPathApproval: undefined, pathExists: () => true,
+    clock: { now() { throw new Error("legacy admission must not read the approval clock"); } } };
+  assert.deepEqual(machineFilingAdmissionViolations(withoutApproval, legacyContext), []);
+  assert.equal(Object.hasOwn(loadPlanFromYaml("- id: W1-T99009\n  title: legacy\n  repo: remudero\n  type: implement\n", "legacy").tasks[0]!, "new_path_approval_ref"), false);
+  const held = { ...task, dispatch_hold: true };
+  assert.throws(() => assertLintClean(held, { machineFilingAdmission: context }), /dispatch.hold|ruling/i,
+    "a path receipt does not release an independent owner hold or re-sign drifted intent");
+  assert.notDeepEqual(machineFilingAdmissionViolations({ ...task, status: "blocked" }, context), []);
+  assert.notDeepEqual(machineFilingAdmissionViolations({ ...task, depends_on: ["W1-T99002"] }, context), []);
 });
 
 test("new path admission refuses missing drifted and unsupported authority before staging", async (t) => {
