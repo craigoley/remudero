@@ -46,11 +46,11 @@ function capture(t: TestContext, run: () => number) {
   try { return {status: run(), stderr: errors.join('\n'), outputComplete: true}; }
   finally {error.mock.restore(); log.mock.restore();}
 }
-function fixture(t: TestContext, instrument = false) {
+function fixture(t: TestContext, instrument = false, nativeBody?: string) {
   const f = gitRepo({kind: 'census-parent-budget', scope: t});
   mkdirSync(join(f.dir, 'lib')); mkdirSync(join(f.dir, 'test'));
   writeFileSync(join(f.dir, 'lib/a.ts'), 'export const a=1;\n');
-  writeFileSync(join(f.dir, 'test/a.test.ts'), 'import{test}from"node:test";test("native census case",()=>{});\n');
+  writeFileSync(join(f.dir, 'test/a.test.ts'), nativeBody ?? 'import{test}from"node:test";test("native census case",()=>{});\n');
   f.git('add', '.'); f.git('commit', '-m', 'test: budget census base'); f.git('switch', '-c', 'work');
   writeFileSync(join(f.dir, 'lib/a.ts'), 'export const a=2;\n');
   if (instrument) {mkdirSync(join(f.dir, 'scripts')); writeFileSync(join(f.dir, 'scripts/leaf.mjs'), 'export const leaf=1;\n');}
@@ -161,10 +161,10 @@ test('real census main defers unstarted expensive work with a context-bound part
 
 test('a complete budgeted census keeps real native success instead of reporting partial', async t => {
   await loadBudget();
-  const f = fixture(t);
-  writeFileSync(join(f.dir, 'test/a.test.ts'),
+  // Install the positive child in the base too. Adding its fs import only at head
+  // would correctly join structural censuses this tiny fixture does not contain.
+  const f = fixture(t, false,
     'import{test}from"node:test";import{writeFileSync}from"node:fs";test("completed child",()=>writeFileSync("completed-child","yes"));\n');
-  f.git('add', '.'); f.git('commit', '-m', 'test: positive native budget completion');
   const result = capture(t, () => census.main(['--root', f.dir, '--base', 'main', '--parent-budget-ms', '110000'], {
     admitted: () => [{testFile: 'test/a.test.ts', script: '', walks: ['lib/']}],
   }));
