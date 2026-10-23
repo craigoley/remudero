@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,18 +30,22 @@ const SCAN_MAX_AGE_MS = 15 * 60_000;
 export function attestedOpen(seed, { dir = OPEN_FILE_SCANS, now = Date.now(), rootUid = 0 } = {}) {
   const store = dirname(resolve(seed)), fold = p => p.toLowerCase(); // APFS here is case-insensitive
   const file = join(dir, createHash('sha256').update(fold(store)).digest('hex') + '.json');
+  const trusted = st => !st.isSymbolicLink() && st.uid === rootUid && !(st.mode & 0o022);
+  let fd;
   try {
-    for (let p = file; ; p = dirname(p)) {
-      const st = lstatSync(p);
-      if (st.isSymbolicLink() || st.uid !== rootUid || st.mode & 0o022) return undefined;
+    for (let p = dir; ; p = dirname(p)) {
+      if (!trusted(lstatSync(p))) return undefined;
       if (p === '/' || (rootUid !== 0 && p === dir)) break; // fixtures stop at their own root-standin
     }
-    const scan = JSON.parse(readFileSync(file, 'utf8'));
+    // Judge and read the same open file, so nothing can swap it in between.
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    if (!trusted(fstatSync(fd))) return undefined;
+    const scan = JSON.parse(readFileSync(fd, 'utf8'));
     const age = now - scan.scannedAt * 1000;
     if (scan.version !== 1 || fold(scan.root) !== fold(store) || !(age >= -60_000 && age < SCAN_MAX_AGE_MS)) return undefined;
     const prefix = fold(resolve(seed)) + '/';
     return scan.open.some(p => fold(p) === fold(resolve(seed)) || fold(p).startsWith(prefix));
-  } catch { return undefined; }
+  } catch { return undefined; } finally { if (fd !== undefined) closeSync(fd); }
 }
 
 export function seedIsOpen(seed, uid = process.getuid?.(), exec = execFileSync, ownerOnly = ownerOnlyHome, attested = attestedOpen) {

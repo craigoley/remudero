@@ -9,7 +9,7 @@ would run account-owned code as root. Instead root runs only this root-owned scr
 
 Usage (as root, from launchd): seed-open-files.py ROOT [ROOT ...]
 """
-import argparse, hashlib, json, os, stat, subprocess, sys, tempfile, time
+import argparse, grp, hashlib, json, os, stat, subprocess, sys, tempfile, time
 
 OUT = "/Library/Application Support/Remudero/open-files"
 
@@ -37,7 +37,12 @@ def scan(root, out_dir, lsof, now):
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(record, f)
-        os.chmod(tmp, 0o644)
+        # Every login account is in `staff`, so each account's sweeper can read its store's scan.
+        try:
+            os.chown(tmp, -1, grp.getgrnam("staff").gr_gid)
+        except (KeyError, PermissionError):
+            pass  # a fixture run by an account outside `staff` keeps its own group
+        os.chmod(tmp, 0o640)
         os.replace(tmp, os.path.join(out_dir, key(root) + ".json"))
     finally:
         if os.path.exists(tmp):
