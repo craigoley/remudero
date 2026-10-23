@@ -311,9 +311,13 @@ stdout_verdict() {
       pat="${t//\[/\\[}"; pat="${pat//\]/\\]}"
       for holder in $(find "$PROC"/[0-9]*/fd -mindepth 1 -maxdepth 1 -lname "$pat" 2>/dev/null); do
         hp="${holder#"$PROC"/}"; hp="${hp%%/*}"
-        if ! printf '%s\n' "$subtree" | grep -qx "$hp"; then
-          echo "keep:its stdout $t is held by pid $hp outside the subtree"; return
-        fi
+        # A case match, not `printf | grep -q`: under pipefail, grep's early exit SIGPIPEs printf
+        # and the pipeline reads as "no match", calling a subtree member an outside holder.
+        case "
+$subtree
+" in *"
+$hp
+"*) ;; *) echo "keep:its stdout $t is held by pid $hp outside the subtree"; return ;; esac
       done
       echo "stop:its stdout $t has no holder outside the subtree of stopped pid $root" ;;
     *" (deleted)") echo "stop:its stdout is a deleted file" ;;
