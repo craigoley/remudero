@@ -834,7 +834,8 @@ test('the real fast gate continues independent checks after partial rules and re
     { job: 'independent', script: 'independent', reason: 'real independent native check' },
     { job: 'census-precheck', script: 'census-precheck', runner: 'census-precheck', reason: 'retain real parent disposition' },
   ] }));
-  assert.equal(result.ok, false); assert.deepEqual(result.deferred, ['rule-checks', 'census-precheck']);
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.deepEqual(result.deferred, ['rule-checks', 'census-precheck'], JSON.stringify(result));
   assert.equal(result.steps[1]!.ok, true, result.steps[1]!.detail);
   assert.equal(readFileSync(join(f.repo.dir, 'coverage/independent'), 'utf8'), 'actual independent native check');
   assert.ok(result.steps.filter(step => !step.ok).every(step => step.detail.includes('OVER-CAPACITY')));
