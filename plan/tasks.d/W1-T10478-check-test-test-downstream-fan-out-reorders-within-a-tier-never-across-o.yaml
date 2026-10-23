@@ -46,3 +46,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The record identifies one failing round and an imported module, but supplies no causal diagnosis or concrete preventive remedy; the finding that changing dispatch-value.ts will prevent this round cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration. It does not execute a behavioral check demonstrating that the reported failure is prevented while dispatch ordering remains correct."
+    judged_at: "2026-10-23T06:59:37.477Z"
+    pin: "151136a19367482a7fa2d3f63261dcb4291e0b24ae00a91e39860353202b3b72"
