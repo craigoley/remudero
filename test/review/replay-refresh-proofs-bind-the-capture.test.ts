@@ -6,6 +6,7 @@ import { CHECK_PROOF_EXIT } from "#src/lib/check-proof.js";
 import { classifyReviewOutcome, reviewReplayLedgerFields, type ReviewReplayInput } from "#src/lib/review-outcome-class.js";
 import { deriveReviewReplaySample, REVIEW_REPLAY_SAMPLE_PATH, reviewReplayGardenSpec, serializeReviewReplaySample } from "#src/lib/review-replay-sample.js";
 import { parseAcceptanceBlock } from "#src/lib/review.js";
+// @ts-expect-error -- the standalone proof-discrimination CLI has no declaration file.
 import { evaluateProofDiscrimination, runCheckProof } from "#scripts/proof-discrimination-gate.mjs";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
