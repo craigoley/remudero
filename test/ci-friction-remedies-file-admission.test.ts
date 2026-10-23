@@ -178,9 +178,11 @@ test("new path admission agrees between the real filing precheck and plan lint t
   try {
     mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
     const planPath = join(repo.dir, "plan", "tasks.yaml");writeFileSync(planPath, "[]\n");
-    repo.git("add", "plan");repo.git("commit", "-m", "chore(plan): seed lint fixture");const base = repo.git("rev-parse", "HEAD");
+    mkdirSync(join(repo.dir, "src"));writeFileSync(join(repo.dir, "src", "consumer.ts"), "export function consume(approvedFixture: () => void) { return approvedFixture(); }\n");
+    repo.git("add", "plan", "src");repo.git("commit", "-m", "chore(plan): seed lint fixture");const base = repo.git("rev-parse", "HEAD");
     const { task, facts, context } = approvalFixture("auto");
-    task.acceptance = [{ claim: "The approved fixture is created", proof: "grep: approved fixture behavior in src/lib/operator-approved-fixture.ts" }];
+    task.acceptance = [{ claim: "The approved fixture is created", proof: "grep: approved fixture behavior in src/lib/operator-approved-fixture.ts" },
+      { claim: "The helper has an existing consumer", proof: "grep: approvedFixture( in src/consumer.ts" }];
     task.risk_ruling!.pin = taskRulingPin(task);
     const record = { ...facts.record, intentDigest: newPathApprovalIntentDigest(task, APPROVAL_RECORD_PATH)! };
     const raw = JSON.parse(JSON.stringify(task));delete raw.sourcePath;
