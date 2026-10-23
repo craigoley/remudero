@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { lstat, opendir, realpath } from "node:fs/promises";
+import { constants as fsConstants, readdirSync, readFileSync, statSync } from "node:fs";
+import { lstat, open, opendir, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -1029,6 +1029,102 @@ export async function readNewPathApprovalPaths(task: Task, context: NewPathAppro
     // Unknown checkout, identity, cancelled I/O or unsuccessful Git is not proof every path is absent.
     return undefined;
   }
+}
+
+/** Private regular file, bounded reads and same descriptor/path identity; no token creation or symlink following. */
+export async function readNewPathApprovalFile(path: string, maxBytes: number, signal: AbortSignal): Promise<string> {
+  signal.throwIfAborted();
+  const handle = await awaitNewPathApprovalRead(signal, open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW));
+  try {
+    const before = await handle.stat();
+    if (!before.isFile() || (before.mode & 0o077) !== 0 || before.size > maxBytes ||
+      (typeof process.getuid === "function" && before.uid !== process.getuid())) throw new Error("unsupported private approval file");
+    const bytes = Buffer.alloc(maxBytes + 1);
+    let count = 0;
+    while (count <= maxBytes) {
+      const read = await awaitNewPathApprovalRead(signal, handle.read(bytes, count, bytes.length - count, count));
+      if (read.bytesRead === 0) break;
+      count += read.bytesRead;
+    }
+    const after = await handle.stat(), current = await lstat(path);
+    if (count > maxBytes || count !== before.size || current.isSymbolicLink() || before.dev !== current.dev || before.ino !== current.ino ||
+      before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw new Error("private approval file changed during read");
+    signal.throwIfAborted();
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, count));
+  } finally { await handle.close(); }
+}
+
+export interface NewPathApprovalReaderContext {
+  repoRoot: string;
+  base: string;
+  readTokenFile: string;
+  currentBinding(): NewPathApprovalBinding | undefined;
+}
+
+export interface NewPathApprovalReaderIO { fetch: typeof fetch; clock: Clock }
+
+export async function prepareNewPathApprovalFacts(task: Task, recordPath: string, context: NewPathApprovalReaderContext,
+  signal: AbortSignal, io: NewPathApprovalReaderIO = { fetch: globalThis.fetch, clock: systemClock }): Promise<NewPathApprovalFacts | undefined> {
+  if (task.new_path_approval_ref === undefined) return undefined;
+  const controller = new AbortController(), deadline = setTimeout(() => controller.abort(), 5_000);
+  const abort = () => controller.abort();signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) controller.abort();
+  const selected = controller.signal;
+  const unknown = (reason: string): NewPathApprovalFacts => Object.freeze({ state: "unknown", reason });
+  try {
+    selected.throwIfAborted();
+    const binding = context.currentBinding();
+    if (!binding || newPathApprovalBindingError(binding) || !isNewPathApprovalReference(task.new_path_approval_ref) ||
+      newPathApprovalIntentDigest(task, recordPath) === undefined) return unknown("missing or unsupported selected issuer binding or task");
+    const bound = JSON.parse(canonicalApprovalJson(binding)) as NewPathApprovalBinding;
+    const credential = parseNewPathApprovalJson(await readNewPathApprovalFile(context.readTokenFile, 16 * 1024, selected)) as { read?: unknown };
+    if (typeof credential?.read !== "string" || !/^[\x21-\x7e]{1,4096}$/.test(credential.read)) return unknown("current read credential is unsupported");
+    const read = async (): Promise<Record<string, unknown>> => {
+      const url = new URL("/v1/new-path-approvals/verify", bound.origin);url.searchParams.set("reference", task.new_path_approval_ref!);
+      const response = await awaitNewPathApprovalRead(selected, io.fetch(url, { method: "GET", redirect: "manual", cache: "no-store", signal: selected,
+        headers: { accept: "application/json", authorization: `Bearer ${credential.read}` } }));
+      if (response.status !== 200 || response.redirected || !response.body || !/^application\/json(?:;|$)/i.test(response.headers.get("content-type") ?? "")) {
+        await response.body?.cancel();throw new Error("unsupported issuer response");
+      }
+      const reader = response.body.getReader(), chunks: Uint8Array[] = [];
+      let received = 0, ended = false;
+      try {
+        while (true) {
+          const chunk = await awaitNewPathApprovalRead(selected, reader.read());
+          if (chunk.done) { ended = true;break; }
+          received += chunk.value.byteLength;
+          if (received > 2 * NEW_PATH_APPROVAL_MAX_TASK_BYTES) throw new Error("issuer response exceeds its byte bound");
+          chunks.push(chunk.value);
+        }
+      } finally { if (!ended) void reader.cancel().catch(() => {});reader.releaseLock(); }
+      const value: unknown = parseNewPathApprovalJson(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("unsupported issuer response shape");
+      const result = value as Record<string, unknown>;
+      if (Object.keys(result).length !== 4 || !["state", "reference", "record", "observedAt"].every(key => Object.hasOwn(result, key)) ||
+        result.state !== "verified" || result.reference !== task.new_path_approval_ref || typeof result.observedAt !== "number" ||
+        result.observedAt > io.clock.now() || io.clock.now() - result.observedAt > NEW_PATH_APPROVAL_FACT_MAX_AGE_MS) throw new Error("issuer has no current verified confirmation");
+      return result;
+    };
+    const first = await read();
+    const paths = await readNewPathApprovalPaths(task, { repoRoot: context.repoRoot, base: context.base, binding: bound }, selected);
+    if (!paths) return unknown("selected checkout or pinned-base evidence is unavailable");
+    const final = await read();
+    if (canonicalApprovalJson(first.record) !== canonicalApprovalJson(final.record) ||
+      canonicalApprovalJson(context.currentBinding()) !== canonicalApprovalJson(bound)) return unknown("issuer, policy or confirmation changed during preparation");
+    const record = final.record as NewPathApprovalRecord;
+    const recordFields = ["protocol", "reference", "binding", "taskId", "taskRepo", "intentDigest", "recordPath", "declaredPaths", "approvedMissingPaths", "operatorId", "confirmationId", "issuedAt", "expiresAt"];
+    if (!record || Object.keys(record).length !== recordFields.length || recordFields.some(key => !Object.hasOwn(record, key))) return unknown("unsupported confirmation record");
+    const facts: Extract<NewPathApprovalFacts, { state: "verified" }> = { state: "verified", reference: task.new_path_approval_ref, binding: bound,
+      record, observedAt: io.clock.now(), currentSourcePath: task.sourcePath!, recordPath, paths };
+    const decision = newPathApprovalDecision(task, { plan: { tasks: [], byId: new Map() }, releasedIds: new Set(), newPathApproval: facts, clock: io.clock });
+    if (decision.reason) return unknown(decision.reason);
+    selected.throwIfAborted();
+    Object.freeze(record.binding);Object.freeze(record.declaredPaths);Object.freeze(record.approvedMissingPaths);Object.freeze(record);Object.freeze(bound);
+    return Object.freeze(facts);
+  } catch {
+    // Transport, bytes, credentials, current config, time and filesystem failures remain UNKNOWN without staging effects.
+    return unknown("current selected approval could not be prepared");
+  } finally { clearTimeout(deadline);signal.removeEventListener("abort", abort);controller.abort(); }
 }
 
 /**
