@@ -307,7 +307,7 @@ test("new path admission agrees between the real filing precheck and plan lint t
     task.acceptance = [{ claim: "The approved fixture is created", proof: "grep: approved fixture behavior in src/lib/operator-approved-fixture.ts" },
       { claim: "The helper has an existing consumer", proof: "grep: approvedFixture( in src/consumer.ts" }];
     task.risk_ruling!.pin = taskRulingPin(task);
-    const record = { ...facts.record, declaredPaths: [...task.files], intentDigest: newPathApprovalIntentDigest(task, APPROVAL_RECORD_PATH)! };
+    const record = { ...facts.record, declaredPaths: [...task.files], intentDigest: approvalPlan.newPathApprovalIntentDigest(task, APPROVAL_RECORD_PATH)! };
     const paths = { ...facts.paths, "src/consumer.ts": { checkout: "present" as const, base: "present" as const } };
     const raw = JSON.parse(JSON.stringify(task));delete raw.sourcePath;
     writeFileSync(join(repo.dir, APPROVAL_RECORD_PATH), JSON.stringify([raw]));repo.git("add", "plan");repo.git("commit", "-m", "chore(plan): file selected fixture");
@@ -696,7 +696,7 @@ test("new path admission refuses missing drifted and unsupported authority befor
     const files = [...task.files!];
     let invoked = 0;
     Object.defineProperty(files, "0", { enumerable: true, get() { invoked++; return "src/lib/operator-approved-fixture.ts"; } });
-    assert.equal(newPathApprovalIntentDigest({ ...task, files }, APPROVAL_RECORD_PATH), undefined);
+    assert.equal(approvalPlan.newPathApprovalIntentDigest({ ...task, files }, APPROVAL_RECORD_PATH), undefined);
     assert.equal(invoked, 0, "unsupported data is rejected without executing accessors");
   });
   await t.test("hidden and symbol task fields are unsupported rather than unsigned data", () => {
@@ -704,7 +704,7 @@ test("new path admission refuses missing drifted and unsupported authority befor
     for (const key of ["hidden", Symbol("hidden")]) {
       const changed = { ...task };
       Object.defineProperty(changed, key, { value: "unsupported", enumerable: false });
-      assert.equal(newPathApprovalIntentDigest(changed, APPROVAL_RECORD_PATH), undefined);
+      assert.equal(approvalPlan.newPathApprovalIntentDigest(changed, APPROVAL_RECORD_PATH), undefined);
     }
   });
   await t.test("selected YAML refuses unsupported fields instead of dropping their bytes", () => {
