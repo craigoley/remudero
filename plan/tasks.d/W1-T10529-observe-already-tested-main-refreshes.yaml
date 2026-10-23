@@ -1,0 +1,91 @@
+- id: W1-T10529
+  title: Observe when a pending CI refresh only brings main changes its actual checkout already tested
+  repo: remudero
+  type: recon
+  verify: human
+  depends_on: []
+  plan_refs: [W1-T7735, W1-T5696, W1-T6022, W1-T10338, W1-T10065]
+  priority: 1
+  risk: low
+  band_meaning: blast-radius
+  budget_usd: 4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:refresh-tested-tree:PR-13834"
+  files: [docs/ci-friction-remedies.md]
+  rationale: |
+    Operator-requested stuck-PR root-cause research, filed by the queue coordinator, not a claim
+    that the native friction collector produced these measurements. The initial cohort is exactly
+    PR #13834 and its 2026-10-23 21:29:15Z through 21:42:14Z refresh decision. Do not infer that
+    other refreshes or earlier stuck PRs share this cause.
+
+    OBSERVED: CI run 40027123854, job 120666003041, checked out
+    4c25bdf9ac1717701f9fde8372486bb9096d9293 at 21:29:34Z. Its parents are main
+    358ab4af0c10e845281c657fbfec5edb9ba1ef3b and head
+    f6d321730212dfae23dda6d4688fd71f0c5d5c2d. The daemon first recorded
+    sweep.update_branch.pending_guard at 21:41:31Z, then sweep.refresh.decided with path general,
+    ci_in_flight true and decision refresh because the judge ruled overlap at 21:42:11Z.
+    That exact row says strict false, update_reason distance-unknown, overlap_count 0,
+    overlap_files [], predicted_cost_ci_min 36.6 and predicted_benefit 0.005. No positive
+    overlap path was recorded; this alone does not identify which input was unavailable.
+    sweep.update_branch.updated followed at 21:42:13Z. The resulting head is
+    7fb436e4ed6f376f2136fe5ad79e8353b09f1704, with parents f6d3217 and main
+    28bced98f83bf1a35eab0419b507b11538b419ae.
+
+    The complete tree delta from the actual CI checkout to that refreshed head is only
+    plan/feedback/incident-ac8200367eff4984.yaml. The src, test, scripts and .github subtree
+    objects are each identical. GitHub logs and immutable commit objects are positive controls;
+    a branch's behind-count alone is not evidence that its running CI missed those main changes.
+
+    READ: buildBehindMainByPr in src/lib/tick-read-worker.ts obtains main-side files from
+    compare/<pr-head>...main. When available, buildRefreshValueGate sends that divergence list to
+    the refresh judge; it supplies no actual tested checkout or tested merge parent. The
+    ciInFlight arm in decideRefresh can accept the judge's overlap despite the pending guard.
+    This is an observed input mismatch on this one case, not authority to change that policy.
+
+    W1-T7735 is the existing value policy. W1-T10338 addresses repeated red refreshes while a fix
+    stands down; this case was pending without that recorded prerequisite. W1-T10065 addresses
+    alert-path evidence in the fix rung, a separate surface. Main and all six open PR head plan
+    trees were compared at main 7428a8993b on 2026-10-23; the 47 matching subject paths had no
+    added overlapping observation record. The reservation for this exact id was pushed normally.
+  design: |
+    Append a bounded observation packet to docs/ci-friction-remedies.md. Name the fixed cohort,
+    observation window and per-PR dispositions. Preserve head, actual CI checkout, its parents,
+    refreshed head and parents, subtree object ids, complete changed paths, workflow/job URLs,
+    refresh decision provenance, branch-protection strictness, and the known/missing/truncated
+    states of both PR files and main-delta files. Do not collapse unavailable into an empty known
+    list or infer either input's absence just from overlap_count 0. Preserve the model's reason
+    if actually available; otherwise mark it unknown. Separate observed facts from
+    inferred causal delay; later pin repairs and additional pushes confound final PR latency.
+
+    Resolve the actual checkout from the trusted Actions checkout step and verify its commit
+    parents against the exact reviewed head. Compare it with the actual refresh result, not a
+    current refs/pull merge ref or the latest main guessed to be the tested base. Explain how
+    reruns, moving refs and unknown checkout evidence prevent treating ordinary run metadata as
+    a trustworthy parent. Missing, truncated, contradictory or unmatched evidence is UNKNOWN.
+
+    Include a positive control with identical material subtrees and a counterexample in which
+    an untested main change reaches a PR path. Name the falsifiers: mismatched head/parents,
+    different allegedly identical trees, a strict-protection or distinct repair trigger, or a
+    second case with a different mechanism. Retain existing dispositions and do not group such
+    counterexamples into a class. Report the exact corpus opened, its newest timestamp and the
+    question it can answer; do not turn a selected-file zero into a fleet-wide absence claim.
+
+    Identify a possible tested-parent-aware refresh input and its conservative UNKNOWN fallback,
+    but keep automatic refresh, judging, budgets, checks, assertions and every runtime unchanged.
+    Any class-wide implementation or policy change requires its own reviewed proposal after
+    this observation packet. No worker, claim, service, model-routing or main-protection action
+    is authorized. The native machine-filing judge must supply a real ruling; none is invented.
+  acceptance:
+    - claim: The report preserves the exact PR-13834 checkout, refresh and per-PR provenance
+      proof: "grep: PR-13834 tested-merge-parent observation in docs/ci-friction-remedies.md"
+    - claim: The report distinguishes already-tested source from a genuinely untested main change
+      proof: "grep: Control: already-tested source is not new main overlap in docs/ci-friction-remedies.md"
+    - claim: The report retains UNKNOWN, counterexamples and a separate policy decision
+      proof: "grep: UNKNOWN and separate refresh-policy decision in docs/ci-friction-remedies.md"
+  falsifier: |
+    If the trusted checkout is not tied to head f6d3217 and main 358ab4a, any named equal subtree
+    differs, or the actual recorded trigger is a distinct mandatory repair, the initial
+    unnecessary-refresh hypothesis fails. A genuinely untested reaching change must remain
+    separate. A report claiming a fleet-wide zero from this one selected case is not acceptable.
