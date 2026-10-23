@@ -29045,7 +29045,8 @@ async function retroCommand(
         const resumed = expected.mode === "resumed" && expected.reason === "same-provider";
         const freshWriter = worker.provider === "codex" && expected.mode === "fresh-handoff" &&
           expected.reason === "provider-fresh-only";
-        if (!worker.sessionId?.trim() || !repaired.sessionId?.trim() ||
+        if (!worker.sessionId || !repaired.sessionId ||
+            worker.sessionId.trim() === "" || repaired.sessionId.trim() === "" ||
             (resumed ? repaired.sessionId !== worker.sessionId : !freshWriter || repaired.sessionId === worker.sessionId)) {
           throw new Error("retro preflight repair returned an inconsistent session identity");
         }
