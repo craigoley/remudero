@@ -1,0 +1,48 @@
+- id: W1-T10463
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/ledger-account-dimension.test.ts:flaky cost 14 PR minute(s) across 2 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.39
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/ledger-account-dimension.test.ts:flaky"
+  files:
+    - src/lib/ledger.ts
+    - test/ledger/check-test-test-ledger-account-dimension-test-ts-flaky.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/ledger-account-dimension.test.ts:flaky"
+      proof: "grep: test(\"W1-T10463: check:test:test/ledger-account-dimension.test.ts:flaky is prevented, not retried\" in test/ledger/check-test-test-ledger-account-dimension-test-ts-flaky.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/ledger-account-dimension.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/ledger-account-dimension.test.ts:flaky cost 14 PR minute(s) (seven-day half-life) across 2 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ledger.ts: test/ledger-account-dimension.test.ts imports it
+    - test/ledger-account-dimension.test.ts: named by the failing check
+    - the rounds name a failing test: test/ledger-account-dimension.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13637 (https://github.com/craigoley/remudero/pull/13637) at 2026-10-22T21:01:21.424Z: ci-log round — coverage-shard (2/8): test/ledger-account-dimension.test.ts
+        failing tests: src/run-task.ts: every `billing_mode:` assignment site is the derivation call, `billing_mode: billingMode(`; ["src/run-task.ts: every `billing_mode:` assignment site is the derivation call, `billing_mode: billingMode(`"]
+        log excerpt:
+          | # FLAKE-RETRY: retry ALSO failed — (no test name parsed from output)
+          | not ok 2168 - src/run-task.ts: every `billing_mode:` assignment site is the derivation call, `billing_mode: billingMode(`
+          |   ---
+          |   duration_ms: 10.179625
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/ledger-account-dimension.test.ts:124:1'
+          |   failureType: 'testCodeFailure'
+          |   error: 'billing_mode site "resources?.billing_mode ?? "unknown"" is neither the BillingMode type annotation nor a billingMode(...) derivation'
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+          |   expected: true
+          |   actual: false
+          |   operato
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
