@@ -31,7 +31,8 @@ export interface OpenPullRequestProofResult {
 
 export type OpenPullRequestProofRunner = (
   proof: string,
-  mergeBase: string,
+  /** Undefined runs only at head, for a plan-declared regression guard. */
+  mergeBase: string | undefined,
   repoRoot: string,
   target?: SuiteRegistryTarget,
 ) => OpenPullRequestProofResult;
@@ -48,10 +49,10 @@ const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
  * the tsx source entry, exactly as checkProofChildArgv did. `extra` follows `--base <base>`.
  */
 export function checkProofLaunchArgv(
-  proof: string, base: string, root: string = HARNESS_ROOT, extra: readonly string[] = [],
+  proof: string, base: string | undefined, root: string = HARNESS_ROOT, extra: readonly string[] = [],
   store: ChildEntryStoreOptions = {},
 ): string[] {
-  const launch = childEntryArgv(root, "check-proof-main", CHECK_PROOF_CHILD_ENTRY, [proof, "--base", base, ...extra], undefined, store);
+  const launch = childEntryArgv(root, "check-proof-main", CHECK_PROOF_CHILD_ENTRY, [proof, ...proofBaseArgs(base), ...extra], undefined, store);
   store.log?.("pr_open.check_proof_child", { kind: launch.kind, reason: launch.reason });
   return launch.argv;
 }
@@ -65,13 +66,17 @@ export function filedTaskIdFromRunBranch(branch: string): string | undefined {
 }
 
 /** The argv, env and buffer every proof run shares, so the sync and async runners cannot drift apart. */
+function proofBaseArgs(base: string | undefined): string[] {
+  return base === undefined ? [] : ["--base", base];
+}
+
 function proofArgs(
-  proof: string, mergeBase: string, target?: SuiteRegistryTarget, bin = PROOF_NODE, harnessRoot: string = HARNESS_ROOT,
+  proof: string, mergeBase: string | undefined, target?: SuiteRegistryTarget, bin = PROOF_NODE, harnessRoot: string = HARNESS_ROOT,
   store: ChildEntryStoreOptions = {},
 ): string[] {
   const repo = target ? ["--repo", `${target.owner}/${target.repo}`] : [];
   // Keep the injected launcher seam's command argv; production invokes the narrow Node entry.
-  if (bin !== PROOF_NODE) return ["check-proof", proof, "--base", mergeBase, ...repo];
+  if (bin !== PROOF_NODE) return ["check-proof", proof, ...proofBaseArgs(mergeBase), ...repo];
   return checkProofLaunchArgv(proof, mergeBase, harnessRoot, repo, store);
 }
 
@@ -82,7 +87,7 @@ const PROOF_MAX_BUFFER = 16 * 1024 * 1024;
 
 export function defaultProofRunner(
   proof: string,
-  mergeBase: string,
+  mergeBase: string | undefined,
   repoRoot: string,
   target?: SuiteRegistryTarget,
   bin: string = PROOF_NODE,
@@ -108,7 +113,7 @@ export function defaultProofRunner(
 /** The awaited form of {@link OpenPullRequestProofRunner}: same inputs, same result shape. */
 export type AsyncOpenPullRequestProofRunner = (
   proof: string,
-  mergeBase: string,
+  mergeBase: string | undefined,
   repoRoot: string,
   target?: SuiteRegistryTarget,
 ) => Promise<OpenPullRequestProofResult>;
@@ -133,7 +138,7 @@ export interface AsyncProofRunOptions {
  */
 export function defaultProofRunnerAsync(
   proof: string,
-  mergeBase: string,
+  mergeBase: string | undefined,
   repoRoot: string,
   target?: SuiteRegistryTarget,
   opts: AsyncProofRunOptions = {},
@@ -371,8 +376,10 @@ const STALE_PROOF = 5;
 
 /**
  * Prepare the exact body an existing PR opener will send. Filed task branches resolve their
- * criteria from plan/tasks.yaml, receive their task trailer, and execute every local proof against
- * the branch's merge base before a REST argv can be built. Other opener lanes keep their existing
+ * criteria from plan/tasks.yaml, receive their task trailer, and execute every local proof before
+ * a REST argv can be built. Only a filed `kind: guard` runs head-only, matching the canonical CI
+ * discrimination contract; ordinary product proofs still compare against the branch's merge base.
+ * Other opener lanes keep their existing
  * body and are checked with the same author-time parser.
  *
  * The optional proof runner is a narrow positional test seam. Production callers omit it and run
@@ -422,12 +429,13 @@ export function openPullRequestChecked(
     if (!runnableProof(proof, target)) {
       return reject(`${taskId} has a proof the local check-proof command cannot execute: ${proof || "(empty)"}`);
     }
-    const result = runProof(proof, mergeBase, repoRoot, target);
+    const proofBase = criterion.kind === "guard" ? undefined : mergeBase;
+    const result = runProof(proof, proofBase, repoRoot, target);
     if (proofFailed(result)) {
       const detail = [result.error, result.stderr, result.stdout].filter(Boolean).join("\n").trim();
       const stale = result.status === STALE_PROOF || /\bexecuted_stale\b/.test(detail);
       return reject(
-        `${taskId} proof did not pass against merge base (${proof})${detail ? `: ${detail}` : `: exit ${result.status ?? result.signal ?? "unknown"}`}`,
+        `${taskId} proof did not pass ${proofBase === undefined ? "at head" : "against merge base"} (${proof})${detail ? `: ${detail}` : `: exit ${result.status ?? result.signal ?? "unknown"}`}`,
         stale ? "stale-proof" : "branch-gap",
         result.status !== EXECUTED_PROOF_FAILURE || result.error || result.signal || stale
           ? undefined
@@ -459,7 +467,7 @@ export async function prerunPullRequestProofs(
   runProofAsync: AsyncOpenPullRequestProofRunner = defaultProofRunnerAsync,
 ): Promise<OpenPullRequestProofRunner> {
   const results = new Map<string, OpenPullRequestProofResult>();
-  const key = (proof: string, mergeBase: string): string => `${mergeBase}\0${proof}`;
+  const key = (proof: string, mergeBase: string | undefined): string => `${mergeBase ?? "head-only"}\0${proof}`;
   const answer: OpenPullRequestProofRunner = (proof, mergeBase) =>
     results.get(key(proof, mergeBase)) ?? {
       status: null,
@@ -467,7 +475,7 @@ export async function prerunPullRequestProofs(
     };
   const taskId = filedTaskIdFromRunBranch(branch);
   if (!taskId) return answer; // not a filed run branch: the open runs no proofs
-  let criteria: { claim: string; proof: string }[];
+  let criteria: AcceptanceCriterion[];
   let mergeBase: string;
   try {
     criteria = filedCriteria(taskId, repoRoot).executable;
@@ -482,8 +490,9 @@ export async function prerunPullRequestProofs(
   for (const criterion of criteria) {
     const proof = criterion.proof.trim();
     if (!runnableProof(proof, target)) break;
-    const result = await runProofAsync(proof, mergeBase, repoRoot, target);
-    results.set(key(proof, mergeBase), result);
+    const proofBase = criterion.kind === "guard" ? undefined : mergeBase;
+    const result = await runProofAsync(proof, proofBase, repoRoot, target);
+    results.set(key(proof, proofBase), result);
     if (proofFailed(result)) break;
   }
   return answer;
