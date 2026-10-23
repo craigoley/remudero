@@ -63,3 +63,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.9
+    reasons:
+      - "high-risk verdict at confidence 0.90 — on the change's description/files alone, no diff was read — The supplied rounds establish recurring failures, but do not establish a shared cause remediable in src/lib/learnings.ts; the explicit assertion identifies ci.yaml:687, outside the declared files.; on the change's description/files alone, no diff was read — The record requests prevention or self-healing without identifying the mechanism. Its grep acceptance checks for a test declaration rather than demonstrating that fix rounds are prevented, leaving the proposed remedy unverifiable from what is shown."
+    judged_at: "2026-10-23T01:22:42.186Z"
+    pin: "6dbab26367a9c45f52a3b380512e78e5bab0f83de971acc91f76101006fcd6c1"
