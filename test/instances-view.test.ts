@@ -25,6 +25,11 @@ import type { ViewBodyEntry } from "../src/lib/views.js";
 import { observeInstanceInboxContract, mountInstanceInboxRoutes } from "#src/lib/instance-inbox-contract.js";
 import { judgeSource, SLOW_LANE_STORE_BUDGET_MS } from "#src/lib/view-freshness.js";
 import { RAW_BODY_CACHE } from "#src/lib/service.js";
+import { symlinkSync, truncateSync } from "node:fs";
+import { INBOX_CONTRACT_OBSERVATION_MAX_BYTES } from "#src/lib/instance-inbox-contract.js";
+import { createDemandBook } from "#src/lib/view-demand.js";
+import { createReadModelWorker, readModelLaneViews } from "#src/lib/read-model-worker.js";
+import { INSTANCES_QUALIFICATION_GENERATION } from "#src/lib/instances-view.js";
 
 const NOW = Date.parse("2026-10-01T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
@@ -43,7 +48,7 @@ interface Fixture {
   stateDir: string;
   repoPath: string;
   hostPath: string;
-  instances: Array<{ name: string; ledgerDir: string }>;
+  instances: Array<{ name: string; ledgerDir: string; repo: string }>;
 }
 
 /** Core and console are mounted with ledgers; site is registered and projected but its state dir was never mounted. */
@@ -61,9 +66,9 @@ function fixture(t: TestCtx, opts: { heartbeatAgoMs?: number } = {}): Fixture {
   writeFileSync(repoPath, REPO_REGISTRY);
   writeFileSync(hostPath, HOST_REGISTRY);
   const instances = [
-    { name: "core", ledgerDir: stateDir },
-    { name: "console", ledgerDir: consoleDir },
-    { name: "site", ledgerDir: join(root, "instances", "site", "state") },
+    { name: "core", ledgerDir: stateDir, repo: "craigoley/remudero" },
+    { name: "console", ledgerDir: consoleDir, repo: "craigoley/remudero-console" },
+    { name: "site", ledgerDir: join(root, "instances", "site", "state"), repo: "craigoley/remudero-site" },
   ];
   return { root, stateDir, repoPath, hostPath, instances };
 }
@@ -259,7 +264,7 @@ test("W1-T10430: capability evidence follows owned generation and revalidation w
   writeFileSync(marker, "[]");
   const state = { instance: "core", lease: "held" as "held" | "elsewhere" | "none", generation: 4 };
   let invalidate = false;
-  const view = createInstancesView({ instances: [{ name: "core", ledgerDir: f.stateDir }], repoPath: f.repoPath, hostPath: f.hostPath,
+  const view = createInstancesView({ instances: [{ name: "core", ledgerDir: f.stateDir, repo: "craigoley/remudero" }], repoPath: f.repoPath, hostPath: f.hostPath,
     mounted: () => { if (invalidate) state.generation++; return true; }, ledgerSource: () => ({ name: "ledger:core", asOf: null, state: "stale" }) });
   const ctx = { now: NOW, instances: [{ state, lease: {} }] };
   const read = () => view.materialize(ctx)[0].data.instances.find(i => i.id === "core")!.inboxCapabilityEvidence!;
@@ -293,4 +298,39 @@ test("W1-T10430: legacy instances remain conservative and new capability clocks 
   const legacy = structuredClone(first.body.data) as InstancesData;
   for (const entry of legacy.instances) delete entry.inboxCapabilityEvidence;
   assert.deepEqual(registryFromInstances(legacy), registryFromInstances(first.body.data as InstancesData), "old registry projection does not invent capability evidence");
+  const factory = readModelLaneViews({ instances: f.instances, registry: { repoPath: f.repoPath, hostPath: f.hostPath } }, clockAt(NOW), () => {}, createDemandBook({ clock: clockAt(NOW) })).find(v => v.name === "instances")!;
+  assert.equal(factory.qualificationGeneration, INSTANCES_QUALIFICATION_GENERATION);
+  assert.ok("create" in factory);
+  assert.equal(factory.create().qualificationGeneration, factory.qualificationGeneration);
+  const worker = createReadModelWorker({ stateDir: f.stateDir, instances: f.instances, clock: clockAt(NOW) });
+  assert.equal(worker.qualificationGeneration?.("instances"), INSTANCES_QUALIFICATION_GENERATION, "persisted auto readiness cannot borrow an older generation");
+  assert.equal(worker.qualificationGeneration?.("unknown-view"), undefined);
+});
+
+test("W1-T10430: revoked contract controls stay closed without positive qualification wiring", (t) => {
+  const f = fixture(t), marker = join(f.stateDir, "inbox-proposals.json");
+  const state = { instance: "core", lease: "held" as "held" | "elsewhere", generation: 2 };
+  const view = createInstancesView({ instances: f.instances, repoPath: f.repoPath, hostPath: f.hostPath, ledgerSource });
+  const read = () => view.materialize({ now: NOW, instances: [{ state: { ...state, failures: 0, newestTs: null }, lease: {} }] })[0];
+  for (const raw of ["{malformed", "null", "42", JSON.stringify({ repository: "foreign/repo" }), JSON.stringify({ instance: "foreign" })]) {
+    writeFileSync(marker, raw);
+    const entry = read();
+    assert.equal(entry.data.instances.find(i => i.id === "core")!.inboxCapabilityEvidence?.state, "unavailable");
+    assert.equal(entry.sources.find(s => s.name === "inbox-capability:core")!.state, "unavailable");
+  }
+  rmSync(marker);
+  assert.equal(read().data.instances[0].inboxCapabilityEvidence?.state, "unavailable");
+  assert.deepEqual(read().data.instances[0].capabilities.writes.filter(w => w.startsWith("inbox/")), [], "the real revoked marker also removes legacy Inbox write advertisements");
+  writeFileSync(marker, "[]"); truncateSync(marker, INBOX_CONTRACT_OBSERVATION_MAX_BYTES + 1);
+  assert.equal(read().data.instances[0].inboxCapabilityEvidence?.state, "unavailable", "oversized regular sources are not read or truncated into positives");
+  rmSync(marker); symlinkSync(f.repoPath, marker);
+  assert.equal(read().data.instances[0].inboxCapabilityEvidence?.state, "unavailable", "a link cannot substitute another readable source");
+  rmSync(marker); writeFileSync(marker, "[]");
+  state.lease = "elsewhere";
+  assert.equal(read().data.instances[0].inboxCapabilityEvidence?.state, "unavailable");
+  state.lease = "held";
+  writeFileSync(f.repoPath, REPO_REGISTRY.replace("craigoley/remudero\n", "foreign/repository\n"));
+  assert.equal(read().data.instances[0].inboxCapabilityEvidence?.state, "unavailable", "mutable registry cannot rebind the fixed mount's repository");
+  rmSync(f.repoPath);
+  assert.equal(read().data.instances[0].inboxCapabilityEvidence?.state, "unavailable");
 });

@@ -176,7 +176,7 @@ interface ProjectedState {
 
 export interface InstancesViewOptions<S extends ProjectedState> {
   /** Every instance the worker projects, with the state dir its ledger lives in; the first is core. */
-  instances: ReadonlyArray<{ name: string; ledgerDir: string }>;
+  instances: ReadonlyArray<{ name: string; ledgerDir: string; repo?: string }>;
   /** The repo-tracked registry `GET /v1/registry` answers from. */
   repoPath?: string;
   /** The fleet host's copy, compared against it. */
@@ -206,6 +206,8 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
 } {
   const mounted = opts.mounted ?? existsSync;
   const core = opts.instances[0]?.name;
+  // Mount/route scope is invocation-owned; a mutable registry cannot rebind an existing state dir.
+  const projected = new Map(opts.instances.map(i => [i.name, { ...i }]));
   const registrySource = (read: ReturnType<typeof readFile>, parsed: ReturnType<typeof parseRegistryRead>): ViewSource => {
     const name = "registry:repo";
     if ("code" in parsed) return { name, asOf: null, state: "unavailable", reason: `the instance registry is ${read.ok ? "malformed" : "unreadable"}: ${parsed.code}` };
@@ -228,7 +230,6 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
       const parsed = parseRegistryRead(read);
       const live = "registry" in parsed ? parsed.registry.instances.filter((i) => i.live) : [];
       const { hostRegistry, drift } = hostRegistryDrift(live.map((i) => i.name), hostText());
-      const projected = new Map(opts.instances.map((i) => [i.name, i]));
       const capabilitySources: ViewSource[] = [];
       const revalidate: Array<() => void> = [];
       const entry = (id: string, registered: (typeof live)[number] | undefined): InstanceEntry => {
@@ -237,7 +238,8 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
         const served = slot !== undefined && dir !== undefined && mounted(dir);
         const prefix = `/v1/i/${id}`;
         const generation = slot?.state.generation;
-        const owned = slot?.state.lease === "held" && slot.lease !== undefined && Number.isSafeInteger(generation) && generation! >= 0;
+        const scopeMatches = registered !== undefined && projected.get(id)?.repo === registered.repo && opts.instances.filter(i => i.name === id).length === 1;
+        const owned = scopeMatches && slot?.state.lease === "held" && slot.lease !== undefined && Number.isSafeInteger(generation) && generation! >= 0;
         const observation = registered && served ? observeInstanceInboxContract(dir, { instance: id, repository: registered.repo }) : undefined;
         const source = `inbox-capability:${id}`;
         const evidence: NonNullable<InstanceEntry["inboxCapabilityEvidence"]> = { version: 1, qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION, source, state: "unavailable", instance: id, ...(registered ? { repository: registered.repo } : {}), prefix, ...(Number.isSafeInteger(generation) && generation! >= 0 ? { generation } : {}) };
