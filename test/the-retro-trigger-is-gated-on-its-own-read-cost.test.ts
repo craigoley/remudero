@@ -207,6 +207,28 @@ function persistingDeps(retroGapHours: number | undefined): Partial<DaemonDeps> 
   };
 }
 
+test("W1-T9119: an unreadable retro history records the error and keeps the check deferred", async () => {
+  let historyReads = 0;
+  let checks = 0;
+  const rows = await daemonTicks(3, {
+    ...persistingDeps(2),
+    readRetroHistory: async () => {
+      historyReads++;
+      throw new Error("retro history unavailable");
+    },
+    checkRetroTrigger: () => { checks++; return FIRE; },
+  });
+  assert.equal(historyReads, 2, "history is retried on each subsequent deferral observation");
+  assert.deepEqual(of(rows, "daemon.retro_trigger.deferral_persisting_unread").map((row) => row.extra), [
+    { error: "retro history unavailable" },
+    { error: "retro history unavailable" },
+  ]);
+  assert.equal(checks, 0, "a history read failure does not bypass the heap headroom gate");
+  assert.equal(of(rows, "daemon.retro_trigger.deferred_ledger_pressure").length, 3);
+  assert.equal(of(rows, "daemon.retro_trigger.deferral_persisting").length, 0);
+  assert.equal(of(rows, "retro_triggered").length, 0);
+});
+
 test("W1-T9119: a deferral past the learned retro interval is named once", async () => {
   const rows = await daemonTicks(14, persistingDeps(6));
   assert.equal(of(rows, "daemon.retro_trigger.deferred_ledger_pressure").length, 14);
