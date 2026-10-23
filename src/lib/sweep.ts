@@ -612,12 +612,10 @@ export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): 
   return reviewLedgerKeyFor(pr.taskId, pr.prNumber);
 }
 
-/** W1-T5866 — THE KEY THIS PR's FIX-LANE ROWS ARE READ UNDER: {@link escalationTaskIdFor}'s identity, but
- *  `undefined` stays `undefined` (a PR with no id at all has no strike history to read, as before). A run-unfiled PR
- *  is `PR-<n>`, so its strikes, refusals and fix claims are its own instead of one `unfiled` budget every ad-hoc PR
- *  shares. Legacy `unfiled`-keyed rows carry no `pr_url`, so they are not reattributed to any one PR. */
-export function fixLedgerTaskIdFor(pr: { taskId?: string; prNumber: number }): string | undefined {
-  return pr.taskId === undefined ? undefined : reviewLedgerKeyFor(pr.taskId, pr.prNumber);
+/** W1-T9955: taskless and run-unfiled PRs read their own PR-<n> fix rows; real task ids stay unchanged.
+ *  Legacy `unfiled`-keyed rows are not reattributed to any one PR. */
+export function fixLedgerTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
+  return reviewLedgerKeyFor(pr.taskId, pr.prNumber);
 }
 
 /** W1-T5866 — the id the fix lane's branch-OWNERSHIP check uses: a run-unfiled PR's own `run-unfiled-<epochMs>` head is

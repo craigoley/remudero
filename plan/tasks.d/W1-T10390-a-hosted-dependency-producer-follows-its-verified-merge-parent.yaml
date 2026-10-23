@@ -1,0 +1,88 @@
+- id: W1-T10390
+  title: "A hosted dependency producer follows its verified merge parent when main moves"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 5.00
+  priority: 1
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-22: #13008 producer identity race"
+  plan_refs: [ W1-T10258, W1-T3060 ]
+  files:
+    - .github/workflows/ci.yml
+    - test/a-moving-base-attributes-another-lanes-lines.test.ts
+    - test/the-merge-queue-runs-the-recorded-literal-gates.test.ts
+  rationale: |
+    OBSERVED on #13008 at public head 201fdc867c50b22ff56b05f1e75abed47ead9413,
+    Actions run 39709352581. Its actual merge checkout b7412584ef405cf9860c7c625a6286da07f1e57f
+    has first parent d9a2f278fa771e0bb4203ef2048751f8e696644c and second parent 201fdc86.
+    The event base is 50976632de12022bd4ec75740f11ad50b8d2706d, an earlier ancestor of that
+    first parent. The W1-T10258 protected producer refuses because event base must equal HEAD^1.
+    No artifact is produced; online lint-plan and shard 5's unmodified lint-plan:fast both refuse
+    W1-T10160's real merged dependency W1-T9658 as UNKNOWN. The shard retry repeats this exact
+    failure. The native review passes, but cannot make hosted evidence available.
+    An unmodified identity-prefix replay against those real Git objects fails; the proposed
+    prefix resolves the protected first parent. This is the healthy main-advance population
+    already distinguished from stale attribution by W1-T3060, newly encountered in the producer.
+    The baseline subject census opened all eleven open heads at main 9b3259b0 with a full remote
+    heads control and found no covering producer-identity repair. W1-T10390 is atomically reserved.
+  design: |
+    For pull_request only, use the actual two-parent merge checkout's first parent as protected
+    producer source and sealed base. Keep the event base as ancestry evidence, never a diff or
+    source attribution base. Require full immutable event-base, PR-head and checkout SHAs; main
+    as the target; a refs/pull/<positive-number>/merge ref; HEAD equal to GITHUB_SHA; exactly two
+    parents; second parent equal to the event PR head; event base ancestor of first parent; and
+    first parent ancestor of the fetched protected origin/main ref. Missing or contradictory
+    witnesses fail closed before archive, install or API work. Unsupported events remain refused.
+    Preserve the existing merge_group base path, protected git archive, implementation loader,
+    schema, same-run digest, bounded observation, read-only permissions and UNKNOWN fallback.
+    Add only DEPENDENCY_HEAD_SHA to the producer's existing metadata environment. Amend the
+    existing moving-base fixture's exact allowlist and assert every new provenance witness;
+    retain all stale diff, wrong-step, altered-env, archive and scheduling negative controls.
+    Update the existing merge-queue job fixture to supply the real default Actions identity
+    environment and explicit SHA/parent outputs for its Git seam, pin every new producer identity
+    command in order, and refuse its unavailable archive without minting evidence. Retain all
+    literal gate, absent digest, reporter, queue-base and unsupported-expression assertions.
+    Use real Git fixtures with explicit identity and no global/system Git configuration to prove
+    both a healthy advanced parent and rejection of foreign heads/parents/refs, direct checkouts,
+    missing protected refs, extra parents and unsupported events. Execute the shipped YAML prefix,
+    not a second predicate. Prove removal of the production protections and qualification witness
+    check fails, then restore and rerun. No durable dependency credit is created or seeded; the
+    filed W1-T10160 record, its dependency, rulings and accounting stay unchanged. No scheduling,
+    capacity, provider, security-policy, host or merge-rule change is included.
+  prompt: |
+    Build only after the operator explicitly approves this qualification-contract amendment.
+    Preserve the exact three-path scope and all provenance witnesses. Obtain fresh ownership and
+    merged-credit checks before building, and stand down to any covering fleet implementation.
+    Run ordinary author validation on the committed tree before the first push, plus joined
+    source-reader/census checks and discriminating literal proofs. Current proposal measurements
+    are not author qualification. Full hosted CI, security, native review and protected merge
+    remain required. No CI-first exception, failed-head publication, manual review verdict,
+    manual arming/merge, host change, capacity override or queued-fix-branch push is authorized.
+  acceptance:
+    - claim: a genuine Actions merge with a valid advanced protected base produces evidence against its actual first parent while an unchanged base and the existing merge-group path still work
+      proof: "unit test: W1-T10390: dependency producer follows a verified advanced merge parent"
+    - claim: foreign or missing identity witnesses cannot select producer source, including an unprotected parent, wrong PR head, wrong checkout/ref/target, direct checkout, extra parent or unsupported event
+      proof: "unit test: W1-T10390: dependency producer rejects foreign heads parents and event contexts"
+    - claim: the existing moving-base qualification rejects removal of every required producer identity witness and keeps the exact head metadata expression
+      proof: "unit test: W1-T10390: moving-base qualification retains every producer identity witness"
+  falsifier: |
+    Replace only the new production identity prefix with its pre-repair prefix: the advanced-parent
+    acceptance case must fail. Remove protected-main membership, event ancestry or exact PR-head
+    matching individually: each negative control must fail. Remove only the qualification witness
+    check: the qualification mutation case must fail. Restore all proposed bytes and require zero
+    failures with a genuine tests summary over the verified physical file list.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Operator explicitly approved the bounded W1-T10390 proposal at pin d83e52e4813de8316ea8a512341ceeac167264702ad8d274f5e4041feace216a on 2026-10-23. Exact user instruction: Approve the bounded W1-T10390 proposal at pin d83e52e4. Finish #13008 through all normal gates, then verify nothing remains to do or hand off. Stay within all guardrails."
+      - "Three-path qualification amendment only, with all ordinary author, hosted, security, native-review and protected merge gates retained; no CI-first waiver, manual merge or host change."
+    judged_at: "2026-10-23T11:25:12.857280+00:00"
+    pin: "d83e52e4813de8316ea8a512341ceeac167264702ad8d274f5e4041feace216a"

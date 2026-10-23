@@ -1,0 +1,60 @@
+- id: W1-T10287
+  title: "Retain already-executed issue-revalidation judge attempt prices before verdict parsing"
+  repo: remudero
+  depends_on: [W1-T10160]
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "console-followup:issue-revalidation-price-receipt-20261020"
+  files:
+    - src/lib/issue-revalidation-garden.ts
+    - src/lib/spend-rows.ts
+    - src/lib/ledger-steps.ts
+    - test/the-issue-revalidation-garden-re-judges-every-open-issue.test.ts
+    - test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts
+    - test/ledger-account-dimension.test.ts
+  acceptance:
+    - claim: "Real default judge composition retains final fallback malformed and interrupted attempt monetary evidence without changing the verdict provider result or retry flow"
+      proof: "unit test: W1-T10287: issue revalidation retains each actual attempt before verdict parsing"
+    - claim: "Immutable assignment and attempt identity deduplicates repeated callbacks and result objects while distinct attempts remain distinct"
+      proof: "unit test: W1-T10287: issue revalidation monetary receipts deduplicate without merging distinct attempts"
+    - claim: "Actual API zero and positive reported price remain monetary evidence while missing price subscription placeholders and notional estimates remain separate"
+      proof: "unit test: W1-T10287: issue revalidation preserves reported zero unknown and subscription price semantics"
+    - claim: "Existing collector counts dedicated producer once only under exact verified parent provenance and leaves foreign ambiguous or unpriced evidence explicitly unknown"
+      proof: "unit test: W1-T10287: exact-parent collector counts issue revalidation money once and preserves unknowns"
+  note: |
+    reservation hand-off: run-TRIAGE-console-issue-revalidation-price-receipt-20261020-1792528570203 -> codex/w10287-issue-revalidation-price-filing-20261022
+    Recovered from the original reserved task and interrupted authoring triage. The
+    consumed owner-assisted recovery and original evidence are preserved. No ID was
+    minted again and the authoring triage was not retried. The first native filing-risk
+    judgment is recorded separately below; it is not a production gardener pass.
+    Normal native admission, author qualification, task ownership, stored-body proofs,
+    review and CI gates remain required. This record grants no production action,
+    deployment, provider, permission, billing, budget, retry, service or cadence change.
+  rationale: |
+    Bounded prior evidence and full interruption/recovery receipts are retained privately in issue-revalidation-monetary-followup-20261020.md. Do not put topology, live IDs, prices, raw operator/provider logs or private evidence paths in a public task/PR. A sampled identity-join gap is not a universal absence claim or invoice total.
+    Fresh October22 API credit verifies W1-T10160 implementation merged via #13637. That narrower machine-filing producer is not this producer and must not be rebuilt. Original #13008 filing prerequisite is settled, but adoption and live monetary verification remain separate.
+    Fresh main and all captured-open advertised head trees were searched for this subject and reserved ID; the existing feedback is a positive corpus control. No second ID was minted. Current source still returns only the spawned result text from issueRevalidationJudgeText.
+    Capture at the existing default composition before parsing can discard paid malformed results; preserve every callback from existing fallback surfaces, the final return and failure after an actual selection. Reuse canonical worker accounting helpers and symbol-only receipt identity. Do not change prompt, routing, mount, tools, timeout, retry count, environment permissions or execution behavior.
+    Emit a dedicated canonical produced-spend step, with known provider and billing mode where actually reported. Keep API positive/real zero distinct from missing price and subscription placeholder zero. Keep notional cost separately labeled. A telemetry failure must not change the returned result, rejection or verdict.
+    Use the existing exact immutable assignment/attempt and gardener parent carrier. Deduplicate same object plus same immutable attempt without collapsing different attempts. Unstarted or failed-without-price receipts do not manufacture zero. Do not produce money from benchmark assignment/attempt coverage rows, add historical guessed backfill or turn an observed amount into an invoice.
+    The existing collector already reads canonical produced rows and verifies parent provenance; add actual default-collector controls rather than changing its limits, scope or semantics. Register the step truthfully for its census/retention readers. If current-main caller/census identifies another necessary path, obtain/qualify a narrow scope amendment rather than hiding it.
+    Drive actual default composition with external provider work faked only, including final, fallback, malformed, interrupted and rejected results. Check once-only production, explicit zero/unknown/subscription/notional, duplicate and distinct attempt controls, collector replay and foreign/ambiguous parent refusal. Run physical whole suites, caller/census, exact committed source-positive coverage, stored literal discriminating proofs and delete/restore falsifiers.
+    Normal native author, governed review, current-head hosted CI and protected merge remain required. Source merge, qualified exact-revision serve/daemon adoption, a natural real gardener pass, canonical producer row, complete cached Analytics and signed-in rendering are separate verification stages. Do not enable a gardener or call a model to manufacture production evidence. CI infrastructure and Azure memory remain with their existing owners; Field Trials is out of scope.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.75
+    reasons:
+      - "The description states the change only records prices from already-executed judge calls, adds no new model call, retry, provider setting, budget or permission change, and does not authorize deployment."
+      - "The declared files are limited to one garden library, spend-row and ledger-step helpers, and three test files. None of them is declared as auth, secrets, CI, deploy or review-policy files."
+      - "The acceptance criteria are all unit-test verifiable, so the finding can be checked from what is shown."
+      - "The note states that normal author, review, CI and merge gates remain mandatory. It also says no operator decision is requested and no deletion or irreversible action is involved."
+      - "The family has no track record (0 merged, 0 declined; Beta mean 0.50), which is neutral rather than concerning. The task spans several files and touches spend accounting, but the description says it reuses existing helpers and the collector semantics are unchanged."
+    judged_at: "2026-10-22T22:53:35.322Z"
+    pin: "a1aa56fc25cdb9193bf62ffcddc6107ce7352053aa56cc20eff510993fc1b700"

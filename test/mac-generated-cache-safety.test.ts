@@ -223,12 +223,14 @@ test("artifact cache reference errors and directory symlink swaps fail closed wi
       mkdirSync(join(fx.home, "external")); writeFileSync(join(fx.home, "external/private.txt"), "unpublished");
       const report = receipt(fx.run(String.raw`g=ns['main'].__globals__;home=pathlib.Path(os.environ['CACHE_HOME'])
 external=home/'external';consumer=home/'Developer/consumer';original_scan=os.scandir;original_open=os.open
-external_inode=external.stat().st_ino;consumer_inode=consumer.stat().st_ino;swapped=[False]
+external_inode=external.stat().st_ino;consumer_inode=consumer.stat().st_ino;swapped=[False];writes=[0]
 def scanned(fd):
  inode=os.fstat(fd).st_ino
  assert inode!=external_inode,'followed swapped directory symlink'
  if ${JSON.stringify(variant)}=='error' and inode==consumer_inode:raise PermissionError('private-reference-unreadable')
- if ${JSON.stringify(variant)}=='changed' and inode==consumer_inode:(consumer/'new-private.txt').write_text('concurrent source')
+ # A namespace that settles is re-read (namespaceRetries); one that never settles still holds.
+ if ${JSON.stringify(variant)}=='changed' and inode==consumer_inode:
+  writes[0]+=1;(consumer/('new-private-%d.txt'%writes[0])).write_text('concurrent source')
  return original_scan(fd)
 def opened(path,flags,*args,**kwargs):
  if ${JSON.stringify(variant)}=='swap' and path=='consumer' and not swapped[0]:

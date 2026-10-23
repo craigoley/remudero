@@ -111,7 +111,7 @@ node --import tsx scripts/preflight-author.mjs --low-footprint --scratch-mib 256
 
 Choose the scratch/runtime budgets for the named work; the example is not a policy default.
 This opt-in Mac path requires a committed tree, fresh base, physical tracked files, publication
-identity, a test slot, normal native memory pressure and room for the bounded image plus retained
+identity, a test slot, native memory admission and room for the bounded image plus retained
 output. It runs serially with no discovery/full-suite fallback. A fixed-capacity disk image bounds
 fixture growth, and an inherited native sandbox denies writes outside it, dependency payload
 writes and networking. An incompatible test fails; it is not silently rerun unsandboxed.
@@ -123,6 +123,19 @@ its 20-GiB guard. Capture is output/runtime bounded, source is rechecked afterwa
 detach retains the scratch and refuses the run rather than deleting a possibly active volume.
 This is local write/resource containment, not a security boundary for hostile test code or a
 host-wide storage reservation; other sessions' writes and OS swap remain separate pressure.
+
+Operator-approved 2026-10-23: workload-aware warning admission is limited to at most four
+explicit files, one worker, 120 seconds of test execution and 256 MiB of scratch. Those jobs
+inherit a 512-MiB V8 old-space ceiling. The 1-GiB process planning allowance is **not** an RSS
+hard cap. Three fresh native samples, five seconds apart, must show no new swap-outs,
+swap-ins no faster than 64 KiB/s in **each** interval, and at least the allowance plus a
+2-GiB reserve in the explicitly approximate free-plus-inactive measure. Critical/unknown
+pressure, failed reads, counter resets and changed disk capacity refuse; admission is
+repeated after slot waiting and immediately before tests. These are conservative policy
+ceilings, not Apple-defined limits or demonstrated full-gate capacity. Larger scoped jobs
+remain normal-pressure-only. The ordinary full-author function, 20-GiB floor, slots,
+selection, checks and assurance are unchanged. This does not enable budget enforcement
+in production or change Linux/hosted admission.
 
 Regression evidence: `test/author-preflight.test.ts` exercises real Git and Node subprocesses,
 including a failing test; `test/merge-lcov.test.ts` compares every LCOV record against pinned Node.

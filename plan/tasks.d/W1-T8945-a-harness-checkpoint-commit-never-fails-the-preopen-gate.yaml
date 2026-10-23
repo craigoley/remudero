@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-13: PR-flow re-measure (~/Remudero-notes/flow-remeasure-2026-10-13/RESULTS.md); operator: go with all of your recommendations"
   plan_refs: [W1-T8920, W1-T8198, W1-T7806, W1-T8139]
-  files: [src/lib/commit-message.ts, src/run-task.ts, test/a-harness-checkpoint-commit-never-fails-the-preopen-gate.test.ts, test/preflight.test.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts, test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts]
+  files: [src/lib/commit-message.ts, src/run-task.ts, test/a-harness-checkpoint-commit-never-fails-the-preopen-gate.test.ts, test/preflight.test.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts, test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts, "src/cli/commands/run-task-verb.ts"]
   status: queued
   priority: 1
   attempts: 0

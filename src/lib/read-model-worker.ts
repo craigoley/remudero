@@ -2614,7 +2614,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       }
       for (const entry of again.bodies) {
         const key = readModelBodyKey(entry.view, entry.key);
-        if (posted.has(key) || bodies.get(key)?.etag === entry.etag) continue;
+        const previous = bodies.get(key);
+        if (posted.has(key) || (previous?.etag === entry.etag
+          && previous.qualificationGeneration === entry.qualificationGeneration
+          && previous.qualificationReason === entry.qualificationReason)) continue;
         bodies.set(key, entry);
         replaced++;
       }
