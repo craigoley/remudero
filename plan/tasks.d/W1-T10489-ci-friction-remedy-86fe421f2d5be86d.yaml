@@ -1,0 +1,32 @@
+- id: W1-T10489
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — hand_fix:scripts/expiring-fixture-census.mjs cost 7.3 PR minute(s) across 2 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.69
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:hand_fix:scripts/expiring-fixture-census.mjs"
+  files:
+    - scripts/expiring-fixture-census.mjs
+    - test/ci/gates/ci-friction-remedy-86fe421f2d5be86d.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on hand_fix:scripts/expiring-fixture-census.mjs"
+      proof: "grep: test(\"W1-T10489: hand_fix:scripts/expiring-fixture-census.mjs is prevented, not retried\" in test/ci/gates/ci-friction-remedy-86fe421f2d5be86d.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures hand_fix:scripts/expiring-fixture-census.mjs's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: hand_fix:scripts/expiring-fixture-census.mjs cost 7.3 PR minute(s) across 2 red run(s) within the measured window on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - scripts/expiring-fixture-census.mjs: repaired by hand in multiple distinct merged PRs
+
+    RECENT ROUNDS (newest first):
+    - PR #13672 at 2026-10-23T00:55:00Z: hand fix PR #13672: scripts/expiring-fixture-census.mjs; minutes are the pass median proxy (5.840216666666667), not measured repair time
+    - PR #10661 at 2026-10-10T14:03:05Z: hand fix PR #10661: scripts/expiring-fixture-census.mjs; minutes are the pass median proxy (5.840216666666667), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
