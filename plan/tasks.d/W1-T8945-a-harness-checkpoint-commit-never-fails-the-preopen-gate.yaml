@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-13: PR-flow re-measure (~/Remudero-notes/flow-remeasure-2026-10-13/RESULTS.md); operator: go with all of your recommendations"
   plan_refs: [W1-T8920, W1-T8198, W1-T7806, W1-T8139]
-  files: [src/lib/commit-message.ts, src/run-task.ts, test/a-harness-checkpoint-commit-never-fails-the-preopen-gate.test.ts, test/preflight.test.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts, test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts, "src/cli/commands/run-task-verb.ts"]
+  files: [src/lib/commit-message.ts, src/run-task.ts, test/a-harness-checkpoint-commit-never-fails-the-preopen-gate.test.ts, test/preflight.test.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts, test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts, "src/cli/commands/run-task-verb.ts", "src/lib/unfinished-checkpoint.ts"]
   status: queued
   priority: 1
   attempts: 0
@@ -44,6 +44,11 @@
        (no new hold); a second failure is recorded with its steps so the fix lane and the operator can see what the
        repair did not fix.
     NOT IN SCOPE: rewriting or squashing existing checkpoint commits; W1-T8920's consumer-repo step skipping.
+    REPAIR SCOPE (2026-10-23): unfinished-checkpoint.ts is a companion solely so both existing public helper APIs
+    share the same isWipSubject/stripWipMarker function objects through its existing commit-message import.
+    Preserve helper bodies, avoid a new runtime import cycle, and restore the existing commit-message comment
+    ceiling of 180: deleting its old row implicitly raises it to 250. A prose-only 3-to-1-line condensation keeps
+    all operative caveats while meeting 180. Acceptance, falsifier, risk, budget and all gate limits stay unchanged.
   acceptance:
     - claim: "a branch with a legacy wip: checkpoint commit followed by a conventional worker commit passes the gate's commit-range steps"
       proof: 'grep: test("W1-T8945: a legacy wip checkpoint commit does not fail the commit-range steps" in test/a-harness-checkpoint-commit-never-fails-the-preopen-gate.test.ts'
