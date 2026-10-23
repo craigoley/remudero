@@ -153,6 +153,12 @@ test("a unique verified CI rerun dates its missing required gate without resetti
   assert.equal(ambiguous.checksPendingSince, undefined, "an unresolved second run is not a unique proof");
   const [otherMissing] = viewsFor(checks, minutesAgo(90), { required: [...required, "other-required"], runs: [run] });
   assert.equal(otherMissing.checksPendingSince, undefined, "CI cannot date a different missing requirement");
+  const [otherSatisfied] = viewsFor([...checks,
+    { name: "other-required", status: "completed", conclusion: "success" }], minutesAgo(90),
+    { required: [...required, "other-required"], runs: [run] });
+  assert.equal(otherSatisfied.checksPendingSince, minutesAgo(5), "every other CI requirement is satisfied");
+  const [undatedGate] = viewsFor([...checks, { name: "ci-gate", status: "queued" }], minutesAgo(90), { required, runs: [run] });
+  assert.equal(undatedGate.checksPendingSince, undefined, "a registered undated gate is not treated as absent");
   const [datedGate] = viewsFor([...checks,
     { name: "ci-gate", status: "in_progress", started_at: minutesAgo(90) }], minutesAgo(1), { required, runs: [run] });
   assert.equal(datedGate.checksPendingSince, minutesAgo(90), "a dated required check retains its original clock");
