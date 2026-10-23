@@ -283,8 +283,42 @@ unless the account opts in to the preserve-then-retire phase below.
 
 Azure installs the shared guard through `deploy/install-host-units.sh` and records
 the same receipts. Broad temp globs route Git-containing units through these
-guards instead of recursively deleting them. Older orphan archives never expire
-automatically: they may contain the only surviving unpublished work.
+guards instead of recursively deleting them. Operator ruling 2026-10-23: preserved
+and archived copies of unpublished work expire after 7 days, the Mac's
+preserve-retire `retain_days`. The Azure janitor expires the worktree archive
+(`/mnt/rmd/host-cleanup-worktree-archive`), the dated archives under `/mnt/rmd/archive`
+and `/mnt/rmd/host-cleanup-archive`, and its own preserved copies, entry by entry
+(a top-level file, or one entry inside a top-level folder, unchanged by mtime and
+ctime for `RMD_CLEANUP_RETAIN_DAYS`). It never touches `host-cleanup-validation-bundles-*`
+or anything outside those roots. Transcripts in `/mnt/rmd/host/archive` keep their
+30-day `ARCHIVE_DAYS`. Until 2026-10-23 the janitor's default archive path was
+`/mnt/rmd/host-cleanup-archive`, which held no transcripts, so that expiry never ran.
+
+The Azure janitor also runs the preserve-then-retire design below on the host's own
+roots: the worktree roots, `/mnt/scratch` with its `o/`, `tmp/` and `rmd-work-tmp/`,
+`/mnt/rmd/tmp`, `~/rmd-state2/tmp` and `/tmp`. It does that inside
+`deploy/rmd-host-cleanup.sh`, which also runs from stdin, and not through
+`preserve-retire.py`, whose roots must live inside the home. Copies go to
+`/mnt/scratch/host-cleanup-preserved/<path>@<UTC>`, on the scratch disk rather than
+the full state disk. A folder of units that is held only because a child is live,
+open, mounted or otherwise held is descended, so each child is judged on its own.
+A folder holding an instance's protected checkout (`rmd/<key>/remudero` or `serve-repo`)
+is held whole. The 6-hourly service-user pass judges only what that user owns;
+the hourly root pass sweeps temporary/scratch roots and also runs retention.
+Docker and containerd stores are held by name even when idle; nested coverage and
+dump housekeeping leave their data intact. Dump housekeeping follows the Mac rule
+below: only a file of at least `dump_min_mb` is a dump, and only a `.gz` or `.zst` the
+janitor wrote (its receipt `janitor-compressed.tsv`) expires in compressed form. Nothing
+in a repository or an installed package or toolchain tree is touched: a venv (`pyvenv.cfg`),
+`site-packages`, `lib/pythonX.Y`, a prefix install with `lib/pythonX.Y/`, `*.dist-info`,
+`node_modules`, cargo or Go module caches. A keep marker whose first line is
+`keep-until: YYYY-MM-DD` (or JSON `"until"`) lapses after that date; one without a date is
+honoured and listed once a pass as `MARKER … days old`. By operator ruling 2026-10-23,
+`/mnt/scratch/rmd-qa-namespace.ulkfFP`, an active operator session's namespace, has
+only its idle `operator/wt-*` worktrees and top-level `tmp`, `tmp-*` and `t3.*` retired.
+Everything else in it is kept, with no dump action, and each pass logs `MARKER-RULING`. In `/mnt/rmd/agent-codex/sessions` it never deletes, and it compresses idle
+sessions to `.jsonl.zst` with zstd instead of gzip: Codex resumes `.jsonl` and
+`.jsonl.zst`, but not `.jsonl.gz`.
 
 ## Preserve-then-retire (opt-in per account)
 

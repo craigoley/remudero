@@ -30,10 +30,13 @@
 #                  tsx's transpile cache (`tsx-*` directly under a tmp root) is a protected UNIT —
 #                  the directory itself is never removed — but its stale FILES are (prune_tsx_cache).
 #   4. archive   — transcripts are moved, never deleted; refused when the archive root shares a
-#                  filesystem with /; only the archive itself ages out, after ARCHIVE_DAYS
-#   5. DRY_RUN=1 changes nothing; a pass that leaves ANY watched filesystem past its mark exits
+#                  filesystem with /; only the archive itself ages out, after ARCHIVE_DAYS; archived
+#                  and preserved copies of unpublished work after RETAIN_DAYS (ruling 2026-10-23)
+#   5. DRY_RUN=1 (or RMD_CLEANUP_DRY_RUN=1) writes nothing anywhere; a pass that leaves ANY watched filesystem past its mark exits
 #      non-zero, naming each one (W1-T5548, pinned by
 #      test/the-host-janitor-alarms-on-every-watched-filesystem.test.ts; `/` used to be the only alarm)
+
+# The 2026-10-23 phases (deploy/mac/JANITOR.md) log `reclaim-total <phase> <root>`; the root pass runs retention only.
 
 # Every decision is logged: `KEEP <path>: <reason>` / `REMOVE <path>` / `ARCHIVE <path>` /
 # `PRUNE <path>: <bytes> bytes, ...` / `REFUSE <what>: <reason>`, then a summary `rmd-host-cleanup: / 57% -> 57% (-4 MB reclaimed this
@@ -65,7 +68,10 @@
 #   RMD_CLEANUP_TSX_MAX_AGE_HOURS  pins the age (h; under 6 is clamped to 6) past which a file
 #                               inside a `tsx-*` cache directly under a tmp root is pruned
 #                               (default: the idle window)
-#   RMD_CLEANUP_ARCHIVE_ROOT    where transcripts go
+#   RMD_CLEANUP_ARCHIVE_ROOT    where transcripts go (default <state disk>/host/archive)
+#   RMD_CLEANUP_STATE_DISK, RMD_SCRATCH_ROOT  the data disks (/mnt/rmd, /mnt/scratch); setting the first selects the host layout
+#   RMD_CLEANUP_{RETAIN_DAYS,RETAIN_ROOTS,PRESERVE_ROOTS,PRESERVE_ROOT,MAX_UNTRACKED_MB,PUBLISHED_REMOTES,DUMP_ROOTS,
+#     DUMP_RESUMABLE_ROOTS,DUMP_MIN_MB,DUMP_RETAIN_DAYS}  the 2026-10-23 phases; their defaults are set below
 #   RMD_CLEANUP_ROOT_FS         the filesystem being protected (default /)
 #   RMD_CLEANUP_DF              command taking a path and printing `df -Pk`-shaped output for the
 #                               filesystem holding it (default `df -Pk`)
@@ -110,7 +116,7 @@
 #                               both the root and the user cron run, so one path serves both)
 #   RMD_CLEANUP_FLOCK           flock command (tests may simulate an unavailable lock)
 set -uo pipefail
-SEED_GUARD_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SEED_GUARD_DIR=$(cd "$(dirname -- "${BASH_SOURCE[0]:-}")" && pwd)
 if [ -f "$SEED_GUARD_DIR/dependency-seed-guard.sh" ]; then
   # shellcheck source=deploy/dependency-seed-guard.sh
   source "$SEED_GUARD_DIR/dependency-seed-guard.sh"
@@ -127,10 +133,14 @@ fi
 FLOOR_MINUTES=360                        # 6 h: the protective floor for anything that could be live work
 IDLE_MINUTES="${IDLE_MINUTES:-}"         # empty: six hours (retention_window)
 HIGH_WATER="${HIGH_WATER:-85}"           # [UNVERIFIED] percent of / at which a pass fails
-ARCHIVE_DAYS="${ARCHIVE_DAYS:-30}"       # [UNVERIFIED] archive retention
-DRY_RUN="${DRY_RUN:-0}"
+ARCHIVE_DAYS="${ARCHIVE_DAYS:-30}"       # [UNVERIFIED] transcript archive retention
+DRY_RUN_RAW="${DRY_RUN:-0}"; DRY_RUN_ALIAS="${RMD_CLEANUP_DRY_RUN:-0}"
+DRY_RUN=0
+if [ "$DRY_RUN_RAW" = 1 ] || [ "$DRY_RUN_ALIAS" = 1 ]; then DRY_RUN=1; fi
 
 CLEAN_HOME="${RMD_CLEANUP_HOME:-${HOME:-/}}"
+STATE_DISK="${RMD_CLEANUP_STATE_DISK:-/mnt/rmd}"
+SCRATCH_DISK="${RMD_SCRATCH_ROOT:-/mnt/scratch}"
 WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees}"  # 2026-10-01 coordinator: $HOME trees are live checkouts (rmd-mint, rmd-op); never swept
 LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-$CLEAN_HOME/rmd-mint:$CLEAN_HOME/rmd-op}"
 PROTECTED_WORKTREE_ROOTS="${RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS-$CLEAN_HOME/rmd-serve-repo}"
@@ -141,13 +151,13 @@ for scratch_checkout in "${RMD_SCRATCH_ROOT:-/mnt/scratch}"/rmd/*/remudero "${RM
   [ -d "$scratch_checkout" ] && [ ! -L "$scratch_checkout" ] || continue
   PROTECTED_WORKTREE_ROOTS="${PROTECTED_WORKTREE_ROOTS:+$PROTECTED_WORKTREE_ROOTS:}$scratch_checkout"
 done
-WORKTREE_ARCHIVE_ROOT="${RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT:-/mnt/rmd/host-cleanup-worktree-archive}"
+WORKTREE_ARCHIVE_ROOT="${RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT:-$STATE_DISK/host-cleanup-worktree-archive}"
 COVERAGE_PATHS="${RMD_CLEANUP_COVERAGE_PATHS-$CLEAN_HOME/.remudero-coverage}"
 TMP_ROOTS="${RMD_CLEANUP_TMP_ROOTS-/tmp}"                                # [UNVERIFIED]
 TMP_GLOBS="${RMD_CLEANUP_TMP_GLOBS-claude-* rmd-* remudero-* tmp.*}"     # [UNVERIFIED]
 BIG_MB="${RMD_CLEANUP_BIG_MB:-200}"                                      # [UNVERIFIED]
 TSX_MAX_AGE_HOURS="${RMD_CLEANUP_TSX_MAX_AGE_HOURS:-}"  # empty: the idle window
-ARCHIVE_ROOT="${RMD_CLEANUP_ARCHIVE_ROOT:-/mnt/rmd/host-cleanup-archive}" # [UNVERIFIED]
+ARCHIVE_ROOT="${RMD_CLEANUP_ARCHIVE_ROOT:-$STATE_DISK/host/archive}"
 ROOT_FS="${RMD_CLEANUP_ROOT_FS:-/}"
 DF_CMD="${RMD_CLEANUP_DF:-df -Pk}"
 if [ -n "${RMD_CLEANUP_WATCH_FS+x}" ]; then WATCH_FS="$RMD_CLEANUP_WATCH_FS"
@@ -184,17 +194,51 @@ fi
 COVERAGE_LOCK_DIR="${RMD_CLEANUP_COVERAGE_LOCK_DIR:-/tmp}"
 SCRATCH_IDLE_MINUTES="${RMD_CLEANUP_SCRATCH_IDLE_MINUTES:-}"  # empty: the idle window
 DOCKER_CMD="${RMD_CLEANUP_DOCKER:-docker}"
+
+# ── 2026-10-23 phases. Host defaults apply only on the host layout: a fixture never inherits the disks.
+RETAIN_DAYS="${RMD_CLEANUP_RETAIN_DAYS:-7}"
+PRESERVE_ROOT="${RMD_CLEANUP_PRESERVE_ROOT:-$SCRATCH_DISK/host-cleanup-preserved}"
+MAX_UNTRACKED_MB="${RMD_CLEANUP_MAX_UNTRACKED_MB:-50}"
+DUMP_MIN_MB="${RMD_CLEANUP_DUMP_MIN_MB:-5}"
+DUMP_RETAIN_DAYS="${RMD_CLEANUP_DUMP_RETAIN_DAYS:-14}"
+PUBLISHED_REMOTES="${RMD_CLEANUP_PUBLISHED_REMOTES-https://github.com/craigoley/ git@github.com:craigoley/ ssh://git@github.com/craigoley/}"
+HOST_LAYOUT=0
+if [ "$ROOT_FS" = / ] || [ -n "${RMD_CLEANUP_STATE_DISK+x}" ]; then HOST_LAYOUT=1; fi
+if [ -n "${RMD_CLEANUP_RETAIN_ROOTS+x}" ]; then RETAIN_ROOTS="$RMD_CLEANUP_RETAIN_ROOTS"
+elif [ "$HOST_LAYOUT" = 1 ]; then RETAIN_ROOTS="$WORKTREE_ARCHIVE_ROOT:$STATE_DISK/archive:$STATE_DISK/host-cleanup-archive"
+else RETAIN_ROOTS=""; fi
+if [ -n "${RMD_CLEANUP_PRESERVE_ROOTS+x}" ]; then PRESERVE_ROOTS="$RMD_CLEANUP_PRESERVE_ROOTS"
+elif [ "$HOST_LAYOUT" = 1 ]; then
+  PRESERVE_ROOTS="$WORKTREE_ROOTS:$SCRATCH_DISK:$SCRATCH_DISK/o:$SCRATCH_DISK/tmp:$SCRATCH_DISK/rmd-work-tmp:$STATE_DISK/tmp:$CLEAN_HOME/rmd-state2/tmp:$TMP_ROOTS"
+else PRESERVE_ROOTS=""; fi
+DUMP_ROOTS="${RMD_CLEANUP_DUMP_ROOTS-$PRESERVE_ROOTS}"
+# Operator ruling 2026-10-23 (an active session's namespace with recorded holds): see ruling_retire.
+if [ -n "${RMD_CLEANUP_RULING_NAMESPACES+x}" ]; then RULING_NAMESPACES="$RMD_CLEANUP_RULING_NAMESPACES"
+elif [ "$HOST_LAYOUT" = 1 ]; then RULING_NAMESPACES="$SCRATCH_DISK/rmd-qa-namespace.ulkfFP"
+else RULING_NAMESPACES=""; fi
+if [ -n "${RMD_CLEANUP_DUMP_RESUMABLE_ROOTS+x}" ]; then DUMP_RESUMABLE_ROOTS="$RMD_CLEANUP_DUMP_RESUMABLE_ROOTS"
+elif [ "$HOST_LAYOUT" = 1 ]; then DUMP_RESUMABLE_ROOTS="$STATE_DISK/agent-codex/sessions"  # Codex may resume these
+else DUMP_RESUMABLE_ROOTS=""; fi
 # Not /tmp: a root-created 0644 lock there could not be opened for write by the user cron, and
 # with fs.protected_regular=2 root cannot O_CREAT-open a user's file in a sticky directory either.
-if ! SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"; then
+if ! SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]:-}")" && pwd -P)"; then
   echo "rmd-host-cleanup: FATAL cannot resolve the script directory for the lock" >&2; exit 2
 fi
 LOCK_FILE="${RMD_CLEANUP_LOCK_FILE:-$SCRIPT_DIR/rmd-host-cleanup.lock}"
 FLOCK_CMD="${RMD_CLEANUP_FLOCK:-flock}"
 
-case "$HIGH_WATER$ARCHIVE_DAYS$BIG_MB" in
+case "$HIGH_WATER$ARCHIVE_DAYS$BIG_MB$MAX_UNTRACKED_MB$DUMP_MIN_MB" in
   ""|*[!0-9]*) echo "rmd-host-cleanup: FATAL thresholds must be non-negative integers" >&2; exit 2 ;;
 esac
+case "$DRY_RUN_RAW:$DRY_RUN_ALIAS" in
+  [01]:[01]) ;;
+  *) echo "rmd-host-cleanup: FATAL DRY_RUN and RMD_CLEANUP_DRY_RUN must each be 0 or 1" >&2; exit 2 ;;
+esac
+for retain in "$RETAIN_DAYS" "$DUMP_RETAIN_DAYS"; do
+  case "$retain" in
+    ""|*[!0-9]*|0|0*) echo "rmd-host-cleanup: FATAL retention days must be positive integers" >&2; exit 2 ;;
+  esac
+done
 # A pinned window must be a number (a typo is refused, not guessed at); how SMALL it is is not
 # refused here, it is clamped to the floor below.
 case "$IDLE_MINUTES$SCRATCH_IDLE_MINUTES" in
@@ -241,11 +285,14 @@ fi
 # ISO time, uid, DRY_RUN, pid, then the decision as logged (action, path, reason).
 AUDIT_LOG="${RMD_CLEANUP_AUDIT_LOG:-$CLEAN_HOME/.local/state/remudero/janitor-audit.log}"
 DECISION_LOG="${RMD_CLEANUP_DECISION_LOG:-$CLEAN_HOME/.local/state/remudero/janitor-decisions.tsv}"
-mkdir -p "$(dirname "$DECISION_LOG")" && : >> "$DECISION_LOG" || exit 2
+# A dry run writes nothing anywhere: no receipt, no audit line, no lock file (operator 2026-10-23).
+if [ "$DRY_RUN" = 1 ]; then DECISION_LOG=/dev/null
+else mkdir -p "$(dirname "$DECISION_LOG")" && : >> "$DECISION_LOG" || exit 2; fi
 audit_writable() {
   mkdir -p -- "$(dirname -- "$AUDIT_LOG")" 2>/dev/null && : >> "$AUDIT_LOG" 2>/dev/null
 }
 audit_append() {
+  [ "$DRY_RUN" != 1 ] || return 0
   printf '%s uid=%s dry_run=%s pid=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_UID" "$DRY_RUN" "$$" "$*" \
     >> "$AUDIT_LOG" 2>/dev/null
 }
@@ -253,7 +300,7 @@ log() {
   rmd_decision_record "$DECISION_LOG" "$*" || { echo 'REFUSE decision log unwritable' >&2; exit 2; }
   printf '%s\n' "$*"
   case "$*" in
-    "REMOVE "*|"ARCHIVE "*|"ARCHIVE-WORKTREE "*|"PRUNE "*) audit_append "$*" || true ;;
+    "REMOVE "*|"ARCHIVE "*|"ARCHIVE-WORKTREE "*|"PRUNE "*|"PRESERVE "*) audit_append "$*" || true ;;
   esac
 }
 
@@ -263,20 +310,47 @@ retention_window() {
 }
 fmt_minutes() { if [ $(( $1 % 60 )) = 0 ]; then printf '%s h' "$(( $1 / 60 ))"; else printf '%s min' "$1"; fi; }
 
+TALLY_KEYS=(); TALLY_BYTES=(); TALLY_COUNT=(); TALLY_N=0
+du_bytes() { du -sk -- "$1" 2>/dev/null | awk 'NR == 1 { print $1 * 1024 }'; }
+tally() {
+  local key="$1" bytes="${2:-0}" i=0
+  case "$bytes" in ""|*[!0-9]*) bytes=0 ;; esac
+  while [ "$i" -lt "$TALLY_N" ]; do
+    if [ "${TALLY_KEYS[$i]}" = "$key" ]; then
+      TALLY_BYTES[i]=$(( TALLY_BYTES[i] + bytes )); TALLY_COUNT[i]=$(( TALLY_COUNT[i] + 1 )); return
+    fi
+    i=$(( i + 1 ))
+  done
+  TALLY_KEYS[TALLY_N]="$key"; TALLY_BYTES[TALLY_N]="$bytes"; TALLY_COUNT[TALLY_N]=1; TALLY_N=$(( TALLY_N + 1 ))
+}
+print_tallies() {
+  local i=0 verb="reclaimed"
+  [ "$DRY_RUN" = 1 ] && verb="would reclaim"
+  [ "$TALLY_N" -gt 0 ] || { log "rmd-host-cleanup: reclaim-total: nothing to reclaim in any root this pass"; return; }
+  while [ "$i" -lt "$TALLY_N" ]; do
+    log "rmd-host-cleanup: reclaim-total ${TALLY_KEYS[$i]}: $verb $(( TALLY_BYTES[i] / 1048576 )) MB (${TALLY_BYTES[$i]} bytes) in ${TALLY_COUNT[$i]} entries"
+    i=$(( i + 1 ))
+  done
+}
+
 # The lock is created once (O_EXCL, so never through a symlink) and then opened READ-ONLY: flock
 # needs no write access, so whichever identity created it, any mode the other can read works, and
 # an open without O_CREAT is outside fs.protected_regular entirely.
-( set -C; umask 022; : > "$LOCK_FILE" ) 2>/dev/null
-if [ -L "$LOCK_FILE" ] || ! exec 9<"$LOCK_FILE"; then
-  log "REFUSE: cannot acquire janitor lock $LOCK_FILE"; exit 2
+[ "$DRY_RUN" = 1 ] || ( set -C; umask 022; : > "$LOCK_FILE" ) 2>/dev/null
+if [ "$DRY_RUN" = 1 ] && [ ! -e "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ]; then
+  log "rmd-host-cleanup: dry run without the pass lock ($LOCK_FILE is absent and a dry run creates nothing)"
+else
+  if [ -L "$LOCK_FILE" ] || ! exec 9<"$LOCK_FILE"; then
+    log "REFUSE: cannot acquire janitor lock $LOCK_FILE"; exit 2
+  fi
+  $FLOCK_CMD -n -E 73 9
+  lock_status=$?
+  case "$lock_status" in
+    0) ;;
+    73) log "KEEP pass: another janitor pass holds the lock"; exit 0 ;;
+    *) log "REFUSE: cannot acquire janitor lock $LOCK_FILE"; exit 2 ;;
+  esac
 fi
-$FLOCK_CMD -n -E 73 9
-lock_status=$?
-case "$lock_status" in
-  0) ;;
-  73) log "KEEP pass: another janitor pass holds the lock"; exit 0 ;;
-  *) log "REFUSE: cannot acquire janitor lock $LOCK_FILE"; exit 2 ;;
-esac
 
 # Every mutation goes through here, so DRY_RUN=1 has exactly one place to hold.
 act() {
@@ -351,7 +425,7 @@ is_protected_worktree() {
 
 # One decision per path: keep-with-reason, or remove.
 sweep_path() {
-  local p="$1" idle_status seed_reason entries
+  local p="$1" idle_status seed_reason entries bytes
   # Generic temp globs must not bypass Git safety for a checkout or a unit
   # containing one. Incomplete walks are not permission to remove a tree.
   if [ -d "$p" ] && [ ! -L "$p" ]; then
@@ -373,8 +447,9 @@ sweep_path() {
   esac
   if seed_reason=$(rmd_dependency_seed_risk "$p"); then log "KEEP $p: $seed_reason"; return; fi
   if is_open "$p"; then log "KEEP $p: held open by a process"; return; fi
+  bytes="$(du_bytes "$p")"
   log "REMOVE $p"
-  act rm -rf -- "$p"
+  act rm -rf -- "$p" && tally "sweep ${p%/*}" "$bytes"
 }
 
 bare_repository_scan() {
@@ -456,7 +531,7 @@ clone_live_worktree() {
   return 1
 }
 sweep_worktree() {
-  local wt="$1" gitdir idle_status kind head hosted unsaved orphaned=0 seed_reason
+  local wt="$1" gitdir idle_status kind head hosted unsaved orphaned=0 seed_reason bytes
   if seed_reason=$(rmd_dependency_seed_risk "$wt"); then log "KEEP $wt: $seed_reason"; return; fi
   [ -d "$wt" ] && [ ! -L "$wt" ] || { log "KEEP $wt: not a regular directory"; return; }
   if [ -d "$wt/.git" ] && [ ! -L "$wt/.git" ]; then kind="standalone clone"
@@ -525,17 +600,21 @@ sweep_worktree() {
       fi
     fi
   fi
-  if ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG)"; return; fi
+  if [ "$DRY_RUN" != 1 ] && ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG)"; return; fi
+  bytes="$(du_bytes "$wt")"
   log "REMOVE $wt ($kind)"
   if [ "$DRY_RUN" = 1 ]; then
     if [ "$kind" = "standalone clone" ]; then log "DRYRUN would: rm -rf -- $wt"
     else log "DRYRUN would: git worktree remove $wt"; fi
+    tally "sweep ${wt%/*}" "$bytes"
     return
   fi
   if [ "$kind" = "standalone clone" ]; then
-    if ! rm -rf -- "$wt"; then log "KEEP $wt: standalone clone removal failed"; fi
+    if ! rm -rf -- "$wt"; then log "KEEP $wt: standalone clone removal failed"; else tally "sweep ${wt%/*}" "$bytes"; fi
   elif ! rgit "$wt" worktree remove -- "$wt" 2>/dev/null; then
     log "KEEP $wt: git worktree remove failed; no recursive filesystem fallback"
+  else
+    tally "sweep ${wt%/*}" "$bytes"
   fi
 }
 
@@ -593,16 +672,51 @@ keep_parent() {
   PARENTS_LOGGED="$PARENTS_LOGGED$1:"
   log "KEEP $1: workspace parent root"
 }
+# A keep marker whose first line is `keep-until: YYYY-MM-DD` (or JSON "until") lapses after that UTC date.
+MARKERS_SEEN="|"; TODAY_UTC="$(date -u +%Y-%m-%d)"
+keep_marker() {   # keep_marker <folder> [quiet]: true while its marker is in force
+  local m="$1/.rmd-scratch-keep" text until seen=0 mtime
+  [ -e "$m" ] || [ -L "$m" ] || return 1
+  if [ -L "$m" ] || [ ! -f "$m" ]; then return 0; fi
+  text="$(head -c 4096 -- "$m" 2>/dev/null)"
+  until="$(printf '%s\n' "$text" | sed -n -E '1s/^keep-until:[[:space:]]*([0-9]{4}-[0-9]{2}-[0-9]{2}).*/\1/p')"
+  [ -n "$until" ] || until="$(printf '%s' "$text" | tr '\n' ' ' | sed -n -E 's/.*"until"[[:space:]]*:[[:space:]]*"([0-9]{4}-[0-9]{2}-[0-9]{2})".*/\1/p')"
+  [ "${2:-}" = quiet ] && seen=1
+  case "$MARKERS_SEEN" in *"|$m|"*) seen=1 ;; *) [ "$seen" = 1 ] || MARKERS_SEEN="$MARKERS_SEEN$m|" ;; esac
+  if [ -n "$until" ]; then
+    if [[ "$until" < "$TODAY_UTC" ]]; then
+      [ "$seen" = 1 ] || log "KEEP-EXPIRED $m: keep-until $until has passed; the folder is judged normally"
+      return 1
+    fi
+    return 0
+  fi
+  if [ "$seen" = 0 ]; then
+    mtime="$(file_sig "$m")"; mtime="${mtime##* }"
+    log "MARKER $m: honoured with no machine-readable expiry, $(( ( $(date +%s) - ${mtime:-0} ) / 86400 )) days old"
+  fi
+  return 0
+}
+ruling_namespace() {   # true when $1 is, or is inside, a namespace under an operator ruling
+  local n
+  while IFS= read -r n; do
+    n="${n%/}"; [ -n "$n" ] || continue
+    case "$1" in "$n"|"$n"/*) return 0 ;; esac
+  done < <(printf '%s\n' "$RULING_NAMESPACES" | tr ':' '\n')
+  return 1
+}
 scratch_guard() {
   local p="$1" protected parent
   case "${p##*/}" in
-    swapfile|lost+found|rmd|worktrees|tmp|npm-cache|node-compile-cache|node-v*-linux-x64*|tsx-*|.remudero-coverage|state)
+    swapfile|lost+found|rmd|worktrees|tmp|npm-cache|node-compile-cache|node-v*-linux-x64*|tsx-*|.remudero-coverage|state|docker|containerd)
       log "KEEP $p: protected scratch name"; return 1 ;;
   esac
   if [ -L "$p" ]; then log "KEEP $p: symbolic link"; return 1; fi
-  if [ -e "$p/.rmd-scratch-keep" ] || [ -L "$p/.rmd-scratch-keep" ]; then
+  if keep_marker "$p"; then
     log "KEEP $p: scratch keep marker"; return 1
   fi
+  if ruling_namespace "$p"; then log "KEEP $p: operator ruling 2026-10-23 (retired only by the service-user pass)"; return 1; fi
+  # The preserve-then-retire copies sit on the scratch disk; only retention may expire them.
+  case "$PRESERVE_ROOT" in "$p"|"$p"/*) log "KEEP $p: holds the janitor's preserve root $PRESERVE_ROOT"; return 1 ;; esac
   while IFS= read -r parent; do
     [ -n "$parent" ] || continue
     parent="${parent%/}"
@@ -704,6 +818,7 @@ keep_scratch_for_repo() {
       log "PRUNE $tree: ${bytes:-unknown} bytes, unit kept for $reason"
       if act rm -rf -- "$tree"; then
         PRUNED_COUNT=$((PRUNED_COUNT + 1)); PRUNED_BYTES=$((PRUNED_BYTES + ${bytes:-0}))
+        tally "prune ${p%/*}" "$bytes"
       fi
     done
   done <<< "$entries"
@@ -733,6 +848,7 @@ prune_tsx_cache() {
     log "PRUNE $dir: ${bytes} bytes, ${count} tsx cache files older than $(fmt_minutes "$TSX_MAX_AGE_MINUTES")"
     if act find "$dir" -xdev -type f -mmin "+$minutes" -delete; then
       TSX_PRUNED_COUNT=$((TSX_PRUNED_COUNT + count)); TSX_PRUNED_BYTES=$((TSX_PRUNED_BYTES + bytes))
+      tally "tsx $dir" "$bytes"
     fi
   fi
   if [ -n "$(find "$dir" -xdev -mindepth 1 -type d -empty -mmin "+$minutes" -print -quit 2>/dev/null)" ]; then
@@ -760,15 +876,44 @@ normalize_path() {
     print (out == "" ? "/" : out)
   }'
 }
+# find into SCAN_OUT, each refused folder into SCAN_DENIED; only a non-refusal error fails (one foreign folder must not fail all).
+scan_find() {
+  local out line rc other=0
+  SCAN_OUT=""; SCAN_DENIED=""
+  out="$(LC_ALL=C $FIND_CMD "$@" 2>&1 </dev/null)"; rc=$?
+  while IFS= read -r line; do
+    case "$line" in
+      "") ;;
+      /*) SCAN_OUT="$SCAN_OUT$line
+" ;;
+      "find: "*": Permission denied")
+        line="${line#find: }"; line="${line%: Permission denied}"; line="${line#\'}"; line="${line%\'}"
+        SCAN_DENIED="$SCAN_DENIED$line
+" ;;
+      *) other=1 ;;
+    esac
+  done <<< "$out"
+  [ "$rc" = 0 ] || { [ "$other" = 0 ] && [ -n "$SCAN_DENIED" ]; }
+}
+denied_inside() {
+  local d
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    case "$d" in "$2"|"$2"/*) printf '%s\n' "$d"; return 0 ;; esac
+  done <<< "$1"
+  return 1
+}
+ALTERNATES_DENIED=""
 snapshot_alternates() {
   local root files file lines line target
   while IFS= read -r root; do
     root="${root%/}"
     [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
-    if ! files="$(find "$root" -maxdepth 8 \( -name node_modules -o -path '*/objects/[0-9a-f][0-9a-f]' \
-        -o -path '*/objects/pack' \) -prune -o -type f -path '*/objects/info/alternates' -print 2>/dev/null)"; then
+    if ! scan_find "$root" -maxdepth 8 \( -name node_modules -o -path '*/objects/[0-9a-f][0-9a-f]' \
+        -o -path '*/objects/pack' \) -prune -o -type f -path '*/objects/info/alternates' -print; then
       ALTERNATES_OK=0; return
     fi
+    files="$SCAN_OUT"; ALTERNATES_DENIED="$ALTERNATES_DENIED$SCAN_DENIED"
     while IFS= read -r file; do
       [ -n "$file" ] || continue
       lines="$(head -n 64 -- "$file" 2>/dev/null)" || { ALTERNATES_OK=0; return; }
@@ -778,13 +923,17 @@ snapshot_alternates() {
 "
       done <<< "$lines"
     done <<< "$files"
-  done < <(printf '%s\n%s\n%s\n%s\n%s\n' "$SCRATCH_ROOTS" "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$LIVE_CHECKOUTS" "$TMP_ROOTS" | tr ':' '\n'; state_units)
+  done < <(printf '%s\n%s\n%s\n%s\n%s\n' "$SCRATCH_ROOTS" "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$LIVE_CHECKOUTS" "$TMP_ROOTS" | tr ':' '\n'
+             # the preserve-then-retire phase judges these too, so their borrowers count (full pass only)
+             [ "$ONLY_TMP" = 1 ] || printf '%s\n' "$PRESERVE_ROOTS" | tr ':' '\n'
+             state_units)
 }
 # Sets SCRATCH_REASON and fails when unit $1 must stay: it borrows from a store that is gone, or a
 # borrower outside it still names it. A borrower removed earlier in this pass no longer holds it.
 lender_check() {
   local p="$1" pp file target borrower borrowers=""
   if [ "$ALTERNATES_OK" != 1 ]; then SCRATCH_REASON="alternates scan failed (unknown)"; return 1; fi
+  if file="$(denied_inside "$ALTERNATES_DENIED" "$p")"; then SCRATCH_REASON="alternates scan refused at $file (unknown)"; return 1; fi
   pp="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || pp="$p"
   while IFS='	' read -r file target; do
     [ -n "$file" ] || continue
@@ -882,7 +1031,7 @@ sweep_scratch_unit() {
   bytes="$(du -sk -- "$p" 2>/dev/null | awk '{print $1 * 1024}')"
   log "REMOVE $p"
   [ "$DRY_RUN" = 1 ] && log "DRYRUN would reclaim ${bytes:-unknown} bytes from $p"
-  act rm -rf -- "$p"
+  act rm -rf -- "$p" && tally "sweep ${p%/*}" "$bytes"
 }
 sweep_scratch_root() {
   local root="$1" unit
@@ -910,7 +1059,8 @@ state_child_guard() {
     [ -n "$configured" ] || continue
     case "$configured" in "$p"|"$p"/*) STATE_REASON="holds janitor path $configured"; return 1 ;; esac
   done < <(printf '%s\n' "$ARCHIVE_ROOT" "$WORKTREE_ARCHIVE_ROOT" "$TMP_ROOTS" "$SCRATCH_ROOTS" \
-             "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$COVERAGE_LOCK_DIR" "$LOCK_FILE" | tr ':' '\n')
+             "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$COVERAGE_LOCK_DIR" "$LOCK_FILE" "$PRESERVE_ROOT" \
+             "$RETAIN_ROOTS" | tr ':' '\n')
 }
 # Fails with STATE_REASON when state parent $1 is the root disk's own directory (disk not mounted).
 state_parent_ok() {
@@ -924,7 +1074,7 @@ state_units() {
   local parent unit STATE_REASON
   while IFS= read -r parent; do
     parent="${parent%/}"
-    [ -n "$parent" ] && [ -d "$parent" ] && [ ! -L "$parent" ] && [ ! -e "$parent/.rmd-scratch-keep" ] || continue
+    [ -n "$parent" ] && [ -d "$parent" ] && [ ! -L "$parent" ] && ! keep_marker "$parent" quiet || continue
     state_parent_ok "$parent" || continue
     for unit in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
       { [ -e "$unit" ] || [ -L "$unit" ]; } && state_child_guard "$unit" "$parent" && printf '%s\n' "$unit"
@@ -935,7 +1085,7 @@ sweep_state_parent() {
   local parent="${1%/}" unit STATE_REASON=""
   [ -d "$parent" ] || return
   keep_parent "$parent"
-  if [ -e "$parent/.rmd-scratch-keep" ] || [ -L "$parent" ]; then
+  if keep_marker "$parent" || [ -L "$parent" ]; then
     log "KEEP $parent: scratch keep marker or symbolic link"; return
   fi
   if ! state_parent_ok "$parent"; then log "KEEP $parent: $STATE_REASON"; return; fi
@@ -972,6 +1122,7 @@ sweep_nested_coverage() {
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     [[ "${p##*/}" =~ ^rmd-c-[0-9a-f]{12}$ ]] || continue
+    ruling_namespace "$p" && continue
     case "$NESTED_COVERAGE_SEEN" in *"|$p|"*) continue ;; esac
     NESTED_COVERAGE_SEEN="$NESTED_COVERAGE_SEEN|$p|"
     [ -d "$p" ] && [ ! -L "$p" ] || continue
@@ -985,8 +1136,8 @@ sweep_nested_coverage() {
     if is_open "$p"; then log "KEEP $p: held open by a process"; continue; fi
     bytes="$(du -sk -- "$p" 2>/dev/null | awk '{print $1 * 1024}')"
     log "REMOVE $p: nested coverage scratch with no lock, ${bytes:-unknown} bytes"
-    act rm -rf -- "$p"
-  done < <(find "$root" -xdev -maxdepth 6 \( -name .git -o -name node_modules \) -prune -o \
+    act rm -rf -- "$p" && tally "coverage $root" "$bytes"
+  done < <(find "$root" -xdev -maxdepth 6 \( -name .git -o -name node_modules -o -name docker -o -name containerd \) -prune -o \
              -type d -name 'rmd-c-*' -print -prune 2>/dev/null)
 }
 ARCHIVE_OK=0
@@ -1016,6 +1167,621 @@ archive_transcript() {
   log "ARCHIVE $f -> $dest"
   if [ "$DRY_RUN" = 1 ]; then log "DRYRUN would: move $f to $dest"; return; fi
   mkdir -p "$(dirname "$dest")" && cp -p -- "$f" "$dest" && rm -f -- "$f"
+}
+
+# ── preserve-then-retire (operator 2026-10-23): the Mac preserve-retire.py design on this janitor's
+# own guards; holds, copy format and restore steps are in deploy/mac/JANITOR.md.
+PRESERVE_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+PRESERVE_SKIP_DIRS="node_modules coverage dist .turbo .next"
+PRESERVE_RETIRED=0; PRESERVE_HELD=0
+owner_uid() { stat -c %u -- "$1" 2>/dev/null || stat -f %u -- "$1" 2>/dev/null; }
+url_without_credentials() { printf '%s\n' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@#\1#'; }
+remote_published() {
+  local url prefix
+  url="$(url_without_credentials "$1")"
+  for prefix in $PUBLISHED_REMOTES; do case "$url" in "$prefix"*) return 0 ;; esac; done
+  return 1
+}
+preserve_hold() {
+  PRESERVE_HELD=$(( PRESERVE_HELD + 1 ))
+  log "KEEP $1: preserve-then-retire hold: $2"
+}
+RULING_CHILD=""
+preserve_skip() {
+  local p="$1" other
+  [ "$p" = "$RULING_CHILD" ] && return 1
+  ruling_namespace "$p" && [ -z "$RULING_CHILD" ] && return 0
+  case "${p##*/}" in
+    swapfile|lost+found|worktrees|tmp|npm-cache|node-compile-cache|node-v*-linux-x64*|tsx-*|.remudero-coverage|state|docker|containerd|host-cleanup-validation-bundles-*|.incoming-*) return 0 ;;
+  esac
+  while IFS= read -r other; do
+    other="${other%/}"
+    [ -n "$other" ] || continue
+    case "$other" in "$p"|"$p"/*) return 0 ;; esac
+  done < <(printf '%s\n' "$PRESERVE_ROOTS" "$PRESERVE_ROOT" "$ARCHIVE_ROOT" "$WORKTREE_ARCHIVE_ROOT" "$RETAIN_ROOTS" \
+             "$COVERAGE_PATHS" "$LOCK_FILE" | tr ':' '\n')
+  return 1
+}
+preserve_oversized() {
+  local repo="$1" files f rel
+  files="$(find "$repo" \( -name .git -o -name node_modules -o -name coverage -o -name dist -o -name .turbo -o -name .next \) -prune \
+             -o -type f -size "+${MAX_UNTRACKED_MB}M" -print 2>/dev/null)" || return 1
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rel="${f#"$repo"/}"
+    rgit "$repo" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || { printf '%s\n' "$rel"; return 0; }
+  done <<< "$files"
+}
+preserve_exclusions() {
+  local repo="$1" unit="$2" url ref sha
+  url="$(rgit "$repo" remote get-url origin 2>/dev/null)" || return 0
+  remote_published "$url" || return 0
+  rmd_remote_outside_retirement "$repo" "$unit" || return 0
+  if rmd_publication_snapshot "$repo"; then
+    printf '%s\n' "$RMD_PUB_REFS" | awk '$2 ~ /^refs\/(heads|tags)\// { print $1 "^{commit}" }' |
+      rgit "$repo" cat-file --batch-check='%(objectname) %(objecttype)' 2>/dev/null |
+      awk '$2 == "commit" { print "^" $1 }' | sort -u
+    return 0
+  fi
+  for ref in refs/remotes/origin/main refs/remotes/origin/master; do
+    sha="$(rgit "$repo" rev-parse --verify -q "$ref^{commit}" 2>/dev/null)" && printf '^%s\n' "$sha"
+  done
+  return 0
+}
+preserve_write() {
+  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count r name url remotes_text="" skip
+  local -a revs=() tar_excludes=()
+  branch="$(rgit "$repo" symbolic-ref -q --short HEAD 2>/dev/null)" || branch="(detached)"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    url="$(rgit "$repo" remote get-url "$name" 2>/dev/null)" || { PRESERVE_REASON="remote-url-unreadable"; return 1; }
+    remotes_text="$remotes_text  $name $(url_without_credentials "$url")
+"
+  done < <(rgit "$repo" remote 2>/dev/null)
+  excl="$(preserve_exclusions "$repo" "$unit")"
+  revs=(--branches --tags HEAD)
+  if rgit "$repo" rev-parse --verify -q refs/stash >/dev/null 2>&1; then revs+=(refs/stash); fi
+  while IFS= read -r r; do [ -n "$r" ] && revs+=("$r"); done <<< "$excl"
+  count="$(rgit "$repo" rev-list --count "${revs[@]}" 2>/dev/null)" || { PRESERVE_REASON="history-unrecoverable (rev-list failed)"; return 1; }
+  if [ "${count:-0}" -gt 0 ]; then
+    rgit "$repo" bundle create "$work/unpublished.bundle" "${revs[@]}" >/dev/null 2>&1 </dev/null || { PRESERVE_REASON="bundle-create-failed"; return 1; }
+    rgit "$repo" bundle verify "$work/unpublished.bundle" >/dev/null 2>&1 </dev/null || { PRESERVE_REASON="bundle-unverified"; return 1; }
+  fi
+  rgit "$repo" for-each-ref --format='%(objectname) %(refname)' > "$work/refs.txt" 2>/dev/null || { PRESERVE_REASON="refs-unreadable"; return 1; }
+  rgit "$repo" diff --binary HEAD > "$work/uncommitted.patch" 2>/dev/null || { PRESERVE_REASON="diff-failed"; return 1; }
+  [ -s "$work/uncommitted.patch" ] || rm -f -- "$work/uncommitted.patch"
+  for skip in $PRESERVE_SKIP_DIRS; do tar_excludes+=("-x" "$skip"); done
+  rgit "$repo" ls-files -z --others "${tar_excludes[@]}" > "$work/.untracked" 2>/dev/null || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
+  if [ -s "$work/.untracked" ]; then
+    tar_excludes=(--exclude=.git)
+    for skip in $PRESERVE_SKIP_DIRS; do tar_excludes+=("--exclude=$skip"); done
+    if ! ( cd -- "$repo" && tar -czf "$work/untracked.tar.gz" "${tar_excludes[@]}" --null -T "$work/.untracked" ) </dev/null >/dev/null 2>&1 ||
+       ! tar -tzf "$work/untracked.tar.gz" </dev/null >/dev/null 2>&1; then
+      PRESERVE_REASON="untracked-tarball-failed"; return 1
+    fi
+  fi
+  rm -f -- "$work/.untracked"
+  {
+    printf 'Preserved by the Azure host janitor (deploy/rmd-host-cleanup.sh, preserve-then-retire).\n'
+    printf 'path:   %s\nunit:   %s\nhead:   %s  branch: %s\npreserved_at: %s\n' "$repo" "$unit" "$head" "$branch" "$PRESERVE_STAMP"
+    printf 'commits not on a published remote: %s\nremotes:\n%s' "$count" "$remotes_text"
+    printf 'expires: %s days after preservation (operator ruling 2026-10-23)\n\nRestore:\n' "$RETAIN_DAYS"
+    printf '  git clone <upstream URL from remotes above> <dir> && cd <dir>\n'
+    printf '  git bundle unbundle %s/unpublished.bundle   # if present; restores every unpublished commit\n' "$final"
+    printf '  # refs.txt lists every original ref: git update-ref <ref> <sha> recreates the ones you want\n'
+    printf '  git checkout %s\n  git apply --binary %s/uncommitted.patch   # if present\n  tar -xzf %s/untracked.tar.gz              # if present\n' "$head" "$final" "$final"
+  } > "$work/MANIFEST.txt" || { PRESERVE_REASON="manifest-write-failed"; return 1; }
+}
+preserve_repo() {
+  local repo="$1" unit="$2" head big name final work
+  PRESERVE_REASON=""; PRESERVED_DIR=""; PRESERVED_HEAD=""
+  if ! head="$(rgit "$repo" rev-parse --verify HEAD 2>/dev/null)" || ! rgit "$repo" cat-file -e 'HEAD^{tree}' 2>/dev/null; then
+    PRESERVE_REASON="history-unrecoverable (HEAD unreadable)"; return 1
+  fi
+  if ! big="$(preserve_oversized "$repo")"; then PRESERVE_REASON="untracked-file scan failed (unknown)"; return 1; fi
+  if [ -n "$big" ]; then PRESERVE_REASON="untracked-file-over-${MAX_UNTRACKED_MB}MB ($big)"; return 1; fi
+  if ! rgit "$repo" remote >/dev/null 2>&1; then PRESERVE_REASON="remotes-unreadable"; return 1; fi
+  name="${repo#/}"; name="${name//\//__}@$PRESERVE_STAMP"
+  final="$PRESERVE_ROOT/$name"
+  PRESERVED_HEAD="$head"
+  if [ "$DRY_RUN" = 1 ]; then PRESERVED_DIR="$final"; log "DRYRUN would: preserve $repo to $final"; return 0; fi
+  if [ -e "$final" ] || [ -L "$final" ]; then PRESERVE_REASON="preserve copy $final already exists"; return 1; fi
+  work="$PRESERVE_ROOT/.incoming-$name"
+  if ! mkdir -m 700 -- "$work" 2>/dev/null; then PRESERVE_REASON="cannot create $work"; return 1; fi
+  if ! preserve_write "$repo" "$unit" "$work" "$head" "$final" || ! mv -- "$work" "$final"; then
+    rm -rf -- "$work"; PRESERVE_REASON="${PRESERVE_REASON:-preserve-move-failed}"; return 1
+  fi
+  PRESERVED_DIR="$final"
+  log "PRESERVE $repo: copied to $final (HEAD=$head)"
+}
+PRESERVE_MARK_PCT=""; PRESERVE_MARK_KB=0
+preserve_root_mark() {
+  local i dev pdev
+  pdev="$($DF_CMD "$PRESERVE_ROOT" 2>/dev/null | awk 'NR==2 { print $1 }')"
+  [ -n "$pdev" ] || return 0
+  for i in "${!W_PATH[@]}"; do
+    [ -e "${W_PATH[$i]}" ] || continue
+    dev="$($DF_CMD "${W_PATH[$i]}" 2>/dev/null | awk 'NR==2 { print $1 }')"
+    [ "$dev" = "$pdev" ] || continue
+    if [ -z "$PRESERVE_MARK_PCT" ] || [ "${W_PCT[$i]}" -lt "$PRESERVE_MARK_PCT" ]; then PRESERVE_MARK_PCT="${W_PCT[$i]}"; fi
+    [ "${W_FREE_KB[$i]}" -gt "$PRESERVE_MARK_KB" ] && PRESERVE_MARK_KB="${W_FREE_KB[$i]}"
+  done
+}
+preserve_root_has_room() {
+  local row pct avail
+  [ -n "$PRESERVE_MARK_PCT" ] || return 0
+  row="$($DF_CMD "$PRESERVE_ROOT" 2>/dev/null | awk 'NR==2 { gsub("%","",$5); print $5, $4 }')"
+  read -r pct avail <<< "$row"
+  case "${pct:-x}${avail:-x}" in *[!0-9]*) return 1 ;; esac
+  [ "$pct" -lt "$PRESERVE_MARK_PCT" ] && [ "$avail" -ge "$PRESERVE_MARK_KB" ]
+}
+docker_mount_inside() {
+  local p="$1" mount
+  while IFS= read -r mount; do
+    mount="${mount%/}"
+    [ -n "$mount" ] || continue
+    case "$mount" in "$p"/*) return 0 ;; esac
+  done <<< "$DOCKER_MOUNTS"
+  return 1
+}
+unit_bundles() {
+  local p="$1" files f
+  scan_find "$p" \( -name node_modules -o -name .git \) -prune -o -type f -name '*.bundle' -print || return 1
+  files="$SCAN_OUT"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    dump_in_repo "$f" "$p" || printf '%s\n' "$f"
+  done <<< "$files"
+}
+preserve_bundles() {
+  local p="$1" list="$2" name final work f
+  PRESERVE_REASON=""; PRESERVED_DIR=""
+  name="${p#/}"; name="${name//\//__}@$PRESERVE_STAMP"; final="$PRESERVE_ROOT/$name.bundles"
+  if [ "$DRY_RUN" = 1 ]; then PRESERVED_DIR="$final"; log "DRYRUN would: copy the loose bundles of $p to $final"; return 0; fi
+  if [ -e "$final" ] || [ -L "$final" ]; then PRESERVE_REASON="preserve copy $final already exists"; return 1; fi
+  work="$PRESERVE_ROOT/.incoming-$name.bundles"
+  mkdir -m 700 -- "$work" 2>/dev/null || { PRESERVE_REASON="cannot create $work"; return 1; }
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    mkdir -p -- "$work/$(dirname -- "${f#"$p"/}")" && cp -p -- "$f" "$work/${f#"$p"/}" && cmp -s -- "$f" "$work/${f#"$p"/}" ||
+      { rm -rf -- "$work"; PRESERVE_REASON="bundle copy failed ($f)"; return 1; }
+  done <<< "$list"
+  printf 'Loose bundles of %s, preserved %s by the Azure host janitor; restore with git fetch <bundle> or git clone <bundle>.\nexpires: %s days after preservation (operator ruling 2026-10-23)\n' \
+    "$p" "$PRESERVE_STAMP" "$RETAIN_DAYS" > "$work/MANIFEST.txt" && mv -- "$work" "$final" ||
+    { rm -rf -- "$work"; PRESERVE_REASON="bundle manifest failed"; return 1; }
+  PRESERVED_DIR="$final"
+  log "PRESERVE $p: loose bundles copied to $final"
+}
+# A repository is judged whole; a folder held only by something inside it is descended, each child
+# judged on its own, and stays while any child does (operator 2026-10-23).
+preserve_unit() {
+  local p="$1" entries bundles status uid found seed_reason entry repo gitdir reg target i bytes copies="" pp
+  local is_repo=0 descend="" protected denied
+  local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
+  local -a repos=() heads=()
+  [ -d "$p" ] && [ ! -L "$p" ] || return 0
+  preserve_skip "$p" && return 0
+  scan_find "$p" -name node_modules -prune -o -name .git -prune -print; status=$?
+  entries="$SCAN_OUT"; denied="$SCAN_DENIED"
+  bundles="$(unit_bundles "$p")" || status=1
+  [ -n "$entries$bundles" ] || return 0   # no repository and no bundle: the other sweeps own it
+  uid="$(owner_uid "$p")"
+  if [ "$uid" != "$RUN_UID" ]; then preserve_hold "$p" "foreign owner (uid ${uid:-unknown}, pass uid $RUN_UID)"; return; fi
+  if [ "$status" != 0 ]; then preserve_hold "$p" "repository scan failed (unknown)"; return; fi
+  if keep_marker "$p"; then preserve_hold "$p" "scratch keep marker"; return; fi
+  if is_protected_worktree "$p"; then preserve_hold "$p" "protected by janitor configuration"; return; fi
+  { [ -e "$p/.git" ] || [ -L "$p/.git" ]; } && is_repo=1
+  [ -z "$denied" ] || descend="unreadable path inside ($(printf '%s\n' "$denied" | head -n 1))"
+  if [ -f "$p/HEAD" ] && [ -d "$p/objects" ] && [ -d "$p/refs" ]; then preserve_hold "$p" "bare repository; Git history retained"; return; fi
+  while IFS= read -r protected; do
+    protected="${protected%/}"
+    [ -n "$protected" ] || continue
+    case "$protected" in
+      "$p"/*/*) descend="${descend:-holds protected checkout $protected}" ;;
+      "$p"/*) preserve_hold "$p" "holds protected checkout $protected"; return ;;
+    esac
+  done < <(printf '%s\n%s\n' "$PROTECTED_WORKTREE_ROOTS" "$LIVE_CHECKOUTS" | tr ':' '\n')
+  if seed_reason=$(rmd_dependency_seed_risk "$p"); then
+    case "$seed_reason" in contains*) descend="${descend:-$seed_reason}" ;; *) preserve_hold "$p" "$seed_reason"; return ;; esac
+  fi
+  if scan_find "$p" ! -user "$RUN_UID" -print -quit; then found="$(printf '%s\n' "$SCAN_OUT" | head -n 1)"
+  else found=""; descend="${descend:-ownership scan failed (unknown)}"; fi
+  [ -z "$found" ] || descend="${descend:-foreign owner (holds $found)}"
+  if [ -z "$descend" ]; then
+    is_worktree_idle "$p"; status=$?
+    case "$status" in
+      0) ;;
+      1) descend="written within ${IDLE_MINUTES} min" ;;
+      *) descend="activity probe failed (unknown)" ;;
+    esac
+  fi
+  [ -n "$descend" ] || ! is_open "$p" || descend="held open by a process"
+  if [ "$DOCKER_OK" != 1 ]; then preserve_hold "$p" "Docker mount snapshot failed (unknown)"; return; fi
+  if docker_mount_inside "$p"; then descend="${descend:-holds the mount of a running container}"
+  elif is_docker_mount "$p"; then log "KEEP $p: Docker mount"; return; fi
+  if [ -z "$descend" ]; then
+    bare_repository_scan "$p"; status=$?
+    case "$status" in
+      1) descend="holds a bare repository" ;;
+      2) descend="repository scan failed (unknown)" ;;
+    esac
+  fi
+  if [ -z "$descend" ] && ! lender_check "$p"; then descend="$SCRATCH_REASON"; fi
+  if [ -z "$descend" ] && ! link_lender_check "$p"; then descend="$SCRATCH_REASON"; LINK_LENDERS+=("$p"); fi
+  if [ -z "$descend" ]; then
+    pp="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || pp="$p"
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || continue
+      case "$entry" in */.git) repo="${entry%/.git}" ;; *) descend="unreadable repository path"; break ;; esac
+      if [ -L "$entry" ]; then descend="Git metadata has an unexpected type ($repo)"; break; fi
+      if ! gitdir="$(rgit "$repo" rev-parse --absolute-git-dir 2>/dev/null)" || [ ! -d "$gitdir" ]; then
+        descend="history-unrecoverable: Git metadata is unreadable or missing ($repo)"; break
+      fi
+      if [ -f "$gitdir/locked" ]; then descend="Git worktree is locked ($repo)"; break; fi
+      if ! git_head_idle "$repo"; then descend="recent or unverified Git HEAD activity ($repo)"; break; fi
+      if [ -d "$repo/.git" ]; then
+        for reg in "$gitdir"/worktrees/*/; do
+          [ -d "$reg" ] || continue
+          target="$(head -n 1 -- "${reg}gitdir" 2>/dev/null)" || { descend="linked worktree registration unreadable (${reg%/})"; break 2; }
+          target="${target%/.git}"
+          case "$target" in "$p"/*|"$pp"/*) ;; *) descend="hosts linked worktree ${target:-${reg%/}} outside the unit"; break 2 ;; esac
+        done
+      fi
+      repos+=("$repo")
+    done <<< "$entries"
+  fi
+  if [ -n "$descend" ]; then
+    if [ "$is_repo" = 1 ]; then
+      case "$descend" in
+        written\ within*|held\ open*|recent\ or\ unverified*) log "KEEP $p: $descend" ;;
+        *) preserve_hold "$p" "$descend" ;;
+      esac
+      return
+    fi
+    log "KEEP $p: folder of units kept ($descend); each child judged on its own"
+    local child
+    for child in "$p"/* "$p"/.[!.]* "$p"/..?*; do
+      { [ -e "$child" ] || [ -L "$child" ]; } || continue
+      preserve_unit "$child"
+    done
+    return
+  fi
+  for repo in ${repos[@]+"${repos[@]}"}; do
+    if [ "$DRY_RUN" != 1 ] && ! preserve_root_has_room; then
+      preserve_hold "$p" "preserve root $PRESERVE_ROOT is past its watched mark"; return
+    fi
+    if ! preserve_repo "$repo" "$p"; then preserve_hold "$p" "$PRESERVE_REASON ($repo)"; return; fi
+    heads+=("$PRESERVED_HEAD"); copies="$copies${copies:+ }$PRESERVED_DIR"
+  done
+  if [ -n "$bundles" ]; then
+    if [ "$DRY_RUN" != 1 ] && ! preserve_root_has_room; then
+      preserve_hold "$p" "preserve root $PRESERVE_ROOT is past its watched mark"; return
+    fi
+    if ! preserve_bundles "$p" "$bundles"; then preserve_hold "$p" "$PRESERVE_REASON"; return; fi
+    copies="$copies${copies:+ }$PRESERVED_DIR"
+  fi
+  bytes="$(du_bytes "$p")"
+  if [ "$DRY_RUN" = 1 ]; then
+    log "DRYRUN would: retire $p after preserving ${#repos[@]} repositories (${bytes:-unknown} bytes)"
+    tally "preserve-retire ${p%/*}" "$bytes"
+    return
+  fi
+  snapshot_open; snapshot_docker
+  if ! is_worktree_idle "$p" || is_open "$p" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$p" || ! lender_check "$p" ||
+     ! link_lender_check "$p"; then
+    preserve_hold "$p" "changed or active before retire (copies kept: $copies)"; return
+  fi
+  i=0
+  for repo in ${repos[@]+"${repos[@]}"}; do
+    gitdir="$(rgit "$repo" rev-parse --absolute-git-dir 2>/dev/null)" || { preserve_hold "$p" "Git metadata changed before retire ($repo)"; return; }
+    if [ -f "$gitdir/locked" ] || ! git_head_idle "$repo" || [ "$(rgit "$repo" rev-parse --verify HEAD 2>/dev/null)" != "${heads[$i]}" ]; then
+      preserve_hold "$p" "HEAD moved or worktree locked before retire ($repo; copies kept: $copies)"; return
+    fi
+    i=$(( i + 1 ))
+  done
+  if ! audit_writable; then preserve_hold "$p" "audit log unwritable ($AUDIT_LOG)"; return; fi
+  log "REMOVE $p: preserved then retired (${bytes:-unknown} bytes; copies: $copies)"
+  # A linked worktree of a repository outside the unit (a live checkout's) leaves through its owner's Git.
+  for repo in ${repos[@]+"${repos[@]}"}; do
+    [ -f "$repo/.git" ] || continue
+    gitdir="$(rgit "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || continue
+    case "$gitdir" in "$p"/*|"$pp"/*) continue ;; esac
+    if [ "${gitdir##*/}" = .git ] && rgit "${gitdir%/.git}" worktree remove --force -- "$repo" 2>/dev/null; then
+      rgit "${gitdir%/.git}" worktree prune 2>/dev/null || true
+    elif [ "${gitdir##*/}" = .git ] || ! rgit "$repo" worktree remove --force -- "$repo" 2>/dev/null; then
+      preserve_hold "$p" "git worktree remove failed; no recursive filesystem fallback (copies kept: $copies)"; return
+    fi
+  done
+  if [ -e "$p" ] && ! rm -rf -- "$p"; then preserve_hold "$p" "unit removal failed (copies kept: $copies)"; return; fi
+  PRESERVE_RETIRED=$(( PRESERVE_RETIRED + 1 ))
+  tally "preserve-retire ${p%/*}" "$bytes"
+}
+# A unit a symlink outside it points into (a linked-to node_modules) is a lender; links are never followed.
+LINKS=""; LINKS_OK=1; LINK_LENDERS=(); LINKS_DENIED=""
+snapshot_links() {
+  local root link target out
+  LINKS=""; LINKS_OK=1; LINKS_DENIED=""
+  while IFS= read -r root; do
+    root="${root%/}"
+    [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
+    scan_find "$root" -xdev \( -name .git -o \( -name node_modules -type d \) \) -prune -o -type l -print || { LINKS_OK=0; return; }
+    out="$SCAN_OUT"; LINKS_DENIED="$LINKS_DENIED$SCAN_DENIED"
+    while IFS= read -r link; do
+      [ -n "$link" ] || continue
+      target="$(readlink -- "$link" 2>/dev/null)" || continue
+      case "$target" in /*) ;; *) target="${link%/*}/$target" ;; esac
+      LINKS="$LINKS$link	$(normalize_path "$target")
+"
+    done <<< "$out"
+  done < <(printf '%s\n%s\n' "$PRESERVE_ROOTS" "$LIVE_CHECKOUTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
+}
+link_lender_check() {   # fails with SCRATCH_REASON when a live link outside unit $1 points into it
+  local p="$1" pp link target borrowers=""
+  if [ "$LINKS_OK" != 1 ]; then SCRATCH_REASON="symlink scan failed (unknown)"; return 1; fi
+  if link="$(denied_inside "$LINKS_DENIED" "$p")"; then SCRATCH_REASON="symlink scan refused at $link (unknown)"; return 1; fi
+  pp="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || pp="$p"
+  while IFS='	' read -r link target; do
+    [ -n "$link" ] || continue
+    case "$link" in "$p"/*|"$pp"/*) continue ;; esac
+    case "$target" in "$p"|"$p"/*|"$pp"|"$pp"/*) [ -L "$link" ] && borrowers="$borrowers${borrowers:+, }$link" ;; esac
+  done <<< "$LINKS"
+  [ -z "$borrowers" ] || { SCRATCH_REASON="lends files to symlinks $borrowers"; return 1; }
+}
+ruling_remove_plain() {
+  local c="$1" n="$2" status bytes seed_reason
+  local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES"
+  if keep_marker "$c"; then preserve_hold "$c" "scratch keep marker"; return; fi
+  if ! scan_find "$c" ! -user "$RUN_UID" -print -quit || [ -n "$SCAN_OUT$SCAN_DENIED" ]; then
+    preserve_hold "$c" "foreign-owned or unreadable content"; return
+  fi
+  if seed_reason=$(rmd_dependency_seed_risk "$c"); then preserve_hold "$c" "$seed_reason"; return; fi
+  is_worktree_idle "$c"; status=$?
+  case "$status" in
+    0) ;;
+    1) log "KEEP $c: written within ${IDLE_MINUTES} min"; return ;;
+    *) preserve_hold "$c" "activity probe failed (unknown)"; return ;;
+  esac
+  if is_open "$c"; then log "KEEP $c: held open by a process"; return; fi
+  if [ "$DOCKER_OK" != 1 ] || is_docker_mount "$c"; then preserve_hold "$c" "Docker mount or snapshot failed"; return; fi
+  bytes="$(du_bytes "$c")"
+  log "REMOVE $c: idle scratch retired under the operator ruling of 2026-10-23"
+  act rm -rf -- "$c" && tally "ruling $n" "$bytes"
+}
+ruling_retire() {
+  local n c
+  while IFS= read -r n; do
+    n="${n%/}"
+    [ -n "$n" ] && [ -d "$n" ] && [ ! -L "$n" ] || continue
+    log "MARKER-RULING $n: operator 2026-10-23: retire idle operator/wt-* worktrees and top-level tmp, tmp-*, t3.*; keep everything else (an active operator session whose plan records holds)"
+    for c in "$n"/operator/wt-* "$n"/tmp "$n"/tmp-* "$n"/t3.*; do
+      [ -d "$c" ] && [ ! -L "$c" ] || continue
+      RULING_CHILD="$c"
+      if scan_find "$c" -name node_modules -prune -o \( -name .git -o -name '*.bundle' \) -print -quit && [ -z "$SCAN_OUT" ]; then
+        ruling_remove_plain "$c" "$n"
+      else
+        preserve_unit "$c"
+      fi
+      RULING_CHILD=""
+    done
+  done < <(printf '%s\n' "$RULING_NAMESPACES" | tr ':' '\n' | awk 'NF && !seen[$0]++')
+}
+preserve_then_retire() {
+  local root unit retired_before lender
+  [ -n "$PRESERVE_ROOTS" ] || return 0
+  if [ -L "$PRESERVE_ROOT" ]; then log "REFUSE preserve-then-retire: $PRESERVE_ROOT is a symbolic link"; return; fi
+  if [ "$OPEN_OK" != 1 ]; then log "REFUSE preserve-then-retire: lsof failed — keeping everything (fail closed)"; return; fi
+  if [ "$DRY_RUN" != 1 ]; then
+    if ! mkdir -p -- "$PRESERVE_ROOT" 2>/dev/null || ! chmod 700 "$PRESERVE_ROOT" 2>/dev/null; then
+      log "REFUSE preserve-then-retire: cannot create $PRESERVE_ROOT"; return
+    fi
+    preserve_root_mark
+  fi
+  log "rmd-host-cleanup: preserve-then-retire over ${PRESERVE_ROOTS} into $PRESERVE_ROOT (copies expire after $RETAIN_DAYS days)"
+  snapshot_links
+  retired_before="$PRESERVE_RETIRED"
+  while IFS= read -r root; do
+    root="${root%/}"
+    [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
+    for unit in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+      { [ -e "$unit" ] || [ -L "$unit" ]; } || continue
+      preserve_unit "$unit"
+    done
+  done < <(printf '%s\n' "$PRESERVE_ROOTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
+  ruling_retire
+  while [ "${#LINK_LENDERS[@]}" -gt 0 ] && [ "$PRESERVE_RETIRED" != "$retired_before" ]; do
+    retired_before="$PRESERVE_RETIRED"
+    set -- "${LINK_LENDERS[@]}"; LINK_LENDERS=()
+    for lender in "$@"; do
+      if ruling_namespace "$lender"; then RULING_CHILD="$lender"; fi
+      preserve_unit "$lender"; RULING_CHILD=""
+    done
+  done
+  log "rmd-host-cleanup: preserve-then-retire retired $PRESERVE_RETIRED units, held $PRESERVE_HELD"
+}
+
+# ── dump housekeeping (the Mac rule, JANITOR.md). A resumable root (Codex sessions) is compressed to
+# `.zst`, which Codex resumes (it cannot resume `.gz`), and is never deleted from.
+DUMP_COMPRESSED=0; DUMP_EXPIRED=0
+dump_in_repo() {   # true when an ancestor of file $1, up to root $2, is a repository
+  local d="${1%/*}" stop="$2"
+  while :; do
+    if [ -e "$d/.git" ] || { [ -f "$d/HEAD" ] && [ -d "$d/objects" ] && [ -d "$d/refs" ]; }; then return 0; fi
+    [ "$d" = "$stop" ] && return 1
+    case "$d" in "$stop"/*) d="${d%/*}" ;; *) return 0 ;; esac
+  done
+}
+file_sig() { stat -c '%s %Y' -- "$1" 2>/dev/null || stat -f '%z %m' -- "$1" 2>/dev/null; }
+dump_pack() { if [ "$1" = zst ]; then zstd -q -3 -c -- "$2"; else gzip -6 -c -- "$2"; fi; }
+dump_unpack() { if [ "$1" = zst ]; then zstd -q -dc -- "$2"; else gzip -dc -- "$2"; fi; }
+compress_dump() {   # compress_dump <file> <root> <gz|zst>
+  local f="$1" root="$2" ext="$3" tmp="$1.$3.incoming" before after mode orig packed tool=gzip
+  [ "$ext" = zst ] && tool=zstd
+  if [ -e "$tmp" ] || [ -L "$tmp" ] || [ -e "$f.gz" ] || [ -L "$f.gz" ] || [ -e "$f.zst" ] || [ -L "$f.zst" ]; then
+    log "KEEP $f: a compressed copy is already beside it"; return
+  fi
+  if ! command -v "$tool" >/dev/null 2>&1; then log "KEEP $f: $tool unavailable"; return; fi
+  orig="$(wc -c < "$f" | tr -d ' ')"
+  if [ "$DRY_RUN" = 1 ]; then
+    log "DRYRUN would: $tool $f (${orig} bytes; idle dump)"; tally "dumps-$tool $root" "$orig"; return
+  fi
+  before="$(file_sig "$f")" || { log "KEEP $f: stat failed (unknown)"; return; }
+  if ! dump_pack "$ext" "$f" > "$tmp" 2>/dev/null </dev/null || ! dump_unpack "$ext" "$tmp" 2>/dev/null </dev/null | cmp -s - "$f"; then
+    rm -f -- "$tmp"; log "KEEP $f: compression read-back failed"; return
+  fi
+  after="$(file_sig "$f")"
+  if [ "$before" != "$after" ]; then rm -f -- "$tmp"; log "KEEP $f: changed while compressing"; return; fi
+  mode="$(stat -c %a -- "$f" 2>/dev/null || stat -f %Lp -- "$f" 2>/dev/null)" && chmod "$mode" "$tmp" 2>/dev/null
+  if ! touch -r "$f" -- "$tmp" 2>/dev/null || ! audit_writable || ! mv -n -- "$tmp" "$f.$ext" 2>/dev/null || [ -e "$tmp" ]; then
+    rm -f -- "$tmp"; log "KEEP $f: could not place $f.$ext"; return
+  fi
+  packed="$(wc -c < "$f.$ext" | tr -d ' ')"
+  log "PRUNE $f: $(( orig - packed )) bytes, compressed beside itself as $f.$ext after a full read-back"
+  { mkdir -p -- "$(dirname -- "$DUMP_RECEIPT")" && printf '%s\t%s\n' "$f.$ext" "$packed" >> "$DUMP_RECEIPT"; } 2>/dev/null ||
+    log "KEEP $f.$ext: compression receipt unwritable; this copy will not expire"
+  if rm -f -- "$f"; then DUMP_COMPRESSED=$(( DUMP_COMPRESSED + 1 )); tally "dumps-$tool $root" "$(( orig - packed ))"; fi
+}
+# A dump is a file of at least DUMP_MIN_MB, never inside a repository or an installed package/toolchain tree.
+dump_excluded() {   # dump_excluded <file> <root>
+  local d="${1%/*}" stop="$2" x
+  while :; do
+    if [ -e "$d/.git" ] || [ -e "$d/pyvenv.cfg" ] || { [ -f "$d/HEAD" ] && [ -d "$d/objects" ] && [ -d "$d/refs" ]; }; then return 0; fi
+    case "${d##*/}" in docker|containerd|node_modules|site-packages|dist-packages|*.dist-info|*.egg-info|.cargo|.rustup|.venv|venv) return 0 ;; esac
+    case "$d/" in */lib/python[0-9]*/*|*/pkg/mod/*) return 0 ;; esac
+    for x in "$d"/lib/python[0-9]*; do [ -d "$x" ] && return 0; done
+    [ "$d" = "$stop" ] && return 1
+    case "$d" in "$stop"/*) d="${d%/*}" ;; *) return 0 ;; esac
+  done
+}
+DUMP_RECEIPT="${RMD_CLEANUP_DUMP_RECEIPT:-$CLEAN_HOME/.local/state/remudero/janitor-compressed.tsv}"
+dump_receipted() { [ -f "$DUMP_RECEIPT" ] && grep -qxF -- "$1$(printf '\t')$(wc -c < "$1" | tr -d ' ')" "$DUMP_RECEIPT" 2>/dev/null; }
+dump_walk() {   # dump_walk <root> <unit> <resumable 0|1>
+  local root="$1" unit="$2" only="$3" f bytes idle_m="$IDLE_MINUTES" keep_m=$(( DUMP_RETAIN_DAYS * 1440 ))
+  local min_c=$(( DUMP_MIN_MB * 1048576 - 1 ))
+  local -a plain=(-name "*.json") packed=(-name "*.json.gz" -o -name "*.json.zst")
+  local -a prune=(\( -name docker -o -name containerd -o -name node_modules -o -name .git -o -name site-packages -o -name dist-packages -o -name .venv -o -name venv
+                     -o -name '*.dist-info' -o -name '*.egg-info' -o -name .cargo -o -name .rustup -o -path '*/lib/python[0-9]*'
+                     -o -path '*/pkg/mod' \) -prune)
+  local s
+  for s in jsonl ndjson log lcov info; do
+    plain+=(-o -name "*.$s"); packed+=(-o -name "*.$s.gz" -o -name "*.$s.zst")
+  done
+  if [ "$only" != 1 ]; then
+    while IFS= read -r f; do
+      [ -n "$f" ] && [ -f "$f" ] && [ ! -L "$f" ] || continue
+      dump_excluded "$f" "$root" && continue
+      [ "$(owner_uid "$f")" = "$RUN_UID" ] || continue
+      case "$f" in *.gz|*.zst) dump_receipted "$f" || continue ;; esac
+      if is_open "$f"; then log "KEEP $f: held open by a process"; continue; fi
+      bytes="$(du_bytes "$f")"
+      log "REMOVE $f: dump unchanged ${DUMP_RETAIN_DAYS} days"
+      if act rm -f -- "$f"; then DUMP_EXPIRED=$(( DUMP_EXPIRED + 1 )); tally "dumps-expire $root" "$bytes"; fi
+    done < <($FIND_CMD "$unit" -xdev "${prune[@]}" -o -type f \( \( \( "${plain[@]}" \) -size "+${min_c}c" \) -o \( "${packed[@]}" \) \) \
+               ! -mmin "-$idle_m" ! -cmin "-$idle_m" -mmin "+$keep_m" -print 2>/dev/null)
+  fi
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$f" ] && [ ! -L "$f" ] || continue
+    dump_excluded "$f" "$root" && continue
+    [ "$(owner_uid "$f")" = "$RUN_UID" ] || continue
+    if is_open "$f"; then log "KEEP $f: held open by a process"; continue; fi
+    if [ "$only" = 1 ]; then compress_dump "$f" "$root" zst; else compress_dump "$f" "$root" gz; fi
+  done < <($FIND_CMD "$unit" -xdev "${prune[@]}" -o -type f \( "${plain[@]}" \) \
+             ! -mmin "-$idle_m" ! -cmin "-$idle_m" -size "+${min_c}c" -print 2>/dev/null)
+}
+dump_housekeeping() {
+  local root unit
+  [ -n "$DUMP_ROOTS$DUMP_RESUMABLE_ROOTS" ] || return 0
+  if [ "$OPEN_OK" != 1 ]; then log "REFUSE dump housekeeping: lsof failed — keeping everything (fail closed)"; return; fi
+  while IFS= read -r root; do
+    root="${root%/}"
+    [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
+    for unit in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+      { [ -e "$unit" ] && [ ! -L "$unit" ]; } || continue
+      preserve_skip "$unit" && continue
+      [ "$(owner_uid "$unit")" = "$RUN_UID" ] || continue
+      ! keep_marker "$unit" || continue
+      is_protected_worktree "$unit" && continue
+      dump_walk "$root" "$unit" 0
+    done
+  done < <(printf '%s\n' "$DUMP_ROOTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
+  while IFS= read -r root; do
+    root="${root%/}"
+    [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
+    [ "$(owner_uid "$root")" = "$RUN_UID" ] || { log "KEEP $root: resumable dump root is not the pass identity's own"; continue; }
+    dump_walk "$root" "$root" 1
+  done < <(printf '%s\n' "$DUMP_RESUMABLE_ROOTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
+  log "rmd-host-cleanup: dump housekeeping compressed $DUMP_COMPRESSED and expired $DUMP_EXPIRED dumps"
+}
+
+# ── retention (ruling 2026-10-23): each top-level file, or entry inside a top-level folder, of an
+# archive root expires once unchanged (mtime and ctime) for RETAIN_DAYS; roots reaching live data are refused.
+retain_root_ok() {
+  local r="$1" c cs
+  case "$r" in /*) ;; *) RETAIN_REASON="not an absolute path"; return 1 ;; esac
+  [ "$r" != / ] || { RETAIN_REASON="is /"; return 1; }
+  case "$r/" in */host-cleanup-validation-bundles-*) RETAIN_REASON="a live validation-bundles tree"; return 1 ;; esac
+  if [ -L "$r" ] || [ ! -d "$r" ]; then RETAIN_REASON="not a regular directory"; return 1; fi
+  for c in "$STATE_DISK" "$SCRATCH_DISK" "$CLEAN_HOME" "$ROOT_FS" /tmp "$PRESERVE_ROOTS"; do
+    while IFS= read -r cs; do
+      [ -n "$cs" ] || continue
+      cs="${cs%/}/"
+      case "$cs" in "$r/"|"$r/"*) RETAIN_REASON="contains $cs"; return 1 ;; esac
+    done < <(printf '%s\n' "$c" | tr ':' '\n')
+  done
+}
+expire_entry() {   # expire_entry <entry> <days> <tally key> <why>
+  local e="$1" days="$2" key="$3" why="$4" m recent bytes
+  [ -e "$e" ] && [ ! -L "$e" ] || return 0
+  case "${e##*/}" in host-cleanup-validation-bundles-*) return 0 ;; esac
+  m=$(( days * 1440 ))
+  if ! recent="$($FIND_CMD "$e" \( -mmin "-$m" -o -cmin "-$m" \) -print -quit 2>/dev/null)"; then
+    log "KEEP $e: age probe failed (unknown)"; return 0
+  fi
+  [ -z "$recent" ] || return 0
+  if is_open "$e"; then log "KEEP $e: held open by a process"; return 0; fi
+  bytes="$(du_bytes "$e")"
+  log "REMOVE $e: $why"
+  if act rm -rf -- "$e"; then tally "$key" "$bytes"; else log "KEEP $e: removal failed"; fi
+}
+expire_dated_root() {
+  local root="${1%/}" e c RETAIN_REASON="" why="archived copy unchanged ${RETAIN_DAYS} days (operator ruling 2026-10-23)"
+  [ -e "$root" ] || return 0
+  if ! retain_root_ok "$root"; then log "REFUSE retention $root: $RETAIN_REASON"; return; fi
+  for e in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+    [ -e "$e" ] && [ ! -L "$e" ] || continue
+    case "${e##*/}" in host-cleanup-validation-bundles-*) continue ;; esac
+    if [ -d "$e" ]; then
+      if [ "$RUN_UID" != 0 ] && [ ! -w "$e" ]; then log "KEEP $e: its expired entries are the root pass's (folder not writable by uid $RUN_UID)"; continue; fi
+      for c in "$e"/* "$e"/.[!.]* "$e"/..?*; do
+        [ -e "$c" ] && [ ! -L "$c" ] || continue
+        expire_entry "$c" "$RETAIN_DAYS" "retention $root" "$why"
+      done
+      if [ -r "$e" ] && [ -z "$(ls -A -- "$e" 2>/dev/null)" ] && is_idle "$e"; then
+        log "REMOVE $e: emptied archive folder"; act rmdir -- "$e"
+      fi
+    else
+      if [ "$RUN_UID" != 0 ] && [ ! -w "$root" ]; then log "KEEP $e: expired entries here are the root pass's"; continue; fi
+      expire_entry "$e" "$RETAIN_DAYS" "retention $root" "$why"
+    fi
+  done
+}
+expire_preserved_copies() {
+  local e
+  [ -d "$PRESERVE_ROOT" ] && [ ! -L "$PRESERVE_ROOT" ] || return 0
+  for e in "$PRESERVE_ROOT"/*@[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z "$PRESERVE_ROOT"/.incoming-*; do
+    [ -d "$e" ] && [ ! -L "$e" ] || continue
+    [ "$(owner_uid "$e")" = "$RUN_UID" ] || continue   # only copies this identity made
+    case "${e##*/}" in
+      .incoming-*)   # an interrupted copy never counted as one; it goes once idle
+        if is_idle "$e" && ! is_open "$e"; then log "REMOVE $e: interrupted preservation"; act rm -rf -- "$e"; fi ;;
+      *) expire_entry "$e" "$RETAIN_DAYS" "retention $PRESERVE_ROOT" "preserved copy older than ${RETAIN_DAYS} days (operator ruling 2026-10-23)" ;;
+    esac
+  done
+}
+retention() {
+  local root
+  while IFS= read -r root; do
+    [ -n "$root" ] && expire_dated_root "$root"
+  done < <(printf '%s\n' "$RETAIN_ROOTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
 }
 
 fmt_kb() { if [ "$1" -ge 1048576 ]; then printf '%sG' "$(( $1 / 1048576 ))"; else printf '%sM' "$(( $1 / 1024 ))"; fi; }
@@ -1119,7 +1885,7 @@ while IFS= read -r parent; do
   [ -n "$parent" ] && [ -d "$parent" ] || continue
   parent="${parent%/}"
   keep_parent "$parent"
-  if [ -e "$parent/.rmd-scratch-keep" ] || [ -L "$parent" ]; then
+  if keep_marker "$parent" || [ -L "$parent" ]; then
     log "KEEP $parent: scratch keep marker or symbolic link"; continue
   fi
   sweep_scratch_root "$parent"
@@ -1137,9 +1903,9 @@ for root in $(printf '%s' "$TMP_ROOTS" | tr ':' ' '); do
     { [ -e "$p" ] || [ -L "$p" ]; } && prune_tsx_cache "$p"
   done
   # big idle scratch files that sit inside a root rather than directly under it
-  find "$root" -maxdepth 3 -type f -size "+${BIG_MB}M" 2>/dev/null | while IFS= read -r f; do
+  while IFS= read -r f; do
     [ -e "$f" ] && sweep_path "$f"
-  done
+  done < <(find "$root" -maxdepth 3 -type f -size "+${BIG_MB}M" 2>/dev/null)
 done
 
 while IFS= read -r root; do
@@ -1170,21 +1936,28 @@ if [ "$ONLY_TMP" != 1 ]; then
     [ -n "$checkout" ] && sweep_live_checkout "$checkout"
   done < <(printf '%s\n' "$LIVE_CHECKOUTS" | tr ':' '\n')
 
-  # Earlier janitors archived orphan payload without proving publication.
-  # Those archives might be the sole remaining work copy; never expire them.
+  preserve_then_retire
+  dump_housekeeping
 
   check_archive_root
   if [ "$ARCHIVE_OK" = 1 ]; then
     for f in "$CLEAN_HOME"/*/.claude/projects/*/*.jsonl; do
       [ -f "$f" ] && archive_transcript "$f"
     done
-    if [ -d "$ARCHIVE_ROOT" ]; then
-      find "$ARCHIVE_ROOT" -type f -mtime "+$ARCHIVE_DAYS" 2>/dev/null | while IFS= read -r old; do
+    if [ -d "$ARCHIVE_ROOT" ] && [ ! -L "$ARCHIVE_ROOT" ]; then
+      while IFS= read -r old; do
+        [ -n "$old" ] || continue
+        bytes="$(du_bytes "$old")"
         log "REMOVE $old: archive older than ${ARCHIVE_DAYS} days"
-        act rm -f -- "$old"
-      done
+        act rm -f -- "$old" && tally "archive-expire $ARCHIVE_ROOT" "$bytes"
+      done < <(find "$ARCHIVE_ROOT" -type f -mtime "+$ARCHIVE_DAYS" 2>/dev/null)
+      if [ -n "$(find "$ARCHIVE_ROOT" -mindepth 1 -type d -empty -mmin "+$IDLE_MINUTES" -print -quit 2>/dev/null)" ]; then
+        log "REMOVE $ARCHIVE_ROOT/*: empty transcript folders idle $(fmt_minutes "$IDLE_MINUTES")"
+        act find "$ARCHIVE_ROOT" -mindepth 1 -depth -type d -empty -mmin "+$IDLE_MINUTES" -delete
+      fi
     fi
   fi
+  expire_preserved_copies
 
   for wr in $WATCH_ROOTS; do
     [ -d "$wr" ] || continue
@@ -1195,6 +1968,7 @@ if [ "$ONLY_TMP" != 1 ]; then
 else
   log "rmd-host-cleanup: temporary-roots-only mode"
 fi
+retention
 
 if [ "$PRUNED_COUNT" -gt 0 ]; then
   log "rmd-host-cleanup: pruned $PRUNED_COUNT regenerable trees from kept scratch units ($PRUNED_BYTES bytes)"
@@ -1213,8 +1987,10 @@ case "$after_pct" in ""|*[!0-9]*) after_pct=unknown ;; *) after_pct="${after_pct
 log "rmd-host-cleanup: / ${before_pct} -> ${after_pct}${reclaimed}"
 [ "$DRY_RUN" = 1 ] && log "rmd-host-cleanup: DRY_RUN=1 — nothing was changed"
 
+print_tallies
 rmd_decision_summary "$DECISION_LOG"
-log "rmd-host-cleanup: decision-report $DECISION_LOG"
+if [ "$DRY_RUN" = 1 ]; then log "rmd-host-cleanup: decision-report none (a dry run writes no receipt)"
+else log "rmd-host-cleanup: decision-report $DECISION_LOG"; fi
 judge_filesystems
 [ "$FS_FAILED" = 0 ] || exit 1
 exit 0

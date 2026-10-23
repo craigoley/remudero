@@ -18079,7 +18079,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           runId,
           openTaskIds,
           ...(shadow ? { shadow: true } : {}),
-        })),
+        }), join(config.root, "state", "inflight")),
       ),
     baseProof?.baseIsGrepTree ? (_repo, tree) => rmSync(tree, { recursive: true, force: true }) : undefined,
   );
@@ -29957,7 +29957,7 @@ interface LifetimeReplayWindow {
   seen: Set<string>;
 }
 
-export const MAX_LIFETIME_ARCHIVE_START_IDENTITIES = 8_192; // BACKSTOP: accommodates 5,134 observed starts while bounding identity memory.
+export const MAX_LIFETIME_ARCHIVE_START_IDENTITIES = 4_096; // BACKSTOP: a capped identity set keeps the live-only decision.
 
 type LifetimeArchiveHistoryUnavailableReason =
   | "archive_unreadable"
@@ -33519,14 +33519,18 @@ export function buildDaemonReadRefresher(options: {
 /** W1-T5998 — run ids of workers this process spawned and has not reaped. A review takes no
  *  inflight lock, so only this registry tells the orphan sweep its worker is still running. */
 const liveWorkerRunIds = new Set<string>();
+const reviewWorkerLockId = (runId: string) => `review-worker-${createHash("sha256").update(runId).digest("hex")}`;
 
 /** W1-T5998 — hold `runId` in {@link liveWorkerRunIds} for as long as `spawn` runs its worker. */
-export async function whileWorkerRunLive<T>(runId: string, spawn: () => Promise<T>): Promise<T> {
+export async function whileWorkerRunLive<T>(runId: string, spawn: () => Promise<T>, inflightDir?: string): Promise<T> {
+  const held = inflightDir === undefined ? undefined : acquireInflightLock(join(inflightDir, "review-workers"),
+    reviewWorkerLockId(runId), { run_id: runId, reclaim: false });
   liveWorkerRunIds.add(runId);
   try {
     return await spawn();
   } finally {
     liveWorkerRunIds.delete(runId);
+    held?.release();
   }
 }
 
@@ -33539,10 +33543,15 @@ export function orphanSweepRunActive(
   isPidAlive?: (pid: number) => boolean,
   adoptedRunIds: ReadonlySet<string> = new Set(),
 ): (runId: string) => boolean {
+  const reviewIsLive = (runId: string) => {
+    const held = readInflightLock(join(inflightDir, "review-workers"), reviewWorkerLockId(runId));
+    return held?.run_id === runId && sameHost(held.host, hostname()) && (isPidAlive ?? defaultIsPidAlive)(held.pid);
+  };
   return (runId) =>
     runId === ownRunId ||
     liveWorkerRunIds.has(runId) ||
     adoptedRunIds.has(runId) ||
+    reviewIsLive(runId) ||
     liveInflightRuns(inflightDir, isPidAlive).some((r) => r.runId === runId || r.runId.startsWith(`${runId}:fix-claim:`));
 }
 
@@ -37714,7 +37723,11 @@ export function runInflightLockSweepRung(
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): InflightSweepResult {
   try {
-    const swept = sweepInflightLocksWithReceipts(join(config.root, "state", "inflight"), ledgerPathFor(config));
+    const inflightDir = join(config.root, "state", "inflight");
+    const results = [inflightDir, join(inflightDir, "review-workers")]
+      .map((dir) => sweepInflightLocksWithReceipts(dir, ledgerPathFor(config)));
+    const swept = { reaped: results.flatMap((r) => r.reaped), kept: results.flatMap((r) => r.kept),
+      live: results.flatMap((r) => r.live), unverifiableForeignHost: results.flatMap((r) => r.unverifiableForeignHost) };
     // `kept` alone conflates a confirmed-live holder with an unverifiable-foreign-host one
     // (W1-T461) — the per-poll site the boot sweep's own doc calls out as the one that must not
     // stay silent (design clause iii), so `live`/`unverifiable_foreign_host` ride the same line.
