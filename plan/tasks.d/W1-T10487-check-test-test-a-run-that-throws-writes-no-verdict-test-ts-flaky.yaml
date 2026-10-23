@@ -1,0 +1,43 @@
+- id: W1-T10487
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/a-run-that-throws-writes-no-verdict.test.ts:flaky cost 7.6 PR minute(s) across 1 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.68
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/a-run-that-throws-writes-no-verdict.test.ts:flaky"
+  files:
+    - src/lib/config.ts
+    - test/infra/check-test-test-a-run-that-throws-writes-no-verdict-test-ts-flaky.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/a-run-that-throws-writes-no-verdict.test.ts:flaky"
+      proof: "grep: test(\"W1-T10487: check:test:test/a-run-that-throws-writes-no-verdict.test.ts:flaky is prevented, not retried\" in test/infra/check-test-test-a-run-that-throws-writes-no-verdict-test-ts-flaky.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/a-run-that-throws-writes-no-verdict.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/a-run-that-throws-writes-no-verdict.test.ts:flaky cost 7.6 PR minute(s) (seven-day half-life) across 1 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/config.ts: test/a-run-that-throws-writes-no-verdict.test.ts imports it
+    - test/a-run-that-throws-writes-no-verdict.test.ts: named by the failing check
+    - the rounds name a failing test: test/a-run-that-throws-writes-no-verdict.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12660 (https://github.com/craigoley/remudero/pull/12660) at 2026-10-17T22:21:20.904Z: ci-log round — coverage-shard (8/8): test/a-run-that-throws-writes-no-verdict.test.ts
+        failing tests: W1-T4655: a hook-refused push after implement writes one run.error verdict and the error still propagates; ["W1-T4693: a non-census push failure is ledgered by class and ends the rung, never swallowed","W1-T4655: a hook-refused push after implement writes one run.error verdict and the error still propagates"]
+        log excerpt:
+          | execFileSync (node:child_process:978:15)
+          |     commitIn (/home/runner/work/remudero/remudero/test/a-fix-rounds-refused-push-is-not-swallowed.test.ts:151:3)
+          |     <anonymous> (/home/runner/work/remudero/remudero/test/a-fix-rounds-refused-push-is-not-swallowed.test.ts:278:7)
+          |     spawn (/home/runner/work/remudero/remudero/test/a-fix-rounds-refused-push-is-not-swallowed.test.ts:200:7)
+          |     <anonymous> (/home/runner/work/remudero/remudero/src/run-task.ts:18308:47)
+          |     recordBenchmarkWorkerAttempt (/home/runner/work/remudero/remudero/src/run-task.ts:17903:18)
+          |     spawn (/home/runner/work/remudero/remuder
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
