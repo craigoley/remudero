@@ -220,7 +220,7 @@ export interface DispatchClaimReleaseDecision {
  *  1. HOLDER — the run that took the claim drops it in a `finally`, success or not.
  *  2. EVIDENCE — the caller's own proof the task is already done; any host may drop it.
  *  3. DEAD-CLAIMANT — W1-T2784: THIS host's anchor predates its PID namespace and the pid is absent; W1-T5047: this
- *     instance's daemon minted it on another host and this daemon took state/drain.lock after the mint.
+ *     instance's daemon or run child minted it on another host and this daemon took state/drain.lock after the mint.
  *  4. OPERATOR — everything else; cross-host liveness is not decidable (W1-T396).
  *
  * FALSIFIER: test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts. Why:
