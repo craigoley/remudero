@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, parseDocument } from "yaml";
 import { RmdError } from "./errors.js";
 import { sameTestFile } from "./test-path-resolver.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -470,14 +470,21 @@ function canonicalApprovalJson(value: unknown, seen = new Set<object>(), depth =
   seen.add(value);
   try {
     if (Array.isArray(value)) {
-      if (value.length > 1_024 || Object.keys(value).length !== value.length) throw new Error("unsupported approval array");
-      return `[${value.map(item => canonicalApprovalJson(item, seen, depth + 1)).join(",")}]`;
+      const properties = Object.getOwnPropertyDescriptors(value);
+      if (value.length > 1_024 || Object.keys(properties).length !== value.length + 1) throw new Error("unsupported approval array");
+      const items: string[] = [];
+      for (let index = 0; index < value.length; index++) {
+        const property = properties[String(index)];
+        if (!property || !Object.hasOwn(property, "value") || !property.enumerable) throw new Error("unsupported approval array element");
+        items.push(canonicalApprovalJson(property.value, seen, depth + 1));
+      }
+      return `[${items.join(",")}]`;
     }
     const properties = Object.getOwnPropertyDescriptors(value);
     if (Object.keys(properties).length > 256) throw new Error("approval object exceeds its field bound");
     return `{${Object.keys(properties).sort().flatMap(key => {
       const property = properties[key]!;
-      if (!Object.hasOwn(property, "value")) throw new Error("approval accessors are unsupported");
+      if (!Object.hasOwn(property, "value") || !property.enumerable) throw new Error("approval accessors or hidden fields are unsupported");
       return property.value === undefined ? [] : [`${JSON.stringify(key)}:${canonicalApprovalJson(property.value, seen, depth + 1)}`];
     }).join(",")}}`;
   } finally {
@@ -489,10 +496,11 @@ function canonicalApprovalJson(value: unknown, seen = new Set<object>(), depth =
 export function newPathApprovalIntentDigest(task: Task, recordPath: string): string | undefined {
   try {
     if (!isCanonicalApprovalPath(recordPath) || !/^plan\/tasks[.]d\/[^/]+[.]ya?ml$/.test(recordPath) ||
-      Object.keys(task).some(key => !NEW_PATH_TASK_FIELDS.has(key))) return undefined;
+      ![Object.prototype, null].includes(Object.getPrototypeOf(task)) ||
+      Reflect.ownKeys(task).some(key => typeof key !== "string" || !NEW_PATH_TASK_FIELDS.has(key))) return undefined;
     const canonical: Record<string, unknown> = Object.create(null);
     for (const [key, property] of Object.entries(Object.getOwnPropertyDescriptors(task))) {
-      if (!Object.hasOwn(property, "value")) return undefined;
+      if (!Object.hasOwn(property, "value") || !property.enumerable) return undefined;
       if (key !== "new_path_approval_ref") canonical[key] = key === "sourcePath" ? recordPath : property.value;
     }
     const bytes = canonicalApprovalJson({ protocol: NEW_PATH_APPROVAL_PROTOCOL, recordPath, task: canonical });
@@ -535,13 +543,16 @@ function newPathApprovalDecision(task: Task, context: MachineFilingAdmissionCont
     const facts = context.newPathApproval;
     if (!isNewPathApprovalReference(task.new_path_approval_ref)) return refuse("unsupported reference");
     if (!facts || facts.state !== "verified") return refuse(facts?.state === "unknown" ? facts.reason : "current selected evidence is missing");
+    if (Buffer.byteLength(canonicalApprovalJson(facts), "utf8") > 2 * NEW_PATH_APPROVAL_MAX_TASK_BYTES) return refuse("prepared evidence exceeds its byte bound");
     const record = facts.record, now = (context.clock ?? systemClock).now();
+    const intentDigest = newPathApprovalIntentDigest(task, facts.recordPath);
+    if (intentDigest === undefined || typeof record.intentDigest !== "string" || !/^[a-f0-9]{64}$/.test(record.intentDigest)) return refuse("unsupported full task intent or digest");
     if (newPathApprovalBindingError(facts.binding) || newPathApprovalBindingError(record.binding) ||
       canonicalApprovalJson(facts.binding) !== canonicalApprovalJson(record.binding)) return refuse("issuer, repository, instance, audience or policy drift");
     if (facts.reference !== task.new_path_approval_ref || record.reference !== task.new_path_approval_ref ||
       record.protocol !== NEW_PATH_APPROVAL_PROTOCOL || record.taskId !== task.id || record.taskRepo !== task.repo ||
       facts.currentSourcePath !== task.sourcePath || typeof facts.currentSourcePath !== "string" ||
-      facts.recordPath !== record.recordPath || record.intentDigest !== newPathApprovalIntentDigest(task, facts.recordPath)) return refuse("task, reference, destination or full intent drift");
+      facts.recordPath !== record.recordPath || record.intentDigest !== intentDigest) return refuse("task, reference, destination or full intent drift");
     if (![now, facts.observedAt, record.issuedAt, record.expiresAt].every(Number.isFinite) ||
       facts.observedAt > now || now - facts.observedAt > NEW_PATH_APPROVAL_FACT_MAX_AGE_MS ||
       record.issuedAt > now || record.expiresAt <= now || record.expiresAt <= record.issuedAt ||
@@ -857,6 +868,30 @@ function detachStrings(node: unknown): unknown {
   return node;
 }
 
+function validateSelectedApprovalInput(text: string): void {
+  try {
+    if (Buffer.byteLength(text, "utf8") > NEW_PATH_APPROVAL_MAX_TASK_BYTES) throw new Error("draft exceeds its byte bound");
+    const document = parseDocument(text, { strict: true, uniqueKeys: true });
+    if (document.errors.length || document.warnings.length) throw new Error("ambiguous YAML");
+    const entries: unknown = document.toJS({ maxAliasCount: 0 });
+    if (!Array.isArray(entries) || entries.length !== 1) throw new Error("approval requires exactly one task");
+    canonicalApprovalJson(entries);
+    const entry = entries[0] as Record<string, unknown>;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) ||
+      Object.keys(entry).some(key => !NEW_PATH_TASK_FIELDS.has(key) || key === "sourcePath" || key === "narrativeUnavailable")) throw new Error("unknown or loader-owned task field");
+    for (const key of ["id", "title", "repo", "type", "verify", "risk", "band_meaning", "status", "not_before", "note", "rationale", "design", "amendment", "origin", "author_class", "prompt", "retirement", "superseded_by", "goal", "new_path_approval_ref"]) {
+      if (Object.hasOwn(entry, key) && typeof entry[key] !== "string") throw new Error(`invalid ${key} type`);
+    }
+    for (const key of ["dispatch_hold", "hand_built"]) if (Object.hasOwn(entry, key) && typeof entry[key] !== "boolean") throw new Error(`invalid ${key} type`);
+    for (const key of ["priority", "attempts", "pr", "budget_usd"]) if (Object.hasOwn(entry, key) && (typeof entry[key] !== "number" || !Number.isFinite(entry[key]))) throw new Error(`invalid ${key} type`);
+    for (const key of ["files", "depends_on", "plan_refs"]) if (Object.hasOwn(entry, key) && (!Array.isArray(entry[key]) || !(entry[key] as unknown[]).every(value => typeof value === "string"))) throw new Error(`invalid ${key} type`);
+    if (entry.verify !== undefined && entry.verify !== "auto" && entry.verify !== "human") throw new Error("invalid verification mode");
+    if (entry.author_class !== undefined && entry.author_class !== "machine" && entry.author_class !== "operator") throw new Error("invalid author class");
+  } catch (error) {
+    throw new PlanError(`new-path approval unsupported input: ${String(error)}`);
+  }
+}
+
 /**
  * Parse and field-validate a YAML task-list blob into {@link Task}s (schema v1), without checking
  * that every `depends_on` id resolves. Split out of {@link loadPlanFromYaml} so a caller validating
@@ -871,6 +906,8 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
     throw new PlanError(`plan is not valid YAML (${sourceLabel}): ${String(err)}`);
   }
   if (!Array.isArray(raw)) throw new PlanError("plan must be a YAML list of task entries (schema v1).");
+  const selectedApproval = raw.some(entry => entry !== null && typeof entry === "object" && Object.hasOwn(entry, "new_path_approval_ref"));
+  if (selectedApproval) validateSelectedApprovalInput(text);
   detachStrings(raw);
 
   const byId = new Map<string, Task>();
@@ -965,6 +1002,15 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       // this id" without ever re-reading a file to find out.
       sourcePath: sourceLabel,
     };
+    if (selectedApproval) {
+      try {
+        for (const key of Object.keys(e)) {
+          if (canonicalApprovalJson(e[key]) !== canonicalApprovalJson(task[key as keyof Task])) throw new Error(`lossy ${key} normalization`);
+        }
+      } catch (error) {
+        throw new PlanError(`new-path approval unsupported input: ${String(error)}`);
+      }
+    }
     byId.set(id, task);
     return task;
   });
