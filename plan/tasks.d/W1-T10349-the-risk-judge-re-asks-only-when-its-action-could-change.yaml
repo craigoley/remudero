@@ -9,7 +9,7 @@
   band_meaning: span
   budget_usd: 8.00
   priority: 1  # each spurious re-ask is a model call: 191 calls, about 11M input tokens in a week
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-21: machine_judge.reasked fired 40 times each on W1-T9002, W1-T9003 and W1-T9023, every one moved: [confidence_bar], cadence_due: false"
   plan_refs: [W1-T8830, W1-T9043, W1-T9045, W1-T10348, W1-T10350]

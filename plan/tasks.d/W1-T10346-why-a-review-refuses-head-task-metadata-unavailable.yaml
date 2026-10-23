@@ -10,7 +10,7 @@
   plan_refs: [W1-T3387, W1-T9232, W1-T10269, W1-T5865]
   files:
     - docs/forensics/why-a-review-refuses-head-task-metadata-unavailable.md
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED by the #13305 builder: `zgrep` over all 401 `ledger.*.ndjson.gz` archives plus the live ledger.ndjson,

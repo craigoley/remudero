@@ -10,7 +10,7 @@
   band_meaning: span
   budget_usd: 8.00
   priority: 1.3
-  status: queued
+  status: merged
   attempts: 0
   origin: "console-gardener-telemetry:default-machine-filing-producer-2026-10-18"
   plan_refs: [W1-T2383, W1-T8484, W1-T8667, W1-T9494, W1-T9658, W1-T9045]
