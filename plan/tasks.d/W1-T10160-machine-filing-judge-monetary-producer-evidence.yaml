@@ -20,6 +20,7 @@
     - src/lib/ledger-steps.ts
     - test/the-machine-filing-judge-releases-or-escalates.test.ts
     - test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts
+    - test/ledger-account-dimension.test.ts
   rationale: |
     OBSERVED current-generation retained exposure, not an invoice or proof of all SDK calls:
     the complete controlled 2026-10-18T12:11:46.145Z–13:12:23.813Z union opened the selected
@@ -105,6 +106,10 @@
     Promote worker.attempt to monetary production or coerce unknown to zero: replay/price controls
     fail. Restore all source and retain genuine failure/pass receipts on the committed tree.
   note: |
+    October 22 operator approved the existing billing-provenance census test scope addition.
+    Retain every hardcoded-billing rejection; qualify only the canonical provider-aware worker
+    accounting source, with forged and unrelated source controls. This is not a census waiver,
+    an env-only billing substitution, or permission to change providers, prices or service settings.
     Native reservation refs/rmd-id/W1-T10160 is held by this filing branch; never delete or reuse
     it if publication is delayed. Machine-authored proposal, not an operator approval or model
     risk verdict. verify: human retains the existing governed filing judgment boundary until an
@@ -121,6 +126,6 @@
     action: proceed
     confidence: 1
     reasons:
-      - "Released by the operator through native rmd approve W1-T10160 after direct approval of the exact existing-call telemetry scope: reported cost and billing mode, explicit unknown prices and deduplication; no added calls/retries/providers/budgets/permissions/services or relaxed review/CI gates."
-    judged_at: "2026-10-18T19:33:41.008Z"
-    pin: "0d5cff903d7295af97500b398a14929887c40ceb9d0c041f700775290c0cbf55"
+      - "Direct operator decision in this chat on October 22: Approve this narrow census-test amendment. Add only existing test/ledger-account-dimension.test.ts to W1-T10160; preserve hardcoded-billing rejection, canonical worker accounting and forged/unrelated-source controls. No billing, provider, credential, spending, service or required-gate change. This is an operator release, not a model verdict."
+    judged_at: "2026-10-22T20:49:05.092Z"
+    pin: "08541e2dc8428e96ec19aee68836c59fbc02b2cea9c3d8f1fadfb636243c620e"
