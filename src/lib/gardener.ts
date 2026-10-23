@@ -1200,7 +1200,9 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
     const judged = judgedByDecision(spec, held.actionClass)
       ? judgeGardenDecision(state, prState ?? "unknown", clock)
       : judgeGardenPending(state, metricOf(spec, inventory, held.actionClass), prState ?? "unknown", clock);
+    const feedbackChanged = judged.state !== state;
     state = judged.state.pending ? judged.state : heldPassForgotten(judged.state);
+    if (feedbackChanged) writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
     if (judged.verdict === "credit" || judged.verdict === "debit") deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
     if (judged.verdict === "released") {
       const decision = judgedByDecision(spec, held.actionClass);
