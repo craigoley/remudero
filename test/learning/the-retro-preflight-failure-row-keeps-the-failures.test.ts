@@ -131,3 +131,13 @@ test("retro excerpt never aliases a cancelled prefix sibling and keeps byte-capp
   assert.match(out, /distinct-error-prefix/);
   assert.ok(out.includes(`distinct-error-${name}`));
 });
+
+test("retro excerpt never shortens complete failing blocks that fit together", async (t) => {
+  const large = block(1, "large-but-fitting", "x".repeat(12_000));
+  const small = block(2, "small-and-fitting");
+  const { out } = await retained(t, prelude + large + small + summary);
+  assert.ok(out.includes(large));
+  assert.ok(out.includes(small));
+  assert.doesNotMatch(out, /failure block omitted/);
+  assert.ok(out.endsWith(summary));
+});
