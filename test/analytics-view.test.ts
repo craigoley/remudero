@@ -49,9 +49,15 @@ import type { ViewSource } from "../src/lib/views.js";
 import { switchViewsOn } from "./helpers/read-model-switches.js";
 import { SPEC, violations } from "./helpers/openapi-strict.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { GARDENER_SPEND_SOURCE_NAME } from "#src/lib/analytics-view.js";
+import { captureGardenerSpendSource, foldGardenerSpend } from "#src/lib/gardener-spend.js";
+import { createReadModelWorker } from "#src/lib/read-model-worker.js";
+import { createService } from "#src/lib/service.js";
+import { buildReadModelViewRoutes } from "#src/lib/views.js";
+import type { AddressInfo } from "node:net";
 
 type TestCtx = { after: (fn: () => void | Promise<void>) => void };
-const fixtureClosers = new WeakMap<TestCtx, Array<() => void>>();
+const fixtureClosers = new WeakMap<TestCtx, Array<() => void | Promise<void>>>();
 
 const T0 = Date.parse("2026-10-05T12:00:00.000Z");
 const MINUTE = 60_000;
@@ -68,7 +74,7 @@ function handClock(start: number): { clock: Clock; advance: (ms: number) => void
 function scratch(t: TestCtx, kind: string): string {
   const dir = makeTempDir(kind);
   t.after(async () => {
-    for (const close of fixtureClosers.get(t) ?? []) close();
+    for (const close of fixtureClosers.get(t) ?? []) await close();
     await flushReadModelTransactions();
     rmSync(dir, { recursive: true, force: true });
   });
@@ -554,7 +560,7 @@ test("a corpus with no worker call and no resolved run merges to not collected",
 /** The slow lane's body in this thread, its passes fired by hand. */
 function lane(config: Parameters<typeof runSlowLaneWorker>[1], refresh?: AnalyticsRefresh, clock?: Clock,
   inbox?: NonNullable<Parameters<typeof runSlowLaneWorker>[2]>["inbox"]) {
-  let onMessage: ((msg: { type?: string; held?: unknown; modes?: unknown }) => void) | undefined;
+  let onMessage: ((msg: { type?: string; held?: unknown; modes?: unknown; instances?: unknown }) => void) | undefined;
   const posted: SlowLaneMessage[] = [];
   let next: (() => void) | undefined;
   const handle = runSlowLaneWorker({ on: (_event, run) => (onMessage = run), postMessage: (m) => void posted.push(m as SlowLaneMessage) }, config, {
@@ -566,13 +572,14 @@ function lane(config: Parameters<typeof runSlowLaneWorker>[1], refresh?: Analyti
       return () => void (next = undefined);
     },
   });
-  const snapshots = (): SourceSnapshotWrite[] => posted.flatMap((m) => (m.type === "source_snapshot" ? [m.snapshot] : []));
+  const allSnapshots = (): SourceSnapshotWrite[] => posted.flatMap((m) => (m.type === "source_snapshot" ? [m.snapshot] : []));
+  const snapshots = () => allSnapshots().filter(s => s.ok ? s.bodies.some(b => b.name === ANALYTICS_SOURCE_CONSOLE_V1) : s.names.includes(ANALYTICS_SOURCE_CONSOLE_V1));
   const passes = (): number => posted.filter((m) => m.type === "unit" && m.unit === "analytics").length;
   const legs = (): number => posted.filter(m => m.type === "end" && m.work.unit === "analytics" && m.work.instance !== undefined).length;
   return {
-    handle, posted, snapshots,
+    handle, posted, snapshots, allSnapshots,
     switchOn: (mode = "shadow") => onMessage?.({ type: "views", modes: { [ANALYTICS_VIEW_NAME]: mode } }),
-    lease: (held = true) => onMessage?.({ type: "lease", held }),
+    lease: (held = true, instances = config.analytics?.instances.map(i => i.name) ?? []) => onMessage?.({ type: "lease", held, instances }),
     fire: () => next?.(),
     settle: async (want: { passes: number; snapshots?: number; legs?: number }): Promise<void> => {
       const deadline = Date.now() + 10_000;
@@ -751,6 +758,167 @@ test("W1-T9523: bounded analytics retains timeout and completed-source semantics
   await abortSeen; finish(); await q.settle({ passes: 1, legs: 1, snapshots: 1 });
   assert.equal(q.snapshots()[0]?.ok, false, "a result that resolves after abort cannot advance the successful source clock");
   assert.equal(q.posted.some(m => m.type === "log" && m.step === "analytics.source_snapshot_built"), false);
+});
+
+/** Current-generation files, including exact replay in gzip, plain and live forms. */
+function recentGarden(dir: string, repository = "fixture/recent") {
+  const runtime = { version: 1, repository, daemonRunId: "recent-generation", codeSha: null,
+    configuredAt: iso(T0), observedAt: iso(T0), gardens: [{ name: "config", enabled: true, scope: "repository",
+      cadenceMs: 1000, phase: "completed", observedAt: iso(T0), passId: null, nextDueAt: null,
+      queueMs: null, executionMs: null, exit: 0, reason: null, attempts: 1, completions: 1, failures: 0,
+      lastCompletedAt: iso(T0), lastSuccessAt: iso(T0), lastFailureAt: null }] };
+  const passId = "12345678-1234-4123-8123-123456789abc";
+  const rows = [{ ts: iso(T0), step: "garden.lifecycle", name: "config", passId, repository,
+    daemon_run_id: runtime.daemonRunId, phase: "completed", exit: 0 },
+  { ts: iso(T0), step: "machine_judge.attempt_spend", run_id: "recent-child", task_id: "fixture-task",
+    billing_mode: "api", total_cost_usd: 2, gardener_origin: { state: "linked", version: 1, name: "config", passId } }];
+  const text = rows.map(row => JSON.stringify(row)).join("\n") + "\n";
+  writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify(runtime));
+  writeFileSync(join(dir, "ledger.2026-10-05T12-00-00-000Z.ndjson.gz"), gzipSync(text));
+  writeFileSync(join(dir, "ledger.2026-10-05T12-00-01-000Z.ndjson"), text);
+  writeFileSync(join(dir, "ledger.ndjson"), text);
+  return { runtime, rows, text };
+}
+
+test("W1-T10461: recent gardener telemetry refreshes while historical analytics remains incomplete", async t => {
+  const { clock } = handClock(T0 + MINUTE);
+  const stateDir = scratch(t, "independent-worker-history");
+  const ledgerDir = join(stateDir, "core");
+  mkdirSync(ledgerDir); recentGarden(ledgerDir);
+  switchViewsOn(stateDir, [ANALYTICS_VIEW_NAME]);
+  const oldAsOf = iso(T0 - MINUTE);
+  const damaged = join(ledgerDir, "ledger.2026-10-04T00-00-00-000Z.ndjson.gz");
+  const damagedBytes = gzipSync('{"invalid historical row"\n');
+  writeFileSync(damaged, damagedBytes);
+  // Seed against the SAME ledger identity as the real worker. Replacing a shorter live file
+  // after projection legitimately resets its store, which is not this source-isolation scenario.
+  const initial = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], views: [createAnalyticsView()],
+    clock, holder: "independent-fixture-seed", oracle: "off", post() {} });
+  try {
+    initial.start(); initial.tick();
+    initial.acceptSnapshot(written("core", snapshotOf(CORE_LINES, T0 - MINUTE), "fixture/recent")); initial.tick();
+  } finally { initial.release(); }
+  const posted: ReadModelWorkerMessage[] = [];
+  let onMessage: ((msg: { type?: string }) => void) | undefined;
+  const signal = new SharedArrayBuffer(8);
+  const stopped = new Int32Array(signal);
+  runReadModelWorker({ on: (_event, run) => onMessage = run, postMessage: m => posted.push(m as ReadModelWorkerMessage), close() {} },
+    { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir, repo: "fixture/recent" }],
+      tickMs: 20, signal, slowLane: { intervalMs: 60000 } });
+  const stop = async () => {
+    onMessage?.({ type: "stop" });
+    const deadline = Date.now() + 5000;
+    while (!Atomics.load(stopped, 1) && Date.now() < deadline) await sleep(10);
+    assert.equal(Atomics.load(stopped, 1), 1, "owned worker drains before fixture cleanup");
+  };
+  fixtureClosers.set(t, [stop]);
+  const latest = () => posted.findLast(m => m.type === "body" && m.entry.view === ANALYTICS_VIEW_NAME);
+  const ready = () => {
+    const m = latest();
+    return m?.type === "body" && (m.entry.body.data as AnalyticsViewData).instances[0]?.gardenerSpend?.totalUsd === 2 &&
+      m.entry.body.sources.some(s => s.name === "analytics:core" && s.phase === "failed");
+  };
+  const deadline = Date.now() + 30000;
+  while (!ready() && Date.now() < deadline) await sleep(20);
+  assert.ok(ready(), JSON.stringify(posted.filter(m => m.type === "log")));
+  const m = latest(); assert.ok(m?.type === "body");
+  assert.equal(m.entry.body.sources.find(s => s.name === "analytics:core")?.asOf, oldAsOf);
+  assert.equal(m.entry.body.sources.find(s => s.name === "gardener-spend:core")?.state, "fresh");
+  assert.equal(m.entry.body.stale, true, "recent money never repairs the whole historical envelope");
+  assert.deepEqual(readFileSync(damaged), damagedBytes, "historical evidence is byte-for-byte retained");
+  assert.deepEqual(violations(m.entry.body, SPEC.components.schemas.AnalyticsView!), []);
+  await stop();
+  // A new cache answers the persisted projection with no collector or ledger access on requests.
+  rmSync(ledgerDir, { recursive: true });
+  const restarted = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir, repo: "fixture/recent" }] });
+  const server = createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [],
+    readModelViews: [ANALYTICS_VIEW_NAME], readModel: restarted }) });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    for (let i = 0; i < 2; i++) {
+      const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/analytics`, { headers: { authorization: "Bearer r" } });
+      assert.equal(response.status, 200);
+      const body = await response.json() as { data: AnalyticsViewData; sources: ViewSource[]; stale: boolean };
+      assert.equal(body.data.instances[0]!.gardenerSpend!.totalUsd, 2);
+      assert.equal(body.sources.find(s => s.name === "analytics:core")?.asOf, oldAsOf);
+      assert.equal(body.stale, true);
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve()));
+  }
+});
+
+test("W1-T10461: independent gardener capture obeys cancellation ownership and bounded cadence", async t => {
+  const { clock, advance } = handClock(T0 + MINUTE);
+  const stateDir = scratch(t, "independent-cadence"); recentGarden(stateDir);
+  const other = scratch(t, "independent-other"); recentGarden(other, "fixture/other");
+  let historicalCalls = 0;
+  const refresh: AnalyticsRefresh = async () => { historicalCalls++; throw Error("historical incomplete"); };
+  const l = lane({ analytics: { instances: [{ name: "core", stateDir, repository: "fixture/recent" },
+    { name: "other", stateDir: other, repository: "fixture/other" }], intervalMs: 1000 } }, refresh, clock);
+  t.after(() => l.handle.stop()); l.switchOn(); l.lease();
+  await l.settle({ passes: 1, snapshots: 2, legs: 2 });
+  const gardener = () => l.allSnapshots().filter(s => s.ok && s.bodies.some(b => b.name === GARDENER_SPEND_SOURCE_NAME));
+  assert.equal(gardener().length, 2, "both due repositories get one independent complete capture");
+  l.fire(); await l.settle({ passes: 2 });
+  assert.equal(gardener().length, 2, "another lane pass is not another provider or ledger capture");
+  advance(1000); l.lease(true, ["other"]); await l.settle({ passes: 3, snapshots: 3, legs: 3 });
+  assert.deepEqual(gardener().map(s => s.instance), ["core", "other", "other"]);
+  l.switchOn("off"); advance(1000); l.fire(); await l.settle({ passes: 4 });
+  assert.equal(historicalCalls, 3); assert.equal(gardener().length, 3);
+  l.switchOn(); l.fire(); l.handle.stop();
+  await sleep(30);
+  assert.equal(gardener().length, 3, "stop cancels in-flight real filesystem capture before publication");
+});
+
+test("W1-T10461: gardener source freshness compatibility and fleet budgets remain independent", async t => {
+  const { clock, advance } = handClock(T0 + MINUTE);
+  const w = world(t, clock, { names: ["core"] });
+  const sourceDir = scratch(t, "independent-source"); recentGarden(sourceDir);
+  const source = await captureGardenerSpendSource(sourceDir, clock);
+  const historical = written("core", snapshotOf(CORE_LINES, T0 - MINUTE), "fixture/recent"); assert.ok(historical.ok);
+  historical.bodies = historical.bodies.map(b => b.name === ANALYTICS_SOURCE_CONSOLE_V1 ? { ...b, body: { ...b.body as object, gardenerSpendSource: source } } : b);
+  w.ticker.acceptSnapshot(historical); w.ticker.tick();
+  assert.equal(w.body().data.instances[0]!.gardenerSpend!.materializedAt, historical.asOf, "legacy row fallback retains its old clock");
+  w.ticker.acceptSnapshot({ instance: "core", ok: false, names: [GARDENER_SPEND_SOURCE_NAME], error: "no current evidence", atMs: clock.now() });
+  w.ticker.tick();
+  assert.equal(w.body().data.instances[0]!.gardenerSpend!.totalUsd, null, "a failed first independent capture cannot revive embedded success");
+  const fresh: SourceSnapshotWrite = { instance: "core", ok: true, asOf: source.observedAt!, bodies: [{ name: GARDENER_SPEND_SOURCE_NAME, body: { repository: "fixture/recent", source } }] };
+  w.ticker.acceptSnapshot(fresh); advance(10000); w.ticker.tick();
+  assert.equal(w.body().data.instances[0]!.gardenerSpend!.materializedAt, source.observedAt);
+  assert.equal(w.body().sources.find(s => s.name === "analytics:core")!.asOf, historical.asOf);
+  assert.equal(w.body().sources.find(s => s.name === "gardener-spend:core")!.state, "fresh");
+  const cold = world(t, clock, { names: ["cold"] });
+  cold.ticker.acceptSnapshot({ ...fresh, instance: "cold" }); cold.ticker.tick();
+  assert.equal(cold.body().data.coverage.counted, 0);
+  assert.equal(cold.body().data.instances[0]!.repository, "fixture/recent");
+  assert.equal(cold.body().data.instances[0]!.gardenerSpend!.totalUsd, 2);
+  const names = Array.from({ length: 12 }, (_, i) => `repo-${i}`);
+  const fleet = world(t, clock, { names });
+  for (const name of names) {
+    const repository = `fixture/${name}`;
+    const dir = scratch(t, "independent-fleet-source"), { runtime } = recentGarden(dir, repository);
+    runtime.gardens = Array.from({ length: 32 }, (_, i) => ({ ...runtime.gardens[0]!, name: i === 0 ? "config" : `garden-${i}` }));
+    writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify(runtime));
+    const source = await captureGardenerSpendSource(dir, clock, { repository });
+    fleet.ticker.acceptSnapshot({ instance: name, ok: true, asOf: source.observedAt!,
+      bodies: [{ name: GARDENER_SPEND_SOURCE_NAME, body: { repository, source } }] });
+  }
+  fleet.ticker.tick();
+  const spend = fleet.body().data.instances.map(i => i.gardenerSpend);
+  assert.equal(spend.length, 12); assert.ok(spend.every(s => s?.totalUsd === 2), "all repositories reserve monetary evidence first");
+  assert.ok(Buffer.byteLength(JSON.stringify(spend)) <= 65536);
+  assert.ok(spend.some(s => s!.workerCalls?.state !== "complete"), "optional call coverage cannot crowd other repositories' money out");
+  const history = snapshotOf(CORE_LINES, T0 - MINUTE);
+  const compared = compareAnalytics([["core", history]], [["core", history]], data => {
+    data.instances[0]!.gardenerSpend = foldGardenerSpend(source, "fixture/recent", source.observedAt!);
+  });
+  assert.ok(compared.diffs.some(d => d.path.includes("gardenerSpend") && d.classification === "real"),
+    "legacy disagreement is not fabricated parity or an automatic view promotion");
+  advance(ANALYTICS_STALE_AFTER_MS + 1); w.ticker.tick();
+  assert.equal(w.body().sources.find(s => s.name === "gardener-spend:core")!.state, "stale");
+  assert.equal(foldGardenerSpend(source, "wrong/repository", source.observedAt!).totalUsd, null);
 });
 
 test("the slow lane refreshes each instance's analytics off serve's loop and posts its source snapshots", async (t) => {
