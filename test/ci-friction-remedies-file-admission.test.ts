@@ -24,7 +24,7 @@ import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
 import * as approvalPlan from "#src/lib/plan.js";
 import * as runTask from "#src/run-task.js";
 import * as service from "#src/lib/service.js";
-import type { IncomingMessage } from "node:http";
+import { request as httpRequest, type ClientRequest, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 
 function admit(yaml: string, pathExists = (p: string) => existsSync(join(REPO_ROOT, p))): string[] {
@@ -126,6 +126,79 @@ test("new path admission binds the explicit approval to the exact task and decla
       "restart does not restore canonical authority from audit JSON");
   } finally {
     server.closeAllConnections();await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
+
+test("new path admission bounds partial bodies and pending authentication before issuer effects with real HTTP", { timeout: 30_000 }, async () => {
+  const now = Date.UTC(2026, 9, 23, 12), clock = fixedClock(now);
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwk = { ...publicKey.export({ format: "jwk" }), kid: "bounded-request-key", kty: "RSA" } as service.OperatorJwk;
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const head = encode({ alg: "RS256", kid: jwk.kid });
+  const claims = encode({ iss: "https://session.fixture.invalid", sub: "fixture-user", azp: "https://ui.fixture.invalid",
+    iat: now / 1_000 - 1, exp: now / 1_000 + 60, fva: [0, -1] });
+  const token = `${head}.${claims}.${sign("RSA-SHA256", Buffer.from(`${head}.${claims}`), privateKey).toString("base64url")}`;
+  for (const mode of ["partial-body", "pending-auth"] as const) {
+    let holdKeys = mode === "pending-auth", keyReads = 0, effects = 0, sequence = 0;
+    const releaseKeys: Array<() => void> = [], captured: IncomingMessage[] = [];
+    const operatorSession = service.operatorSessionIdentityProvider({ issuer: "https://session.fixture.invalid",
+      allowedOrigins: ["https://ui.fixture.invalid"], operatorUserIds: ["fixture-user"], clock, keys: { key: async () => {
+        keyReads++;if (holdKeys) await new Promise<void>(resolve => releaseKeys.push(resolve));return jwk;
+      } } });
+    const authorize = operatorSession.authorize!.bind(operatorSession);
+    operatorSession.authorize = (req, allow) => { captured.push(req);return authorize(req, allow); };
+    const path = "/v1/new-path-approvals/confirm", payload = "{}";
+    const nonces = service.createConfirmNonceStore(() => `bounded-nonce-${++sequence}`, clock.now);
+    const server = service.createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession,
+      enforceWriteTiers: true, confirmNonces: nonces, routes: [
+        { method: "POST", path, scope: "write", tier: "high", newPathApproval: true, handler: (req, res) => {
+          const actor = service.verifiedNewPathApprovalAction(req, true);if (actor) effects++;
+          res.writeHead(actor ? 200 : 403, { "content-type": "application/json" });res.end(JSON.stringify({ actor }));
+        } },
+        { method: "GET", path: "/fixture/healthy", scope: "read", handler: (_req, res) => { res.writeHead(200);res.end("legacy healthy"); } },
+      ] });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const opened: Array<{ req: ClientRequest; done: Promise<{ status: number; text: string }> }> = [];
+    const open = () => {
+      let req!: ClientRequest;
+      const done = new Promise<{ status: number; text: string }>((resolve, reject) => {
+        req = httpRequest(origin + path, { method: "POST", headers: { [service.OPERATOR_SESSION_HEADER]: token,
+          "x-confirm-nonce": "unconfirmed-stalled-body", "content-length": mode === "partial-body" ? "100" : "2" } }, res => {
+          let text = "";res.setEncoding("utf8");res.on("data", chunk => { text += chunk; });
+          res.on("end", () => resolve({ status: res.statusCode!, text }));res.on("error", reject);
+        });req.on("error", reject);
+      });
+      void done.catch(() => {});req.flushHeaders();if (mode === "partial-body") req.write("{");else req.end(payload);
+      const value = { req, done };opened.push(value);return value;
+    };
+    const healthyPost = () => fetch(origin + path, { method: "POST", body: payload,
+      headers: { [service.OPERATOR_SESSION_HEADER]: token, "x-confirm-nonce": nonces.issue({ method: "POST", path, payload }) },
+      signal: AbortSignal.timeout(2_000) });
+    try {
+      for (let i = 0; i < 8; i++) open();
+      const readyUntil = performance.now() + 1_000;
+      while (keyReads < 8 && performance.now() < readyUntil) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.equal(keyReads, 8, "all eight genuine signed HTTP requests reached authentication");
+      const busy = await healthyPost();assert.equal(busy.status, 409, `${mode}: the selected bound must include work before issuer dispatch`);await busy.text();
+      const legacy = await fetch(origin + "/fixture/healthy", { headers: { authorization: "Bearer fixture-read" }, signal: AbortSignal.timeout(2_000) });
+      assert.equal(legacy.status, 200);assert.equal(await legacy.text(), "legacy healthy", "selected backpressure is not a global trusted-flow hold");
+      const responses = await Promise.race([Promise.all(opened.map(value => value.done)),
+        new Promise<never>((_resolve, reject) => { const timer = setTimeout(() => reject(new Error(`${mode}: selected default deadline never answered`)), 8_000);timer.unref(); })]);
+      assert.ok(responses.every(value => value.status === 409 && JSON.parse(value.text).state === "unknown"), mode);
+      assert.equal(effects, 0);
+      holdKeys = false;for (const release of releaseKeys) release();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(effects, 0, "late authentication completion is not a grant");
+      for (const req of captured.slice(0, 8)) {
+        assert.equal(service.verifiedNewPathApprovalAction(req, false), undefined);
+        assert.equal(req.listenerCount("data"), 0, "cancelled selected body readers release buffering listeners");
+      }
+      const admitted = await healthyPost();assert.equal(admitted.status, 200);await admitted.text();assert.equal(effects, 1);
+    } finally {
+      holdKeys = false;for (const release of releaseKeys) release();for (const value of opened) value.req.destroy();
+      server.closeAllConnections();await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
   }
 });
 
