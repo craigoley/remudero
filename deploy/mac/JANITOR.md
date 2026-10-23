@@ -357,3 +357,61 @@ passes report zero retirements, with held repositories unknown because no scan r
 excludes the preservation phase. The `free=before->afterGiB` readings cover the
 whole pass and can also reflect concurrent writers. `planned` retains its legacy
 scope; `preservation-planned` is separate and can overlap with those dry-run plans.
+
+## Session and process reaper (Azure)
+
+`deploy/rmd-session-reaper.sh` runs hourly as root on the Azure host, from
+`rmd-session-reaper.timer`, which `deploy/install-host-units.sh` installs and checks for drift.
+It appends to `~/session-reaper.log` and keeps CPU observations in
+`/var/lib/rmd-session-reaper/`. `DRY_RUN=1` logs every decision and changes nothing:
+`ssh remudero 'sudo -n env DRY_RUN=1 bash -s' < deploy/rmd-session-reaper.sh`.
+
+**The incident.** At 2026-10-20 00:06:33Z a `systemctl daemon-reload` took 208 s under memory
+pressure, and PID 1 logged `systemd-logind.service: Unexpected error response from
+GetNameOwner(): Connection terminated`. logind lost its subscription to PID 1's unit and job
+signals. It had logged `Removed session` 2,152 times before then and never once after. Every SSH
+logout left a session in `State=closing` whose scope unit was already gone; `loginctl
+terminate-session` could not finish them. By 2026-10-23 there were 3,073 such sessions:
+`uptime` counted 3,056 users while `who` showed none. At about 650 a day, logind's default
+`SessionsMax=8192` would eventually have refused new SSH logins. A logind restart re-subscribes
+and drops every session whose scope is gone.
+
+The same host also held processes leaked from long-closed sessions, re-parented to PID 1: a
+forgotten `docker logs -f` pipeline (10 days old) and test `node` processes whose working
+directory was a deleted `rmd-reader-runtime-*` temp dir (6 days old).
+
+**What a pass does.**
+
+1. *Leaked processes.* It reads only processes in a `session-*.scope` cgroup. Builder
+   `run-*.scope` jobs, containers, services and `user@.service` are never read. It stops a
+   process (SIGTERM, then SIGKILL after a grace) only when all of these hold:
+   - its session is closing, unknown to logind, or has a dead leader;
+   - its parent is PID 1, or it descends from such a process in the same scope;
+   - it is not sshd, systemd or logind, and no terminal multiplexer (tmux, screen and the like)
+     sits above it, because a detached tmux is the operator's live work;
+   - its cwd is deleted, or it provably used no CPU for six hours.
+
+   The kernel's `se.exec_start` for every thread proves no CPU use on the first pass. Without
+   that record, the proof is utime+stime unchanged since the reaper's own observation six hours
+   earlier. Only comm and exe are logged, never a cmdline or environment.
+
+   A descendant of a root stopped in the same pass is stopped with it, even while it uses CPU,
+   when its stdout reaches nobody: a pipe or socket that no process outside the subtree holds, a
+   deleted file, or a tty that no longer exists. That is the measured `docker logs -f | tail`
+   pipeline, whose output pipe only its own bash and tail held. A descendant writing to an
+   existing file, or read by an outside process, is a deliberate watcher and stays.
+2. *Orphan sessions.* A session is a proven orphan when it is closing, its scope is gone, no
+   process is still in the scope's cgroup, and nothing but logind holds its
+   `/run/systemd/sessions/<id>.ref` fifo. One proven orphan is enough to restart logind, once per
+   pass. The pass then checks that logind is active and that the session count dropped. If
+   either check fails, it logs `REFUSE` and exits non-zero.
+
+Every pass also logs how long ago logind last logged `Removed session`. A growing age while people
+log in and out means logind has stopped finalising sessions again.
+
+**The alarm.** `scripts/fleet-heartbeat.sh` publishes `session_reaper_verdict` from the log's last
+pass and from `systemctl show rmd-session-reaper.service`. It reads `REFUSED` when the pass logged a
+REFUSE, `INCOMPLETE` when the pass never reached its summary line (or was already running at the
+previous beat), and `FAILED` when the unit's last result was not success. Any of the three raises
+the `REAPER_ALARM` arm in `fleet-heartbeat-watch.yml`, which files that host's needs-human issue.
+`ok`, `running` and `unknown` (no reaper on the host) are silent.
