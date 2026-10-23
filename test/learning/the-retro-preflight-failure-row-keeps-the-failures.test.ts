@@ -121,3 +121,13 @@ test("retro excerpt trims an oversized untrusted UTF-8 summary without splitting
   assert.doesNotMatch(out, /\uFFFD/);
   assert.ok(out.endsWith(summary));
 });
+
+test("retro excerpt never aliases a cancelled prefix sibling and keeps byte-capped UTF-8 names", async (t) => {
+  const name = "é".repeat(149) + "🙂-long-name";
+  const cancelled = "not ok 1 - prefix-cancelled\n  ---\n  failureType: cancelledByParent\n  ...\n";
+  const { out, failure } = await retained(t, cancelled + prelude + block(2, "prefix") + block(3, name) + summary);
+  assert.deepEqual(failure.failing_tests, ["prefix", Buffer.from(name).subarray(0, 300).toString("utf8")]);
+  assert.doesNotMatch(out, /prefix-cancelled/);
+  assert.match(out, /distinct-error-prefix/);
+  assert.ok(out.includes(`distinct-error-${name}`));
+});
