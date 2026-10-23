@@ -58,6 +58,21 @@ test('bounded author runtime refuses unknown or excessive heap and does not clai
   requireBoundedAuthorHost({platform: 'darwin', heapLimitBytes: getHeapStatistics().heap_size_limit});
 });
 
+test('bounded author validates real V8 young-generation overhead with its 1-GiB old-space cap', () => {
+  const code = 'import {requireBoundedAuthorHost} from "#scripts/preflight-author.mjs";' +
+    'import {getHeapStatistics} from "node:v8";requireBoundedAuthorHost({platform:"darwin"});' +
+    'console.log(getHeapStatistics().heap_size_limit);';
+  const run = (semi: number) => spawnSync(process.execPath, ['--max-old-space-size=1024',
+    `--max-semi-space-size=${semi}`, '--import', 'tsx', '--input-type=module', '-e', code],
+  {cwd: REPO_ROOT, env: process.env, encoding: 'utf8', timeout: 20000, maxBuffer: 1024 ** 2});
+  const bounded = run(16);
+  assert.equal(bounded.status, 0, bounded.stderr);
+  assert.ok(Number(bounded.stdout.trim()) <= 1088 * 1024 ** 2);
+  const excessive = run(64);
+  assert.equal(excessive.status, 1);
+  assert.match(excessive.stderr, /actual V8 heap ceiling/);
+});
+
 test('a missing, malformed or unrelated capture receipt cannot authorize bounded author scratch cleanup', t => {
   const {dir} = ownedFixtureDir(t, 'author-budget-closure');
   const path = join(dir, 'native.json');

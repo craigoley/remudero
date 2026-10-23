@@ -16,7 +16,7 @@ export function boundedAuthorWorkload(scratchMiB) {
     throw new TypeError('bounded author scratch must be an integer from 16 through 256 MiB');
   const scratchBytes = scratchMiB * 1024 ** 2;
   const stepOutputBytes = 8 * 1024 ** 2, maximumPhases = 32;
-  return Object.freeze({kind: 'bounded-ordinary-mac-author', workers: 1, heapMiB: 1024,
+  return Object.freeze({kind: 'bounded-ordinary-mac-author', workers: 1, heapMiB: 1024, semiSpaceMiB: 16,
     scratchBytes, stepOutputBytes, stepRuntimeMs: 120_000, maximumPhases,
     systemReserveBytes: 4 * 1024 ** 3, metadataReserveBytes: 16 * 1024 ** 2,
     minimumFreeBytes: 4 * 1024 ** 3 + 2 * scratchBytes + maximumPhases * stepOutputBytes + 16 * 1024 ** 2});

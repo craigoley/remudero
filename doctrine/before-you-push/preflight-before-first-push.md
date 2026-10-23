@@ -106,11 +106,11 @@ Operator-approved 2026-10-23: the ordinary author entry point can price a declar
 workload instead of requiring the full coverage job's 20-GiB reserve:
 
 ```sh
-node --max-old-space-size=1024 --import tsx scripts/preflight-author.mjs --bounded-scratch-mib 128 --head-ref run-unfiled-<epochMs>
+node --max-old-space-size=1024 --max-semi-space-size=16 --import tsx scripts/preflight-author.mjs --bounded-scratch-mib 128 --head-ref run-unfiled-<epochMs>
 ```
 
 This mode keeps ordinary selection, identity, static checks, native judgments and verdicts.
-It uses one worker, an inherited 1-GiB V8 old-space ceiling, at most 32 native phases, 120 seconds
+It uses one worker, an inherited 1-GiB V8 old-space ceiling with 16-MiB semi-spaces, at most 32 native phases, 120 seconds
 and 8 MiB of combined output per phase, and a fixed native scratch volume between 16 and 256 MiB.
 Disk admission includes a 4-GiB system reserve, twice the declared scratch size, all 32 output
 allowances and 16 MiB of metadata. These are declared bounds, not measured production peaks;

@@ -37,7 +37,7 @@ export function requireBoundedAuthorHost({platform = process.platform,
   if (platform !== 'darwin')
     throw new Error('bounded ordinary author scratch requires the native Mac volume; Linux/hosted admission is unchanged');
   if (!Number.isSafeInteger(heapLimitBytes) || heapLimitBytes <= 0 || heapLimitBytes > 1088 * 1024 ** 2)
-    throw new Error('bounded author requires an actual V8 heap ceiling of at most 1024 MiB; start Node with --max-old-space-size=1024');
+    throw new Error('bounded author requires an actual V8 heap ceiling of at most 1088 MiB; start Node with --max-old-space-size=1024 --max-semi-space-size=16');
 }
 
 /** Only this capture's recorded process group can qualify volume cleanup.
@@ -375,7 +375,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         temp = realpathSync(mkdtempSync(join(base, 'ra')));
       }
       fixtureTemporaryEnvironment = { TMPDIR: temp, TMP: temp, TEMP: temp,
-        ...(resourceBudget ? {NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --max-old-space-size=${resourceBudget.heapMiB}`.trim()} : {}) };
+        ...(resourceBudget ? {NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --max-old-space-size=${resourceBudget.heapMiB} --max-semi-space-size=${resourceBudget.semiSpaceMiB}`.trim()} : {}) };
       receipt.fixtureTemporaryRoot = relative(root, temp);
     }
     return fixtureTemporaryEnvironment;
