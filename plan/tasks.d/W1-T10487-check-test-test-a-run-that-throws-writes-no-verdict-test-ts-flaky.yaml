@@ -41,3 +41,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares test/infra/check-test-test-a-run-that-throws-writes-no-verdict-test-ts-flaky.test.ts, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-23T09:12:28.084Z"
+    pin: "d40613c2c2b2cf1a8ddb5432e7a366f9fd84cd04d015b436e003e796605e42f3"
