@@ -20,6 +20,7 @@
     - test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts
     - docs/views.md
     - test/a-slow-lane-death-names-its-unit.test.ts
+    - test/scout-analytics-source-snapshot-failed.test.ts
   acceptance:
     - claim: "The real complete current-generation collector and fenced cached view refresh gardener evidence while malformed historical analytics retains its old source clock and refusal"
       proof: "unit test: W1-T10461: recent gardener telemetry refreshes while historical analytics remains incomplete"
@@ -29,7 +30,7 @@
       proof: "unit test: W1-T10461: independent gardener capture obeys cancellation ownership and bounded cadence"
     - claim: "Own source clocks conservative legacy fallback shadow pairing cached restart and monetary-first fleet payload bounds remain honest without advancing historical sources"
       proof: "unit test: W1-T10461: gardener source freshness compatibility and fleet budgets remain independent"
-  note: "Direct operator answer call_7f61fd5db01a4778a50f0086d9a0cc7f: Approve independently qualified telemetry repair. Historical/benchmark evidence stays explicitly incomplete. Preserve the damaged archive, unknown prices, completed-scan and ownership guards and every normal test/review/CI gate. This is not approval for a deployment, service change, gardener activation, action authority, provider/spending change, archive repair, history deletion or source-quality waiver. Operator ruling is not a model verdict. A separately gated Console freshness consumer may be required before end-to-end live completion. October 23 operator approved only the existing lifecycle fixture scope addition. Supply explicit core instance ownership in the fixture lease, retaining every lifecycle assertion and all production ownership, cancellation, freshness and publication guards. Preserve the failed qualification. This adds no production behavior, model call, provider, permission, budget, service or deployment authority and changes no required gate."
+  note: "Direct operator answer call_7f61fd5db01a4778a50f0086d9a0cc7f: Approve independently qualified telemetry repair. Historical/benchmark evidence stays explicitly incomplete. Preserve the damaged archive, unknown prices, completed-scan and ownership guards and every normal test/review/CI gate. This is not approval for a deployment, service change, gardener activation, action authority, provider/spending change, archive repair, history deletion or source-quality waiver. Operator ruling is not a model verdict. A separately gated Console freshness consumer may be required before end-to-end live completion. October 23 operator approved only the existing lifecycle fixture scope addition. Supply explicit core instance ownership in the fixture lease, retaining every lifecycle assertion and all production ownership, cancellation, freshness and publication guards. Preserve the failed qualification. This adds no production behavior, model call, provider, permission, budget, service or deployment authority and changes no required gate. The same operator separately approved the existing scout analytics fixture after the closed run exposed the same missing owned-instance input. Supply explicit core ownership and retain all bounded-scan, no-partial-publication and one-pass-equivalence assertions. No production guard or timeout changes."
   rationale: |
     Grounded in CLAUDE.md, MASTER-PLAN.md, DECISIONS.md and LEARNINGS.md. The read model is a rebuildable projection, not a replacement source of truth; observation, freshness, complete coverage, price reporting and billed money remain separate facts.
     Observed October22: core slow-lane analytics repeatedly failed ledger-source-malformed while site/console completed. A complete read-only audit of ledger.2026-09-20T23-59-59-117Z.ndjson.gz verified gzip/CRC, stable identity,81600physical lines,81599validobjects and one invalid-JSON row36871. Its491byte row digest is2e954cb5cc99a06fb286a47f49ac6b00b16376f4bda5bceb4ca2945d4388a048. Preserve the archive and finding; do not print raw rows, silently repair data or clear checkpoint quality.
@@ -50,6 +51,6 @@
     action: proceed
     confidence: 1
     reasons:
-      - "Direct operator response call_3659fe054b154b3bb4703a2cccca58f9 item0: Approve this test-only scope addition. Add only existing test/a-slow-lane-death-names-its-unit.test.ts to W1-T10461 so its lease names core ownership. Preserve all lifecycle assertions, failed evidence and every production guard. This is operator approval, not a model verdict; no deployment or other authority changes."
-    judged_at: "2026-10-23T14:41:59.656Z"
-    pin: "d0895b8a3133dd6007a36efcdff3a8cc09ac04decb6605c3cc25bfe346ac2d09"
+      - "Direct operator approvals: call_3659fe054b154b3bb4703a2cccca58f9 item0 approves only existing lifecycle fixture; call_2de21b5e66094027a0cad7083c947441 item1 additionally approves only existing scout analytics fixture. Supply explicit core ownership in both, preserving every lifecycle, bounded-scan, no-partial-publication and one-pass-equivalence assertion. Preserve failed evidence; no production guard, timeout, provider, permission, budget, service, deployment or required-gate change. Operator approval, not a model verdict."
+    judged_at: "2026-10-23T14:56:09.834Z"
+    pin: "1fb5f6713966aec147d49048d9ab80cb10189c7ffefd0b09b878a37ddec121ca"
