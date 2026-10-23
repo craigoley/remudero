@@ -6,7 +6,7 @@
  * exist yet — and admission must take it as a parked proposal, as it does the legacy shape.
  */
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -18,6 +18,9 @@ import { machineShardFilingRefusal } from "#src/lib/machine-filing.js";
 import { assertLintClean, lintTask, sizingViolation, taskRulingPin } from "#src/lib/task-linter.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations, newPathApprovalIntentDigest, newTestPath, type NewPathApprovalFacts, type Task } from "#src/lib/plan.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import * as service from "#src/lib/service.js";
+import type { IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
 
 function admit(yaml: string, pathExists = (p: string) => existsSync(join(REPO_ROOT, p))): string[] {
   const plan = loadPlanFromYaml(yaml, "ci-friction-fixture");
@@ -230,5 +233,66 @@ test("new path admission refuses missing drifted and unsupported authority befor
   await t.test("selected aliases and cyclic input refuse without recursing into detachment", () => {
     const text = `- &task\n  id: W1-T99001\n  title: fixture\n  repo: remudero\n  type: implement\n  new_path_approval_ref: ${APPROVAL_REFERENCE}\n  context: [*task]\n`;
     assert.throws(() => loadPlanFromYaml(text, APPROVAL_RECORD_PATH), /new.path approval.*unsupported/i);
+  });
+  await t.test("confirmation authority requires a genuine fresh signed-session dispatcher and consumed action nonce", async () => {
+    const action = (service as unknown as { verifiedNewPathApprovalAction?: (req: IncomingMessage, confirmed: boolean) => { actor: string } | undefined }).verifiedNewPathApprovalAction;
+    assert.equal(typeof action, "function", "a public actor symbol or provider name is not confirmation provenance");
+    assert.equal(action!({ [Symbol.for("remudero.service.verifiedActor")]: "operator:fixture-user" } as unknown as IncomingMessage, true), undefined);
+    const now = Date.UTC(2026, 9, 23, 12), clock = fixedClock(now);
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const jwk = { ...publicKey.export({ format: "jwk" }), kid: "fixture-key", kty: "RSA" } as service.OperatorJwk;
+    const encoded = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const token = (claims: Record<string, unknown> = {}) => {
+      const head = encoded({ alg: "RS256", kid: jwk.kid });
+      const body = encoded({ iss: "https://session.fixture.invalid", sub: "fixture-user", azp: "https://ui.fixture.invalid",
+        iat: now / 1_000 - 1, exp: now / 1_000 + 60, fva: [0, -1], ...claims });
+      return `${head}.${body}.${sign("RSA-SHA256", Buffer.from(`${head}.${body}`), privateKey).toString("base64url")}`;
+    };
+    const provider = () => service.operatorSessionIdentityProvider({ issuer: "https://session.fixture.invalid",
+      allowedOrigins: ["https://ui.fixture.invalid"], operatorUserIds: ["fixture-user"], keys: { key: async () => jwk }, clock });
+    const path = "/v1/new-path-approvals/confirm", payload = "{}";
+    for (const mode of ["genuine", "wrong-provider", "unenforced", "missing-iat", "oversized", "cached-oversized"] as const) {
+      let effects = 0, consumes = 0, sequence = 0;
+      const store = service.createConfirmNonceStore(() => `fixture-nonce-${++sequence}`, clock.now);
+      const consume = store.consume.bind(store);
+      store.consume = (nonce, intended) => { consumes++; return consume(nonce, intended); };
+      let operatorSession = provider();
+      if (mode === "wrong-provider") operatorSession = { name: "operator-session", grant: () => undefined,
+        authorize: () => ({ scopes: new Set(["read", "write"]), tier: "high", actor: "operator:fixture-user" }) };
+      if (mode === "cached-oversized") {
+        const authorize = operatorSession.authorize!.bind(operatorSession);
+        operatorSession.authorize = (req, allow) => {
+          (req as unknown as Record<symbol, unknown>)[service.RAW_BODY_CACHE] = "x".repeat(256 * 1_024);
+          return authorize(req, allow);
+        };
+      }
+      const route = { method: "POST", path, scope: "write", tier: "high", newPathApproval: true,
+        handler: (req: IncomingMessage, res: import("node:http").ServerResponse) => {
+          const proof = action!(req, true);
+          if (proof) effects++;
+          res.writeHead(proof ? 200 : 403, { "content-type": "application/json" });
+          res.end(JSON.stringify({ actor: proof?.actor }));
+        } } as service.Route;
+      const server = service.createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession,
+        enforceWriteTiers: mode !== "unenforced", confirmNonces: store, routes: [route] });
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}${path}`;
+      try {
+        const nonce = store.issue({ method: "POST", path, payload });
+        const response = await fetch(url, { method: "POST", body: mode === "oversized" ? "x".repeat(256 * 1_024) : payload,
+          headers: { [service.OPERATOR_SESSION_HEADER]: token(mode === "missing-iat" ? { iat: undefined } : {}), "x-confirm-nonce": nonce }, signal: AbortSignal.timeout(2_000) });
+        assert.equal(response.status, mode === "genuine" ? 200 : mode.includes("oversized") ? 413 : 403, mode);
+        await response.text();
+        if (mode === "genuine") {
+          const replay = await fetch(url, { method: "POST", body: payload, headers: { [service.OPERATOR_SESSION_HEADER]: token(), "x-confirm-nonce": nonce }, signal: AbortSignal.timeout(2_000) });
+          assert.equal(replay.status, 403);await replay.text();
+        }
+        assert.equal(effects, mode === "genuine" ? 1 : 0, "forbidden effect stays trapped");
+        if (mode.includes("oversized")) assert.equal(consumes, 0, "the byte bound precedes nonce buffering/consumption, including the cache");
+      } finally {
+        server.closeAllConnections();
+        await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      }
+    }
   });
 });
