@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -43,6 +44,13 @@ test("a managed garden renews before work and again across inherited-token expir
       tick();
       await second;
       assert.equal(process.env.GH_TOKEN, "renewed-test-token-2", "publication sees the child's renewal");
+      const credential = execFileSync("git", ["-c", "credential.helper=", "-c",
+        'credential.helper=!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f', "credential", "fill"], {
+        input: "protocol=https\nhost=example.invalid\n\n", encoding: "utf8",
+        env: { PATH: process.env.PATH, GH_TOKEN: process.env.GH_TOKEN, GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null", GIT_TERMINAL_PROMPT: "0" },
+      });
+      assert.match(credential, /^password=renewed-test-token-2$/m, "the real Git helper receives the renewed child environment");
       return 17;
     }, { start });
     assert.equal(result, 17);
