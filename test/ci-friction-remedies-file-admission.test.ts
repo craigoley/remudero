@@ -416,7 +416,7 @@ test("new path admission actual serve and default HTTPS reader retain current Gi
   const nonces = service.createConfirmNonceStore();
   const operatorSession = service.operatorSessionIdentityProvider({ issuer: "https://session.fixture.invalid", allowedOrigins: ["https://ui.fixture.invalid"],
     operatorUserIds: ["fixture-user"], keys: { key: async () => jwk }, clock: systemClock });
-  let routes: service.Route[] = [], verifyCalls = 0, driftAfterFirstRead = false;
+  let routes: service.Route[] = [], verifyCalls = 0, driftAfterFirstRead = false, stallBody = false, closedStalledBodies = 0;
   const dispatcher = service.createService({ tokens: deps.tokens!, operatorSession, enforceWriteTiers: true, confirmNonces: nonces,
     routes: ["preview", "confirm", "revoke", "verify"].map((operation): service.Route => ({ method: operation === "verify" ? "GET" : "POST",
       path: `/v1/new-path-approvals/${operation}`, scope: operation === "verify" ? "read" : "write",
@@ -425,6 +425,7 @@ test("new path admission actual serve and default HTTPS reader retain current Gi
   const tls = createHttpsServer({ key: readFileSync(key), cert: readFileSync(cert) }, (req, res) => {
     if (req.url?.startsWith("/v1/new-path-approvals/verify?")) {
       verifyCalls++;assert.equal(req.headers.authorization, "Bearer fixture-read");assert.equal(req.headers[service.OPERATOR_SESSION_HEADER], undefined);
+      if (stallBody) { res.once("close", () => { closedStalledBodies++; });res.writeHead(200, { "content-type": "application/json" });res.write('{"unfinished":');return; }
       if (driftAfterFirstRead) { driftAfterFirstRead = false;res.once("finish", () => { current = { ...current!, epoch: "changed-after-first-read" }; }); }
     }
     dispatcher.emit("request", req, res);
@@ -443,16 +444,16 @@ test("new path admission actual serve and default HTTPS reader retain current Gi
   });
   const preview = () => post("preview", { draftYaml, recordPath: APPROVAL_RECORD_PATH, approvedMissingPaths: original.files, lifetimeMs: 60_000 });
   const childScript = `import {prepareNewPathApprovalFacts} from "#src/lib/plan.js";
-    const input=JSON.parse(process.argv[1]);let calls=0;const bind=()=>{calls++;return input.absentBinding?undefined:input.binding;};
+    const input=JSON.parse(process.argv[1]);let calls=0,ticks=0;const timer=setInterval(()=>ticks++,10);const bind=()=>{calls++;return input.absentBinding?undefined:input.binding;};
     const facts=await prepareNewPathApprovalFacts(input.task,input.recordPath,{repoRoot:input.root,base:input.base,readTokenFile:input.tokenFile,currentBinding:bind},AbortSignal.timeout(8000));
-    console.log(JSON.stringify({state:facts?.state??null,facts,calls}));`;
+    clearInterval(timer);console.log(JSON.stringify({state:facts?.state??null,facts,calls,ticks}));`;
   const read = async (task: Task, trust = true, absentBinding = false) => {
     const env = { ...process.env };delete env.NODE_TLS_REJECT_UNAUTHORIZED;delete env.NODE_EXTRA_CA_CERTS;
     if (trust) env.NODE_EXTRA_CA_CERTS = cert;
     const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", childScript,
       JSON.stringify({ task, binding: current, root: repo.dir, base, tokenFile, recordPath: APPROVAL_RECORD_PATH, absentBinding })],
       { cwd: REPO_ROOT, env, timeout: 12_000, maxBuffer: 128 * 1_024 });
-    return JSON.parse(stdout.trim()) as { state: string | null; facts?: NewPathApprovalFacts; calls: number };
+    return JSON.parse(stdout.trim()) as { state: string | null; facts?: NewPathApprovalFacts; calls: number; ticks: number };
   };
   try {
     throwConfig = true;assert.deepEqual(assembled(), []);throwConfig = false;
@@ -467,6 +468,7 @@ test("new path admission actual serve and default HTTPS reader retain current Gi
     let before = verifyCalls;
     assert.equal((await read(task, false)).state, "unknown");assert.equal(verifyCalls, before, "untrusted TLS fails before issuer dispatch");
     const observed = await read(task);assert.equal(observed.state, "verified");assert.equal(verifyCalls - before, 2, "real default fetch rereads after actual checkout/base evidence");
+    assert.ok(observed.ticks > 0, "the real child event loop stays responsive during native transport and Git reads");
     assert.ok(observed.facts?.state === "verified");assert.deepEqual(observed.facts.paths, { [task.files![0]!]: { checkout: "missing", base: "missing" } });
     const prepared = { clock: systemClock, newPathApprovals: new Map([[task.id, observed.facts]]) };
     const filing = JSON.parse(JSON.stringify(task));delete filing.sourcePath;
@@ -477,6 +479,12 @@ test("new path admission actual serve and default HTTPS reader retain current Gi
     assert.match(machineShardLandingGuard({ repoRoot: repo.dir })(repo.dir, [APPROVAL_RECORD_PATH])!, /approval/i, "stored reference is not prepared authority");
     before = verifyCalls;const legacy = { ...task };delete legacy.new_path_approval_ref;
     assert.equal((await read(legacy)).state, null);assert.equal((await read(task, true, true)).state, "unknown");assert.equal(verifyCalls, before);
+    renameSync(tokenFile, tokenFile + ".preserved-original");symlinkSync(tokenFile + ".preserved-original", tokenFile);
+    assert.equal((await read(task)).state, "unknown");assert.equal(verifyCalls, before, "a symlink credential never reaches the real transport");
+    renameSync(tokenFile, tokenFile + ".retained-symlink");renameSync(tokenFile + ".preserved-original", tokenFile);
+    stallBody = true;const timedOut = await read(task);stallBody = false;
+    assert.equal(timedOut.state, "unknown");assert.ok(timedOut.ticks > 10, "the default body deadline does not block the child event loop");
+    assert.equal(verifyCalls - before, 1, "a stalled body never reaches a second verification");assert.equal(closedStalledBodies, 1, "default cancellation closes the stalled response");
     driftAfterFirstRead = true;assert.equal((await read(task)).state, "unknown");
     current = { ...facts.binding, origin };
     renameSync(auditPath, auditPath + ".preserved-original");writeFileSync(auditPath, readFileSync(auditPath + ".preserved-original"), { mode: 0o600 });
