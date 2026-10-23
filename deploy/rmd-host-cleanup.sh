@@ -164,7 +164,12 @@ if [ -n "${RMD_CLEANUP_WATCH_FS+x}" ]; then WATCH_FS="$RMD_CLEANUP_WATCH_FS"
 elif [ "$ROOT_FS" = / ]; then WATCH_FS="/mnt/rmd:85 /mnt/scratch:90/40G"  # the Azure host's state + swap disks
 else WATCH_FS=""; fi  # a relocated root (a fixture, another layout) does not inherit the host's mounts
 FSID_CMD="${RMD_CLEANUP_FSID:-}"
-LSOF_CMD="${RMD_CLEANUP_LSOF:-lsof}"
+# An account-owned checkout can be read by root or another account. An unprivileged lsof
+# reports those /proc paths as Permission denied with exit 0, so it cannot prove global idleness.
+# Elevate only the fixed system binary; an explicitly configured probe is never elevated for it.
+if [ -n "${RMD_CLEANUP_LSOF:-}" ]; then LSOF_CMD="$RMD_CLEANUP_LSOF"
+elif [ "$(id -u)" = 0 ]; then LSOF_CMD=lsof
+else LSOF_CMD="sudo -n -- /usr/bin/lsof"; fi
 FIND_CMD="${RMD_CLEANUP_FIND:-find}"
 CONTAINER_MAP="${RMD_CLEANUP_CONTAINER_MAP:-}"
 WATCH_ROOTS="${RMD_CLEANUP_WATCH_ROOTS-$CLEAN_HOME/.codex $CLEAN_HOME/.claude}"
@@ -390,16 +395,22 @@ is_worktree_idle() {
 OPEN_SNAPSHOT=""
 PROCESS_SNAPSHOT=""
 OPEN_OK=1
+OPEN_FAILURE="lsof failed"
 snapshot_open() {
   local out
-  OPEN_OK=1
-  PROCESS_SNAPSHOT=$(ps -axww -o command= 2>/dev/null) || { OPEN_OK=0; return; }
-  if ! out="$($LSOF_CMD -Fn 2>/dev/null)" && [ -z "$out" ]; then
-    # An lsof that failed and printed nothing tells us NOTHING; treating that as "nothing is open"
-    # is the failure this rule exists to prevent. Fail closed: keep everything.
+  OPEN_OK=1; OPEN_FAILURE="lsof failed"
+  PROCESS_SNAPSHOT=$(ps -axww -o command= 2>/dev/null) || {
+    OPEN_OK=0; OPEN_FAILURE="process snapshot failed"; return
+  }
+  if ! out="$($LSOF_CMD -Fn 2>/dev/null)"; then
+    # Some paths do not make an unsuccessful probe complete. Unknown readers keep every path.
     OPEN_OK=0
     return
   fi
+  case "$out" in
+    *"Permission denied"*)
+      OPEN_OK=0; OPEN_FAILURE="lsof returned incomplete visibility (Permission denied)"; return ;;
+  esac
   OPEN_SNAPSHOT="$(printf '%s\n' "$out" | sed -n 's/^n//p')"
 }
 is_open() {
@@ -838,7 +849,7 @@ prune_tsx_cache() {
   local dir="$1" minutes stats count bytes
   minutes="$TSX_MAX_AGE_MINUTES"
   if [ -L "$dir" ] || [ ! -d "$dir" ]; then log "KEEP $dir: not a regular directory"; return; fi
-  if [ "$OPEN_OK" != 1 ]; then log "KEEP $dir: lsof failed (fail closed)"; return; fi
+  if [ "$OPEN_OK" != 1 ]; then log "KEEP $dir: $OPEN_FAILURE (fail closed)"; return; fi
   if ! stats="$(find "$dir" -xdev -type f -mmin "+$minutes" -exec du -k {} + 2>/dev/null \
        | awk '{ n++; kb += $1 } END { printf "%d %d", n, kb * 1024 }')"; then
     log "KEEP $dir: tsx cache scan failed (unknown)"; return
@@ -1569,7 +1580,7 @@ preserve_then_retire() {
   local root unit retired_before lender
   [ -n "$PRESERVE_ROOTS" ] || return 0
   if [ -L "$PRESERVE_ROOT" ]; then log "REFUSE preserve-then-retire: $PRESERVE_ROOT is a symbolic link"; return; fi
-  if [ "$OPEN_OK" != 1 ]; then log "REFUSE preserve-then-retire: lsof failed — keeping everything (fail closed)"; return; fi
+  if [ "$OPEN_OK" != 1 ]; then log "REFUSE preserve-then-retire: $OPEN_FAILURE — keeping everything (fail closed)"; return; fi
   if [ "$DRY_RUN" != 1 ]; then
     if ! mkdir -p -- "$PRESERVE_ROOT" 2>/dev/null || ! chmod 700 "$PRESERVE_ROOT" 2>/dev/null; then
       log "REFUSE preserve-then-retire: cannot create $PRESERVE_ROOT"; return
@@ -1690,7 +1701,7 @@ dump_walk() {   # dump_walk <root> <unit> <resumable 0|1>
 dump_housekeeping() {
   local root unit
   [ -n "$DUMP_ROOTS$DUMP_RESUMABLE_ROOTS" ] || return 0
-  if [ "$OPEN_OK" != 1 ]; then log "REFUSE dump housekeeping: lsof failed — keeping everything (fail closed)"; return; fi
+  if [ "$OPEN_OK" != 1 ]; then log "REFUSE dump housekeeping: $OPEN_FAILURE — keeping everything (fail closed)"; return; fi
   while IFS= read -r root; do
     root="${root%/}"
     [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
@@ -1874,7 +1885,7 @@ fi
 log "rmd-host-cleanup: retention idle $(fmt_minutes "$IDLE_MINUTES"), scratch $(fmt_minutes "$SCRATCH_IDLE_MINUTES"), tsx $(fmt_minutes "$TSX_MAX_AGE_MINUTES") ($IDLE_SOURCE)"
 
 snapshot_open
-[ "$OPEN_OK" = 1 ] || log "REFUSE sweeps: lsof failed — keeping everything (fail closed)"
+[ "$OPEN_OK" = 1 ] || log "REFUSE sweeps: $OPEN_FAILURE — keeping everything (fail closed)"
 
 snapshot_docker
 snapshot_alternates
