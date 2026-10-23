@@ -1847,6 +1847,8 @@ export function compactRotations(
  *  window's patience is never held hostage by it. */
 function ledgerRotationDue(sizeBytes: number, ceilingBytes: number, dir: string, fs: ArchiveNamingFs, windowMs: number): boolean {
   if (sizeBytes > ceilingBytes * LEDGER_ROTATION_BACKSTOP_MULTIPLIER) return true;
+  // Zero disables pacing, including when an archive's mtime is ahead of the real clock.
+  if (windowMs === 0) return true;
   // The newest archive's FILE mtime, not its name's stamp — the window paces real rotations, and a
   // name is exactly what reconcileArchiveStamps exists because it cannot always be trusted.
   const mtimes = archiveMtimes(dir, fs).map((a) => a.mtimeMs);

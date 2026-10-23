@@ -9,7 +9,7 @@
   band_meaning: span
   budget_usd: 12.00
   priority: 1  # operator-2026-10-20: "file the codex gap now"
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-20: root-causing the Mac gh read floor; Codex was found reading as the same GitHub user outside every pacer"
   plan_refs: [W1-T10279, W1-T10271, W1-T3275, W1-T3297, W1-T5354]

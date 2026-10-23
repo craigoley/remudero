@@ -7,7 +7,7 @@
   risk: high
   band_meaning: blast-radius
   priority: 1.06
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:mutation-ratchet"

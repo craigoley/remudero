@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-11 (\"go with your recommendations\"): the stride and the breaker disagree about orphans (follow-up to #10916)"
   plan_refs: [W1-T7742, W1-T3523, W1-T4064, W1-T7534, W1-T4025]
   files: [src/lib/non-worker-verdict.ts, src/lib/status.ts, src/lib/dispatch-value.ts, test/the-stride-skips-a-proven-orphan-run.test.ts, test/new-work-is-ordered-by-cost-of-delay.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

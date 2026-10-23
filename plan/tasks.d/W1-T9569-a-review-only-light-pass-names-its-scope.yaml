@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14 (approved \"go\"): the orphaned recycle PAUSE read-out, 08:12-10:57Z, read only"
   plan_refs: [W1-T100, W1-T147, W1-T254, W1-T1211, W1-T2426, W1-T4053, W1-T4429, W1-T5343, W1-T8086, W1-T9558]
   files: [src/lib/daemon.ts, src/run-task.ts, src/lib/sweep.ts, test/a-review-only-light-pass-names-its-scope.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

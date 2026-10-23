@@ -29,6 +29,8 @@
     - test/an-instance-reframes-only-its-current-proposal.test.ts
     - test/inbox-thread-view.test.ts
     - test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts
+    - test/inbox-registry-atomic.test.ts
+    - test/the-daemon-reads-the-proposal-shards-off-the-loop.test.ts
   priority: 3
   status: queued
   # backlog gardener: band=3 evidence=ab374897457de40c
@@ -114,6 +116,15 @@
     receipts and same-committed-tree instrumented diff coverage, naming the SHA; helper-only mocks,
     test-title greps and a fabricated mutant result are not evidence.
   note: |
+    October 22 separate operator approval adds only the existing off-loop shard-reader
+    test companion: five additive empty-completion-outbox positive-control lines audited
+    at PR13649 head3547e731. Preserve every original line and assertion; no other path,
+    source behavior, scanner waiver, deployment, provider, budget or service change.
+    October 22 operator approved only the existing atomic-registry fixture scope addition.
+    Preserve verbatim feedback, explicit supersession, fresh locked writes and draft invalidation
+    assertions, and additionally validate the new exact scoped causal-input identities. The
+    separate off-loop recovery regression stays within already-approved source and causal tests.
+    No test removal, scanner waiver, deployment or CI-policy change is authorized.
     Generated companion qualification adds only docs/cli-reference.md and
     packages/api-client/src/schema.d.ts, regenerated from the already-qualified CLI and OpenAPI
     sources. Retain the complete command reference and contract, including other owners' changes;
@@ -194,3 +205,11 @@
     No git/gh command, live ledger read or claim mutation was used by this triage. External trace-link
     and message-reference documents are design analogies only; no platform-facts gap required web
     research and no instrumentation/framework migration is proposed.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Actual operator user answer call_4b1554ee3b6b409398fdf3973b2c20d7, independently read in coordination chat01a16024-d78a-7832-ac23-9ec5dc68d306: Approve this one test companion. Add only existing test/the-daemon-reads-the-proposal-shards-off-the-loop.test.ts and the five additive empty-outbox positive-control lines audited at PR13649 head3547e731, retaining every original line/assertion. Prior atomic-registry approval and all task properties remain intact. No model verdict, other path, source behavior, test removal, scanner waiver, deployment, provider, budget, permission, CI or service authority."
+    judged_at: "2026-10-22T22:33:26.058Z"
+    pin: "07665761df27d825010f23691880b927717c78207d51777bef393565808b05dd"

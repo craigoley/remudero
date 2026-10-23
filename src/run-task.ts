@@ -75,6 +75,7 @@ import {
 export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
 import { daemonCommand as daemonCommandFromModule, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
+import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import { defaultCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
   type CreditOverrideRow, type CreditReadState, type CreditStore } from "./lib/status.js";
@@ -33075,7 +33076,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // canary it judges and rolls back. The headroom sweep is an ES module, so it starts once loaded.
     case "config": {
       const d = deps("config");
-      return import(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href).then(
+      return tsImport(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href, import.meta.url).then(
         (): RegisteredGardenPass => {
           const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
           // Leave the build seam absent: production must use the heap-bounded measurement worker.
@@ -44809,10 +44810,10 @@ export function mainRepairTaskId(offendingSha: string): string {
 export const mainRepairRevertTaskId = (offendingSha: string): string => `main-repair-revert-${offendingSha.slice(0, 12)}`;
 
 /**
- * W1-T8572 — THE DISPATCHER WRITES A MAIN-REPAIR PR'S ACCEPTANCE BLOCK. Each `request.testFiles` entry fails on main
- * by definition (`baseReproductionFiles`), so `unit test: <path>` fails at base and passes at a repaired head: the
- * discrimination proof-discrimination wants, written by the harness so a model's spelling never sits between a red
- * main and its repair (#11096's prose proofs). Rendered through {@link renderAcceptanceBlock}, so it round-trips
+ * W1-T8572 — THE DISPATCHER WRITES A MAIN-REPAIR PR'S ACCEPTANCE BLOCK. Paths with a named failing-test witness
+ * qualify for whole-file proofs through {@link mainRepairUsesFileProofs}; reported paths alone remain context.
+ * The harness spells the file proof so a model's spelling never sits between a red main and its repair
+ * (#11096's prose proofs). Rendered through {@link renderAcceptanceBlock}, so it round-trips
  * through `parseAcceptanceBlock` or throws; it throws on an empty list too, which the no-test-file path never reaches.
  */
 export function mainRepairAcceptanceCriteria(request: Pick<MainRepairFixRequest, "testFiles">): string {
@@ -44824,11 +44825,16 @@ export const MAIN_REPAIR_PROSE_PLACEHOLDER = "WORKER-PROSE: replace this one lin
 /** W1-T8572 — the no-test-file body's one line under `Acceptance:` that the worker replaces with its bullets. */
 export const MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER = "WORKER-ACCEPTANCE: replace this one line with your `- <claim> | <proof>` bullets.";
 
+// Gate reports can name suites that pass normally; paths alone are not a failing-test witness.
+function mainRepairUsesFileProofs(request: Pick<MainRepairFixRequest, "testFiles" | "failingTestTitles">): boolean {
+  return request.testFiles.length > 0 && request.failingTestTitles.some((title) => title.trim().length > 0);
+}
+
 /** W1-T8572 — the body the dispatcher writes BEFORE the fix worker spawns: the prose placeholder, the Acceptance
  *  block (rendered here when test files are known, a placeholder line for the worker's bullets when not), the
  *  `origin:` line and the `Remudero-Task:` trailer last. */
 export function mainRepairFixBody(request: MainRepairFixRequest): string {
-  const block = request.testFiles.length > 0 ? mainRepairAcceptanceCriteria(request) : `Acceptance:\n${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}`;
+  const block = mainRepairUsesFileProofs(request) ? mainRepairAcceptanceCriteria(request) : `Acceptance:\n${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}`;
   return [
     MAIN_REPAIR_PROSE_PLACEHOLDER,
     "",
@@ -44847,7 +44853,7 @@ export function mainRepairFixBody(request: MainRepairFixRequest): string {
  *  the open to the dispatcher, which checks those proofs first. */
 export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: string, harnessOwnsGit = false): string {
   const pr = request.offendingPr !== undefined ? `PR #${request.offendingPr}` : "an unnamed PR";
-  const known = request.testFiles.length > 0;
+  const known = mainRepairUsesFileProofs(request);
   const merges = mainRepairMergesBrief(request);
   return [
     "You are a REMUDERO red-main fix worker dispatched by the main-health rung (W1-T6403).",
@@ -44859,7 +44865,7 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: str
     "",
     `Failing check(s): ${request.failingChecks.join(", ") || "(none named)"}`,
     `Failing test title(s): ${request.failingTestTitles.join("; ") || "(none parsed from the log)"}`,
-    `Failing test file(s): ${request.testFiles.join(", ") || "(none parsed from the log)"}`,
+    `${known ? "Failing test file(s)" : "Reported test path(s), not established whole-file failures"}: ${request.testFiles.join(", ") || "(none parsed from the log)"}`,
     `Why main reads red: ${request.reason}`,
     "Log excerpt of the failing check(s):",
     "```",
@@ -44868,7 +44874,8 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: str
     "",
     merges.fixLine,
     "Do NOT revert that merge — a revert PR is this lane's separate, later step. Do not scope-creep.",
-    "Reproduce the failing test file(s) above first, then make the minimal correct change.",
+    known ? "Reproduce the failing test file(s) above first, then make the minimal correct change."
+      : "Reproduce the red check's actual failing experiment first: reported paths may pass at the ordinary clock. Then make the minimal correct change.",
     "",
     `THE PR BODY IS ALREADY WRITTEN, by the dispatcher, at: ${bodyFile}`,
     "It lives outside your checkout: never copy it in and never commit it. Its `origin:` line and its",
@@ -44877,7 +44884,7 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: str
     ...(known
       ? ["Its Acceptance block is the dispatcher's too: never edit, add or remove a bullet in it."]
       : [
-          `No failing test file was parsed, so replace the line \`${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}\``,
+          `${request.testFiles.length > 0 ? "No named failing test witness was supplied" : "No failing test file was parsed"}, so replace the line \`${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}\``,
           "with ONE executable bullet per check you repair, in this grammar:",
           ...PR_BODY_ACCEPTANCE_GRAMMAR,
           "The dispatcher reads those bullets before it opens the PR. An undialected proof is a defect it never",
@@ -45017,7 +45024,7 @@ export async function dispatchMainRepairFixRun(
       const landed = await landHarnessCommit("main-repair", worker, branch, worktreePath, log, deps);
       if (landed === undefined) return undefined;
       prUrl = await openCheckedMainRepairPr(owner, repo, request, branch, worktreePath, bodyFile, log, deps, landed);
-    } else if (request.testFiles.length === 0) {
+    } else if (!mainRepairUsesFileProofs(request)) {
       // A no-test-file worker that opened its own PR broke the contract: its body reached GitHub unchecked, so the
       // breach is ledgered with whatever the body file holds. The PR exists, so it is still returned for review.
       if (prUrl) log(MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP, mainRepairWorkerOpenedDefect(prUrl, existsSync(bodyFile) ? readFileSync(bodyFile, "utf8") : undefined));

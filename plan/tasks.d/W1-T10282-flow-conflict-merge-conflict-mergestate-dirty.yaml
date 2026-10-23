@@ -6,7 +6,7 @@
   verify: auto
   risk: high
   priority: 1.33
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: flow-blocker:conflict:merge conflict (mergeState dirty)
