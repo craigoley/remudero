@@ -23180,6 +23180,7 @@ export function readReservationHolder(
  *  CLI dispatch below) omit `deps` entirely and get the real functions, same DI shape as
  *  `runTask`'s `opts.config ?? loadConfig()` / `opts.github ?? ghGateway(...)`. */
 export type LintPlanStatusDeps = {
+  newPathApproval?: Pick<NewPathProposalCommitIO, "prepareFacts" | "clock">;
   /** A CI adapter may supply independently verified, invocation-bound dependency evidence.
    * Offline callers still perform no GitHub/config writes. Omitted preserves the native store path. */
   dependencyEvidence?: (task: Task) => DependencyMergeEvidence;
@@ -24657,6 +24658,26 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         pathExists: opts.moduleExists,
         pathExistsAtBase,
       };
+      if (task.author_class === "machine" && task.new_path_approval_ref !== undefined) {
+        const ports = deps.newPathApproval ?? { prepareFacts: prepareNewPathApprovalFacts, clock: systemClock };
+        let facts: NewPathApprovalFacts = { state: "unknown", reason: "offline selected approval cannot be verified" };
+        if (!offline) {
+          try {
+            const readConfig = deps.loadConfig ?? loadConfig, config = readConfig();
+            const base = (await hostWorktreeGitAsync(checkoutRoot, ["rev-parse", "--verify", "--end-of-options", `${scopeBase}^{commit}`],
+              { timeout: 2_000, configReadTimeoutMs: 2_000, maxBuffer: 4_096 })).trim();
+            const recordPath = relative(checkoutRoot, task.sourcePath ?? "").split(sep).join("/");
+            facts = await ports.prepareFacts(task, recordPath, { repoRoot: checkoutRoot, base,
+              readTokenFile: join(config.root, "state", "service-tokens.json"), currentBinding: () => readConfig().serve?.newPathApproval },
+              AbortSignal.timeout(5_000)) ?? { state: "unknown", reason: "current selected approval facts missing" };
+          } catch {
+            // Unreadable selected config/base/issuer facts are a named refusal, never a new-path grant.
+            facts = { state: "unknown", reason: "selected approval context could not be read" };
+          }
+        }
+        opts.machineFilingAdmission.newPathApproval = facts;
+        opts.machineFilingAdmission.clock = ports.clock;
+      }
     }
     let { violations: lintViolations } = lintTask(task, opts);
     // W1-T3814: a plan-only filing is allowed to carry inherited diagnostics, but a newly added
