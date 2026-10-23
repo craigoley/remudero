@@ -36,8 +36,7 @@
 #      non-zero, naming each one (W1-T5548, pinned by
 #      test/the-host-janitor-alarms-on-every-watched-filesystem.test.ts; `/` used to be the only alarm)
 
-# The 2026-10-23 phases (preserve-then-retire, dump housekeeping, retention: deploy/mac/JANITOR.md)
-# log one `reclaim-total <phase> <root>` line per root; the hourly root pass runs retention only.
+# The 2026-10-23 phases (deploy/mac/JANITOR.md) log `reclaim-total <phase> <root>`; the root pass runs retention only.
 
 # Every decision is logged: `KEEP <path>: <reason>` / `REMOVE <path>` / `ARCHIVE <path>` /
 # `PRUNE <path>: <bytes> bytes, ...` / `REFUSE <what>: <reason>`, then a summary `rmd-host-cleanup: / 57% -> 57% (-4 MB reclaimed this
@@ -670,6 +669,30 @@ keep_parent() {
   PARENTS_LOGGED="$PARENTS_LOGGED$1:"
   log "KEEP $1: workspace parent root"
 }
+# A keep marker whose first line is `keep-until: YYYY-MM-DD` (or JSON "until") lapses after that UTC date.
+MARKERS_SEEN="|"; TODAY_UTC="$(date -u +%Y-%m-%d)"
+keep_marker() {   # keep_marker <folder> [quiet]: true while its marker is in force
+  local m="$1/.rmd-scratch-keep" text until seen=0 mtime
+  [ -e "$m" ] || [ -L "$m" ] || return 1
+  if [ -L "$m" ] || [ ! -f "$m" ]; then return 0; fi
+  text="$(head -c 4096 -- "$m" 2>/dev/null)"
+  until="$(printf '%s\n' "$text" | sed -n -E '1s/^keep-until:[[:space:]]*([0-9]{4}-[0-9]{2}-[0-9]{2}).*/\1/p')"
+  [ -n "$until" ] || until="$(printf '%s' "$text" | tr '\n' ' ' | sed -n -E 's/.*"until"[[:space:]]*:[[:space:]]*"([0-9]{4}-[0-9]{2}-[0-9]{2})".*/\1/p')"
+  [ "${2:-}" = quiet ] && seen=1
+  case "$MARKERS_SEEN" in *"|$m|"*) seen=1 ;; *) [ "$seen" = 1 ] || MARKERS_SEEN="$MARKERS_SEEN$m|" ;; esac
+  if [ -n "$until" ]; then
+    if [[ "$until" < "$TODAY_UTC" ]]; then
+      [ "$seen" = 1 ] || log "KEEP-EXPIRED $m: keep-until $until has passed; the folder is judged normally"
+      return 1
+    fi
+    return 0
+  fi
+  if [ "$seen" = 0 ]; then
+    mtime="$(file_sig "$m")"; mtime="${mtime##* }"
+    log "MARKER $m: honoured with no machine-readable expiry, $(( ( $(date +%s) - ${mtime:-0} ) / 86400 )) days old"
+  fi
+  return 0
+}
 scratch_guard() {
   local p="$1" protected parent
   case "${p##*/}" in
@@ -677,7 +700,7 @@ scratch_guard() {
       log "KEEP $p: protected scratch name"; return 1 ;;
   esac
   if [ -L "$p" ]; then log "KEEP $p: symbolic link"; return 1; fi
-  if [ -e "$p/.rmd-scratch-keep" ] || [ -L "$p/.rmd-scratch-keep" ]; then
+  if keep_marker "$p"; then
     log "KEEP $p: scratch keep marker"; return 1
   fi
   # The preserve-then-retire copies sit on the scratch disk; only retention may expire them.
@@ -841,15 +864,44 @@ normalize_path() {
     print (out == "" ? "/" : out)
   }'
 }
+# find into SCAN_OUT, each refused folder into SCAN_DENIED; only a non-refusal error fails (one foreign folder must not fail all).
+scan_find() {
+  local out line rc other=0
+  SCAN_OUT=""; SCAN_DENIED=""
+  out="$(LC_ALL=C $FIND_CMD "$@" 2>&1 </dev/null)"; rc=$?
+  while IFS= read -r line; do
+    case "$line" in
+      "") ;;
+      /*) SCAN_OUT="$SCAN_OUT$line
+" ;;
+      "find: "*": Permission denied")
+        line="${line#find: }"; line="${line%: Permission denied}"; line="${line#\'}"; line="${line%\'}"
+        SCAN_DENIED="$SCAN_DENIED$line
+" ;;
+      *) other=1 ;;
+    esac
+  done <<< "$out"
+  [ "$rc" = 0 ] || { [ "$other" = 0 ] && [ -n "$SCAN_DENIED" ]; }
+}
+denied_inside() {
+  local d
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    case "$d" in "$2"|"$2"/*) printf '%s\n' "$d"; return 0 ;; esac
+  done <<< "$1"
+  return 1
+}
+ALTERNATES_DENIED=""
 snapshot_alternates() {
   local root files file lines line target
   while IFS= read -r root; do
     root="${root%/}"
     [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
-    if ! files="$(find "$root" -maxdepth 8 \( -name node_modules -o -path '*/objects/[0-9a-f][0-9a-f]' \
-        -o -path '*/objects/pack' \) -prune -o -type f -path '*/objects/info/alternates' -print 2>/dev/null)"; then
+    if ! scan_find "$root" -maxdepth 8 \( -name node_modules -o -path '*/objects/[0-9a-f][0-9a-f]' \
+        -o -path '*/objects/pack' \) -prune -o -type f -path '*/objects/info/alternates' -print; then
       ALTERNATES_OK=0; return
     fi
+    files="$SCAN_OUT"; ALTERNATES_DENIED="$ALTERNATES_DENIED$SCAN_DENIED"
     while IFS= read -r file; do
       [ -n "$file" ] || continue
       lines="$(head -n 64 -- "$file" 2>/dev/null)" || { ALTERNATES_OK=0; return; }
@@ -869,6 +921,7 @@ snapshot_alternates() {
 lender_check() {
   local p="$1" pp file target borrower borrowers=""
   if [ "$ALTERNATES_OK" != 1 ]; then SCRATCH_REASON="alternates scan failed (unknown)"; return 1; fi
+  if file="$(denied_inside "$ALTERNATES_DENIED" "$p")"; then SCRATCH_REASON="alternates scan refused at $file (unknown)"; return 1; fi
   pp="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || pp="$p"
   while IFS='	' read -r file target; do
     [ -n "$file" ] || continue
@@ -1009,7 +1062,7 @@ state_units() {
   local parent unit STATE_REASON
   while IFS= read -r parent; do
     parent="${parent%/}"
-    [ -n "$parent" ] && [ -d "$parent" ] && [ ! -L "$parent" ] && [ ! -e "$parent/.rmd-scratch-keep" ] || continue
+    [ -n "$parent" ] && [ -d "$parent" ] && [ ! -L "$parent" ] && ! keep_marker "$parent" quiet || continue
     state_parent_ok "$parent" || continue
     for unit in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
       { [ -e "$unit" ] || [ -L "$unit" ]; } && state_child_guard "$unit" "$parent" && printf '%s\n' "$unit"
@@ -1020,7 +1073,7 @@ sweep_state_parent() {
   local parent="${1%/}" unit STATE_REASON=""
   [ -d "$parent" ] || return
   keep_parent "$parent"
-  if [ -e "$parent/.rmd-scratch-keep" ] || [ -L "$parent" ]; then
+  if keep_marker "$parent" || [ -L "$parent" ]; then
     log "KEEP $parent: scratch keep marker or symbolic link"; return
   fi
   if ! state_parent_ok "$parent"; then log "KEEP $parent: $STATE_REASON"; return; fi
@@ -1159,7 +1212,6 @@ preserve_exclusions() {
   done
   return 0
 }
-# Writes the copy of $1 into the private folder $3. Sets PRESERVE_REASON when it cannot.
 preserve_write() {
   local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count r name url remotes_text="" skip
   local -a revs=() tar_excludes=()
@@ -1204,7 +1256,6 @@ preserve_write() {
     printf '  git checkout %s\n  git apply --binary %s/uncommitted.patch   # if present\n  tar -xzf %s/untracked.tar.gz              # if present\n' "$head" "$final" "$final"
   } > "$work/MANIFEST.txt" || { PRESERVE_REASON="manifest-write-failed"; return 1; }
 }
-# Copies repository $1 of unit $2. Sets PRESERVED_HEAD/PRESERVED_DIR, or PRESERVE_REASON to hold it.
 preserve_repo() {
   local repo="$1" unit="$2" head big name final work
   PRESERVE_REASON=""; PRESERVED_DIR=""; PRESERVED_HEAD=""
@@ -1259,7 +1310,8 @@ docker_mount_inside() {
 }
 unit_bundles() {
   local p="$1" files f
-  files="$(find "$p" \( -name node_modules -o -name .git \) -prune -o -type f -name '*.bundle' -print 2>/dev/null)" || return 1
+  scan_find "$p" \( -name node_modules -o -name .git \) -prune -o -type f -name '*.bundle' -print || return 1
+  files="$SCAN_OUT"
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     dump_in_repo "$f" "$p" || printf '%s\n' "$f"
@@ -1288,20 +1340,22 @@ preserve_bundles() {
 # judged on its own, and stays while any child does (operator 2026-10-23).
 preserve_unit() {
   local p="$1" entries bundles status uid found seed_reason entry repo gitdir reg target i bytes copies="" pp
-  local is_repo=0 descend="" protected
+  local is_repo=0 descend="" protected denied
   local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
   local -a repos=() heads=()
   [ -d "$p" ] && [ ! -L "$p" ] || return 0
   preserve_skip "$p" && return 0
-  entries="$(find "$p" -name node_modules -prune -o -name .git -prune -print 2>/dev/null)"; status=$?
+  scan_find "$p" -name node_modules -prune -o -name .git -prune -print; status=$?
+  entries="$SCAN_OUT"; denied="$SCAN_DENIED"
   bundles="$(unit_bundles "$p")" || status=1
   [ -n "$entries$bundles" ] || return 0   # no repository and no bundle: the other sweeps own it
   uid="$(owner_uid "$p")"
   if [ "$uid" != "$RUN_UID" ]; then preserve_hold "$p" "foreign owner (uid ${uid:-unknown}, pass uid $RUN_UID)"; return; fi
   if [ "$status" != 0 ]; then preserve_hold "$p" "repository scan failed (unknown)"; return; fi
-  if [ -e "$p/.rmd-scratch-keep" ] || [ -L "$p/.rmd-scratch-keep" ]; then preserve_hold "$p" "scratch keep marker"; return; fi
+  if keep_marker "$p"; then preserve_hold "$p" "scratch keep marker"; return; fi
   if is_protected_worktree "$p"; then preserve_hold "$p" "protected by janitor configuration"; return; fi
   { [ -e "$p/.git" ] || [ -L "$p/.git" ]; } && is_repo=1
+  [ -z "$denied" ] || descend="unreadable path inside ($(printf '%s\n' "$denied" | head -n 1))"
   if [ -f "$p/HEAD" ] && [ -d "$p/objects" ] && [ -d "$p/refs" ]; then preserve_hold "$p" "bare repository; Git history retained"; return; fi
   # A protected checkout's own folder (an instance's rmd/<key>) is held whole; a folder above it is descended.
   while IFS= read -r protected; do
@@ -1315,14 +1369,15 @@ preserve_unit() {
   if seed_reason=$(rmd_dependency_seed_risk "$p"); then
     case "$seed_reason" in contains*) descend="${descend:-$seed_reason}" ;; *) preserve_hold "$p" "$seed_reason"; return ;; esac
   fi
-  if ! found="$(find "$p" ! -user "$RUN_UID" -print -quit 2>/dev/null)"; then preserve_hold "$p" "ownership scan failed (unknown)"; return; fi
+  if scan_find "$p" ! -user "$RUN_UID" -print -quit; then found="$(printf '%s\n' "$SCAN_OUT" | head -n 1)"
+  else found=""; descend="${descend:-ownership scan failed (unknown)}"; fi
   [ -z "$found" ] || descend="${descend:-foreign owner (holds $found)}"
   if [ -z "$descend" ]; then
     is_worktree_idle "$p"; status=$?
     case "$status" in
       0) ;;
       1) descend="written within ${IDLE_MINUTES} min" ;;
-      *) preserve_hold "$p" "activity probe failed (unknown)"; return ;;
+      *) descend="activity probe failed (unknown)" ;;
     esac
   fi
   [ -n "$descend" ] || ! is_open "$p" || descend="held open by a process"
@@ -1333,7 +1388,7 @@ preserve_unit() {
     bare_repository_scan "$p"; status=$?
     case "$status" in
       1) descend="holds a bare repository" ;;
-      2) preserve_hold "$p" "repository scan failed (unknown)"; return ;;
+      2) descend="repository scan failed (unknown)" ;;
     esac
   fi
   if [ -z "$descend" ] && ! lender_check "$p"; then descend="$SCRATCH_REASON"; fi
@@ -1376,7 +1431,6 @@ preserve_unit() {
     done
     return
   fi
-  # Every repository and loose bundle is copied before the unit is touched.
   for repo in ${repos[@]+"${repos[@]}"}; do
     if [ "$DRY_RUN" != 1 ] && ! preserve_root_has_room; then
       preserve_hold "$p" "preserve root $PRESERVE_ROOT is past its watched mark"; return
@@ -1428,14 +1482,15 @@ preserve_unit() {
   tally "preserve-retire ${p%/*}" "$bytes"
 }
 # A unit a symlink outside it points into (a linked-to node_modules) is a lender; links are never followed.
-LINKS=""; LINKS_OK=1; LINK_LENDERS=()
+LINKS=""; LINKS_OK=1; LINK_LENDERS=(); LINKS_DENIED=""
 snapshot_links() {
   local root link target out
-  LINKS=""; LINKS_OK=1
+  LINKS=""; LINKS_OK=1; LINKS_DENIED=""
   while IFS= read -r root; do
     root="${root%/}"
     [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
-    out="$(find "$root" -xdev \( -name .git -o \( -name node_modules -type d \) \) -prune -o -type l -print 2>/dev/null)" || { LINKS_OK=0; return; }
+    scan_find "$root" -xdev \( -name .git -o \( -name node_modules -type d \) \) -prune -o -type l -print || { LINKS_OK=0; return; }
+    out="$SCAN_OUT"; LINKS_DENIED="$LINKS_DENIED$SCAN_DENIED"
     while IFS= read -r link; do
       [ -n "$link" ] || continue
       target="$(readlink -- "$link" 2>/dev/null)" || continue
@@ -1448,6 +1503,7 @@ snapshot_links() {
 link_lender_check() {   # fails with SCRATCH_REASON when a live link outside unit $1 points into it
   local p="$1" pp link target borrowers=""
   if [ "$LINKS_OK" != 1 ]; then SCRATCH_REASON="symlink scan failed (unknown)"; return 1; fi
+  if link="$(denied_inside "$LINKS_DENIED" "$p")"; then SCRATCH_REASON="symlink scan refused at $link (unknown)"; return 1; fi
   pp="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || pp="$p"
   while IFS='	' read -r link target; do
     [ -n "$link" ] || continue
@@ -1566,7 +1622,7 @@ dump_housekeeping() {
       { [ -e "$unit" ] && [ ! -L "$unit" ]; } || continue
       preserve_skip "$unit" && continue
       [ "$(owner_uid "$unit")" = "$RUN_UID" ] || continue
-      [ ! -e "$unit/.rmd-scratch-keep" ] || continue
+      ! keep_marker "$unit" || continue
       is_protected_worktree "$unit" && continue
       dump_walk "$root" "$unit" 0
     done
@@ -1753,7 +1809,7 @@ while IFS= read -r parent; do
   [ -n "$parent" ] && [ -d "$parent" ] || continue
   parent="${parent%/}"
   keep_parent "$parent"
-  if [ -e "$parent/.rmd-scratch-keep" ] || [ -L "$parent" ]; then
+  if keep_marker "$parent" || [ -L "$parent" ]; then
     log "KEEP $parent: scratch keep marker or symbolic link"; continue
   fi
   sweep_scratch_root "$parent"

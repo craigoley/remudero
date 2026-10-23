@@ -286,3 +286,63 @@ test("retiring a worktree whose node_modules links to a live tree removes only t
   assert.equal(existsSync(lender), false, `the lender goes once its last borrower is retired:\n${second.stdout}`);
   assert.equal(readFileSync(ownerDep, "utf8"), "live install\n");
 });
+
+test("a folder the pass is refused makes only what contains it unknown; every other checkout is still preserved and retired", () => {
+  const fx = phaseFixture();
+  const root = units(fx);
+  const elsewhere = cloneAt(fx, join(root, "c2-operator-478.6DYT6I"));
+  const namespace = join(root, "flow-followups.ISOfnj");
+  const refused = cloneAt(fx, join(namespace, "foreign-hold"));
+  const sibling = cloneAt(fx, join(namespace, "followup-1"));
+  for (const u of [elsewhere, refused, sibling]) work(u);
+  age(root, 13);
+  // a find that is refused the one folder (a root- or foreign-owned directory on the host): it
+  // prints the folder, hides what is inside it and exits 1 with find's own message, for every uid
+  const deniedFind = join(fx.root, "bin", "find-refused");
+  writeFileSync(deniedFind, [
+    "#!/usr/bin/env bash",
+    'args=(); for a; do if [ "$a" = -cmin ]; then args+=(-mmin); else args+=("$a"); fi; done',
+    `deny='${refused}'`,
+    'case "$deny/" in "${1%/}"/*) ;; *) exec find "${args[@]}" ;; esac',
+    'find "${args[@]}" | awk -v d="$deny" \'index($0, d "/") != 1\'',
+    "echo \"find: '$deny': Permission denied\" >&2",
+    "exit 1",
+    "",
+  ].join("\n"), { mode: 0o755 });
+
+  const r = pass(fx, root, { RMD_CLEANUP_FIND: deniedFind });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.doesNotMatch(r.stdout, /alternates scan failed \(unknown\)/);
+  assert.match(r.stdout, new RegExp(`REMOVE ${elsewhere}: preserved then retired`), "a checkout outside the refused folder is judged normally");
+  assert.match(r.stdout, new RegExp(`KEEP ${namespace}: folder of units kept \\(unreadable path inside \\(${refused}\\)\\)`));
+  assert.equal(existsSync(sibling), false, `the refused folder's sibling is judged on its own:\n${r.stdout}`);
+  assert.equal(existsSync(refused), true, "what the pass could not read stays");
+  assert.equal(copiesOf(fx, refused).length, 0);
+});
+
+test("a keep marker past its keep-until date lapses, a future one holds, and one with no date holds and is listed once", () => {
+  const fx = phaseFixture();
+  const root = units(fx);
+  const lapsed = cloneAt(fx, join(root, "lapsed"));
+  const lapsedJson = cloneAt(fx, join(root, "lapsed-json"));
+  const future = cloneAt(fx, join(root, "future"));
+  const undated = cloneAt(fx, join(root, "rmd-qa-namespace.ulkfFP"));
+  for (const u of [lapsed, lapsedJson, future, undated]) work(u);
+  writeFileSync(join(lapsed, ".rmd-scratch-keep"), "keep-until: 2026-01-01\nrecovery snapshot\n");
+  writeFileSync(join(lapsedJson, ".rmd-scratch-keep"), '{"until": "2026-01-02", "reason": "receipts"}\n');
+  writeFileSync(join(future, ".rmd-scratch-keep"), "keep-until: 2999-01-01\n");
+  writeFileSync(join(undated, ".rmd-scratch-keep"), "operator artifact namespace: protected snapshot\n");
+  age(root, 13);
+
+  const r = pass(fx, root, { RMD_CLEANUP_DUMP_ROOTS: root });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  for (const u of [lapsed, lapsedJson]) {
+    assert.match(r.stdout, new RegExp(`KEEP-EXPIRED ${u}/.rmd-scratch-keep: keep-until 2026-01-0[12] has passed`));
+    assert.equal(existsSync(u), false, `a lapsed marker no longer holds ${u}:\n${r.stdout}`);
+  }
+  assert.match(r.stdout, new RegExp(`KEEP ${future}: preserve-then-retire hold: scratch keep marker`));
+  assert.equal(existsSync(future), true);
+  assert.equal(existsSync(undated), true);
+  const listed = r.stdout.split("\n").filter(l => l.startsWith(`MARKER ${undated}/.rmd-scratch-keep: honoured with no machine-readable expiry, `));
+  assert.equal(listed.length, 1, `an undated marker is listed once a pass:\n${r.stdout}`);
+});
