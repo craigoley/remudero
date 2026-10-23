@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { materializeDependencySeed, observeDependencySeedReuse } from '#src/lib/dependency-seeds.js';
+import { ensureDeps, ensureDepsAsync, proofDependencyProvisioning, refreshProofToolchain, refreshProofToolchainAsync, registerReviewerCheckout } from '#src/lib/review.js';
 // @ts-expect-error -- the standalone CLI has no declaration file.
 import { main } from '#scripts/dependency-seeds.mjs';
 
@@ -87,4 +88,68 @@ test('seed report command emits observed metadata in process and refuses any app
   assert.match(errors[0],/read-only/);
   assert.equal(main(['unknown','--root',f.store]),1);
   assert.match(errors[1],/usage:/);
+});
+
+function existingProofInputs(t: TestContext) {
+  const f=fixture(t),store=join(f.root,'seeds'),donor=f.checkout('donor');
+  const manifest={name:'empty-proof',version:'1.0.0',type:'module',workspaces:['packages/*'],dependencies:{'proof-input':'1.0.0'}};
+  const lock={name:'empty-proof',lockfileVersion:3,packages:{'':manifest,'node_modules/proof-input':{version:'1.0.0'},'node_modules/local-input':{link:true,resolved:'packages/local'},'packages/local':{name:'local-input',version:'1.0.0'}}};
+  function checkout(name: string) {
+    const root=name==='donor'?donor:f.checkout(name);
+    writeFileSync(join(root,'package.json'),JSON.stringify(manifest));writeFileSync(join(root,'package-lock.json'),JSON.stringify(lock));
+    mkdirSync(join(root,'packages/local'),{recursive:true});writeFileSync(join(root,'packages/local/package.json'),JSON.stringify({name:'local-input',version:'1.0.0',type:'module',exports:'./index.js'}));
+    writeFileSync(join(root,'packages/local/index.js'),`export default ${JSON.stringify(name)};\n`);
+    return root;
+  }
+  checkout('donor');mkdirSync(join(donor,'node_modules/proof-input'),{recursive:true});
+  writeFileSync(join(donor,'node_modules/proof-input/package.json'),JSON.stringify({name:'proof-input',version:'1.0.0',type:'module',exports:'./index.js'}));
+  writeFileSync(join(donor,'node_modules/proof-input/index.js'),'export default "sealed-external-input";\n');
+  symlinkSync(join(donor,'packages/local'),join(donor,'node_modules/local-input'),'dir');
+  const input=checkout('input'),seed=materializeDependencySeed(input,{root:store,sourceDir:donor});
+  assert.equal(seed.status,'materialized');if(seed.status!=='materialized')throw Error('existing generation required');
+  assert.equal(seed.installed,false);
+  return {...f,store,seed,checkout};
+}
+
+test('explicit read-only generation consumers share package bytes and bind workspace code to their own checkout',t=>{
+  const f=existingProofInputs(t),target=f.checkout('target');
+  const result=materializeDependencySeed(target,{root:f.store,sourceSeed:f.seed.seed,readOnlyLinks:true});
+  assert.equal(result.status,'materialized');if(result.status!=='materialized')throw Error('consumer required');
+  assert.equal(result.method,'readonly-links');assert.equal(result.installed,false);
+  assert.ok(lstatSync(join(target,'node_modules/proof-input')).isSymbolicLink());
+  assert.equal(realpathSync(join(target,'node_modules/proof-input')),realpathSync(join(result.seed,'node_modules/proof-input')));
+  assert.equal(realpathSync(join(target,'node_modules/local-input')),join(target,'packages/local'));
+  const observed=spawnSync(process.execPath,['--input-type=module','-e','import external from "proof-input";import local from "local-input";console.log(JSON.stringify({external,local}));'],{cwd:target,encoding:'utf8',timeout:5000});
+  assert.equal(observed.status,0,observed.stderr);assert.deepEqual(JSON.parse(observed.stdout),{external:'sealed-external-input',local:'target'});
+  assert.throws(()=>materializeDependencySeed(f.checkout('no-source'),{root:f.store,readOnlyLinks:true}),/explicit source seed/);
+});
+
+test('real sync and async proof provisioning reuse explicit inputs without invoking an installer',async t=>{
+  const f=existingProofInputs(t),bin=join(f.root,'bin'),calls=join(f.root,'installer-calls');mkdirSync(bin);
+  const realNpm=realpathSync(join(dirname(process.execPath),'npm'));
+  writeFileSync(join(bin,'npm'),`#!${process.execPath}\nconst fs=require('node:fs'),cp=require('node:child_process');const args=process.argv.slice(2);if(args.length===1&&args[0]==='--version'){const p=cp.spawnSync(process.execPath,[${JSON.stringify(realNpm)},...args],{stdio:'inherit'});process.exit(p.status??1);}fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(args)+'\\n');process.exit(89);\n`,{mode:0o700});
+  const prior={PATH:process.env.PATH,RMD_DEPENDENCY_SEED_ROOT:process.env.RMD_DEPENDENCY_SEED_ROOT,RMD_PROOF_DEPENDENCY_SEED:process.env.RMD_PROOF_DEPENDENCY_SEED};
+  t.after(()=>{for(const [key,value]of Object.entries(prior)){if(value===undefined)delete process.env[key];else process.env[key]=value;}});
+  process.env.PATH=bin+':'+process.env.PATH;process.env.RMD_DEPENDENCY_SEED_ROOT=f.store;process.env.RMD_PROOF_DEPENDENCY_SEED=f.seed.seed;
+  for(const [name,asyncMode]of [['sync',false],['async',true]] as const){
+    const target=f.checkout(name);registerReviewerCheckout(target);
+    assert.equal(asyncMode?await ensureDepsAsync(target):ensureDeps(target),true);
+    assert.ok(lstatSync(join(target,'node_modules/proof-input')).isSymbolicLink());
+    assert.equal(realpathSync(join(target,'node_modules/local-input')),join(target,'packages/local'));
+    assert.equal(refreshProofToolchain(target),false);assert.equal(await refreshProofToolchainAsync(target),false);
+  }
+  assert.equal(readdirSync(f.root).includes('installer-calls'),false);
+});
+
+test('existing-input proof refusals retain unknown qualification and never fall back to installation',async t=>{
+  const f=existingProofInputs(t),prior={RMD_DEPENDENCY_SEED_ROOT:process.env.RMD_DEPENDENCY_SEED_ROOT,RMD_PROOF_DEPENDENCY_SEED:process.env.RMD_PROOF_DEPENDENCY_SEED};
+  t.after(()=>{for(const [key,value]of Object.entries(prior)){if(value===undefined)delete process.env[key];else process.env[key]=value;}});
+  assert.throws(()=>proofDependencyProvisioning(f.root,{RMD_PROOF_DEPENDENCY_SEED:'relative',RMD_DEPENDENCY_SEED_ROOT:f.store}),/absolute source seed/);
+  assert.throws(()=>proofDependencyProvisioning(f.root,{RMD_PROOF_DEPENDENCY_SEED:f.seed.seed,RMD_DEPENDENCY_SEED_ROOT:''}),/configured store/);
+  process.env.RMD_DEPENDENCY_SEED_ROOT=f.store;process.env.RMD_PROOF_DEPENDENCY_SEED=join(f.store,'missing');
+  const sync=f.checkout('refuse-sync'),async=f.checkout('refuse-async');
+  assert.throws(()=>ensureDeps(sync),/installation refused/);
+  assert.throws(()=>ensureDeps(sync),/installation refused/);
+  await assert.rejects(()=>ensureDepsAsync(async),/installation refused/);
+  await assert.rejects(()=>ensureDepsAsync(async),/installation refused/);
 });

@@ -2312,6 +2312,7 @@ const reviewerOwnedCheckouts = new Set<string>();
 // One failed staged install per canonical install and lockfile hash per reviewer process. A
 // network timeout cannot become a two-minute retry for every criterion in the same review.
 const failedProofToolchainInstalls = new Set<string>();
+const existingProofDependencyFailures = new Map<string, Error>();
 export function registerReviewerCheckout(path: string): void {
   reviewerOwnedCheckouts.add(resolve(path));
 }
@@ -2329,6 +2330,23 @@ export function proofInstallEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS
   return buildProofEnv(parent);
 }
 
+/** An explicit existing generation never falls back to a package-manager install.
+ * The development identity is retained truthfully; read-only links change only
+ * this consumer's materialization and rebind workspaces to its own checkout. */
+export function proofDependencyProvisioning(cwd: string, env: NodeJS.ProcessEnv = process.env): { command: string; args: readonly string[] } {
+  const root = configuredDependencySeedRoot(undefined, env);
+  const sourceSeed = env.RMD_PROOF_DEPENDENCY_SEED;
+  const script = fileURLToPath(new URL("../../scripts/dependency-seeds.mjs", import.meta.url));
+  if (sourceSeed !== undefined) {
+    if (!sourceSeed || !isAbsolute(sourceSeed) || !root) throw new Error("existing proof dependencies require an absolute source seed and configured store");
+    return { command: process.execPath, args: ["--experimental-strip-types", script, "prime", cwd,
+      "--root", root, "--reuse-seed", sourceSeed, "--read-only-links"] };
+  }
+  return root && !existsSync(join(cwd, "node_modules"))
+    ? { command: process.execPath, args: ["--experimental-strip-types", script, "prime", cwd, "--proof", "--root", root] }
+    : { command: "npm", args: PROOF_INSTALL_ARGS };
+}
+
 /** `npm ci` a fresh checkout ONCE before its first test proof, since fresh worktrees have no node_modules.
  *  When a proof names a checkout-local runner, return whether that exact path exists after priming.
  *  A linked `node_modules` is deliberately NEVER reinstalled: `npm ci` would clear its shared target.
@@ -2344,6 +2362,8 @@ export function ensureDeps(
   exec: typeof execFileSync = execFileSync,
   requiredRunnerPath?: string,
 ): boolean {
+  const priorFailure = existingProofDependencyFailures.get(cwd);
+  if (process.env.RMD_PROOF_DEPENDENCY_SEED !== undefined && priorFailure) throw priorFailure;
   const runnerIsPresent = () => requiredRunnerPath === undefined || existsSync(requiredRunnerPath);
   if (npmCiPrimed.has(cwd)) return runnerIsPresent();
   npmCiPrimed.add(cwd); // mark attempted regardless of outcome — never retry-storm a cwd
@@ -2369,13 +2389,14 @@ export function ensureDeps(
   try {
     // W1-T3266: same untrappable bound as the proof spawner above — a wedged install must not
     // outlive its timeout and hold the reviewer the way a wedged proof did.
-    const root = configuredDependencySeedRoot();
-    const command = root && !existsSync(nodeModules) ? process.execPath : "npm";
-    const args = root && !existsSync(nodeModules)
-      ? ["--experimental-strip-types", fileURLToPath(new URL("../../scripts/dependency-seeds.mjs", import.meta.url)), "prime", cwd, "--proof", "--root", root]
-      : PROOF_INSTALL_ARGS;
+    const { command, args } = proofDependencyProvisioning(cwd);
     exec(command, args, { cwd, env: proofInstallEnv(), stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
-  } catch {
+  } catch (error) {
+    if (process.env.RMD_PROOF_DEPENDENCY_SEED !== undefined) {
+      const failure = new Error("existing proof dependency provisioning failed; installation refused", { cause: error });
+      existingProofDependencyFailures.set(cwd, failure);
+      throw failure;
+    }
     /* best-effort priming; see doc comment above */
   }
   return runnerIsPresent();
@@ -2383,6 +2404,8 @@ export function ensureDeps(
 
 /** The review path primes a fresh checkout without holding the daemon's event loop. */
 export async function ensureDepsAsync(cwd: string, requiredRunnerPath?: string): Promise<boolean> {
+  const priorFailure = existingProofDependencyFailures.get(cwd);
+  if (process.env.RMD_PROOF_DEPENDENCY_SEED !== undefined && priorFailure) throw priorFailure;
   const runnerIsPresent = () => requiredRunnerPath === undefined || existsSync(requiredRunnerPath);
   const pending = npmCiPending.get(cwd);
   if (pending) {
@@ -2400,14 +2423,19 @@ export async function ensureDepsAsync(cwd: string, requiredRunnerPath?: string):
   }
   if (requiredRunnerPath === undefined ? existsSync(nodeModules) : runnerIsPresent()) return true;
   if (existsSync(nodeModules) && !reviewerOwnedCheckouts.has(resolve(cwd))) return runnerIsPresent();
-  const root = configuredDependencySeedRoot();
-  const command = root && !existsSync(nodeModules) ? process.execPath : "npm";
-  const args = root && !existsSync(nodeModules)
-    ? ["--experimental-strip-types", fileURLToPath(new URL("../../scripts/dependency-seeds.mjs", import.meta.url)), "prime", cwd, "--proof", "--root", root]
-    : PROOF_INSTALL_ARGS;
-  const install = execFileAsync(command, args, { cwd, env: proofInstallEnv(), timeout: 120_000, killSignal: "SIGKILL" }).then(
+  const install = Promise.resolve().then(() => {
+    const { command, args } = proofDependencyProvisioning(cwd);
+    return execFileAsync(command, args, { cwd, env: proofInstallEnv(), timeout: 120_000, killSignal: "SIGKILL" });
+  }).then(
     () => undefined,
-    () => undefined, // Best effort; the runner check below decides availability.
+    (error) => {
+      if (process.env.RMD_PROOF_DEPENDENCY_SEED !== undefined) {
+        const failure = new Error("existing proof dependency provisioning failed; installation refused", { cause: error });
+        existingProofDependencyFailures.set(cwd, failure);
+        throw failure;
+      }
+      return undefined; // Best effort outside explicit existing-input mode.
+    },
   );
   npmCiPending.set(cwd, install);
   try { await install; }
@@ -2437,6 +2465,7 @@ export function refreshProofToolchain(
   exec: typeof execFileSync = execFileSync,
   ops: { rename?: typeof renameSync; remove?: typeof rmSync } = {},
 ): boolean {
+  if (process.env.RMD_PROOF_DEPENDENCY_SEED !== undefined) return false;
   const rename = ops.rename ?? renameSync;
   const remove = ops.remove ?? rmSync;
   if (!reviewerOwnedCheckouts.has(resolve(cwd))) return false;
@@ -2527,6 +2556,7 @@ export async function refreshProofToolchainAsync(
   cwd: string,
   ops: { rename?: typeof renameSync; remove?: typeof rmSync; install?: (stage: string) => Promise<void> } = {},
 ): Promise<boolean> {
+  if (process.env.RMD_PROOF_DEPENDENCY_SEED !== undefined) return false;
   const rename = ops.rename ?? renameSync;
   const remove = ops.remove ?? rmSync;
   if (!reviewerOwnedCheckouts.has(resolve(cwd))) return false;

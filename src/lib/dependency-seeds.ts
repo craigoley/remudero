@@ -19,6 +19,8 @@ export interface DependencySeedOptions {
   sourceDir?: string;
   /** Explicit managed generation reuse when only non-installing root scripts changed. */
   sourceSeed?: string;
+  /** Explicit reuse-only consumer: share sealed package inputs, even on APFS. */
+  readOnlyLinks?: boolean;
   proof?: boolean;
   platform?: NodeJS.Platform;
   npmVersion?: string;
@@ -488,6 +490,7 @@ function compatibleSourceSeed(source: string, target: SeedMetadata, opts: Depend
 
 /** Existing installs, including dangling links, are never replaced. Publication fails if a concurrent installer wins. */
 export function materializeDependencySeed(checkout: string, opts: DependencySeedOptions = {}): DependencySeedResult {
+  if (opts.readOnlyLinks && !opts.sourceSeed) throw new Error("read-only dependency links require an explicit source seed");
   if (opts.sourceDir && opts.sourceSeed) throw new Error("choose a dependency donor or source seed, not both");
   if (opts.sourceSeed && !isAbsolute(opts.sourceSeed)) throw new Error("dependency source seed must be absolute");
   checkout = realpathSync(checkout);
@@ -572,7 +575,7 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
     const ready = JSON.parse(readFileSync(join(seed, "ready.json"), "utf8")) as SeedMetadata;
     if (ready.version !== VERSION || ready.key !== meta.key) throw new Error("dependency seed readiness metadata mismatch");
     verifyPackages(checkout, join(seed, "node_modules"));
-    const method: SeedMethod = meta.platform === "darwin" ? "apfs-clone" : opts.proof ? "private-copy" : "readonly-links";
+    const method: SeedMethod = opts.readOnlyLinks ? "readonly-links" : meta.platform === "darwin" ? "apfs-clone" : opts.proof ? "private-copy" : "readonly-links";
     if (method === "readonly-links") { linkPackages(join(seed, "node_modules"), targetStage); setWritable(targetStage, true); }
     else { copyModules(join(seed, "node_modules"), targetStage, method === "apfs-clone"); setWritable(targetStage, true); }
     workspaceLinks(checkout, targetStage);

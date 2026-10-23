@@ -31,6 +31,25 @@ installation permissions, GC's six-hour rule, active consumer protection,
 resource admission or required assurance. Metadata compatibility is not a full
 package byte attestation or permission to replay tests from another head.
 
+## Existing-input proof mode
+
+For isolated proof validation, explicitly set `RMD_DEPENDENCY_SEED_ROOT` and
+`RMD_PROOF_DEPENDENCY_SEED` to an owned store and an already verified generation.
+Fresh proof checkouts reuse that generation with `--read-only-links`; this
+consumer uses package links on Darwin too, while its local workspace links point
+to the code in the proof checkout. The generation keeps its actual development
+identity and the consumer records its actual materialization method.
+
+An explicit source refuses invalid identities, incompatible inputs and missing
+generations. It never falls back to installation or toolchain refresh. A failed
+provisioning attempt remains failed on later calls in the same process. This
+mode does not change the default installation path, admission or assurance gates.
+
+The standalone `prime --reuse-seed GENERATION --read-only-links` command also
+requires an explicit managed generation. It makes no new package installation
+permission implicit. Read-only links protect against writes by sandboxed proofs;
+they are not a replacement for the proof sandbox or generation byte attestation.
+
 ## Basis
 
 - [npm ci](https://docs.npmjs.com/cli/v11/commands/npm-ci/) replaces an existing
