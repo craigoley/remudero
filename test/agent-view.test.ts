@@ -200,8 +200,7 @@ test("malformed nonnull signal rows are refused before agent publication and pre
 });
 
 test("committed source clock mismatch and failed refresh refuse complete records without touching the fold", async (t) => {
-  const { stateDir } = await corpus(t);
-  const { db, lease } = projected(t, stateDir);
+  const { db, lease } = await projectedCorpus(t);
   const view = createAgentView({ instances: [{ name: "core", ledgerDir: stateDir, repo: REPO }], ledgerSource });
   const materialize = (): AgentProposalsBody => bodies(view, db, lease).get(agentViewKey("core", "proposals"))!.body as AgentProposalsBody;
   writeSourceSnapshot(db, lease, { instance: "core", ok: true, asOf: ANALYTICS_AS_OF, bodies: analyticsSourceBodies(busySnapshot(), REPO) });
@@ -265,6 +264,73 @@ function busySnapshot(): AnalyticsSnapshot {
   } as AnalyticsSnapshot;
 }
 
+type FixtureHooks = { after: (fn: () => void) => void };
+
+/** These directory fixtures register removal first, then resources in acquisition order. */
+function ownedDirectoryFixture(t: FixtureHooks): FixtureHooks {
+  const cleanup: Array<() => void> = [];
+  t.after(async () => {
+    const failures: unknown[] = [];
+    // Finish every resource hook, even when one fails. Keep its directory as
+    // evidence if a close failed instead of deleting underneath an open handle.
+    for (let i = cleanup.length - 1; i > 0; i--) {
+      try { await cleanup[i]!(); } catch (error) { failures.push(error); }
+    }
+    if (failures.length) throw new AggregateError(failures, "agent fixture resources did not close");
+    await cleanup[0]?.();
+  });
+  return { after: (fn) => void cleanup.push(fn) };
+}
+
+async function projectedCorpus(t: FixtureHooks) {
+  const fixture = ownedDirectoryFixture(t);
+  const input = await corpus(fixture);
+  const store = projected(fixture, input.stateDir);
+  return { ...input, ...store, listen: (routes: Parameters<typeof listen>[1]) => listen(fixture, routes) };
+}
+
+test("W1-T10430: an agent directory fixture closes real SQLite before removing its directory", async (t) => {
+  const root = makeTempDir("agent-fixture-order");
+  const db = openProjectorReadModel(join(root, "state"), "core", fixedClock(NOW));
+  let closed = false;
+  t.after(() => { if (!closed) db.close(); rmSync(root, { recursive: true, force: true }); });
+  const cleanup: Array<() => void> = [];
+  const fixture = ownedDirectoryFixture({ after: (fn) => void cleanup.push(fn) });
+  fixture.after(() => {
+    assert.equal(closed, true, "the resource closes before directory removal");
+    rmSync(root, { recursive: true, force: true });
+  });
+  fixture.after(() => {
+    assert.equal(existsSync(root), true, "the real SQLite close still has its directory");
+    db.close();
+    closed = true;
+  });
+  assert.equal(cleanup.length, 1, "one owner controls every acquired resource and its directory");
+  await cleanup[0]!();
+  assert.equal(existsSync(root), false);
+  assert.throws(() => db.prepare("SELECT 1"), "the real database connection is closed");
+});
+
+test("W1-T10430: a failed agent resource close preserves its directory and attempts the other closes", async (t) => {
+  const root = makeTempDir("agent-fixture-failed-close");
+  const db = openProjectorReadModel(join(root, "state"), "core", fixedClock(NOW));
+  let closed = false;
+  t.after(() => { if (!closed) db.close(); rmSync(root, { recursive: true, force: true }); });
+  const cleanup: Array<() => void> = [], events: string[] = [];
+  const fixture = ownedDirectoryFixture({ after: (fn) => void cleanup.push(fn) });
+  const failure = new Error("owned fixture close failed");
+  fixture.after(() => { events.push("remove"); rmSync(root, { recursive: true, force: true }); });
+  fixture.after(() => { db.close(); closed = true; events.push("closed SQLite"); });
+  fixture.after(() => { events.push("failed close"); throw failure; });
+  assert.equal(cleanup.length, 1);
+  await assert.rejects(async () => cleanup[0]!(), (error) =>
+    error instanceof AggregateError && error.errors.length === 1 && error.errors[0] === failure);
+  assert.deepEqual(events, ["failed close", "closed SQLite"]);
+  assert.equal(closed, true, "one failed close does not leak the other real resource");
+  assert.equal(existsSync(root), true, "failed cleanup retains its directory and evidence");
+  assert.throws(() => db.prepare("SELECT 1"));
+});
+
 /** The corpus projected into core's store (on the real clock: its rows carry real stamps), reopened under this test's own lease. */
 function projected(t: { after: (fn: () => void) => void }, stateDir: string): { db: ReadModelDb; lease: ReadModelLease } {
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [], holder: "agent-view-test", post: () => {} });
@@ -297,9 +363,8 @@ const ARCHIVED: Record<Exclude<AgentViewPart, "proposals">, string> = {
 };
 
 test("W1-T5051: each agent view part equals its operator agent route over the same ledger", async (t) => {
-  const { stateDir, ledgerPath } = await corpus(t);
-  const routes = await listen(t, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW }));
-  const { db, lease } = projected(t, stateDir);
+  const { stateDir, ledgerPath, db, lease, listen: listenRoutes } = await projectedCorpus(t);
+  const routes = await listenRoutes(buildOperatorAgentRoutes({ ledgerPath, now: () => NOW }));
   writeSourceSnapshot(db, lease, { instance: "core", ok: true, asOf: ANALYTICS_AS_OF, bodies: analyticsSourceBodies(busySnapshot()) });
   const view = createAgentView({ instances: [{ name: "core", ledgerDir: stateDir, repo: REPO }], ledgerSource });
   const built = bodies(view, db, lease);
@@ -335,8 +400,7 @@ test("W1-T5051: each agent view part equals its operator agent route over the sa
 });
 
 test("an agent proposals part with no committed analytics or no repository names why and proposes nothing", async (t) => {
-  const { stateDir } = await corpus(t);
-  const { db, lease } = projected(t, stateDir);
+  const { stateDir, db, lease } = await projectedCorpus(t);
   const proposals = (repo?: string): AgentProposalsBody => {
     const view = createAgentView({ instances: [{ name: "core", ledgerDir: stateDir, ...(repo ? { repo } : {}) }], ledgerSource });
     return bodies(view, db, lease).get(agentViewKey("core", "proposals"))!.body as AgentProposalsBody;
@@ -353,8 +417,7 @@ test("an agent proposals part with no committed analytics or no repository names
 });
 
 test("the agent view builds nothing without a home store or for an instance it does not project", async (t) => {
-  const { stateDir } = await corpus(t);
-  const { db } = projected(t, stateDir);
+  const { stateDir, db } = await projectedCorpus(t);
   const view = createAgentView({ instances: [{ name: "core", ledgerDir: stateDir, repo: REPO }], ledgerSource });
   assert.deepEqual(view.materialize({ now: NOW, instances: [] }), []);
   assert.deepEqual(view.materialize({ now: NOW, instances: [{ state: state("elsewhere"), db }] }), [], "an unconfigured instance");
@@ -363,8 +426,7 @@ test("the agent view builds nothing without a home store or for an instance it d
 });
 
 test("an agent view part recomputes its time-dependent states on the clock with no new fact", async (t) => {
-  const { stateDir } = await corpus(t);
-  const { db, lease } = projected(t, stateDir);
+  const { stateDir, db, lease } = await projectedCorpus(t);
   const logged: string[] = [];
   const view = createAgentView({ instances: [{ name: "core", ledgerDir: stateDir, repo: REPO }], ledgerSource, log: (step) => void logged.push(step) });
   const expiry = (now: number): string => {
@@ -378,8 +440,7 @@ test("an agent view part recomputes its time-dependent states on the clock with 
 });
 
 test("the nav badge reads the agent view's fold, so its count never folds past the agent pages", async (t) => {
-  const { stateDir } = await corpus(t);
-  const { db, lease } = projected(t, stateDir);
+  const { stateDir, db, lease } = await projectedCorpus(t);
   assert.equal(readAgentFold(db, "core"), undefined, "control: no fold was committed before the agent view's");
   const instances = [{ state: state(), db, lease }];
   assert.equal(createAgentView({ instances: [{ name: "core", ledgerDir: stateDir, repo: REPO }], ledgerSource }).prepare({ instances }, () => true), true);
@@ -529,8 +590,9 @@ test("an agent fold committed in another state version or past a shrunken store 
 });
 
 function repositoryUnitFixture(t: { after(run: () => void): void }) {
+  const fixture = ownedDirectoryFixture(t);
   const stateDir = makeTempDir("agent-repository-units");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  fixture.after(() => rmSync(stateDir, { recursive: true, force: true }));
   const instances = ["core", "site", "console"].map((name) => {
     const ledgerDir = join(stateDir, name);
     mkdirSync(ledgerDir);
@@ -543,7 +605,7 @@ function repositoryUnitFixture(t: { after(run: () => void): void }) {
   const posts: ReadModelWorkerMessage[] = [];
   const projector = createReadModelTicker({ stateDir, instances, views: [], holder: "agent-repository-units", clock,
     oracle: "off", post: (msg) => void posts.push(msg) });
-  t.after(() => void projector.release());
+  fixture.after(() => void projector.release());
   projector.start();
   projector.tick();
   for (const instance of instances) assert.equal(projector.acceptSnapshot({ instance: instance.name, ok: true,
@@ -553,7 +615,7 @@ function repositoryUnitFixture(t: { after(run: () => void): void }) {
     assert.ok(last && last.type === "state");
     return last.instances;
   };
-  return { stateDir, instances, clock, projector, observed, advance: (by: number) => void (now += by) };
+  return { stateDir, instances, clock, projector, fixture, observed, advance: (by: number) => void (now += by) };
 }
 
 test("repository-scoped agent builds keep individually affordable repos off the heavy lane", (t) => {
@@ -577,7 +639,7 @@ test("repository-scoped agent builds keep individually affordable repos off the 
       } };
     } }],
   });
-  t.after(() => void ticker.release());
+  f.fixture.after(() => void ticker.release());
   ticker.start();
   for (let i = 0; i < 3; i++) {
     ticker.observe(f.observed());
@@ -599,7 +661,7 @@ test("repository-scoped agent builds keep individually affordable repos off the 
 test("repository-scoped agent builds retain home analytics and refuse foreign evidence", (t) => {
   const f = repositoryUnitFixture(t);
   const home = openProjectorReadModel(f.stateDir, "core"), site = openProjectorReadModel(f.stateDir, "site");
-  t.after(() => { site.close(); home.close(); });
+  f.fixture.after(() => { site.close(); home.close(); });
   const view = createAgentView({ instances: f.instances, ledgerSource });
   const context = { now: NOW, sourceStore: home, instances: [{ state: state("site"), db: site }] };
   assert.equal(view.prepare(context, () => true), true);
