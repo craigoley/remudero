@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.41
   status: queued
@@ -57,3 +57,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.75
+    reasons:
+      - "The declared files are a pre-push census precheck script (scripts/census-precheck.mjs) and a new test file. Neither is described as touching secrets, credentials, auth, permissions, deletion, merge/deploy policy, or irreversible actions."
+      - "The task is a machine-filed ci-friction remedy that makes a recurring test failure (a real git push hook test) be prevented rather than retried. It is verifiable by a grep acceptance on a named test in a new file, and its PR still goes through CI and review."
+      - "The family track record (39 merged, 58 declined) is mixed, but this is a caution rather than a concrete danger. The evidence shows 4 distinct PRs cited and 1 of 2 declared files existing, with the other being the new test the task creates. No operator-only decision is requested."
+    judged_at: "2026-10-23T00:13:03.315Z"
+    pin: "73f7286227238f4365c7053b027e0b2d834cddd1a4a4d36dbc60bd3ed538d9de"
