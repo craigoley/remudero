@@ -11,6 +11,8 @@
 #    - has a deleted cwd, or provably used no CPU for six hours (the janitor's idle window): by
 #      the kernel's se.exec_start for every thread, or by utime+stime unchanged since this
 #      reaper's own observation six hours earlier.
+#    A descendant of a root stopped this pass follows it when its stdout reaches nobody outside
+#    the subtree; an existing file or an outside reader keeps it (stdout_verdict).
 # 2. Orphan sessions. A proven orphan is closing, its scope is gone (not-found, or inactive with no
 #    tasks, and no /proc cgroup member), and no process but logind holds its ref fifo. One proven
 #    orphan means logind lost PID 1's signals: restart logind once, then verify it is active and
@@ -203,6 +205,13 @@ SCHED_NOW_MS="$(awk '/^se\.exec_start[[:space:]]/ { v = $NF; sub(/\..*/, "", v);
 OLD_OBS=""; [ -r "$STATE_FILE" ] && OLD_OBS="$(cat "$STATE_FILE" 2>/dev/null)"
 NEW_OBS=""
 STOPS=""   # pid start
+PENDING="" # descendants kept so far: pid start root what whence seen
+stop_one() {
+  if [ "$DRY_RUN" = 1 ]; then log "STOP $3: $4 (dry run: not signalled)"; else log "STOP $3: $4"; fi
+  STOPS="${STOPS}$1 $2
+"
+  STOPPED=$(( STOPPED + 1 ))
+}
 STOPPED=0; KEPT=0
 VERDICTS=""  # "<sid><TAB><verdict>" cache: gone:<why> | live:<why>
 
@@ -277,15 +286,55 @@ while IFS="$TAB" read -r pid ppid scope ticks start comm exe deleted; do
     reason="no CPU for $(fmt_age $(( NOW - since ))) (window 6h)"
   else
     [ -z "$ran_ago" ] || seen="$seen, last on a CPU $(fmt_age "$ran_ago") ago"
+    if [ "$root" != "$pid" ]; then   # judged again below, once it is known whether its root stops
+      PENDING="${PENDING}${pid}${TAB}${start}${TAB}${root}${TAB}${what}${TAB}${why}, ${lineage}${TAB}${seen} (window 6h)
+"
+      continue
+    fi
     log "KEEP $what: $why, $lineage, $seen (window 6h)"; KEPT=$(( KEPT + 1 )); continue
   fi
-  if [ "$DRY_RUN" = 1 ]; then log "STOP $what: $why, $lineage, $reason (dry run: not signalled)"
-  else log "STOP $what: $why, $lineage, $reason"; fi
-  STOPS="${STOPS}${pid} ${start}
-"
-  STOPPED=$(( STOPPED + 1 ))
+  stop_one "$pid" "$start" "$what" "$why, $lineage, $reason"
 done <<EOF
 $PROCS
+EOF
+
+# stdout_verdict <pid> <root>: "stop:<why>" when the process's stdout (fd 1) reaches nobody outside
+# its root's subtree (a pipe or socket no outside process holds, a deleted file, a gone tty), else
+# "keep:<why>". An existing regular file or an outside reader is a deliberate watcher, and stays.
+stdout_verdict() {
+  local pid="$1" root="$2" t pat subtree holder hp
+  t="$(readlink "$PROC/$pid/fd/1" 2>/dev/null)"
+  case "$t" in
+    '') echo "keep:its stdout is unreadable" ;;
+    pipe:\[*\]|socket:\[*\])
+      subtree="$(printf '%s\n' "$CHAINS" | awk -F'\t' -v r="$root" '$4 == r { print $1 }')"
+      pat="${t//\[/\\[}"; pat="${pat//\]/\\]}"
+      for holder in $(find "$PROC"/[0-9]*/fd -mindepth 1 -maxdepth 1 -lname "$pat" 2>/dev/null); do
+        hp="${holder#"$PROC"/}"; hp="${hp%%/*}"
+        if ! printf '%s\n' "$subtree" | grep -qx "$hp"; then
+          echo "keep:its stdout $t is held by pid $hp outside the subtree"; return
+        fi
+      done
+      echo "stop:its stdout $t has no holder outside the subtree of stopped pid $root" ;;
+    *" (deleted)") echo "stop:its stdout is a deleted file" ;;
+    /dev/pts/*|/dev/tty*) if [ -e "$t" ]; then echo "keep:its stdout is the tty $t"; else echo "stop:its stdout tty $t no longer exists"; fi ;;
+    *) echo "keep:its stdout is $t" ;;
+  esac
+}
+# A descendant of a root stopped above follows it when its output goes nowhere (the 2026-10-23
+# `docker logs -f | tail` pipeline under an idle bash): its own CPU use does not keep it.
+while IFS="$TAB" read -r pid start root what whence seen; do
+  [ -n "$pid" ] || continue
+  if ! printf '%s' "$STOPS" | awk -v r="$root" '$1 == r { f = 1 } END { exit !f }'; then
+    log "KEEP $what: $whence, $seen"; KEPT=$(( KEPT + 1 )); continue
+  fi
+  out="$(stdout_verdict "$pid" "$root")"
+  case "$out" in
+    stop:*) stop_one "$pid" "$start" "$what" "$whence, ${out#stop:}" ;;
+    *) log "KEEP $what: $whence, $seen; its root $root stops, but ${out#keep:}"; KEPT=$(( KEPT + 1 )) ;;
+  esac
+done <<EOF
+$PENDING
 EOF
 
 # Signal: TERM every stop at once, wait out one grace, KILL whatever remains. A pid is signalled

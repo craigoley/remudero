@@ -34,6 +34,7 @@ interface Proc {
   /** se.exec_start (ms) per thread; omitted = no scheduler record */
   lastRanMs?: number[];
   holds?: string[]; // ref fifos this process holds open, by session id
+  fds?: Record<number, string>; // other open fds, by number: the link target /proc shows
 }
 
 interface Fx {
@@ -131,6 +132,7 @@ function proc(fx: Fx, p: Proc) {
     writeFileSync(join(fx.sessions, `${sid}.ref`), "");
     symlinkSync(join(fx.sessions, `${sid}.ref`), join(d, "fd", String(10 + i)));
   });
+  for (const [fd, target] of Object.entries(p.fds ?? {})) symlinkSync(target, join(d, "fd", fd));
   (p.lastRanMs ?? []).forEach((ms, i) => {
     mkdirSync(join(d, "task", String(p.pid + i)), { recursive: true });
     writeFileSync(join(d, "task", String(p.pid + i), "sched"), `${p.comm} (${p.pid}, #threads: 1)\n---\nse.exec_start                                :    ${ms}.838795\nse.vruntime : 1.0\n`);
@@ -273,7 +275,8 @@ test("session reaper: a leaked process with no CPU across a six-hour observation
   const pipeline = (dockerTicks: number) => {
     proc(fx, { pid: 453564, ppid: 1, cgroup: "session-63047.scope", comm: "bash", exe: "/usr/bin/bash", cwd: "/home/u", ticks: 0, start: 231434062 });
     proc(fx, { pid: 453625, ppid: 453564, cgroup: "session-63047.scope", comm: "docker", exe: "/usr/bin/docker", cwd: "/home/u", ticks: dockerTicks, start: 231434073 });
-    proc(fx, { pid: 453626, ppid: 453564, cgroup: "session-63047.scope", comm: "tail", exe: "/usr/bin/tail", cwd: "/home/u", ticks: 189, start: 231434073 });
+    // tail's output reaches nobody, but its root is not stopped yet, so that alone never stops it
+    proc(fx, { pid: 453626, ppid: 453564, cgroup: "session-63047.scope", comm: "tail", exe: "/usr/bin/tail", cwd: "/home/u", ticks: 189, start: 231434073, fds: { 1: "pipe:[1048010155]" } });
   };
   pipeline(18189);
   const first = run(fx);
@@ -312,6 +315,52 @@ test("session reaper: the kernel's last-on-CPU record stops a process idle six h
   assert.match(r.out, /KEEP pid=453625 comm=docker .*first observation, last on a CPU 0m ago/);
   assert.match(r.out, /KEEP pid=453626 comm=tail .*last on a CPU 5h 59m ago/);
   assert.deepEqual(calls(fx), ["TERM 453564"]);
+});
+
+/** The measured 2026-10-23 shape: an idle bash re-parented to PID 1 in a gone session, with a busy
+ *  `docker logs -f` piping into `tail`, whose stdout is the same pipe as bash's and read by no one. */
+function loggerPipeline(fx: Fx) {
+  const now = 3_249_468_570;
+  schedNow(fx, now);
+  const scope = "session-63047.scope";
+  proc(fx, { pid: 453564, ppid: 1, cgroup: scope, comm: "bash", exe: "/usr/bin/bash", cwd: "/home/u", lastRanMs: [2_314_355_599], fds: { 1: "pipe:[1048010155]" } });
+  proc(fx, { pid: 453625, ppid: 453564, cgroup: scope, comm: "docker", exe: "/usr/bin/docker", cwd: "/home/u", ticks: 18189, lastRanMs: [now - 337], fds: { 1: "pipe:[1048010200]" } });
+  proc(fx, { pid: 453626, ppid: 453564, cgroup: scope, comm: "tail", exe: "/usr/bin/tail", cwd: "/home/u", ticks: 189, lastRanMs: [now - 337], fds: { 0: "pipe:[1048010200]", 1: "pipe:[1048010155]" } });
+  return { now, scope };
+}
+
+test("session reaper: a busy pipeline under a stopped re-parented root follows it when its output reaches nobody outside the subtree", (t) => {
+  const fx = fixture(t);
+  liveHost(fx);
+  sessions(fx, ["200 active session-200.scope 700"]);
+  const { now, scope } = loggerPipeline(fx);
+  proc(fx, { pid: 453630, ppid: 453564, cgroup: scope, comm: "sleep", exe: "/usr/bin/sleep", cwd: "/home/u", lastRanMs: [now - 5], fds: { 1: "/home/u/watch.log (deleted)" } });
+  proc(fx, { pid: 453631, ppid: 453564, cgroup: scope, comm: "watch", exe: "/usr/bin/watch", cwd: "/home/u", lastRanMs: [now - 5], fds: { 1: "/dev/pts/987654" } });
+  const r = run(fx);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /STOP pid=453564 comm=bash .*not on a CPU for 10d 19h/);
+  assert.match(r.out, /STOP pid=453625 comm=docker .*descends from re-parented pid 453564, its stdout pipe:\[1048010200\] has no holder outside the subtree of stopped pid 453564/);
+  assert.match(r.out, /STOP pid=453626 comm=tail .*its stdout pipe:\[1048010155\] has no holder outside the subtree of stopped pid 453564/);
+  assert.match(r.out, /STOP pid=453630 .*its stdout is a deleted file/);
+  assert.match(r.out, /STOP pid=453631 .*its stdout tty \/dev\/pts\/987654 no longer exists/);
+  assert.deepEqual(calls(fx), ["TERM 453564", "TERM 453625", "TERM 453626", "TERM 453630", "TERM 453631"]);
+});
+
+test("session reaper: a descendant whose output an outside process reads, or that writes to an existing file, is kept when its root stops", (t) => {
+  const fx = fixture(t);
+  liveHost(fx);
+  sessions(fx, ["200 active session-200.scope 700"]);
+  const { now, scope } = loggerPipeline(fx);
+  // an operator's shell in the live session reads the pipeline's output
+  proc(fx, { pid: 960, ppid: 700, cgroup: LIVE_SCOPE, comm: "bash", exe: "/usr/bin/bash", cwd: "/home/u", fds: { 0: "pipe:[1048010155]" } });
+  const log = join(fx.root, "watcher.out");
+  writeFileSync(log, "");
+  proc(fx, { pid: 453632, ppid: 453564, cgroup: scope, comm: "node", exe: "/usr/bin/node", cwd: "/home/u", lastRanMs: [now - 5], fds: { 1: log } });
+  const r = run(fx);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /KEEP pid=453626 comm=tail .*its root 453564 stops, but its stdout pipe:\[1048010155\] is held by pid 960 outside the subtree/);
+  assert.match(r.out, new RegExp(`KEEP pid=453632 comm=node .*its root 453564 stops, but its stdout is ${log}`));
+  assert.deepEqual(calls(fx), ["TERM 453564", "TERM 453625"], "docker's own pipe still reaches only tail, inside the subtree");
 });
 
 test("session reaper: a process in a live session is kept even with a deleted cwd and PID 1 as its parent", (t) => {

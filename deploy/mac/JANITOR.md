@@ -394,6 +394,12 @@ directory was a deleted `rmd-reader-runtime-*` temp dir (6 days old).
    The kernel's `se.exec_start` for every thread proves no CPU use on the first pass. Without
    that record, the proof is utime+stime unchanged since the reaper's own observation six hours
    earlier. Only comm and exe are logged, never a cmdline or environment.
+
+   A descendant of a root stopped in the same pass is stopped with it, even while it uses CPU,
+   when its stdout reaches nobody: a pipe or socket that no process outside the subtree holds, a
+   deleted file, or a tty that no longer exists. That is the measured `docker logs -f | tail`
+   pipeline, whose output pipe only its own bash and tail held. A descendant writing to an
+   existing file, or read by an outside process, is a deliberate watcher and stays.
 2. *Orphan sessions.* A session is a proven orphan when it is closing, its scope is gone, no
    process is still in the scope's cgroup, and nothing but logind holds its
    `/run/systemd/sessions/<id>.ref` fifo. One proven orphan is enough to restart logind, once per
@@ -402,3 +408,10 @@ directory was a deleted `rmd-reader-runtime-*` temp dir (6 days old).
 
 Every pass also logs how long ago logind last logged `Removed session`. A growing age while people
 log in and out means logind has stopped finalising sessions again.
+
+**The alarm.** `scripts/fleet-heartbeat.sh` publishes `session_reaper_verdict` from the log's last
+pass and from `systemctl show rmd-session-reaper.service`. It reads `REFUSED` when the pass logged a
+REFUSE, `INCOMPLETE` when the pass never reached its summary line (or was already running at the
+previous beat), and `FAILED` when the unit's last result was not success. Any of the three raises
+the `REAPER_ALARM` arm in `fleet-heartbeat-watch.yml`, which files that host's needs-human issue.
+`ok`, `running` and `unknown` (no reaper on the host) are silent.
