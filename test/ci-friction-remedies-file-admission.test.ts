@@ -14,7 +14,7 @@ import { test } from "node:test";
 import { CI_FRICTION_REMEDIES_FILE, ciFrictionRemedyTestTitle, ciFrictionShardStem, ciFrictionShardYaml } from "#src/lib/ci-friction-gardener.js";
 import { fixedClock } from "#src/lib/clock.js";
 import { lintTask, sizingViolation } from "#src/lib/task-linter.js";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, newTestPath } from "#src/lib/plan.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, newPathApprovalIntentDigest, newTestPath, type NewPathApprovalFacts, type Task } from "#src/lib/plan.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function admit(yaml: string, pathExists = (p: string) => existsSync(join(REPO_ROOT, p))): string[] {
@@ -129,4 +129,57 @@ test("new path admission binds the explicit approval to the exact task and decla
     { ...task, design: "Different requested behavior" }, { ...task, rationale: "A different justification" },
     { ...task, files: [...task.files!, "src/lib/unapproved-extra.ts"] },
   ]) assert.notDeepEqual(machineFilingAdmissionViolations(changed, context), [], "task or full intent drift must not inherit permission");
+});
+
+test("new path admission refuses missing drifted and unsupported authority before staging", async (t) => {
+  await t.test("missing or expired prepared evidence never reaches the staging effect", () => {
+    const { task, context, facts, record } = approvalFixture();
+    let staged = 0;
+    for (const evidence of [undefined, { state: "unknown" as const, reason: "issuer unavailable" },
+      { ...facts, record: { ...record, expiresAt: 1_100 } },
+      { ...facts, binding: { ...facts.binding, epoch: "replacement-epoch" } },
+      { ...facts, paths: { "src/lib/operator-approved-fixture.ts": { checkout: "unknown" as const, base: "missing" as const } } },
+    ]) {
+      const reasons = machineFilingAdmissionViolations(task, { ...context, newPathApproval: evidence });
+      if (reasons.length === 0) staged++;
+      assert.match(reasons.join(";"), /new-path approval UNKNOWN:/);
+    }
+    assert.equal(staged, 0);
+  });
+  await t.test("an unsupported task cannot match an omitted digest", () => {
+    const { task, context, facts, record } = approvalFixture();
+    const malformed = { ...task, unsupported: "acted-on-looking data" } as Task;
+    const evidence = { ...facts, record: { ...record, intentDigest: undefined } } as unknown as NewPathApprovalFacts;
+    assert.notDeepEqual(machineFilingAdmissionViolations(malformed, { ...context, newPathApproval: evidence }), []);
+  });
+  await t.test("a digest never invokes a nested array accessor", () => {
+    const { task } = approvalFixture();
+    const files = [...task.files!];
+    let invoked = 0;
+    Object.defineProperty(files, "0", { enumerable: true, get() { invoked++; return "src/lib/operator-approved-fixture.ts"; } });
+    assert.equal(newPathApprovalIntentDigest({ ...task, files }, APPROVAL_RECORD_PATH), undefined);
+    assert.equal(invoked, 0, "unsupported data is rejected without executing accessors");
+  });
+  await t.test("hidden and symbol task fields are unsupported rather than unsigned data", () => {
+    const { task } = approvalFixture();
+    for (const key of ["hidden", Symbol("hidden")]) {
+      const changed = { ...task };
+      Object.defineProperty(changed, key, { value: "unsupported", enumerable: false });
+      assert.equal(newPathApprovalIntentDigest(changed, APPROVAL_RECORD_PATH), undefined);
+    }
+  });
+  await t.test("selected YAML refuses unsupported fields instead of dropping their bytes", () => {
+    const { task } = approvalFixture();
+    const raw = JSON.parse(JSON.stringify(task));
+    delete raw.sourcePath;
+    for (const changed of [{ ...raw, unsupported: "silently lost" }, { ...raw, design: { nested: "lost" } },
+      { ...raw, depends_on: "not-a-sequence" }, { ...raw, files: "not-a-sequence" },
+      { ...raw, verify: "unsupported" }, { ...raw, sourcePath: "a-spoofed-destination" }]) {
+      assert.throws(() => loadPlanFromYaml(JSON.stringify([changed]), APPROVAL_RECORD_PATH), /new.path approval.*unsupported/i);
+    }
+  });
+  await t.test("selected aliases and cyclic input refuse without recursing into detachment", () => {
+    const text = `- &task\n  id: W1-T99001\n  title: fixture\n  repo: remudero\n  type: implement\n  new_path_approval_ref: ${APPROVAL_REFERENCE}\n  context: [*task]\n`;
+    assert.throws(() => loadPlanFromYaml(text, APPROVAL_RECORD_PATH), /new.path approval.*unsupported/i);
+  });
 });
