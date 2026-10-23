@@ -164,9 +164,7 @@ if [ -n "${RMD_CLEANUP_WATCH_FS+x}" ]; then WATCH_FS="$RMD_CLEANUP_WATCH_FS"
 elif [ "$ROOT_FS" = / ]; then WATCH_FS="/mnt/rmd:85 /mnt/scratch:90/40G"  # the Azure host's state + swap disks
 else WATCH_FS=""; fi  # a relocated root (a fixture, another layout) does not inherit the host's mounts
 FSID_CMD="${RMD_CLEANUP_FSID:-}"
-# An account-owned checkout can be read by root or another account. An unprivileged lsof
-# reports those /proc paths as Permission denied with exit 0, so it cannot prove global idleness.
-# Elevate only the fixed system binary; an explicitly configured probe is never elevated for it.
+# Elevate only system lsof; account views can hide root readers behind exit-zero Permission denied.
 if [ -n "${RMD_CLEANUP_LSOF:-}" ]; then LSOF_CMD="$RMD_CLEANUP_LSOF"
 elif [ "$(id -u)" = 0 ]; then LSOF_CMD=lsof
 else LSOF_CMD="sudo -n -- /usr/bin/lsof"; fi
@@ -403,7 +401,6 @@ snapshot_open() {
     OPEN_OK=0; OPEN_FAILURE="process snapshot failed"; return
   }
   if ! out="$($LSOF_CMD -Fn 2>/dev/null)"; then
-    # Some paths do not make an unsuccessful probe complete. Unknown readers keep every path.
     OPEN_OK=0
     return
   fi
