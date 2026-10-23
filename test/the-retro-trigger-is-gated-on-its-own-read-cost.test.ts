@@ -220,6 +220,32 @@ test("W1-T9119: a deferral past the learned retro interval is named once", async
   assert.equal(extra.reason_class, "read_cost_over_heap_headroom");
 });
 
+test("W1-T9119: an unreadable retro history is ledgered and retried during the deferral", async () => {
+  let historyReads = 0;
+  let checks = 0;
+  const deps = persistingDeps(2);
+  const rows = await daemonTicks(5, {
+    ...deps,
+    checkRetroTrigger: () => { checks++; return FIRE; },
+    readRetroHistory: async () => {
+      if (++historyReads === 1) throw new Error("retro history unavailable");
+      return deps.readRetroHistory!();
+    },
+  });
+  assert.deepEqual(of(rows, "daemon.retro_trigger.deferral_persisting_unread"), [
+    { step: "daemon.retro_trigger.deferral_persisting_unread", extra: { error: "retro history unavailable" } },
+  ]);
+  assert.equal(checks, 0, "a history read failure does not bypass the heap headroom gate");
+  assert.equal(of(rows, "daemon.retro_trigger.deferred_ledger_pressure").length, 5);
+  assert.equal(of(rows, "retro_triggered").length, 0);
+  assert.equal(historyReads, 3, "history is retried until the recovered episode is named");
+  const named = of(rows, "daemon.retro_trigger.deferral_persisting");
+  assert.equal(named.length, 1, "recovery names the original episode once");
+  assert.equal(named[0]?.extra?.first_deferred_at, new Date(BASE + HOUR).toISOString());
+  assert.equal(named[0]?.extra?.observations, 4);
+  assert.equal(named[0]?.extra?.expected_interval_ms, 2 * HOUR);
+});
+
 test("W1-T9119: the persisting row follows the learned interval, never a fixed count", async () => {
   const short = await daemonTicks(14, persistingDeps(2));
   assert.equal(of(short, "daemon.retro_trigger.deferral_persisting")[0]?.extra?.observations, 4);
