@@ -9,6 +9,8 @@
  * unparseable line (here, snapshotState refuses it and these tests go red).
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -108,4 +110,103 @@ test("a copy failure that is not a vanished file still fails the snapshot", () =
     (err: unknown) => err instanceof StateBackupError && /snapshot of .* failed: /.test(err.message),
   );
   assert.deepEqual(readdirSync(backups), [], "the staging dir is removed");
+});
+
+for (const listing of [1, 2]) {
+  test(listing === 1
+    ? "a source engine lost during the initial snapshot inventory remains a loud failure"
+    : "the late archive check never revisits an already copied engine directory", (t) => {
+    const { state, backups } = liveState(WHOLE);
+    t.after(() => rmSync(join(state, ".."), { recursive: true, force: true }));
+    const engineRel = join("engines", "a".repeat(64));
+    const engine = join(state, engineRel);
+    mkdirSync(engine, { recursive: true });
+    writeFileSync(join(engine, "engine.json"), "{}\n");
+    const original = fs.realpathSync;
+    let visits = 0;
+    const replacement = ((path: fs.PathLike, ...args: unknown[]) => {
+      if (String(path) === engine && ++visits === listing) rmSync(engine, { recursive: true });
+      return (original as (...args: unknown[]) => unknown)(path, ...args);
+    }) as typeof fs.realpathSync;
+    t.mock.method(fs, "realpathSync", replacement);
+    syncBuiltinESMExports();
+    let snap: ReturnType<typeof snapshotState>;
+    try {
+      if (listing === 1) {
+        assert.throws(() => snapshotState(state, backups), StateBackupError);
+        assert.deepEqual(readdirSync(backups), []);
+        return;
+      }
+      snap = snapshotState(state, backups);
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+    assert.equal(visits, 1, "the archive catch-up must not walk engine directories again");
+    assert.equal(readFileSync(join(snap.archiveDir, "ledger.ndjson"), "utf8"), WHOLE);
+    assert.equal(readFileSync(join(snap.archiveDir, "inbox-proposals.json"), "utf8"), "{}\n");
+    assert.ok(snap.entries.includes(join(engineRel, "engine.json")), "the copied engine is retained, not excluded");
+    assert.equal(readFileSync(join(snap.archiveDir, engineRel, "engine.json"), "utf8"), "{}\n");
+  });
+}
+
+test("a vanished non-engine directory is not silently excluded from a live snapshot", (t) => {
+  const { state, backups } = liveState(WHOLE);
+  t.after(() => rmSync(join(state, ".."), { recursive: true, force: true }));
+  const locks = join(state, "locks");
+  writeFileSync(join(locks, "run.lock"), "irreplaceable\n");
+  const original = fs.realpathSync;
+  t.mock.method(fs, "realpathSync", ((path: fs.PathLike, ...args: unknown[]) => {
+    if (String(path) === locks) rmSync(locks, { recursive: true });
+    return (original as (...args: unknown[]) => unknown)(path, ...args);
+  }) as typeof fs.realpathSync);
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => snapshotState(state, backups), StateBackupError);
+    assert.deepEqual(readdirSync(backups), []);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
+test("an ENOENT beneath an engine that still exists remains a loud snapshot failure", (t) => {
+  const { state, backups } = liveState(WHOLE);
+  t.after(() => rmSync(join(state, ".."), { recursive: true, force: true }));
+  const engine = join(state, "engines", "b".repeat(64));
+  mkdirSync(engine, { recursive: true });
+  writeFileSync(join(engine, "engine.json"), "{}\n");
+  const original = fs.realpathSync;
+  t.mock.method(fs, "realpathSync", ((path: fs.PathLike, ...args: unknown[]) => {
+    if (String(path) === engine) throw Object.assign(new Error("fixture: missing child, not a pruned engine"), {
+      code: "ENOENT", path: join(engine, "not-there"),
+    });
+    return (original as (...args: unknown[]) => unknown)(path, ...args);
+  }) as typeof fs.realpathSync);
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => snapshotState(state, backups), StateBackupError);
+    assert.deepEqual(readdirSync(backups), []);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
+test("the top-level archive catch-up still copies a rotation published during the first copy", (t) => {
+  const { state, backups } = liveState(WHOLE);
+  t.after(() => rmSync(join(state, ".."), { recursive: true, force: true }));
+  const archive = "ledger.2026-10-23T00-00-00-000Z.ndjson";
+  let published = false;
+  const snap = snapshotState(state, backups, {
+    beforeCopy: (rel) => {
+      if (rel !== "ledger.ndjson" || published) return;
+      writeFileSync(join(state, archive), WHOLE);
+      published = true;
+    },
+  });
+  assert.equal(published, true);
+  assert.ok(snap.entries.includes(archive));
+  assert.equal(readFileSync(join(snap.archiveDir, archive), "utf8"), WHOLE);
+  assert.equal(readFileSync(join(snap.archiveDir, "ledger.ndjson"), "utf8"), WHOLE);
 });
