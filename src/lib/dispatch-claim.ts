@@ -348,8 +348,8 @@ export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReser
     anchorMessage(taskId, expect) {
       const sha = expect ?? this.holder(taskId);
       if (!sha) return undefined;
-      // Fetch first: no clone tracks this parentless ref, so a bare cat-file would read "no identity".
-      if (deps.run(claimFetchArgs(taskId, expect)).status !== 0) return undefined;
+      // Fetch acquires the object even when updating a stale local claim ref is rejected.
+      deps.run(claimFetchArgs(taskId, expect));
       return messageFromCatFile(deps.run(["cat-file", "-p", sha]));
     },
     renew(taskId, expect) {
@@ -542,7 +542,7 @@ export function gitDispatchClaimReserverAsync(deps: ClaimGitDepsAsync): Dispatch
     async anchorMessage(taskId, expect) {
       const sha = expect ?? await holder(taskId);
       if (!sha) return undefined;
-      if ((await deps.run(claimFetchArgs(taskId, expect))).status !== 0) return undefined;
+      await deps.run(claimFetchArgs(taskId, expect));
       return messageFromCatFile(await deps.run(["cat-file", "-p", sha]));
     },
     async renew(taskId, expect) {

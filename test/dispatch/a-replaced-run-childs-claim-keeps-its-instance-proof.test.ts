@@ -155,3 +155,22 @@ test("claim evidence refuses an unreadable initially selected object", async (t)
   assert.equal((await releaseDispatchClaimAsync(TASK, awaited, { livenessProbe: () => PROBE })).release, false);
   assert.equal(f.current(), f.old);
 });
+
+for (const awaited of [false, true]) {
+  test(`${awaited ? "async" : "sync"} anchor messages remain readable after an unrelated claim replaces the cached ref`, async (t) => {
+    const f = fixture(t);
+    const reserver = awaited
+      ? gitDispatchClaimReserverAsync({ run: async args => f.run(args) })
+      : gitDispatchClaimReserver({ run: f.run });
+    assert.equal(parseClaimAnchorMessage(await reserver.anchorMessage!(TASK))?.pid, 42);
+    f.replace();
+    const rejected = f.run(["fetch", "origin", `${dispatchClaimRef(TASK)}:${dispatchClaimRef(TASK)}`]);
+    assert.notEqual(rejected.status, 0, "the stale local ref rejects the unrelated replacement");
+    assert.match(rejected.stderr, /non-fast-forward/);
+    assert.equal(parseClaimAnchorMessage(await reserver.anchorMessage!(TASK))?.pid, 43,
+      "a rejected ref update does not make the replacement's fetched object unreadable");
+    assert.equal(parseClaimAnchorMessage(await reserver.anchorMessage!(TASK, f.old))?.pid, 42,
+      "an explicit SHA still reads only the original claimant");
+    assert.equal(f.current(), f.replacement, "reading evidence leaves the remote claim intact");
+  });
+}
