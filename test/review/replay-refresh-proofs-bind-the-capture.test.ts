@@ -6,8 +6,14 @@ import { CHECK_PROOF_EXIT } from "#src/lib/check-proof.js";
 import { classifyReviewOutcome, reviewReplayLedgerFields, type ReviewReplayInput } from "#src/lib/review-outcome-class.js";
 import { deriveReviewReplaySample, REVIEW_REPLAY_SAMPLE_PATH, reviewReplayGardenSpec, serializeReviewReplaySample } from "#src/lib/review-replay-sample.js";
 import { parseAcceptanceBlock } from "#src/lib/review.js";
-// @ts-expect-error -- the standalone proof-discrimination CLI has no declaration file.
-import { evaluateProofDiscrimination, runCheckProof } from "#scripts/proof-discrimination-gate.mjs";
+
+type ProofResult = { status: number | null; signal?: string | null; error?: string; stdout: string; stderr: string };
+const proofModule = "#scripts/proof-discrimination-gate.mjs";
+const { evaluateProofDiscrimination, runCheckProof } = await import(proofModule) as {
+  evaluateProofDiscrimination: (criteria: ReturnType<typeof parseAcceptanceBlock>, base: string,
+    run: (proof: string) => ProofResult) => { executed: number; guarded: number; stale: unknown[]; unreadable: unknown[] };
+  runCheckProof: (proof: string, base: string, options: { root: string }) => ProofResult;
+};
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const input = (extra: Partial<ReviewReplayInput> = {}): ReviewReplayInput => ({ stage: "semantic", plan_only: false,
