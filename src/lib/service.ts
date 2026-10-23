@@ -226,7 +226,7 @@ export function verifiedNewPathApprovalAction(req: IncomingMessage, requireConfi
       new URL(req.url ?? "", "http://localhost").pathname !== action.route.path) return undefined;
     const { proof } = action, now = proof.clock.now();
     if (!Number.isFinite(now) || now < proof.verifiedAt || now - proof.verifiedAt > 30_000 || now >= proof.expiresAt) return undefined;
-    if (requireConfirmation && (proof.highUntil === undefined || now > proof.highUntil || action.confirmedPayload === undefined ||
+    if (requireConfirmation && (proof.highUntil === undefined || !Number.isFinite(proof.highUntil) || now > proof.highUntil || action.confirmedPayload === undefined ||
       (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE] !== action.confirmedPayload)) return undefined;
     return { actor: proof.actor };
   } catch {
@@ -1130,6 +1130,8 @@ export function createService(opts: ServiceOptions): Server {
         return;
       }
 
+      let selectedApprovalProof: OperatorRequestEvidence | undefined;
+      let selectedApprovalPayload: string | undefined;
       if (route?.newPathApproval) {
         try {
           await readBoundedRawBody(req, NEW_PATH_APPROVAL_BODY_MAX_BYTES);
@@ -1139,7 +1141,7 @@ export function createService(opts: ServiceOptions): Server {
           return;
         }
         const proof = operatorGrantEvidence.get(granted);
-        if (enforceWriteTiers && route.scope === "write" && proof?.request === req) newPathApprovalActions.set(req, { proof, route });
+        if (enforceWriteTiers && route.scope === "write" && proof?.request === req) selectedApprovalProof = proof;
       }
 
       // The tier + second-factor gate (W1-T404), additive to the scope check above, a no-op
@@ -1163,8 +1165,7 @@ export function createService(opts: ServiceOptions): Server {
             sendJson(res, 403, { error: "confirm_nonce_required" });
             return;
           }
-          const selectedAction = newPathApprovalActions.get(req);
-          if (selectedAction) selectedAction.confirmedPayload = await readRawBody(req);
+          if (selectedApprovalProof) selectedApprovalPayload = await readRawBody(req);
         }
       }
 
@@ -1172,6 +1173,10 @@ export function createService(opts: ServiceOptions): Server {
         openSse(req, res, sseRoute, path, log);
         return;
       }
+
+      if (selectedApprovalProof && route) newPathApprovalActions.set(req, {
+        proof: selectedApprovalProof, route, confirmedPayload: selectedApprovalPayload,
+      });
 
       try {
         await route!.handler(req, res, { params: {} });
