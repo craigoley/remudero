@@ -1,0 +1,48 @@
+- id: W1-T10478
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts cost 8 PR minute(s) across 1 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.65
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts"
+  files:
+    - src/lib/dispatch-value.ts
+    - test/dispatch/check-test-test-downstream-fan-out-reorders-within-a-tier-never-across-o.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts"
+      proof: "grep: test(\"W1-T10478: check:test:test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts is prevented, not retried\" in test/dispatch/check-test-test-downstream-fan-out-reorders-within-a-tier-never-across-o.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts cost 8 PR minute(s) (seven-day half-life) across 1 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/dispatch-value.ts: test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts imports it
+    - test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts: named by the failing check
+    - the rounds name a failing test: test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12787 (https://github.com/craigoley/remudero/pull/12787) at 2026-10-18T16:04:59.765Z: ci-log round — coverage-shard (2/8): test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts; coverage-shard (8/8): pool defect: test/b.test.ts leaks into test/c.test.ts
+        failing tests: W1-T9968: a P2 with 29 open dependents does not outrank a fresh P1; W1-T9325: calibrated age, starts and imputation survive in the explanation; ["W1-T9325: a tick start logs dispatch.pick_scored with its components and the runner-up","W1-T9325: a lane refill logs dispatch.pick_scored for the task it starts","W1-T9325: a runner-up serialized by packing keeps its score and reason","W1-T9325: explanation preserves calibrated inputs without reading a clock","W1-T9325: calibrated age, starts and imputation survive in the explanation"]
+        log excerpt:
+          | not ok 2270 - W1-T9968: a P2 with 29 open dependents does not outrank a fresh P1
+          |   ---
+          |   duration_ms: 27.574104
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts:53:1'
+          |   failureType: 'testCodeFailure'
+          |   error: "the cost of delay keeps the fan-out product (W1-T9325's row)"
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+          |   expected: true
+          |   actual: false
+          |   operator: '=='
+          |   stack: |-
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
