@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os';
 import {join, resolve, sep} from 'node:path';
 import {parseArgv} from './argv.mjs';
 import {captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES} from './author-step-capture.mjs';
-import {readMacAuthorAdmission} from './mac-author-admission.mjs';
+import {focusedMacWorkload, readMacAuthorAdmission, readMacFocusedAdmission} from './mac-author-admission.mjs';
 import {prepareJudgedRun, judgedNodeTestArgs, closeJudgedRun} from '../pure-test-pool.mjs';
 import {acquireTestSlot, TEST_FILE_PEAK_BYTES, testSlotExecutionAllowed} from '../../src/lib/test-slot.ts';
 
@@ -77,8 +77,9 @@ export function createBoundedAuthorScratch(bytes, {parent = tmpdir(), command = 
   }
 }
 
-function requireAdmission(root, scratch, minimumFreeBytes) {
-  const admission = readMacAuthorAdmission(root, {scratch, minimumFreeBytes});
+function requireAdmission(root, scratch, minimumFreeBytes, workload) {
+  const admission = workload ? readMacFocusedAdmission(root, {scratch, minimumFreeBytes, workload}) :
+    readMacAuthorAdmission(root, {scratch, minimumFreeBytes});
   if (admission.state !== 'admitted') throw new Error(`low-footprint capacity NOT_RUN: ${JSON.stringify(admission)}`);
   return admission;
 }
@@ -114,21 +115,24 @@ export async function runLowFootprintAuthor(argv, {root, publicationIdentity, au
         throw new Error(`unverified physical test file: ${file}`);
     }
     git(['diff', '--check', `${receipt.baseSha}...${receipt.headSha}`]);
+    const workload = focusedMacWorkload(options);
     receipt.budgets = {scratchBytes: options.scratchBytes, runtimeMs: options.runtimeMs,
+      focusedWorkload: workload,
       outputBytes: AUTHOR_OUTPUT_LIMIT_BYTES, minimumFreeBytes: options.minimumFreeBytes};
-    receipt.entryAdmission = admit(root, tmpdir(), options.minimumFreeBytes);
+    receipt.entryAdmission = admit(root, tmpdir(), options.minimumFreeBytes, workload);
     slot = acquire('author-low-footprint', {perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: 1});
-    if (slot.outcome !== 'acquired' || !testSlotExecutionAllowed(slot))
+    if (slot.outcome !== 'acquired' || slot.concurrency !== 1 || !testSlotExecutionAllowed(slot))
       throw new Error(`low-footprint NOT_RUN: ${slot.note}`);
     receipt.slot = {outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs};
-    receipt.freshAdmission = admit(root, tmpdir(), options.minimumFreeBytes);
+    receipt.freshAdmission = admit(root, tmpdir(), options.minimumFreeBytes, workload);
     mkdirSync(join(root, 'coverage'), {recursive: true});
     diagnostics = mkdtempSync(join(root, 'coverage', 'author-low-footprint-'));
     scratch = makeScratch(options.scratchBytes);
     receipt.scratch = {writableCapacityBytes: scratch.writableCapacityBytes, imageBytes: scratch.imageBytes};
     for (const dir of ['t', 'h']) mkdirSync(join(scratch.volume, dir));
     const env = {...authorEnvironment(process.env), ...slot.childEnvironment, TMPDIR: join(scratch.volume, 't'),
-      HOME: join(scratch.volume, 'h'), TSX_DISABLE_CACHE: '1', npm_config_offline: 'true'};
+      HOME: join(scratch.volume, 'h'), TSX_DISABLE_CACHE: '1', npm_config_offline: 'true',
+      ...(workload ? {NODE_OPTIONS: `--max-old-space-size=${workload.heapMiB}`} : {})};
     const profile = lowFootprintSandbox(scratch.volume);
     const probe = join(scratch.volume, 'probe');
     const outside = join(scratch.dir, 'outside-probe');
@@ -138,9 +142,10 @@ export async function runLowFootprintAuthor(argv, {root, publicationIdentity, au
       'for(const p of process.argv.slice(2)){let denied=false;try{f.writeFileSync(p,"forbidden")}catch(e){denied=e.code==="EPERM"||e.code==="EACCES"}if(!denied)process.exit(2)}';
     command('/usr/bin/sandbox-exec', ['-p', profile, process.execPath, '-e', code, probe, outside, forbidden], {env});
     if (!existsSync(probe) || existsSync(outside) || existsSync(forbidden)) throw new Error('native write containment control failed');
-    receipt.testAdmission = admit(root, tmpdir(), options.minimumFreeBytes);
+    receipt.testAdmission = admit(root, tmpdir(), options.minimumFreeBytes, workload);
     judged = prepareJudgedRun({makeDir: () => mkdtempSync(join(scratch.volume, 'j-'))});
-    const args = judgedNodeTestArgs(['--test', '--test-reporter=tap', '--test-concurrency=1', '--import', 'tsx',
+    const args = judgedNodeTestArgs([...(workload ? [`--max-old-space-size=${workload.heapMiB}`] : []),
+      '--test', '--test-reporter=tap', '--test-concurrency=1', '--import', 'tsx',
       '--import', './test/setup/tmp-hygiene.ts', ...options.files], judged.args);
     const native = capture('/usr/bin/sandbox-exec', ['-p', profile, process.execPath, ...args], {
       cwd: root, env: {...env, ...judged.env}, stdoutPath: join(diagnostics, 'tests.stdout.log'),

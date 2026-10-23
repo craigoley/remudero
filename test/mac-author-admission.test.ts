@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {existsSync, readFileSync, readdirSync, statfsSync} from 'node:fs';
+import {existsSync, readFileSync, readdirSync, statfsSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {test} from 'node:test';
 type Admission = {state: string; minimumFreeBytes: number; workspaceFreeBytes: number | null;
@@ -107,14 +107,21 @@ test('Mac author phase refusals save OVER-CAPACITY, start no refused phase, and 
   const {resolveTestSlotDir} = await import('#src/lib/test-slot.js');
   for (const refusedStage of ['static-preflight', 'affected-tests']) {
     const fixture = makeRuntimeFixture(); t.after(() => fixture.cleanup());
+    // This tiny Git/Node fixture uses these three tools, not the application's
+    // SDK/browser dependency graph. Lock their actual installed versions so an
+    // unrelated application dependency update cannot prevent reaching the guard.
+    const packages = Object.fromEntries(['tsx', 'typescript', '@commitlint/cli'].map(name =>
+      [`node_modules/${name}`, {version: JSON.parse(readFileSync(join(fixture.dir, 'node_modules', name, 'package.json'), 'utf8')).version}]));
+    writeFileSync(join(fixture.dir, 'package-lock.json'), JSON.stringify({lockfileVersion: 3, packages}));
+    fixture.git('add', 'package-lock.json'); fixture.git('commit', '-m', 'test: lock the native fixture tools');
     const status = main([], {root: fixture.dir,
       select: () => ({fullRun: false, suites: ['test/a.test.ts', 'test/b.test.ts'], reasons: ['physical fixture']}),
       admitHost: (stage: string) => {
         if (stage === refusedStage) throw new MacAuthorCapacityRefusal(stage, {state: 'not-run', pressure: 'warning'});
         return {stage, state: 'admitted'};
       }});
-    assert.equal(status, 3);
     const receipt = JSON.parse(readFileSync(join(fixture.dir, 'coverage/preflight-author.json'), 'utf8'));
+    assert.equal(status, 3, JSON.stringify(receipt));
     assert.equal(receipt.verdict, 'over-capacity'); assert.equal(receipt.hostCapacity.at(-1).stage, refusedStage);
     assert.equal(receipt.steps.some((row: {name: string}) => row.name === 'affected-tests'), false);
     assert.equal(existsSync(join(fixture.dir, 'coverage/static-started')), refusedStage === 'affected-tests');
@@ -131,4 +138,99 @@ test('Mac capacity default seam really reads the native volume and pressure with
   const pressure = spawnSync('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level'], {encoding: 'utf8', timeout: 2000});
   assert.equal(pressure.status, 0); assert.notEqual(macPressureState(pressure.stdout), 'unknown');
   assert.ok(['normal', 'warning', 'critical'].includes(result.pressure), 'native readings are known, not assumed unchanged across two probes');
+});
+
+test('focused Mac admission accepts a costed warning only with quiet paging and measured headroom', async () => {
+  const {focusedMacWorkload, judgeFocusedMacSamples} = await import(admissionModule);
+  const workload = focusedMacWorkload({scratchBytes: 64 * 1024 ** 2, runtimeMs: 30_000, files: ['test/a.test.ts']});
+  assert.equal(workload.workers, 1); assert.equal(workload.heapMiB, 512);
+  const samples = [0, 5000, 10_000].map(at => ({at, pressure: 'warning', pageBytes: 16384,
+    freePlusInactiveBytesApprox: 4 * 1024 ** 3, swapins: 100, swapouts: 200}));
+  assert.equal(judgeFocusedMacSamples(workload, samples).state, 'admitted');
+  for (const pressure of ['critical', 'unknown'])
+    assert.equal(judgeFocusedMacSamples(workload, samples.map(s => ({...s, pressure}))).state, 'not-run');
+  const replaceLast = (change: object) => [...samples.slice(0, -1), {...samples[2], ...change}];
+  for (const change of [{swapouts: 201}, {swapins: 1000}, {swapins: 99}, {swapouts: 199},
+    {freePlusInactiveBytesApprox: 3 * 1024 ** 3 - 1}, {pageBytes: 4096}, {at: 4999}, {at: 40_000},
+    {swapins: NaN}, {pressure: 'unknown'}])
+    assert.equal(judgeFocusedMacSamples(workload, replaceLast(change)).state, 'not-run', JSON.stringify(change));
+  assert.equal(judgeFocusedMacSamples(workload, samples.slice(1)).state, 'not-run');
+  assert.equal(judgeFocusedMacSamples(workload, [null, ...samples.slice(1)]).state, 'not-run');
+  assert.equal(judgeFocusedMacSamples(null, samples).state, 'not-run');
+  // Check every interval: a burst hidden by a quiet final interval must still refuse.
+  assert.equal(judgeFocusedMacSamples(workload, samples.map((s, i) => ({...s, swapins: i ? 200 : 100}))).state, 'not-run');
+});
+
+test('focused warning eligibility cannot be used for full, oversized or multi-worker jobs', async () => {
+  const {focusedMacWorkload, judgeFocusedMacSamples} = await import(admissionModule);
+  const input = {scratchBytes: 64 * 1024 ** 2, runtimeMs: 30_000, files: ['test/a.test.ts']};
+  for (const change of [{runtimeMs: 120_001}, {scratchBytes: 256 * 1024 ** 2 + 1},
+    {files: []}, {files: Array(5).fill('test/a.test.ts')}, {runtimeMs: NaN}])
+    assert.equal(focusedMacWorkload({...input, ...change}), null);
+  const workload = focusedMacWorkload(input);
+  assert.equal(judgeFocusedMacSamples({...workload, workers: 2}, []).state, 'not-run');
+  assert.equal(judgeFocusedMacSamples({...workload, heapMiB: 513}, []).state, 'not-run');
+  // The full gate's production seam remains normal-only even with a bounded disk reserve.
+  assert.equal(readMacAuthorAdmission('/w', {platform: 'darwin', statfs: ample,
+    spawn: () => ({status: 0, stdout: '2'})}).state, 'not-run');
+});
+
+test('focused Mac sampling parses actual page size and refuses absent or duplicate counters', async () => {
+  const {parseMacVmSample} = await import(admissionModule);
+  const text = 'Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 5.\nPages inactive: 7.\nSwapins: 100.\nSwapouts: 200.\n';
+  assert.deepEqual(parseMacVmSample(text), {pageBytes: 16384, freePlusInactiveBytesApprox: 12 * 16384, swapins: 100, swapouts: 200});
+  for (const broken of [text.replace('Swapins: 100.\n', ''), text + 'Swapins: 1.\n',
+    text.replace('100.', '-1.'), text.replace('16384', '0'), text.replace('200.', '9007199254740992.')])
+    assert.throws(() => parseMacVmSample(broken));
+});
+
+test('focused Mac reader never rescues disk, unknown or critical refusals and rechecks after sampling', async () => {
+  const {focusedMacWorkload, readMacFocusedAdmission} = await import(admissionModule);
+  const workload = focusedMacWorkload({scratchBytes: 64 * 1024 ** 2, runtimeMs: 30_000, files: ['test/a.test.ts']});
+  let time = 0, reads = 0, flag = '2';
+  const deps = {platform: 'darwin', scratch: '/s', statfs: ample, workload,
+    spawn: () => ({status: 0, stdout: flag}), now: () => time, wait: (ms: number) => {time += ms;},
+    sample: () => {reads++; return {at: time, pressure: 'warning', pageBytes: 16384,
+      freePlusInactiveBytesApprox: 4 * 1024 ** 3, swapins: 100, swapouts: 200};}};
+  assert.equal(readMacFocusedAdmission('/w', deps).state, 'admitted'); assert.equal(reads, 3);
+  for (const pressure of ['4', 'bad']) {
+    reads = 0; flag = pressure;
+    assert.equal(readMacFocusedAdmission('/w', deps).state, 'not-run'); assert.equal(reads, 0);
+  }
+  reads = 0; flag = '2';
+  assert.equal(readMacFocusedAdmission('/w', {...deps, statfs: () => ({bavail: 1, bsize: 1})}).state, 'not-run');
+  assert.equal(reads, 0);
+  assert.equal(readMacFocusedAdmission('/w', {...deps, sample: () => {throw new Error('probe unavailable');}}).state, 'not-run');
+  const moved = readMacFocusedAdmission('/w', {...deps, sample: () => {
+    reads++; if (reads === 3) flag = '4';
+    return {at: time, pressure: 'warning', pageBytes: 16384, freePlusInactiveBytesApprox: 4 * 1024 ** 3, swapins: 100, swapouts: 200};
+  }});
+  assert.equal(moved.state, 'not-run');
+});
+
+test('focused default Mac probe really reads native counters without allocating a workload', async () => {
+  if (process.platform !== 'darwin') return;
+  const {readMacFocusedSample} = await import(admissionModule);
+  const sample = readMacFocusedSample();
+  assert.ok([4096, 16384, 65536].includes(sample.pageBytes));
+  assert.ok(Number.isSafeInteger(sample.swapins));
+  assert.ok(Number.isSafeInteger(sample.swapouts));
+  assert.ok(['normal', 'warning', 'critical'].includes(sample.pressure));
+});
+
+test('focused native probes are bounded and fail closed on spawn, timeout and malformed data', async () => {
+  const {readMacFocusedSample} = await import(admissionModule);
+  for (const response of [{status: 1, stdout: ''}, {status: 0, stdout: '', error: new Error('read failed')},
+    {status: null, stdout: '', signal: 'SIGTERM'}, {status: 0, stdout: 'not vm_stat'}])
+    assert.throws(() => readMacFocusedSample({spawn: (_file: string, _args: string[], options: {timeout: number; maxBuffer: number}) => {
+      assert.equal(options.timeout, 2000); assert.equal(options.maxBuffer, 4096); return response;
+    }}));
+  const workload = {kind: 'explicit-scoped-tests-only', workers: 1, heapMiB: 512, memoryBudgetBytes: 1024 ** 3,
+    scratchBytes: 64 * 1024 ** 2, runtimeMs: 30_000, files: ['test/a.test.ts']};
+  const {readMacFocusedAdmission} = await import(admissionModule);
+  const result = readMacFocusedAdmission('/w', {workload, platform: 'darwin', statfs: ample,
+    spawn: () => ({status: 0, stdout: '2'}), wait: () => {throw new Error('sampling interrupted');},
+    sample: () => ({at: 0, pressure: 'warning', pageBytes: 16384, freePlusInactiveBytesApprox: 4 * 1024 ** 3, swapins: 0, swapouts: 0})});
+  assert.equal(result.state, 'not-run');
+  assert.ok(result.reasons.some((reason: string) => reason.includes('sampling interrupted')));
 });
