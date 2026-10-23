@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.43
   status: queued
@@ -21,3 +21,11 @@
     The ledger step dispatch.lifetime_history_unavailable carries a failure shape and landed rows in both halves of the trailing 7 days: 12 in the older half, 58 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-23T18:24:21.805Z"
+    pin: "9836a3460e8e5d99489943c6d8538dd437d2a47eb8ff20a475282bb3e7116b33"
