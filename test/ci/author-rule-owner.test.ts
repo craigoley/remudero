@@ -863,13 +863,17 @@ test('an actual timeout of a started bounded rule remains incomplete and cannot 
     "test('started real timeout',()=>{writeFileSync('coverage/started-timeout','native');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10000);});\n");
   f.repo.git('add', '.'); f.repo.git('commit', '-qm', 'test: real native timeout input');
   const handle = budgetHandle(f), directory = join(f.repo.dir, 'coverage/timeout-capture'); mkdirSync(directory);
-  const program = `import{beginOwnedRuleResults}from${JSON.stringify(MODULE)};const o=beginOwnedRuleResults(process.cwd(),${JSON.stringify(rules)});if(!o)process.exit(2);o.run(${JSON.stringify(rules[0])});process.exit(o.finish());`;
+  const program = `import{beginOwnedRuleResults,observeOwnedStaticStep}from${JSON.stringify(MODULE)};const o=beginOwnedRuleResults(process.cwd(),${JSON.stringify(rules)});if(!o)process.exit(2);observeOwnedStaticStep(process.cwd(),'actual-native-leaf','started');o.run(${JSON.stringify(rules[0])});process.exit(o.finish());`;
   const native = captureStepSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', program], {
     cwd: f.repo.dir, env: handle.childEnvironment, runtimeMs: 2000, maxBytes: 1024 * 1024,
     stdoutPath: join(directory, 'stdout'), stderrPath: join(directory, 'stderr'), resultPath: join(directory, 'native.json'),
   });
   assert.equal(readFileSync(join(f.repo.dir, 'coverage/started-timeout'), 'utf8'), 'native');
   assert.ok(native.signal || native.error, JSON.stringify(native));
+  const boundary = readFileSync(join(directory, 'stderr'), 'utf8').split('\n')
+    .filter(line => line.startsWith('{')).map(line => JSON.parse(line)).find(row => row.step === 'bounded-static-step');
+  assert.equal(boundary?.name, 'actual-native-leaf'); assert.equal(boundary?.event, 'started');
+  assert.equal(boundary?.head, f.repo.git('rev-parse', 'HEAD')); assert.equal(boundary?.ownerPid, process.pid);
   assert.equal(JSON.parse(readFileSync(handle.file, 'utf8')).phase, 'running');
   assert.equal(readOwnedStaticBudgetResult(handle, f.repo.dir, handle.childEnvironment, native, {}), undefined);
   assert.throws(() => qualifiedAffectedRules(handle, f.repo.dir, handle.childEnvironment, affected), /failed or incomplete/);

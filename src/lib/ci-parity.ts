@@ -3310,6 +3310,10 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const ownedBudget = (kind: string) => spawn === defaultPreflightSpawn
     ? require("../../scripts/lib/author-rule-owner.mjs").ownedPreflightBudgetResult(repoRoot, kind)
     : undefined;
+  const observeOwnedStep = (name: string, event: string, result?: CiParityStepResult) => {
+    if (spawn === defaultPreflightSpawn)
+      require("../../scripts/lib/author-rule-owner.mjs").observeOwnedStaticStep(repoRoot, name, event, result);
+  };
   // W1-T8920 — in a repo that is not the harness's own, core's steps it does not hold are skipped.
   const consumer = isConsumerRepo(repoRoot, deps.packageJsonText);
   const timedCensus = (script: string, spawn: PreflightSpawn) => {
@@ -3325,7 +3329,8 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const censusCosts = new Map<number, number>();
   const steps = gateSteps.map(({ job, script, runner, boundMs, retainSuccessOutput, skipWhenAbsent }, i) => {
     const spawn = timings[i].wrap("initial");
-    return runStep(job, () => {
+    observeOwnedStep(job, "started");
+    const step = runStep(job, () => {
       if (skipWhenAbsent !== undefined && !existsSync(join(repoRoot, skipWhenAbsent))) {
         return { ok: true, detail: `SKIPPED — no ${skipWhenAbsent}/ directory in this checkout; nothing for ${job} to check here` };
       }
@@ -3371,6 +3376,8 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       }
       return result;
     });
+    observeOwnedStep(job, "returned", step);
+    return step;
   });
 
   // PASS TWO: with every census cost measured on the SAME machine in the SAME run, a runaway is

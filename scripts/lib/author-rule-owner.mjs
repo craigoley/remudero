@@ -302,6 +302,16 @@ export function ownedPreflightBudgetResult(root, kind) {
   return census;
 }
 
+/** Diagnostic only. Emit before a blocking leaf so a killed outer buffer still names it.
+ * This marker grants no result, test-slot or partial authority. Ordinary/full runs stay quiet. */
+export function observeOwnedStaticStep(root, name, event, result) {
+  const read = readOwner(root);
+  if (!read?.owner.policy) return;
+  process.stderr.write(JSON.stringify({ step: 'bounded-static-step', name, event,
+    head: read.owner.head, ownerPid: read.owner.pid, observerPid: process.pid,
+    ...(result ? { ok: result.ok, durationMs: result.durationMs, detail: result.detail.slice(0, 4096) } : {}) }) + '\n');
+}
+
 /** The real parent rechecks native closure, its live rule context and every independent step.
  * A random exit3, stale summary, native error or actual failed step cannot be a partial result. */
 export function readOwnedStaticBudgetResult(handle, root, environment, result, summary) {

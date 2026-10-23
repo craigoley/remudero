@@ -148,13 +148,15 @@ baseline. Choose scratch from the actual tree footprint: a counted 10633-blob ba
 133 MiB of 4-KiB data blocks before directories and index, and the real 128-MiB checkout filled;
 256 MiB remains within the existing maximum. Neither a space refusal nor a truncated capture is PASS.
 
-Operator-approved 2026-10-23: bounded author also gives the serial rule sweep a 60-second soft
-producer allowance inside the unchanged 120-second static backstop. The allowance is checked
+Operator-approved 2026-10-23: bounded author also gives the serial rule sweep a soft producer
+allowance of one quarter of the static phase (30 seconds at the unchanged 120-second backstop),
+capped at 60 seconds. The allowance is checked
 between files; it does not promise that the next file finishes within it, shorten a started child's
 backstop, or hide an actual timeout. The live owner names completed, failed, unknown and deferred
 physical files separately. Only unstarted files are deferred. Any failure, missing native completion,
 changed source/dependency/runtime/environment, stale owner or truncated outer capture prevents a
-budget-only result. Bounded native failure diagnostics survive in the owner's event files.
+budget-only result. Bounded native failure diagnostics survive in the owner's event files;
+same-owner static step boundaries are emitted immediately so a killed outer buffer names the leaf.
 
 Independent static checks continue after a qualified partial rule result. That same invocation's
 already measured parent census is retained rather than run a second time; an earlier partial census

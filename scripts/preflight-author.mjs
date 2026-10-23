@@ -663,7 +663,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             try {
               ruleOwner = createAuthorRuleOwner({ root, directory: diagnosticsRoot, head: receipt.headSha,
                 rules: listRuleSuites(root), affected: receipt.suites, concurrency: Math.min(resourceBudget?.workers ?? 4, slot.concurrency),
-                ...(resourceBudget ? { budgetMs: AUTHOR_RULE_BUDGET_MAX_MS, parentCensus: {
+                ...(resourceBudget ? { budgetMs: Math.min(AUTHOR_RULE_BUDGET_MAX_MS, Math.floor(resourceBudget.stepRuntimeMs / 4)), parentCensus: {
                   root: realpathSync(root), head: receipt.headSha, base: receipt.baseSha,
                   state: censusPartial ? 'over-capacity' : 'complete' } } : {}),
                 environment: { ...authorEnvironment(process.env), ...slot.childEnvironment, ...temporaryEnvironment() } });
