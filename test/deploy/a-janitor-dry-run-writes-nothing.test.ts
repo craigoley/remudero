@@ -23,7 +23,7 @@ function everything(fx: PhaseFixture): { units: string; dumps: string } {
   const dumps = join(fx.root, "dumps");
   mkdirSync(join(dumps, "run"), { recursive: true });
   writeFileSync(join(dumps, "run", "big.json"), Buffer.alloc(6 * 1024 * 1024, 120));
-  writeFileSync(join(dumps, "run", "old.log"), "old\n");
+  writeFileSync(join(dumps, "run", "old.log"), Buffer.alloc(6 * 1024 * 1024, 120));
   const archived = join(fx.state, "host-cleanup-worktree-archive", "W1-T1.bundle");
   mkdirSync(join(archived, ".."), { recursive: true });
   writeFileSync(archived, "b\n");

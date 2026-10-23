@@ -116,7 +116,6 @@
 #                               both the root and the user cron run, so one path serves both)
 #   RMD_CLEANUP_FLOCK           flock command (tests may simulate an unavailable lock)
 set -uo pipefail
-# `:-`: a stdin run (`bash -s`) has no BASH_SOURCE; its guards and lock are the working directory's.
 SEED_GUARD_DIR=$(cd "$(dirname -- "${BASH_SOURCE[0]:-}")" && pwd)
 if [ -f "$SEED_GUARD_DIR/dependency-seed-guard.sh" ]; then
   # shellcheck source=deploy/dependency-seed-guard.sh
@@ -213,6 +212,10 @@ elif [ "$HOST_LAYOUT" = 1 ]; then
   PRESERVE_ROOTS="$WORKTREE_ROOTS:$SCRATCH_DISK:$SCRATCH_DISK/o:$SCRATCH_DISK/tmp:$SCRATCH_DISK/rmd-work-tmp:$STATE_DISK/tmp:$CLEAN_HOME/rmd-state2/tmp:$TMP_ROOTS"
 else PRESERVE_ROOTS=""; fi
 DUMP_ROOTS="${RMD_CLEANUP_DUMP_ROOTS-$PRESERVE_ROOTS}"
+# Operator ruling 2026-10-23 (an active session's namespace with recorded holds): see ruling_retire.
+if [ -n "${RMD_CLEANUP_RULING_NAMESPACES+x}" ]; then RULING_NAMESPACES="$RMD_CLEANUP_RULING_NAMESPACES"
+elif [ "$HOST_LAYOUT" = 1 ]; then RULING_NAMESPACES="$SCRATCH_DISK/rmd-qa-namespace.ulkfFP"
+else RULING_NAMESPACES=""; fi
 if [ -n "${RMD_CLEANUP_DUMP_RESUMABLE_ROOTS+x}" ]; then DUMP_RESUMABLE_ROOTS="$RMD_CLEANUP_DUMP_RESUMABLE_ROOTS"
 elif [ "$HOST_LAYOUT" = 1 ]; then DUMP_RESUMABLE_ROOTS="$STATE_DISK/agent-codex/sessions"  # Codex may resume these
 else DUMP_RESUMABLE_ROOTS=""; fi
@@ -693,6 +696,14 @@ keep_marker() {   # keep_marker <folder> [quiet]: true while its marker is in fo
   fi
   return 0
 }
+ruling_namespace() {   # true when $1 is, or is inside, a namespace under an operator ruling
+  local n
+  while IFS= read -r n; do
+    n="${n%/}"; [ -n "$n" ] || continue
+    case "$1" in "$n"|"$n"/*) return 0 ;; esac
+  done < <(printf '%s\n' "$RULING_NAMESPACES" | tr ':' '\n')
+  return 1
+}
 scratch_guard() {
   local p="$1" protected parent
   case "${p##*/}" in
@@ -703,6 +714,7 @@ scratch_guard() {
   if keep_marker "$p"; then
     log "KEEP $p: scratch keep marker"; return 1
   fi
+  if ruling_namespace "$p"; then log "KEEP $p: operator ruling 2026-10-23 (retired only by the service-user pass)"; return 1; fi
   # The preserve-then-retire copies sit on the scratch disk; only retention may expire them.
   case "$PRESERVE_ROOT" in "$p"|"$p"/*) log "KEEP $p: holds the janitor's preserve root $PRESERVE_ROOT"; return 1 ;; esac
   while IFS= read -r parent; do
@@ -1110,6 +1122,7 @@ sweep_nested_coverage() {
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     [[ "${p##*/}" =~ ^rmd-c-[0-9a-f]{12}$ ]] || continue
+    ruling_namespace "$p" && continue
     case "$NESTED_COVERAGE_SEEN" in *"|$p|"*) continue ;; esac
     NESTED_COVERAGE_SEEN="$NESTED_COVERAGE_SEEN|$p|"
     [ -d "$p" ] && [ ! -L "$p" ] || continue
@@ -1173,8 +1186,11 @@ preserve_hold() {
   PRESERVE_HELD=$(( PRESERVE_HELD + 1 ))
   log "KEEP $1: preserve-then-retire hold: $2"
 }
+RULING_CHILD=""
 preserve_skip() {
   local p="$1" other
+  [ "$p" = "$RULING_CHILD" ] && return 1
+  ruling_namespace "$p" && [ -z "$RULING_CHILD" ] && return 0
   case "${p##*/}" in
     swapfile|lost+found|worktrees|tmp|npm-cache|node-compile-cache|node-v*-linux-x64*|tsx-*|.remudero-coverage|state|docker|containerd|host-cleanup-validation-bundles-*|.incoming-*) return 0 ;;
   esac
@@ -1357,7 +1373,6 @@ preserve_unit() {
   { [ -e "$p/.git" ] || [ -L "$p/.git" ]; } && is_repo=1
   [ -z "$denied" ] || descend="unreadable path inside ($(printf '%s\n' "$denied" | head -n 1))"
   if [ -f "$p/HEAD" ] && [ -d "$p/objects" ] && [ -d "$p/refs" ]; then preserve_hold "$p" "bare repository; Git history retained"; return; fi
-  # A protected checkout's own folder (an instance's rmd/<key>) is held whole; a folder above it is descended.
   while IFS= read -r protected; do
     protected="${protected%/}"
     [ -n "$protected" ] || continue
@@ -1512,6 +1527,44 @@ link_lender_check() {   # fails with SCRATCH_REASON when a live link outside uni
   done <<< "$LINKS"
   [ -z "$borrowers" ] || { SCRATCH_REASON="lends files to symlinks $borrowers"; return 1; }
 }
+ruling_remove_plain() {
+  local c="$1" n="$2" status bytes seed_reason
+  local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES"
+  if keep_marker "$c"; then preserve_hold "$c" "scratch keep marker"; return; fi
+  if ! scan_find "$c" ! -user "$RUN_UID" -print -quit || [ -n "$SCAN_OUT$SCAN_DENIED" ]; then
+    preserve_hold "$c" "foreign-owned or unreadable content"; return
+  fi
+  if seed_reason=$(rmd_dependency_seed_risk "$c"); then preserve_hold "$c" "$seed_reason"; return; fi
+  is_worktree_idle "$c"; status=$?
+  case "$status" in
+    0) ;;
+    1) log "KEEP $c: written within ${IDLE_MINUTES} min"; return ;;
+    *) preserve_hold "$c" "activity probe failed (unknown)"; return ;;
+  esac
+  if is_open "$c"; then log "KEEP $c: held open by a process"; return; fi
+  if [ "$DOCKER_OK" != 1 ] || is_docker_mount "$c"; then preserve_hold "$c" "Docker mount or snapshot failed"; return; fi
+  bytes="$(du_bytes "$c")"
+  log "REMOVE $c: idle scratch retired under the operator ruling of 2026-10-23"
+  act rm -rf -- "$c" && tally "ruling $n" "$bytes"
+}
+ruling_retire() {
+  local n c
+  while IFS= read -r n; do
+    n="${n%/}"
+    [ -n "$n" ] && [ -d "$n" ] && [ ! -L "$n" ] || continue
+    log "MARKER-RULING $n: operator 2026-10-23: retire idle operator/wt-* worktrees and top-level tmp, tmp-*, t3.*; keep everything else (an active operator session whose plan records holds)"
+    for c in "$n"/operator/wt-* "$n"/tmp "$n"/tmp-* "$n"/t3.*; do
+      [ -d "$c" ] && [ ! -L "$c" ] || continue
+      RULING_CHILD="$c"
+      if scan_find "$c" -name node_modules -prune -o \( -name .git -o -name '*.bundle' \) -print -quit && [ -z "$SCAN_OUT" ]; then
+        ruling_remove_plain "$c" "$n"
+      else
+        preserve_unit "$c"
+      fi
+      RULING_CHILD=""
+    done
+  done < <(printf '%s\n' "$RULING_NAMESPACES" | tr ':' '\n' | awk 'NF && !seen[$0]++')
+}
 preserve_then_retire() {
   local root unit retired_before lender
   [ -n "$PRESERVE_ROOTS" ] || return 0
@@ -1534,11 +1587,14 @@ preserve_then_retire() {
       preserve_unit "$unit"
     done
   done < <(printf '%s\n' "$PRESERVE_ROOTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
-  # Recompute after the batch: a lender whose every borrower was retired above goes in this pass too.
+  ruling_retire
   while [ "${#LINK_LENDERS[@]}" -gt 0 ] && [ "$PRESERVE_RETIRED" != "$retired_before" ]; do
     retired_before="$PRESERVE_RETIRED"
     set -- "${LINK_LENDERS[@]}"; LINK_LENDERS=()
-    for lender in "$@"; do preserve_unit "$lender"; done
+    for lender in "$@"; do
+      if ruling_namespace "$lender"; then RULING_CHILD="$lender"; fi
+      preserve_unit "$lender"; RULING_CHILD=""
+    done
   done
   log "rmd-host-cleanup: preserve-then-retire retired $PRESERVE_RETIRED units, held $PRESERVE_HELD"
 }
@@ -1580,35 +1636,55 @@ compress_dump() {   # compress_dump <file> <root> <gz|zst>
   fi
   packed="$(wc -c < "$f.$ext" | tr -d ' ')"
   log "PRUNE $f: $(( orig - packed )) bytes, compressed beside itself as $f.$ext after a full read-back"
+  { mkdir -p -- "$(dirname -- "$DUMP_RECEIPT")" && printf '%s\t%s\n' "$f.$ext" "$packed" >> "$DUMP_RECEIPT"; } 2>/dev/null ||
+    log "KEEP $f.$ext: compression receipt unwritable; this copy will not expire"
   if rm -f -- "$f"; then DUMP_COMPRESSED=$(( DUMP_COMPRESSED + 1 )); tally "dumps-$tool $root" "$(( orig - packed ))"; fi
 }
+# A dump is a file of at least DUMP_MIN_MB, never inside a repository or an installed package/toolchain tree.
+dump_excluded() {   # dump_excluded <file> <root>
+  local d="${1%/*}" stop="$2" x
+  while :; do
+    if [ -e "$d/.git" ] || [ -e "$d/pyvenv.cfg" ] || { [ -f "$d/HEAD" ] && [ -d "$d/objects" ] && [ -d "$d/refs" ]; }; then return 0; fi
+    case "${d##*/}" in node_modules|site-packages|dist-packages|*.dist-info|*.egg-info|.cargo|.rustup|.venv|venv) return 0 ;; esac
+    case "$d/" in */lib/python[0-9]*/*|*/pkg/mod/*) return 0 ;; esac
+    for x in "$d"/lib/python[0-9]*; do [ -d "$x" ] && return 0; done
+    [ "$d" = "$stop" ] && return 1
+    case "$d" in "$stop"/*) d="${d%/*}" ;; *) return 0 ;; esac
+  done
+}
+DUMP_RECEIPT="${RMD_CLEANUP_DUMP_RECEIPT:-$CLEAN_HOME/.local/state/remudero/janitor-compressed.tsv}"
+dump_receipted() { [ -f "$DUMP_RECEIPT" ] && grep -qxF -- "$1$(printf '\t')$(wc -c < "$1" | tr -d ' ')" "$DUMP_RECEIPT" 2>/dev/null; }
 dump_walk() {   # dump_walk <root> <unit> <resumable 0|1>
   local root="$1" unit="$2" only="$3" f bytes idle_m="$IDLE_MINUTES" keep_m=$(( DUMP_RETAIN_DAYS * 1440 ))
   local min_c=$(( DUMP_MIN_MB * 1048576 - 1 ))
-  local -a names=(-name "*.json" -o -name "*.json.gz") plain=(-name "*.json")
+  local -a plain=(-name "*.json") packed=(-name "*.json.gz" -o -name "*.json.zst")
+  local -a prune=(\( -name node_modules -o -name .git -o -name site-packages -o -name dist-packages -o -name .venv -o -name venv
+                     -o -name '*.dist-info' -o -name '*.egg-info' -o -name .cargo -o -name .rustup -o -path '*/lib/python[0-9]*'
+                     -o -path '*/pkg/mod' \) -prune)
   local s
   for s in jsonl ndjson log lcov info; do
-    plain+=(-o -name "*.$s"); names+=(-o -name "*.$s" -o -name "*.$s.gz")
+    plain+=(-o -name "*.$s"); packed+=(-o -name "*.$s.gz" -o -name "*.$s.zst")
   done
   if [ "$only" != 1 ]; then
     while IFS= read -r f; do
       [ -n "$f" ] && [ -f "$f" ] && [ ! -L "$f" ] || continue
-      dump_in_repo "$f" "$root" && continue
+      dump_excluded "$f" "$root" && continue
       [ "$(owner_uid "$f")" = "$RUN_UID" ] || continue
+      case "$f" in *.gz|*.zst) dump_receipted "$f" || continue ;; esac
       if is_open "$f"; then log "KEEP $f: held open by a process"; continue; fi
       bytes="$(du_bytes "$f")"
       log "REMOVE $f: dump unchanged ${DUMP_RETAIN_DAYS} days"
       if act rm -f -- "$f"; then DUMP_EXPIRED=$(( DUMP_EXPIRED + 1 )); tally "dumps-expire $root" "$bytes"; fi
-    done < <($FIND_CMD "$unit" -xdev \( -name node_modules -o -name .git \) -prune -o -type f \( "${names[@]}" \) \
+    done < <($FIND_CMD "$unit" -xdev "${prune[@]}" -o -type f \( \( \( "${plain[@]}" \) -size "+${min_c}c" \) -o \( "${packed[@]}" \) \) \
                ! -mmin "-$idle_m" ! -cmin "-$idle_m" -mmin "+$keep_m" -print 2>/dev/null)
   fi
   while IFS= read -r f; do
     [ -n "$f" ] && [ -f "$f" ] && [ ! -L "$f" ] || continue
-    dump_in_repo "$f" "$root" && continue
+    dump_excluded "$f" "$root" && continue
     [ "$(owner_uid "$f")" = "$RUN_UID" ] || continue
     if is_open "$f"; then log "KEEP $f: held open by a process"; continue; fi
     if [ "$only" = 1 ]; then compress_dump "$f" "$root" zst; else compress_dump "$f" "$root" gz; fi
-  done < <($FIND_CMD "$unit" -xdev \( -name node_modules -o -name .git \) -prune -o -type f \( "${plain[@]}" \) \
+  done < <($FIND_CMD "$unit" -xdev "${prune[@]}" -o -type f \( "${plain[@]}" \) \
              ! -mmin "-$idle_m" ! -cmin "-$idle_m" -size "+${min_c}c" -print 2>/dev/null)
 }
 dump_housekeeping() {
@@ -1892,7 +1968,6 @@ if [ "$ONLY_TMP" != 1 ]; then
 else
   log "rmd-host-cleanup: temporary-roots-only mode"
 fi
-# Both passes: only the hourly root pass can remove the root-owned archive entries.
 retention
 
 if [ "$PRUNED_COUNT" -gt 0 ]; then

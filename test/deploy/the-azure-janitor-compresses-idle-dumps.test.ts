@@ -35,16 +35,13 @@ test("outside any repository an idle dump is gzipped beside itself, an old one e
   const open = join(unit, "results", "held.ndjson");
   dump(open, 6 * MB);
   const old = join(unit, "old-run.log");
-  dump(old, 1024);
-  const oldGz = join(unit, "older.json.gz");
-  dump(oldGz, 100);
+  dump(old, 6 * MB);
   const repo = cloneAt(fx, join(root, "creditq-x6LSzP"));
   const inRepo = join(repo, "coverage-run.lcov");
   dump(inRepo, 6 * MB);
   age(unit, 13);
   age(repo, 13);
   ageDays(old, 20);
-  ageDays(oldGz, 20);
   age(fresh, 1);
   const mtime = statSync(big).mtimeMs;
   writeFileSync(fx.lsofList, `${open}\n`);
@@ -57,7 +54,6 @@ test("outside any repository an idle dump is gzipped beside itself, an old one e
   assert.deepEqual(gunzipSync(readFileSync(`${big}.gz`)), body, "the compressed copy reads back byte for byte");
   assert.equal(Math.round(statSync(`${big}.gz`).mtimeMs / 1000), Math.round(mtime / 1000), "its modification time is kept");
   assert.equal(existsSync(old), false, `a dump unchanged 14 days expires:\n${r.stdout}`);
-  assert.equal(existsSync(oldGz), false, "so does a compressed one");
   for (const kept of [fresh, open, inRepo]) assert.equal(existsSync(kept), true, `${kept}\n${r.stdout}`);
   assert.match(r.stdout, new RegExp(`KEEP ${open}: held open by a process`));
   assert.match(r.stdout, new RegExp(`reclaim-total dumps-gzip ${root}: reclaimed [1-9]\\d* MB`));
@@ -109,4 +105,51 @@ test("a dump whose compressed copy does not read back byte for byte is kept, and
   assert.match(r.stdout, new RegExp(`KEEP ${big}: compression read-back failed`));
   assert.deepEqual(readFileSync(big), body, "the original is untouched");
   assert.equal(existsSync(`${big}.gz`) || existsSync(`${big}.gz.incoming`), false, r.stdout);
+});
+
+test("a small file is never a dump: a 1 KB .json unchanged 14 days stays, and only a compressed copy the janitor wrote expires", () => {
+  const fx = phaseFixture();
+  const root = join(fx.root, "dump-root");
+  const big = join(root, "unit", "native.json");
+  dump(big, 6 * MB);
+  const small = join(root, "unit", "boolean.json");
+  dump(small, 1024);
+  const foreignGz = join(root, "unit", "fixture.json.gz");
+  dump(foreignGz, 100);
+  age(join(root, "unit"), 13);
+  const env = { ...fx.env, RMD_CLEANUP_PRESERVE_ROOTS: "", RMD_CLEANUP_DUMP_ROOTS: root, RMD_CLEANUP_DUMP_RESUMABLE_ROOTS: "" };
+  const first = run(fx, env);
+  assert.equal(first.status, 0, first.stderr + first.stdout);
+  assert.equal(existsSync(`${big}.gz`), true, first.stdout);
+
+  for (const f of [`${big}.gz`, small, foreignGz]) ageDays(f, 20);
+  const second = run(fx, env);
+  assert.equal(second.status, 0, second.stderr + second.stdout);
+  assert.equal(existsSync(`${big}.gz`), false, `the janitor's own compressed copy expires:\n${second.stdout}`);
+  assert.equal(existsSync(small), true, "a 1 KB .json is not a dump, however old");
+  assert.equal(existsSync(foreignGz), true, "a .gz the janitor did not write never expires");
+});
+
+test("installed package and toolchain trees are never touched: lib/python3.12/test data, a venv, a prefix install", () => {
+  const fx = phaseFixture();
+  const root = join(fx.root, "dump-root");
+  const unit = join(root, "operator-stuck-pr-private-20261020T2215Z");
+  const stdlibData = join(unit, "certifi-25-toolchain", "lib", "python3.12", "test", "test_tomllib", "data", "valid", "big.json");
+  const stdlibSmall = join(unit, "certifi-25-toolchain", "lib", "python3.12", "test", "test_tomllib", "data", "valid", "boolean.json");
+  const prefixLog = join(unit, "certifi-25-toolchain", "install.log");
+  const venv = join(unit, "tools-venv");
+  const venvData = join(venv, "share", "data.json");
+  const distInfo = join(unit, "vendored", "pkg-1.0.dist-info", "RECORD.json");
+  for (const f of [stdlibData, prefixLog, venvData, distInfo]) dump(f, 6 * MB);
+  dump(stdlibSmall, 1024);
+  writeFileSync(join(venv, "pyvenv.cfg"), "home = /usr/bin\n");
+  age(unit, 13);
+  for (const f of [stdlibData, stdlibSmall, prefixLog, venvData, distInfo]) ageDays(f, 20);
+
+  const r = run(fx, { ...fx.env, RMD_CLEANUP_PRESERVE_ROOTS: "", RMD_CLEANUP_DUMP_ROOTS: root, RMD_CLEANUP_DUMP_RESUMABLE_ROOTS: "" });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  for (const f of [stdlibData, stdlibSmall, prefixLog, venvData, distInfo]) {
+    assert.equal(existsSync(f), true, `${f}\n${r.stdout}`);
+    assert.equal(existsSync(`${f}.gz`), false, `${f} is never compressed`);
+  }
 });

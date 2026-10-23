@@ -11,7 +11,7 @@ import { chmodSync, existsSync, lutimesSync, mkdirSync, readFileSync, readdirSyn
 import { join } from "node:path";
 
 import { age, git, run } from "#test/helpers/host-cleanup-fixture.js";
-import { cloneAt, commitFile, phaseFixture, type PhaseFixture } from "#test/helpers/host-cleanup-phases.js";
+import { ageDays, cloneAt, commitFile, phaseFixture, type PhaseFixture } from "#test/helpers/host-cleanup-phases.js";
 
 function units(fx: PhaseFixture): string {
   const dir = join(fx.root, "units");
@@ -345,4 +345,44 @@ test("a keep marker past its keep-until date lapses, a future one holds, and one
   assert.equal(existsSync(undated), true);
   const listed = r.stdout.split("\n").filter(l => l.startsWith(`MARKER ${undated}/.rmd-scratch-keep: honoured with no machine-readable expiry, `));
   assert.equal(listed.length, 1, `an undated marker is listed once a pass:\n${r.stdout}`);
+});
+
+test("under the operator ruling of 2026-10-23 only idle operator/wt-* worktrees and top-level tmp scratch leave the QA namespace", () => {
+  const fx = phaseFixture();
+  const ns = join(fx.disk, "rmd-qa-namespace.ulkfFP");
+  const owner = cloneAt(fx, join(fx.root, "rmd-op"));
+  const wt = (name: string) => {
+    const p = join(ns, "operator", name);
+    mkdirSync(join(p, ".."), { recursive: true });
+    git(owner, "worktree", "add", "--quiet", "-b", name, p, "main");
+    commitFile(p, `${name}.txt`, "unpublished\n", `work in ${name}`);
+    return p;
+  };
+  const idleWt = wt("wt-13324");
+  const liveWt = wt("wt-file-1022");
+  const buildOut = cloneAt(fx, join(ns, "operator", "build-out-1"));
+  const repair = cloneAt(fx, join(ns, "issue-repairs-oct6", "spin-repro"));
+  const home = cloneAt(fx, join(ns, "a-home"));
+  const tmps = ["tmp", "tmp-9", "t3.aa"].map(n => { const d = join(ns, n); mkdirSync(d, { recursive: true }); writeFileSync(join(d, "scratch.txt"), "x\n"); return d; });
+  const bundle = join(ns, "snapshot.bundle");
+  writeFileSync(bundle, "bundle\n");
+  const dumpFile = join(ns, "operator", "logs-8864", "run.json");
+  mkdirSync(join(dumpFile, ".."), { recursive: true });
+  writeFileSync(dumpFile, Buffer.alloc(6 * 1024 * 1024, 120));
+  age(ns, 13);
+  age(owner, 13);
+  ageDays(dumpFile, 20);
+  writeFileSync(join(liveWt, "today.txt"), "live\n");
+  age(join(liveWt, "today.txt"), 1);
+
+  const r = pass(fx, fx.disk, { RMD_CLEANUP_DUMP_ROOTS: fx.disk });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(r.stdout.split("\n").filter(l => l.startsWith(`MARKER-RULING ${ns}: operator 2026-10-23`)).length, 1, r.stdout);
+  assert.equal(existsSync(idleWt), false, `an idle operator/wt-* worktree is preserved, then retired:\n${r.stdout}`);
+  assert.equal(copiesOf(fx, idleWt).length, 1);
+  assert.doesNotMatch(git(owner, "worktree", "list"), /wt-13324/);
+  for (const d of tmps) assert.equal(existsSync(d), false, `${d}\n${r.stdout}`);
+  for (const kept of [liveWt, buildOut, repair, home, bundle, dumpFile]) assert.equal(existsSync(kept), true, `${kept}\n${r.stdout}`);
+  assert.equal(existsSync(`${dumpFile}.gz`), false, "no dump action anywhere inside the namespace");
+  assert.doesNotMatch(r.stdout, new RegExp(`(PRUNE|REMOVE) ${ns}/(issue-repairs-oct6|a-home|operator/build-out|operator/logs)`));
 });
