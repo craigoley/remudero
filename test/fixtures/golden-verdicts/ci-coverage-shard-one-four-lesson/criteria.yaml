@@ -1,0 +1,2 @@
+- claim: the coverage-shard (1/4) refusal lesson reaches the task-authoring lane
+  proof: "grep: ci-learning:6062:coverage-shard (1/4) in learnings/ci.yaml"

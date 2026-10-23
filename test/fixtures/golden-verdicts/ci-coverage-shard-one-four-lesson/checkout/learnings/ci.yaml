@@ -1,0 +1,9 @@
+- id: coverage-shard-one-four-refusal-repair-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**"]
+  fact: >-
+    When coverage-shard (1/4) refuses a pull request, inspect that shard's failure output.
+  evidence: >-
+    The window recorded as ci-learning:6062:coverage-shard (1/4) includes repaired pull requests.
+  src: "ci-learning:6062:coverage-shard (1/4)"

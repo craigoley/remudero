@@ -637,6 +637,26 @@
   src: "ci-learning:6062:coverage-ratchet"
   cited: "2026-10-14"
 
+- id: coverage-shard-one-four-refusal-repair-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**"]
+  fact: >-
+    When coverage-shard (1/4) refuses a pull request, inspect that shard's failure output before
+    repairing; a refusal cohort and its repaired diffs do not establish a shared cause. Route the
+    verified failure and its narrow repair into the lane that owns the failing test or source, and
+    preserve per-PR uncertainty when logs or diffs are unavailable instead of prescribing a
+    class-wide fix.
+  evidence: >-
+    The window recorded as ci-learning:6062:coverage-shard (1/4) names PRs #6062, #6077 (listed
+    three times), #6093, #6098, #6099, #6113, #6135, and #6154 as refused and repaired. Its recorded
+    repair spans a wide set of source, test, workflow, and plan files; the available cohort record
+    does not establish each PR's shard failure or one common mechanism. Workers in the
+    task-authoring lane should use each PR's failure output to identify its owner before selecting
+    a repair.
+  src: "ci-learning:6062:coverage-shard (1/4)"
+  cited: "2026-10-22"
+
 - id: coverage-ratchet-is-a-reporter
   subsystem: ci
   lifecycle: active
