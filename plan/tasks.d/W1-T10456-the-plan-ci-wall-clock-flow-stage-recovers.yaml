@@ -23,3 +23,11 @@
     Last 24 h: n 46, p50 16.4, p90 18.4 min.
     Slowest PRs: #13595 (27.9 min), #13498 (21.3 min), #13639 (19.6 min).
     Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-23T02:18:52.716Z"
+    pin: "7463d4d5a6660877613154d215e5bcd5d7c4ae40bd51550c731050b30da27b14"
