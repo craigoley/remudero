@@ -889,7 +889,7 @@ test("W1-T10461: gardener source freshness compatibility and fleet budgets remai
   assert.equal(w.body().data.instances[0]!.gardenerSpend!.materializedAt, source.observedAt);
   assert.equal(w.body().sources.find(s => s.name === "analytics:core")!.asOf, historical.asOf);
   assert.equal(w.body().sources.find(s => s.name === "gardener-spend:core")!.state, "fresh");
-  const db = attachReadModel(currentReadModelPath(w.stateDir, "core", LEDGER_PROJECTOR_SCHEMA_VERSION));
+  const db = attachReadModel(currentReadModelPath(w.stateDir, "core", LEDGER_PROJECTOR_SCHEMA_VERSION), LEDGER_PROJECTOR_SCHEMA_VERSION);
   try {
     for (const [body, reason] of [["{", "not valid JSON"], [JSON.stringify({ repository: "fixture/recent", source: { ...source, corpusComplete: false } }), "unsupported or incomplete"]]) {
       db.prepare("UPDATE source_snapshot SET body = ? WHERE instance = ? AND name = ?").run(body, "core", GARDENER_SPEND_SOURCE_NAME);
