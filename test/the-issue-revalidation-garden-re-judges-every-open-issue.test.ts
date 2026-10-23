@@ -52,7 +52,7 @@ function revalidationMoneyFixture(t: { after(fn: () => void): void },
     return result;
   };
   const benchmark = benchmarkNonDispatchSpawn("escalation-summary", raw);
-  const judge = issueRevalidationJudgeText({ mount: { model: "fixture", effort: "low", maxTurns: 1, provider: "claude" },
+  const judge = issueRevalidationJudgeText({ mount: { model: "fixture", effort: "low", maxTurns: 1, contextBudget: 1024, provider: "claude" },
     cwd: root, settingsFile: join(root, "settings.json"), config,
     // Only external provider execution is fake. Real composition, benchmark receipts and default ledger append run.
     spawn: args => benchmark({ ...args, config }) });
