@@ -560,7 +560,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       if(dependencyBefore.state!=='present')throw new Error(`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
       const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha,
         ...(resourceBudget ? ['--parent-budget-ms', '110000'] : [])]);
-      const censusTimeBound = censusTimeBoundOnly(census);
+      // The bounded mode accepts only its explicit unstarted-work deferral.
+      // Legacy default-author handling of a head backstop remains unchanged.
+      const censusTimeBound = !resourceBudget && censusTimeBoundOnly(census);
       const censusPartial = resourceBudget && readCensusParentBudgetResult(census,
         {root: resolve(root), head: receipt.headSha, requestedBase: receipt.baseSha, budgetMs: 110000});
       const censusOk = (census.status === 0 || censusTimeBound || Boolean(censusPartial)) && !census.signal && !census.error;

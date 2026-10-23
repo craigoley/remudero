@@ -165,3 +165,22 @@ test('ordinary bounded author continues after a genuine partial producer and nev
   assert.equal(row.steps.find((x: {name: string}) => x.name === 'affected-tests').ok, true);
   assert.equal(row.resourceBudget.cleanup, 'closed-and-removed');
 });
+
+test('ordinary bounded author refuses a native timeout even when the legacy producer marks it time-bound',
+  {skip: process.platform !== 'darwin' ? 'actual bounded-volume author requires Mac' : false}, t => {
+  const f = makeRuntimeFixture(); t.after(() => f.cleanup());
+  const packages = Object.fromEntries(['tsx', 'typescript', '@commitlint/cli'].map(name =>
+    [`node_modules/${name}`, {version: JSON.parse(readFileSync(join(f.dir, 'node_modules', name, 'package.json'), 'utf8')).version}]));
+  writeFileSync(join(f.dir, 'package-lock.json'), JSON.stringify({lockfileVersion: 3, packages}));
+  writeFileSync(join(f.dir, 'scripts/census-precheck.mjs'),
+    'console.error("census-precheck: census suites NOT MEASURED (time bound) - fixture native backstop");process.exitCode=2;\n');
+  f.git('add', '.'); f.git('commit', '-m', 'test: legacy native timeout producer');
+  const result = authorMain(['--bounded-scratch-mib', '64'], {root: f.dir,
+    select: () => ({fullRun: false, suites: ['test/a.test.ts'], reasons: ['native timeout refusal']}),
+    admitHost: () => ({state: 'admitted', fixtureOnly: true})});
+  const row = JSON.parse(readFileSync(join(f.dir, 'coverage/preflight-author.json'), 'utf8'));
+  assert.equal(result, 1); assert.equal(row.verdict, 'refused');
+  assert.equal(row.steps.find((x: {name: string}) => x.name === 'census-precheck').ok, false);
+  assert.equal(row.steps.some((x: {name: string}) => x.name === 'static-preflight'), false);
+  assert.equal(row.resourceBudget.cleanup, 'closed-and-removed');
+});
