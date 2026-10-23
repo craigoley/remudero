@@ -49,6 +49,7 @@ import {
   createConfirmNonceStore,
   createService,
   createNewPathApprovalIssuer,
+  type NewPathApprovalAudit,
   makeConfirmNonceRoute,
   type ConfirmNonceStore,
   type Method,
@@ -3225,6 +3226,52 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   return assembleServeRoutes(deps).routes;
 }
 
+export function createNewPathApprovalFilesystemAudit(root: string): NewPathApprovalAudit {
+  const state = join(root, "state"), directory = join(state, "new-path-approvals-v1");
+  const pins = new Map<string, { dev: number; ino: number; uid: number; size: number; mtimeMs: number; ctimeMs: number }>();
+  const privateDirectory = async (create: boolean, signal: AbortSignal): Promise<void> => {
+    for (const [path, privateMode] of [[root, false], [state, false], [directory, true]] as const) {
+      signal.throwIfAborted();
+      if (create && path !== root) {
+        try { await fsPromises.mkdir(path, { mode: 0o700 }); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+      }
+      const info = await fsPromises.lstat(path);
+      if (!info.isDirectory() || info.isSymbolicLink() || (privateMode && (info.mode & 0o077) !== 0) ||
+        (typeof process.getuid === "function" && info.uid !== process.getuid())) throw new Error("unsupported approval audit directory");
+    }
+  };
+  return {
+    write: async (record: Readonly<NewPathApprovalRecord>, bytes: string, signal: AbortSignal) => {
+      if (pins.size >= 256) throw new Error("approval audit identity capacity reached");
+      await privateDirectory(true, signal);signal.throwIfAborted();
+      const path = join(directory, `${record.reference}.json`);
+      const handle = await fsPromises.open(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+      try {
+        signal.throwIfAborted();
+        await handle.writeFile(bytes, "utf8");await handle.sync();
+        const info = await handle.stat();
+        pins.set(record.reference, { dev: info.dev, ino: info.ino, uid: info.uid, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs });
+        const parent = await fsPromises.open(directory, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+        try { await parent.sync(); } finally { await parent.close(); }
+        signal.throwIfAborted();
+      } finally { await handle.close(); }
+    },
+    read: async (reference, signal) => {
+      const pin = pins.get(reference);
+      if (!pin) return undefined;
+      await privateDirectory(false, signal);
+      const path = join(directory, `${reference}.json`);
+      const before = await fsPromises.lstat(path);
+      const matches = (info: typeof before) => info.isFile() && !info.isSymbolicLink() &&
+        ["dev", "ino", "uid", "size", "mtimeMs", "ctimeMs"].every(key => info[key as keyof typeof pin] === pin[key as keyof typeof pin]);
+      if (!matches(before)) return undefined;
+      const bytes = await awaitNewPathApprovalRead(signal, readNewPathApprovalFile(path, 128 * 1024, signal));
+      return matches(await fsPromises.lstat(path)) ? bytes : undefined;
+    },
+  };
+}
+
 function newPathApprovalServeRoutes(deps: ServeDeps): Route[] {
   const read = deps.newPathApprovalConfig ?? (() => loadConfig().serve?.newPathApproval);
   const currentBinding = (): NewPathApprovalBinding | undefined => {
@@ -3237,20 +3284,6 @@ function newPathApprovalServeRoutes(deps: ServeDeps): Route[] {
     // Absent or unreadable opt-in config mounts no issuer and creates no new authority or files.
     return [];
   }
-  const state = join(deps.fleetControlRoot, "state"), directory = join(state, "new-path-approvals-v1");
-  const pins = new Map<string, { dev: number; ino: number; uid: number; size: number; mtimeMs: number; ctimeMs: number }>();
-  const privateDirectory = async (create: boolean, signal: AbortSignal): Promise<void> => {
-    for (const [path, privateMode] of [[deps.fleetControlRoot, false], [state, false], [directory, true]] as const) {
-      signal.throwIfAborted();
-      if (create && path !== deps.fleetControlRoot) {
-        try { await fsPromises.mkdir(path, { mode: 0o700 }); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-      }
-      const info = await fsPromises.lstat(path);
-      if (!info.isDirectory() || info.isSymbolicLink() || (privateMode && (info.mode & 0o077) !== 0) ||
-        (typeof process.getuid === "function" && info.uid !== process.getuid())) throw new Error("unsupported approval audit directory");
-    }
-  };
   const clock = deps.operatorIdentityIo?.clock ?? systemClock;
   return createNewPathApprovalIssuer({ clock, binding: async () => currentBinding(),
     paths: async (task, _recordPath, signal) => {
@@ -3259,35 +3292,7 @@ function newPathApprovalServeRoutes(deps: ServeDeps): Route[] {
       const base = (await awaitNewPathApprovalRead(signal, hostWorktreeGitAsync(deps.questionsRoot, ["rev-parse", "--verify", "HEAD^{commit}"],
         { timeout: 2_000, configReadTimeoutMs: 2_000, maxBuffer: 4_096 }))).trim();
       return readNewPathApprovalPaths(task, { repoRoot: deps.questionsRoot, base, binding }, signal);
-    }, audit: {
-      write: async (record: Readonly<NewPathApprovalRecord>, bytes: string, signal: AbortSignal) => {
-        if (pins.size >= 256) throw new Error("approval audit identity capacity reached");
-        await privateDirectory(true, signal);signal.throwIfAborted();
-        const path = join(directory, `${record.reference}.json`);
-        const handle = await fsPromises.open(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
-        try {
-          signal.throwIfAborted();
-          await handle.writeFile(bytes, "utf8");await handle.sync();
-          const info = await handle.stat();
-          pins.set(record.reference, { dev: info.dev, ino: info.ino, uid: info.uid, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs });
-          const parent = await fsPromises.open(directory, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-          try { await parent.sync(); } finally { await parent.close(); }
-          signal.throwIfAborted();
-        } finally { await handle.close(); }
-      },
-      read: async (reference, signal) => {
-        const pin = pins.get(reference);
-        if (!pin) return undefined;
-        await privateDirectory(false, signal);
-        const path = join(directory, `${reference}.json`);
-        const before = await fsPromises.lstat(path);
-        const matches = (info: typeof before) => info.isFile() && !info.isSymbolicLink() &&
-          ["dev", "ino", "uid", "size", "mtimeMs", "ctimeMs"].every(key => info[key as keyof typeof pin] === pin[key as keyof typeof pin]);
-        if (!matches(before)) return undefined;
-        const bytes = await awaitNewPathApprovalRead(signal, readNewPathApprovalFile(path, 128 * 1024, signal));
-        return matches(await fsPromises.lstat(path)) ? bytes : undefined;
-      },
-    } }).routes;
+    }, audit: createNewPathApprovalFilesystemAudit(deps.fleetControlRoot) }).routes;
 }
 
 interface ServeServerAssembly {

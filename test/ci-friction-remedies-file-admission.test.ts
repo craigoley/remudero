@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -20,7 +20,7 @@ import { loadPlanFromYaml, machineFilingAdmissionViolations, newPathApprovalInte
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
-import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
+import { buildServeRoutes, createNewPathApprovalFilesystemAudit, type ServeDeps } from "#src/lib/serve.js";
 import * as approvalPlan from "#src/lib/plan.js";
 import * as runTask from "#src/run-task.js";
 import * as service from "#src/lib/service.js";
@@ -200,6 +200,40 @@ test("new path admission bounds partial bodies and pending authentication before
       server.closeAllConnections();await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     }
   }
+});
+
+test("new path admission default filesystem audit bounds concurrent identities and never restores authority from replaced bytes", { timeout: 30_000 }, async () => {
+  const repo = gitRepo({ kind: "default-approval-audit" }), controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), 25_000);
+  try {
+    const audit = createNewPathApprovalFilesystemAudit(repo.dir), { record } = approvalFixture();
+    const at = (index: number) => {
+      const value = { ...record, reference: `npa1_${index.toString(36).padStart(43, "A")}` };
+      return { value, bytes: `${JSON.stringify(value)}\n` };
+    };
+    for (let i = 0; i < 255; i++) { const { value, bytes } = at(i);await audit.write(value, bytes, controller.signal); }
+    const concurrent = await Promise.allSettled(Array.from({ length: 8 }, (_, index) => {
+      const { value, bytes } = at(255 + index);return audit.write(value, bytes, controller.signal);
+    }));
+    const directory = join(repo.dir, "state", "new-path-approvals-v1"), names = readdirSync(directory);
+    assert.equal(names.length, 256, "concurrent default writes must reserve before the first filesystem await");
+    assert.equal(concurrent.filter(result => result.status === "fulfilled").length, 1);
+    assert.equal(concurrent.filter(result => result.status === "rejected").length, 7);
+    assert.equal(lstatSync(directory).mode & 0o777, 0o700);
+    assert.ok(names.every(name => (lstatSync(join(directory, name)).mode & 0o777) === 0o600));
+    const first = at(0), path = join(directory, `${first.value.reference}.json`);
+    assert.equal(await audit.read(first.value.reference, controller.signal), first.bytes);
+    assert.equal(await createNewPathApprovalFilesystemAudit(repo.dir).read(first.value.reference, controller.signal), undefined,
+      "a new process-local reader does not hydrate pins or authority from retained audit JSON");
+    const originalBytes = readFileSync(path);renameSync(path, path + ".retained-original");
+    writeFileSync(path, originalBytes, { mode: 0o600 });
+    assert.equal(await audit.read(first.value.reference, controller.signal), undefined, "same bytes on a replacement inode stay unknown");
+    renameSync(path, path + ".retained-replacement");symlinkSync(path + ".retained-original", path);
+    assert.equal(await audit.read(first.value.reference, controller.signal), undefined, "a symlink cannot restore the original audit identity");
+    const cancelled = new AbortController();cancelled.abort();
+    await assert.rejects(audit.write(at(999).value, at(999).bytes, cancelled.signal));
+    assert.equal(existsSync(join(directory, `${at(999).value.reference}.json`)), false);
+  } finally { clearTimeout(deadline);controller.abort();repo.cleanup(); }
 });
 
 test("an invented source path is still refused, and a remedy with no owning code is not a parked shape", () => {
