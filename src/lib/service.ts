@@ -18,7 +18,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createPublicKey, randomBytes, timingSafeEqual, verify as verifySignature } from "node:crypto";
 import { systemClock, type Clock } from "./clock.js";
 import { NEW_PATH_APPROVAL_PROTOCOL, NEW_PATH_APPROVAL_MAX_LIFETIME_MS, isNewPathApprovalReference,
-  newPathApprovalBindingError, newPathApprovalIntentDigest, parseNewPathApprovalDraft, parseNewPathApprovalJson,
+  awaitNewPathApprovalRead, newPathApprovalBindingError, newPathApprovalIntentDigest, parseNewPathApprovalDraft, parseNewPathApprovalJson,
   type NewPathApprovalBinding, type NewPathApprovalPathEvidence, type NewPathApprovalRecord, type Task } from "./plan.js";
 
 /** Bearer scope a route (or SSE stream) requires. `write` implies `read`. */
@@ -270,6 +270,7 @@ interface IssuedNewPathApproval { record: NewPathApprovalRecord; bytes: string }
 export function createNewPathApprovalIssuer(io: NewPathApprovalIssuerIO): { routes: Route[] } {
   const previews = new Map<string, NewPathApprovalPreview>();
   const issued = new Map<string, IssuedNewPathApproval>();
+  let inFlight = 0;
   const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
   const fields = (value: unknown, allowed: string[], required = allowed): value is Record<string, unknown> =>
     value !== null && typeof value === "object" && !Array.isArray(value) &&
@@ -280,7 +281,7 @@ export function createNewPathApprovalIssuer(io: NewPathApprovalIssuerIO): { rout
     return value;
   };
   const binding = async (signal: AbortSignal): Promise<NewPathApprovalBinding> => {
-    const current = await io.binding(signal);
+    const current = await awaitNewPathApprovalRead(signal, io.binding(signal));
     if (!current || newPathApprovalBindingError(current)) throw new Error("unknown issuer binding");
     return Object.freeze({ ...current });
   };
@@ -292,7 +293,7 @@ export function createNewPathApprovalIssuer(io: NewPathApprovalIssuerIO): { rout
   const currentDraft = async (draftYaml: string, recordPath: string, signal: AbortSignal) => {
     const task = parseNewPathApprovalDraft(draftYaml, recordPath), current = await binding(signal);
     if (current.repository.split("/")[1] !== task.repo) throw new Error("repository does not match the server binding");
-    const observed = await io.paths(task, recordPath, signal);
+    const observed = await awaitNewPathApprovalRead(signal, io.paths(task, recordPath, signal));
     if (!observed || !equal(Object.keys(observed).sort(), [...task.files!].sort()) || task.files!.some(path =>
       !fields(observed[path], ["checkout", "base"]) || !["present", "missing"].includes(observed[path]!.checkout) ||
       !["present", "missing"].includes(observed[path]!.base))) throw new Error("unknown current path evidence");
@@ -306,6 +307,8 @@ export function createNewPathApprovalIssuer(io: NewPathApprovalIssuerIO): { rout
     handler: async (req, res) => {
       const action = verifiedNewPathApprovalAction(req, confirmed);
       if (!action) { sendJson(res, 403, { state: "unknown", reason: "verified_operator_confirmation_required" });return; }
+      if (inFlight >= 8) { sendJson(res, 409, { state: "unknown", reason: "issuer_busy" });return; }
+      inFlight++;
       const controller = new AbortController();
       const deadline = setTimeout(() => controller.abort(), 5_000);
       const disconnected = () => controller.abort();
@@ -350,10 +353,13 @@ export function createNewPathApprovalIssuer(io: NewPathApprovalIssuerIO): { rout
             operatorId: action.actor, confirmationId: `npc1_${randomBytes(32).toString("base64url")}`, issuedAt, expiresAt: issuedAt + preview.lifetimeMs };
           Object.freeze(record);
           const bytes = `${JSON.stringify(record)}\n`;
-          await io.audit.write(record, bytes, controller.signal);
-          if (await io.audit.read(reference, controller.signal) !== bytes || !equal(await binding(controller.signal), prepared.binding)) throw new Error("audit or current binding not retained");
+          await awaitNewPathApprovalRead(controller.signal, io.audit.write(record, bytes, controller.signal));
+          if (await awaitNewPathApprovalRead(controller.signal, io.audit.read(reference, controller.signal)) !== bytes ||
+            !equal(await binding(controller.signal), prepared.binding)) throw new Error("audit or current binding not retained");
+          const finalDraft = await currentDraft(preview.draftYaml, preview.recordPath, controller.signal);
+          if (!equal(finalDraft.binding, prepared.binding) || !equal(finalDraft.paths, prepared.paths) || finalDraft.intentDigest !== prepared.intentDigest) throw new Error("intent changed during durable confirmation");
           check();
-          if (now() >= record.expiresAt) throw new Error("approval expired during confirmation");
+          if (now() < issuedAt || now() >= record.expiresAt || issued.size >= 256) throw new Error("approval expired or capacity changed during confirmation");
           issued.set(reference, { record, bytes });
           sendJson(res, 200, { state: "verified", reference, record, observedAt: now() });
         } else {
@@ -364,26 +370,30 @@ export function createNewPathApprovalIssuer(io: NewPathApprovalIssuerIO): { rout
       } catch {
         // Parse, path, audit, policy and confirmation failures cannot establish canonical authority.
         if (!res.headersSent) sendJson(res, 409, { state: "unknown", reason: "approval_not_established" });
-      } finally { clearTimeout(deadline);res.off("close", disconnected); }
+      } finally { inFlight--;clearTimeout(deadline);res.off("close", disconnected); }
     },
   });
   return { routes: [post("preview", false), post("confirm", true), post("revoke", true), {
     method: "GET", path: "/v1/new-path-approvals/verify", scope: "read",
     handler: async (req, res) => {
+      if (inFlight >= 8) { sendJson(res, 200, { state: "unknown", reason: "issuer_busy" });return; }
+      inFlight++;
       const controller = new AbortController(), deadline = setTimeout(() => controller.abort(), 5_000);
+      const disconnected = () => controller.abort();res.once("close", disconnected);
       try {
         prune();
         const url = new URL(req.url ?? "", "http://localhost"), references = url.searchParams.getAll("reference");
         if (references.length !== 1 || [...url.searchParams.keys()].some(key => key !== "reference") || !isNewPathApprovalReference(references[0])) throw new Error("unsupported reference");
         const value = issued.get(references[0]);
         if (!value || !equal(await binding(controller.signal), value.record.binding) ||
-          await io.audit.read(references[0], controller.signal) !== value.bytes || controller.signal.aborted ||
+          await awaitNewPathApprovalRead(controller.signal, io.audit.read(references[0], controller.signal)) !== value.bytes ||
+          !equal(await binding(controller.signal), value.record.binding) || controller.signal.aborted ||
           issued.get(references[0]) !== value || now() < value.record.issuedAt || now() >= value.record.expiresAt) throw new Error("unknown current approval");
         sendJson(res, 200, { state: "verified", reference: references[0], record: value.record, observedAt: now() });
       } catch {
         // An absent in-process confirmation, lost audit, revocation, expiry or read failure stays UNKNOWN.
         sendJson(res, 200, { state: "unknown", reason: "current_approval_unavailable" });
-      } finally { clearTimeout(deadline); }
+      } finally { inFlight--;clearTimeout(deadline);res.off("close", disconnected); }
     },
   }] };
 }
