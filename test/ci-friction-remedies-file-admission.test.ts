@@ -526,6 +526,20 @@ test("new path admission refuses missing drifted and unsupported authority befor
   } finally { repo.cleanup(); }
 });
 
+test("new path admission distinguishes omitted and empty declared scope without inventing missing paths", async () => {
+  const repo = gitRepo({ kind: "approval-absent-scope" });
+  try {
+    const { task, facts } = approvalFixture(), raw = JSON.parse(JSON.stringify(task));
+    delete raw.sourcePath;delete raw.new_path_approval_ref;delete raw.files;
+    assert.throws(() => approvalPlan.parseNewPathApprovalDraft(JSON.stringify([raw]), APPROVAL_RECORD_PATH), /has no declared paths/);
+    assert.throws(() => approvalPlan.parseNewPathApprovalDraft(JSON.stringify([{ ...raw, files: [] }]), APPROVAL_RECORD_PATH), /declares an empty path set/);
+    const absent = { ...task };delete absent.files;
+    const context = { repoRoot: repo.dir, base: repo.git("rev-parse", "HEAD"), binding: facts.binding };
+    assert.equal(await approvalPlan.readNewPathApprovalPaths(absent, context, AbortSignal.timeout(2_000)), undefined);
+    assert.equal(await approvalPlan.readNewPathApprovalPaths({ ...task, files: [] }, context, AbortSignal.timeout(2_000)), undefined);
+  } finally { repo.cleanup(); }
+});
+
 test("new path admission agrees between the real filing precheck and plan lint with current asynchronous issuer facts", async () => {
   const prepare = (approvalPlan as unknown as { prepareNewPathApprovalFacts?: typeof approvalPlan.prepareNewPathApprovalFacts }).prepareNewPathApprovalFacts;
   assert.equal(typeof prepare, "function", "selected callers need a current bounded reader, not stored trusted receipt text");
