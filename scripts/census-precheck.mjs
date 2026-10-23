@@ -610,9 +610,9 @@ export async function loadTestPriority(importSlot = defaultImportTestSlot) {
     const slot = await importSlot();
     return {
       priority: "nice",
-      wrap: (file, args) => {
+      wrap: (file, args, { serial = false } = {}) => {
         const load = slot.readHostLoad();
-        return slot.lowPriorityCommand(file, slot.testRunArgv(args, slot.testRunConcurrency(load, slot.defaultTestSlots(load.cores))));
+        return slot.lowPriorityCommand(file, slot.testRunArgv(args, serial ? 1 : slot.testRunConcurrency(load, slot.defaultTestSlots(load.cores))));
       },
     };
   } catch (e) {
@@ -764,7 +764,7 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
   parentBudget, captureRoot }) {
   const args = ["--test", ...(parentBudget ? ['--test-concurrency=1'] : []), "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
-  const child = priority.wrap(process.execPath, args);
+  const child = priority.wrap(process.execPath, args, {serial: Boolean(parentBudget)});
   const options = childOptions(root, timeoutMs);
   if (parentBudget) options.maxBuffer = Math.min(options.maxBuffer, parentBudget.outputLimitBytes);
   if (captureRoot) options.captureRoot = captureRoot;

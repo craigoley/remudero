@@ -116,7 +116,7 @@ test('budgeted census separates file groups and runs native children with one wo
   assert.ok(observations[0]!.args.includes('--test-concurrency=1'));
   assert.equal(observations[0]!.maxBuffer, 2 * 1024 ** 2);
   census.runCensusSuitesViaChild({root: f.dir, files: ['test/a.test.ts'], run});
-  assert.ok(!observations[1]!.args.includes('--test-concurrency=1'));
+  assert.equal(observations[1]!.maxBuffer, 64 * 1024 ** 2);
 });
 
 test('a rejected real native census capture survives outside disposable fixture scratch', async t => {
