@@ -22,7 +22,7 @@ export interface ReviewReplayRow {
 }
 export interface ReviewReplaySample {
   header: { format: "review-replay-v1"; window: { from: string; through: string };
-    generator_revision: string; classes: ReviewOutcomeClass[]; digest: string };
+    generator_revision: string; classes: ReviewOutcomeClass[]; digest: string; legacy_unattributed?: number };
   rows: ReviewReplayRow[];
 }
 const classes = (rows: readonly ReviewReplayRow[]): ReviewOutcomeClass[] => [...new Set(rows.map(r => r.recorded_class))].sort();
@@ -61,6 +61,10 @@ function checkedRow(value: unknown): ReviewReplayRow {
 }
 
 function validateSample(sample: ReviewReplaySample): void {
+  if (sample.header.legacy_unattributed !== undefined &&
+      (!Number.isSafeInteger(sample.header.legacy_unattributed) || sample.header.legacy_unattributed < 0)) {
+    throw new Error("invalid unattributed legacy count");
+  }
   if (sample.rows.length === 0) throw new Error("empty review replay sample");
   for (const row of sample.rows) checkedRow(row);
   if (digest(sample.rows) !== sample.header.digest) throw new Error("review replay header digest mismatch");
@@ -94,8 +98,10 @@ export function replayReviewSample(sample: ReviewReplaySample,
   }
 }
 
-/** Legacy evidence reaches only setup: no transcript or semantic verdict is invented. */
-function legacyRow(row: Record<string, unknown>, prior: readonly Record<string, unknown>[]): ReviewReplayRow | undefined {
+type LegacyReplayRow = ReviewReplayRow | { unattributed: true };
+
+/** Legacy evidence reaches only setup: no transcript, identity or semantic verdict is invented. */
+function legacyRow(row: Record<string, unknown>, prior: readonly Record<string, unknown>[]): LegacyReplayRow | undefined {
   if (row.step !== "review.posted") return undefined;
   const skipped = prior.findLast(r => r.step === "review.reviewer.skipped" &&
     (r.reason === "head-task-metadata-unavailable" || r.reason === "plan-only"));
@@ -110,10 +116,16 @@ function legacyRow(row: Record<string, unknown>, prior: readonly Record<string, 
     budget_present: !missing.includes("budget_usd"), untasked: defaults !== undefined,
     head_task_resolved: count > 0, own_task_record_missing: false,
     reviewer_outcome: typeof row.reviewer_outcome === "string" ? row.reviewer_outcome : "not_recorded",
-    verdict_lines: "unrecorded" };
+    verdict_lines: "unrecorded",
+    ...(skipped?.reason === "head-task-metadata-unavailable" ? { setup_unavailable: true } : {}) };
   const provenance = record(row.reviewer_code_provenance) ? row.reviewer_code_provenance : undefined;
-  return checkedRow({ ...row, reviewer_code_sha: row.reviewer_code_sha ?? provenance?.codeSha,
-    input, input_digest: reviewReplayInputDigest(input), recorded_class: "posted" });
+  const reviewerSha = row.reviewer_code_sha ?? provenance?.codeSha;
+  if ([row.pr_url, row.head_sha, reviewerSha].some(value => typeof value !== "string" || !value)) {
+    return { unattributed: true };
+  }
+  return checkedRow({ ...row, reviewer_code_sha: reviewerSha,
+    input, input_digest: reviewReplayInputDigest(input),
+    recorded_class: skipped?.reason === "head-task-metadata-unavailable" ? "refused" : "posted" });
 }
 
 export function deriveReviewReplaySample(ledger: readonly Record<string, unknown>[],
@@ -128,13 +140,30 @@ export function deriveReviewReplaySample(ledger: readonly Record<string, unknown
     group.push(raw);
     byRun.set(raw.run_id, group);
   }
-  const recordedRuns = new Set(ledger.filter(r => r.step === "review.replay_input").map(r => r.run_id));
+  const recorded = ledger.filter(r => r.step === "review.replay_input");
+  const recordedRuns = new Set(recorded.map(r => r.run_id));
+  const firstRecordedAt = recorded.reduce((earliest, row) => {
+    const at = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+    return Number.isFinite(at) ? Math.min(earliest, at) : earliest;
+  }, Number.POSITIVE_INFINITY);
   const distinct = new Map<string, ReviewReplayRow>();
   const observed: ReviewReplayRow[] = [];
+  let legacyUnattributed = 0;
   for (const raw of ledger) {
     let row: ReviewReplayRow | undefined;
     if (raw.step === "review.replay_input") row = checkedRow(raw);
-    else if (typeof raw.run_id === "string" && !recordedRuns.has(raw.run_id)) row = legacyRow(raw, byRun.get(raw.run_id) ?? []);
+    else if (typeof raw.run_id === "string" && !recordedRuns.has(raw.run_id)) {
+      const legacy = legacyRow(raw, byRun.get(raw.run_id) ?? []);
+      if (legacy && "unattributed" in legacy) {
+        const at = typeof raw.ts === "string" ? Date.parse(raw.ts) : NaN;
+        if (!Number.isFinite(firstRecordedAt) || !Number.isFinite(at) || at >= firstRecordedAt) {
+          throw new Error("unattributable legacy outcome is outside the observed pre-recording era");
+        }
+        legacyUnattributed++;
+        continue;
+      }
+      row = legacy;
+    }
     if (!row || regressed.has(row.reviewer_code_sha) || (options.since !== undefined && row.ts < options.since)) continue;
     observed.push(row);
     const existing = distinct.get(row.input_digest);
@@ -146,7 +175,8 @@ export function deriveReviewReplaySample(ledger: readonly Record<string, unknown
   const times = observed.map(r => r.ts).sort();
   const sample: ReviewReplaySample = { header: { format: "review-replay-v1",
     window: { from: options.since ?? times[0]!, through: times.at(-1)! }, generator_revision: options.generatorRevision,
-    classes: classes(observed), digest: digest(rows) }, rows };
+    classes: classes(observed), digest: digest(rows),
+    ...(legacyUnattributed > 0 ? { legacy_unattributed: legacyUnattributed } : {}) }, rows };
   validateSample(sample);
   return sample;
 }
