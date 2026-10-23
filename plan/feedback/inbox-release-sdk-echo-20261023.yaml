@@ -1,0 +1,56 @@
+id: inbox-release-sdk-echo-20261023
+ts: 2026-10-23T14:35:00.000Z
+origin: cli
+status: new
+attachments: []
+proposal_pr: null
+contribution: null
+raw: |
+  Machine-authored investigation in the operator-authorized three-daemon recovery. This is evidence and a
+  proposed narrow repair, NOT an operator ruling, a task release, a native gardener receipt or permission
+  to change provider routing, quota, caps or human approval. Use normal triage and machine-filing judgment.
+
+  OBSERVED: the fallback draft parser can reject a valid single RELEASE because the harness repeats the
+  SDK's final message. This is distinct from the cash endpoint's measured HTTP429 token-rate refusal.
+  On Oct23, all35 joined cash draft attempts failed;33 carried safe429 evidence, and all35 fell back to
+  subscription Sonnet.32 ended as fragment-contract errors,3 as lint-dirty. No accepted cash output or
+  accepted-output-per-dollar denominator was observed. Do NOT infer all32 share this mechanism.
+
+  TWO EXACT COMPLETED SESSION JOINS were opened read-only, no credentials, prompts or tools returned:
+  W1-T10490, SDK session c5eed979-5cf7-4af6-bd9f-fe92c8f8282b, assistant696chars, error1393chars;
+  W1-T10483, SDK session22a309de-40b7-4055-83aa-fde20f9912ab, assistant792chars, error1585chars.
+  Each contained one anchored RELEASE naming its own task, with explanatory prose, and no fragment/stamp.
+  Each error count is exactly2*assistantChars+1. Their ledger rows retain the same session/proposal identity.
+  The current SDK collector pushes assistant text into blocks, then reads the echoed result into text.
+  runDraftRung manually joins both copies before parseDraftedCandidate. That parser correctly requires
+  exactlyONE release; both copies are then rejected. Its error reports no fragment/stamp, hiding the valid
+  release. Trailing prose itself IS accepted by the existing parser; that alternative cause was falsified.
+
+  GUARDED LOCAL REPLAY at private committed554282698cf3f80a364b04cbcfa6d8117ec6b8c5, fresh main
+  b452cccc2f0d5a72979501aaa2b9da9b704218b7: actual runDraftRung,5complete tests,4controls PASS,
+  1functional ERR_ASSERTION: a final RELEASE in both text and blocks is rejected. A single-copy release
+  with prose passes; the existing workerTranscript helper removes only its identical last-block echo;
+  a genuinely repeated release, wrong task id and dispatch-held task remain refused. Real native admission,
+  slot, serial768MiB heap, sealed256MiB scratch,120s, no child network/dependency writes; cleanup closed.
+  The author correctly REFUSED the assertion-red job. This is diagnosis, NOT author PASS or a deletion
+  falsifier for an unbuilt fix. No production invocation or paid model call was made.
+
+  Source inbox blob f59663f2b94bf74850ea7271552630ac9b9a3a64 and worker blob
+  15210781bf81c4d1f4fda2a39b5944c8b1debcbe match fresh main b452cccc2 at14:33Z. Existing W1-T2205
+  shipped workerTranscript but explicitly left inbox.ts's consumers to a follow-up. Use that existing helper
+  in the initial draft parse, escalation parse and buildInboxDraftSpawnArgs routing evaluator; keep their
+  representation identical. Proposed scope: src/lib/inbox.ts, src/run-task.ts and a correctly computed
+  test/inbox/ regression. No parser relaxation, new helper/module, retry, silent truncation or routing change.
+
+  Eventual build falsifiers: remove each repaired join separately, keeping identical test bytes; the direct
+  rung, Sonnet-escalation and routing-evaluation regressions must respectively fail. Restored source must
+  pass real complete tallies. Preserve genuinely multiple releases, wrong id, fragments mixed with release,
+  dispatch holds and current-pin machine risk escalations; accepting a draft candidate is NEVER operator
+  approval. W1-T10348's machine-versus-operator release boundary is unchanged. Do not auto-release W10483
+  or W10490: both carry genuine human escalations, and W10490 names a privileged workflow path.
+
+  SUBJECT/OWNER SWEEP14:32Z: all2 open heads pinned against449actual remote heads,12candidate subject
+  records on main and each head, no introduced/changed candidate and no inbox.ts/run-task.ts/worker.ts
+  product overlap. W1-T2205 owns the existing join primitive, not this still-unconverted consumer;
+  W1-T10347 is the separate failed operator-intent interpreter. Refresh ownership/source before building.
+  Hosted gates, native review, protected merge, natural adoption and real draft efficacy are separate.
