@@ -40,8 +40,8 @@ test("quality contracts reject healthy scores from incomplete or incomparable ev
 });
 
 test("expected code quality sources are present before any scan is observed", () => {
-  const value = buildRepositoryEvidenceInventory([{ instanceId: "one", options: { instanceRepository: "acme/atlas" } }]);
+  const value = buildRepositoryEvidenceInventory([{ instanceId: "one", options: { instanceRepository: { owner: "acme", repo: "atlas" } } }]);
   assert.deepEqual(value.repositories[0]!.expectedQualitySources, ["quality", "coverage"]);
   assert.equal(value.measurementState, "not_collected");
-  assert.deepEqual(buildRepositoryEvidenceInventory([{ instanceId: "one", options: { instanceRepository: "../not-a-repo" } }]).unresolvedInstances, ["one"]);
+  assert.deepEqual(buildRepositoryEvidenceInventory([{ instanceId: "one", options: { instanceRepository: { owner: "..", repo: "not-a-repo" } } }]).unresolvedInstances, ["one"]);
 });

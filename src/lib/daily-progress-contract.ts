@@ -1,4 +1,5 @@
 import type { ContractResult } from "./code-health-contract.js";
+import type { ManagedRepo } from "./managed-repos.js";
 
 export const DAILY_PROGRESS_VERSION = "daily-progress-v1" as const;
 export type EvidenceState = "complete" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized";
@@ -34,7 +35,7 @@ export interface RepositoryEvidenceInventory {
   measurementState: "not_collected";
 }
 
-export function buildRepositoryEvidenceInventory(_instances: ReadonlyArray<{ instanceId: string; options: { instanceRepository?: string } }>): RepositoryEvidenceInventory {
+export function buildRepositoryEvidenceInventory(_instances: ReadonlyArray<{ instanceId: string; options: { instanceRepository?: ManagedRepo } }>): RepositoryEvidenceInventory {
   return { version: "repository-evidence-inventory-v1", repositories: [], unresolvedInstances: [], measurementState: "not_collected" };
 }
 

@@ -45,7 +45,7 @@ test("daily contracts preserve coverage and reject contradictory day identity", 
 
 test("the repositories publisher exposes expected inventory independently of observed events", async () => {
   await withTempDir("daily-contract", async (root) => {
-    const instances = [{ instanceId: "one", options: { root, instanceRepository: "Acme/Atlas" } }, { instanceId: "two", options: { root, instanceRepository: "acme/atlas" } }, { instanceId: "unknown", options: { root } }];
+    const instances = [{ instanceId: "one", options: { root, instanceRepository: { owner: "Acme", repo: "Atlas" } } }, { instanceId: "two", options: { root, instanceRepository: { owner: "acme", repo: "atlas" } } }, { instanceId: "unknown", options: { root } }];
     const path = repositoriesSourcesPath(root); mkdirSync(dirname(path), { recursive: true });
     const publish = createRepositoriesSourcePublisher({ stateDir: root, instances: () => instances });
     assert.equal(publish(), true); assert.equal(publish(), false, "unchanged scope must not rewrite source clocks");
