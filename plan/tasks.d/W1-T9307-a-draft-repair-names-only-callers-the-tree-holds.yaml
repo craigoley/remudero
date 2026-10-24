@@ -38,7 +38,7 @@
       - `proofScopeViolations` (src/lib/task-linter.ts) escalates to block exactly when the proof's path is ABSENT at
         head, and its remedy for that case is still "Add <path> to files:". The next redraft obeys and adds the
         invented file, which is the stamp above.
-      - W1-T9062 (queued, not built) will refuse a declared path the tree does not hold, but it exempts a path declared
+      - W1-T9062 (merged; its CREATES floor is on main) will refuse a declared path the tree does not hold, but it exempts a path declared
         on a `CREATES: <path>` line. A drafter told to "add a caller" can declare that caller as CREATES and pass, so the
         exemption must never let a new file stand as the call site.
     RELATED, NOT DUPLICATED: W1-T9062 owns the path-existence floor, the CREATES allowance, parked-shard grounding and

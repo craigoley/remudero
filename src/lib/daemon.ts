@@ -52,6 +52,7 @@ import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-
 import {
   nextRunnable,
   runnableCandidates,
+  passedOverStateKey,
   laneDispatchBudget,
   wipDeferredAdmissionFields,
   type QueueAdmissionReading,
@@ -1769,6 +1770,8 @@ export interface DaemonDeps {
    *  `eligible <= 0` is no demand: the idle branch sleeps as it always has. A `cadenceMs` that is
    *  `undefined` (nothing observed yet) leaves the idle sleep a single poll interval. */
   readIdleReviewDemand?: () => { eligible: number; cadenceMs?: number; medianReviewMs?: number; pushesPerPrHour?: number } | undefined;
+  /** Existing bounded completed-review memo, independent of current eligible demand. */
+  readReviewMedianMs?: () => number | undefined;
   /** Called exactly once, when a block classifies as a genuine blocker — one or more tasks
    *  transitively depend on the blocked task. The real command escalates naming the dependents.
    *  Optional: omitted, a genuine blocker still halts the loop, it just opens no issue (W1-T46). */
@@ -3962,6 +3965,18 @@ export async function runDaemon(
   const logPriorityRelease = (r: PriorityReservationRelease): void => {
     log("dispatch.priority_reservation_released", { task: r.task.id, waiting_task: r.waiting.id, reason: r.reason });
   };
+  const passedOverStates = new Map<string, string>();
+  const observePassedOver = (site: "tick" | "lane-refill"): NonNullable<NextRunnableOpts["onPassedOver"]> => (task, detail) => {
+    const key = passedOverStateKey(detail);
+    if (passedOverStates.get(task.id) === key) return;
+    log("dispatch.passed_over", { task: task.id, priority: task.priority ?? null, site,
+      passed_for: detail.passedFor, holders: detail.holders });
+    passedOverStates.set(task.id, key);
+  };
+  const forgetPassedOver = (current: Plan, collected: readonly Task[] = []): void => {
+    for (const task of collected) passedOverStates.delete(task.id);
+    for (const id of passedOverStates.keys()) if (!current.byId.has(id)) passedOverStates.delete(id);
+  };
   // W1-T8235: the gap since the previous process's last idle record is charged to `restart` (this process's first
   // sample ends it), at the idle slots that record left.
   idleLaneAccount = chargeRestartGap(idleLaneAccount, lastIdleLaneRecord(bootLedgerLines));
@@ -4496,14 +4511,17 @@ export async function runDaemon(
       detached_sweep_actions: detached, in_flight_reviews: reviews.size, waited_on: observation.snapshot() });
   };
   // W1-T8172 design 2: the drain's clock admits a pass only while the time left exceeds the measured review length.
-  const measuredReviewLength = (): { ms?: number; fixMs?: number; source: "measured" | "no_history" | "unreadable" } => {
+  const measuredReviewLength = (): { ms?: number; fixMs?: number; source: "measured" | "measured_memo" | "no_history" | "unreadable" } => {
     try {
       const lines = deps.readLedgerLines?.() ?? [];
       const ms = medianReviewRunMs(lines);
       const fixMs = medianFixRoundMs(lines);
-      return ms === undefined ? { fixMs, source: "no_history" } : { ms, fixMs, source: "measured" };
+      if (ms !== undefined) return { ms, fixMs, source: "measured" };
+      const memoMs = deps.readReviewMedianMs?.();
+      return typeof memoMs === "number" && Number.isFinite(memoMs) && memoMs > 0
+        ? { ms: memoMs, fixMs, source: "measured_memo" } : { fixMs, source: "no_history" };
     } catch (error) {
-      // An unreadable ledger is no history: the clock admits as before W1-T8172, and the completion row says why.
+      // An unreadable timing input is no history: the clock admits as before W1-T8172, and the completion row says why.
       return { source: "unreadable" };
     }
   };
@@ -4928,6 +4946,7 @@ export async function runDaemon(
       const fresh = await deps.reloadPlan();
       if (fresh) {
         plan = fresh;
+        forgetPassedOver(fresh);
         deps.onPlanReload?.(fresh);
         log("daemon.plan_reloaded", { tasks: fresh.tasks.length });
       }
@@ -6546,6 +6565,7 @@ export async function runDaemon(
         lazyClosedUnmerged(deps.readClosedRunBranchPrs),
       );
       const dispatchOpts: NextRunnableOpts = {
+      onPassedOver: observePassedOver("tick"),
       priorityBackfill,
       onDeferredForPriority: logPriorityDeferral,
       onPriorityReservationReleased: logPriorityRelease,
@@ -6710,6 +6730,7 @@ export async function runDaemon(
         ...dispatchOpts, excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...childTaskIds()]), inFlight: occupiedTasks,
       });
       const candidates = runnableCandidates(planForBatch, isMerged, budget, selection.opts);
+      forgetPassedOver(planForBatch, candidates);
       tickEligible = selection.eligible;
       tickContext = selection.context;
       // Passed explicitly rather than relying on the partition's own default parameter — see
@@ -7189,9 +7210,11 @@ export async function runDaemon(
               ...[...refillProposals].map((proposal) => proposal.id)]),
             // W1-T8502: pack the pool disjoint from the occupied lanes too, so a head they block cannot crowd out the rest.
             inFlight: [...inFlightTasks, ...refillProposals],
+            onPassedOver: observePassedOver("lane-refill"),
             onDeferredForPriority: (d) => { refillDeferrals.push(d); logPriorityDeferral(d); },
           });
           const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, selection.opts);
+          forgetPassedOver(snapshot.plan, pool);
           refillEligible = selection.eligible;
           refillContext = selection.context;
           const fits = partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);

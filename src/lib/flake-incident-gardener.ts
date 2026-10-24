@@ -198,7 +198,7 @@ function sameIncidentOrigin(a: string, b: string): boolean {
   return a === b || (fileA !== undefined && fileB !== undefined && sameTestFile(fileA, fileB));
 }
 
-/** The repo paths a test file's own relative imports name — the source its failure could come from.
+/** The repo paths a test file's relative or package-alias imports name — the source its failure could come from.
  *  A `.js` specifier names its `.ts` source (this repo's ESM convention). A `.mjs` specifier names a
  *  real `.mjs` file (scripts/*.mjs), so it is kept as written, beside the `.mts` a TypeScript build
  *  would resolve it to: rewriting it to `.ts` named a file that does not exist, and the ci-friction
@@ -206,9 +206,13 @@ function sameIncidentOrigin(a: string, b: string): boolean {
 export function testSourcePaths(file: string, source: string | undefined): string[] {
   if (source === undefined) return [];
   const out = new Set<string>();
-  const specifier = /(?:\bfrom\s+|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["'](\.{1,2}\/[^"']+)["']/g;
+  const specifier = /(?:\bfrom\s+|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["']((?:\.{1,2}\/|#(?:src|scripts|test)\/)[^"']+)["']/g;
   for (const match of source.matchAll(specifier)) {
-    const resolved = normalize(join(dirname(file), match[1]!));
+    const spec = match[1]!;
+    // package.json maps these three aliases from the repository root, not the test's folder.
+    // Invalid alias path segments cannot nominate a different source owner after normalization.
+    if (spec.startsWith("#") && spec.split("/").slice(1).some(part => ["", ".", "..", "node_modules"].includes(part))) continue;
+    const resolved = spec.startsWith("#") ? spec.slice(1) : normalize(join(dirname(file), spec));
     if (resolved.endsWith(".mjs")) {
       out.add(resolved);
       out.add(resolved.replace(/\.mjs$/, ".mts"));

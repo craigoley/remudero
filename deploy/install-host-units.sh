@@ -2014,6 +2014,39 @@ if [ -n "$CLEANUP_PATH" ]; then
   # accumulating indefinitely. Keep the roots overrideable for hosts with a different layout.
   CLEANUP_WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees:/home/${SERVICE_USER}/rmd-work}"
   CLEANUP_LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-/home/${SERVICE_USER}/rmd-mint:/home/${SERVICE_USER}/rmd-op}"
+  checkout_git() {
+    if [ "$(id -un)" = "$SERVICE_USER" ]; then git -C "$@"
+    else sudo -n -u "$SERVICE_USER" git -C "$@"; fi
+  }
+  while IFS= read -r live_checkout; do
+    [ -n "$live_checkout" ] || continue
+    checkout_git "$live_checkout" rev-parse --git-dir >/dev/null 2>&1 || continue
+    if hooks_path=$(checkout_git "$live_checkout" config --path --get core.hooksPath 2>/dev/null); then
+      :
+    else
+      hooks_status=$?
+      if [ "$hooks_status" != 1 ]; then
+        echo "install-host-units: DRIFTED $live_checkout post-checkout (cannot resolve hooksPath)"
+        drift=$(( drift + 1 ))
+        continue
+      fi
+      if [ "$MODE" = install ]; then
+        checkout_git "$live_checkout" config core.hooksPath hooks
+        hooks_path=hooks
+        echo "install-host-units: set     $live_checkout core.hooksPath hooks"
+      else
+        hooks_path=$(checkout_git "$live_checkout" rev-parse --git-path hooks)
+      fi
+    fi
+    case "$hooks_path" in /*) ;; *) hooks_path="$live_checkout/$hooks_path" ;; esac
+    if [ ! -f "$hooks_path/post-checkout" ] || [ ! -x "$hooks_path/post-checkout" ]; then
+      echo "install-host-units: MISSING $live_checkout post-checkout"
+      drift=$(( drift + 1 ))
+    elif ! cmp -s "$SCRIPT_DIR/../hooks/post-checkout" "$hooks_path/post-checkout"; then
+      echo "install-host-units: DRIFTED $live_checkout post-checkout (bring this checkout to main)"
+      drift=$(( drift + 1 ))
+    fi
+  done < <(printf '%s\n' "$CLEANUP_LIVE_CHECKOUTS" | tr ':' '\n')
   CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} RMD_CLEANUP_WORKTREE_ROOTS=${CLEANUP_WORKTREE_ROOTS} RMD_CLEANUP_LIVE_CHECKOUTS=${CLEANUP_LIVE_CHECKOUTS} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
   CRONTAB_CMD="${RMD_CRONTAB_CMD-crontab}"
 

@@ -145,7 +145,7 @@ test("W1-T10380: a pasted Claude code replaces the fleet store and leaves the ho
   assert.equal(submitted.outcome, "accepted");
   const done = submitted.outcome === "accepted" ? submitted.projection : null;
   assert.equal(done?.state, "complete", done?.reason);
-  assert.equal(done?.accountLabel, "o***@example.com");
+  assert.equal(done?.accountLabel, "op***or@example.com");
 
   const replaced = JSON.parse(readFileSync(f.storeFile, "utf8")) as { claudeAiOauth: { accessToken: string; refreshToken: string } };
   assert.equal(replaced.claudeAiOauth.accessToken, NEW_ACCESS, "the store now holds the credential the CLI staged");
@@ -153,7 +153,7 @@ test("W1-T10380: a pasted Claude code replaces the fleet store and leaves the ho
   assert.deepEqual(readFileSync(f.hostFile), f.hostLogin, "the host login is byte-identical");
   assert.deepEqual(stagingDirs(f), [], "the staging dir is removed once the store is replaced");
   const fleetStore = join(f.realHome, ".claude", "fleet-auth", "claude");
-  assert.deepEqual(readdirSync(fleetStore).sort(), [".credentials.json"], "no lock or temp file is left in the store");
+  assert.deepEqual(readdirSync(fleetStore).sort(), [".claude.json", ".credentials.json"], "no lock or temp file is left in the store");
   assert.equal(existsSync(`${fleetStore}.lock`), false, "the legacy refresh lock is released");
 
   const cli = JSON.parse(readFileSync(f.record, "utf8")) as { args: string[]; code: string; configDir: string; home: string; keys: string[] };

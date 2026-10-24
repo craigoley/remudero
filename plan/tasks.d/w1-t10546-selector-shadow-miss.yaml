@@ -1,0 +1,29 @@
+- id: W1-T10546
+  title: "REPAIR THE SELECTOR EDGE INTO test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts"
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  note: "W1-T4439 first observed a floor miss on coverage run 40056042457 for PR #13876 at 675e3c77a80a8603966fbfc86f2ccafe7b02b371: src/lib/sweep.ts, test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts -> test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in test/the-affected-suite-selector-runs-in-shadow.test.ts that selects test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts for each edge: diff-coverage blocks an edge no test exercises."
+  acceptance:
+    - claim: "the floor selector includes test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts when this edge is exercised"
+      proof: "grep: test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run\\.test\\.ts in src/lib/affected-suites.ts"
+    - claim: "a regression test selects test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts for each recorded edge"
+      proof: "grep: test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.95
+    reasons:
+      - "The filed scope is a selector-edge repair in two existing files, with a regression test required for each recorded edge."
+      - "The record names a specific coverage run, PR, commit and missed suite; it requests no merge, deploy, infrastructure or review policy change."
+      - "The supplied family history reports 18 merged and 0 declined tasks, and the gates state identifies no concerning condition."
+    judged_at: "2026-10-24T06:49:19.003Z"
+    pin: "6b965f2c6edd65528280af33ae3e9af775ba55542bd425aa54d69c565000d885"
