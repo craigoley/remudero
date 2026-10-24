@@ -1,0 +1,29 @@
+id: incident-d66a9f50b1a0a0c1
+ts: 2026-10-24T17:51:23.132Z
+raw: >-
+  Incident d66a9f50b1a0: intervention
+  own-red:fix-lane:comment-load-ratchet-failed-on-mutation
+
+  First seen: 2026-10-24T17:19:34.446Z
+
+  Last seen: 2026-10-24T17:51:18.816Z
+
+  Count: 9, burn: 9.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10954@b7433e120 actor=cao825 cause=own-red:fix-lane:comment-load-ratchet-failed-on-mutation — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#d66a9f50b1a0a0c11b5df446161ea74f13911cce7203e5cde0a4835615e79317
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

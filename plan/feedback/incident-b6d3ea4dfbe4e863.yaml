@@ -1,0 +1,31 @@
+id: incident-b6d3ea4dfbe4e863
+ts: 2026-10-24T17:08:10.184Z
+raw: >-
+  Incident b6d3ea4dfbe4: intervention
+  own-red:fix-lane:depcruise-failed-on-rule-checks-failed-o
+
+  First seen: 2026-10-24T16:59:54.504Z
+
+  Last seen: 2026-10-24T17:08:08.270Z
+
+  Count: 36, burn: 36.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#10482@ac953d18a actor=cao825 cause=own-red:fix-lane:depcruise-failed-on-rule-checks-failed-o — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10482@58f9af4d7 actor=cao825 cause=own-red:fix-lane:depcruise-failed-on-rule-checks-failed-o — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10482@d8e232237 actor=cao825 cause=own-red:fix-lane:depcruise-failed-on-rule-checks-failed-o — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#b6d3ea4dfbe4e863ffabe9d947a48485d24b6ed87db1ad95c6d9ea8a4243922d
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -1,0 +1,22 @@
+id: incident-ab13c7b84a2c3096
+ts: 2026-10-24T18:20:54.984Z
+raw: |-
+  Incident ab13c7b84a2c: flow pr-stage-stall:escalated:unknown signature
+  First seen: 2026-10-24T18:20:06.545Z
+  Last seen: 2026-10-24T18:20:06.545Z
+  Count: 1, burn: 1.00/hr
+  Deploy sha(s): unknown
+  Instance(s): core
+  Sample events:
+    - pr=14002 escalated: unknown signature
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#ab13c7b84a2c3096c84e3cb043d88e30b760432e9ce0e0d97908aa8306998df4
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

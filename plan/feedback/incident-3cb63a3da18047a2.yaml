@@ -1,0 +1,22 @@
+id: incident-3cb63a3da18047a2
+ts: 2026-10-24T20:35:48.853Z
+raw: |-
+  Incident 3cb63a3da180: flow pr-stage-stall:own-red:unknown signature
+  First seen: 2026-10-24T20:30:11.859Z
+  Last seen: 2026-10-24T20:30:11.859Z
+  Count: 1, burn: 1.00/hr
+  Deploy sha(s): unknown
+  Instance(s): core
+  Sample events:
+    - pr=14007 own-red: unknown signature
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#3cb63a3da18047a20934700bd34a0e463af28c86e780a7f696a644e91882dc21
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -15168,13 +15168,18 @@ export function fixSeedRead(
   }
   if (fixRungStalledWithoutNewHead([...window], taskId)) return { kind: "ended", seed };
   const handoffAt = window.findLastIndex((line) => rung(line) && line.step === "fix.stood_down" && line.outcome === "handed_off");
+  // Rotation may retain another seed's handoff and an older head's dispatch in this window.
+  // Neither owns this seed; unread identities still veto recovery.
+  const ownerHandedOff = window.some(line => rung(line) && line.step === "fix.stood_down" && line.outcome === "handed_off" &&
+    (typeof line.run_id !== "string" || seed.runId === undefined || line.run_id === seed.runId || line.run_id.startsWith(`${seed.runId}-`)));
   // A started in-process rung also loses its continuation when its daemon dies (#12904).
   // Re-enter the ordinary owner/checkout claim, never clear it here: a surviving worker,
   // dirty unpublished tree or unreadable process census must still refuse there. Require
   // this boot's explicit empty adoption receipt; a different run id or age alone proves nothing.
-  if (handoffAt < 0 && seed.runId !== undefined &&
+  if (!ownerHandedOff && seed.runId !== undefined &&
       continuationEndedAtEmptyBoot(lines, seedAt, seed.runId, taskId, runId) &&
-      window.filter((line) => rung(line) && line.step === "fix.dispatch").every((line) => line.run_id === seed.runId)) {
+      window.filter((line) => rung(line) && line.step === "fix.dispatch" &&
+        (typeof line.head_sha !== "string" || line.head_sha === pr.headSha)).every((line) => line.run_id === seed.runId)) {
     return { kind: "orphaned", seed, orphanReason: "owner-run-ended" };
   }
   // A hand-off to the sweep is a live wait only until the sweep has disposed the same head after it.
