@@ -1,0 +1,87 @@
+- repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: span
+  origin: "operator request 2026-10-24: fleet cockpit code health and daily progress; approved researched
+    eight-slice delivery"
+  status: queued
+  attempts: 0
+  id: W1-T10559
+  title: Collect and serve durable timezone-aware Daily progress independently of page visits
+  depends_on:
+    - W1-T10558
+  priority: 1
+  budget_usd: 60
+  files:
+    - src/lib/daily-progress-calendar.ts
+    - src/lib/daily-progress-store.ts
+    - src/lib/daily-progress-collector.ts
+    - src/lib/daily-progress-view.ts
+    - src/lib/read-model-worker.ts
+    - src/lib/read-model-slow-lane.ts
+    - src/lib/status.ts
+    - src/lib/board-snapshot-cache.ts
+    - src/lib/views.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - test/console-api/read-model/daily-progress-projection.test.ts
+    - test/console-api/read-model/daily-progress-worker.test.ts
+    - test/console-api/views/daily-progress-view.test.ts
+  rationale: A complete Today/Yesterday report must survive Recent feed truncation, read-model scratch deletion,
+    browser closure and restart. Existing Analytics collection is view-switch dependent, existing windows are
+    UTC, and current open PRs do not reconstruct yesterday midnight. Operators need each repository and the
+    authorized whole fleet with truthful coverage.
+  design: >-
+    Implement daily-progress-v1 from W1-T10558 as an independently owned core read-model collection unit.
+    Reuse the existing complete paginated PR collector, cached authoritative mergedAt and exact Remudero-Task
+    trailer UNION run-branch delivery joins; retain current collection success/truncation/error receipts, not
+    only last-good file mtimes. Exclude known non-fleet PRs and surface unknown attribution outside confirmed
+    fleet counts. Reuse ledger projection/union for observed activity with explicit retention/parse coverage;
+    never claim complete history from compacted views.
+
+
+    Persist canonical events, report revisions and due/job receipts under durable state outside
+    RMD_READ_MODEL_DB_DIR. Atomic committed publication and owner-epoch fencing prevent stale/overlapping
+    writers and success before persistence; corrupt history refuses and stays available for diagnosis.
+    Pagination bounds response evidence, not stored/count populations. Hourly collection works with no browser
+    and Analytics off; local midnight changes Today/Yesterday pointers independently of closing
+    reconciliation; restart catches up missed hourly/closing work and bounded late-event corrections create
+    immutable source-date revisions. Retain last-good report with its actual cutoff/failure on source errors.
+    Derive local calendar days in one explicit IANA zone, initially America/New_York, including DST 23/25-hour
+    days; do not add 24 elapsed hours. History remains identified by its original zone/date when settings
+    change.
+
+
+    Serve the new authenticated cached /v1/views/daily-progress contract with bounded known
+    repository/zone/date/page/revision parameters and server-owned registry scope; filter scope before
+    aggregate counts and coverage. Do not trust browser daemon URLs or path fragments. No per-user ACL
+    capability is assumed beyond actual service/console authorization. Register the route in the existing
+    contract/OpenAPI/view wiring, preserve shadow/activation policy and verify served adoption independently.
+    Use deterministic summaries; distinguish merged work, independently evidenced releases, observed day
+    activity and present open work. No request-time scans, second GitHub fetcher, paid summarizer, cron,
+    daemon restart, gate change or borrowed test slot.
+  falsifier: Keep the new tests and independently remove durable retention, calendar arithmetic, expected scope
+    or ownership fencing. The >200/restart, DST, missing-source and stale-writer tests respectively must fail.
+    Use a real filesystem persistence failure, browser-closed worker integration, known fleet/non-fleet PR
+    controls and zero-work complete-corpus control. Restore and prove exact summaries. No source or CI receipt
+    claims deployment.
+  acceptance:
+    - claim: daily history survives more than 200 events restart late data and scratch rebuild without double credit
+      proof: "unit test: daily progress retains complete history and immutable late corrections"
+    - claim: hourly and midnight collection is independent of browsers and Analytics and fenced against lost
+        ownership
+      proof: "unit test: daily progress collects hourly and closes local days without page demand"
+    - claim: daily calendar correctly handles DST midnight and year boundaries
+      proof: "unit test: daily progress uses calendar days across DST and midnight"
+    - claim: served reports validate scope before counts and preserve partial or stale evidence
+      proof: "unit test: daily progress served scope preserves partial evidence and rejects foreign repositories"
+  note: Reviewed core c18e7e4c48cee7cb19d2fc96fa93273ef63d85a5 and console
+    c57646ea3636341cc1fad8847df8b144e169d3f1. Before filing, all 10 open core PR heads and main were compared
+    by subject; each head had the same subject counts as main, with more than 4,370 plan shards as corpus
+    controls. No new daily report or code-health producer exists. Refresh main, all open heads, exact
+    merged-task credit and dispatch/run claims before implementation. Reservations belong to
+    codex/file-console-improvement-20261024; preserve contested claims. Reserved W1-T10559 through rmd
+    next-task-id; this filing does not claim implementation or deployment.

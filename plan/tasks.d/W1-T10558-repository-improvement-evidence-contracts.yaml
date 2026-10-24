@@ -1,0 +1,62 @@
+- repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: span
+  origin: "operator request 2026-10-24: fleet cockpit code health and daily progress; approved researched
+    eight-slice delivery"
+  status: queued
+  attempts: 0
+  id: W1-T10558
+  title: Define repository improvement evidence and calendar-day report contracts
+  depends_on: []
+  priority: 1
+  budget_usd: 35
+  files:
+    - src/lib/daily-progress-contract.ts
+    - src/lib/code-health-contract.ts
+    - test/console-api/read-model/daily-progress-contract.test.ts
+    - test/console-api/read-model/code-health-contract.test.ts
+  rationale: Daily progress and Code health have no source-owned versioned contract. Current UTC 7/30-day flow
+    buckets and a 200-entry Recent feed cannot establish a complete local-day report. Code quality must remain
+    separate from delivery friction. Establish expected evidence independently of rows observed, so missing
+    data cannot look healthy.
+  design: >-
+    Define independently versioned typed contracts and runtime boundary validation for daily-progress-v1 and
+    code-health-v1. Daily reports identify repository, instance/source scope, local ISO report date, IANA
+    reporting zone, exact half-open UTC boundaries, schema version, revision and correction reason,
+    generatedAt, source-specific last attempt/last success/coverage-through/next-due clocks, expected and
+    observed sources/repositories, completeness and failure reasons. Define authoritative merge event time
+    separately from ingestion; confirmed fleet attribution, unknown attribution and non-fleet evidence;
+    distinct PR/task identities; observed day activity separate from historical end-of-day open work. Missing
+    source, stale source, unauthorized, not collected, measured empty and partial are distinct. Bound rendered
+    pages/cursors without bounding the count population. Deployment remains uncollected without an independent
+    receipt.
+
+
+    Code health identifies analyzed/baseline commits, tool/rules/config versions, scan coverage/exclusions,
+    stable finding fingerprints, category and source evidence, modeled estimates, required checks and
+    assessed/met counts. Incomplete required evidence cannot be healthy. Preserve new/existing findings and
+    comparable-scope rules. Do not derive scores from CI success, average unlike repository grades, add
+    scanner services, or invent calibration thresholds. These modules define and validate facts; no live
+    collection, scheduling, paid model calls or writes. Validate the contract through direct fixtures and
+    negative cases. New tests use computed rmd test-place folders and package aliases; adjust proposed test
+    paths to the computed locations before filing implementation scope changes.
+  falsifier: "Remove coverage/identity validation while keeping its fixtures: missing expected repositories,
+    invalid day bounds or contradictory source scope must be accepted and the first test fail. Remove
+    assessed/comparability validation and the second test must fail. Restore each guard and require real
+    matched test summaries."
+  acceptance:
+    - claim: daily contracts preserve source coverage and reject contradictory repository or day identity
+      proof: "unit test: daily contracts preserve coverage and reject contradictory day identity"
+    - claim: quality contracts keep incomplete and incomparable assessments from healthy scores
+      proof: "unit test: quality contracts reject healthy scores from incomplete or incomparable evidence"
+  note: Reviewed core c18e7e4c48cee7cb19d2fc96fa93273ef63d85a5 and console
+    c57646ea3636341cc1fad8847df8b144e169d3f1. Before filing, all 10 open core PR heads and main were compared
+    by subject; each head had the same subject counts as main, with more than 4,370 plan shards as corpus
+    controls. No new daily report or code-health producer exists. Refresh main, all open heads, exact
+    merged-task credit and dispatch/run claims before implementation. Reservations belong to
+    codex/file-console-improvement-20261024; preserve contested claims. Reserved W1-T10558 through rmd
+    next-task-id; this filing does not claim implementation or deployment.

@@ -1,0 +1,62 @@
+- repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: span
+  origin: "operator request 2026-10-24: fleet cockpit code health and daily progress; approved researched
+    eight-slice delivery"
+  status: queued
+  attempts: 0
+  id: W1-T10562
+  title: Measure whether planned improvements helped using comparable before-and-after evidence
+  depends_on:
+    - W1-T10560
+    - W1-T10561
+  priority: 2
+  budget_usd: 45
+  files:
+    - src/lib/opportunity-outcomes.ts
+    - src/lib/gardener-opportunity-evidence.ts
+    - src/lib/gardeners-route.ts
+    - src/lib/code-health-projection.ts
+    - src/lib/daily-progress-collector.ts
+    - openapi/daemon.yaml
+    - test/gardeners/improvement-effect-follow-through.test.ts
+  rationale: Gardeners save outcome classifications but reported states alone do not prove benefit. The cockpit
+    should connect a finding to a plan, merged implementation and comparable follow-up rather than reward
+    acceptance or activity counts.
+  design: >-
+    Extend the existing opportunity outcome lifecycle rather than create another suggestion store. Join stable
+    finding/snapshot baseline, saved planning conversation, governed filed task, exact merged PR and
+    independent deployment where relevant, and remeasurement at the new analyzed commit. Schedule bounded
+    follow-up through existing gardener ownership/admission. Publish expected effect, observed comparable
+    result, observation window and uncertainty as helped/hurt/unchanged/insufficient-evidence. A saved
+    measured-helped label, accepted proposal, successful build, scanner config change, exclusion/dismissal or
+    absent measurement cannot certify benefit.
+
+
+    Use source versions, rule/scope/baseline comparability and required denominator checks from
+    code-health-v1. Preserve unknown and stale outcomes; retain evidence-backed history and human reasons for
+    defer/reject. Let factual Daily progress identify prevention work merged with effect not yet measured
+    until the independent check exists. Feed usefulness feedback into transparent opportunity reasoning under
+    current policy, never automatic authority or quality-gate changes. Provide bounded typed evidence for
+    console Did this help detail and daily improvement sections.
+  falsifier: "Keep the tests while substituting saved outcome or merged status for measurement, then removing
+    comparability guards: dedicated false-benefit tests must fail. Include helped/hurt/unchanged controls and
+    unavailable/corrupt persistence recovery; restore and verify actual test summaries."
+  acceptance:
+    - claim: outcome credit requires comparable baseline and remeasurement rather than saved classifications
+      proof: "unit test: improvement effects require comparable measurements beyond saved states"
+    - claim: task and merge joins preserve pending deployed and measured stages separately
+      proof: "unit test: improvement effects preserve evidence stages and missing follow-up"
+    - claim: changed scope or policy cannot create a beneficial outcome
+      proof: "unit test: improvement effects refuse benefit from scope policy or dismissal changes"
+  note: Reviewed core c18e7e4c48cee7cb19d2fc96fa93273ef63d85a5 and console
+    c57646ea3636341cc1fad8847df8b144e169d3f1. Before filing, all 10 open core PR heads and main were compared
+    by subject; each head had the same subject counts as main, with more than 4,370 plan shards as corpus
+    controls. No new daily report or code-health producer exists. Refresh main, all open heads, exact
+    merged-task credit and dispatch/run claims before implementation. Reservations belong to
+    codex/file-console-improvement-20261024; preserve contested claims. Reserved W1-T10562 through rmd
+    next-task-id; this filing does not claim implementation or deployment.
