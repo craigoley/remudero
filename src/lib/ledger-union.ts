@@ -1260,6 +1260,34 @@ function rotationDigestCodec<T>(operation: DigestCodecRequest["operation"], valu
   });
 }
 
+export type ValidatedRotationDigest =
+  | { kind: "hit"; read: LedgerRotationRecords; bytes: number }
+  | { kind: "missing" | "unreadable" | "corrupt" | "identity" | "version"; error?: string };
+
+/** The async reader's ONE digest validator, also used by cost admission. Parsing stays in its existing worker. */
+export async function readValidatedRotationDigest(
+  path: string,
+  identity: { holder: string; archive: string; key: string; reducerVersion: string },
+): Promise<ValidatedRotationDigest> {
+  let raw: Buffer;
+  try {
+    raw = await nodeReadFile(path);
+  } catch (error) {
+    const reason = (error as NodeJS.ErrnoException).code ?? (error as Error).name;
+    return { kind: reason === "ENOENT" ? "missing" : "unreadable", error: reason };
+  }
+  let digest: Record<string, unknown> | undefined;
+  try {
+    digest = await rotationDigestCodec<Record<string, unknown> | undefined>("parse", raw.toString("utf8"));
+  } catch (error) {
+    return { kind: "corrupt", error: (error as Error).name };
+  }
+  if (!digest) return { kind: "corrupt" };
+  if (digest.holder !== identity.holder || digest.archive !== identity.archive || digest.key !== identity.key) return { kind: "identity" };
+  if (digest.reducerVersion !== identity.reducerVersion) return { kind: "version" };
+  return { kind: "hit", read: digest.read as LedgerRotationRecords, bytes: raw.length };
+}
+
 /**
  * Memoizes each rotation's `reduce`d records by path, size and mtime. A rotation is written once, so a
  * repeated union read parses only the live file: re-parsing ~150 immutable archives per request held
@@ -1305,36 +1333,15 @@ export function createLedgerRotationMemo(
   const digestDirectory = (stateDir: string): string => join(stateDir, "cache", "rotation-digests", encodeURIComponent(io.holder!).replaceAll(".", "%2E"));
   const digestPath = (entry: LedgerCorpusEntry): string => join(digestDirectory(dirname(entry.path)), `${basename(entry.path)}.json`);
   const readDigest = async (entry: LedgerCorpusEntry, key: string): Promise<{ read: LedgerRotationRecords; bytes: number } | undefined> => {
-    let raw: Buffer;
-    try {
-      raw = await nodeReadFile(digestPath(entry));
-    } catch (error) {
-      const reason = (error as NodeJS.ErrnoException).code ?? (error as Error).name;
-      outcome(reason === "ENOENT" ? "missing" : "unreadable", reason);
-      return undefined;
-    }
-    let digest: Record<string, unknown> | undefined;
-    try {
-      digest = await rotationDigestCodec<Record<string, unknown> | undefined>("parse", raw.toString("utf8"));
-    } catch (error) {
-      const reason = (error as Error).name;
-      outcome("corrupt", reason);
-      return undefined;
-    }
-    if (!digest) {
-      outcome("corrupt");
-      return undefined;
-    }
-    if (digest.holder !== io.holder || digest.archive !== basename(entry.path) || digest.key !== key) {
-      outcome("identity");
-      return undefined;
-    }
-    if (digest.reducerVersion !== io.durableDigest!.reducerVersion) {
-      outcome("version");
+    const digest = await readValidatedRotationDigest(digestPath(entry), {
+      holder: io.holder!, archive: basename(entry.path), key, reducerVersion: io.durableDigest!.reducerVersion,
+    });
+    if (digest.kind !== "hit") {
+      outcome(digest.kind, digest.error);
       return undefined;
     }
     digestHits++;
-    return { read: digest.read as LedgerRotationRecords, bytes: raw.length };
+    return { read: digest.read, bytes: digest.bytes };
   };
   /** Resolves to the digest text's length once it is serialized (whether or not it then lands), else undefined. */
   const writeDigest = async (entry: LedgerCorpusEntry, key: string, read: LedgerRotationRecords): Promise<number | undefined> => {

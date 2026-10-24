@@ -22,7 +22,7 @@
 import { systemClock } from "./clock.js";
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { INBOX_RETIREMENT_RESTORE_ACTION, restoreInboxRetirement, type InboxRetirementRestoreInput } from "./inbox-retirement.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -60,6 +60,56 @@ export const INSTANCE_INBOX_SOURCE_PATHS: ReadonlySet<string> = new Set(INSTANCE
 /** The daemon's inbox registry; an instance without one predates the contract and is read-only. */
 export const INBOX_CONTRACT_MARKER = "inbox-proposals.json";
 
+/** PRIMARY CONTROL: retained bytes per optional background observation; over-budget is unavailable, never truncated into readiness. */
+export const INBOX_CONTRACT_OBSERVATION_MAX_BYTES = 16 * 1024 * 1024;
+export interface InstanceInboxContractObservation {
+  state: InstanceInboxContractState;
+  /** Revalidate the exact file after the remaining materialization inputs have been read. */
+  current(): boolean;
+}
+
+/** Read the real legacy contract; an empty proposal list is compatible, not a revoked capability set. */
+export function observeInstanceInboxContract(stateDir: string, expected: { instance: string; repository: string }): InstanceInboxContractObservation {
+  const path = join(stateDir, INBOX_CONTRACT_MARKER);
+  const refused = (): InstanceInboxContractObservation => ({ state: { mode: "read-only", code: "inbox_contract_unreadable", reason: "current instance conversation contract could not be verified" }, current: () => false });
+  let fd: number | undefined;
+  try {
+    if (typeof constants.O_NOFOLLOW !== "number" || typeof constants.O_NONBLOCK !== "number") return refused();
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.size > INBOX_CONTRACT_OBSERVATION_MAX_BYTES) return refused();
+    const buffer = Buffer.alloc(Math.min(64 * 1024, INBOX_CONTRACT_OBSERVATION_MAX_BYTES + 1));
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    while (bytes <= INBOX_CONTRACT_OBSERVATION_MAX_BYTES) {
+      const count = readSync(fd, buffer, 0, Math.min(buffer.length, INBOX_CONTRACT_OBSERVATION_MAX_BYTES + 1 - bytes), null);
+      if (count === 0) break;
+      chunks.push(Buffer.from(buffer.subarray(0, count)));
+      bytes += count;
+    }
+    const same = (now: ReturnType<typeof fstatSync>): boolean => now.isFile() && now.dev === before.dev && now.ino === before.ino && now.size === before.size && now.mtimeMs === before.mtimeMs && now.ctimeMs === before.ctimeMs;
+    if (bytes > INBOX_CONTRACT_OBSERVATION_MAX_BYTES || bytes !== before.size || !same(fstatSync(fd))) return refused();
+    const text = Buffer.concat(chunks, bytes).toString("utf8");
+    const state = instanceInboxContractState(stateDir, () => text);
+    if (state.mode !== "read-write") return { state, current: () => false };
+    const body = JSON.parse(text) as Record<string, unknown>;
+    if ((body.instance !== undefined && body.instance !== expected.instance) || (body.repository !== undefined && body.repository !== expected.repository)) return refused();
+    const current = (): boolean => {
+      try { return same(lstatSync(path)); }
+      catch {
+        // deliberate: missing and unreadable both invalidate this prior positive; callers publish unavailable, never absence or readiness.
+        return false;
+      }
+    };
+    return current() ? { state, current } : refused();
+  } catch {
+    // deliberate: no stale positive or private file/error content survives an unverifiable observation.
+    return refused();
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 export type InstanceInboxContractState =
   | { mode: "read-write" }
   | { mode: "read-only"; code: "inbox_contract_absent" | "inbox_contract_unreadable" | "inbox_state_unconfigured"; reason: string };
@@ -85,8 +135,7 @@ export function instanceInboxContractState(stateDir: string | undefined, read: (
 }
 
 /** What the instances view advertises for one served instance's conversations: only usable routes. */
-export function instanceInboxCapabilities(stateDir: string | undefined): { views: string[]; writes: string[]; inbox: { mode: InstanceInboxContractState["mode"]; reason?: string } } {
-  const state = instanceInboxContractState(stateDir);
+export function instanceInboxCapabilities(stateDir: string | undefined, state = instanceInboxContractState(stateDir)): { views: string[]; writes: string[]; inbox: { mode: InstanceInboxContractState["mode"]; reason?: string } } {
   return state.mode === "read-write"
     ? { views: [...INSTANCE_INBOX_VIEWS], writes: [...INSTANCE_INBOX_WRITES], inbox: { mode: "read-write" } }
     : { views: [...INSTANCE_INBOX_VIEWS], writes: [], inbox: { mode: "read-only", reason: state.reason } };

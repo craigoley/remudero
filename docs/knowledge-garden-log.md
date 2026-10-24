@@ -139,3 +139,9 @@ Learnings used when offered: 28%. Dangling Why pointers: 1.
 - retire position-is-presentation-not-identity: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 26%. Dangling Why pointers: 1.
+
+## Pass 2026-10-23T22:56:34.410Z
+
+- retire ci-gate-refusals-repaired-by-hand: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 26%. Dangling Why pointers: 1.

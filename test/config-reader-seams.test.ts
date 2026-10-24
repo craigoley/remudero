@@ -374,7 +374,9 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // `workerAbandon`, as the calibration driver above does. SEAMED from the start
   // (`seams.workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon`), so NOT allowlisted; the file set GAINS
   // `src/lib/skill-eval-command.ts`.
-  assert.equal(readers.length, 35, `expected 35 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // THIRTY-SIX since the retro trigger's cadence history (run-task.ts, W1-T9119) learned the retro's interval, falling back
+  // to `retro.daysThreshold`. SEAMED from the start (`policy ?? loadPolicy(...)`), so NOT allowlisted; the file set is UNCHANGED.
+  assert.equal(readers.length, 36, `expected 36 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

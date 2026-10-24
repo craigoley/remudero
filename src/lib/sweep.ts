@@ -191,6 +191,7 @@ import {
   postedArmFactsFromLedger,
   REVIEW_CONTEXT,
   reviewLedgerKeyFor,
+  reviewTaskNarrative,
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
 } from "./review.js";
@@ -749,6 +750,9 @@ type FixRungTask = {
   acceptance: AcceptanceCriterion[];
   budget_usd?: number;
   files: string[];
+  design?: string;
+  amendment?: string;
+  narrativeUnavailable?: true;
 };
 
 const NEVER_A_PLAN_TASK_ID = /^(?:PR-\d+|RETRO|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/;
@@ -819,7 +823,7 @@ export function fixRungWantsHeadContract(pr: { taskId?: string }): pr is { taskI
  * the round down, named — the snapshot is the very thing this task refuses to trust. A record the
  * head plan does not carry at all (a readable plan, no such id) is NOT unreadable: it leaves the
  * task exactly as `fixRungTaskWithPlanReload` resolved it. One the head DOES carry replaces
- * acceptance, files, risk and budget and is never synthetic, even when the snapshot lacked it.
+ * acceptance, files, risk, budget and narrative and is never synthetic, even when the snapshot lacked it.
  */
 export function fixRungTaskAtHead(
   current: { task: FixRungTask; synthetic: boolean },
@@ -831,8 +835,10 @@ export function fixRungTaskAtHead(
     const why = resolveError ?? resolved?.divergence?.reason ?? "no contract returned";
     return { standDown: `fix rung: PR-head task contract unreadable — ${why}` };
   }
+  const narrative = reviewTaskNarrative(resolved.taskNarrative ?? {});
+  if (narrative === undefined) return { standDown: "fix rung: PR-head task narrative unreadable" };
   const carried =
-    resolved.criteria.length > 0 || resolved.taskDeclaredFiles !== undefined || resolved.taskRisk !== undefined;
+    resolved.criteria.length > 0 || resolved.taskDeclaredFiles !== undefined || resolved.taskRisk !== undefined || resolved.taskNarrative !== undefined;
   if (!carried) return current;
   const { task } = current;
   return {
@@ -842,6 +848,9 @@ export function fixRungTaskAtHead(
       risk: resolved.taskRisk ?? task.risk,
       acceptance: resolved.criteria,
       files: resolved.taskDeclaredFiles ?? [],
+      design: narrative.design,
+      amendment: narrative.amendment,
+      narrativeUnavailable: undefined,
       ...(resolved.taskBudgetUsd !== undefined ? { budget_usd: resolved.taskBudgetUsd } : {}),
     },
     synthetic: false,
@@ -9362,7 +9371,17 @@ function isMainRepairPrIn(pr: Pick<OpenPrView, "taskId" | "prUrl">, repairPrUrls
 
 /** W1-T8575 — required checks that judge only the PR's own body, title or proofs (each re-runs on
  *  `edited`). Main's red cannot reach them, so absence from main's run never makes them base red. */
-export const PR_BODY_SCOPED_CHECKS: readonly string[] = ["proof-discrimination", "acceptance-author-gate", "commitlint"];
+export const PR_BODY_SCOPED_CHECKS: readonly string[] = [
+  "proof-discrimination", // scripts/proof-discrimination-gate.mjs: the PR's acceptance proofs at head/base.
+  "acceptance-author-gate", // scripts/acceptance-author-gate.mjs: the PR event's body and task identity.
+  "commitlint", // .github/workflows/pr-title-lint.yml: the PR's live title.
+];
+
+/** W1-T9931: body- and diff-scoped checks that main's tree cannot turn red. */
+export const PR_OWN_INPUT_CHECKS: readonly string[] = [
+  ...PR_BODY_SCOPED_CHECKS,
+  "prompt-surface-gate", // scripts/prompt-surface-gate.mjs: git diff <base>...HEAD, the PR's own edits.
+];
 
 export type BaseRedDecision = { kind: "own" } | { kind: "wait" | "refresh"; check: string };
 
@@ -9383,15 +9402,15 @@ export function decideBaseRed(
     if (names.some((name) => main.observedChecks!.includes(name) && !main.failingChecks.includes(name))) return { kind: "own" };
     // W1-T7848: a red only a rule-suite probe saw names its one check; no other absent check is inherited from it.
     const absent = main.ciState !== undefined ? undefined
-      : names.find((name) => !main.observedChecks!.includes(name) && !PR_BODY_SCOPED_CHECKS.includes(name));
+      : names.find((name) => !main.observedChecks!.includes(name) && !PR_OWN_INPUT_CHECKS.includes(name));
     if (absent !== undefined) return { kind: "wait", check: absent };
   }
-  const shared = main?.state === "red" ? names.find((name) => main.failingChecks.includes(name)) : undefined;
+  const shared = main?.state === "red" ? names.find((name) => !PR_OWN_INPUT_CHECKS.includes(name) && main.failingChecks.includes(name)) : undefined;
   if (shared !== undefined) return { kind: "wait", check: shared };
   const key = `${pr.prNumber}@${pr.headSha}`;
   const recorded = history.stoodDown.get(key);
   if (history.refreshed.has(key)) return { kind: "own" };
-  if (recorded !== undefined && names.includes(recorded) && !PR_BODY_SCOPED_CHECKS.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
+  if (recorded !== undefined && names.includes(recorded) && !PR_OWN_INPUT_CHECKS.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
   // W1-T6024: a head whose failing tests a probe reproduced on main is main's red, whatever its check is called.
   const named = names[0];
   return main?.state === "green" && named !== undefined && history.reproducedBeforeGreen.has(key) ? { kind: "refresh", check: named } : { kind: "own" };
@@ -16701,7 +16720,12 @@ export async function runSweep(
     // W1-T9971: the fix rung writes `fix.dispatch` when a round ENDS, so a round an EARLIER pass handed to it
     // (still queued in memory admission, or running) has no qualifying row yet. Read it as the dedup does: this
     // head is in the dispatched set and its seed's rung has not ended. Only a seed since the stage began counts.
-    const roundInFlight = prior.fixed.has(`${pr.prNumber}@${pr.headSha}`) &&
+    // Preparation writes fix.* before the end-of-round fix.dispatch row. The live registry owns
+    // admission and worker phases even when the ledger-only seed reader cannot yet prove that.
+    const detachedOwner = detachedFixHolder(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`, now);
+    const liveDetachedRound = detachedOwner !== undefined &&
+      (detachedOwner.fields.in_flight_phase === "admission" || detachedOwner.fields.in_flight_phase === "worker");
+    const roundInFlight = liveDetachedRound || prior.fixed.has(`${pr.prNumber}@${pr.headSha}`) &&
       (fixSeedRead(ledgerLines, pr, deps.runId)?.kind ?? "live") === "live" &&
       ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber && row.acted === true &&
         row.head_sha === pr.headSha && Date.parse(String(row.ts)) >= since);
@@ -20353,7 +20377,9 @@ export async function runSweep(
                 // W1-T6405: main's fix can land BEFORE this head's first probe, so nothing was ever reproduced — a head
                 // behind that main, or of unread distance on a red main held or once failed, still takes it once.
                 const behindBy = deps.behindMainByPr?.get(pr.prNumber);
-                const inheritedBasis = behindBy !== undefined || verdict !== "clear" ? undefined : baseRedHistory.stoodDown.has(key) ? "stood-down"
+                const stoodDownCheck = baseRedHistory.stoodDown.get(key);
+                const inheritedBasis = behindBy !== undefined || verdict !== "clear" ? undefined
+                  : stoodDownCheck !== undefined && !PR_OWN_INPUT_CHECKS.includes(stoodDownCheck) ? "stood-down"
                   : reproductionFiles.every((file) => formerlyFailingOnMain.has(file)) ? "main-formerly-failing" : undefined;
                 const fixedOnMain = !previouslyReproduced && ((behindBy ?? 0) > 0 || inheritedBasis !== undefined);
                 if (fixedOnMain && inheritedBasis !== undefined && !inheritedRedNoted.has(key)) {

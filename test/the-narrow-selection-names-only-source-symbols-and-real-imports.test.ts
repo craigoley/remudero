@@ -43,7 +43,7 @@ test("a changed test file's own declarations name no symbol suites", () => {
   const both = testOnly + "+++ b/src/heavy.ts\n@@ -1 +1 @@\n-export const heavy = 1;\n+export const heavy = 2;\n";
   assert.deepEqual(affected.changedSymbols(both, (p) => files[p]!), ["heavy"]);
   // The changed test still selects itself in both arms.
-  const sel = select(["test/x.test.ts"], { symbolSuites: [] });
+  const sel = select(["test/x.test.ts"], { files: new Map(Object.entries(files)), symbolSuites: [] });
   assert.deepEqual(sel.suites, ["test/x.test.ts"]);
   assert.deepEqual(sel.narrow, ["test/x.test.ts"]);
 });

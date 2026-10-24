@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -16,3 +17,13 @@
       proof: "grep: test/github/preflight-phase-integration\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/github/preflight-phase-integration.test.ts for each recorded edge"
       proof: "grep: test/github/preflight-phase-integration\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed scope is a selector-edge repair in two existing files, with regression coverage requested for each recorded edge."
+      - "The note identifies a specific coverage run, PR, commit and missed suite; the supplied family record reports 18 merged tasks and zero declined."
+      - "The supplied record requests no sensitive access, deletion, irreversible action, policy change or operator-only decision. This filing-time assessment does not verify implementation."
+    judged_at: "2026-10-23T17:25:47.333Z"
+    pin: "c77fff95e5375e797d55b874c17252b4021cf585ef1ae583275ddb58b3763d1d"

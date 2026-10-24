@@ -1438,6 +1438,42 @@ else
   CRASH_LOOP_VERDICT=ok
 fi
 
+# The session reaper's last pass (deploy/rmd-session-reaper.sh), from its log and its unit. REFUSED,
+# INCOMPLETE (no summary line, and not running, or already running at the previous beat) and FAILED
+# alarm in fleet-heartbeat-watch.yml; a host with neither log nor pass reads unknown, silently.
+REAPER_LOG="${RMD_SESSION_REAPER_LOG:-${HOME}/session-reaper.log}"
+REAPER_SYSTEMCTL="${RMD_HEARTBEAT_SYSTEMCTL:-systemctl}"
+REAPER_VERDICT=unknown
+reaper_pass="$(tail -c 1048576 "$REAPER_LOG" 2>/dev/null | grep -E '^(rmd-session-reaper: (pass|sessions) |REFUSE )' |
+  awk '/^rmd-session-reaper: pass / { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }')"
+reaper_unit=""
+if command -v "$REAPER_SYSTEMCTL" >/dev/null 2>&1; then
+  reaper_unit="$("$REAPER_SYSTEMCTL" show rmd-session-reaper.service -p ActiveState -p Result 2>/dev/null </dev/null)"
+fi
+reaper_active="$(printf '%s\n' "$reaper_unit" | sed -n 's/^ActiveState=//p')"
+reaper_result="$(printf '%s\n' "$reaper_unit" | sed -n 's/^Result=//p')"
+reaper_refuse="$(printf '%s' "$reaper_pass" | grep -m 1 '^REFUSE ' | cut -c1-300)"
+reaper_summary="$(printf '%s' "$reaper_pass" | grep '^rmd-session-reaper: sessions ' | tail -n 1 | cut -c1-300)"
+reaper_started="$(printf '%s' "$reaper_pass" | sed -n 's/^rmd-session-reaper: pass \([^ ]*\) .*/\1/p' | head -n 1)"
+if [ -n "$reaper_refuse" ]; then
+  REAPER_VERDICT="REFUSED — ${reaper_refuse}"
+elif [ -n "$reaper_started" ] && [ -z "$reaper_summary" ]; then
+  reaper_started_epoch="$(epoch_of "$reaper_started")"
+  case "$reaper_active" in
+    active|activating)
+      if [ -n "$PREV_EPOCH" ] && [ -n "$reaper_started_epoch" ] && [ "$reaper_started_epoch" -le "$PREV_EPOCH" ]; then
+        REAPER_VERDICT="INCOMPLETE — the pass started ${reaper_started} was already running at the previous beat"
+      else
+        REAPER_VERDICT="running — a pass started ${reaper_started}"
+      fi ;;
+    *) REAPER_VERDICT="INCOMPLETE — the pass started ${reaper_started} ended before its summary line" ;;
+  esac
+elif [ -n "$reaper_result" ] && [ "$reaper_result" != success ]; then
+  REAPER_VERDICT="FAILED — rmd-session-reaper.service result=${reaper_result}"
+elif [ -n "$reaper_summary" ]; then
+  REAPER_VERDICT="ok — ${reaper_summary#rmd-session-reaper: }"
+fi
+
 # ── the payload ───────────────────────────────────────────────────────────────────────────────
 # `key=value`, one per line: greppable, phone-readable, and parseable by the watcher with no jq.
 PAYLOAD="$(cat <<EOF
@@ -1513,7 +1549,8 @@ escalation_spool_pending=${SPOOL_PENDING}
 escalation_spool_drain_ts=${SPOOL_DRAIN_TS:-none}${SPOOL_LINES}"
 
 PAYLOAD="${PAYLOAD}
-crash_loop_verdict=${CRASH_LOOP_VERDICT}"
+crash_loop_verdict=${CRASH_LOOP_VERDICT}
+session_reaper_verdict=${REAPER_VERDICT}"
 
 # Same absent-never-zero shape as RESTART_COUNT/IMAGE_BUILD_SHA below: `supervisor_source` (in the
 # heredoc above) is always present as the diagnosis, and `supervisor_last_age_s` is appended ONLY

@@ -225,3 +225,69 @@ test("W1-T5002: the standalone timer keeps one asynchronous read in flight and r
     assert.deepEqual(rows, ["host_resource.failed"]);
   } finally { handle.stop(); }
 });
+
+
+async function withHeartbeatFetchFault(
+  readerDir: string,
+  mode: "once" | "persistent" | "other-ref" | "invalid-fetch",
+  run: (count: () => number) => Promise<void>,
+): Promise<void> {
+  const nativeGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  const bin = join(readerDir, "heartbeat-fetch-fault-bin");
+  const countPath = join(readerDir, "heartbeat-fetch-count");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "git"), `#!${process.execPath}\n` + [
+    'const {spawnSync}=require("node:child_process");const{existsSync,readFileSync,writeFileSync}=require("node:fs");',
+    `const git=${JSON.stringify(nativeGit)};const mode=${JSON.stringify(mode)};const countPath=${JSON.stringify(countPath)};`,
+    'const args=process.argv.slice(2);let result;',
+    'if(args[2]==="fetch"){',
+    'const count=existsSync(countPath)?Number(readFileSync(countPath,"utf8"))+1:1;writeFileSync(countPath,String(count));',
+    'if(mode==="invalid-fetch"){result=spawnSync(git,[...args,"--rmd-invalid"],{encoding:"utf8"});}else{',
+    'result=spawnSync(git,args,{encoding:"utf8"});',
+    'if(result.status===0 && (mode!=="once" || count===1)){',
+    'const prefix=["-C",args[1]];const read=ref=>spawnSync(git,[...prefix,"rev-parse",ref],{encoding:"utf8"}).stdout.trim();',
+    'const current=read("refs/remotes/origin/heartbeat-azure");const wrong=read("refs/remotes/origin/heartbeat-mini-west");',
+    'const ref=mode==="other-ref"?"refs/remotes/origin/unrelated":"refs/remotes/origin/heartbeat-azure";',
+    'if(mode==="other-ref")spawnSync(git,[...prefix,"update-ref",ref,current],{encoding:"utf8"});',
+    // This is an actual native compare-and-swap refusal, not hand-written error text.
+    'result=spawnSync(git,[...prefix,"update-ref",ref,current,wrong],{encoding:"utf8"});',
+    '}}}else result=spawnSync(git,args,{encoding:"utf8"});',
+    'process.stdout.write(result.stdout??"");process.stderr.write(result.stderr??"");process.exit(result.status??1);',
+  ].join("\n") + "\n", { mode: 0o700 });
+  const previous = process.env.PATH;
+  process.env.PATH = `${bin}:${previous ?? ""}`;
+  try { await run(() => Number(readFileSync(countPath, "utf8"))); }
+  finally {
+    if (previous === undefined) delete process.env.PATH;
+    else process.env.PATH = previous;
+  }
+}
+
+test("a heartbeat ref compare-and-swap refusal gets one fresh fetch before sampling", async () => {
+  const { reader } = fixtures();
+  await withHeartbeatFetchFault(reader.dir, "once", async count => {
+    const beats = await gitHeartbeatSource(reader.dir)();
+    assert.equal(count(), 2);
+    assert.deepEqual(beats.map(beat => beat.host), ["azure", "mini-west"]);
+  });
+});
+
+test("a repeated native heartbeat ref race still refuses the entire sample population", async () => {
+  const { reader } = fixtures();
+  const stateDir = join(reader.dir, "state");
+  await withHeartbeatFetchFault(reader.dir, "persistent", async count => {
+    await assert.rejects(runHostResourcePassAsync(ports(stateDir, gitHeartbeatSource(reader.dir))), /cannot lock ref.*heartbeat-azure.*is at.*but expected/);
+    assert.equal(count(), 2);
+    assert.equal(existsSync(samplesPath(stateDir)), false);
+  });
+});
+
+for (const mode of ["other-ref", "invalid-fetch"] as const) {
+  test(`a ${mode} native failure does not get the heartbeat-ref recovery`, async () => {
+    const { reader } = fixtures();
+    await withHeartbeatFetchFault(reader.dir, mode, async count => {
+      await assert.rejects(gitHeartbeatSource(reader.dir)(), /fetching heartbeat branches failed:/);
+      assert.equal(count(), 1);
+    });
+  });
+}

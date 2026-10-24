@@ -17,6 +17,10 @@ Invariants (JANITOR.md "Preserve-then-retire"):
 - Housekeeping changes no history: a repository with too many packs is repacked keeping every
   object, and outside any checkout idle dumps are compressed (deleted after dump_retain_days) and
   idle regenerable build folders are removed.
+- Temp roots (`temp_roots`, matched under /private/tmp) count only when owned by this account, and
+  a clone or bare repository there is deleted only when other accounts cannot enter its root. The
+  borrower census always walks the temp folders as well as the home.
+- Codex session logs idle for `codex_session_days` (0 = never) and not open are deleted.
 Usage: preserve-retire.py --home DIR [--apply] [--config PATH]
 """
 import argparse, glob, gzip, json, os, re, shlex, shutil, stat, subprocess, sys, tarfile, tempfile, time
@@ -26,9 +30,12 @@ STAMP_REL = ".local/state/remudero/preserve-retire.last"
 MIN_IDLE_HOURS = 6
 DEFAULTS = {"enabled": False, "idle_hours": 24, "retain_days": 7, "interval_hours": 6,
             "preserve_root": "Remudero-preserved", "max_untracked_mb": 50, "census_seconds": 180,
-            "repack_min_packs": 50, "repack_seconds": 1800, "dump_min_mb": 5, "dump_retain_days": 14,
+            "repack_min_packs": 50, "repack_seconds": 1800, "dump_min_mb": 5, "dump_retain_days": 7,
+            "codex_session_days": 0,
             "roots": ["Remudero", "rmd-work", ".codex/work-artifacts", "Developer/remudero-operator-worktrees",
-                      "Developer/remudero-operator-recovered-worktrees-*", "Downloads/remudero-*"],
+                      "Developer/remudero-operator-recovered-worktrees-*", "Downloads/remudero-*",
+                      ".local/share/remudero/source-recovery"],
+            "temp_roots": [],
             "published_remotes": ["https://github.com/craigoley/", "git@github.com:craigoley/",
                                   "ssh://git@github.com/craigoley/"]}
 # Regenerable trees that are neither preserved nor counted as data.
@@ -36,7 +43,11 @@ SKIP_DIRS = ("node_modules", "coverage", "dist", ".turbo", ".next")
 # Outside a checkout these are removed once idle; `dist` may be a deliverable, so it stays.
 BUILD_DIRS = ("node_modules", "coverage", ".turbo", ".next")
 DUMP_SUFFIXES = (".json", ".jsonl", ".ndjson", ".log", ".lcov", ".info")
+# An application or framework bundle is an installed program, never a pile of dumps.
+BUNDLE_SUFFIXES = (".app", ".framework", ".xcframework", ".bundle")
 CENSUS_PRUNE = {"Library", ".Trash", "Music", "Movies", "Pictures", "node_modules"}
+TEMP_BASE = "/private/tmp"
+CODEX_SESSION_DIRS = (".codex/sessions", ".codex/archived_sessions")
 MIN_FREE_BYTES = 1 << 30
 MAIN_HISTORY = 20000
 
@@ -88,7 +99,7 @@ def private_file(path, uid, home):
         parent = os.path.dirname(parent)
 
 
-def load_config(home, path):
+def load_config(home, path, temp_base=TEMP_BASE):
     ok = private_file(os.path.abspath(path), os.getuid(), home)
     if ok is None:
         return None, "disabled (no config)"
@@ -102,15 +113,18 @@ def load_config(home, path):
         return None, "refused: config has unknown keys"
     cfg = dict(DEFAULTS, **raw)
     ints = ("idle_hours", "retain_days", "interval_hours", "max_untracked_mb", "census_seconds",
-            "repack_min_packs", "repack_seconds", "dump_min_mb", "dump_retain_days")
+            "repack_min_packs", "repack_seconds", "dump_min_mb", "dump_retain_days", "codex_session_days")
     if any(type(cfg[k]) is not int or cfg[k] < 0 for k in ints) or cfg["idle_hours"] < MIN_IDLE_HOURS:
         return None, f"refused: numeric settings must be whole numbers, idle_hours >= {MIN_IDLE_HOURS}"
     if cfg["enabled"] is not True:
         return None, "disabled (config enabled=false)"
     cfg["preserve_root"] = os.path.join(home, cfg["preserve_root"])
-    if any(type(r) is not str or os.path.isabs(r) or ".." in r.split("/") for r in cfg["roots"]):
-        return None, "refused: roots must be relative to the home"
-    cfg["roots"] = expand_roots(home, cfg["roots"])
+    cfg["home"] = home
+    if any(type(r) is not str or os.path.isabs(r) or ".." in r.split("/") for r in cfg["roots"] + cfg["temp_roots"]):
+        return None, "refused: roots must be relative to the home, temp_roots to the temp folder"
+    cfg["temp_roots"] = owned_temp_roots(temp_base, cfg["temp_roots"])
+    cfg["temp_base"] = temp_base
+    cfg["roots"] = expand_roots(home, cfg["roots"]) + cfg["temp_roots"]
     for root in cfg["roots"]:
         if cfg["preserve_root"] == root or cfg["preserve_root"].startswith(root + "/") or root.startswith(cfg["preserve_root"] + "/"):
             return None, "refused: preserve_root overlaps a scan root"
@@ -124,6 +138,25 @@ def expand_roots(home, roots):
         p = os.path.join(home, r)
         out += sorted(m for m in glob.glob(p) if os.path.isdir(m) and not os.path.islink(m)) if "*" in r else [p]
     return out
+
+
+def owned_temp_roots(base, patterns):
+    """Folders in the shared temp folder that match a pattern and that this account owns outright;
+    a symlink or a folder another account made is never a root."""
+    uid, out = os.getuid(), []
+    for m in expand_roots(base, patterns):
+        try:
+            st = os.lstat(m)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISDIR(st.st_mode) and st.st_uid == uid and os.path.realpath(m) == m:
+            out.append(m)
+    return out
+
+
+def shared_temp(path, cfg):
+    """True when `path` is inside a temp root that other accounts can enter."""
+    return any((path + "/").startswith(r + "/") and os.lstat(r).st_mode & 0o011 for r in cfg.get("temp_roots", []))
 
 
 def protected_paths(home, cfg):
@@ -281,12 +314,12 @@ def home_private(home):
     return True
 
 
-def borrower_census(home, seconds):
-    """Map lender git dir -> borrower git dirs for every alternates file in this home.
-    Returns None when the walk did not finish within its budget."""
+def borrower_census(home, seconds, extra=()):
+    """Map lender git dir -> borrower git dirs for every alternates file in this home and in
+    `extra` folders. Returns None when the walk did not finish within its budget."""
     deadline = time.monotonic() + seconds
     borrowers = {}
-    for dirpath, dirs, files in os.walk(home):
+    for dirpath, dirs, files in (w for top in (home, *extra) for w in os.walk(top)):
         if time.monotonic() > deadline:
             return None
         dirs[:] = [d for d in dirs if d not in CENSUS_PRUNE and not os.path.islink(os.path.join(dirpath, d))]
@@ -392,6 +425,12 @@ class Published:
         return list(dict.fromkeys(shas))
 
 
+def git_reason(out):
+    """Git's last stderr line, so a hold says why without a rerun."""
+    lines = out.stderr.decode(errors="replace").strip().split("\n")
+    return lines[-1][:120] or f"exit {out.returncode}"
+
+
 def save_tar(path, members, dest):
     with tarfile.open(dest, "w:gz") as t:
         for rel in members:
@@ -401,7 +440,8 @@ def save_tar(path, members, dest):
 def preserve(repo, published, cfg, home, now):
     """Write a verified copy of everything retirement would lose. Returns (dir, summary) or raises Hold."""
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
-    name = os.path.relpath(repo.path, home).replace("/", "__") + "@" + stamp
+    rel = os.path.relpath(repo.path, home) if repo.path.startswith(home + "/") else "tmp/" + os.path.relpath(repo.path, cfg["temp_base"])
+    name = rel.replace("/", "__") + "@" + stamp
     final = os.path.join(cfg["preserve_root"], name)
     work = tempfile.mkdtemp(prefix=".incoming-", dir=cfg["preserve_root"])
     summary = {"path": repo.path, "kind": repo.kind, "preserved_at": now}
@@ -435,8 +475,9 @@ def preserve(repo, published, cfg, home, now):
         summary["published_base"] = excl
         if summary["unpublished_commits"]:
             bundle = os.path.join(work, "unpublished.bundle")
-            if repo.git("bundle", "create", bundle, *revs).returncode != 0:
-                raise Hold("bundle-create-failed")
+            made = repo.git("bundle", "create", bundle, *revs)
+            if made.returncode != 0:
+                raise Hold(f"bundle-create-failed ({git_reason(made)})")
             checks = [repo.git("bundle", "verify", bundle)] + [
                 run(["git", "--git-dir", b, "bundle", "verify", bundle]) for b in published.bases]
             if not any(c.returncode == 0 for c in checks):
@@ -581,7 +622,7 @@ def loose_folders(cfg, protected):
                     "HEAD" in files and "objects" in dirs and "refs" in dirs):
                 dirs[:] = []
                 continue
-            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(dirpath, d))]
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(dirpath, d)) and not d.endswith(BUNDLE_SUFFIXES)]
             yield dirpath, dirs, files
 
 
@@ -609,7 +650,8 @@ def compress(path):
 
 def housekeeping(cfg, protected, repos, snap, now, apply):
     """Repack, compress, expire and clear what retirement never reaches. Returns counts."""
-    counts = {"repacked": 0, "compressed": 0, "dumps-expired": 0, "build-dirs-removed": 0}
+    counts = {"repacked": 0, "compressed": 0, "dumps-expired": 0, "build-dirs-removed": 0,
+              "codex-sessions-removed": 0}
     planned = {"REPACKED": "WOULD-REPACK", "REMOVED": "WOULD-REMOVE", "EXPIRED": "WOULD-EXPIRE",
                "COMPRESSED": "WOULD-COMPRESS"}
     verb = (lambda done: done) if apply else planned.get
@@ -651,7 +693,8 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
                     continue
             counts["build-dirs-removed"] += 1
             say(verb("REMOVED"), "build-dir", p)
-        for name in files:
+        # A package root is a project, whose small JSON and logs are its files, not dumps.
+        for name in [] if "package.json" in files else files:
             p = os.path.join(dirpath, name)
             plain = name.endswith(DUMP_SUFFIXES)
             if not (plain or (name.endswith(".gz") and name[:-3].endswith(DUMP_SUFFIXES))):
@@ -661,7 +704,8 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
             except OSError:
                 continue
             last = max(st.st_mtime, st.st_ctime)
-            if not stat.S_ISREG(st.st_mode) or in_use(p, snap):
+            # Only a large plain file or one already compressed is a dump; a small config or log is not.
+            if not stat.S_ISREG(st.st_mode) or (plain and st.st_size < cfg["dump_min_mb"] << 20) or in_use(p, snap):
                 continue
             # Compression keeps the original modification time, so the age survives it.
             if st.st_mtime < expiry and last < cutoff:
@@ -669,7 +713,7 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
                     os.remove(p)
                 counts["dumps-expired"] += 1
                 say(verb("EXPIRED"), f"dump unchanged {cfg['dump_retain_days']}d+", p)
-            elif plain and last < cutoff and st.st_size >= cfg["dump_min_mb"] << 20 and not os.path.exists(p + ".gz"):
+            elif plain and last < cutoff and not os.path.exists(p + ".gz"):
                 if apply:
                     try:
                         compress(p)
@@ -678,7 +722,30 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
                         continue
                 counts["compressed"] += 1
                 say(verb("COMPRESSED"), f"{st.st_size >> 20}MB", p)
+    days = cfg["codex_session_days"]
+    for p in codex_sessions(cfg["home"]) if days else []:
+        st = os.lstat(p)
+        if max(st.st_mtime, st.st_ctime) >= now - days * 86400 or in_use(p, snap):
+            continue
+        if apply:
+            os.remove(p)
+        counts["codex-sessions-removed"] += 1
+        say(verb("REMOVED"), f"codex session idle {days}d+", p)
     return counts
+
+
+def codex_sessions(home):
+    """Regular Codex session logs (rollout-*.jsonl, plain or compressed) in this account's Codex folder."""
+    for rel in CODEX_SESSION_DIRS:
+        top = os.path.join(home, rel)
+        if not os.path.isdir(top) or os.path.islink(top):
+            continue
+        for dirpath, dirs, files in os.walk(top):
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(dirpath, d))]
+            for name in sorted(files):
+                p = os.path.join(dirpath, name)
+                if re.fullmatch(r"rollout-.*\.jsonl(\.zst|\.gz)?", name) and stat.S_ISREG(os.lstat(p).st_mode):
+                    yield p
 
 
 def main():
@@ -687,9 +754,10 @@ def main():
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--config")
     ap.add_argument("--now", type=int, help=argparse.SUPPRESS)  # fixtures only: shifts the clock forward
+    ap.add_argument("--temp-base", default=TEMP_BASE, help=argparse.SUPPRESS)  # fixtures only
     a = ap.parse_args()
     home = os.path.realpath(a.home)
-    cfg, why = load_config(home, a.config or os.path.join(home, CONFIG_REL))
+    cfg, why = load_config(home, a.config or os.path.join(home, CONFIG_REL), a.temp_base)
     if cfg is None:
         say(why)
         return 2 if why.startswith("refused") else 0
@@ -710,6 +778,8 @@ def main():
             keep[r.path] = r.hold
         elif os.lstat(r.path).st_uid != os.getuid():
             keep[r.path] = "foreign-owner"
+        elif r.kind != "worktree" and shared_temp(r.path, cfg):
+            keep[r.path] = "shared-temp-root (other accounts may borrow its objects)"
         elif snap is None:
             keep[r.path] = "process-visibility-unknown"
         else:
@@ -723,7 +793,9 @@ def main():
             if why:
                 keep[r.path] = why
     lenders_ok = home_private(home)
-    borrowers = borrower_census(home, cfg["census_seconds"]) if lenders_ok else {}
+    # A clone in a temp folder may borrow from a home checkout whether or not temp roots are scanned.
+    census_extra = sorted({cfg["temp_base"], os.path.realpath(tempfile.gettempdir())})
+    borrowers = borrower_census(home, cfg["census_seconds"], census_extra) if lenders_ok else {}
     if borrowers is None:
         lenders_ok, borrowers = False, {}
     keep_closure(repos, keep, borrowers, lenders_ok)

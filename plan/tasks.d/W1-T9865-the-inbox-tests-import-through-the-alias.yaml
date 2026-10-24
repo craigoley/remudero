@@ -69,7 +69,7 @@
     - claim: 'a plan test imports src through the alias'
       proof: 'grep: from "#src/lib/plan\.js" in test/a-blocked-task-with-no-disposition-is-reported.test.ts'
     - claim: 'the location-relative count falls at this batch, measured by W1-T9864''s guard'
-      proof: 'grep: test("W1-T9864: location-relative test files never rise above the merge base" in test/a-test-imports-through-the-subpath-alias.test.ts'
+      proof: 'unit test: W1-T9864: location-relative test files never rise above the merge base'
       kind: guard
   falsifier: |
     On origin/main each representative above imports `../src/lib/<module>.js`, so each `#src` grep misses.

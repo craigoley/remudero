@@ -253,21 +253,19 @@ test("W1-T3368: a CHECK that throws is survivable too — an unreadable corpus n
   assert.deepEqual(rows.map((r) => r.step), ["ledger_compaction.check_failed"]);
 });
 
-test("W1-T3368: an over-bound corpus defers the retro but not the daemon's ordinary work", async () => {
+test("W1-T3368: an over-bound corpus no longer borrows the compaction bound as the retro's pressure signal (W1-T9119)", async () => {
   let retroRuns = 0;
   const rows = await daemonRows({
-    // This is the critical interval state after the first 50-source pass: still unsafe to
-    // materialize, but not permitted to compact again yet.
+    // Still unsafe to materialize by the RUNG's count, but the retro now defers only on its own projected read cost.
     checkLedgerCompaction: () => ({ fire: false, overBound: true, reason: "835 archives over bound 400 but throttled" }),
     checkRetroTrigger: () => ({ fire: true, reason: "merges", mergesSinceMarker: 25, daysSinceMarker: 0 }),
     runRetroTrigger: async () => {
       retroRuns += 1;
     },
   }, true);
-  assert.equal(retroRuns, 0, "the full-union retro must not start while the corpus is still unsafe");
-  const deferred = rows.find((row) => row.step === "daemon.retro_trigger.deferred_ledger_pressure");
-  assert.equal(deferred?.extra?.reason, "835 archives over bound 400 but throttled");
-  assert.equal(rows.some((row) => row.step === "retro_triggered"), false, "a deferral must not forge a fire receipt");
+  assert.equal(rows.some((row) => row.step === "daemon.retro_trigger.deferred_ledger_pressure"), false);
+  assert.equal(rows.some((row) => row.step === "retro_triggered"), true, "the check ran and its fire is receipted");
+  assert.ok(retroRuns <= 1);
 });
 
 test("W1-T3368: the rung is OPTIONAL, so a host that never wires it behaves exactly as before", async () => {
