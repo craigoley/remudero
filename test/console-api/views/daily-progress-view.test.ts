@@ -93,3 +93,25 @@ test("daily progress served scope preserves partial evidence and rejects foreign
     } finally { db.close(); }
   });
 });
+
+test("daily source freshness does not move forward just because another retry is scheduled", async () => {
+  await withTempDir("daily-source-age", async stateDir => {
+    createRepositoriesSourcePublisher({ stateDir, instances: () => [{ instanceId: "core", options: { root: stateDir, instanceRepository: { owner: "acme", repo: "a" } } }] })();
+    const db = openReadModel({ stateDir, instance: "proof", schemaVersion: 1 });
+    try {
+      const lease = acquireLease(db); assert.ok(lease.ok); if (!lease.ok) return;
+      const saved = record("acme/a", 1, "2026-11-02T05:55:00.000Z"); saved.phase = "finalizing";
+      saved.totals.mergedChanges.precision = saved.totals.completedTasks.precision = "at_least";
+      const source = saved.coverage.sources[0]!;
+      Object.assign(source, { state: "partial", lastAttemptAt: "2026-11-02T04:50:00.000Z", lastSuccessAt: "2026-11-02T04:50:00.000Z",
+        coverageThrough: "2026-11-02T04:50:00.000Z", nextDueAt: "2026-11-02T07:00:00.000Z", reason: "The saved source does not cover the report cutoff." });
+      prepareDailyProgressPublication(stateDir, [saved], []).commit(db, lease.lease);
+      const read = () => readDailyProgressReport({ stateDir, params: new URLSearchParams({ repository: "acme/a", date: "2026-11-01" }), now: Date.parse("2026-11-02T06:00:00Z") });
+      assert.equal(read().sources[0]!.state, "stale", "a future retry cannot extend an old successful reading's freshness");
+      assert.deepEqual(read().data.totals.mergedChanges, { value: 1, precision: "at_least" }, "the last good evidence stays visible");
+      Object.assign(source, { lastAttemptAt: "2026-11-02T05:45:00.000Z", lastSuccessAt: "2026-11-02T05:45:00.000Z", coverageThrough: saved.windowEnd });
+      prepareDailyProgressPublication(stateDir, [saved], []).commit(db, lease.lease);
+      assert.equal(read().sources[0]!.state, "fresh", "a genuinely newer source receipt is the positive control");
+    } finally { db.close(); }
+  });
+});
