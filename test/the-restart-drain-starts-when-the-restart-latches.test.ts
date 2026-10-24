@@ -44,7 +44,7 @@ interface Row { step: string; extra: Record<string, unknown> }
 
 /** One lane (task A) runs; a dispatch tick at `latch()` latches the restart; `settle()` ends the lane, and the
  *  daemon exits for freshness. `drainClock` flips the wake seam to an immediate wake once the lane has settled. */
-function latchedLane(t: TestContext, ledger: readonly string[] | ((exiting: boolean) => readonly string[]) = []) {
+function latchedLane(t: TestContext, ledger: readonly string[] | ((exiting: boolean) => readonly string[]) = [], readReviewMedianMs?: DaemonDeps["readReviewMedianMs"]) {
   assert.equal(inFlightReviewCount(), 0, "precondition: no review leaked from another test");
   assert.equal(detachedSweepActionCount(), 0, "precondition: no detached action leaked from another test");
   const dir = mkdtempSync(join(tmpdir(), "rmd-t8172-"));
@@ -65,6 +65,7 @@ function latchedLane(t: TestContext, ledger: readonly string[] | ((exiting: bool
   const daemon = runDaemon(loadPlan(planPath), {
     now: () => new Date(nowMs),
     readLedgerLines: () => typeof ledger === "function" ? ledger(exiting) : ledger,
+    readReviewMedianMs,
     refreshMerged: () => (id) => id === "A" && exiting,
     checkFreshness: () => stale ? material : { stale: false },
     log: (step, extra = {}) => rows.push({ step, extra }),
@@ -187,10 +188,10 @@ test("W1-T8172: the drain bound runs from the latch", async (t) => {
 
 /** A detached fix held from before the latch keeps the drain's clock running; the exit is at 5 min, so the drain's
  *  bound, counted from the latch at 1 min, leaves 6 min. */
-async function drainClockRun(t: TestContext, ledger: Parameters<typeof latchedLane>[1]) {
+async function drainClockRun(t: TestContext, ledger: Parameters<typeof latchedLane>[1], readReviewMedianMs?: DaemonDeps["readReviewMedianMs"]) {
   let releaseFix!: () => void;
   const fix = new Promise<void>((resolve) => { releaseFix = resolve; });
-  const h = latchedLane(t, ledger);
+  const h = latchedLane(t, ledger, readReviewMedianMs);
   detachSweepAction(fix, { actionKind: "fix-dispatch", taskId: "W1-T8172-FIX" });
   try {
     await h.latch(1);
@@ -243,4 +244,39 @@ test("W1-T8172: the review length pairs each start with its own PR's post", () =
     JSON.stringify({ ts: ts(10), step: "review.posted", pr_url: "https://github.com/acme/remudero/pull/3" }),
   ]), (2 * minute + 9 * minute) / 2);
   assert.equal(daemonModule.medianReviewRunMs([]), undefined);
+});
+
+
+test("the freshness drain keeps observed review timing when rotation removes live ledger pairs", async (t) => {
+  const memo = await import("#src/lib/sweep.js");
+  memo.resetIdleReviewMemo(); t.after(() => memo.resetIdleReviewMemo());
+  for (const invalid of [NaN, Infinity, -1, 0]) memo.noteReviewDuration(invalid);
+  assert.equal(memo.readObservedReviewMedianMs(), undefined);
+  memo.noteReviewDuration(8 * minute);
+  assert.equal(memo.readIdleLightCadence(Date.now()), undefined, "zero eligible demand does not erase timing evidence");
+  const long = await drainClockRun(t, [], memo.readObservedReviewMedianMs);
+  assert.equal(long.completed.review_length_source, "measured_memo");
+  assert.equal(long.completed.review_length_ms, 8 * minute);
+  assert.deepEqual(long.drainPasses, []);
+  assert.ok(Number(long.completed.review_passes_held) >= 1);
+  memo.resetIdleReviewMemo(); memo.noteReviewDuration(3 * minute);
+  const short = await drainClockRun(t, [], memo.readObservedReviewMedianMs);
+  assert.equal(short.completed.review_length_ms, 3 * minute);
+  assert.ok(short.drainPasses.length >= 1);
+  const paired = await drainClockRun(t, reviewHistory(8 * minute), () => assert.fail("paired live evidence takes precedence"));
+  assert.equal(paired.completed.review_length_source, "measured");
+  assert.equal(paired.completed.review_length_ms, 8 * minute);
+  memo.resetIdleReviewMemo();
+  for (let i = 0; i < 64; i++) memo.noteReviewDuration(8 * minute);
+  for (let i = 0; i < 33; i++) memo.noteReviewDuration(3 * minute);
+  assert.equal(memo.readObservedReviewMedianMs(), 3 * minute, "the existing 64-sample window remains bounded");
+});
+
+test("invalid review memo evidence preserves the drain's existing no-history policy", async (t) => {
+  for (const value of [undefined, NaN, Infinity, -1, 0]) {
+    const run = await drainClockRun(t, [], () => value);
+    assert.equal(run.completed.review_length_source, "no_history");
+    assert.equal(run.completed.review_length_ms, null);
+    assert.ok(run.drainPasses.length >= 1);
+  }
 });

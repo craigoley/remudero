@@ -52,6 +52,7 @@ import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-
 import {
   nextRunnable,
   runnableCandidates,
+  passedOverStateKey,
   laneDispatchBudget,
   wipDeferredAdmissionFields,
   type QueueAdmissionReading,
@@ -512,6 +513,28 @@ export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[stri
 /** W1-T5720 — BACKSTOP: the longest tick 1's cadences and the garden fan-out wait, from boot, for the
  *  first full pass. That pass's own 559 s bound normally opens the gate first, so this fires never. */
 export const BOOT_CADENCE_GATE_BOUND_MS = 10 * 60_000;
+
+/** W1-T9119: the decompressed bytes the retro check's ledger read would open, and the rotations behind the figure. */
+export interface RetroReadProjection { projectedBytes: number; rotations: number; undigested: number; unreadable?: string[] }
+
+/** W1-T9119: the reads a `checkRetroTrigger` may carry as properties (see buildRetroDaemonHooks); `deps` fields win. */
+export interface RetroCheckCompanions {
+  projectRetroReadCost?: () => Promise<RetroReadProjection>;
+  readRetroHistory?: () => Promise<{ retroTriggeredAtMs: number[]; fallbackIntervalMs: number }>;
+}
+
+/** W1-T9119: the retro's recent `retro_triggered` gaps considered when learning its expected interval. */
+const RETRO_INTERVAL_SAMPLE = 8;
+
+/** W1-T9119: one run of consecutive retro deferrals of one reason class. */
+interface RetroDeferralEpisode {
+  reasonClass: string;
+  firstAtMs: number;
+  lastAtMs: number;
+  observations: number;
+  gapsMs: number[];
+  named: boolean;
+}
 
 /** W1-T5720: the tick-1 rungs the boot gate holds, by their deps key, each ledgered when deferred. */
 const BOOT_GATED_CADENCES = [
@@ -1705,6 +1728,12 @@ export interface DaemonDeps {
    * crosses first (policy data). An undefined return means there is nothing safe to evaluate — a corrupt marker, a
    * degraded read — and the loop only acts on an explicit fire. Optional (W1-T160). */
   checkRetroTrigger?: () => RetroTriggerDecision | undefined | Promise<RetroTriggerDecision | undefined>;
+  /** W1-T9119: what the retro check's own ledger read would decompress right now (the rotations it holds no digest
+   *  for). The retro defers only when this exceeds the heap's measured headroom; absent, nothing gates the check. */
+  projectRetroReadCost?: RetroCheckCompanions["projectRetroReadCost"];
+  /** W1-T9119: the `retro_triggered` times (ms, ascending) and the policy's own cadence in ms, from which a
+   *  persisting deferral learns the retro's expected interval. Absent, no episode is named. */
+  readRetroHistory?: RetroCheckCompanions["readRetroHistory"];
   /** Run the automated retro once the trigger fires. The real wiring threads the fired decision's
    *  merge count into the retro command, so the integrity gate can compare it against the real
    *  gather's credited count and abort loudly on a mismatch. Best-effort (W1-T160). */
@@ -1741,6 +1770,8 @@ export interface DaemonDeps {
    *  `eligible <= 0` is no demand: the idle branch sleeps as it always has. A `cadenceMs` that is
    *  `undefined` (nothing observed yet) leaves the idle sleep a single poll interval. */
   readIdleReviewDemand?: () => { eligible: number; cadenceMs?: number; medianReviewMs?: number; pushesPerPrHour?: number } | undefined;
+  /** Existing bounded completed-review memo, independent of current eligible demand. */
+  readReviewMedianMs?: () => number | undefined;
   /** Called exactly once, when a block classifies as a genuine blocker — one or more tasks
    *  transitively depend on the blocked task. The real command escalates naming the dependents.
    *  Optional: omitted, a genuine blocker still halts the loop, it just opens no issue (W1-T46). */
@@ -3934,6 +3965,18 @@ export async function runDaemon(
   const logPriorityRelease = (r: PriorityReservationRelease): void => {
     log("dispatch.priority_reservation_released", { task: r.task.id, waiting_task: r.waiting.id, reason: r.reason });
   };
+  const passedOverStates = new Map<string, string>();
+  const observePassedOver = (site: "tick" | "lane-refill"): NonNullable<NextRunnableOpts["onPassedOver"]> => (task, detail) => {
+    const key = passedOverStateKey(detail);
+    if (passedOverStates.get(task.id) === key) return;
+    log("dispatch.passed_over", { task: task.id, priority: task.priority ?? null, site,
+      passed_for: detail.passedFor, holders: detail.holders });
+    passedOverStates.set(task.id, key);
+  };
+  const forgetPassedOver = (current: Plan, collected: readonly Task[] = []): void => {
+    for (const task of collected) passedOverStates.delete(task.id);
+    for (const id of passedOverStates.keys()) if (!current.byId.has(id)) passedOverStates.delete(id);
+  };
   // W1-T8235: the gap since the previous process's last idle record is charged to `restart` (this process's first
   // sample ends it), at the idle slots that record left.
   idleLaneAccount = chargeRestartGap(idleLaneAccount, lastIdleLaneRecord(bootLedgerLines));
@@ -4468,14 +4511,17 @@ export async function runDaemon(
       detached_sweep_actions: detached, in_flight_reviews: reviews.size, waited_on: observation.snapshot() });
   };
   // W1-T8172 design 2: the drain's clock admits a pass only while the time left exceeds the measured review length.
-  const measuredReviewLength = (): { ms?: number; fixMs?: number; source: "measured" | "no_history" | "unreadable" } => {
+  const measuredReviewLength = (): { ms?: number; fixMs?: number; source: "measured" | "measured_memo" | "no_history" | "unreadable" } => {
     try {
       const lines = deps.readLedgerLines?.() ?? [];
       const ms = medianReviewRunMs(lines);
       const fixMs = medianFixRoundMs(lines);
-      return ms === undefined ? { fixMs, source: "no_history" } : { ms, fixMs, source: "measured" };
+      if (ms !== undefined) return { ms, fixMs, source: "measured" };
+      const memoMs = deps.readReviewMedianMs?.();
+      return typeof memoMs === "number" && Number.isFinite(memoMs) && memoMs > 0
+        ? { ms: memoMs, fixMs, source: "measured_memo" } : { fixMs, source: "no_history" };
     } catch (error) {
-      // An unreadable ledger is no history: the clock admits as before W1-T8172, and the completion row says why.
+      // An unreadable timing input is no history: the clock admits as before W1-T8172, and the completion row says why.
       return { source: "unreadable" };
     }
   };
@@ -4900,6 +4946,7 @@ export async function runDaemon(
       const fresh = await deps.reloadPlan();
       if (fresh) {
         plan = fresh;
+        forgetPassedOver(fresh);
         deps.onPlanReload?.(fresh);
         log("daemon.plan_reloaded", { tasks: fresh.tasks.length });
       }
@@ -5379,11 +5426,73 @@ export async function runDaemon(
       }
     }
   });
+  const retroCompanions = deps.checkRetroTrigger as (RetroCheckCompanions & object) | undefined;
+  const retroGate: RetroCheckCompanions = {
+    projectRetroReadCost: deps.projectRetroReadCost ?? retroCompanions?.projectRetroReadCost,
+    readRetroHistory: deps.readRetroHistory ?? retroCompanions?.readRetroHistory,
+  };
+  let retroDeferral: RetroDeferralEpisode | undefined;
+  /** W1-T9119: a deferral that outlasts the retro's own learned interval says so, once per episode. */
+  const noteRetroDeferral = async (reasonClass: string, reason: string): Promise<void> => {
+    const nowMs = daemonClock.now();
+    const prior = retroDeferral?.reasonClass === reasonClass ? retroDeferral : undefined;
+    const episode: RetroDeferralEpisode = prior ?? { reasonClass, firstAtMs: nowMs, lastAtMs: nowMs, observations: 0, gapsMs: [], named: false };
+    if (prior) episode.gapsMs.push(nowMs - episode.lastAtMs);
+    episode.lastAtMs = nowMs;
+    episode.observations++;
+    retroDeferral = episode;
+    if (episode.named || !retroGate.readRetroHistory || episode.gapsMs.length === 0) return;
+    try {
+      const history = await retroGate.readRetroHistory();
+      const at = [...history.retroTriggeredAtMs].sort((a, b) => a - b).slice(-(RETRO_INTERVAL_SAMPLE + 1));
+      const retroGaps = at.slice(1).map((ms, i) => ms - at[i]!);
+      const expectedMs = at.length >= 2 ? medianOf(retroGaps)! : history.fallbackIntervalMs;
+      const observationGapMs = medianOf([...episode.gapsMs]) ?? 0;
+      const needed = observationGapMs > 0 ? Math.ceil(expectedMs / observationGapMs) : Number.POSITIVE_INFINITY;
+      if (episode.named || nowMs - episode.firstAtMs <= expectedMs || episode.observations < needed) return;
+      episode.named = true;
+      log("daemon.retro_trigger.deferral_persisting", {
+        reason,
+        reason_class: reasonClass,
+        first_deferred_at: fixedClock(episode.firstAtMs).iso(),
+        observations: episode.observations,
+        expected_interval_ms: expectedMs,
+        last_retro_at: at.length > 0 ? fixedClock(at[at.length - 1]!).iso() : null,
+      });
+    } catch (e) {
+      log("daemon.retro_trigger.deferral_persisting_unread", { error: String((e as Error)?.message ?? e) });
+    }
+  };
+  /** W1-T9119: the check's own read cost against the heap's measured headroom; a deferral's reason, else undefined.
+   *  A projection that cannot be made is ledgered and does not defer: the check then reads as it always did. */
+  const retroReadDeferral = async (): Promise<{ reason: string; fields: Record<string, number> } | undefined> => {
+    if (!retroGate.projectRetroReadCost) return undefined;
+    let projection: RetroReadProjection;
+    try {
+      projection = await retroGate.projectRetroReadCost();
+    } catch (e) {
+      log("daemon.retro_trigger.projection_failed", { error: String((e as Error)?.message ?? e) });
+      return undefined;
+    }
+    const heap = deps.heapStatistics?.() ?? v8HeapStatistics();
+    const headroom = Math.max(0, heap.heap_size_limit - heap.used_heap_size);
+    if (projection.projectedBytes <= headroom) return undefined;
+    return {
+      reason: `retro read projects ${Math.round(projection.projectedBytes / 1e6)} MB decompressed (${projection.undigested} of ${projection.rotations} rotation(s) hold no digest) against ${Math.round(headroom / 1e6)} MB heap headroom`,
+      fields: {
+        projected_bytes: projection.projectedBytes, heap_headroom_bytes: headroom, heap_used_bytes: heap.used_heap_size,
+        heap_limit_bytes: heap.heap_size_limit, rotations: projection.rotations, undigested_rotations: projection.undigested,
+      },
+    };
+  };
   /** Resolves true when a fleet-control hold says the tick must not go on (the old `continue`). */
   const retroCadence = cadenceFlight(async (): Promise<boolean> => {
-    if (ledgerCompactionDecision?.overBound) {
-      log("daemon.retro_trigger.deferred_ledger_pressure", { reason: ledgerCompactionDecision.reason });
+    const deferral = await retroReadDeferral();
+    if (deferral) {
+      log("daemon.retro_trigger.deferred_ledger_pressure", { reason: deferral.reason, reason_class: "read_cost_over_heap_headroom", ...deferral.fields });
+      await noteRetroDeferral("read_cost_over_heap_headroom", deferral.reason);
     } else {
+      retroDeferral = undefined;
       let decision: RetroTriggerDecision | undefined;
       try {
         decision = await deps.checkRetroTrigger!();
@@ -5410,6 +5519,7 @@ export async function runDaemon(
           log("daemon.retro_trigger.crossing_already_fired", { reason: decision.reason });
         } else {
           activeRetroCrossingKey = crossingKey;
+          retroDeferral = undefined;
           log("retro_triggered", {
             reason: decision.reason,
             merges_since_marker: decision.mergesSinceMarker,
@@ -6455,6 +6565,7 @@ export async function runDaemon(
         lazyClosedUnmerged(deps.readClosedRunBranchPrs),
       );
       const dispatchOpts: NextRunnableOpts = {
+      onPassedOver: observePassedOver("tick"),
       priorityBackfill,
       onDeferredForPriority: logPriorityDeferral,
       onPriorityReservationReleased: logPriorityRelease,
@@ -6619,6 +6730,7 @@ export async function runDaemon(
         ...dispatchOpts, excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...childTaskIds()]), inFlight: occupiedTasks,
       });
       const candidates = runnableCandidates(planForBatch, isMerged, budget, selection.opts);
+      forgetPassedOver(planForBatch, candidates);
       tickEligible = selection.eligible;
       tickContext = selection.context;
       // Passed explicitly rather than relying on the partition's own default parameter — see
@@ -7098,9 +7210,11 @@ export async function runDaemon(
               ...[...refillProposals].map((proposal) => proposal.id)]),
             // W1-T8502: pack the pool disjoint from the occupied lanes too, so a head they block cannot crowd out the rest.
             inFlight: [...inFlightTasks, ...refillProposals],
+            onPassedOver: observePassedOver("lane-refill"),
             onDeferredForPriority: (d) => { refillDeferrals.push(d); logPriorityDeferral(d); },
           });
           const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, selection.opts);
+          forgetPassedOver(snapshot.plan, pool);
           refillEligible = selection.eligible;
           refillContext = selection.context;
           const fits = partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);

@@ -30,7 +30,7 @@ test("W1-T9523: scout symptom — bounded legs never post a failed or partial sn
 
   let at = T0;
   const clock: Clock = { now: () => (at += 35_000), date: () => new Date(at), iso: () => iso(at) };
-  let onMessage: ((msg: { type?: string; held?: unknown; modes?: unknown }) => void) | undefined;
+  let onMessage: ((msg: { type?: string; held?: unknown; modes?: unknown; instances?: unknown }) => void) | undefined;
   let next: (() => void) | undefined;
   const posted: SlowLaneMessage[] = [];
   const handle = runSlowLaneWorker(
@@ -48,7 +48,7 @@ test("W1-T9523: scout symptom — bounded legs never post a failed or partial sn
   };
 
   onMessage?.({ type: "views", modes: { [ANALYTICS_VIEW_NAME]: "shadow" } });
-  onMessage?.({ type: "lease", held: true });
+  onMessage?.({ type: "lease", held: true, instances: ["core"] });
   await settle(1);
   assert.deepEqual(snapshots(), [], "the first bounded leg posts neither a success nor a fresh failure");
 

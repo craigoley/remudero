@@ -621,7 +621,7 @@ function readState(path: string): MachineJudgeState {
 
 export interface MachineJudgePorts {
   stateDir: string;
-  plan: () => Plan;
+  plan: () => Plan | Promise<Plan>;
   riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>;
   riskPolicy?: () => RiskPolicy;
   isMerged?: (id: string) => boolean;
@@ -652,10 +652,10 @@ export interface MachineJudgePorts {
 /** What the machine judge reads that a pass can change: the plan tree it judges (and its risk policy, which
  *  lives in it) and the operator's releases. A plan that cannot be resolved stamps as unreadable, so it
  *  differs from any recorded tree and the pass runs and reports the failure. */
-export function machineJudgeInputs(repoRoot: string, stateDir: string): string {
+export function machineJudgeInputs(repoRoot: string, stateDir: string, ref = "HEAD"): string {
   let plan: string;
   try {
-    plan = hostWorktreeGit(repoRoot, ["rev-parse", `HEAD:${relative(repoRoot, resolveRepoLayout(repoRoot).planDir)}`], { stdio: "pipe" }).trim();
+    plan = hostWorktreeGit(repoRoot, ["rev-parse", `${ref}:${relative(repoRoot, resolveRepoLayout(repoRoot).planDir)}`], { stdio: "pipe" }).trim();
   } catch {
     // deliberate: an unresolvable plan tree is its own stamp; it never matches a tree a pass recorded.
     plan = "unreadable";
@@ -664,10 +664,10 @@ export function machineJudgeInputs(repoRoot: string, stateDir: string): string {
   return `${plan}:${releases ? `${releases.size}:${releases.mtimeMs}` : "absent"}`;
 }
 
-export async function machineJudgeInputsAsync(repoRoot: string, stateDir: string): Promise<string> {
+export async function machineJudgeInputsAsync(repoRoot: string, stateDir: string, ref = "HEAD"): Promise<string> {
   let plan: string;
   try {
-    plan = (await hostWorktreeGitAsync(repoRoot, ["rev-parse", `HEAD:${relative(repoRoot, resolveRepoLayout(repoRoot).planDir)}`], { stdio: "pipe" })).trim();
+    plan = (await hostWorktreeGitAsync(repoRoot, ["rev-parse", `${ref}:${relative(repoRoot, resolveRepoLayout(repoRoot).planDir)}`], { stdio: "pipe" })).trim();
   } catch {
     // An unreadable tree retains the existing input stamp instead of claiming no change.
     plan = "unreadable";
@@ -1002,7 +1002,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   if (state.pending) {
     const pr = ports.prState?.(state.pending.prUrl) ?? "unknown";
     if (pr === "open" || pr === "unknown") {
-      const pendingPlan = ports.plan();
+      const pendingPlan = await ports.plan();
       const records = state.pending.records ?? state.pending.ids.map((id) => ({
         id, relPath: shardRelPath(pendingPlan.byId.get(id) ?? {}) ?? "",
         pin: state.rulings?.[id]?.pin ?? "unknown", sourcePin: state.rulings?.[id]?.pin ?? "unknown",
@@ -1025,7 +1025,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       return report;
     }
     if (pr === "closed") {
-      const plan = ports.plan();
+      const plan = await ports.plan();
       state.declined ??= {};
       for (const id of state.pending.ids) {
         const t = plan.byId.get(id);
@@ -1035,7 +1035,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
     state.pending = undefined;
   }
 
-  const plan = ports.plan();
+  const plan = await ports.plan();
   const isMerged = ports.isMerged ?? ((id: string) => ["merged", "done"].includes(plan.byId.get(id)?.status ?? ""));
   const excluded = new Set(ports.excludeFamilies ?? []);
   const released = ports.operatorReleases?.() ?? new Set<string>();

@@ -220,7 +220,7 @@ export interface DispatchClaimReleaseDecision {
  *  1. HOLDER — the run that took the claim drops it in a `finally`, success or not.
  *  2. EVIDENCE — the caller's own proof the task is already done; any host may drop it.
  *  3. DEAD-CLAIMANT — W1-T2784: THIS host's anchor predates its PID namespace and the pid is absent; W1-T5047: this
- *     instance's daemon minted it on another host and this daemon took state/drain.lock after the mint.
+ *     instance's daemon or run child minted it on another host and this daemon took state/drain.lock after the mint.
  *  4. OPERATOR — everything else; cross-host liveness is not decidable (W1-T396).
  *
  * FALSIFIER: test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts. Why:
@@ -263,13 +263,14 @@ export function decideDispatchClaimRelease(i: {
   }
   const r = i.replaced;
   const m = r?.mintRow;
-  if (a && r && m && !sameHost(a.host, r.localHost) && sameHost(m.host, a.host) && m.actor === "daemon" && a.mintedAtMs < r.lockHeldSinceMs) {
+  if (a && r && m && !sameHost(a.host, r.localHost) && sameHost(m.host, a.host) &&
+      (m.actor === "daemon" || m.actor === "run_child") && a.mintedAtMs < r.lockHeldSinceMs) {
     return {
       arm: "dead-claimant",
       release: true,
       reason:
         `${dispatchClaimRef(i.taskId)} is held by ${a.pid}@${a.host}, minted ${a.mintedAtIso}. This instance's ledger ` +
-        `records that daemon minting it (${m.source}, ${m.ts}), and this daemon on ${r.localHost} has held the ` +
+        `records that ${m.actor} minting it (${m.source}, ${m.ts}), and this daemon on ${r.localHost} has held the ` +
         `instance's single-instance lock (state/drain.lock) since ${r.lockHeldSinceIso}. The claimant's container ` +
         `was replaced, so the claimant cannot exist; releasing.`,
     };
@@ -299,8 +300,9 @@ export interface DispatchClaimReserver {
   lastAttemptStderr?(): string | undefined;
   /** W1-T2784: the claim ref's current commit MESSAGE, for {@link parseClaimAnchorMessage} to
    *  decode. `undefined` when absent, unfetched, or unreadable — each declines the
-   *  `dead-claimant` arm rather than releasing on a guess. Optional and last. */
-  anchorMessage?(taskId: string): string | undefined;
+   *  `dead-claimant` arm rather than releasing on a guess. With expect, read ONLY that exact object,
+   *  never a later holder. Omitting expect retains the current-holder lookup. Optional and last. */
+  anchorMessage?(taskId: string, expect?: string): string | undefined;
   list?(): string[];
   /** W1-T9432: extend the claim at `expect` by one renewal commit; see {@link DispatchClaimRenewal}. */
   renew?(taskId: string, expect: string): DispatchClaimRenewal;
@@ -343,11 +345,11 @@ export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReser
     list() {
       return claimIdsFromLsRemote(deps.run(["ls-remote", "origin", "refs/rmd-dispatch/*"]));
     },
-    anchorMessage(taskId) {
-      const sha = this.holder(taskId);
+    anchorMessage(taskId, expect) {
+      const sha = expect ?? this.holder(taskId);
       if (!sha) return undefined;
-      // Fetch first: no clone tracks this parentless ref, so a bare cat-file would read "no identity".
-      deps.run(claimFetchArgs(taskId));
+      // Fetch acquires the object even when updating a stale local claim ref is rejected.
+      deps.run(claimFetchArgs(taskId, expect));
       return messageFromCatFile(deps.run(["cat-file", "-p", sha]));
     },
     renew(taskId, expect) {
@@ -447,7 +449,8 @@ function claimDropArgs(taskId: string, expect: string | undefined): string[] {
   return expect ? ["push", `--force-with-lease=${ref}:${expect}`, "origin", `:${ref}`] : ["push", "origin", `:${ref}`];
 }
 
-function claimFetchArgs(taskId: string): string[] {
+function claimFetchArgs(taskId: string, expect?: string): string[] {
+  if (expect !== undefined) return ["fetch", "--quiet", "--no-write-fetch-head", "origin", expect];
   return ["fetch", "--quiet", "origin", `${dispatchClaimRef(taskId)}:${dispatchClaimRef(taskId)}`];
 }
 
@@ -480,7 +483,7 @@ export interface DispatchClaimReserverAsync {
   holder(taskId: string): Awaitable<string | undefined>;
   drop(taskId: string, opts?: { expect?: string }): Awaitable<boolean>;
   lastAttemptStderr?(): string | undefined;
-  anchorMessage?(taskId: string): Awaitable<string | undefined>;
+  anchorMessage?(taskId: string, expect?: string): Awaitable<string | undefined>;
   list?(): Awaitable<string[]>;
   listHeld?(): Awaitable<DispatchClaimListing>;
   renew?(taskId: string, expect: string): Awaitable<DispatchClaimRenewal>;
@@ -536,10 +539,10 @@ export function gitDispatchClaimReserverAsync(deps: ClaimGitDepsAsync): Dispatch
     async listHeld() {
       return claimListingFromLsRemote(await deps.run(["ls-remote", "origin", "refs/rmd-dispatch/*"]));
     },
-    async anchorMessage(taskId) {
-      const sha = await holder(taskId);
+    async anchorMessage(taskId, expect) {
+      const sha = expect ?? await holder(taskId);
       if (!sha) return undefined;
-      await deps.run(claimFetchArgs(taskId));
+      await deps.run(claimFetchArgs(taskId, expect));
       return messageFromCatFile(await deps.run(["cat-file", "-p", sha]));
     },
     async renew(taskId, expect) {
@@ -652,8 +655,10 @@ export function releaseDispatchClaim(
   let anchorIdentity: ClaimAnchorIdentity | undefined;
   let liveness: ClaimantLivenessProbe | undefined;
   let replaced: ReplacedClaimantProbe | undefined;
+  let judged: string | undefined;
   if (i.anchor === undefined && i.evidenceObserved !== true && (i.livenessProbe || i.replacedProbe)) {
-    anchorIdentity = parseClaimAnchorMessage(reserver.anchorMessage?.(taskId));
+    judged = reserver.holder(taskId);
+    anchorIdentity = judged ? parseClaimAnchorMessage(reserver.anchorMessage?.(taskId, judged)) : undefined;
     // The pid is only meaningful once an anchor parsed — probe after, never before.
     if (anchorIdentity) liveness = i.livenessProbe?.();
     if (anchorIdentity) replaced = i.replacedProbe?.(anchorIdentity);
@@ -669,7 +674,6 @@ export function releaseDispatchClaim(
   if (!decision.release) return { ...decision, dropped: false };
   // Pinned via `--force-with-lease` to the sha just judged, so a claim re-minted since survives.
   if (decision.arm === "dead-claimant") {
-    const judged = reserver.holder(taskId);
     return { ...decision, dropped: judged ? reserver.drop(taskId, { expect: judged }) : false };
   }
   return { ...decision, dropped: reserver.drop(taskId, i.anchor !== undefined ? { expect: i.anchor } : {}) };
@@ -688,8 +692,10 @@ export async function releaseDispatchClaimAsync(
 ): Promise<DispatchClaimReleaseResult> {
   let anchorIdentity: ClaimAnchorIdentity | undefined;
   let liveness: ClaimantLivenessProbe | undefined;
+  let judged: string | undefined;
   if (i.anchor === undefined && i.evidenceObserved !== true && i.livenessProbe) {
-    anchorIdentity = parseClaimAnchorMessage(await reserver.anchorMessage?.(taskId));
+    judged = await reserver.holder(taskId);
+    anchorIdentity = judged ? parseClaimAnchorMessage(await reserver.anchorMessage?.(taskId, judged)) : undefined;
     if (anchorIdentity) liveness = i.livenessProbe(anchorIdentity);
   }
   const decision = decideDispatchClaimRelease({
@@ -701,7 +707,6 @@ export async function releaseDispatchClaimAsync(
   });
   if (!decision.release) return { ...decision, dropped: false };
   if (decision.arm === "dead-claimant") {
-    const judged = await reserver.holder(taskId);
     return { ...decision, dropped: judged ? await reserver.drop(taskId, { expect: judged }) : false };
   }
   const expect = i.anchor ?? i.expect;

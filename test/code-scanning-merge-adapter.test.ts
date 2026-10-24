@@ -52,3 +52,32 @@ test('security status publication never paints another head green and UNKNOWN is
  assert.equal((await publishSecurityMergeDecision(target,{read,status:async(s:any)=>statuses.push(s)})).published,false);
  assert.equal(statuses.length,1);
 });
+
+
+test('security decision receipts bind the exact native generation and summary without changing permission',async()=>{
+ const first=clean(),latest={...clean(),id:2,conclusion:'neutral',output:{title:'1 configuration not found',summary:'unrecognized comparison state'}};
+ const spoof={...clean(),id:3,app:{...clean().app,id:1}};
+ const f=fixture({checks:[first,latest,spoof]});
+ const result=await readSecurityMergeDecision(target,f.read);
+ assert.equal(result.decision.state,'unknown');assert.equal(result.decision.mergeAllowed,false);
+ assert.equal(result.observation.checksComplete,true);assert.equal(result.observation.checkCount,3);
+ assert.equal(result.observation.trustedCodeqlCount,2);assert.equal(result.observation.latest.id,2);
+ assert.equal(result.observation.latest.conclusion,'neutral');assert.equal(result.observation.latest.title,'1 configuration not found');
+ assert.equal(result.observation.latest.summarySha256,'b9a1072a9117a12327e25988081e5b13dd04fc9cee4c9a4a7433f569afa869fc');
+ assert.equal(JSON.stringify(result.observation).includes('unrecognized comparison state'),false);
+ const changed=await readSecurityMergeDecision(target,fixture({checks:[{...latest,output:{...latest.output,summary:'new comparison state'}}]}).read);
+ assert.notEqual(changed.observation.latest.summarySha256,result.observation.latest.summarySha256);
+ assert.equal(changed.decision.mergeAllowed,false);
+ const missing=await readSecurityMergeDecision(target,fixture({checks:[{...latest,output:{title:latest.output.title}}]}).read);
+ assert.equal(missing.observation.latest.summarySha256,null);assert.equal(missing.decision.mergeAllowed,false);
+ for(const checks of [[first,first],[{...first,id:NaN}]]){
+  const refused=await readSecurityMergeDecision(target,fixture({checks}).read);
+  assert.equal(refused.observation.latest,undefined);assert.equal(refused.decision.mergeAllowed,false);
+ }
+ const absent=await readSecurityMergeDecision(target,fixture({checks:[]}).read);
+ assert.equal(absent.observation.trustedCodeqlCount,0);assert.equal(absent.observation.latest,undefined);
+ const safe=await readSecurityMergeDecision(target,fixture().read);
+ assert.equal(safe.observation.latest.id,1);assert.equal(safe.observation.latest.status,'completed');
+ assert.equal(safe.observation.latest.startedAt,null);assert.equal(safe.observation.latest.completedAt,null);
+ assert.equal(safe.decision.mergeAllowed,true);
+});

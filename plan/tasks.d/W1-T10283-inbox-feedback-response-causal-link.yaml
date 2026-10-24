@@ -32,7 +32,7 @@
     - test/inbox-registry-atomic.test.ts
     - test/the-daemon-reads-the-proposal-shards-off-the-loop.test.ts
   priority: 3
-  status: queued
+  status: merged
   # backlog gardener: band=3 evidence=ab374897457de40c
   # backlog gardener: placed=2026-10-22T04:22:07.100Z
   attempts: 0

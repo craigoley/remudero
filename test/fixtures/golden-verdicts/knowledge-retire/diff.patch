@@ -1,25 +1,17 @@
 diff --git a/docs/knowledge-garden-log.md b/docs/knowledge-garden-log.md
 --- a/docs/knowledge-garden-log.md
 +++ b/docs/knowledge-garden-log.md
-@@ -134,0 +135,7 @@
+@@ -141,0 +142,6 @@
 +
-+## Pass 2026-10-22T06:10:07.785Z
++## Pass 2026-10-23T22:56:34.410Z
 +
-+- retire commitlint-pr-title-lane: Workers offered it have rarely used it, compared with other learnings.
-+- retire position-is-presentation-not-identity: Workers offered it have rarely used it, compared with other learnings.
++- retire ci-gate-refusals-repaired-by-hand: Workers offered it have rarely used it, compared with other learnings.
 +
 +Learnings used when offered: 26%. Dangling Why pointers: 1.
 diff --git a/learnings/ci.yaml b/learnings/ci.yaml
 --- a/learnings/ci.yaml
 +++ b/learnings/ci.yaml
-@@ -260,1 +260,2 @@
+@@ -548,1 +548,2 @@
 -  lifecycle: active
-+  # knowledge gardener: retire commitlint-pr-title-lane
-+  lifecycle: superseded
-diff --git a/learnings/testing.yaml b/learnings/testing.yaml
---- a/learnings/testing.yaml
-+++ b/learnings/testing.yaml
-@@ -96,1 +96,2 @@
--  lifecycle: active
-+  # knowledge gardener: retire position-is-presentation-not-identity
++  # knowledge gardener: retire ci-gate-refusals-repaired-by-hand
 +  lifecycle: superseded

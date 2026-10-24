@@ -218,17 +218,19 @@ test("the awaited dispatch claim release takes the same arm as the sync release 
   assert.equal(reaped.arm, "dead-claimant");
   assert.equal(reaped.dropped, true);
   assert.deepEqual(seen, [4242], "the probe is handed the identity the release parsed");
-  assert.deepEqual(dead.calls, ["message:W1-T9007", "holder:W1-T9007", "drop:W1-T9007:judged-sha"]);
+  assert.deepEqual(dead.calls, ["holder:W1-T9007", "message:W1-T9007", "drop:W1-T9007:judged-sha"],
+    "the message and deletion are bound to the one holder read before evidence acquisition");
   const syncDead = releaseDispatchClaim("W1-T9007", {
     mintAnchor: () => "a", attempt: () => "created", holder: () => "judged-sha", drop: () => true, anchorMessage: () => DEAD_MESSAGE,
   }, { livenessProbe: deadProbe });
   assert.equal(syncDead.arm, reaped.arm);
   assert.equal(syncDead.reason, reaped.reason);
 
-  // dead-claimant whose ref vanished before the leased drop: nothing dropped
+  // No initial holder means there is no identity to judge, so no release is authorized.
   const vanished = awaitedScripted({ message: DEAD_MESSAGE });
   const gone = await releaseDispatchClaimAsync("W1-T9007", vanished, { livenessProbe: deadProbe });
-  assert.equal(gone.arm, "dead-claimant");
+  assert.equal(gone.arm, "operator");
+  assert.equal(gone.release, false);
   assert.equal(gone.dropped, false);
   assert.ok(!vanished.calls.some((c) => c.startsWith("drop:")));
 

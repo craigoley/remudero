@@ -200,3 +200,44 @@ test("required semantic decision identity cannot replay an advisory-only termina
   assert.equal(requiredSemanticDecisionDigest(digest, true), requiredSemanticDecisionDigest(digest, true));
   assert.notEqual(requiredSemanticDecisionDigest(digest, true), requiredSemanticDecisionDigest(digest + "b", true));
 });
+
+
+test("the unattended fix reviewer requires semantic completion and preserves its trusted start freshness", async () => {
+  const { buildRequiredFixReviewRunner } = await import("#src/run-task.js");
+  const fresh = { status: "fresh" as const, codeSha: "trusted-start", originMainSha: "trusted-start", advance: "none" as const };
+  let reads = 0;
+  const review = buildRequiredFixReviewRunner(async (args) => {
+    assert.equal(args.requireSemanticReview, true);
+    assert.equal(requiredSemanticRefusal({ required: args.requireSemanticReview === true,
+      planOnly: false, outcome: "unavailable", criteriaCount: 1, verdicts: undefined }), "required-semantic-unavailable");
+    assert.deepEqual(await args.reviewerCodeFreshness?.(), fresh);
+    assert.deepEqual(await args.reviewerCodeFreshness?.(), fresh);
+    assert.notEqual(requiredSemanticDecisionDigest("same-material-input", args.requireSemanticReview === true),
+      requiredSemanticDecisionDigest("same-material-input", false));
+    return { marker: "actual-next-result" } as never;
+  }, async () => { reads++; return fresh; });
+  const result = await review({ requireSemanticReview: false,
+    reviewerCodeFreshness: async () => { throw new Error("untrusted override must not replace the production reader"); } } as never);
+  assert.deepEqual(result, { marker: "actual-next-result" });
+  assert.equal(reads, 1, "the review uses the actual start reading throughout publication");
+});
+
+test("the unattended fix reviewer preserves stale starts and retries unreadable start evidence at publication", async () => {
+  const { buildRequiredFixReviewRunner } = await import("#src/run-task.js");
+  const stale = { status: "stale" as const, codeSha: "old-code", originMainSha: "new-code", advance: "review-path" as const };
+  for (const mode of ["stale", "throw", "unreadable"] as const) {
+    let reads = 0;
+    const review = buildRequiredFixReviewRunner(async (args) => {
+      assert.equal(args.requireSemanticReview, true);
+      assert.deepEqual(await args.reviewerCodeFreshness?.(), stale);
+      return {} as never;
+    }, async () => {
+      reads++;
+      if (reads === 1 && mode === "throw") throw new Error("git unreadable");
+      if (reads === 1 && mode === "unreadable") return { status: "unreadable", reason: "git unreadable" };
+      return stale;
+    });
+    await review({} as never);
+    assert.equal(reads, mode === "stale" ? 1 : 2, mode);
+  }
+});

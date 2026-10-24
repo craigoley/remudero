@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -20,12 +20,12 @@ import type { Clock } from "../src/lib/clock.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import { acquireLease, type ReadModelDb, type ReadModelLease } from "../src/lib/read-model-db.js";
+import { acquireLease, flushReadModelTransactions, type ReadModelDb, type ReadModelLease } from "#src/lib/read-model-db.js";
 import { DEFAULT_LIVENESS_BOUND_MS, ENVIRONMENTAL_BLOCK_COOLDOWN_MS, projectPlan, WORKER_ACTIVITY_STAND_IN_STEP, type GitHub, type PrRef } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
-type TestCtx = { after: (fn: () => void) => void };
+type TestCtx = { after: (fn: () => void | Promise<void>) => void };
 
 function task(id: string, over: Partial<Task> = {}): Task {
   return { id, title: `task ${id}`, repo: "remudero", depends_on: [], type: "implement", risk: "medium", verify: "auto", status: "queued", attempts: 0, ...over };
@@ -60,13 +60,18 @@ interface Rig {
   board(opts?: { plan?: () => Plan; rules?: Partial<BoardDirtRules>; github?: GitHub; lease?: boolean; oracleSlices?: number }): BoardProjection;
 }
 
-function rig(t: TestCtx): Rig {
+function rig(t: TestCtx, flushTransactions = flushReadModelTransactions): Rig {
   const dir = makeTempDir("board-projection");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  let closeDb: (() => void) | undefined;
+  t.after(async () => {
+    closeDb?.();
+    await flushTransactions();
+    rmSync(dir, { recursive: true, force: true });
+  });
   let now = T0;
   const clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString(), set: (ms: number) => { now = ms; } };
   const db = openProjectorReadModel(dir, "core", clock);
-  t.after(() => db.close());
+  closeDb = () => db.close();
   const acquired = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(acquired.ok);
   const lease = acquired.lease;
@@ -86,6 +91,57 @@ function rig(t: TestCtx): Rig {
     }),
   };
 }
+
+test("board projection fixture closes its database before removing its directory", async () => {
+  const cleanup: Array<() => void | Promise<void>> = [];
+  const r = rig({ after: (fn) => { cleanup.push(fn); } });
+  const close = r.db.close.bind(r.db);
+  let closed = false;
+  r.db.close = () => {
+    assert.equal(existsSync(r.dir), true, "database close must see its existing directory");
+    close();
+    closed = true;
+  };
+  try {
+    for (const fn of cleanup) await fn();
+    assert.equal(closed, true);
+    assert.equal(existsSync(r.dir), false);
+  } finally {
+    if (!closed) close();
+    await flushReadModelTransactions();
+    rmSync(r.dir, { recursive: true, force: true });
+  }
+});
+
+test("board projection fixture preserves its directory when database close fails", async () => {
+  const cleanup: Array<() => void | Promise<void>> = [];
+  const r = rig({ after: (fn) => { cleanup.push(fn); } });
+  const close = r.db.close.bind(r.db);
+  r.db.close = () => { throw new Error("injected database close failure"); };
+  try {
+    await assert.rejects(async () => { for (const fn of cleanup) await fn(); }, /injected database close failure/);
+    assert.equal(existsSync(r.dir), true, "failed close must not remove the live database directory");
+  } finally {
+    close();
+    await flushReadModelTransactions();
+    rmSync(r.dir, { recursive: true, force: true });
+  }
+});
+
+test("board projection fixture preserves its directory when diagnostic publication cannot settle", async () => {
+  const cleanup: Array<() => void | Promise<void>> = [];
+  const r = rig({ after: (fn) => { cleanup.push(fn); } }, async () => {
+    await flushReadModelTransactions();
+    throw new Error("injected diagnostic barrier failure");
+  });
+  try {
+    await assert.rejects(async () => { for (const fn of cleanup) await fn(); }, /injected diagnostic barrier failure/);
+    assert.equal(existsSync(r.dir), true, "an unverified publication must preserve its directory");
+  } finally {
+    await flushReadModelTransactions();
+    rmSync(r.dir, { recursive: true, force: true });
+  }
+});
 
 function blockRow(taskId: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return { run_id: `run-${taskId}`, task_id: taskId, step: "dispatch.blocked_independent", verdict: "failed", ...extra };

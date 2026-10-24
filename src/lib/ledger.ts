@@ -590,6 +590,7 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  * docs/forensics/ledger.md#decision_relevant_ledger_steps.
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
+  "retro_triggered", // W1-T9119: the retro cadence reader learns the persistent-deferral interval from these rows.
   "implement.preopen_gate", // preopen-gate.ts counts the fleet streak across rotations.
   "implement.preopen_gate.alert", // preopen-gate.ts dedups raises and clears on recovery.
   "run.start",
@@ -782,6 +783,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T4207: `lastCommitRefusalPromptLines` (run-task.ts) reads its `subtype` to name the last refused paths.
   "fix.done",
   "fix.progress_judged", // the sweep labels each judged PR from its newest judgement; rotated away, the label reverts to the stale strike ratio.
+  "fix.progress_reused", // fixSeedRead distinguishes reused judgment metadata from an owning worker rung.
   "fix.needs_design", // W1-T5532: preserve the explicit hand-off for the next fix-lane decision.
   "fix.scope_amendment", // W1-T5534: runFixRung and lookupIdentity resume pending amendments after rotation.
   "fix.resolved",
@@ -2481,7 +2483,13 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: Snaps
     copy(stateDir, tmpDir, liveCopyOrder(sourceEntries.filter((rel) => !linkPaths.has(rel))));
     for (let pass = 1; ; pass++) {
       const have = new Set([...listStateFiles(tmpDir), ...report.vanished]);
-      const late = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS).filter((rel) => isLedgerArchiveRelPath(rel) && !have.has(rel));
+      // Only root-level ledger archives are eligible for catch-up. The complete
+      // initial inventory is already copied; walking live engines again races pruning.
+      // Preserve the old file-link/error semantics for archive-shaped entries.
+      const late = readdirSync(stateDir, { withFileTypes: true })
+        .filter((entry) => isLedgerArchiveRelPath(entry.name) && (entry.isFile() ||
+          (entry.isSymbolicLink() && statSync(join(stateDir, entry.name)).isFile())))
+        .map((entry) => entry.name).filter((rel) => !have.has(rel));
       if (late.length === 0) break;
       if (pass >= attempts) {
         throw new StateBackupError(

@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
+import { getHeapStatistics } from 'node:v8';
 import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
   planOnlySelectionOrFull, readAffectedSuitesInput, readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
 import { callerReachableSuites, listRuleSuites } from '../src/lib/ci-parity.ts';
@@ -14,13 +15,17 @@ import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from './pure-tes
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
-import { authorRuleTestEnvironment, createAuthorRuleOwner, qualifiedAffectedRules, admittedAffectedRules } from './lib/author-rule-owner.mjs';
+import { authorRuleTestEnvironment, createAuthorRuleOwner, qualifiedAffectedRules, admittedAffectedRules,
+  AUTHOR_RULE_BUDGET_MAX_MS, readOwnedStaticBudgetResult } from './lib/author-rule-owner.mjs';
+import {executeOwnedStaticPhases} from './lib/author-rule-owner.mjs';
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
 import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
 import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
-import { guardedAuthorEntry, MacAuthorCapacityRefusal } from './lib/mac-author-admission.mjs';
+import { boundedAuthorWorkloadFromArgv, guardedAuthorEntry, MacAuthorCapacityRefusal } from './lib/mac-author-admission.mjs';
+import { createBoundedAuthorScratch } from './lib/author-low-footprint.mjs';
+import {readCensusParentBudgetResult} from './lib/census-parent-budget.mjs';
 
 /** The exit status of a run whose selection the host cannot carry: distinct from pass (0) and fail (1). */
 export const OVER_CAPACITY_EXIT = 3;
@@ -28,6 +33,42 @@ export const OVER_CAPACITY_EXIT = 3;
 export const AUTHOR_MAX_WORKERS = 4;
 /** BACKSTOP: a docs freshness failure must not wait through a heavy author phase. */
 export const AUTHOR_DOCS_PRECHECK_MAX_MS = 30_000;
+
+/** V8 old-space is a declared resource bound, not a process-tree RSS promise. */
+export function requireBoundedAuthorHost({platform = process.platform,
+  heapLimitBytes = getHeapStatistics().heap_size_limit} = {}) {
+  if (platform !== 'darwin')
+    throw new Error('bounded ordinary author scratch requires the native Mac volume; Linux/hosted admission is unchanged');
+  if (!Number.isSafeInteger(heapLimitBytes) || heapLimitBytes <= 0 || heapLimitBytes > 1088 * 1024 ** 2)
+    throw new Error('bounded author requires an actual V8 heap ceiling of at most 1088 MiB; start Node with --max-old-space-size=1024 --max-semi-space-size=16');
+}
+
+/** Only this capture's recorded process group can qualify volume cleanup.
+ * This is not a generic proof about escaped descendants or a dead slot owner. */
+export function boundedAuthorCaptureClosure(resultPath, ownerPid = process.pid) {
+  try {
+    const native = JSON.parse(readFileSync(resultPath, 'utf8')), tracking = native.parentTracking;
+    if (tracking?.ownerPid !== ownerPid) return {state: 'unknown', reason: 'capture owner identity unavailable'};
+    if (Number.isSafeInteger(tracking.childPid) && tracking.childPid > 0) {
+      try { process.kill(-tracking.childPid, 0); }
+      catch (error) {
+        if (error.code === 'ESRCH') return {state: 'closed', reason: 'owned capture process group is absent'};
+        return {state: 'unknown', reason: `owned group probe unavailable: ${error.code}`};
+      }
+      return {state: 'unknown', reason: 'owned capture process group remains present'};
+    }
+    if (tracking.childPid === null && native.status === null && native.error?.code && Number.isInteger(native.spawnCloseCode))
+      return {state: 'closed', reason: 'capture recorded failed spawn with no native child'};
+    return {state: 'unknown', reason: 'native child identity unavailable'};
+  } catch (error) { return {state: 'unknown', reason: `native receipt unavailable: ${error.code ?? error.message}`}; }
+}
+
+export function finishBoundedAuthorScratch(scratch, childGroupsClosed) {
+  if (!childGroupsClosed) return {state: 'retained-child-closure-unproven',
+    reason: 'bounded author child closure is unproven; scratch retained'};
+  try { scratch.release(); return {state: 'closed-and-removed'}; }
+  catch (error) { return {state: 'retained-detach-failed', reason: `bounded author scratch retained: ${error.message}`}; }
+}
 /** Only docs-index inputs and its executable contract; deletion/rename sides remain in the diff. */
 export function authorDocsIndexInputs(changedFiles) {
   return changedFiles.filter(path => (path.startsWith('docs/') && (path.endsWith('.md') || path === 'docs/docs-index.json')) ||
@@ -291,20 +332,25 @@ export function authorPublicationIdentity({ headRef, headSha, baseSha, publicati
 }
 
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
-  select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined } = {}) {
+  select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined,
+  makeBoundedScratch = createBoundedAuthorScratch } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
     deadline: { type: 'string' },
     'runtime-profile': { type: 'string' },
     'head-ref': { type: 'string' },
     'head-sha': { type: 'string' },
-  }, { allowPositionals: false, helpText: 'preflight-author.mjs [--dry-run] [--head-ref <publication destination branch> [--head-sha <committed HEAD sha>]] [--deadline <ISO> --runtime-profile <path>]: fresh-base affected tests + default static preflight; unknown publication target is NOT identity assurance; full hosted CI remains required.' });
+    'bounded-scratch-mib': { type: 'string' },
+  }, { allowPositionals: false, helpText: 'preflight-author.mjs [--dry-run] [--head-ref <publication destination branch> [--head-sha <committed HEAD sha>]] [--bounded-scratch-mib <16..256>] [--deadline <ISO> --runtime-profile <path>]: fresh-base affected tests + default static preflight; bounded scratch caps each step at120s/8MiB and one worker; unknown publication target is NOT identity assurance; full hosted CI remains required.' });
   if (helpRequested) return 0;
   const startedAt = Date.now();
   const receipt = { version: 1, assurance: 'author-only', hostedFullSuiteAndCoverage: 'required-pending',
     node: process.version, dryRun: Boolean(values['dry-run']), steps: [], suites: [] };
   let diagnosticsRoot;
   let fixtureTemporaryEnvironment;
+  const resourceBudget = boundedAuthorWorkloadFromArgv(argv);
+  if (resourceBudget) receipt.resourceBudget = {...resourceBudget, assurance: 'resource-limits-only; verdict still requires ordinary author checks'};
+  let boundedScratch, boundedSlot, boundedClosureUnproven = false, budgetedPhases = 0;
   const deadline = values.deadline === undefined ? undefined : Date.parse(values.deadline);
   const run = (file, args, extra = {}) => spawn(file, args, {
     cwd: root, encoding: 'utf8', maxBuffer: 100 * 1024 * 1024,
@@ -321,9 +367,18 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   const temporaryEnvironment = () => {
     ensureDiagnostics();
     if (!fixtureTemporaryEnvironment) {
-      const base = process.platform === 'win32' ? tmpdir() : '/tmp';
-      const temp = realpathSync(mkdtempSync(join(base, 'ra')));
-      fixtureTemporaryEnvironment = { TMPDIR: temp, TMP: temp, TEMP: temp };
+      let temp;
+      if (resourceBudget) {
+        boundedScratch = makeBoundedScratch(resourceBudget.scratchBytes, {parent: '/tmp', shortPath: true});
+        temp = boundedScratch.volume;
+        receipt.resourceBudget.scratch = {dir: boundedScratch.dir, volume: boundedScratch.volume,
+          imageBytes: boundedScratch.imageBytes, writableCapacityBytes: boundedScratch.writableCapacityBytes};
+      } else {
+        const base = process.platform === 'win32' ? tmpdir() : '/tmp';
+        temp = realpathSync(mkdtempSync(join(base, 'ra')));
+      }
+      fixtureTemporaryEnvironment = { TMPDIR: temp, TMP: temp, TEMP: temp,
+        ...(resourceBudget ? {NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --max-old-space-size=${resourceBudget.heapMiB} --max-semi-space-size=${resourceBudget.semiSpaceMiB}`.trim()} : {}) };
       receipt.fixtureTemporaryRoot = relative(root, temp);
     }
     return fixtureTemporaryEnvironment;
@@ -337,17 +392,32 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     renameSync(path + '.next', path);
   };
   const runStep = (name, args, file = process.execPath, childEnvironment = {}, phaseMaxMs = AUTHOR_STEP_RUNTIME_MS, heartbeat = undefined) => {
-    const runtimeLimitMs = deadline === undefined ? phaseMaxMs :
-      Math.min(phaseMaxMs, Math.max(1, deadline - Date.now() - AUTHOR_SHUTDOWN_RESERVE_MS));
-    progress({ name, outputLimitBytes: AUTHOR_OUTPUT_LIMIT_BYTES, runtimeLimitMs });
+    if (resourceBudget && ++budgetedPhases > resourceBudget.maximumPhases)
+      throw new Error('bounded author phase/output allowance exhausted; no new phase started');
+    const phaseLimitMs = resourceBudget ? Math.min(phaseMaxMs, resourceBudget.stepRuntimeMs) : phaseMaxMs;
+    const runtimeLimitMs = deadline === undefined ? phaseLimitMs :
+      Math.min(phaseLimitMs, Math.max(1, deadline - Date.now() - AUTHOR_SHUTDOWN_RESERVE_MS));
+    const effectiveRuntimeMs = Math.min(runtimeLimitMs, phaseLimitMs);
+    const outputLimitBytes = resourceBudget?.stepOutputBytes ?? AUTHOR_OUTPUT_LIMIT_BYTES;
+    progress({ name, outputLimitBytes, runtimeLimitMs: effectiveRuntimeMs });
     const logs = { stdoutPath: join(diagnosticsRoot, `${name}.stdout.log`),
       stderrPath: join(diagnosticsRoot, `${name}.stderr.log`) };
     // Injected spawn outcomes remain an explicit diagnostic seam; production owns live pipes.
-    if (spawn !== spawnSync) return run(file, args, { env: { ...authorEnvironment(process.env), ...childEnvironment, ...temporaryEnvironment() } });
+    const environment = {...authorEnvironment(process.env), ...boundedSlot?.childEnvironment,
+      ...childEnvironment, ...temporaryEnvironment()};
+    if (spawn !== spawnSync) return run(file, args, { env: environment });
     const resultPath = join(diagnosticsRoot, `${name}.native-result.json`);
     // W1-T9928: a slotted step's spooler beats the slot while this loop is blocked in spawnSync.
-    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment, ...temporaryEnvironment() }, trackParent: true,
-      ...logs, resultPath, runtimeMs: runtimeLimitMs, ...(heartbeat ? { heartbeat } : {}) });
+    const stepHeartbeat = heartbeat ?? boundedSlot?.heartbeat;
+    const result = captureStepSync(file, args, { cwd: root, env: environment, trackParent: true,
+      ...logs, resultPath, maxBytes: outputLimitBytes, runtimeMs: effectiveRuntimeMs, ...(stepHeartbeat ? { heartbeat: stepHeartbeat } : {}) });
+    if (resourceBudget) {
+      const closure = boundedAuthorCaptureClosure(resultPath);
+      boundedClosureUnproven ||= closure.state !== 'closed';
+      receipt.resourceBudget.completedPhaseCaptures = budgetedPhases;
+      receipt.resourceBudget.childProcessGroupsClosed = !boundedClosureUnproven;
+      (receipt.resourceBudget.closureObservations ??= []).push({phase: name, ...closure});
+    }
     return { ...result, capturedLogs: true, nativeResult: relative(root, resultPath) };
   };
   const git = (args) => {
@@ -377,7 +447,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         mayBeIncomplete: Boolean(result.error || result.signal || result.outputComplete === false) } });
     progress();
     // Keep terminal feedback small even for thousands of suites. Never rerun to recover output.
-    console.log(`${name}: ${!ok ? 'FAIL' : metadata.notMeasured ? 'NOT MEASURED' : 'PASS'}; ${result.error || result.signal ? 'captured output (may be incomplete)' : 'complete output'}: ${relative(root, diagnosticsRoot)}`);
+    console.log(`${name}: ${!ok ? 'FAIL' : metadata.partial ? 'OVER-CAPACITY' : metadata.notMeasured ? 'NOT MEASURED' : 'PASS'}; ${result.error || result.signal ? 'captured output (may be incomplete)' : 'complete output'}: ${relative(root, diagnosticsRoot)}`);
     const failures = stdout.split('\n').filter((line) => /^\s*not ok [0-9]+/.test(line));
     const replay = (text, channel) => text.split('\n').map(line => `[author ${name} ${channel}] ${line}`).join('\n') + '\n';
     if (failures.length) console.log(replay(failures.slice(0, 40).join('\n').slice(0, 4096), 'failures'));
@@ -493,10 +563,29 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       const dependencyBefore=authorDependencyProvenance(root);
       receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
       if(dependencyBefore.state!=='present')throw new Error(`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
-      const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha]);
-      const censusTimeBound = censusTimeBoundOnly(census);
-      const censusOk = (census.status === 0 || censusTimeBound) && !census.signal && !census.error;
-      report('census-precheck', census, censusOk, censusTimeBound ? { notMeasured: 'time-bound' } : {});
+      if (resourceBudget) {
+        boundedSlot = acquireTestSlot('preflight-author:bounded-census-static-affected', {perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: 1});
+        if (!boundedSlot || !testSlotExecutionAllowed(boundedSlot)) throw new Error('bounded author census requires a genuine serial lease');
+        receipt.censusTestSlot = {outcome: boundedSlot.outcome, concurrency: boundedSlot.concurrency, note: boundedSlot.note};
+        const capacity = admitHost('census-precheck', {refresh: () => boundedSlot.refresh()});
+        if (capacity) (receipt.hostCapacity ??= []).push(capacity);
+      }
+      ensureDiagnostics();
+      const censusCaptures = resourceBudget ? join(diagnosticsRoot, 'census-native') : undefined;
+      if (censusCaptures) mkdirSync(censusCaptures, {mode: 0o700});
+      const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha,
+        ...(resourceBudget ? ['--parent-budget-ms', '110000', '--capture-root', censusCaptures,
+          '--capture-budget-bytes', String(resourceBudget.scratchBytes)] : [])]);
+      // The bounded mode accepts only its explicit unstarted-work deferral.
+      // Legacy default-author handling of a head backstop remains unchanged.
+      const censusTimeBound = !resourceBudget && censusTimeBoundOnly(census);
+      const censusPartial = resourceBudget && readCensusParentBudgetResult(census,
+        {root: resolve(root), head: receipt.headSha, requestedBase: receipt.baseSha, budgetMs: 110000,
+          captureBytes: resourceBudget.scratchBytes});
+      const censusOk = (census.status === 0 || censusTimeBound || Boolean(censusPartial)) && !census.signal && !census.error;
+      report('census-precheck', census, censusOk, censusPartial ? {notMeasured: 'parent-budget', partial: true}
+        : censusTimeBound ? { notMeasured: 'time-bound' } : {});
+      if (censusPartial) receipt.censusParentBudget = censusPartial;
       if (censusTimeBound) {
         receipt.censusNotMeasured = { reason: 'time-bound', checkedBy: 'CI' };
         console.log('census suites NOT MEASURED (time bound) — CI runs them');
@@ -545,13 +634,13 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         }
         // The cheap census runs first. One owner then admits BOTH expensive phases;
         // nested production checks borrow only its actual live ancestor lease.
-        const slot = acquireTestSlot('preflight-author:static-and-affected', { perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: 1 });
+        const slot = boundedSlot ?? acquireTestSlot('preflight-author:static-and-affected', { perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: 1 });
         try {
           receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
           if (!testSlotExecutionAllowed(slot)) throw new Error(`author preflight NOT_RUN (${slot.note})`);
           let runtimeProfile, runtimeManifest;
           const admitRuntime = (stage, staticReserveMs, files = receipt.suites,
-            workers = Math.min(AUTHOR_MAX_WORKERS, slot.concurrency)) => {
+            workers = Math.min(resourceBudget?.workers ?? AUTHOR_MAX_WORKERS, slot.concurrency)) => {
             if (deadline === undefined) return;
             if (!['acquired', 'inherited'].includes(slot.outcome)) throw new Error('runtime admission requires a real slot; unslotted fallback is not deadline-fit capacity');
             runtimeProfile ??= readRuntimeProfile(root, values['runtime-profile'], runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
@@ -574,7 +663,10 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           if (spawn === spawnSync) {
             try {
               ruleOwner = createAuthorRuleOwner({ root, directory: diagnosticsRoot, head: receipt.headSha,
-                rules: listRuleSuites(root), affected: receipt.suites, concurrency: Math.min(4, slot.concurrency),
+                rules: listRuleSuites(root), affected: receipt.suites, concurrency: Math.min(resourceBudget?.workers ?? 4, slot.concurrency),
+                ...(resourceBudget ? { budgetMs: Math.min(AUTHOR_RULE_BUDGET_MAX_MS, Math.floor(resourceBudget.stepRuntimeMs / 4)), parentCensus: {
+                  root: realpathSync(root), head: receipt.headSha, base: receipt.baseSha,
+                  state: censusPartial ? 'over-capacity' : 'complete' } } : {}),
                 environment: { ...authorEnvironment(process.env), ...slot.childEnvironment, ...temporaryEnvironment() } });
               receipt.ruleExecution = { state: 'prepared', receipt: relative(root, ruleOwner.file), reusedFiles: [] };
             } catch (error) {
@@ -582,13 +674,40 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
                 fallback: 'original rule and affected execution; no cached result qualifies' };
             }
           }
+          let staticOk;
+          if (resourceBudget && ruleOwner) {
+            const staticPhases = executeOwnedStaticPhases({root, base: receipt.baseSha, owner: ruleOwner,
+              run: phase => {
+                const capacity = admitHost(phase.name, {refresh: () => slot.refresh()});
+                if (capacity) (receipt.hostCapacity ??= []).push(capacity);
+                const command = lowPriorityCommand(process.execPath, phase.args);
+                const result = runStep(phase.name, command.args, command.file,
+                  ruleOwner.childEnvironment, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
+                if (boundedClosureUnproven) throw new Error('bounded static child closure unproven; no next phase started');
+                return result;
+              },
+              report: (phase, result, ok, metadata) => report(phase.name, result, ok,
+                {...metadata, ...(phase.summary ? {summary: relative(root, phase.summary)} : {})}),
+            });
+            receipt.staticPhases = staticPhases;
+            if (staticPhases.ok && staticPhases.partial) receipt.staticParentBudget = {state: 'over-capacity', phases: staticPhases.phases};
+            staticOk = staticPhases.ok;
+          } else {
+          const staticSummary = join(diagnosticsRoot, 'static-summary.json');
           const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
             join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
-            '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
+            '--summary-file', staticSummary]);
           const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file,
             ruleOwner?.childEnvironment ?? slot.childEnvironment, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
-          const staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
-          report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
+          let staticPartial;
+          if (resourceBudget && ruleOwner && staticResult.status === 3 && existsSync(staticSummary))
+            staticPartial = readOwnedStaticBudgetResult(ruleOwner, root, ruleOwner.childEnvironment,
+              staticResult, JSON.parse(readFileSync(staticSummary, 'utf8')));
+          if (staticPartial) receipt.staticParentBudget = staticPartial;
+          staticOk = (staticResult.status === 0 || Boolean(staticPartial)) && !staticResult.signal && !staticResult.error;
+          report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority,
+            ...(staticPartial ? { partial: true, summary: relative(root, staticSummary) } : {}) });
+          }
           // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
           // receipt and selected floor, but don't spend another full run on known-doomed tests.
           // W1-T7809: a plan-only selection is plan lint first; a failed lint is as unpublishable as a failed static gate.
@@ -607,13 +726,15 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             let manifest = { files: {} };
             try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
             catch (error) { receipt.manifestUnavailable = error.message; }
-            const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot.concurrency });
+            const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: Math.min(resourceBudget?.workers ?? slot.concurrency, slot.concurrency),
+              ...(resourceBudget ? {stepRuntimeMs: resourceBudget.stepRuntimeMs} : {}) });
             // A deadline without a validated native profile was refused before static work.
             // Never expand workers or restart the deadline to admit a larger selection.
             const nativeBudget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline }) : legacyBudget;
             // W1-T9953: a full fallback is priced against the HOST, never the deadline; a deadline may only shrink it.
             const budget = partial && nativeBudget.budgetMs > legacyBudget.budgetMs ? legacyBudget : nativeBudget;
-            const executionWorkers = runtimeProfile ? budget.workers : Math.min(AUTHOR_MAX_WORKERS, slot.concurrency);
+            const executionWorkers = Math.min(resourceBudget?.workers ?? AUTHOR_MAX_WORKERS,
+              runtimeProfile ? budget.workers : slot.concurrency);
             receipt.executionWorkers = executionWorkers;
             const priced = partial ? partial.suites : receipt.suites;
             reportManifestFallbacks(priced, manifest);
@@ -728,7 +849,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             console.log(`affected-tests: NOT RUN — ${gate} did not succeed; selected floor retained in the receipt`);
           }
         } finally {
-          slot.release();
+          if (resourceBudget && boundedClosureUnproven)
+            receipt.resourceBudget.slotCleanup = 'retained-child-closure-unproven';
+          else if (!boundedSlot) slot.release();
         }
       }
       if (git(['rev-parse', 'HEAD']).trim() !== receipt.headSha || git(['status', '--porcelain', '--untracked-files=normal']).trim()) {
@@ -738,13 +861,13 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       receipt.dependencyProvenance.after=dependencyAfter;
       if(!sameAuthorDependencyProvenance(dependencyBefore,dependencyAfter))throw new Error('installed dependency donor changed during author validation; receipt refused');
     }
-    if (fixtureTemporaryEnvironment) {
+    if (fixtureTemporaryEnvironment && !resourceBudget) {
       rmSync(fixtureTemporaryEnvironment.TMPDIR, { recursive: true, force: true });
       receipt.fixtureTemporaryCleanup = 'removed';
     }
     // An over-capacity run is never green: its tests were skipped, or only the subset that fits ran.
     receipt.verdict = values['dry-run'] ? 'not-run' : !receipt.steps.every((step) => step.ok) ? 'failed'
-      : receipt.selection === 'over-capacity' ? 'over-capacity' : 'passed';
+      : receipt.selection === 'over-capacity' || receipt.censusParentBudget || receipt.staticParentBudget ? 'over-capacity' : 'passed';
   } catch (error) {
     receipt.verdict = error instanceof MacAuthorCapacityRefusal ? 'over-capacity' : 'refused';
     if (error instanceof MacAuthorCapacityRefusal) {
@@ -753,6 +876,24 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     }
     receipt.error = error.message;
     console.error(`author preflight ${error instanceof MacAuthorCapacityRefusal ? 'NOT_RUN' : 'REFUSED'}: ${error.message}`);
+  } finally {
+    if (boundedScratch) {
+      const cleanup = finishBoundedAuthorScratch(boundedScratch, !boundedClosureUnproven);
+      receipt.resourceBudget.cleanup = cleanup.state;
+      if (cleanup.state !== 'closed-and-removed') {
+        receipt.verdict = 'refused'; receipt.error ??= cleanup.reason;
+      }
+    }
+    if (boundedSlot) {
+      if (boundedClosureUnproven) receipt.resourceBudget.slotCleanup = 'retained-child-closure-unproven';
+      else {
+        try { boundedSlot.release(); receipt.resourceBudget.slotCleanup = 'release-requested'; }
+        catch (error) {
+          receipt.resourceBudget.slotCleanup = 'retained-release-failed';
+          receipt.verdict = 'refused'; receipt.error ??= `bounded author lease release failed: ${error.message}`;
+        }
+      }
+    }
   }
   receipt.durationMs = Date.now() - startedAt;
   receipt.phaseAccounting = accountAuthorPhases(receipt);
@@ -784,5 +925,12 @@ if (isMainModule(import.meta.url)) {
     process.exitCode = await runLowFootprintAuthor(argv, {
       root: REPO_ROOT, publicationIdentity: authorPublicationIdentity, authorEnvironment, completeTestResult,
     });
-  } else process.exitCode = guardedAuthorEntry(argv, {root: REPO_ROOT, runAuthor: (args, deps) => main(args, deps)});
+  } else {
+    const budget = boundedAuthorWorkloadFromArgv(argv);
+    if (budget && !argv.some(arg => ['--help', '-h', '--dry-run'].includes(arg))) {
+      requireBoundedAuthorHost();
+    }
+    process.exitCode = guardedAuthorEntry(argv, {root: REPO_ROOT,
+      runAuthor: (args, deps) => main(args, deps)});
+  }
 }

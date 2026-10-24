@@ -169,7 +169,7 @@ test("the daemon builds due probes for evidence-coverage, selector-shadow and ma
   const judge = await buildRegisteredGarden("machine-judge", ctx);
   writeFileSync(gardenPacingPath(stateDir, "machine-judge"), JSON.stringify({
     lastPassAt: new Date(Date.now() - 60_000).toISOString(), lastNewAt: new Date(Date.now() - 3_600_000).toISOString(),
-    inputs: machineJudgeInputs(process.cwd(), stateDir),
+    inputs: machineJudgeInputs(process.cwd(), stateDir, "origin/main"),
   }));
   assert.equal(await judge.due!(), false, "nothing new for an hour, and the inputs are unchanged");
   writeFileSync(join(stateDir, "operator-releases.json"), JSON.stringify({ releases: { "W1-T1": "2026-10-09T12:00:00Z" } }));

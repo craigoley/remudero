@@ -21,7 +21,9 @@ export function runRuleSuites(repoRoot = root, run = spawnSync) {
   for (const suite of suites) {
     console.log(`rule-checks: ${suite}`);
     if (owner) {
-      if (owner.run(suite) !== 0) failed.push(suite);
+      const status = owner.run(suite);
+      if (status === 3) break;
+      if (status !== 0) failed.push(suite);
       continue;
     }
     const result = run(process.execPath, [
@@ -40,7 +42,12 @@ export function runRuleSuites(repoRoot = root, run = spawnSync) {
       failed.push(suite);
     }
   }
-  const complete = owner ? owner.finish() === 0 : true;
+  const completion = owner ? owner.finish() : 0;
+  const complete = completion === 0;
+  if (failed.length === 0 && completion === 3) {
+    console.error('rule-checks: OVER-CAPACITY; unstarted files are named in the live owner receipt; full assurance required');
+    return 3;
+  }
   if (failed.length === 0 && complete) return 0;
   if (failed.length > 0) console.error(`rule-checks: failed suites: ${failed.join(" ")}`);
   else console.error("rule-checks: owner completion unavailable");

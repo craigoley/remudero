@@ -76,7 +76,7 @@ test("a slow lane thread that exits with nothing in flight says so, and is not c
 
 test("the slow lane names each unit and analytics refresh to its parent before it starts and after it ends", async (t) => {
   const posted: SlowLaneMessage[] = [];
-  let onMessage: ((msg: { type?: string; held?: unknown; modes?: unknown }) => void) | undefined;
+  let onMessage: ((msg: { type?: string; held?: unknown; modes?: unknown; instances?: unknown }) => void) | undefined;
   const beforeRefresh: string[] = [];
   const stateDir = makeTempDir("rmd-slow-lane-begin");
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
@@ -89,7 +89,7 @@ test("the slow lane names each unit and analytics refresh to its parent before i
   });
   t.after(() => handle.stop());
   onMessage?.({ type: "views", modes: { [ANALYTICS_VIEW_NAME]: "shadow" } });
-  onMessage?.({ type: "lease", held: true });
+  onMessage?.({ type: "lease", held: true, instances: ["core"] });
   await until(() => posted.some((m) => m.type === "source_snapshot"));
   await until(() => posted.some((m) => m.type === "end" && m.work.instance === "core"));
   assert.deepEqual(beforeRefresh, ["analytics/-/run", "analytics/core/read-checkpoint", "analytics/core/scan-from-disk-checkpoint"], "posted before the refresh ran");

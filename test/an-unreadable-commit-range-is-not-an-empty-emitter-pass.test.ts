@@ -49,7 +49,7 @@ test("emitter range status checks preserve healthy and invalid message controls"
   assert.equal(good.ok, true, good.detail);
   assert.match(good.detail, /1 commit message/);
   valid.repo.git("-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "--quiet",
-    "--allow-empty", "-m", "wip: invalid conventional type");
+    "--allow-empty", "-m", "invalid: unsupported conventional type");
   const bad = emitterChecksStep(valid.repo.dir, { from: valid.to, to: "HEAD" });
   assert.equal(bad.ok, false);
   assert.match(bad.detail, /type-enum/);

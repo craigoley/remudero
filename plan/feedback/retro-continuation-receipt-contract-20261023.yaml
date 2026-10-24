@@ -1,0 +1,60 @@
+id: retro-continuation-receipt-contract-20261023
+ts: 2026-10-23T20:35:42.201Z
+origin: cli
+status: new
+attachments: []
+proposal_pr: null
+contribution: null
+raw: |
+  Machine-authored bounded observation, not an operator ruling or a waiver of the retro's
+  prepublication, session/provider, tool, budget or identity checks. No production retry, restart,
+  claim/breaker/marker clearing, cap change or model-policy change is requested or performed.
+
+  OBSERVED on the natural RETRO-1792783194611 attempt, 2026-10-23:
+  Synthesis completed on Codex. Preflight attempt1 at20:19:45.484 exited tests_failed after
+  2575460ms over183suites, with has_summarytrue, cancelled_count0 and two named failures:
+  author deadline admission refuses a too-small real slot budget before starting static work;
+  a valid batch's PR lists only the files it wrote - MASTER-PLAN.md only when a stamp changed it.
+  Their bounded excerpts name inherited NODE_OPTIONS instrumentation and a fixture push inheriting
+  the real pre-push hook without its capability-snapshot generator. These symptoms remain separate:
+  no head/base cause has been reproduced, no fixture or gate has been weakened, and this finding
+  does not assert the initial tests passed or a plan defect caused them.
+
+  The one allowed repair assignment de60cafa-843b-4521-a52d-074a7a29a6d8 selected Codex Sol.
+  At20:22:46.643 the actual retro.preflight_repair row reports worker success and continuation
+  mode fresh-handoff, reason provider-fresh-only, from codex, to codex. The next preflight row
+  reports repair_spawn_failed, elapsed_ms0, no second suite run and a different-session refusal.
+  At20:22:53.496 the actual subprocess terminal row reports nonzero_exit1, signalnull.
+  Marker advancement and publication did not occur; the last-retro marker remains October6.
+  No raw session identifier, prompt, credential or transcript is reproduced here.
+
+  SOURCE / PURE REPLAY: loaded Core4ad9710aab3d1bbacbf3415218354f9476d6fb9a worker blob
+  15210781bf81c4d1f4fda2a39b5944c8b1debcbe matches replay head09176ea34f43573bc34cf50e17838ab262c372f3.
+  Its real workerExecutionForProvider chooses fresh-handoff/provider-fresh-only for the retro's
+  declared Read/Grep/Glob/Edit/Bash surface on selected Codex, carrying the task and pending action.
+  Same-provider Claude and read-only Codex controls preserve a real resume instead.
+  The run-task retro repair supplies workerContinuation, but then unconditionally rejects a
+  nonempty changed sessionId, without consulting the returned continuation receipt. The live
+  receipt confirms this is the supported fresh-writer path, not a foreign-provider resume.
+  This was a pure existing-policy replay, not a paid probe, guarded suite or publication proof.
+
+  NEXT STEP, only after fresh ownership reconciliation: make the existing consumer contract agree
+  with the typed continuation receipt. Preserve exact session equality for actual resumes; prove
+  malformed/missing or inconsistent provenance and forbidden provider changes still refuse. Keep
+  the existing one-repair limit, current-workspace/task/tool contract, all prepublication tests,
+  timeout/bound-failure stand-down and publication/marker ordering. A fresh handoff is not proof a
+  repair worked: rerun the unchanged gate and require its real success before publication.
+  Drive the actual retro producer/callback, not only a predicate. Delete the proposed consumer
+  correction and require the Codex fresh-writer functional case to fail; restore it and require
+  the case plus genuine-resume and hostile-receipt controls to pass. No new provider, store,
+  supervisor, fallback policy or threshold is needed. Do not alter W1-T10164's fresh-writer policy
+  merely to satisfy the old equality check. Reconcile any required policy judgment explicitly.
+
+  OWNERSHIP20:35:42.201 atmainb45b866f2f64de548ace567b5a30dffd76bff30c:
+  All7APIopenheads pinned against454actualremoteheads; two subject candidates are unchanged on
+  everyhead. W1-T10164's full design requires provider-safe fresh handoffs and preserves Codex's
+  fresh-writer sandbox; W1-T7421 is the generic fix-lane gardener, not this retro callback repair.
+  Shared run-task heads13821(child-review liveness) and13789(dispatch lifetime history) were
+  inspected at their exact heads and do not change this callback. W1-T2803's bound-failure,
+  one-repair and honest surviving-evidence contracts remain intact. This is feedback intake only:
+  no task has been credited or automatically activated, and no follow-up acknowledgment was written.

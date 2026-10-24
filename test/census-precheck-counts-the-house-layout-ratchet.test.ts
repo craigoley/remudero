@@ -102,11 +102,11 @@ function installHook(dir: string): void {
     "fixture-copy-census.mjs",
     "house-layout-census.mjs",
     "deps-interface-census.mjs",
-    "test-repo-root-codemod.mjs",
+    "test-repo-root-codemod.mjs", "coverage-session-blanking-check.mjs",
   ]) {
     copyFileSync(join(REPO_ROOT, "scripts", script), join(dir, "scripts", script));
   }
-  for (const lib of ["argv.mjs", "git.mjs", "author-step-capture.mjs", "author-step-resources.mjs", "json-duplicate-keys.mjs", "instrument-surface-census.mjs", "git-spawn-shapes.mjs", "repo-root.mjs", "retained-fixtures.mjs"]) {
+  for (const lib of ["argv.mjs", "git.mjs", "census-parent-budget.mjs", "author-step-capture.mjs", "author-step-resources.mjs", "json-duplicate-keys.mjs", "instrument-surface-census.mjs", "git-spawn-shapes.mjs", "repo-root.mjs", "retained-fixtures.mjs"]) {
     copyFileSync(join(REPO_ROOT, "scripts", "lib", lib), join(dir, "scripts", "lib", lib));
   }
   writeFileSync(join(dir, "scripts", "rule15-precheck.mjs"), "process.exit(0)\n");

@@ -100,6 +100,85 @@ and `--coverage` remain available for full local reproduction; infrastructure, c
 and test-selector changes should use that full reproduction before their first push. The default
 static preflight's small scoped coverage check is also retained, not silently removed.
 
+### Bounded ordinary author feedback
+
+Operator-approved 2026-10-23: the ordinary author entry point can price a declared, bounded
+workload instead of requiring the full coverage job's 20-GiB reserve:
+
+```sh
+node --max-old-space-size=1024 --max-semi-space-size=16 --import tsx scripts/preflight-author.mjs --bounded-scratch-mib 128 --head-ref run-unfiled-<epochMs>
+```
+
+This mode keeps ordinary selection, identity, static checks, native judgments and verdicts.
+It uses one worker, an inherited 1-GiB V8 old-space ceiling with 16-MiB semi-spaces, at most 32 top-level phases, 120 seconds
+and 8 MiB of combined output per phase, and a fixed native scratch volume between 16 and 256 MiB.
+Disk admission uses max(10 GiB, the fully costed allocation requirement): a 4-GiB system reserve,
+twice the declared scratch size, all 32 output allowances and 16 MiB of metadata. The actual guarded
+entry applies this same floor before starting and before each expensive phase. Workspace/output
+and scratch-image backing filesystems each retain their own path, numeric counters and free-byte
+observation; a malformed or unavailable read refuses admission. The fixed fixture volume retains
+its independent declared capacity and closure checks. These are declared bounds, not measured production peaks;
+the V8 ceiling does not bound process-tree RSS. Only temporary fixtures are capacity bounded:
+this mode does not sandbox trusted tests or bound every workspace write. A native capture whose
+process group cannot be proven closed retains scratch and its lease; a failed normal detach
+retains the volume and refuses the receipt. Existing memory-pressure and serial-slot checks remain.
+
+The smaller runtime budget may select a subset or no affected suites. An `over-capacity` receipt
+is partial feedback, never author PASS. Failed phases remain failed. Required isolated full
+assurance and hosted checks, coverage, security and native review remain separate merge gates.
+The default author invocation and full coverage job retain their existing 20-GiB policy;
+Linux admission is unchanged. No quiet window is required merely because this bounded job has
+less than 20 GiB free.
+
+Operator-approved 2026-10-23: this opt-in mode gives the census producer a shared 110-second
+allowance inside its unchanged 120-second native backstop. Before each instrument, admission-table,
+calibration or qualification child, the producer requires room for that child's existing worst-case
+backstop plus shutdown reserve. It never shortens a child timeout. An unstarted child which cannot
+fit is deferred in a head/base/root-bound partial receipt. Only that complete, typed exit3 can let
+independent bounded checks continue; the author verdict remains `over-capacity`, never PASS.
+Actual timeouts, unknown measurements, incomplete/skipped child results and failed caused assertions
+retain their refusal/failure behavior. A failed head whose base cannot run stays unavailable, not a
+budget-only result. Default author and hosted/full census commands receive no parent-budget option.
+
+Bounded author acquires its genuine serial lease before census and reuses it through static/affected
+checks; the native spooler maintains its heartbeat while the owner blocks. Budgeted census files
+run separately with `--test-concurrency=1`; an outer slot alone does not make
+Node's file runner serial. The census admits at most 32 operations, with each native output cap
+no larger than one thirty-second of the declared scratch allowance or 8 MiB. Completed successful
+spools are removed; rejected native captures stay in the owning author diagnostics directory,
+outside disposable fixture scratch. The second scratch allowance in disk admission covers these
+bounded retained captures. A failing head checks whether its base child can fit before copying a
+baseline. Choose scratch from the actual tree footprint: a counted 10633-blob base is estimated to need
+133 MiB of 4-KiB data blocks before directories and index, and the real 128-MiB checkout filled;
+256 MiB remains within the existing maximum. Neither a space refusal nor a truncated capture is PASS.
+
+Operator-approved 2026-10-23: bounded author also gives the serial rule sweep a soft producer
+allowance of one quarter of the static phase (30 seconds at the unchanged 120-second backstop),
+capped at 60 seconds. The allowance is checked
+between files; it does not promise that the next file finishes within it, shorten a started child's
+backstop, or hide an actual timeout. The live owner names completed, failed, unknown and deferred
+physical files separately. Only unstarted files are deferred. Any failure, missing native completion,
+changed source/dependency/runtime/environment, stale owner or truncated outer capture prevents a
+budget-only result. Bounded native failure diagnostics survive in the owner's event files;
+same-owner static step boundaries are emitted immediately so a killed outer buffer names the leaf.
+
+Independent static checks continue after a qualified partial rule result. That same invocation's
+already measured parent census is retained rather than run a second time; an earlier partial census
+stays partial. Static exit3 requires all other checks to succeed, a fresh head-bound summary and the
+live owner's verified native receipts. The author rechecks them and remains `over-capacity`, never
+PASS. Default/unbudgeted and hosted/full sweeps still execute every file. Required isolated full
+Linux assurance, hosted checks/coverage/security, native review and ordinary merge are unchanged.
+
+Operator-approved 2026-10-23: bounded author separates default compiler/commitlint/emitter checks,
+the rule sweep, the remaining maintained fast checks, CI checks and scoped coverage into five
+serial native phases. Each retains its 120-second backstop and 8-MiB output allowance; the same
+32-phase maximum, one-hour outer controller, heap, scratch, disk and live serial lease remain.
+This explicitly increases the combined static time allowance beyond the former shared120s.
+The later fast phase verifies the same owner's original rule receipts instead of rerunning them.
+No additional check becomes deferrable. A failed/unknown/timed-out phase stops affected tests;
+native summary identity, actual head, dependencies, environment and child closure remain required.
+Only a budgeted live owner receives this partition; default/full/hosted preflight remains unchanged.
+
 ### Explicit low-footprint local checks
 
 Operator-approved 2026-10-17: the Mac may run an explicitly scoped check below the ordinary
@@ -111,7 +190,7 @@ node --import tsx scripts/preflight-author.mjs --low-footprint --scratch-mib 256
 
 Choose the scratch/runtime budgets for the named work; the example is not a policy default.
 This opt-in Mac path requires a committed tree, fresh base, physical tracked files, publication
-identity, a test slot, normal native memory pressure and room for the bounded image plus retained
+identity, a test slot, native memory admission and room for the bounded image plus retained
 output. It runs serially with no discovery/full-suite fallback. A fixed-capacity disk image bounds
 fixture growth, and an inherited native sandbox denies writes outside it, dependency payload
 writes and networking. An incompatible test fails; it is not silently rerun unsandboxed.
@@ -123,6 +202,19 @@ its 20-GiB guard. Capture is output/runtime bounded, source is rechecked afterwa
 detach retains the scratch and refuses the run rather than deleting a possibly active volume.
 This is local write/resource containment, not a security boundary for hostile test code or a
 host-wide storage reservation; other sessions' writes and OS swap remain separate pressure.
+
+Operator-approved 2026-10-23: workload-aware warning admission is limited to at most four
+explicit files, one worker, 120 seconds of test execution and 256 MiB of scratch. Those jobs
+inherit a 512-MiB V8 old-space ceiling. The 1-GiB process planning allowance is **not** an RSS
+hard cap. Three fresh native samples, five seconds apart, must show no new swap-outs,
+swap-ins no faster than 64 KiB/s in **each** interval, and at least the allowance plus a
+2-GiB reserve in the explicitly approximate free-plus-inactive measure. Critical/unknown
+pressure, failed reads, counter resets and changed disk capacity refuse; admission is
+repeated after slot waiting and immediately before tests. These are conservative policy
+ceilings, not Apple-defined limits or demonstrated full-gate capacity. Larger scoped jobs
+remain normal-pressure-only. The ordinary full-author function, 20-GiB floor, slots,
+selection, checks and assurance are unchanged. This does not enable budget enforcement
+in production or change Linux/hosted admission.
 
 Regression evidence: `test/author-preflight.test.ts` exercises real Git and Node subprocesses,
 including a failing test; `test/merge-lcov.test.ts` compares every LCOV record against pinned Node.

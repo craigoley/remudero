@@ -1,0 +1,4 @@
+- claim: the active SQLite fixture cleanup lesson records diagnostic publication ordering
+  proof: "grep: id: sqlite-fixture-cleanup-waits-for-diagnostic-publication in learnings/testing.yaml"
+- claim: the SQLite fixture cleanup lesson preserves evidence when close or flush fails
+  proof: "grep: Preserve the directory if close or flush fails in learnings/testing.yaml"

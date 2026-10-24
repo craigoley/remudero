@@ -14,7 +14,7 @@
     - src/lib/sweep.ts
     - test/an-unfiled-pr-has-its-own-fix-and-escalation-identity.test.ts
     - test/a-taskless-prs-ended-fix-rung-is-read-under-its-own-key.test.ts
-  status: queued
+  status: merged
   priority: 1.5  # every taskless PR (codex/*, any head with no Remudero-Task trailer) whose first fix round ends without a push is parked forever with no escalation
   attempts: 0
   rationale: |

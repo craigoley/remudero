@@ -164,7 +164,7 @@ export interface AdmissionRequest {
 export type AdmissionOutcome =
   | { kind: "abandoned"; reason: "admission-abandoned"; waitedMs: number; attempts: number }
   | { kind: "not-enforced"; why: string }
-  | { kind: "deferred"; reasons: ShadowVerdict["reasons"] }
+  | { kind: "deferred"; reasons: ShadowVerdict["reasons"]; basis?: "rank" }
   | { kind: "admitted"; tier: AdmissionTier | "nothing-to-wait-for" | "aged" | "own-tail" | "starvation"; waitedMs: number; attempts: number; reservation?: LearnedReservation;
     /** Only on the aged tier: call when the admitted child ends, so the next aged start may run. */
     endAged?: () => void }
@@ -638,6 +638,19 @@ async function admissionLoop(request: AdmissionRequest, ports: AdmissionPorts, v
       if (head !== waiter) {
         lastKey = "queued";
         observeQueue("queued-behind-rank", ranked.indexOf(waiter) + 1, ranked.length, head?.workerClass ?? null);
+        if (defers && request.workerClass === "garden") {
+          // The caller owns its retry cadence: an outranked request must not occupy its pass pool.
+          // This is an observed rank refusal, not a measured memory shortfall or an admission.
+          const streak = streaks.get(key) ?? { instance: root, workerClass: request.workerClass,
+            waitingSinceMs: seededSince ?? since, askedSinceMs: askedSince, runId, deferrals: 0 };
+          streak.deferrals += 1;
+          streaks.set(key, streak);
+          write({ step: ENFORCE_DEFER_STEP, worker_class: request.workerClass, basis: "rank",
+            ahead_worker_class: head?.workerClass ?? null, attempts: attempt, waited_ms: now - startedAt,
+            deferred_since: fixedClock(streak.waitingSinceMs).iso(), seeded_ms: streak.askedSinceMs - streak.waitingSinceMs,
+            deferrals: streak.deferrals, cadence_ms: request.deferral?.cadenceMs ?? null });
+          return { kind: "deferred", reasons: [], basis: "rank" };
+        }
       } else if (observationId !== undefined) observeQueue("evaluating-head", 1, ranked.length, null);
       // Diagnostic sinks may synchronously cancel this strict invocation before evaluation.
       if (validation && request.signal?.aborted) return abandoned();

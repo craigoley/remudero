@@ -1,0 +1,37 @@
+- id: W1-T10520
+  title: "THE FIX-LANE GARDENER'S COSTLIEST DEFECT CLASS — fixed-still-red cost 200.96 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.08
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "fix-lane:fixed-still-red"
+  files:
+    - src/lib/fix-lane-gardener.ts
+    - test/gardeners/fix-lane-fixed-still-red.test.ts
+  acceptance:
+    - claim: "fixed-still-red no longer needs an operator hand fix"
+      proof: "grep: test(\"W1-T10520: fix-lane-fixed-still-red clears without a person\" in test/gardeners/fix-lane-fixed-still-red.test.ts"
+  note: "Filed by fix-lane at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    fixed-still-red cost 200.96 PR-hours; owner fix-lane
+    Owner: the fix lane itself (a defect in the harness that repairs PRs, not in the PR).
+    Source owner: src/lib/fix-lane-gardener.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #10350: 84.25 PR-hours — a FIXED push 23bcf7c9a is still red on the next sweep
+    - PR #11049: 76.13 PR-hours — a FIXED push 88d66510c is still red on the next sweep — worker saw: state/runs/DAEMON-1791802848509-fix1-1791805614514.tail
+    - PR #11487: 32.56 PR-hours — a FIXED push d6db5b929 is still red on the next sweep — worker saw: state/runs/DAEMON-1791934437639-fix1-1791934849764.tail
+    - PR #10785: 25.15 PR-hours — a FIXED push 67b1cb1bb is still red on the next sweep — worker saw: state/runs/DAEMON-1791700549368-fix1-1791707326748.tail
+    - PR #10600: 24.52 PR-hours — a FIXED push 2433f689f is still red on the next sweep — worker saw: state/runs/DAEMON-1791634616149-fix1-1791641849319.tail
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.92
+    reasons:
+      - "high-risk verdict at confidence 0.92 — on the change's description/files alone, no diff was read — The filing lists five still-red pushes and their PR-hours, but supplies no shared root-cause diagnosis or bounded remedy; the finding supporting a class-wide repair cannot be verified from the supplied evidence.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; it does not establish that the test passes or that recovery occurs without operator intervention."
+    judged_at: "2026-10-23T20:54:41.732Z"
+    pin: "e7316b437dfdd76c7c6f3a3572a031b885655080942d704a33b9d2519d117157"

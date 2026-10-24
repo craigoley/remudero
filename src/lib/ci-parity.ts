@@ -3267,6 +3267,8 @@ export interface PreflightFastDeps {
 export interface PreflightFastResult {
   steps: CiParityStepResult[];
   ok: boolean;
+  /** Only live same-author producer receipts can mark an unstarted obligation deferred. */
+  deferred?: string[];
 }
 
 // Native context isolation retains verified heap policy; see node-test-environment.ts.
@@ -3304,6 +3306,14 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const gateSteps = deps.steps ?? FAST_GATE_STEPS;
   const timingClock = deps.timingNow ? clockFromMillisFn(deps.timingNow) : undefined;
   const timings = gateSteps.map(() => createStaticCheckTiming(spawn, timingClock));
+  const deferred: string[] = [];
+  const ownedBudget = (kind: string, allowPrepared = false) => spawn === defaultPreflightSpawn
+    ? require("../../scripts/lib/author-rule-owner.mjs").ownedPreflightBudgetResult(repoRoot, kind, allowPrepared)
+    : undefined;
+  const observeOwnedStep = (name: string, event: string, result?: CiParityStepResult) => {
+    if (spawn === defaultPreflightSpawn)
+      require("../../scripts/lib/author-rule-owner.mjs").observeOwnedStaticStep(repoRoot, name, event, result);
+  };
   // W1-T8920 — in a repo that is not the harness's own, core's steps it does not hold are skipped.
   const consumer = isConsumerRepo(repoRoot, deps.packageJsonText);
   const timedCensus = (script: string, spawn: PreflightSpawn) => {
@@ -3319,7 +3329,8 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const censusCosts = new Map<number, number>();
   const steps = gateSteps.map(({ job, script, runner, boundMs, retainSuccessOutput, skipWhenAbsent }, i) => {
     const spawn = timings[i].wrap("initial");
-    return runStep(job, () => {
+    observeOwnedStep(job, "started");
+    const step = runStep(job, () => {
       if (skipWhenAbsent !== undefined && !existsSync(join(repoRoot, skipWhenAbsent))) {
         return { ok: true, detail: `SKIPPED — no ${skipWhenAbsent}/ directory in this checkout; nothing for ${job} to check here` };
       }
@@ -3330,17 +3341,35 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         return { ok: true, detail: `SKIPPED — ${job}: "${script}" is core's step and this repo does not define it` };
       }
       if (runner === "rule-checks") {
-        return withoutNodeTestContext(() =>
-          shellOut(
-            spawn,
-            "node --import tsx scripts/list-rule-suites.mjs --run",
-            process.execPath,
-            ["--import", "tsx", "scripts/list-rule-suites.mjs", "--run"],
-            { cwd: repoRoot },
-          ),
-        );
+        return withoutNodeTestContext(() => {
+          const prior = ownedBudget("rules", true);
+          if (prior) {
+            if (prior.state === "over-capacity") {
+              deferred.push(job);
+              return { ok: false, detail: "OVER-CAPACITY — verified same-author rules retained; unstarted files remain deferred" };
+            }
+            return { ok: true, detail: "PASS — verified same-author native rules retained; no second rule child" };
+          }
+          const args = ["--import", "tsx", "scripts/list-rule-suites.mjs", "--run"];
+          const result = spawn(process.execPath, args, { cwd: repoRoot });
+          if (result.status === 3 && !result.signal && !result.error && ownedBudget("rules")?.state === "over-capacity") {
+            deferred.push(job);
+            return { ok: false, detail: "OVER-CAPACITY — unstarted rule files remain deferred in the live owner receipt; full assurance required" };
+          }
+          return shellOut(() => result, "node --import tsx scripts/list-rule-suites.mjs --run", process.execPath, args, { cwd: repoRoot });
+        });
       }
-      if (runner === "census-precheck") return censusPrecheckLeaf(repoRoot, spawn);
+      if (runner === "census-precheck") {
+        const prior = ownedBudget("census");
+        if (prior) {
+          if (prior.state === "over-capacity") {
+            deferred.push(job);
+            return { ok: false, detail: "OVER-CAPACITY — same-author parent census retained; unstarted work remains deferred, not PASS" };
+          }
+          return { ok: true, detail: "PASS — actual same-author parent census completion retained; no second census child" };
+        }
+        return censusPrecheckLeaf(repoRoot, spawn);
+      }
       if (!scriptNames.has(script)) {
         return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };
       }
@@ -3355,6 +3384,8 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       }
       return result;
     });
+    observeOwnedStep(job, "returned", step);
+    return step;
   });
 
   // PASS TWO: with every census cost measured on the SAME machine in the SAME run, a runaway is
@@ -3412,6 +3443,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   return {
     steps: steps.map((step, i) => ({ ...step, staticTiming: timings[i].snapshot() })),
     ok: steps.every((s) => s.ok),
+    ...(deferred.length ? { deferred } : {}),
   };
 }
 

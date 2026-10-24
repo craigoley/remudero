@@ -43,6 +43,24 @@ test("W1-T9059: a shard failure naming a test file is owned by the source module
   }
 });
 
+test("the Git-backed friction owner resolves source and script package aliases before declaring no owner", t => {
+  const f = fixture(t);
+  f.put("scripts/remedy.mjs", "export const remedy = true;\n");
+  for (const [source, expected] of [
+    ['import { govern } from "#src/lib/dispatch-governor.js";\n', SOURCE],
+    ['const remedy = await import("#scripts/remedy.mjs");\n', "scripts/remedy.mjs"],
+    ['import "#src/absent.js";\nimport "#src/lib/dispatch-governor.js";\n', SOURCE],
+  ] as const) {
+    f.put(TEST, source);
+    f.commit();
+    assert.deepEqual(locateCiFrictionOwner(`check:test:${TEST}`, [], f.search())?.files, [expected, TEST]);
+  }
+  f.put("test/helper.ts", "export {};\n");
+  f.put(TEST, 'import "#test/helper.js";\nimport "#src/absent.js";\n');
+  f.commit();
+  assert.deepEqual(locateCiFrictionOwner(`check:test:${TEST}`, [], f.search())?.files, [TEST]);
+});
+
 test("W1-T9059: a timeout signature is owned by the workflow, never by the gardener vocabulary", t => {
   const f = fixture(t);
   const signatures = [

@@ -1,0 +1,213 @@
+- id: W1-T10507
+  title: "A HOST WORKTREE LINKS ITS DEPENDENCIES WHOEVER CREATES IT — a tracked `hooks/post-checkout` sees a NEW linked worktree (old HEAD is the null sha) of a checkout whose hooks path holds it and runs `remudero-dependencies prime` on it, so a raw `git worktree add` of the host's operator checkout gets read-only seed links (2 MB measured) instead of a 511-537 MB `npm ci`; the installer keeps the hook reachable from the host's live checkouts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 9.00
+  risk: high  # Rule 19: one concern, a worktree's dependencies at creation, across one hook, its installer check, its test and its doctrine line
+  band_meaning: span
+  priority: 1  # coordinator brief 2026-10-23: the host's operator namespace grew to 85 GB from per-worktree installs
+  status: queued
+  attempts: 0
+  origin: "coordinator brief 2026-10-23: worktrees of the host's operator checkout each carry a private node_modules; instructions to use hand-worktree and dependency seeds did not change what sessions do"
+  plan_refs: [W1-T5533, W1-T10257, W1-T6147, W1-T10265, W1-T9432, W1-T10501]
+  files:
+    - hooks/post-checkout
+    - deploy/install-host-units.sh
+    - doctrine/plan-and-task-hygiene/host-worktrees-arrive-linked.md
+    - CLAUDE.md
+    - AGENTS.md
+    - test/deploy/a-host-worktree-links-its-dependencies-whoever-creates-it.test.ts
+  rationale: |
+    MEASURED 2026-10-23 on `ssh remudero` (read-only, niced, bounded), at origin/main 1bb959a54.
+
+    THE WORKTREES:
+    - /mnt/scratch/rmd-qa-namespace.ulkfFP/operator holds 125 `wt-*` directories. All are linked worktrees of
+      /home/craigoleyagent/rmd-op: each `.git` file names rmd-op/.git/worktrees/wt-*.
+    - By node_modules, classified with `[ -L node_modules ]`, then `[ -L node_modules/typescript ]`, then `[ -d ]`:
+        57 hold a REAL install. In 55 of them `typescript/package.json` has 1 link; the other 2 have 2 links.
+        65 hold a SYMLINK: 43 point to /home/craigoleyagent/rmd-op/node_modules, 21 to another worktree's
+           (wt-batch1017-repro), and 1 to wt-13223's.
+         0 hold seed links.
+         3 hold no node_modules.
+      The brief measured 511-537 MB for each real install, so the 57 hold about 30 GB. The namespace totals 85 GB.
+    - Real installs by worktree creation day (mtime of `.git`): 10-15 15, 10-16 11, 10-17 4, 10-18 0, 10-19 8,
+      10-20 6, 10-21 12, 10-22 1. That is 57 in 8 days.
+    - The symlinked half costs no space, but it is the hazard `ensureInstallFresh` refuses: an `npm ci` through
+      the link empties the target tree. That was the 2026-07-29 outage mechanism, and here the target is rmd-op's
+      own node_modules for 43 of them.
+    - On 10-22, wt-file-1022's gitdir was created at 01:21:28 and its `node_modules/.package-lock.json` is dated
+      01:32:03: an install 11 minutes after the cut.
+
+    THE CHEAP PATH ALREADY EXISTS ON THE HOST:
+    - `~/.local/bin/remudero-dependencies` was installed 10-14 by deploy/install-dependency-seeds.sh.
+    - `~/.config/remudero/dependency-seeds.json` is
+      `{"enabled":true,"root":"/mnt/scratch/remudero-dependencies/craigoleyagent"}`.
+    - The store holds 7 ready seeds. The newest key, 90905545…, was used 10-23 15:21.
+    - A readonly-links consumer node_modules measures 2 MB with du: dependency-seed-canary-20261014,
+      harness-observation/run-unfiled-1792543557343 and recorded-history/run-unfiled-1792554158266.
+    - `rmd hand-worktree` (W1-T5533, src/lib/hand-worktree.ts) primes through it when the seed config is
+      enabled. The sessions that cut these worktrees run plain `git worktree add`, and then `npm ci` or `ln -s`.
+
+    WHY A post-checkout HOOK REACHES EVERY CREATOR:
+    - rmd-op's `core.hooksPath` is `/home/craigoleyagent/rmd-op/hooks`, an absolute path to its tracked hooks/.
+      rmd-mint is a worktree of rmd-op and shares that config.
+    - git runs post-checkout from that directory for every `git worktree add` that checks out. Whoever calls git
+      and from wherever, the tracked file is what runs.
+    - A throwaway probe (git 2.54 on the Mac, 2026-10-23) measured three things:
+        `git worktree add` runs post-checkout with $1 = 0000000000000000000000000000000000000000 and $3 = 1,
+          cwd = the new worktree, and `git rev-parse --git-dir` = <common>/worktrees/<name>.
+        A later `git checkout -b` in it passes a real sha.
+        `--no-checkout` runs no hook, and a non-zero hook exit makes `git worktree add` itself exit non-zero
+          (rc 3), although the worktree was made.
+    - The host runs git 2.43.0.
+    - The fleet's own cuts run no hook by design. worktreeAdd sets core.hooksPath to HOST_HOOKS_DIR (hooks/host)
+      at command-line precedence (W1-T6106/W1-T6147, src/lib/worktree-git.ts), and the fleet already symlinks
+      lanes (linkWorktreeNodeModules). So the managed checkouts need nothing new. The hook must not be added to
+      hooks/host.
+
+    CANDIDATES WEIGHED:
+    - (a) THIS TASK, the hook. It acts at creation, for any creator, through a config the host already has.
+    - (b) Janitor dedup of idle kept worktrees against a lockfile-matched donor or seed. This is a reclaim tier,
+      not prevention.
+        It is the only one that recovers the existing ~30 GB.
+        It runs after the bytes were written. The operator namespace is not a janitor root today
+          (WORKTREE_ROOTS is /mnt/scratch/worktrees:/home/<user>/rmd-work).
+        Mutation safety: seed links are read-only (`setWritable(..., false)` in materializeDependencySeed), so an
+          in-place write fails loudly rather than leaking into other consumers. hand-worktree's plain `cp -al`
+          has no such guard: its only safety is that `npm ci` unlinks before writing.
+        Reported to the coordinator as its own item, not filed here.
+    - (c) Making `npm ci` a no-op when linked deps match. Rejected.
+        `.npmrc` cannot skip or alias a command.
+        npm ci clears node_modules before any root lifecycle script runs, and the dependency-seed donor check
+          refuses a root preinstall/install/postinstall/prepare script.
+        A PATH shim would change every install the account runs, including the seed's own `npm ci`.
+        Over seed links, npm ci only unlinks the read-only links, so it stays SAFE. It just pays the 500 MB
+          again, and that is the doctrine line's job.
+
+    THE OPEN RISK THIS TASK MUST MEASURE FIRST:
+    - Of the 12 readonly-links consumers registered under /mnt/scratch/operator-stuck-pr-private-20261020T2215Z,
+      10 now hold a REAL node_modules dated after their registration.
+        6 have 1 link on typescript/package.json, the shape of a fresh install.
+        4 have 2 or 5 links, the shape of hard-linked copies.
+      Examples: registered 10-21 04:23 and reinstalled 18:09; registered 10-23 11:40 and reinstalled 11:46.
+    - What replaced the links is not known.
+        It may be a session's habitual `npm ci`.
+        Or a repo command may misread seed links (for example `npm ls --depth=0 --offline` flagging symlinked
+          packages) and lead to a reinstall.
+    - A hook that primes links which are then thrown away saves nothing. For the sessions that symlink today, it
+      would cost more if the links push them to `npm ci`.
+
+    WHO CREATES THESE (read-only evidence; not proven to one agent):
+    - Commits in them are authored by the host identity Craig Oley.
+    - Branch names: `file-1022-fleet-routing`, `fix-workflow-scope-hold-<epochMs>`, `run-W1-T9434-<epochMs>`.
+    - W1-T9432 (10-14) called them "Azure-host Codex worktrees".
+    - Searched for a cwd under the namespace or rmd-op:
+        host ~/.codex/sessions 10-15..10-23 (5,327 rollouts): 0. All are fleet lanes or review checkouts.
+        host ~/.claude/projects: none.
+        Mac ~/.claude/projects: none outside this filing session.
+    - The host's interactive logins come from the operator's address. Ssh sessions driving the host keep their
+      transcripts off-host.
+    - The hook is designed not to need the answer.
+
+    SHARED SURFACE:
+    - W1-T10501 (queued) also edits deploy/install-host-units.sh (systemd reload). Its edits are to the
+      unit-write and reload paths, not the live-checkout block this task adds to.
+    - Branch run-unfiled-1792766428371 (an hourly logind session reaper; no open PR at 15:26Z) also edits
+      deploy/install-host-units.sh. This build merges after it and resolves on top of it.
+    - This task does not edit deploy/rmd-host-cleanup.sh.
+    - W1-T10257 owns Mac worktree materialization (`rmd worktree add`, with --no-checkout, so no hook runs). The
+      Mac house rule still symlinks, so this hook does nothing on darwin.
+
+    EXPECTED SAVING (a projection, verified by design step 5):
+    - Up to about 520 MB for each worktree that would otherwise get a real install. That is 57 in 8 days on the
+      measured window, about 30 GB, or ~3.7 GB a day at that window's mean.
+    - Less whatever share of linked worktrees still get reinstalled. Design step 1 measures that share's cause.
+  design: |
+    1. MEASURE FIRST, before wiring anything (prove the approach in a throwaway run):
+       - In the builder's own lane, make a throwaway checkout.
+       - Materialize readonly-links into it with materializeDependencySeed, using a temp seed root and the lane's
+         own node_modules as sourceDir.
+       - Run the commands a session runs in a fresh worktree and record each exit status:
+           `npm ls --depth=0 --offline`
+           `npm run -s lint-plan:fast`
+           `node --import tsx --import ./test/setup/tmp-hygiene.ts --test <one small test>`
+           `./bin/rmd preflight --fast` (or `node scripts/preflight-author.mjs --fast`)
+       - Record the results in the PR body.
+       - If any command refuses or rewrites the links, name it in the PR body and in the doctrine body as the
+         known reinstall cause. Fixing that command is a separate filed item, not this PR's growth. The hook
+         still ships, because a refusal there is no worse than today's `npm ci`.
+    2. hooks/post-checkout (bash; tracked; mode 0755). In order, it exits 0 SILENTLY unless ALL of these hold:
+         $1 is the null sha and $3 is 1;
+         `git rev-parse --git-dir` differs from `--git-common-dir` (a linked worktree, not a clone or the main
+           tree);
+         `uname -s` is not Darwin;
+         package-lock.json exists;
+         nothing exists at node_modules (lstat: a file, a dir or a dangling link all count as present);
+         `remudero-dependencies` resolves (PATH, then $HOME/.local/bin).
+       Then:
+       - Read the main worktree from the first `worktree` line of `git worktree list --porcelain`.
+       - Print one line to stderr: "post-checkout: linking dependencies from the account seed store".
+       - Run `remudero-dependencies prime "$PWD" --source <main worktree>`.
+       - If the tool refuses with "donor inputs do not match", run `remudero-dependencies prime "$PWD"` without
+         --source. That installs once into the shared seed for this lockfile.
+       - Print the tool's outcome (method and seed key, or the refusal's first line).
+       - Always exit 0. A failed prime must never make `git worktree add` fail.
+       The hook never runs `npm ci` itself, and never writes outside the new worktree and the account seed store.
+       It must pass under bash 5 `set -u`, with arrays initialised.
+    3. deploy/install-host-units.sh, beside the janitor block that already names CLEANUP_LIVE_CHECKOUTS. For each
+       live checkout that is a git repository:
+       - Resolve the effective hooks dir: `git config core.hooksPath`, absolute or relative to the checkout; unset
+         means `<checkout>/.git/hooks`.
+       - Check mode prints `MISSING <checkout> post-checkout` when that dir holds no executable post-checkout.
+         It prints `DRIFTED <checkout> post-checkout` when the file differs from the installer's own
+         `$SCRIPT_DIR/../hooks/post-checkout`. Each line counts as drift.
+       - --install sets `core.hooksPath hooks` only when hooksPath is UNSET (the one value the repo sets). It runs
+         as SERVICE_USER so git's safe.directory check passes.
+       - It never rewrites a set hooksPath and never writes into a checkout's tracked tree. A stale tracked copy
+         is fixed by bringing that checkout to main, and the DRIFTED line says so.
+    4. DOCTRINE (the layout W1-T3323 set):
+       - doctrine/plan-and-task-hygiene/host-worktrees-arrive-linked.md holds the body:
+           why, the measured numbers, the hook's conditions, the step 1 findings, and how to tell what a worktree
+             holds (`[ -L node_modules/typescript ]`);
+           an `ln -s` into an existing node_modules nests a link harmlessly;
+           `npm ci` over seed links is safe but repays the install.
+       - CLAUDE.md gets one headline with its `→ doctrine/...` pointer, and AGENTS.md is regenerated with
+         `npm run agents-md` (CLAUDE.md's Upkeep line). The headline, which the doctrine body repeats on ONE
+         physical line: "On the Azure host a new worktree's dependencies are linked when it is cut — never run
+         `npm ci` or `ln -s` node_modules in it."
+       - The CLAUDE.md change is NET-ZERO bytes (`node scripts/claude-md-budget-ratchet.mjs`). Pay for the
+         headline by shortening an existing headline's wording. Grep test/ for that headline's distinctive phrase
+         first, and never move or delete a rule a test pins.
+    5. MEASURE AFTER MERGE (recorded on this task by an operator session; no fixed threshold):
+       - Once rmd-op is on a main that holds the hook, count new `wt-*` worktrees by node_modules kind each day:
+         seed links, real install, symlink, none.
+       - Report the reclaimed bytes next to this rationale's 57-in-8-days baseline.
+       - The claim stands only if seed-linked worktrees replace real installs. Any worktree that is linked and
+         then reinstalled is named with its timing.
+  acceptance:
+    - claim: "a raw `git worktree add` from a checkout whose hooks path holds hooks/post-checkout runs the account's remudero-dependencies prime on the new linked worktree with --source naming the main worktree, retries without --source when the donor does not match, and git exits 0 whether the prime succeeds or refuses"
+      proof: 'grep: test("W1-T10507: a raw git worktree add primes the new worktree from the seed store and never fails the cut" in test/deploy/a-host-worktree-links-its-dependencies-whoever-creates-it.test.ts'
+    - claim: "the host installer reports a live checkout whose effective hooks dir has no post-checkout or a different one, and --install sets core.hooksPath hooks only where it is unset"
+      proof: 'grep: test("W1-T10507: the installer reports a live checkout whose hooks dir lacks the post-checkout hook" in test/deploy/a-host-worktree-links-its-dependencies-whoever-creates-it.test.ts'
+    - claim: "the doctrine body tells a host session not to install into a fresh worktree"
+      proof: 'grep: never run `npm ci` or `ln -s` node_modules in it in doctrine/plan-and-task-hygiene/host-worktrees-arrive-linked.md'
+  falsifier: |
+    These guards belong here: each one passes at base, where no hook exists, so a claim for it could not fail
+    there. The test covers each.
+    - Drop the null-sha check: a `git checkout -b` in an existing worktree primes again, and the fake tool records
+      a second call.
+    - Drop the existing-node_modules check: a worktree whose node_modules is a symlink or a dangling link reaches
+      prime, and the fake records it.
+    - Drop the linked-worktree check: a `git clone` of the fixture (null sha, flag 1) primes the clone.
+    - Drop the darwin check: on a stubbed `uname -s` of Darwin the fake records a call.
+    - Let a failing prime's status through: `git worktree add` exits non-zero (the probe's rc 3), and the
+      always-exit-0 assertion fails.
+    - Hook with the tool absent: the hook prints nothing, the fake has no record and git exits 0. A hook that
+      prints there breaks every fixture that parses git's stderr.
+    - Add post-checkout to hooks/host: worktreeAdd's W1-T6147 control (test/cutting-a-worktree-runs-no-tracked-or-gitdir-hook.test.ts)
+      sees the marker.
+    - Have the installer rewrite a set hooksPath: the fixture whose hooksPath is an absolute hooks dir comes back
+      changed.

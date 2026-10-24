@@ -545,7 +545,8 @@
 
 - id: ci-gate-refusals-repaired-by-hand
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire ci-gate-refusals-repaired-by-hand
+  lifecycle: superseded
   files:
     - "scripts/comment-load-baseline.json"
     - "scripts/source-size-baseline.json"

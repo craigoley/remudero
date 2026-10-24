@@ -1083,7 +1083,7 @@ export function* hydrateScannerBlockerObservationsSteps(
 
 export const CODEQL_CHECK_NAME = "CodeQL";
 export const CODEQL_HEAD_ALERT_HYDRATION_CAP = 3; // BACKSTOP: one merge-ref read per failing-CodeQL or refused head per pass
-export const CODEQL_HIGH_SEVERITIES: readonly string[] = ["critical", "high", "error"];
+export const CODEQL_HIGH_SEVERITIES: readonly string[] = ["critical", "high", "error", "warning", "medium"];
 
 export interface CodeqlHeadAlert {
   alertNumber: number;

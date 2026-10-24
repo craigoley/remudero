@@ -89,8 +89,12 @@ test("checkpoint emitters pass local range gates without erasing unfinished work
   const legacy = rig();
   legacy.work.git("commit", "--quiet", "--allow-empty", "-m", "wip: yield at worker\n\n[remudero-context]\nremaining: tests");
   const range = { from: legacy.base, to: "HEAD" };
-  for (const gate of [commitlintStep, emitterChecksStep]) assert.equal(gate(legacy.work.dir, range).ok, false, "legacy wip still fails the unchanged local gate");
-  assert.equal(unfinished.isWipSubject("wip: yield at worker"), true, "legacy history remains resumable, not waived");
+  for (const gate of [commitlintStep, emitterChecksStep]) {
+    const result = gate(legacy.work.dir, range);
+    assert.equal(result.ok, true, result.detail);
+    assert.match(result.detail, /skipped checkpoint commit 1\/1: wip: yield at worker/);
+  }
+  assert.equal(unfinished.isWipSubject("wip: yield at worker"), true, "exempt legacy history remains unfinished and resumable");
 });
 
 test("checkpoint prompt and continuation agree with local range and hosted title contracts", () => {
@@ -177,6 +181,7 @@ test("checkpoint no-diff, conflict refusal and failed default pushes retain thei
 
 test("the local checkpoint contract preserves actual merge filtering and configured ignore rules", () => {
   const { work, base } = rig();
+  work.git("commit", "--quiet", "--allow-empty", "-m", "wip: retained work before merge");
   work.git("commit", "--quiet", "--allow-empty", "-m", "test(checkpoint): left branch");
   const left = work.git("rev-parse", "HEAD");
   work.git("checkout", "--quiet", "--detach", base);
@@ -184,13 +189,14 @@ test("the local checkpoint contract preserves actual merge filtering and configu
   const right = work.git("rev-parse", "HEAD");
   const tree = work.git("rev-parse", `${left}^{tree}`);
   for (const [subject, expectedCli] of [
-    ["wip: invalid custom merge", false],
+    ["wip: invalid custom merge", true],
+    ["invalid custom merge", false],
     ["Merge branch 'fixture-side'", true],
     ["chore(checkpoint): merge main into the restored checkpoint", true],
   ] as const) {
     const merge = work.git("commit-tree", tree, "-p", left, "-p", right, "-m", subject);
     const range = { from: base, to: merge };
-    assert.equal(work.git("rev-list", "--count", "--no-merges", `${base}..${merge}`), "2");
+    assert.equal(work.git("rev-list", "--count", "--no-merges", `${base}..${merge}`), "3");
     const cli = commitlintStep(work.dir, range);
     const emitter = emitterChecksStep(work.dir, range);
     assert.equal(cli.ok, expectedCli, cli.detail);

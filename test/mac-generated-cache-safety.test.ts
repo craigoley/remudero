@@ -46,10 +46,11 @@ function fixture() {
     mkdirSync(join(path, ".next/server")); writeFileSync(join(path, ".next/server/compiled.js"), "retain compiled evidence\n");
     return join(path, ".next/cache/turbopack");
   };
-  const run = (code = "", old = true, apply = true) => {
+  const run = (code = "", old = true, apply = true, cwdReadError = false) => {
     // ctime cannot be backdated. Shift only this private Python process's
     // clock; the actual CLI test below uses the real default clock instead.
     const program = `import runpy,os,time,sys,pathlib,json\nns=runpy.run_path(os.environ['CACHE_SCRIPT'])\n` +
+      (cwdReadError ? "host_command=ns['main'].__globals__['command']\ndef unavailable_cwd(argv):\n if argv==['lsof','-nP','-a','-d','cwd','-Fn']:return ns['subprocess'].CompletedProcess(argv,1,'','controlled unread cwd inventory')\n return host_command(argv)\nns['main'].__globals__['command']=unavailable_cwd\n" : "") +
       (old ? "observed=time.time();ns['time'].time=lambda:observed+8*3600\n" : "") + code +
       `\nsys.exit(ns['main'](['--home',os.environ['CACHE_HOME']]${apply ? "+['--apply']" : ""}))\n`;
     return spawnSync("python3", ["-c", program], { encoding: "utf8", timeout: 45_000,
@@ -223,12 +224,14 @@ test("artifact cache reference errors and directory symlink swaps fail closed wi
       mkdirSync(join(fx.home, "external")); writeFileSync(join(fx.home, "external/private.txt"), "unpublished");
       const report = receipt(fx.run(String.raw`g=ns['main'].__globals__;home=pathlib.Path(os.environ['CACHE_HOME'])
 external=home/'external';consumer=home/'Developer/consumer';original_scan=os.scandir;original_open=os.open
-external_inode=external.stat().st_ino;consumer_inode=consumer.stat().st_ino;swapped=[False]
+external_inode=external.stat().st_ino;consumer_inode=consumer.stat().st_ino;swapped=[False];writes=[0]
 def scanned(fd):
  inode=os.fstat(fd).st_ino
  assert inode!=external_inode,'followed swapped directory symlink'
  if ${JSON.stringify(variant)}=='error' and inode==consumer_inode:raise PermissionError('private-reference-unreadable')
- if ${JSON.stringify(variant)}=='changed' and inode==consumer_inode:(consumer/'new-private.txt').write_text('concurrent source')
+ # A namespace that settles is re-read (namespaceRetries); one that never settles still holds.
+ if ${JSON.stringify(variant)}=='changed' and inode==consumer_inode:
+  writes[0]+=1;(consumer/('new-private-%d.txt'%writes[0])).write_text('concurrent source')
  return original_scan(fd)
 def opened(path,flags,*args,**kwargs):
  if ${JSON.stringify(variant)}=='swap' and path=='consumer' and not swapped[0]:
@@ -273,27 +276,61 @@ ns['main'].__globals__['references']=forbidden`, false));
   } finally { rmSync(fx.home, { recursive: true, force: true }); }
 });
 
-test("artifact cache cleanup restores staging when activity appears and reports post-removal uncertainty honestly", () => {
+function stagingAndRemovalCase(cwdReadError = false) {
   const fx = fixture();
   try {
     const p = fx.workspace("candidate"), cache = fx.cache(p);
-    const held = fx.run(String.raw`original=ns['main'].__globals__['inactive'];calls=0
+    const liveness = String.raw`g=ns['main'].__globals__;real_command=g['command']
+package=pathlib.Path(os.environ['CACHE_HOME'])/'.codex/work-artifacts/session/candidate/package.json'
+def private_process_inventory(argv):
+ if argv==['ps','-axww','-o','pid=,command=']:
+  return ns['subprocess'].CompletedProcess(argv,0,str(os.getpid())+' private-cache-fixture\n','')
+ if argv==['lsof','-nP','-a','-d','cwd','-Fn']:
+  return ns['subprocess'].CompletedProcess(argv,0,'p'+str(os.getpid())+'\nn'+str(pathlib.Path.cwd())+'\n','')
+ if argv==['lsof','-nP','-p',str(os.getpid()),'-Fn']:
+  return ns['subprocess'].CompletedProcess(argv,0,'p'+str(os.getpid())+'\nn'+str(package)+'\n','')
+ if argv==['lsof','-nP','+D',str(package.parent)]:
+  return ns['subprocess'].CompletedProcess(argv,1,'','')
+ return real_command(argv)
+g['command']=private_process_inventory
+`;
+    const held = fx.run(liveness + String.raw`original=ns['main'].__globals__['inactive'];calls=0
 def activity(workspace):
  global calls
  calls+=1
  if calls==3:raise ns['Hold']('active-after-staging')
  original(workspace)
-ns['main'].__globals__['inactive']=activity`);
+ns['main'].__globals__['inactive']=activity`, true, true, cwdReadError);
     assert.equal(held.status, 0, held.stderr + held.stdout); assert.ok(existsSync(cache)); assert.match(held.stdout, /active-after-staging/);
-    const changed = fx.run(String.raw`original=ns['shutil'].rmtree
+    const restoredPayload = readFileSync(join(cache, "v16/0001.sst"), "utf8");
+    const changed = fx.run(liveness + String.raw`original=ns['shutil'].rmtree
 def deletion(path):
  original(path)
  p=pathlib.Path(path).parents[2]/'after-removal.txt'
  p.write_text('external source writer')
 deletion.avoids_symlink_attacks=original.avoids_symlink_attacks
-ns['shutil'].rmtree=deletion`);
+ns['shutil'].rmtree=deletion`, true, true, cwdReadError);
     assert.equal(changed.status, 2, changed.stderr + changed.stdout); assert.match(changed.stdout, /removed-unverified/);
+    return {
+      restoredPayload,
+      cacheExistsAfterRemoval: existsSync(cache),
+      sourceAfterRemoval: readFileSync(join(p, "after-removal.txt"), "utf8"),
+    };
   } finally { rmSync(fx.home, { recursive: true, force: true }); }
+}
+
+test("artifact cache cleanup restores staging when activity appears and reports post-removal uncertainty honestly", () => {
+  const result = stagingAndRemovalCase();
+  assert.equal(result.restoredPayload, "generated compiler DB\n");
+  assert.equal(result.cacheExistsAfterRemoval, false);
+  assert.equal(result.sourceAfterRemoval, "external source writer");
+});
+
+test("the cache staging fixture reaches its lifecycle controls despite an unread host cwd inventory", () => {
+  const result = stagingAndRemovalCase(true);
+  assert.equal(result.restoredPayload, "generated compiler DB\n");
+  assert.equal(result.cacheExistsAfterRemoval, false);
+  assert.equal(result.sourceAfterRemoval, "external source writer");
 });
 
 test("artifact cache probe errors retain data and never become successful deletions", () => {
