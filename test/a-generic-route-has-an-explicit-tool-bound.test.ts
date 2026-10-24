@@ -260,8 +260,10 @@ test("every worker spawn declares an explicit tool bound", () => {
   // the claim is about EVERY spawn site, including ones no test happens to drive. W1-T3573 closed
   // this for review/manual and left five sites behind, which is exactly the shape a census catches
   // and a per-lane test does not.
-  const src = ["run-task.ts", "cli/commands/review.ts"]
-    .map((file) => readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8")).join("\n");
+  const src = [
+    readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8"),
+    readFileSync(new URL("../src/cli/commands/review.ts", import.meta.url), "utf8"),
+  ].join("\n");
   const lines = src.split("\n");
   const spawnSites = lines
     .map((line, index) => ({ line, index }))
