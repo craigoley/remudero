@@ -46,10 +46,11 @@ function fixture() {
     mkdirSync(join(path, ".next/server")); writeFileSync(join(path, ".next/server/compiled.js"), "retain compiled evidence\n");
     return join(path, ".next/cache/turbopack");
   };
-  const run = (code = "", old = true, apply = true) => {
+  const run = (code = "", old = true, apply = true, cwdReadError = false) => {
     // ctime cannot be backdated. Shift only this private Python process's
     // clock; the actual CLI test below uses the real default clock instead.
     const program = `import runpy,os,time,sys,pathlib,json\nns=runpy.run_path(os.environ['CACHE_SCRIPT'])\n` +
+      (cwdReadError ? "host_command=ns['main'].__globals__['command']\ndef unavailable_cwd(argv):\n if argv==['lsof','-nP','-a','-d','cwd','-Fn']:return ns['subprocess'].CompletedProcess(argv,1,'','controlled unread cwd inventory')\n return host_command(argv)\nns['main'].__globals__['command']=unavailable_cwd\n" : "") +
       (old ? "observed=time.time();ns['time'].time=lambda:observed+8*3600\n" : "") + code +
       `\nsys.exit(ns['main'](['--home',os.environ['CACHE_HOME']]${apply ? "+['--apply']" : ""}))\n`;
     return spawnSync("python3", ["-c", program], { encoding: "utf8", timeout: 45_000,
@@ -275,7 +276,7 @@ ns['main'].__globals__['references']=forbidden`, false));
   } finally { rmSync(fx.home, { recursive: true, force: true }); }
 });
 
-test("artifact cache cleanup restores staging when activity appears and reports post-removal uncertainty honestly", () => {
+function stagingAndRemovalCase(cwdReadError = false) {
   const fx = fixture();
   try {
     const p = fx.workspace("candidate"), cache = fx.cache(p);
@@ -299,7 +300,7 @@ def activity(workspace):
  calls+=1
  if calls==3:raise ns['Hold']('active-after-staging')
  original(workspace)
-ns['main'].__globals__['inactive']=activity`);
+ns['main'].__globals__['inactive']=activity`, true, true, cwdReadError);
     assert.equal(held.status, 0, held.stderr + held.stdout); assert.ok(existsSync(cache)); assert.match(held.stdout, /active-after-staging/);
     const changed = fx.run(liveness + String.raw`original=ns['shutil'].rmtree
 def deletion(path):
@@ -307,10 +308,14 @@ def deletion(path):
  p=pathlib.Path(path).parents[2]/'after-removal.txt'
  p.write_text('external source writer')
 deletion.avoids_symlink_attacks=original.avoids_symlink_attacks
-ns['shutil'].rmtree=deletion`);
+ns['shutil'].rmtree=deletion`, true, true, cwdReadError);
     assert.equal(changed.status, 2, changed.stderr + changed.stdout); assert.match(changed.stdout, /removed-unverified/);
   } finally { rmSync(fx.home, { recursive: true, force: true }); }
-});
+}
+
+test("artifact cache cleanup restores staging when activity appears and reports post-removal uncertainty honestly", () => stagingAndRemovalCase());
+
+test("the cache staging fixture reaches its lifecycle controls despite an unread host cwd inventory", () => stagingAndRemovalCase(true));
 
 test("artifact cache probe errors retain data and never become successful deletions", () => {
   const fx = fixture();
