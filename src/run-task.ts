@@ -8093,6 +8093,11 @@ async function runReview(args: {
           head_sha: headSha,
           node_modules: snapshot.nodeModules,
         });
+        const evidencePath = join(snapshot.cwd, ".git", "rmd-review-input.json");
+        writeFileSync(evidencePath, JSON.stringify({
+          headSha, diff, report, reportIsSubstitute: args.reportIsSubstitute === true,
+          ...(args.implementationReport === undefined ? {} : { implementationReport: args.implementationReport }),
+        }), { mode: 0o600 });
         const prompt =
           buildReviewPrompt({
             task: { id: task.id, acceptance: criteria, ...narrative },
@@ -8100,6 +8105,7 @@ async function runReview(args: {
             owner,
             repo,
             headSha,
+            evidencePath,
             ...scopeContext,
           }) +
           "\n" +
