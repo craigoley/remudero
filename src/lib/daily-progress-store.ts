@@ -80,7 +80,7 @@ export function readDailyProgressRevision(stateDir: string, day: DailyDay, revis
   const body = read(join(dailyProgressStorePath(stateDir), `${digest}.json`));
   if (hash(body) !== digest) throw new Error("daily history checksum differs; preserved for diagnosis");
   const value = JSON.parse(body) as DailyProgressRevision;
-  if (!value?.report || !Array.isArray(value.events) || value.report.revision !== revision || value.report.scope.kind !== "repository" ||
+  if (!value || !value.report || !Array.isArray(value.events) || value.report.revision !== revision || value.report.scope.kind !== "repository" ||
       value.report.scope.repository !== day.repository || value.report.timeZone !== day.timeZone || value.report.reportDate !== day.reportDate) throw new Error("daily history identity differs; preserved for diagnosis");
   for (let offset = 0; offset < Math.max(1, value.events.length); offset += 200) {
     const valid = validateDailyProgressReport({ ...value.report, events: value.events.slice(offset, offset + 200), page: { totalEvents: value.events.length, nextCursor: offset + 200 < value.events.length ? "retained" : null } });
