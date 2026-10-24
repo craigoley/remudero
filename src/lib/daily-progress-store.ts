@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { validateDailyProgressReport, type DailyProgressEvent, type DailyProgressReport } from "./daily-progress-contract.js";
@@ -20,6 +20,7 @@ export const dailyProgressStorePath = (stateDir: string): string => join(stateDi
 const hash = (body: string): string => createHash("sha256").update(body).digest("hex");
 export const dailyProgressDayKey = (repository: string, timeZone: string, date: string): string => hash(JSON.stringify([repository.toLowerCase(), timeZone, date]));
 const HASH = /^[a-f0-9]{64}$/;
+const PUBLICATION_STARTED = "publication-started";
 /** BACKSTOP: refuse an oversized durable object; never silently truncate the counted population. */
 const MAX_OBJECT_BYTES = 64 * 1024 * 1024;
 
@@ -56,7 +57,7 @@ export function readDailyProgressManifest(stateDir: string): DailyProgressManife
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       const root = dailyProgressStorePath(stateDir);
-      if (existsSync(root) && readdirSync(root).some(name => name.endsWith(".json"))) throw new Error("daily history manifest is missing beside retained evidence; preserved for diagnosis");
+      if (existsSync(join(root, PUBLICATION_STARTED))) throw new Error("daily history manifest is missing beside retained evidence; preserved for diagnosis");
       return { version: 1, generation: 0, days: {}, jobs: {} };
     }
     throw error;
@@ -176,8 +177,14 @@ export function commitDailyProgressPublication(stateDir: string, publication: Da
   withWriteTransaction(db, lease, () => {
     if (!stillCurrent()) throw new Error("daily publication lost its source ownership epoch");
     const manifestPath = join(root, "manifest.json");
-    const currentGeneration = !existsSync(manifestPath) && publication.baseGeneration === 0 ? 0 : readDailyProgressManifest(stateDir).generation;
+    const currentGeneration = readDailyProgressManifest(stateDir).generation;
     if (currentGeneration !== publication.baseGeneration) throw new Error("daily publication was superseded by another writer");
+    if (currentGeneration === 0) {
+      // Only an owning publication starts history. Abandoned staged blobs are never authority.
+      // Persist this marker first, so losing a committed manifest cannot look like a fresh store.
+      durableWrite(join(root, PUBLICATION_STARTED), "daily-progress-v1\n");
+      syncDirectory(root);
+    }
     durableWrite(manifestPath, publication.manifestBody);
     syncDirectory(root);
   });
