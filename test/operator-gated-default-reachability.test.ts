@@ -2,7 +2,8 @@
 // from it (see "THIS FILE IS THE CENSUS, DELIBERATELY NOT A FIX" below); it is not standing in
 // for a behavioural check the way an ordinary test's source-text read would. W1-T2887 added a
 // second readFileSync (src/lib/arm-auto-merge.ts, alongside src/run-task.ts) when the arm cluster
-// this census derives moved there, which is exactly the "docs-claims/census check" carve-out
+// this census derives moved there; W1-T9339 also includes src/cli/commands/review.ts after the
+// review cluster moved there. This is exactly the "docs-claims/census check" carve-out
 // test/source-text-assertion-census.test.ts's own remedy note names.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -645,7 +646,7 @@ test("the whole census runs with no suite spawned and no clock/network touched",
   const before = process.env.NODE_TEST_CONTEXT;
   const pathBefore = process.env.PATH;
 
-  const derivation = deriveRealArmDepsPopulation(readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8"));
+  const derivation = deriveRealArmDepsPopulation(SRC_TEXT);
   const entryNames = new Set([...derivation.level1Names, ...derivation.familyFns.keys()]);
   const sites = findTestCallSites(entryNames);
 
@@ -660,14 +661,16 @@ test("the whole census runs with no suite spawned and no clock/network touched",
 
 // W1-T2887: the whole realArmDeps()-defaulting population this file derives — realArmDeps
 // itself, its four LEVEL-1 entry points, and armIfVerdictPermits's own LEVEL-2 chain — moved to
-// src/lib/arm-auto-merge.ts. `runReview`/`withdrawArmIfVerdictRefuses` (also derived below) stay
-// in run-task.ts. Concatenating both files' text keeps this derivation reading the SAME combined
+// src/lib/arm-auto-merge.ts. W1-T9339 moved `runReview`/`withdrawArmIfVerdictRefuses` into
+// src/cli/commands/review.ts. Concatenating these files keeps this derivation reading the SAME combined
 // population it always has, rather than silently narrowing to whichever file happens to declare
 // a given name.
+const REVIEW_TEXT = readFileSync(join(REPO_ROOT, "src/cli/commands/review.ts"), "utf8");
 const SRC_TEXT =
   readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8") +
   "\n" +
-  readFileSync(join(REPO_ROOT, "src/lib/arm-auto-merge.ts"), "utf8");
+  readFileSync(join(REPO_ROOT, "src/lib/arm-auto-merge.ts"), "utf8") +
+  "\n" + REVIEW_TEXT;
 const REAL = deriveRealArmDepsPopulation(SRC_TEXT);
 
 test("real tree: realArmDeps() is derived with its currently-real field/classification shape — a regression pin, not an assumption", () => {
@@ -783,10 +786,10 @@ test("real tree: runReview forwards its own optional `arm` parameter straight in
   // Derived the same way the LEVEL-2 family membership is: find the (masked, so a comment
   // mentioning the call never counts) real call site of armIfVerdictPermits OUTSIDE its own
   // declaration, inside runReview's own body, and confirm it forwards `{ arm: args.arm }`.
-  const masked = maskNonCode(SRC_TEXT);
-  const fns = findFunctionDecls(masked, SRC_TEXT);
+  const masked = maskNonCode(REVIEW_TEXT);
+  const fns = findFunctionDecls(masked, REVIEW_TEXT);
   const runReviewFn = fns.find((f) => f.name === "runReview");
-  assert.ok(runReviewFn, "sanity: runReview is still a function declaration in src/run-task.ts");
+  assert.ok(runReviewFn, "sanity: runReview is a function declaration in src/cli/commands/review.ts");
   assert.match(
     runReviewFn!.bodyText,
     /armIfVerdictPermits\([^)]*\{\s*arm:\s*args\.arm\s*\}/s,
