@@ -250,6 +250,7 @@ test("BEHAVIORAL: a real runTask implement dispatch carries implement's OWN decl
   assert.ok(spawnCalls[1]!.tools!.includes("Bash"), "a Claude implement still runs the suite and the local gate");
 });
 
+// @census-reads: src/run-task.ts src/cli/commands/fix.ts — both owners of worker spawn sites.
 // @source-text-subject — this test's SUBJECT genuinely IS src/run-task.ts's own text, not a stand-in
 // for behaviour it could exercise instead (test/source-text-assertion-census.test.ts's remedy (2)).
 // The claim under test is "every spawn call site in the file declares a tool bound", a property

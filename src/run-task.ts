@@ -27964,7 +27964,7 @@ export function requeueActionsJobOutcome(
   repo: string,
   failure: { name: string; jobId?: string },
   log: (step: string, extra?: Record<string, unknown>) => void,
-  exec: (args: string[]) => unknown = ghExec,
+  exec: ((args: string[]) => unknown) | undefined = undefined,
 ): JobRequeueOutcome {
   return fixCommandHelpers(fixCommandHost()).requeueActionsJobOutcome(owner, repo, failure, log, exec);
 }
