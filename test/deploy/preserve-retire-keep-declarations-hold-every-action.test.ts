@@ -252,7 +252,8 @@ test("worktree prune leaves a kept or keep-scoped store's stale worktree records
 spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 holder = m.Repo(sys.argv[3], "clone"); holder.store = sys.argv[3] + "/.git"; holder.scoped = "a keep marker in its working tree"
 print(json.dumps(m.prune_worktrees([sys.argv[2] + "/.git", holder.store, sys.argv[4] + "/.git"], [holder])))`;
-    const r = spawnSync("python3", ["-I", "-c", probe, HELPER, kept, shared, plain], { encoding: "utf8", env: GIT_ENV });
+    // -B: importing the helper must not write deploy/mac/__pycache__ into the tracked tree.
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, kept, shared, plain], { encoding: "utf8", env: GIT_ENV });
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(JSON.parse(r.stdout), [join(plain, ".git")], "only the unmarked store is pruned");
     assert.equal(existsSync(records.plain), false, "an unmarked store's stale record is pruned");
