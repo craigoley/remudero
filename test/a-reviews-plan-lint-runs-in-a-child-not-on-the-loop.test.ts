@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { lintPlanCommand, lintPlanForReview, planLintOutcomeFromOutput, spawnCensusChild } from "#src/run-task.js";
+import { lintPlanCommand, lintPlanForReview, planLintOutcomeFromOutput, runReview, spawnCensusChild } from "#src/run-task.js";
+import { drainInFlightReviews, inFlightReviewCount, trackInFlightReview } from "#src/lib/sweep.js";
+import type { Config } from "#src/lib/config.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 function fixture(t: TestContext) {
@@ -151,6 +155,90 @@ test("review lint cancellation kills the child group including descendants", { t
       try { process.kill(-child.pid, "SIGKILL"); }
       catch (error) { assert.equal((error as NodeJS.ErrnoException).code, "ESRCH"); }
     }
+  }
+});
+
+test("draining an admitted review kills its lint group without a caller-supplied signal", { timeout: 15_000 }, async (t) => {
+  for (const mode of ["drain", "drain with explicit signal", "explicit abort"] as const) {
+    await t.test(mode, async (t) => {
+      const { repo } = fixture(t);
+      const head = repo.git("rev-parse", "HEAD");
+      const diff = ["diff --git a/plan/tasks.d/T1.yaml b/plan/tasks.d/T1.yaml",
+        "--- a/plan/tasks.d/T1.yaml", "+++ b/plan/tasks.d/T1.yaml", "@@ -2 +2 @@",
+        '-  title: "old title"', '+  title: "new title"'].join("\n");
+      const gh = ghShim([
+        { when: "api repos/", stdout: JSON.stringify({ number: 1, state: "open", head: { sha: head, ref: "filing" } }) },
+        { when: "pr diff", stdout: diff },
+      ]);
+      const oldPath = process.env.PATH;
+      process.env.PATH = `${gh.dir}:${oldPath ?? ""}`;
+      const realSpawn = childProcess.spawn;
+      let childReady!: () => void;
+      const ready = new Promise<void>((resolve) => { childReady = resolve; });
+      const explicit = mode === "drain" ? undefined : new AbortController();
+      const descendant = "process.stdout.write('ready'); setInterval(() => {}, 1000)";
+      const program = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: 'inherit' }); setInterval(() => {}, 1000)`;
+      let child: childProcess.ChildProcess | undefined;
+      let closed: Promise<unknown[]> | undefined;
+      let lintSignal: AbortSignal | undefined;
+      let verdict: Awaited<ReturnType<typeof runReview>> | undefined;
+      childProcess.spawn = ((file: string, argv: string[], options: childProcess.SpawnOptions) => {
+        if (!argv.includes("lint-plan")) return realSpawn(file, argv, options);
+        child = realSpawn(file, ["-e", program], options);
+        closed = once(child, "close", { signal: t.signal });
+        child.stdout!.once("data", childReady);
+        return child;
+      }) as typeof realSpawn;
+      syncBuiltinESMExports();
+      let work: Promise<void> | undefined;
+      try {
+        work = trackInFlightReview(async () => {
+          await Promise.resolve(); // The admitting lane's context must survive review setup awaits.
+          verdict = await runReview({
+            owner: "fixture", repo: "fixture", prUrl: "https://github.com/fixture/fixture/pull/1",
+            task: { id: "W1-T9545", acceptance: [{ claim: "the task is filed", proof: "the task is filed in the plan" }] },
+            report: "The task is filed in the plan.", settingsFile: "", config: { root: repo.dir } as Config,
+            log: () => {}, say: () => {}, account: (result) => result, spawnReviewer: false,
+            headCheckoutDir: repo.dir, ledgerPath: join(repo.dir, "ledger.ndjson"), runId: `review-${mode}`,
+            shadow: true, runtimeImageSha: null, readReviewReuseFacts: () => undefined,
+            lintPlanForReviewFn: (...args) => {
+              lintSignal = args[3]?.signal;
+              return lintPlanForReview(...args);
+            },
+            ...(explicit ? { signal: explicit.signal } : {}),
+          });
+        });
+        await Promise.race([ready, work.then(() => assert.fail("review ended before its lint child was ready"))]);
+        assert.equal(inFlightReviewCount(), 1);
+        assert.ok(child?.pid, "the production lint runner must have started a real child");
+        if (mode === "explicit abort") explicit!.abort();
+        else assert.equal(await drainInFlightReviews({ boundMs: 0 }), 1);
+        assert.equal(lintSignal?.aborted, true, "the review's cancellation must reach its real lint runner");
+        await closed; // A live descendant holds this pipe open even if only its parent is killed.
+        await work;
+        assert.equal(child.signalCode, "SIGKILL");
+        assert.deepEqual(verdict?.planLint, { ran: false, reason: "lint-plan aborted" });
+        assert.equal(verdict?.state, "failure");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(inFlightReviewCount(), 0);
+        assert.equal(explicit?.signal.aborted ?? false, mode === "explicit abort",
+          "draining must work even when a caller's own signal stays live");
+      } finally {
+        childProcess.spawn = realSpawn;
+        syncBuiltinESMExports();
+        try {
+          if (child?.pid !== undefined) {
+            try { process.kill(-child.pid, "SIGKILL"); }
+            catch (error) { assert.equal((error as NodeJS.ErrnoException).code, "ESRCH"); }
+          }
+          await work;
+        } finally {
+          if (oldPath === undefined) delete process.env.PATH;
+          else process.env.PATH = oldPath;
+          rmSync(gh.dir, { recursive: true, force: true });
+        }
+      }
+    });
   }
 });
 
