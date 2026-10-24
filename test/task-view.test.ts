@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { mock, test } from "node:test";
@@ -10,7 +10,7 @@ import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { BOARD_PROJECTION_DDL } from "../src/lib/board-projection.js";
 import { createReadModelTicker, ledgerSource, type ReadModelBodyEntry, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import type { GitHub } from "../src/lib/status.js";
-import type { ReadModelDb } from "../src/lib/read-model-db.js";
+import { flushReadModelTransactions, type ReadModelDb } from "#src/lib/read-model-db.js";
 import { createTaskView, readRunTail, taskViewKey, type ReadModelInstanceState, type TaskViewData, type TaskViewOptions } from "../src/lib/task-view.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { TASK_VIEW_NAME, createDemandBook } from "../src/lib/view-demand.js";
@@ -33,11 +33,23 @@ interface Fixture {
   root: string;
   stateDir: string;
   ledgerDir: string;
+  releases: Array<() => void>;
+}
+
+async function retireFixture(root: string, releases: readonly (() => void)[], settle = flushReadModelTransactions): Promise<void> {
+  const errors: unknown[] = [];
+  for (const release of releases) {
+    try { release(); } catch (error) { errors.push(error); }
+  }
+  if (errors.length > 0) throw new AggregateError(errors, "task-view fixture release failed; directory preserved");
+  await settle();
+  rmSync(root, { recursive: true, force: true });
 }
 
 function fixture(t: TestCtx): Fixture {
   const root = makeTempDir("task-view");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const releases: Array<() => void> = [];
+  t.after(() => retireFixture(root, releases));
   const ledgerDir = join(root, "state");
   mkdirSync(join(ledgerDir, "runs"), { recursive: true });
   const row = (ms: number, extra: Record<string, unknown>): string => JSON.stringify({ ts: new Date(T0 - 60_000 + ms).toISOString(), task_id: ID, run_id: RUN, ...extra });
@@ -46,7 +58,7 @@ function fixture(t: TestCtx): Fixture {
     [row(1, { step: "run.start" }), row(2, { step: "pr.opened", pr_url: PR_URL, pr_number: 7 }), row(3, { step: "verdict", verdict: "pass", cost_usd: 1.5 })].join("\n") + "\n",
   );
   writeFileSync(join(ledgerDir, "runs", `${RUN}.tail`), "first line\nsecond line\nlast line\n");
-  return { root, stateDir: join(root, "read-model-state"), ledgerDir };
+  return { root, stateDir: join(root, "read-model-state"), ledgerDir, releases };
 }
 
 const PLANNED = { id: ID, title: "the planned title", type: "implement", risk: "low", status: "queued", depends_on: ["W1-T0"], attempts: 0, acceptance: [{ claim: "c", proof: "p" }] } as unknown as Task;
@@ -81,7 +93,7 @@ function spawnSpy(t: TestCtx): { calls: string[] } {
 }
 
 /** Runs a real ticker with the task view until the wanted key's body shows the ledger rows projected. */
-function build(t: TestCtx, f: Fixture, overrides: Partial<TaskViewOptions> = {}, key = KEY): { data: TaskViewData; body: ReadModelBodyEntry["body"]; messages: ReadModelWorkerMessage[] } {
+function build(_t: TestCtx, f: Fixture, overrides: Partial<TaskViewOptions> = {}, key = KEY): { data: TaskViewData; body: ReadModelBodyEntry["body"]; messages: ReadModelWorkerMessage[]; ticker: ReturnType<typeof createReadModelTicker> } {
   const clock = mutableClock();
   const demand = createDemandBook({ clock });
   const messages: ReadModelWorkerMessage[] = [];
@@ -91,7 +103,7 @@ function build(t: TestCtx, f: Fixture, overrides: Partial<TaskViewOptions> = {},
   const ticker = createReadModelTicker({
     stateDir: f.stateDir, instances: [instance], clock, holder: "task-view", oracle: "off", demand, views: [view], post: (m) => void messages.push(m),
   });
-  t.after(() => ticker.release());
+  f.releases.push(() => ticker.release());
   ticker.start();
   ticker.want(TASK_VIEW_NAME, key);
   const latest = (): ReadModelBodyEntry | undefined => messages.flatMap((m) => (m.type === "body" && m.entry.view === TASK_VIEW_NAME && m.entry.key === key ? [m.entry] : [])).at(-1);
@@ -101,7 +113,7 @@ function build(t: TestCtx, f: Fixture, overrides: Partial<TaskViewOptions> = {},
   }
   const entry = latest();
   assert.ok(entry, "the wanted key was materialized");
-  return { data: entry.body.data as TaskViewData, body: entry.body, messages };
+  return { data: entry.body.data as TaskViewData, body: entry.body, messages, ticker };
 }
 
 function seedProjection(f: Fixture): void {
@@ -281,4 +293,48 @@ test("W1-T5048: the default plan reader reads the instance's plan file and repor
   assert.equal(present.data.task?.title, "the plan file's title");
   assert.equal(present.data.found, true);
   assert.equal(present.sources.find((s) => s.name === "plan:core")?.state, "fresh");
+});
+
+
+test("task-view fixture releases its real ticker before retiring its directory", (t) => {
+  const f = fixture(t);
+  const { ticker } = build(t, f);
+  const release = ticker.release.bind(ticker);
+  ticker.release = () => {
+    assert.ok(existsSync(f.root), "the real ticker is released while it still owns its directory");
+    return release();
+  };
+});
+
+test("task-view fixture preserves evidence and attempts every release when one fails", async () => {
+  const root = makeTempDir("task-view-release-control");
+  let secondReleased = false;
+  let settled = false;
+  try {
+    await assert.rejects(retireFixture(root, [
+      () => { throw new Error("injected release failure"); },
+      () => { secondReleased = true; },
+    ], async () => { settled = true; }), /release failed; directory preserved/);
+    assert.equal(secondReleased, true);
+    assert.equal(settled, false);
+    assert.equal(existsSync(root), true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("task-view fixture preserves its directory when diagnostic publication fails", async () => {
+  const root = makeTempDir("task-view-publication-control");
+  try {
+    await assert.rejects(retireFixture(root, [], async () => { throw new Error("injected diagnostic failure"); }), /injected diagnostic failure/);
+    assert.equal(existsSync(root), true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("task-view retirement waits for real diagnostic publication before directory removal", async (t) => {
+  const f = fixture(t);
+  build(t, f);
+  await retireFixture(f.root, f.releases);
+  f.releases.length = 0;
+  await flushReadModelTransactions();
+  assert.equal(existsSync(f.root), false, "diagnostic writes cannot recreate the retired directory");
 });
