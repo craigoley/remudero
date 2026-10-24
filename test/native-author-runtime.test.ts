@@ -41,8 +41,8 @@ test('native timing sample spans the ledger rather than choosing only its cheape
 
 test('native timing calibration binds inherited heap-only NODE_OPTIONS without changing author admission', async (t) => {
   const { makeRuntimeFixture } = await import('#test/helpers/native-runtime-fixture.js');
-  const { calibrateAuthorRuntime } = await import('#scripts/calibrate-author-runtime.mjs');
-  const { main } = await import('#scripts/preflight-author.mjs');
+  const { calibrateAuthorRuntime } = await import(import.meta.resolve('#scripts/calibrate-author-runtime.mjs'));
+  const { main } = await import(import.meta.resolve('#scripts/preflight-author.mjs'));
   const f = makeRuntimeFixture(); t.after(() => f.cleanup());
   const prior = process.env.NODE_OPTIONS;
   try {
@@ -74,7 +74,7 @@ test('native timing calibration binds inherited heap-only NODE_OPTIONS without c
 
 test('native timing profiles refuse changed memory settings and unmodelled NODE_OPTIONS', async (t) => {
   const { makeRuntimeFixture } = await import('#test/helpers/native-runtime-fixture.js');
-  const { calibrateAuthorRuntime } = await import('#scripts/calibrate-author-runtime.mjs');
+  const { calibrateAuthorRuntime } = await import(import.meta.resolve('#scripts/calibrate-author-runtime.mjs'));
   const f = makeRuntimeFixture(); t.after(() => f.cleanup());
   const prior = process.env.NODE_OPTIONS;
   try {
