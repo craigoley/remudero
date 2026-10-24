@@ -9238,7 +9238,9 @@ test("collector handoff preserves held implementation accounting after a real fi
   const now = t.mock.method(Date, "now", () => fixed);
   const fakeBinDir = statefulFakeGh({
     branch: `run-T-FOLLOWUP-${fixed}`,
-    ciSeq: [[{ name: "ci", conclusion: "SUCCESS" }], [{ name: "ci", conclusion: "FAILURE" }]],
+    // A pending fix-round check reaches the external-wait boundary. Terminal red
+    // correctly returns before freshness checks and cannot exercise this handoff.
+    ciSeq: [[{ name: "ci", conclusion: "SUCCESS" }], [{ name: "ci", conclusion: "IN_PROGRESS" }]],
   });
   const priorPath = process.env.PATH;
   process.env.PATH = `${fakeBinDir}:${priorPath}`;
@@ -9246,6 +9248,7 @@ test("collector handoff preserves held implementation accounting after a real fi
   recordCashAccounting(accounting, "usage-priced", 0.1);
   recordCashAccounting(accounting, "held", 0.04);
   let calls = 0;
+  let fixWaitFreshnessReads = 0;
   const spawn: typeof spawnWorker = async () => {
     calls++;
     if (calls === 1) return result({ text: "RECON REPORT\nOBSERVED: fixture\n" });
@@ -9260,9 +9263,14 @@ test("collector handoff preserves held implementation accounting after a real fi
       skipGitSync: true, planPath, config, github: FOLLOWUP_OFFLINE_GITHUB, spawn,
       containmentExec: followupHoldingContainmentExec, isolationExec: followupCleanIsolationExec,
       runReview: async () => fakeReview("failure", [criterion({ claim: "fixture repair", met: false })]),
-      externalWaitFreshness: () => calls >= 3 ? { stale: true, oldSha: "a".repeat(40), newSha: "b".repeat(40) } : undefined,
+      externalWaitFreshness: () => {
+        if (calls < 3) return undefined;
+        fixWaitFreshnessReads++;
+        return { stale: true, oldSha: "a".repeat(40), newSha: "b".repeat(40) };
+      },
     }));
     assert.equal(calls, 3, "the real fix rung starts exactly one fixture worker before yielding");
+    assert.equal(fixWaitFreshnessReads, 1, "the actual pending fix wait consumes the caller's freshness callback");
     assert.equal(outcome.verdict, "handed_off");
     assert.equal(outcome.merged, false);
     const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").split("\n").filter(Boolean)
