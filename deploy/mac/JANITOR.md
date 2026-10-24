@@ -306,7 +306,16 @@ A folder holding an instance's protected checkout (`rmd/<key>/remudero` or `serv
 is held whole. The 6-hourly service-user pass judges only what that user owns;
 the hourly root pass sweeps temporary/scratch roots and also runs retention.
 Docker and containerd stores are held by name even when idle; nested coverage and
-dump housekeeping leave their data intact. Dump housekeeping follows the Mac rule
+dump housekeeping leave their data intact.
+
+The service-user pass obtains its open-file
+view with noninteractive `sudo -n -- /usr/bin/lsof`; the root pass reads it directly.
+An explicit `RMD_CLEANUP_LSOF` command is used unchanged, never automatically run as
+root. A failed process snapshot, any unsuccessful open-file scan (even one that
+prints paths), or permission-denied process paths retain every candidate and name
+the failed probe. Missing privilege never falls back to an account-only view.
+
+Dump housekeeping follows the Mac rule
 below: only a file of at least `dump_min_mb` is a dump, and only a `.gz` or `.zst` the
 janitor wrote (its receipt `janitor-compressed.tsv`) expires in compressed form. Nothing
 in a repository or an installed package or toolchain tree is touched: a venv (`pyvenv.cfg`),
