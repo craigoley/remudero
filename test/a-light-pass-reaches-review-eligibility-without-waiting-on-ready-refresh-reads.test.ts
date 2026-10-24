@@ -68,6 +68,7 @@ function fixture(prs: OpenPrView[]) {
     { tasks: [], byId: new Map() } as never, (step, extra) => { logs.push({ step, ...extra }); },
     undefined, undefined, undefined, undefined, undefined, io);
   return { prs, rows, logs, arms, updates, reviewed, effects, io, compares, hook, shim,
+    advance: (ms: number) => { clock += ms; },
     main: (sha: string) => { main = sha; },
     cleanup: () => {
       for (const [key, value] of oldEnv) {
@@ -79,29 +80,49 @@ function fixture(prs: OpenPrView[]) {
 }
 
 test("W1-T9918: a light pass ledgers each pre-review phase duration", async (t) => {
-  const f = fixture([pr(991801, true), pr(991802)]);
+  const f = fixture([pr(991801, true)]);
+  f.effects.readMainTip = async () => { f.advance(19); return "main-1"; };
+  f.effects.readLedger = () => { f.advance(5); return f.rows.slice(); };
   try {
     await f.hook()();
     assert.deepEqual(f.logs.filter((r) => r.step === "sweep_light.error"), []);
     const timing = f.logs.filter((r) => r.step === "sweep_light.pre_review_timing");
     assert.equal(timing.length, 1);
     const phases = timing[0]!.phase_ms as Record<string, number>;
-    for (const phase of ["open_pr_views", "main_tip", "compare", "ready_ledger", "ready_actions",
-      "ready_value_gate", "ready_update", "refresh_admission", "armed_ratchet_rejudge"]) {
-      assert.equal(typeof phases[phase], "number", phase);
-      assert.ok(phases[phase]! >= 0, phase);
-    }
-    assert.equal(phases.open_pr_views, 3);
-    assert.equal(phases.compare, 7);
-    assert.equal(phases.ready_actions, 11);
-    assert.equal(phases.ready_value_gate, 13);
-    assert.equal(phases.ready_update, 17);
+    assert.deepEqual(phases, { open_pr_views: 3, main_tip: 19, compare: 7, ready_ledger: 5,
+      ready_actions: 11, ready_value_gate: 13, ready_update: 17, refresh_admission: 5,
+      armed_ratchet_rejudge: 0, review_selection_ledger: 0 });
+    assert.equal(timing[0]!.compare_count, 1);
+    assert.deepEqual(timing[0]!.compare_reads, [{ pr_number: 991801, head_sha: "head-991801",
+      main_sha: "main-1", cache_hit: false, outcome: "read", elapsed_ms: 7 }]);
     assert.ok(Number.isFinite(timing[0]!.sync_on_loop_ms));
     t.diagnostic(JSON.stringify(timing[0]));
     assert.deepEqual(f.updates, [991801]);
     assert.deepEqual(f.arms, [], "the refreshed snapshot cannot arm");
-    assert.deepEqual(f.reviewed, [991802]);
+    assert.deepEqual(f.reviewed, []);
   } finally { f.cleanup(); }
+
+  const blocking = fixture([pr(991803)]);
+  delete blocking.io.clock;
+  let blockedMs = 0;
+  blocking.effects.readLedger = () => {
+    if (blockedMs === 0) {
+      const start = performance.now();
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 80);
+      blockedMs = performance.now() - start;
+    }
+    return blocking.rows.slice();
+  };
+  try {
+    await blocking.hook()();
+    assert.ok(blocking.rows.some((row) => row.step === "sweep.review_eligible"));
+    const rows = blocking.logs.filter((row) => row.step === "sweep_light.pre_review_timing");
+    assert.equal(rows.length, 1);
+    assert.ok(Number(rows[0]!.sync_on_loop_ms) >= blockedMs, JSON.stringify(rows[0]));
+    assert.ok(Number((rows[0]!.phase_ms as Record<string, number>).review_selection_ledger) >= blockedMs,
+      "the blocking read before eligibility must be attributed to its phase");
+    t.diagnostic(JSON.stringify({ ...rows[0], injected_block_ms: blockedMs }));
+  } finally { blocking.cleanup(); }
 });
 
 test("W1-T9918: a non-ready PR is review-eligible before the ready refresh settles", async (t) => {
@@ -145,6 +166,36 @@ test("W1-T9918: a non-ready PR is review-eligible before the ready refresh settl
     if (held === "compare" || held === "main_tip") assert.deepEqual(f.arms, [991811], JSON.stringify({ rows: f.rows, logs: f.logs }));
     else assert.deepEqual(f.updates, [991811], "the same overlap winner is refreshed");
   }
+
+  const armed = { ...pr(991813), autoMergeArmed: true, checksState: "pending" as const };
+  const f = fixture([pr(991814, true), armed, pr(991815)]);
+  const gate = deferred<void>();
+  const entered = deferred<void>();
+  const judged: number[] = [];
+  f.io.readCompare = async () => ({ ahead_by: 0, files: [] });
+  f.effects.readActionsStatusSummary = async () => {
+    entered.resolve(); await gate.promise; return { components: [], incidents: [] };
+  };
+  f.effects.readMergedRatchets = async (view) => {
+    judged.push(view.prNumber);
+    return { verdict: "crossing", reason: "two ratchet changes cross the ceiling together",
+      rows: [], counted: ["comment-load"], uncounted: [] };
+  };
+  const running = f.hook()();
+  try {
+    await t.waitFor(() => entered.settled, { interval: 1, timeout: 2000 });
+    await turn();
+    assert.equal(gate.settled, false);
+    assert.ok(f.rows.some((row) => row.step === "sweep.review_eligible" && row.pr_number === 991815));
+    assert.deepEqual(f.arms, [], "ready arms still wait for the whole-snapshot refresh");
+    gate.resolve(); await running;
+    assert.deepEqual(judged, [991813], "only the whole-snapshot owner judges the armed PR");
+    assert.deepEqual(f.updates, [991813], "the original armed-ratchet refresh winner is preserved");
+    assert.deepEqual(f.rows.filter((row) => row.step === "sweep.ratchet_judge.decided")
+      .map((row) => row.remedy), ["update-branch"]);
+    assert.deepEqual(f.arms, [991814]);
+    assert.deepEqual(f.logs.filter((row) => row.step === "sweep_light.error"), []);
+  } finally { gate.resolve(); await running; f.cleanup(); }
 });
 
 test("W1-T9918: an unchanged head and main reuse their compare off the loop", async (t) => {

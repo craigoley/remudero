@@ -21798,7 +21798,7 @@ let lightPassReadyRefreshInFlight = false;
 export class LightPassPreReviewTiming {
   readonly phaseMs: Record<string, number> = Object.fromEntries([
     "open_pr_views", "main_tip", "compare", "ready_ledger", "ready_actions", "ready_value_gate",
-    "ready_update", "refresh_admission", "armed_ratchet_rejudge",
+    "ready_update", "refresh_admission", "armed_ratchet_rejudge", "review_selection_ledger",
   ].map((phase) => [phase, 0]));
   readonly compareReads: Array<Record<string, unknown>> = [];
   private readonly scope = new AsyncLocalStorage<boolean>();
@@ -22123,11 +22123,12 @@ export async function runSweepLightPass(
   openPrs: OpenPrView[],
   deps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  timing?: LightPassPreReviewTiming,
 ): Promise<SweepSummary[]> {
   const memoryHeld = openPrs.filter((pr) => lightPassMemoryWaits.has(lightPassHeadKey(pr)));
   if (memoryHeld.length > 0) {
     const held = memoryHeld.map((pr) => lightPassMemoryWaitSummary(pr, deps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
-    return [...held, ...await runSweepLightPass(openPrs.filter((pr) => !memoryHeld.includes(pr)), deps, policy)];
+    return [...held, ...await runSweepLightPass(openPrs.filter((pr) => !memoryHeld.includes(pr)), deps, policy, timing)];
   }
   if (openPrs.length === 0) {
     noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
@@ -22143,7 +22144,8 @@ export async function runSweepLightPass(
   // LEDGER ONCE FOR SELECTION, BEFORE RANKING; this pass-level fold is only the liveness filter.
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLedgerLines;
-  const selectionLedgerLines = readLedger(deps.ledgerPath);
+  const selectionLedgerLines = timing
+    ? timing.sync("review_selection_ledger", () => readLedger(deps.ledgerPath)) : readLedger(deps.ledgerPath);
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs);
   openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));

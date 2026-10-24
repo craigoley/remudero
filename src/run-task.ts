@@ -39621,12 +39621,13 @@ export function buildSweepLightHook(
       // W1-T7214: only ready heads wait for distance and the whole-snapshot refresh selection.
       const readyPrs = reviewOnly ? [] : openPrs.filter((pr) =>
         pr.isDraft !== true && pr.checksState === "green" && pr.reviewState === "success");
-      const runBatches = async (passPrs: OpenPrView[], distanceKnown = true) => {
+      const runBatches = async (passPrs: OpenPrView[], distanceKnown = true, preReviewTiming?: LightPassPreReviewTiming) => {
         const requeueOnlyPrs = reviewOnly ? [] : passPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
         const requeueNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
         const restPrs = passPrs.filter((pr) => !requeueNumbers.has(pr.prNumber));
-        const common = { ...effects, ledgerPath, runId, log, reviewerCodeRecovery, updateBranch: undefined };
-        // W1-T528: branch updates belong to the whole-snapshot selection, never this per-PR fan-out.
+        const common = { ...effects, ledgerPath, runId, log, reviewerCodeRecovery,
+          updateBranch: undefined, readMergedRatchets: undefined };
+        // Updates and armed-ratchet judgments belong to the whole-snapshot owner below.
         const passes: Array<Promise<unknown>> = [runSweepLightPass(restPrs, {
           ...common,
           restartAdmission: scope?.admit,
@@ -39643,20 +39644,21 @@ export function buildSweepLightHook(
           judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
           planContextDigestFor: riskJudgePlanContextDigestFor(activePlan),
           ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
-        }, DEFAULT_SWEEP_POLICY)];
+        }, DEFAULT_SWEEP_POLICY, preReviewTiming)];
         // W1-T2430: cancelled-only CI has its separate admission and may only requeue that job.
         if (requeueOnlyPrs.length > 0) passes.push(runSweepLightPass(requeueOnlyPrs, {
           ...common,
           actionable: (d) => lightPassActionable(d, fixRungAllowed, true),
           readCiGateRollup: undefined,
           reaggregateCiGate: undefined,
-        }, DEFAULT_SWEEP_POLICY));
+        }, DEFAULT_SWEEP_POLICY, preReviewTiming));
         await Promise.all(passes);
       };
       const readyNumbers = new Set(readyPrs.map((pr) => pr.prNumber));
       const ordinaryPrs = openPrs.filter((pr) => !readyNumbers.has(pr.prNumber));
       // Start review eligibility before any ready-only read. Both paths remain owned by this hook.
-      const ordinary = ordinaryPrs.length > 0 || readyPrs.length === 0 ? runBatches(ordinaryPrs) : Promise.resolve();
+      const ordinary = ordinaryPrs.length > 0 || readyPrs.length === 0
+        ? timing.run(() => runBatches(ordinaryPrs, true, timing)) : Promise.resolve();
       const refresh = timing.run(async () => {
         let readyRefreshed: number | undefined;
         let measuredReadyPrs = readyPrs;
