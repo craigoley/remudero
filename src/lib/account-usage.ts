@@ -608,7 +608,7 @@ export function readAccountUsageFile(path: string = join(homedir(), ".claude.jso
   if (uuid) out.uuid = uuid;
   const org = str(parsed.oauthAccount?.organizationName);
   if (org) out.org = org;
-  const cache = parsed.cachedUsageUtilization;
+  const cache = parsed.cachedUsageUtilization ?? undefined;
   const cacheUuid = str(cache?.accountUuid);
   if (cacheUuid) out.cacheUuid = cacheUuid;
   if (typeof cache?.fetchedAtMs === "number" && Number.isFinite(cache.fetchedAtMs)) {

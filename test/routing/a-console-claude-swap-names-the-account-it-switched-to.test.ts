@@ -217,7 +217,13 @@ test("W1-T10512: a completed Claude login labels two accounts with one initial a
   const log = t.mock.method(console, "error", () => undefined);
   for (const account of [oldAccount, newAccount]) {
     const f = fixture(t);
+    f.originalConfig = JSON.stringify({ ...retainedConfig, cachedUsageUtilization: null, oauthAccount: oldAccount }) + "\n";
+    writeFileSync(f.config, f.originalConfig);
     const done = await login(f, JSON.stringify({ oauthAccount: account }));
+    assert.equal(readFileSync(f.config, "utf8"), f.originalConfig.replace(JSON.stringify(oldAccount), JSON.stringify(account)));
+    assert.equal(readFileSync(join(f.store, ".credentials.json"), "utf8"), credential);
+    assert.deepEqual(readdirSync(f.store).sort(), [".claude.json", ".credentials.json"]);
+    assert.equal(existsSync(`${f.store}.lock`), false);
     labels.push(done.accountLabel!);
     assert.equal(done.accountLabel, redactedAccountLabel(readAccountUsageFile(f.config)));
     assert.ok(!JSON.stringify(done).includes(account.emailAddress));
