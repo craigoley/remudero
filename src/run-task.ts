@@ -46139,6 +46139,16 @@ export function mainRepairLaneFor(
   // W1-T8572: the failing test files each fix request carried, so the revert of the same merge proves itself with them.
   const testFilesBySha = new Map<string, readonly string[]>();
   return {
+    reproduceAt: async (sha, files) => {
+      const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
+      const log = (step: string, extra: Record<string, unknown> = {}) =>
+        appendLedger(ledgerPath, { run_id: runId, task_id: mainRepairTaskId(sha), step, ...extra });
+      const outcomes = await buildBaseReproductionProbe(config, repoDir, ledgerPath, log)({ prNumber: 0, headSha: sha } as OpenPrView, files, sha);
+      log("sweep.base_reproduction", { main_sha: sha, files: [...outcomes], verdict: decideBaseReproduction(files, outcomes),
+        ...(outcomes.setup_error === undefined ? {} : { setup_error: outcomes.setup_error }),
+        ...(outcomes.reason === undefined ? {} : { reason: outcomes.reason }) });
+      return outcomes;
+    },
     openFixPr: (request) => {
       testFilesBySha.set(request.offendingSha, request.testFiles);
       return dispatchFix(owner, repo, config, request, ledgerPath, runId);
