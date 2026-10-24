@@ -115,6 +115,42 @@ test("W1-T10160: owned machine-judge receipts preserve partial money and reporte
   }
 });
 
+test("W1-T10287: exact-parent collector counts issue revalidation money once and preserves unknowns", async t => {
+  const dir = makeTempDir("issue-revalidation-spend");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const inventory = runtime();Object.assign(inventory.gardens[0]!, { name: "issue-revalidation", attempts: 1, completions: 1 });
+  writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify(inventory));
+  const owned = { ...parent, name: "issue-revalidation" }, producer = { ...child,
+    step: "issue_revalidation.attempt_spend", selection_assignment_id: "actual-attempt", billing_mode: "api", provider: "cash",
+    total_cost_usd: 0.25, gardener_origin: { ...origin, name: "issue-revalidation" } };
+  const read = async (rows: unknown[]) => {
+    writeFileSync(join(dir, "ledger.ndjson"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+    return foldGardenerSpend(await captureGardenerSpendSource(dir), repository, at);
+  };
+  const rows = [owned, producer, { ...producer, step: "worker.attempt", total_cost_usd: 99 },
+    { ...producer, step: "verdict", total_cost_usd: 99 }];
+  assert.equal((await read(rows)).totalUsd, 0.25, "attempt coverage and terminal restatements are not money producers");
+  writeFileSync(join(dir, archive()), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+  assert.equal((await read(rows)).totalUsd, 0.25, "exact canonical receipt replay across archive and live is once-only");
+  for (const zero of [true, false]) {
+    const extra = { ...producer, run_id: "other-child", selection_assignment_id: "other-attempt", total_cost_usd: zero ? 0 : undefined,
+      provider: zero ? "cash" : "codex", billing_mode: zero ? "api" : "subscription", ...(zero ? {} : { notional_cost_usd: 5 }) };
+    const spend = await read([...rows, extra]);
+    assert.equal(spend.pricedSubtotalUsd, 0.25);assert.equal(spend.totalUsd, zero ? 0.25 : null);
+    assert.equal(spend.counts.priced, zero ? 2 : 1);assert.equal(spend.counts.unpriced, zero ? 0 : 1);
+  }
+  // Use a second exact scope for refusals; the retained first archive must not supply a valid parent.
+  const otherPass = "22345678-1234-4123-8123-123456789abc";
+  for (const bad of [{ repository: "foreign/repo" }, { daemon_run_id: "foreign-daemon" }, { name: "other" }]) {
+    const spend = await read([{ ...owned, passId: otherPass, ...bad }, { ...producer, gardener_origin: { ...producer.gardener_origin, passId: otherPass } }]);
+    assert.equal(spend.pricedSubtotalUsd, 0.25, "only the separately archived valid pass remains priced");
+    assert.equal(spend.counts.unlinked, 1);
+  }
+  const ambiguous = await read([{ ...owned, passId: otherPass }, { ...owned, passId: otherPass, phase: "cancelled", exit: null },
+    { ...producer, gardener_origin: { ...producer.gardener_origin, passId: otherPass } }]);
+  assert.equal(ambiguous.pricedSubtotalUsd, 0.5);assert.equal(ambiguous.totalUsd, null, "conflicting completion retains reported money but cannot establish a complete total");
+});
+
 test("W1-T9658: default gardener capture observes unpriced assigned calls", async t => {
   const assignment = { ts: at, step: "worker.assignment", run_id: "assigned-child", task_id: "judge",
     gardener_origin: origin, worker_assignment: { id: "assignment-1", selected: { provider: "codex", model: "fixture" } } };
