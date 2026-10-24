@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
@@ -173,5 +173,36 @@ test("daily source receipt IO failures stay unavailable and preserve source data
     assert.ok(logs.includes("board_snapshot.collection_receipt_failed"));
     assert.equal(cache.closedSeed()!.size, 0, "a failed receipt write does not replace the known empty corpus");
     assert.equal(readBoardClosedCollectionReceipt(root, "acme", "app", []).ok, false);
+  });
+});
+
+test("daily source receipts follow the real background PR collector on success and transport failure", { timeout: 30_000 }, async () => {
+  await withTempDir("daily-background-receipts", async root => {
+    let now = Date.parse("2026-11-02T06:00:00Z");
+    const clock = { now: () => now, iso: () => fixedClock(now).iso(), date: () => fixedClock(now).date() };
+    const ghBin = join(root, "fixture-gh"), failed = join(root, "offline");
+    const merged = [{ number: 7, html_url: "https://github.com/acme/app/pull/7", state: "closed", title: "Repair", body: "Remudero-Task: W1-T7",
+      head: { ref: "run-W1-T7-1234567890123", sha: "a".repeat(40) }, updated_at: "2026-11-02T05:00:00Z", merged_at: "2026-11-01T15:00:00Z", auto_merge: null }];
+    writeFileSync(ghBin, `#!${process.execPath}\nconst fs = require("node:fs");\nif (fs.existsSync(${JSON.stringify(failed)})) { process.stderr.write("offline fixture"); process.exit(1); }\nprocess.stdout.write(process.argv.some(a => a.includes("state=closed")) ? ${JSON.stringify(JSON.stringify(merged))} : "[]");\n`);
+    chmodSync(ghBin, 0o700);
+    const cache = createBoardSnapshotCache(root, "acme", "app", { clock });
+    const gateway = buildBatchedGithub("acme", "app", { ghBin, snapshotCache: cache, now: clock.now, ttlMs: 0, mergedTtlMs: 0, offLoop: true });
+    const warm = async () => {
+      gateway.warm!();
+      // BACKSTOP: fail the fixture if the real worker does not settle; never start a second collector.
+      for (let attempt = 0; gateway.readState?.() === "in_flight" && attempt < 1000; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.notEqual(gateway.readState?.(), "in_flight");
+    };
+    await warm();
+    const rows = cache.closedSeed(); assert.ok(rows); assert.deepEqual([...rows.keys()], [7]);
+    let receipt = readBoardClosedCollectionReceipt(root, "acme", "app", rows.values()); assert.ok(receipt.ok);
+    if (receipt.ok) assert.equal(receipt.receipt.state, "complete");
+    now += 60_000; writeFileSync(failed, "offline"); await warm();
+    receipt = readBoardClosedCollectionReceipt(root, "acme", "app", rows.values()); assert.ok(receipt.ok);
+    if (receipt.ok) {
+      assert.equal(receipt.receipt.state, "unavailable"); assert.equal(receipt.receipt.lastAttemptAt, clock.iso());
+      assert.equal(receipt.receipt.lastSuccessAt, "2026-11-02T06:00:00.000Z");
+    }
+    assert.deepEqual([...cache.closedSeed()!.keys()], [7], "a failed background refresh preserves the merged evidence");
   });
 });
