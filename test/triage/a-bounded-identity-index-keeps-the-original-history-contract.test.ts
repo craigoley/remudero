@@ -12,6 +12,7 @@ import { auditedLifetimeTalliesFromArchives, MAX_LIFETIME_ARCHIVE_START_IDENTITI
 
 test("W1-T10228: dispatch.lifetime_history_unavailable no longer recurs", async () => {
   const stateDir = mkdtempSync(join(tmpdir(), "rmd-lifetime-history-"));
+  let close: (() => boolean) | undefined;
   try {
     // The live ledger had 5134 distinct run starts over 470 archives; the old 4096 ceiling fired on it.
     const count = 5_134;
@@ -21,6 +22,7 @@ test("W1-T10228: dispatch.lifetime_history_unavailable no longer recurs", async 
     }));
     writeFileSync(join(stateDir, "ledger.2026-09-17T00-00-00-000Z.ndjson"), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
     const result = await auditedLifetimeTalliesFromArchives(stateDir);
+    close = result.history?.close;
     assert.equal(result.archiveCount, 1);
     assert.equal(result.records, count);
     assert.equal(result.unavailableReason, undefined);
@@ -31,6 +33,7 @@ test("W1-T10228: dispatch.lifetime_history_unavailable no longer recurs", async 
       });
     }
   } finally {
+    close?.();
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
