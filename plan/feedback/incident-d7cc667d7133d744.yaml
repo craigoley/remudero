@@ -1,0 +1,31 @@
+id: incident-d7cc667d7133d744
+ts: 2026-10-24T16:55:52.404Z
+raw: >-
+  Incident d7cc667d7133: intervention
+  own-red:fix-lane:required-checks-red-ci-log-fix-fix-round
+
+  First seen: 2026-10-24T16:52:39.577Z
+
+  Last seen: 2026-10-24T16:55:47.951Z
+
+  Count: 80, burn: 80.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10779@aeeae5884 actor=cao825 cause=own-red:fix-lane:required-checks-red-ci-log-fix-fix-round — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10791@e2889f71a actor=cao825 cause=own-red:fix-lane:required-checks-red-ci-log-fix-fix-round — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10780@2fc6c0591 actor=cao825 cause=own-red:fix-lane:required-checks-red-ci-log-fix-fix-round — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#d7cc667d7133d744e5ecdae21c51c4c07f5946c170daaad2dcdaa49bd300b25f
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

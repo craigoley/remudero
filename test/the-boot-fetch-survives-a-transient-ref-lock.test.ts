@@ -106,6 +106,7 @@ function writeNpmStub(dir: string): void {
 }
 
 interface GitFetchStubOpts {
+  lockErrorSuffix?: string;
   /** fail with a "cannot lock ref" error this many times, then let the real fetch through. */
   failLockTimes?: number;
   /** fail with a "cannot lock ref" error on EVERY call — the lock never clears. */
@@ -122,7 +123,7 @@ interface GitFetchStubOpts {
  */
 function writeGitFetchStub(dir: string, rec: string, opts: GitFetchStubOpts): void {
   const lockError =
-    "error: cannot lock ref 'refs/remotes/origin/main': is at 0000000000000000000000000000000000000000 but expected 1111111111111111111111111111111111111111\nerror: some local refs could not be updated";
+    "error: cannot lock ref 'refs/remotes/origin/main': is at 0000000000000000000000000000000000000000 but expected 1111111111111111111111111111111111111111\nerror: some local refs could not be updated" + (opts.lockErrorSuffix ?? "");
   const nonLockError = "fatal: unable to access 'https://example.invalid/repo.git/': Could not resolve host: example.invalid";
   const failTimes = opts.failLockTimes ?? 0;
   const failBranch = opts.alwaysFailNonLock
@@ -312,4 +313,25 @@ test("MUTANT: forcing the retry budget back to 1 restores the single-attempt beh
   assert.equal(headOf(home), before, "the mutant must land on the STALE tree, reproducing the original defect");
   assert.notEqual(headOf(home), c2, "and must NOT reach the tip a real retry would have fetched");
   assert.match(second.stderr, /STALE BOOT: fetch FAILED after 1 attempt\(s\), still ref-locked/);
+});
+
+
+test("a boot fetch drains long ref-lock diagnostics before deciding whether to retry", () => {
+  const home = freshHome();
+  const origin = makeOrigin();
+  assert.equal(boot(home, origin).status, 0);
+  const c2 = advanceOrigin(origin, "second.txt", "two\n");
+
+  const second = boot(home, origin, {
+    git: { failLockTimes: 2, lockErrorSuffix: "\nerror: cannot lock ref refs/remotes/origin/busy: another process holds it".repeat(8000) },
+    env: { RMD_FETCH_LOCK_RETRY_MAX: "3", RMD_FETCH_LOCK_RETRY_PAUSE_S: "0" },
+  });
+  assert.equal(second.status, 0, `second boot failed: ${second.stderr}`);
+  assert.equal(second.fetchCalls, 3, "must retry twice after long lock diagnostics, then let the real fetch succeed");
+  assert.equal(headOf(home), c2, "the recovered boot must check out the advanced origin tip");
+  assert.equal(readFileSync(join(treeOf(home), "second.txt"), "utf8"), "two\n");
+  assert.match(second.stderr, /another process holds a ref lock \(attempt 1\/3\)/);
+  assert.match(second.stderr, /another process holds a ref lock \(attempt 2\/3\)/);
+  assert.match(second.stderr, /fetch: succeeded on retry 3\/3 — the ref lock cleared/);
+  assert.doesNotMatch(second.stderr, /STALE BOOT/, "a recovered fetch must not be reported stale");
 });

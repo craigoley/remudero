@@ -355,8 +355,11 @@ export interface IssueRevalidationSummary {
   found: boolean;
 }
 
-/** Resolved verdicts with no citation are not evidence: they read as unknown. */
+/** Neither an uncited resolution nor absence-only evidence of a live problem decides the issue. */
 function normalise(v: RevalidationVerdict): RevalidationVerdict {
+  if (v.verdict === "still-true" && v.citation && isAbsenceOnlyCitation(v.citation)) {
+    return { verdict: "unknown", reason: `still-true with an absence-only citation (${v.reason})` };
+  }
   return v.verdict === "resolved" && (v.citation ?? "").trim() === ""
     ? { verdict: "unknown", reason: `resolved without a citation (${v.reason})` }
     : v;
@@ -597,6 +600,8 @@ export function buildIssueRevalidationPrompt(issue: RevalidationIssue, issueClas
     "The costly mistake is closing an issue whose condition is still true: WHEN IN DOUBT, ANSWER unknown.",
     "Answer resolved ONLY when the evidence below positively shows the condition is gone, and cite that evidence.",
     "Absence is not proof: a zero count or a name that does not appear never shows a fix. Cite something PRESENT.",
+    "Answer still-true only with positive current evidence that the condition holds; an old issue is not a fresh observation.",
+    "Answer unknown for an absence-only citation: a missing commit or zero rows proves neither persistence nor resolution.",
     "A commit that names the issue shows work against it, not a fix: cite it only when its subject says the condition was removed.",
     "",
     `ISSUE #${issue.number} (${issueClass}), opened ${issue.createdAt}, last updated ${issue.updatedAt}`,

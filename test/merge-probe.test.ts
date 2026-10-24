@@ -237,11 +237,18 @@ test("W1-T4914: a dry run and a pass with no eligible PR touch no git", async ()
 });
 
 test("W1-T4914: the probe issues no push and no update-branch", async () => {
-  const { git, calls } = mergeTreeGit(MAIN_A, { status: 1, stdout: `${TREE}\nx.ts\n` });
-  await probe([view({ prNumber: 50, headSha: "h50" })], recorder(), { git });
+  const { git, calls } = scriptedGit((args) => {
+    if (args[0] === "rev-parse" || args[0] === "merge-base") return { stdout: `${MAIN_A}\n` };
+    if (args[0] === "merge-tree") return { status: 1, stdout: `${TREE}\nx.ts\n` };
+    if (args[0] === "diff") return { stdout: "1\t1\tx.ts\0" };
+    if (args[0] === "log") return { stdout: "abc1234 edit x\n" };
+    return {};
+  });
+  const summary = await probe([view({ prNumber: 50, headSha: "h50" })], recorder(), { git });
+  assert.deepEqual(summary.conflictsByPr.get(50)?.evidence.files, [{ path: "x.ts", oursDeleted: 1, theirsDeleted: 1 }]);
   assert.ok(calls.length >= 3, "the probe did run");
   const verbs = new Set(calls.map((c) => c[0]));
-  assert.deepEqual([...verbs].sort(), ["fetch", "merge-tree", "rev-parse"]);
+  assert.deepEqual([...verbs].sort(), ["diff", "fetch", "log", "merge-base", "merge-tree", "rev-parse"]);
   assert.equal(calls.some((c) => c.some((a) => /push|update-branch|worktree|checkout/.test(a))), false);
 });
 

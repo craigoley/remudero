@@ -683,7 +683,7 @@ import {
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
-import { mergedHeadTypechecks, probeMerge, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
+import { applyMergeProbeEvidence, mergedHeadTypechecks, probeMerge, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
@@ -6455,7 +6455,8 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
       const message = parseReport(report)?.commitMessage;
       if (!message || checkCommitMessage(message).length) return refuse("the plan round needs a valid COMMIT_MESSAGE");
       git(["add", "-A", "--", ...changed]);
-      git(["commit", "-m", message]);
+      const filedTask = taskIdFromRunBranch(pr.headRefName) === input.task.id && namesATask(input.task.id);
+      git(["commit", "-m", message, ...(filedTask ? ["-m", `Remudero-Task: ${input.task.id}`] : [])]);
       sha = git(["rev-parse", "HEAD"]).trim();
     } else if (metadata.title === input.title && metadata.body === input.body) return refuse("the worker changed nothing");
     const verdict = await preflight(worktreePath, sha, metadata);
@@ -9437,6 +9438,9 @@ export function openEscalationStandDownReason(
   current?: { conflictEvidenceCaptured: boolean; baseSha?: string },
 ): { reason: string } | undefined {
   if (!candidate) return undefined; // nothing open on this key — the ordinary path
+  // The sweep writes the question immediately after its clarification context paragraph.
+  const question = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]*\n\n([^\n]*)/.exec(candidate.body ?? "")?.[1];
+  if (question?.startsWith("PR stage stalled:")) return undefined;
   const candidateHead = escalationHeadSha(candidate.body);
   // STRICTER THAN THE MATCHER (both arms): a candidate naming NO head, or naming a DIFFERENT one,
   // never refuses a worker. The first arm is the legacy-issue case, the second is a genuinely new
@@ -37770,7 +37774,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
   const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
   const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, baseChangedFilesByPr);
-  await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { dryRun, behindMainByPr });
+  applyMergeProbeEvidence(prsForFixRung, await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { dryRun, behindMainByPr }));
   // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
   // composition change, not a new read: the credit rung already built exactly this set, just
   // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
@@ -39162,8 +39166,8 @@ export function buildSweepHook(
       const behindMainByPr = await prelude.time("behind_main", () => tickRead?.behindMainByPr
         ?? buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles));
       const baseChangedFilesByPr = tickRead?.baseChangedFilesByPr ?? freshBaseChangedFiles;
-      await prelude.time("merge_probes", () =>
-        probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr }));
+      applyMergeProbeEvidence(prsForFixRung, await prelude.time("merge_probes", () =>
+        probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr })));
       // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
       // composition change, not a new read: the credit rung already built exactly this set, just
       // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
@@ -39938,6 +39942,7 @@ export async function fixCommand(
       : codeqlHeadAlerts ? [{ name: CODEQL_CHECK_NAME, logTail: "The CodeQL results check failed at this head." }] : undefined,
     codeqlHeadAlerts,
     redRequiredChecks,
+    mergeConflictSource: undefined,
   };
 
   const planPath =
@@ -46135,6 +46140,16 @@ export function mainRepairLaneFor(
   // W1-T8572: the failing test files each fix request carried, so the revert of the same merge proves itself with them.
   const testFilesBySha = new Map<string, readonly string[]>();
   return {
+    reproduceAt: async (sha, files) => {
+      const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
+      const log = (step: string, extra: Record<string, unknown> = {}) =>
+        appendLedger(ledgerPath, { run_id: runId, task_id: mainRepairTaskId(sha), step, ...extra });
+      const outcomes = await buildBaseReproductionProbe(config, repoDir, ledgerPath, log)({ prNumber: 0, headSha: sha } as OpenPrView, files, sha);
+      log("sweep.base_reproduction", { main_sha: sha, files: [...outcomes], verdict: decideBaseReproduction(files, outcomes),
+        ...(outcomes.setup_error === undefined ? {} : { setup_error: outcomes.setup_error }),
+        ...(outcomes.reason === undefined ? {} : { reason: outcomes.reason }) });
+      return outcomes;
+    },
     openFixPr: (request) => {
       testFilesBySha.set(request.offendingSha, request.testFiles);
       return dispatchFix(owner, repo, config, request, ledgerPath, runId);

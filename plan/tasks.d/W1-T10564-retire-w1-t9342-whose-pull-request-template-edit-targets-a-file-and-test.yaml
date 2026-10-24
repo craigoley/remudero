@@ -1,0 +1,22 @@
+- id: W1-T10564
+  title: Retire W1-T9342, whose pull-request-template edit targets a file and test path that do not exist
+  repo: remudero
+  depends_on:
+    - W1-T9772
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T9342-remove-duplicated-cash-summary-from-pull-request-template.yaml
+  acceptance:
+    - claim: The W1-T9342 shard carries a retirement field naming that its declared template file and test path do not exist and that it mirrors the retired W1-T9341
+      proof: "grep: retirement: in plan/tasks.d/W1-T9342-remove-duplicated-cash-summary-from-pull-request-template.yaml"
+  origin: architect
+  rationale: >-
+    From the 2026-10-20 follow-up on W1-T9342-1792469947008, ratified via rmd approve:
+  
+    follow-up harvest [task]: Retire or rescope W1-T9342. Its target `.github/pull_template.md`
+    and the `tests/pull_template_cleanup` path don't exist, and it mirrors the already-retired
+    W1-T9341 (W1-T9772). — from W1-T9342 (run W1-T9342-1792469947008)

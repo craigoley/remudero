@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 10.00
   risk: high  # Rule 19: shared lifecycle opt-in plus exact-main/API preparation and landing revalidation; the gardener still never gates
@@ -94,3 +94,11 @@
     the actual ledger-to-queue reopening fails. Both plan inputs moving, missing API evidence, deleted
     records, concurrent human history, equal-value reclosure and stale queued revisions must stay refused
     or closed as specified, while every original generic lifecycle assertion remains unchanged.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-24T14:53:48.547Z"
+    pin: "778a0971418459c08ed7ade13dd8f921939975cb38972bb289a476e3bd30a728"
