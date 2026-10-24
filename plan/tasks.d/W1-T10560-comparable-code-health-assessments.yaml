@@ -20,6 +20,9 @@
     - src/lib/codeql-quality-intake.ts
     - src/lib/coverage-nightly-intake.ts
     - src/lib/opportunity-intake.ts
+    - src/lib/ops.ts
+    - src/run-task.ts
+    - .github/workflows/coverage-nightly.yml
     - src/lib/read-model-worker.ts
     - src/lib/views.ts
     - src/lib/serve.ts
