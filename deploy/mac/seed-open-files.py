@@ -40,8 +40,10 @@ def scan(root, out_dir, lsof, now):
         # Every login account is in `staff`, so each account's sweeper can read its store's scan.
         try:
             os.chown(tmp, -1, grp.getgrnam("staff").gr_gid)
-        except (KeyError, PermissionError):
-            pass  # a fixture run by an account outside `staff` keeps its own group
+        except (KeyError, OSError):
+            if sys.platform == "darwin":
+                raise  # production scans must be readable by the staff group
+            # Linux fixtures may have no staff group or reject chown in a user namespace.
         os.chmod(tmp, 0o640)
         os.replace(tmp, os.path.join(out_dir, key(root) + ".json"))
     finally:
