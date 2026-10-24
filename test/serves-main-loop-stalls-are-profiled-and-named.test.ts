@@ -48,9 +48,16 @@ function serveBusyFrame(): number {
 
 /** Hold serve's loop for `ms`. Array.from drives the calls in batches, so no frame of the test runs a loop long enough
  *  to be on-stack-replaced before the profile began (loop-stall-profiler.ts's V8 LIMIT). */
-function stallTheLoop(ms: number): void {
-  const end = performance.now() + ms;
-  while (performance.now() < end) Array.from({ length: 50 }, serveBusyFrame);
+function stallTheLoop(ms: number, profiling?: Int32Array): void {
+  // ready() acknowledges inspector attachment, before Profiler.start. Keep the named workload on
+  // the stack until the real start callback arrives, then supply the original sampling duration.
+  const deadline = performance.now() + 10_000;
+  let end = profiling ? undefined : performance.now() + ms;
+  while (end === undefined || performance.now() < end) {
+    if (end === undefined && profiling && Atomics.load(profiling, 0) === 1) end = performance.now() + ms;
+    if (end === undefined && performance.now() > deadline) throw new Error("the real profiler never acknowledged sampling");
+    Array.from({ length: 50 }, serveBusyFrame);
+  }
 }
 
 /** A minute's reading whose p99 sets the bound well above test-runner noise and well below the stall. */
@@ -106,8 +113,26 @@ test("W1-T10074: a failing inspector disables serve's watchdog and says why", as
 });
 
 // LAST: a profile enables V8's Profiler domain, whose disconnect resets this process's precise coverage.
-test("W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame", async () => {
-  const { tick, stop, written } = armServeMonitor();
+async function verifyProfiledStall(startDelayMs: number): Promise<Frame> {
+  const profiling = new Int32Array(new SharedArrayBuffer(4));
+  const { tick, stop, written } = armServeMonitor({
+    spawn: (source, workerData) => new Worker(`
+const profilerTestFlag = new Int32Array(process.getBuiltinModule("node:worker_threads").workerData.profilerTestFlag);
+const proto = process.getBuiltinModule("node:inspector").Session.prototype;
+const originalPost = proto.post;
+let delayedStart = false;
+proto.post = function(method, params, callback) {
+  const invoke = () => originalPost.call(this, method, params, (error, result) => {
+    if (method === "Profiler.start" && !error) Atomics.store(profilerTestFlag, 0, 1);
+    callback(error, result);
+  });
+  if (method === "Profiler.start" && !delayedStart && process.getBuiltinModule("node:worker_threads").workerData.profilerStartDelayMs > 0) {
+    delayedStart = true; setTimeout(invoke, process.getBuiltinModule("node:worker_threads").workerData.profilerStartDelayMs);
+  }
+  else invoke();
+};
+${source}`, { eval: true, execArgv: [], workerData: { ...workerData, profilerTestFlag: profiling.buffer, profilerStartDelayMs: startDelayMs } }),
+  });
   try {
     assert.equal(stop.stallProfiler.boundMs(), undefined, "no bound before serve's first lag reading");
     tick();
@@ -115,9 +140,8 @@ test("W1-T10074: a serve main-thread stall longer than its bound writes a profil
     assert.equal(stop.stallProfiler.boundMs(), boundMs, "the bound is the histogram's resolution plus the p99 quantile");
     assert.equal(await readyWithin(stop.stallProfiler), true);
     await sleep(boundMs);
-    stallTheLoop(1500);
-    const row = await waitFor(() => written.find((line) => line.step === "runtime.loop_stall_profile"
-      && (line.top_frames as Frame[] | undefined)?.[0]?.function === "serveBusyFrame"));
+    stallTheLoop(1500, profiling);
+    const row = await waitFor(() => written.find((line) => line.step === "runtime.loop_stall_profile"));
     const frames = row.top_frames as Frame[];
     assert.match(frames[0]!.url, /serves-main-loop-stalls-are-profiled-and-named\.test\.ts/);
     assert.ok(frames[0]!.self_ms > 0);
@@ -126,8 +150,18 @@ test("W1-T10074: a serve main-thread stall longer than its bound writes a profil
     assert.equal(row.task_id, "INCIDENT");
     assert.match(String(row.run_id), /^RUNTIME-/);
     assert.equal(written.filter((line) => line.step === "runtime.loop_stall_profile_failed").length, 0);
+    return frames[0]!;
   } finally {
     v8.takeCoverage();
     stop();
   }
+}
+
+test("W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame", async () => {
+  const frame = await verifyProfiledStall(0);
+  assert.equal(frame.function, "serveBusyFrame");
+});
+test("a delayed real V8 sampling start still profiles the named serve workload", async () => {
+  const frame = await verifyProfiledStall(2000);
+  assert.equal(frame.function, "serveBusyFrame");
 });

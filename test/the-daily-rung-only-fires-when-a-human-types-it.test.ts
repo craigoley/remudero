@@ -251,7 +251,9 @@ async function tickWith(extra: Partial<Parameters<typeof runDaemon>[1]>): Promis
     } as never,
     // `max` bounds the ITERATIONS — the field a-bound-that-stops-waiting-does-not-stop-the-work
     // uses. `maxTasks` is not an option, so passing it leaves the loop unbounded.
-    { max: 1, pollIntervalMs: 1 } as never,
+    // This fixture checks one iteration, not the separate due-rungs timer. A 1 ms timer can
+    // legitimately rerun an always-due fake after its detached promise settles.
+    { max: 1, pollIntervalMs: 60_000 } as never,
   );
   return { attempted: (summary as { attempted: readonly string[] }).attempted, rows };
 }

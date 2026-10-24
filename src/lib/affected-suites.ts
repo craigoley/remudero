@@ -381,6 +381,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     };
   }
 
+  const absentSuite = files.find((file) => SUITE.test(file) && !input.files.has(file));
+  if (absentSuite !== undefined) {
+    return {
+      suites: [], fullRun: true,
+      reasons: [`full run: changed suite ${absentSuite} is absent from the current selector input`],
+      recentOnly: { floor: [] },
+    };
+  }
+
   const reasons = new Map<string, string>();
   const pick = (suite: string, why: string) => {
     if (!reasons.has(suite)) reasons.set(suite, why);

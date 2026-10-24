@@ -164,7 +164,10 @@ if [ -n "${RMD_CLEANUP_WATCH_FS+x}" ]; then WATCH_FS="$RMD_CLEANUP_WATCH_FS"
 elif [ "$ROOT_FS" = / ]; then WATCH_FS="/mnt/rmd:85 /mnt/scratch:90/40G"  # the Azure host's state + swap disks
 else WATCH_FS=""; fi  # a relocated root (a fixture, another layout) does not inherit the host's mounts
 FSID_CMD="${RMD_CLEANUP_FSID:-}"
-LSOF_CMD="${RMD_CLEANUP_LSOF:-lsof}"
+# Elevate only system lsof; account views can hide root readers behind exit-zero Permission denied.
+if [ -n "${RMD_CLEANUP_LSOF:-}" ]; then LSOF_CMD="$RMD_CLEANUP_LSOF"
+elif [ "$(id -u)" = 0 ]; then LSOF_CMD=lsof
+else LSOF_CMD="sudo -n -- /usr/bin/lsof"; fi
 FIND_CMD="${RMD_CLEANUP_FIND:-find}"
 CONTAINER_MAP="${RMD_CLEANUP_CONTAINER_MAP:-}"
 WATCH_ROOTS="${RMD_CLEANUP_WATCH_ROOTS-$CLEAN_HOME/.codex $CLEAN_HOME/.claude}"
@@ -390,16 +393,21 @@ is_worktree_idle() {
 OPEN_SNAPSHOT=""
 PROCESS_SNAPSHOT=""
 OPEN_OK=1
+OPEN_FAILURE="lsof failed"
 snapshot_open() {
   local out
-  OPEN_OK=1
-  PROCESS_SNAPSHOT=$(ps -axww -o command= 2>/dev/null) || { OPEN_OK=0; return; }
-  if ! out="$($LSOF_CMD -Fn 2>/dev/null)" && [ -z "$out" ]; then
-    # An lsof that failed and printed nothing tells us NOTHING; treating that as "nothing is open"
-    # is the failure this rule exists to prevent. Fail closed: keep everything.
+  OPEN_OK=1; OPEN_FAILURE="lsof failed"
+  PROCESS_SNAPSHOT=$(ps -axww -o command= 2>/dev/null) || {
+    OPEN_OK=0; OPEN_FAILURE="process snapshot failed"; return
+  }
+  if ! out="$($LSOF_CMD -Fn 2>/dev/null)"; then
     OPEN_OK=0
     return
   fi
+  case "$out" in
+    *"Permission denied"*)
+      OPEN_OK=0; OPEN_FAILURE="lsof returned incomplete visibility (Permission denied)"; return ;;
+  esac
   OPEN_SNAPSHOT="$(printf '%s\n' "$out" | sed -n 's/^n//p')"
 }
 is_open() {
@@ -838,7 +846,7 @@ prune_tsx_cache() {
   local dir="$1" minutes stats count bytes
   minutes="$TSX_MAX_AGE_MINUTES"
   if [ -L "$dir" ] || [ ! -d "$dir" ]; then log "KEEP $dir: not a regular directory"; return; fi
-  if [ "$OPEN_OK" != 1 ]; then log "KEEP $dir: lsof failed (fail closed)"; return; fi
+  if [ "$OPEN_OK" != 1 ]; then log "KEEP $dir: $OPEN_FAILURE (fail closed)"; return; fi
   if ! stats="$(find "$dir" -xdev -type f -mmin "+$minutes" -exec du -k {} + 2>/dev/null \
        | awk '{ n++; kb += $1 } END { printf "%d %d", n, kb * 1024 }')"; then
     log "KEEP $dir: tsx cache scan failed (unknown)"; return
@@ -1229,7 +1237,7 @@ preserve_exclusions() {
   return 0
 }
 preserve_write() {
-  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count r name url remotes_text="" skip
+  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count objects r name url remotes_text="" skip
   local -a revs=() tar_excludes=()
   branch="$(rgit "$repo" symbolic-ref -q --short HEAD 2>/dev/null)" || branch="(detached)"
   while IFS= read -r name; do
@@ -1239,15 +1247,17 @@ preserve_write() {
 "
   done < <(rgit "$repo" remote 2>/dev/null)
   excl="$(preserve_exclusions "$repo" "$unit")"
-  revs=(--branches --tags HEAD)
-  if rgit "$repo" rev-parse --verify -q refs/stash >/dev/null 2>&1; then revs+=(refs/stash); fi
+  rgit "$repo" for-each-ref --format='%(objectname) %(refname)' > "$work/refs.txt" 2>/dev/null || { PRESERVE_REASON="refs-unreadable"; return 1; }
+  PRESERVED_REFS_HASH="$(rgit "$repo" hash-object --stdin < "$work/refs.txt")" || { PRESERVE_REASON="refs-hash-failed"; return 1; }
+  revs=(--all HEAD "$head")
+  while read -r r name; do [ -n "$r" ] && revs+=("$r"); done < "$work/refs.txt"
   while IFS= read -r r; do [ -n "$r" ] && revs+=("$r"); done <<< "$excl"
   count="$(rgit "$repo" rev-list --count "${revs[@]}" 2>/dev/null)" || { PRESERVE_REASON="history-unrecoverable (rev-list failed)"; return 1; }
-  if [ "${count:-0}" -gt 0 ]; then
+  objects="$(rgit "$repo" rev-list --objects --no-object-names "${revs[@]}" 2>/dev/null | wc -l)" || { PRESERVE_REASON="objects-unrecoverable (rev-list failed)"; return 1; }
+  if [ "${objects:-0}" -gt 0 ]; then
     rgit "$repo" bundle create "$work/unpublished.bundle" "${revs[@]}" >/dev/null 2>&1 </dev/null || { PRESERVE_REASON="bundle-create-failed"; return 1; }
     rgit "$repo" bundle verify "$work/unpublished.bundle" >/dev/null 2>&1 </dev/null || { PRESERVE_REASON="bundle-unverified"; return 1; }
   fi
-  rgit "$repo" for-each-ref --format='%(objectname) %(refname)' > "$work/refs.txt" 2>/dev/null || { PRESERVE_REASON="refs-unreadable"; return 1; }
   rgit "$repo" diff --binary HEAD > "$work/uncommitted.patch" 2>/dev/null || { PRESERVE_REASON="diff-failed"; return 1; }
   [ -s "$work/uncommitted.patch" ] || rm -f -- "$work/uncommitted.patch"
   for skip in $PRESERVE_SKIP_DIRS; do tar_excludes+=("-x" "$skip"); done
@@ -1264,17 +1274,17 @@ preserve_write() {
   {
     printf 'Preserved by the Azure host janitor (deploy/rmd-host-cleanup.sh, preserve-then-retire).\n'
     printf 'path:   %s\nunit:   %s\nhead:   %s  branch: %s\npreserved_at: %s\n' "$repo" "$unit" "$head" "$branch" "$PRESERVE_STAMP"
-    printf 'commits not on a published remote: %s\nremotes:\n%s' "$count" "$remotes_text"
+    printf 'commits not on a published remote: %s\nobjects not on a published remote: %s\nremotes:\n%s' "$count" "$objects" "$remotes_text"
     printf 'expires: %s days after preservation (operator ruling 2026-10-23)\n\nRestore:\n' "$RETAIN_DAYS"
     printf '  git clone <upstream URL from remotes above> <dir> && cd <dir>\n'
-    printf '  git bundle unbundle %s/unpublished.bundle   # if present; restores every unpublished commit\n' "$final"
+    printf '  git bundle unbundle %s/unpublished.bundle   # if present; restores every unpublished ref object\n' "$final"
     printf '  # refs.txt lists every original ref: git update-ref <ref> <sha> recreates the ones you want\n'
     printf '  git checkout %s\n  git apply --binary %s/uncommitted.patch   # if present\n  tar -xzf %s/untracked.tar.gz              # if present\n' "$head" "$final" "$final"
   } > "$work/MANIFEST.txt" || { PRESERVE_REASON="manifest-write-failed"; return 1; }
 }
 preserve_repo() {
   local repo="$1" unit="$2" head big name final work
-  PRESERVE_REASON=""; PRESERVED_DIR=""; PRESERVED_HEAD=""
+  PRESERVE_REASON=""; PRESERVED_DIR=""; PRESERVED_HEAD=""; PRESERVED_REFS_HASH=""
   if ! head="$(rgit "$repo" rev-parse --verify HEAD 2>/dev/null)" || ! rgit "$repo" cat-file -e 'HEAD^{tree}' 2>/dev/null; then
     PRESERVE_REASON="history-unrecoverable (HEAD unreadable)"; return 1
   fi
@@ -1358,7 +1368,7 @@ preserve_unit() {
   local p="$1" entries bundles status uid found seed_reason entry repo gitdir reg target i bytes copies="" pp
   local is_repo=0 descend="" protected denied
   local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
-  local -a repos=() heads=()
+  local -a repos=() heads=() ref_hashes=()
   [ -d "$p" ] && [ ! -L "$p" ] || return 0
   preserve_skip "$p" && return 0
   scan_find "$p" -name node_modules -prune -o -name .git -prune -print; status=$?
@@ -1451,7 +1461,7 @@ preserve_unit() {
       preserve_hold "$p" "preserve root $PRESERVE_ROOT is past its watched mark"; return
     fi
     if ! preserve_repo "$repo" "$p"; then preserve_hold "$p" "$PRESERVE_REASON ($repo)"; return; fi
-    heads+=("$PRESERVED_HEAD"); copies="$copies${copies:+ }$PRESERVED_DIR"
+    heads+=("$PRESERVED_HEAD"); ref_hashes+=("$PRESERVED_REFS_HASH"); copies="$copies${copies:+ }$PRESERVED_DIR"
   done
   if [ -n "$bundles" ]; then
     if [ "$DRY_RUN" != 1 ] && ! preserve_root_has_room; then
@@ -1476,6 +1486,9 @@ preserve_unit() {
     gitdir="$(rgit "$repo" rev-parse --absolute-git-dir 2>/dev/null)" || { preserve_hold "$p" "Git metadata changed before retire ($repo)"; return; }
     if [ -f "$gitdir/locked" ] || ! git_head_idle "$repo" || [ "$(rgit "$repo" rev-parse --verify HEAD 2>/dev/null)" != "${heads[$i]}" ]; then
       preserve_hold "$p" "HEAD moved or worktree locked before retire ($repo; copies kept: $copies)"; return
+    fi
+    if ! found="$(rgit "$repo" for-each-ref --format='%(objectname) %(refname)' 2>/dev/null | rgit "$repo" hash-object --stdin)" || [ "$found" != "${ref_hashes[$i]}" ]; then
+      preserve_hold "$p" "Git refs moved or became unreadable before retire ($repo; copies kept: $copies)"; return
     fi
     i=$(( i + 1 ))
   done
@@ -1569,7 +1582,7 @@ preserve_then_retire() {
   local root unit retired_before lender
   [ -n "$PRESERVE_ROOTS" ] || return 0
   if [ -L "$PRESERVE_ROOT" ]; then log "REFUSE preserve-then-retire: $PRESERVE_ROOT is a symbolic link"; return; fi
-  if [ "$OPEN_OK" != 1 ]; then log "REFUSE preserve-then-retire: lsof failed — keeping everything (fail closed)"; return; fi
+  if [ "$OPEN_OK" != 1 ]; then log "REFUSE preserve-then-retire: $OPEN_FAILURE — keeping everything (fail closed)"; return; fi
   if [ "$DRY_RUN" != 1 ]; then
     if ! mkdir -p -- "$PRESERVE_ROOT" 2>/dev/null || ! chmod 700 "$PRESERVE_ROOT" 2>/dev/null; then
       log "REFUSE preserve-then-retire: cannot create $PRESERVE_ROOT"; return
@@ -1690,7 +1703,7 @@ dump_walk() {   # dump_walk <root> <unit> <resumable 0|1>
 dump_housekeeping() {
   local root unit
   [ -n "$DUMP_ROOTS$DUMP_RESUMABLE_ROOTS" ] || return 0
-  if [ "$OPEN_OK" != 1 ]; then log "REFUSE dump housekeeping: lsof failed — keeping everything (fail closed)"; return; fi
+  if [ "$OPEN_OK" != 1 ]; then log "REFUSE dump housekeeping: $OPEN_FAILURE — keeping everything (fail closed)"; return; fi
   while IFS= read -r root; do
     root="${root%/}"
     [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
@@ -1874,7 +1887,7 @@ fi
 log "rmd-host-cleanup: retention idle $(fmt_minutes "$IDLE_MINUTES"), scratch $(fmt_minutes "$SCRATCH_IDLE_MINUTES"), tsx $(fmt_minutes "$TSX_MAX_AGE_MINUTES") ($IDLE_SOURCE)"
 
 snapshot_open
-[ "$OPEN_OK" = 1 ] || log "REFUSE sweeps: lsof failed — keeping everything (fail closed)"
+[ "$OPEN_OK" = 1 ] || log "REFUSE sweeps: $OPEN_FAILURE — keeping everything (fail closed)"
 
 snapshot_docker
 snapshot_alternates

@@ -33,7 +33,8 @@ import {
   type AnalyticsResumePoint,
   type AnalyticsScanReport,
 } from "./analytics-route.js";
-import { ANALYTICS_SOURCE_NAMES, ANALYTICS_VIEW_NAME, analyticsSourceBodies } from "./analytics-view.js";
+import { ANALYTICS_SOURCE_NAMES, ANALYTICS_VIEW_NAME, GARDENER_SPEND_SOURCE_NAME, analyticsSourceBodies } from "./analytics-view.js";
+import { captureGardenerSpendSource } from "./gardener-spend.js";
 import type { SourceSnapshotWrite } from "./read-model-db.js";
 import { snapshotGeneration, snapshotGithub, snapshotSource } from "./now-view.js";
 import type { GitHub } from "./status.js";
@@ -90,6 +91,7 @@ interface SlowLaneUnit {
   name: string;
   instance?: string;
   run(): Promise<{ views: SlowLaneBodies[] }>;
+  cancel?(): void;
 }
 
 function instanceInboxUnit(config: NonNullable<SlowLaneConfig["instanceInboxes"]>[number], clock: Clock,
@@ -214,10 +216,13 @@ function analyticsUnit(
   enabled: () => boolean,
   captureOwnership: () => () => boolean,
   refresh: AnalyticsRefresh,
+  ownsInstance: (name: string) => boolean,
 ): SlowLaneUnit {
   const intervalMs = config.intervalMs ?? ANALYTICS_REFRESH_INTERVAL_MS;
   const timeoutMs = config.timeoutMs ?? ANALYTICS_REFRESH_TIMEOUT_MS;
   const nextDue = new Map<string, number>();
+  const gardenerDue = new Map<string, number>();
+  let active: AbortController | undefined;
   const checkpoints = new Map<string, AnalyticsCheckpoint | undefined>();
   const progress = new Map<string, AnalyticsResumePoint>();
   const scanFields = (scan?: AnalyticsScanReport): Record<string, unknown> => scan ? {
@@ -229,6 +234,7 @@ function analyticsUnit(
     const started = clock.now();
     nextDue.set(instance.name, started + intervalMs);
     const controller = new AbortController();
+    active = controller;
     const timer = setTimeout(() => controller.abort(new Error(`analytics refresh exceeded ${timeoutMs} ms`)), timeoutMs);
     let work: SlowLaneWork = { unit: "analytics", instance: instance.name, phase: "read-checkpoint" };
     try {
@@ -272,24 +278,60 @@ function analyticsUnit(
       post({ type: "source_snapshot", snapshot: { instance: instance.name, ok: false, names: ANALYTICS_SOURCE_NAMES, error: message, atMs: clock.now() } });
       log("analytics.source_snapshot_failed", { instance: instance.name, ms: clock.now() - started, error: message });
     } finally {
+      active = undefined;
+      clearTimeout(timer);
+      post({ type: "end", work });
+    }
+  };
+  const refreshGardener = async (instance: typeof config.instances[number], mayPublish: () => boolean): Promise<void> => {
+    const controller = new AbortController();
+    active = controller;
+    const started = clock.now();
+    gardenerDue.set(instance.name, started + intervalMs);
+    const timer = setTimeout(() => controller.abort(new Error(`gardener capture exceeded ${timeoutMs} ms`)), timeoutMs);
+    const work = { unit: "gardener-spend", instance: instance.name, phase: "capture" };
+    post({ type: "begin", work });
+    try {
+      const source = await captureGardenerSpendSource(instance.stateDir, clock, { signal: controller.signal, repository: instance.repository });
+      controller.signal.throwIfAborted();
+      if (!mayPublish() || !ownsInstance(instance.name)) return;
+      if (source.reason || !source.corpusComplete || !source.observedAt) throw new Error(`gardener evidence unavailable: ${source.reason ?? "incomplete current window"}`);
+      post({ type: "source_snapshot", snapshot: { instance: instance.name, ok: true, asOf: source.observedAt,
+        bodies: [{ name: GARDENER_SPEND_SOURCE_NAME, body: { repository: instance.repository, source } }] } });
+      log("gardener.source_snapshot_built", { instance: instance.name, asOf: source.observedAt, ms: clock.now() - started });
+    } catch (error) {
+      if (!mayPublish() || !ownsInstance(instance.name)) return;
+      post({ type: "source_snapshot", snapshot: { instance: instance.name, ok: false, names: [GARDENER_SPEND_SOURCE_NAME],
+        error: String((error as Error)?.message ?? error), atMs: clock.now() } });
+      log("gardener.source_snapshot_failed", { instance: instance.name, ms: clock.now() - started });
+    } finally {
+      active = undefined;
       clearTimeout(timer);
       post({ type: "end", work });
     }
   };
   return {
     name: "analytics",
+    cancel: () => active?.abort(new Error("analytics ownership changed")),
     run: async () => {
       if (!enabled() || running) return { views: [] };
       const mayPublish = captureOwnership();
       if (!mayPublish()) return { views: [] };
-      const due = config.instances.filter((instance) => clock.now() >= (nextDue.get(instance.name) ?? Number.NEGATIVE_INFINITY));
+      const due = config.instances.filter((instance) => ownsInstance(instance.name) &&
+        (clock.now() >= (nextDue.get(instance.name) ?? Number.NEGATIVE_INFINITY) ||
+          instance.repository !== undefined && clock.now() >= (gardenerDue.get(instance.name) ?? Number.NEGATIVE_INFINITY)));
       if (due.length > 0) {
         running = true;
         void (async () => {
           try {
             for (const instance of due) {
               if (!mayPublish()) break;
-              await refreshOne(instance, mayPublish);
+              if (instance.repository !== undefined && clock.now() >= (gardenerDue.get(instance.name) ?? Number.NEGATIVE_INFINITY)) {
+                await refreshGardener(instance, mayPublish);
+              }
+              if (mayPublish() && ownsInstance(instance.name) && clock.now() >= (nextDue.get(instance.name) ?? Number.NEGATIVE_INFINITY)) {
+                await refreshOne(instance, mayPublish);
+              }
             }
           } finally { running = false; }
         })();
@@ -332,7 +374,7 @@ export function runSlowLaneWorker(
     ? [analyticsUnit(data.analytics, clock, post, log, () => BUILT_MODES.has(modes[ANALYTICS_VIEW_NAME]), () => {
       const leaseAtStart = leaseEpoch, viewAtStart = analyticsEpoch;
       return () => !stopped && held && leaseEpoch === leaseAtStart && analyticsEpoch === viewAtStart && BUILT_MODES.has(modes[ANALYTICS_VIEW_NAME]);
-    }, opts.analyticsRefresh ?? scanAnalyticsLedger)]
+    }, opts.analyticsRefresh ?? scanAnalyticsLedger, name => ownedInstances.has(name))]
     : [];
   const units: SlowLaneUnit[] = [...(data.inbox ? coreUnits(data.inbox, clock, log, opts.inbox ?? {}) : []),
     ...(data.instanceInboxes ?? []).map(config => instanceInboxUnit(config, clock, () => {
@@ -367,7 +409,10 @@ export function runSlowLaneWorker(
   port.on("message", (msg) => {
     if (msg.type === "views") {
       const next = (msg.modes ?? {}) as Record<string, unknown>;
-      if (next[ANALYTICS_VIEW_NAME] !== modes[ANALYTICS_VIEW_NAME]) analyticsEpoch += 1;
+      if (next[ANALYTICS_VIEW_NAME] !== modes[ANALYTICS_VIEW_NAME]) {
+        analyticsEpoch += 1;
+        for (const unit of analytics) unit.cancel?.();
+      }
       modes = next;
     }
     if (msg.type !== "lease") return;
@@ -375,7 +420,10 @@ export function runSlowLaneWorker(
     const previous = [...ownedInstances].join("|");
     ownedInstances = new Set(Array.isArray(msg.instances) ? msg.instances.filter((id): id is string => typeof id === "string") : []);
     held = msg.held === true;
-    if (was !== held || previous !== [...ownedInstances].join("|")) leaseEpoch += 1;
+    if (was !== held || previous !== [...ownedInstances].join("|")) {
+      leaseEpoch += 1;
+      for (const unit of analytics) unit.cancel?.();
+    }
     if (held && (!was || previous !== [...ownedInstances].join("|")) && !running) {
       cancel();
       void pass();
@@ -385,6 +433,7 @@ export function runSlowLaneWorker(
   return {
     stop: () => {
       stopped = true;
+      for (const unit of analytics) unit.cancel?.();
       cancel();
     },
   };
