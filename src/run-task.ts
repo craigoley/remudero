@@ -1075,7 +1075,7 @@ import {
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
-import type { ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
+import { childEntryArgv, childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, type ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
 import {
   bodyWithFailingProofAtOpen,
   checkProofLaunchArgv,
@@ -7819,6 +7819,8 @@ async function runReview(args: {
    *  resolved the run policy pass it through; the fallback keeps direct review invocations on
    *  the same policy row without inventing a second timeout. */
   reviewerClockBoundMs?: number;
+  /** Cancellation of this review also stops its plan-lint process group. */
+  signal?: AbortSignal;
   /**
    * PR-HEAD checkout dir the deterministic FLOOR executes whitelisted proofs in
    * (W1-T65, ratifies P15 — HEAD DISCIPLINE: never the operator's working
@@ -8287,7 +8289,8 @@ async function runReview(args: {
   // gate observes repo state whether or not the advisory reviewer above ever
   // completed.
   // W1-T4423: a plan-only PASS names lint-plan, so the review runs it on the target repo's plan at this head.
-  const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir) : undefined;
+  const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir,
+    undefined, undefined, { signal: args.signal, log }) : undefined;
   const computed = await preparedDecision.judge({
     diff,
     report,
@@ -24143,47 +24146,64 @@ export function lintScopeMergeBase(
  * W1-T4423 — THE LINT A PLAN-ONLY PASS NAMES, RUN BY THE REVIEW ITSELF. A consumer repo's CI has no lint-plan job,
  * so remudero-site #133 merged PORTAL-T27 with two violations under a status claiming lint-plan had gated it. This
  * runs `lint-plan:fast`'s selection, {@link lintPlanCommand} offline over the tasks the PR changed against its merge
- * base, on the TARGET repo's plan at the PR head. In-process: the body has no `await`, so every line it prints is
- * written before the console is restored, and a missing summary line reads as "could not run", never as clean.
+ * base, on the TARGET repo's plan at the PR head. Git preparation and the lint child are awaited so the
+ * daemon loop stays available. A missing summary reads as "could not run", never as clean.
  */
 export async function lintPlanForReview(
   headCheckoutDir: string | undefined,
-  git: (cwd: string, args: string[]) => string = (cwd, args) => hostWorktreeGit(cwd, args, { timeout: 120_000 }),
-  lint: typeof lintPlanCommand = lintPlanCommand,
+  git: (cwd: string, args: string[]) => string | Promise<string> = (cwd, args) => hostWorktreeGitAsync(cwd, args, { timeout: 120_000 }),
+  run: (argv: string[], options: { cwd: string; signal?: AbortSignal }) => Promise<CensusChildResult> = spawnReviewPlanLint,
+  options: { signal?: AbortSignal; log?: (step: string, extra?: Record<string, unknown>) => void } = {},
 ): Promise<PlanLintOutcome> {
   if (!headCheckoutDir) return { ran: false, reason: "no PR-head checkout" };
   try {
     // A stale origin/main moves the merge base back and widens the changed-task scope onto other filings.
-    git(headCheckoutDir, ["fetch", "--quiet", "--no-tags", "origin", "main"]);
+    await git(headCheckoutDir, ["fetch", "--quiet", "--no-tags", "origin", "main"]);
   } catch (e) {
     console.error(`### lint-plan for review: origin/main not refreshed (${String((e as Error).message).split("\n")[0]})`);
   }
   let mergeBase: string;
   try {
-    mergeBase = git(headCheckoutDir, ["merge-base", "origin/main", "HEAD"]).trim();
+    mergeBase = (await git(headCheckoutDir, ["merge-base", "origin/main", "HEAD"])).trim();
   } catch (e) {
     return { ran: false, reason: `no merge base: ${String((e as Error).message).split("\n")[0]}` };
   }
-  const lines: string[] = [];
-  const saved = { log: console.log, error: console.error, warn: console.warn };
-  const capture = (...parts: unknown[]): void => void lines.push(parts.map(String).join(" "));
-  let pending: Promise<number>;
-  console.log = console.error = console.warn = capture;
   try {
-    pending = lint(["--plan", join(headCheckoutDir, "plan", "tasks.yaml"), "--base", mergeBase], {
-      offline: true,
-      repoRoot: headCheckoutDir,
-    });
-  } finally {
-    Object.assign(console, saved);
-  }
-  let code: number;
-  try {
-    code = await pending;
+    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted" };
+    const launch = childEntryArgv(repoRoot, "run-task", "src/run-task.ts", ["lint-plan", "--plan",
+      join(headCheckoutDir, "plan", "tasks.yaml"), "--base", mergeBase, "--offline", "--repo-root", headCheckoutDir],
+      undefined, { log: options.log });
+    options.log?.(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow("run-task", "lint-plan", launch));
+    const result = await run(launch.argv, { cwd: repoRoot, signal: options.signal });
+    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted" };
+    if (result.error) return { ran: false, reason: `lint-plan could not start: ${result.error.message}` };
+    if (result.signal) return { ran: false, reason: `lint-plan killed by ${result.signal}` };
+    if (result.status === null) return { ran: false, reason: "lint-plan exited without a status" };
+    const lines = `${result.stdout}\n${result.stderr}`.split(/\r?\n/);
+    return planLintOutcomeFromOutput(result.status, lines, mergeBase, existsSync(join(headCheckoutDir, "plan", "tasks.d")));
   } catch (e) {
     return { ran: false, reason: `lint-plan threw: ${String((e as Error).message).split("\n")[0]}` };
   }
-  return planLintOutcomeFromOutput(code, lines, mergeBase, existsSync(join(headCheckoutDir, "plan", "tasks.d")));
+}
+
+/** The lint leads its own process group, so cancellation reaches its Git descendants too. No new timeout. */
+function spawnReviewPlanLint(argv: string[], options: { cwd: string; signal?: AbortSignal }): Promise<CensusChildResult> {
+  return new Promise((resolveChild) => {
+    const child = spawn(process.execPath, argv, { cwd: options.cwd, detached: true, stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, RMD_SELF_SYNC_DONE: "1" } });
+    let stdout = "", stderr = "";
+    let error: Error | undefined;
+    child.stdout.setEncoding("utf8").on("data", (text: string) => { stdout += text; });
+    child.stderr.setEncoding("utf8").on("data", (text: string) => { stderr += text; });
+    child.once("error", (cause: Error) => { error = cause; });
+    child.once("close", (status, signal) => {
+      options.signal?.removeEventListener("abort", abort);
+      resolveChild({ status, signal, stdout, stderr, ...(error ? { error } : {}) });
+    });
+    const abort = (): void => { if (child.pid !== undefined) killProcessGroup(child.pid); };
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
+  });
 }
 
 /** W1-T4423: read {@link lintPlanCommand}'s printed report back into violations. `monolith-filing` is dropped for a
@@ -24216,7 +24236,7 @@ export function planLintOutcomeFromOutput(code: number, lines: string[], mergeBa
 }
 
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
-  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], ["--all", "--merge-base"]);
+  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base", "--repo-root"], ["--all", "--merge-base", "--offline"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -24224,8 +24244,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // W1-T324: a standalone token, never a substring match on a proof body quoting "--all".
   // Ignored in --base mode, whose own scope already defines what is in-bounds.
   const allFlag = rest.includes("--all");
-  const offline = deps.offline === true;
-  const checkoutRoot = deps.repoRoot ?? repoRoot;
+  const offline = deps.offline === true || rest.includes("--offline");
+  const checkoutRoot = deps.repoRoot ?? resolve(flagValue(rest, "--repo-root") ?? repoRoot);
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show
