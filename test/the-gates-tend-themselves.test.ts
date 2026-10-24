@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { gardenStatePath, readGardenState, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
+import { gardenStatePath, readGardenState, runGardenAsync, type GardenCheckout } from "../src/lib/gardener.js";
 import {
   CI_GATE_YML,
   demoteInCiGate,
@@ -107,7 +107,7 @@ test("W1-T4116: a slack baseline is tightened to its measured value", async () =
   const root = seededGates();
   off(root, "refresh", "demote");
   const landed: Landed[] = [];
-  const pass = runGarden(gateGardenSpec(deps(root, landed), probes), deps(root, landed));
+  const pass = await runGardenAsync(gateGardenSpec(deps(root, landed), probes, { repairObservations: () => [] }), deps(root, landed));
   assert.deepEqual(pass.plan?.acting, ["tighten"]);
   const targets = pass.plan!.actions.map((a) => a.target).sort();
   assert.deepEqual(targets, ["scripts/source-size-baseline.json#src/lib/a.ts"]);
@@ -126,10 +126,10 @@ test("W1-T4116: a demotion is only proposed for operator review", async () => {
   const root = seededGates();
   off(root, "tighten", "refresh");
   const landed: Landed[] = [];
-  const spec = gateGardenSpec(deps(root, landed), probes);
+  const spec = gateGardenSpec(deps(root, landed), probes, { repairObservations: () => [] });
   assert.deepEqual(Object.keys(spec.review ?? {}), ["demote"], "only demotion is a person's call");
   const base = readFileSync(join(root, CI_GATE_YML), "utf8");
-  const pass = runGarden(spec, deps(root, landed));
+  const pass = await runGardenAsync(spec, deps(root, landed));
   assert.deepEqual(pass.plan?.actions.map((a) => a.target), ["quiet-gate"]);
   // Operator ruling 2026-09-24: a demotion is never held or drafted — it is judged by whether it merges.
   assert.equal("review" in landed[0]!, false, "nothing asks the checkout to hold or draft the PR");
@@ -143,7 +143,7 @@ test("W1-T4116: a demotion is only proposed for operator review", async () => {
   // Judged by the decision alone: a closed PR debits the class.
   writeFileSync(join(root, "src/lib/a.ts"), "export const a = 2;\n");
   execFileSync("git", ["-C", root, "-c", "user.email=g@example.invalid", "-c", "user.name=g", "commit", "-qam", "move"], { stdio: "pipe" });
-  runGarden(spec, deps(root, landed, () => "closed"));
+  await runGardenAsync(spec, deps(root, landed, () => "closed"));
   assert.deepEqual(readGardenState(gardenStatePath(join(root, "state"), "gate"), GATE_GARDEN_CLASSES).classes.demote, { alpha: 3, beta: 2 });
 });
 
@@ -159,7 +159,7 @@ test("W1-T4116: a stale row is refreshed and the learnings headroom is left alon
   ]);
   off(root, "tighten", "demote");
   const landed: Landed[] = [];
-  runGarden(gateGardenSpec(deps(root, landed), probes), deps(root, landed));
+  await runGardenAsync(gateGardenSpec(deps(root, landed), probes, { repairObservations: () => [] }), deps(root, landed));
   assert.equal(JSON.parse(readFileSync(join(root, "scripts/source-size-baseline.json"), "utf8"))["src/lib/gone.ts"], undefined);
   const learnings = readFileSync(join(root, "scripts/learnings-budget-baseline.json"), "utf8");
   assert.match(learnings, /"measuredActiveEntries": 1,/);
@@ -199,7 +199,7 @@ test("W1-T4116: edits refuse what they cannot do exactly", async () => {
   // A refused filing lands nothing and is ledgered with its reason, to be retried after a backoff.
   const failures: string[] = [];
   const refusing = { ...deps(root, []), log: (step: string, e?: Record<string, unknown>) => void (step === "gate.garden_filing_failed" && failures.push(String(e?.reason))) };
-  assert.equal(runGarden(gateGardenSpec(refusing, probes), refusing).prUrl, undefined);
+  assert.equal(await runGardenAsync(gateGardenSpec(refusing, probes, { repairObservations: () => [] }), refusing).prUrl, undefined);
   assert.match(failures.join("\n"), /gate-monotonic would refuse/);
   assert.ok(!existsSync(join(root, "docs/gate-garden-log.md")));
 });

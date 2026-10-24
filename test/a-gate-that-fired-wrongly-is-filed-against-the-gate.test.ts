@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { classifyGateRepair, gateRepairCandidates, renderFalsePositiveShard } from "#src/lib/gate-gardener.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations } from "#src/lib/plan.js";
-import { PRECHECK_TRIGGERED_SUITES, PRECHECK_PATH_TRIGGERED_SUITES } from "#scripts/census-precheck.mjs";
+const precheckModule = "#scripts/census-precheck.mjs";
+const { PRECHECK_TRIGGERED_SUITES, PRECHECK_PATH_TRIGGERED_SUITES } = await import(precheckModule) as {
+  PRECHECK_TRIGGERED_SUITES: Array<{ testFile: string; recognizer: string; ownFiles: string[] }>;
+  PRECHECK_PATH_TRIGGERED_SUITES: Array<{ testFile: string; recognizer?: string; symbol?: string; ownFiles?: string[] }>;
+};
 
 const baseline = "scripts/census-precheck-parity-baseline.json";
 const pair = { pr: 10787, gate: "census", redSha: "red", greenSha: "green", state: "repaired" as const,
@@ -96,7 +100,7 @@ test("W1-T9049: precheck gate ownership is explicit and names the census recogni
     assert.ok(entry.recognizer, entry.testFile);
   }
   const census = PRECHECK_PATH_TRIGGERED_SUITES.find((entry) => entry.testFile === "test/every-ci-census-is-asked-before-the-push.test.ts")!;
-  assert.ok(census.ownFiles.includes(baseline));
+  assert.ok(census.ownFiles?.includes(baseline));
   assert.equal(census.recognizer, "src/lib/ci-parity.ts");
   assert.equal(census.symbol, "censusCandidateWalks");
 });

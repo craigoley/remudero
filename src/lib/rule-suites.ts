@@ -332,6 +332,12 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "anchored to",
   ),
   refusedForPredicate(
+    "test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts",
+    "a",
+    "W1-T9049 exercises repair classification over injected diffs and gate ownership metadata. Its ls-files token " +
+      "belongs to synthetic repair evidence; it never enumerates tracked src/ files or asserts a per-source-file property",
+  ),
+  refusedForPredicate(
     "test/an-unmodelled-census-is-named-with-what-it-walks.test.ts",
     "a",
     "W1-T3238's own proof file. It fabricates census-shaped fixture text containing both `ls-files` and dir-walk idioms " +
