@@ -144,6 +144,21 @@ test("daily history refuses real filesystem failures and preserves corrupt evide
   });
 });
 
+test("daily first publication can abandon staged evidence without blocking its successor", async () => {
+  await withTempDir("daily-abandoned-stage", async root => {
+    const db = openReadModel({ stateDir: root, instance: "proof", schemaVersion: 1 });
+    try {
+      const abandoned = prepareDailyProgressPublication(root, [record(205)], []);
+      assert.equal(readDailyProgressManifest(root).generation, 0, "staging alone has never published a report");
+      const got = acquireLease(db); assert.ok(got.ok); if (!got.ok) return;
+      const successor = prepareDailyProgressPublication(root, [record(1)], []); successor.commit(db, got.lease);
+      const key = dailyProgressDayKey("acme/app", "America/New_York", "2026-11-01");
+      assert.equal(readDailyProgressRevision(root, readDailyProgressManifest(root).days[key]!).events.length, 1, "unpublished predecessor evidence cannot enter the successor report");
+      assert.ok(readdirSync(dailyProgressStorePath(root)).includes(abandoned.manifest.days[key]!.revisions[0]! + ".json"), "orphaned evidence remains available for diagnosis");
+    } finally { db.close(); }
+  });
+});
+
 test("daily PR source records complete truncated and failed attempts separately from saved rows", async () => {
   await withTempDir("daily-source-receipts", async root => {
     const cache = createBoardSnapshotCache(root, "acme", "app", { clock: fixedClock(Date.parse("2026-11-02T06:00:00Z")) });
