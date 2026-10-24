@@ -6853,6 +6853,7 @@ export interface OpenPrView {
    *  the merge base (W1-T94's new mode, design note iii). Populated when `mergeState === "dirty"`,
    *  mirroring how `ciFailures` is populated only when `checksState === "red"`. */
   mergeConflict?: MergeConflictEvidence;
+  mergeConflictSource?: "compare" | "merge-probe" | "inherited";
   mergeConflictGap?: string;
   /** What each recorded fix-rung strike TRIED for this PR's task, ledger ground truth only
    *  (W1-T78) — the clarification rung's input. `[]`/undefined when no strike is recorded, as for
@@ -9123,11 +9124,12 @@ export interface KnownMergeState {
 }
 
 export function conflictEvidenceRowFields(
-  pr: Pick<OpenPrView, "mergeState" | "mergeConflict">,
-): { conflict_files?: Array<{ path: string; ours_deleted: number; theirs_deleted: number }> } {
+  pr: Pick<OpenPrView, "mergeState" | "mergeConflict" | "mergeConflictSource">,
+): { conflict_files?: Array<{ path: string; ours_deleted: number; theirs_deleted: number }>; conflict_evidence_source?: OpenPrView["mergeConflictSource"] } {
   if (pr.mergeState !== "dirty" || !hasCapturedMergeConflictEvidence(pr.mergeConflict)) return {};
   return {
     conflict_files: pr.mergeConflict!.files.map((f) => ({ path: f.path, ours_deleted: f.oursDeleted, theirs_deleted: f.theirsDeleted })),
+    conflict_evidence_source: pr.mergeConflictSource ?? "compare",
   };
 }
 
@@ -9193,7 +9195,7 @@ export function withInheritedMergeState(
     const gap = next.mergeConflictGap ?? (inherited
       ? `mergeability was unread this pass, so no compare was read for this PR, and no prior pass recorded conflict files for head ${pr.headSha.slice(0, 7)}`
       : undefined);
-    if (files) next = { ...next, mergeConflict: { files, oursLog: "", theirsLog: "" } };
+    if (files) next = { ...next, mergeConflict: { files, oursLog: "", theirsLog: "" }, mergeConflictSource: "inherited" };
     else if (gap !== undefined && gap !== next.mergeConflictGap) next = { ...next, mergeConflictGap: gap };
   }
   return inherited ? { pr: next, inherited } : { pr: next };
