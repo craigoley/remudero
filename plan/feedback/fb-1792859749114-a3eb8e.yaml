@@ -1,0 +1,48 @@
+id: fb-1792859749114-a3eb8e
+ts: 2026-10-24T16:35:49.115Z
+raw: >-
+  [answer to feedback#incident-dccf9e2a4a76538b] Engineering follow-through:
+  recover context from the actual producer contract, not a new approval request.
+
+
+  The repeated `ledger step cli.approve: 0 row(s)` citation asks for the wrong
+  event. At captured main 9dc859894ba2ddaa260aabde1101656c6583f905,
+  `operator-interventions.ts` derives action `cli.approve` from a `cli.invoked`
+  row whose verb is `approve`. Successful approval outcomes are recorded
+  separately as `ratify.approved`; `cli.approve` is not itself the ledger step.
+  A zero for that nonexistent step cannot establish whether the eleven
+  historical approvals were traced or whether the incident persists.
+
+
+  The current bounded live-file control positively reads both an actual
+  `cli.invoked`/approve invocation and the corresponding `ratify.approved`
+  outcome, along with other real approval records. It covers October 22–24, NOT
+  the October 15 incident window. The historical eleven still need an
+  identity-qualified invocation/outcome/proposal join over the correct retained
+  window. Unknown actors and unmatched invocations must remain unknown; a
+  successful ratification is not, by itself, evidence of a stalled lane or a
+  workaround.
+
+
+  I have prepared a separate two-file revalidation correction: absence-only
+  `still-true` claims become `unknown` and cannot refresh, close or convert an
+  issue; cached verdicts are covered too. It is private at
+  66c7561ab67f4d3eb004d8a0c24e7bbd600f3528, not published or adopted. The three
+  existing suites pass 27/27; removing the correction with its regression tests
+  retained produces three intended failures. Publication still requires the
+  normal qualification route.
+
+
+  No historical approval identity, operator intent, task release, issue
+  resolution or production change is inferred by this note. Keep this as
+  engineering context recovery, not a request for Craig to explain records that
+  the system should reconstruct.
+attachments: []
+origin: issue
+status: new
+reply_to: incident-dccf9e2a4a76538b
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: issue#13345:comment:6386508628
+thread_id: null
