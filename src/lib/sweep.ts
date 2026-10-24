@@ -15,7 +15,7 @@ import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from ".
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -21788,12 +21788,61 @@ function ledgerDependabotDeferrals(
 
 let lightPassReadyRefreshInFlight = false;
 
+/** Wall phases and synchronous execution attributed to this pass's async context, excluding sibling work. */
+export class LightPassPreReviewTiming {
+  readonly phaseMs: Record<string, number> = Object.fromEntries([
+    "open_pr_views", "main_tip", "compare", "ready_ledger", "ready_actions", "ready_value_gate",
+    "ready_update", "refresh_admission", "armed_ratchet_rejudge",
+  ].map((phase) => [phase, 0]));
+  readonly compareReads: Array<Record<string, unknown>> = [];
+  private readonly scope = new AsyncLocalStorage<boolean>();
+  private depth = 0;
+  private started = 0;
+  private syncMs = 0;
+  private readonly hook = createHook({
+    before: () => { if (this.scope.getStore()) this.enter(); },
+    after: () => { if (this.scope.getStore()) this.leave(); },
+  });
+
+  constructor(readonly now: () => number = () => performance.now()) { this.hook.enable(); }
+
+  private enter(): void { if (this.depth++ === 0) this.started = performance.now(); }
+  private leave(): void { if (--this.depth === 0) this.syncMs += performance.now() - this.started; }
+
+  run<T>(action: () => T): T {
+    this.enter();
+    try { return this.scope.run(true, action); }
+    finally { this.leave(); }
+  }
+
+  sync<T>(phase: string, action: () => T): T {
+    const start = this.now();
+    try { return action(); }
+    finally { this.phaseMs[phase] = (this.phaseMs[phase] ?? 0) + this.now() - start; }
+  }
+
+  async measure<T>(phase: string, action: () => T | Promise<T>): Promise<T> {
+    const start = this.now();
+    try { return await action(); }
+    finally { this.phaseMs[phase] = (this.phaseMs[phase] ?? 0) + this.now() - start; }
+  }
+
+  finish(): Record<string, unknown> {
+    if (this.depth > 0) this.syncMs += performance.now() - this.started;
+    this.hook.disable();
+    this.scope.disable();
+    return { phase_ms: { ...this.phaseMs }, compare_count: this.compareReads.filter((r) => !r.cache_hit).length,
+      compare_reads: [...this.compareReads], sync_on_loop_ms: this.syncMs };
+  }
+}
+
 export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-overlap refresh, once per light pass
   openPrs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "mergeQueue" | "readActionsStatusSummary" |
     "readPrFileSource" | "behindMainByPr" | "baseChangedFilesByPr" | "inFlightTaskIds" | "now" | "readLedger" |
     "appendLine" | "dryRun" | "readBranchProtectionStrict" | "refreshJudge" | "log">,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  timing?: LightPassPreReviewTiming,
 ): Promise<number | undefined> {
   const updateBranch = deps.updateBranch;
   if (deps.dryRun || !updateBranch || deps.baseChangedFilesByPr === undefined || lightPassReadyRefreshInFlight) return undefined;
@@ -21801,7 +21850,8 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
   try {
     const appendLine = deps.appendLine ?? appendLedger;
     const now = clockFromMillisFn(deps.now).now();
-    const ledgerLines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+    const readLedger = () => (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+    const ledgerLines = timing ? timing.sync("ready_ledger", readLedger) : readLedger();
     const spentHeads = new Set<string>();
     for (const l of ledgerLines) {
       if (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") {
@@ -21816,8 +21866,9 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     let candidates = select(facts);
     if (candidates.length === 0) return undefined;
     if (deps.readActionsStatusSummary !== undefined) {
-      const incident = await Promise.resolve().then(() => deps.readActionsStatusSummary!())
+      const readActions = () => Promise.resolve().then(() => deps.readActionsStatusSummary!())
         .then((s) => classifyActionsIncident(s), (error) => unreadableActionsIncident(error));
+      const incident = await (timing ? timing.measure("ready_actions", readActions) : readActions());
       if (actionsIncidentHoldDecision(incident, undefined, now) === "hold") return undefined;
     }
     const mergeQueue = deps.mergeQueue;
@@ -21843,7 +21894,8 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     const dependabotDeferred = candidates.filter((c) => byNumber.get(c.prNumber)!.isDependabot === true);
     ledgerDependabotDeferrals(dependabotDeferred, ledgerLines, (row) => appendLine(deps.ledgerPath, row), deps.runId, "light_pass");
     // W1-T7735: the same value test as the full sweep's slot, built once for this light pass.
-    const valueGate = await buildRefreshValueGate(deps, openPrs, ledgerLines, now, appendLine);
+    const readValueGate = () => buildRefreshValueGate(deps, openPrs, ledgerLines, now, appendLine);
+    const valueGate = await (timing ? timing.measure("ready_value_gate", readValueGate) : readValueGate());
     const eligible = candidates.filter((c) => {
       const view = byNumber.get(c.prNumber)!;
       const runTaskId = taskIdFromRunBranch(view.headRefName);
@@ -21852,7 +21904,9 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     });
     const winner = oldestActivityFirst(eligible.map((c) => byNumber.get(c.prNumber)!), now);
     const target = eligible.find((c) => c.prNumber === winner?.prNumber);
-    if (!target || !(await valueGate.settle(target, byNumber.get(target.prNumber)!, "ready-light"))) return undefined;
+    if (!target) return undefined;
+    const settleValue = () => valueGate.settle(target, byNumber.get(target.prNumber)!, "ready-light");
+    if (!(await (timing ? timing.measure("ready_value_gate", settleValue) : settleValue()))) return undefined;
     const row = {
       run_id: deps.runId, task_id: target.taskId ?? "SWEEP", pr_number: target.prNumber, pr_url: target.prUrl,
       head_sha: target.headSha, ...(target.behindBy === undefined ? {} : { behind_by: target.behindBy }),
@@ -21862,7 +21916,9 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     };
     appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.attempted" });
     try {
-      appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${await updateBranch(target)}` });
+      const update = () => updateBranch(target);
+      const outcome = await (timing ? timing.measure("ready_update", update) : update());
+      appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${outcome}` });
     } catch (e) {
       appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.error", error: String((e as Error)?.message ?? e) });
     }
