@@ -7,6 +7,7 @@ import { test, type TestContext } from "node:test";
 import { nextTaskIdCommand, type NextTaskIdReserveDeps } from "#src/run-task.js";
 import { formatReservationAnchorMessage, RESERVATION_PUSH_GRACE_MS } from "#src/lib/task-id-reservation.js";
 import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
+import { realLedgerFs } from "#src/lib/ledger-union.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const NOW = Date.parse("2026-10-24T12:00:00.000Z");
@@ -497,11 +498,36 @@ test("pending reap intents reconcile truthfully across ledger rotation without a
   rotateLedger(f.ledgerPath, { ceilingBytes: 1 });
   writeFileSync(join(state, "ledger.2026-10-22T00-00-00-000Z.ndjson.gz"), gzipSync(JSON.stringify(pending[0]) + "\n"));
   writeFileSync(join(state, "ledger.2026-10-23T00-00-00-000Z.ndjson"), pending.slice(1).map(row => JSON.stringify(row) + "\n").join(""));
+  writeFileSync(f.ledgerPath, JSON.stringify({ step: "task_id.reservation_reap_planned" }) + "\n");
   f.origin.git("update-ref", "-d", "refs/rmd-id/W1-T105");
   const moved = f.repo.git("rev-parse", "HEAD");
   f.origin.git("update-ref", "refs/rmd-id/W1-T106", moved);
   f.calls.length = 0;
   const reconcileFlags = ["--audit", "--reap", "--reconcile"];
+  await t.test("unreadable directory enumeration cannot hide rotated pending intents", async t => {
+    const before = f.remoteIds();
+    const list = realLedgerFs.readdirSync;
+    let attempts = 0;
+    const denied = t.mock.method(realLedgerFs, "readdirSync", (directory: string) => {
+      if (directory === state) {
+        attempts++;
+        throw Object.assign(new Error("EACCES: ledger directory enumeration denied"), { code: "EACCES" });
+      }
+      return list(directory);
+    });
+    try {
+      for (const flags of [reconcileFlags, ["--audit", "--reap", "--apply"]]) {
+        const refused = await f.invoke(flags);
+        assert.equal(refused.code, 2, refused.text);
+        assert.match(refused.text, /history UNKNOWN: directories=.*EACCES.*enumeration denied/);
+        assert.deepEqual(f.remoteIds(), before);
+        assert.equal(f.calls.filter(args => args[0] === "push").length, 0);
+        assert.equal(f.readRows().filter(row => row.intent_status).length, 0);
+      }
+      assert.equal(attempts, 2);
+    } finally { denied.mock.restore(); }
+  });
+  f.calls.length = 0;
   const reconciled = await f.invoke(reconcileFlags, { log: undefined });
   assert.equal(reconciled.code, 0, reconciled.text);
   const resolutions = f.readRows().filter(row => row.step === "task_id.reservation_reap_reconciled");

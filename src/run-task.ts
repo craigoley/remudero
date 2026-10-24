@@ -1225,7 +1225,7 @@ import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, with
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -23109,11 +23109,21 @@ function reservationReapJournal(deps: NextTaskIdReserveDeps) {
     appendLedger(path, { run_id: `REAP-${process.pid}`, task_id: "REAP", step, ...fields });
   });
   const read = (): Record<string, unknown>[] => {
+    const unreadDirectories: string[] = [];
     const history = readLedgerUnionRecordsSync(dirname(path), { refuseIncomplete: true,
       step: [RESERVATION_REAP_PENDING, RESERVATION_REAP_RECONCILED,
-        "task_id.reservation_released", "task_id.reservation_release_skipped"] });
-    if (!history.ok || history.torn || history.unclassified.length) {
-      throw new Error(`reap ledger history UNKNOWN: unread=${history.unread.join(",")}; torn=${history.torn}; unclassified=${history.unclassified.join(",")}`);
+        "task_id.reservation_released", "task_id.reservation_release_skipped"] }, {
+      ...realLedgerFs,
+      readdirSync: directory => {
+        try { return realLedgerFs.readdirSync(directory); }
+        catch (error) {
+          unreadDirectories.push(`${directory}: ${String(error)}`);
+          throw error;
+        }
+      },
+    });
+    if (unreadDirectories.length || !history.ok || history.torn || history.unclassified.length) {
+      throw new Error(`reap ledger history UNKNOWN: directories=${unreadDirectories.join(",")}; unread=${history.unread.join(",")}; torn=${history.torn}; unclassified=${history.unclassified.join(",")}`);
     }
     return history.rows;
   };
