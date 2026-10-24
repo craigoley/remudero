@@ -1,0 +1,15 @@
+violation: none
+rule: >
+  W1-T3077: a learnings data edit needs a golden verdict. The SQLite fixture cleanup
+  lesson must execute its proofs and reach all three database fixture work paths.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass
+  - met: true
+    proof_exec: executed_pass
