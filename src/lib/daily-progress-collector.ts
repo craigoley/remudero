@@ -135,7 +135,6 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
         coverageStart: null, coverageThrough: null, nextDueAt: null, reason: "No activity source is configured for this repository." });
       sources.push({ id: `${repository}:deployments`, repository, kind: "deployments", required: false, state: "not_collected", lastAttemptAt: null, lastSuccessAt: null,
         coverageStart: null, coverageThrough: null, nextDueAt: null, reason: "Deployment evidence is not collected. A merge does not establish deployment." });
-      for (const previous of old?.report.coverage.sources ?? []) if (!sources.some(s => s.id === previous.id)) sources.push({ ...previous, required: false, state: "unavailable", reason: "This historical source is no longer configured; retained evidence remains available." });
       const retained = new Map(old?.events.map(e => [e.id, e]) ?? []); for (const event of events.values()) retained.set(event.id, event);
       const confirmed = [...retained.values()].filter(e => e.kind === "merged" && e.fleetAttribution === "confirmed");
       const unknown = [...retained.values()].some(e => e.kind === "merged" && e.fleetAttribution === "unknown");
@@ -144,6 +143,7 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
       if (reportDate === today && present) sources.push({ id: `${repository}:open`, repository, kind: "pull_requests", required: false, state: "partial",
         lastAttemptAt: present.savedAt, lastSuccessAt: present.savedAt, coverageStart: present.savedAt, coverageThrough: present.savedAt, nextDueAt: null,
         reason: `Present open work is a snapshot, not daily activity. Showing ${Math.min(present.rows.length, 200)} of ${present.rows.length} open pull requests.` });
+      for (const previous of old?.report.coverage.sources ?? []) if (!sources.some(s => s.id === previous.id)) sources.push({ ...previous, required: false, state: "unavailable", reason: "This historical source is no longer configured; retained evidence remains available." });
       const currentWork: DailyProgressReport["currentWork"] = reportDate === today && present ? { asOf: present.savedAt,
         items: present.rows.slice(0, 200).map(pr => ({ repository, id: `pr:${repository}:${pr.number}`, title: pr.title.slice(0, 2048) || "Open pull request", url: pr.url })) } : null;
       const included = raw.some(s => s.saved.closed !== undefined) || activities.some(s => s.available) || old;
