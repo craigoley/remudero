@@ -5147,7 +5147,6 @@ export function buildBatchedGithub(
       } catch (err) {
         lastIssueFetchFailed = true;
         const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
-        if (channel !== "open") snapshotCache?.recordClosedAttempt?.({ ok: false });
         lastIssueFetchFailureReason = classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code);
         console.error(`board gateway: batched issue fetch failed (${lastIssueFetchFailureReason}): ${e?.message ?? String(err)}`);
         log("board_gateway.issue_fetch_failed", { reason: lastIssueFetchFailureReason, message: e?.message ?? String(err) });
@@ -5225,6 +5224,7 @@ export function buildBatchedGithub(
         recordFetchOk(all.length, channel);
       } catch (err) {
         const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
+        if (channel !== "open") snapshotCache?.recordClosedAttempt?.({ ok: false });
         record({ failed: true, reason: classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code) });
         // LOUD (W1-T181 design (ii)/(v)): the pre-fix catch was silent for hours, with zero error lines, ENOBUFS
         // classifying "unknown" and nothing surfacing it. `console.error` guarantees this reaches whatever log
