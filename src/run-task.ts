@@ -23057,26 +23057,39 @@ function buildReservationReapReport(
     openPrTrailerIds, liveHolderBranches: heads.live, strictAge: true, thresholdDays, nowMs: clock.now(),
   });
   const held = new Set(classify(0).filter(r => r.status === "HELD").map(r => r.taskId));
-  const firstByBranch = new Map<string, number>();
+  const anchorTimes = new Map<string, number>();
+  const holderTasks = new Map<string, Set<string>>();
+  for (const reservation of reservations) {
+    if (!held.has(reservation.taskId)) continue;
+    const anchorTime = reservationAnchorTimestamp(reservation.anchor);
+    if (!Number.isFinite(anchorTime)) continue;
+    anchorTimes.set(reservation.taskId, anchorTime);
+    const holder = reservationHolderBranch(reservation.anchor);
+    for (const branch of [...(holder ? [holder] : []), ...(heads.branches.get(reservation.taskId) ?? [])]) {
+      const ids = holderTasks.get(branch) ?? new Set<string>();
+      ids.add(reservation.taskId);
+      holderTasks.set(branch, ids);
+    }
+  }
   const firstByTask = new Map<string, number>();
-  for (const p of pulls) {
-    const opened = Date.parse(p.created_at);
-    firstByBranch.set(p.head.ref, Math.min(firstByBranch.get(p.head.ref) ?? Infinity, opened));
-    const ids = idsFromOpenPrTrailers([p.body ?? ""]);
-    const runTask = RUN_BRANCH_TASK_REF_RE.exec(`refs/heads/${p.head.ref}`)?.[1];
+  const observedNow = clock.now();
+  for (const pull of pulls) {
+    const opened = Date.parse(pull.created_at);
+    const ids = idsFromOpenPrTrailers([pull.body ?? ""]);
+    const runTask = RUN_BRANCH_TASK_REF_RE.exec(`refs/heads/${pull.head.ref}`)?.[1];
     if (runTask) ids.add(runTask);
-    for (const id of ids) firstByTask.set(id, Math.min(firstByTask.get(id) ?? Infinity, opened));
+    for (const id of holderTasks.get(pull.head.ref) ?? []) ids.add(id);
+    for (const id of ids) {
+      const anchorTime = anchorTimes.get(id);
+      if (anchorTime !== undefined && opened >= anchorTime && opened <= observedNow) {
+        firstByTask.set(id, Math.min(firstByTask.get(id) ?? Infinity, opened));
+      }
+    }
   }
   const delays: { taskId: string; ms: number }[] = [];
-  for (const r of reservations) {
-    if (!held.has(r.taskId)) continue;
-    const anchorTime = reservationAnchorTimestamp(r.anchor);
-    const holder = reservationHolderBranch(r.anchor);
-    if (!Number.isFinite(anchorTime)) continue;
-    const firstOpen = Math.min(firstByTask.get(r.taskId) ?? Infinity,
-      holder ? firstByBranch.get(holder) ?? Infinity : Infinity,
-      ...(heads.branches.get(r.taskId) ?? []).map(b => firstByBranch.get(b) ?? Infinity));
-    if (firstOpen >= anchorTime && firstOpen <= clock.now()) delays.push({ taskId: r.taskId, ms: firstOpen - anchorTime });
+  for (const [taskId, anchorTime] of anchorTimes) {
+    const firstOpen = firstByTask.get(taskId);
+    if (firstOpen !== undefined) delays.push({ taskId, ms: firstOpen - anchorTime });
   }
   const values = delays.map(d => d.ms).sort((a, b) => a - b);
   const n = values.length;
