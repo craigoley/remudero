@@ -6,13 +6,14 @@ import { validateDailyProgressReport, type DailyProgressEvent, type DailyProgres
 import { withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
 
 export type DailyProgressRecord = Omit<DailyProgressReport, "revision" | "correctionReason" | "events" | "page"> & { events: DailyProgressEvent[] };
-export interface DailyProgressRevision { report: Omit<DailyProgressReport, "events" | "page">; events: DailyProgressEvent[] }
+export interface DailyProgressRevision { generation: number; report: Omit<DailyProgressReport, "events" | "page">; events: DailyProgressEvent[] }
 export interface DailyProgressJob {
   id: string; lastAttemptAt: string; lastSuccessAt: string | null; nextDueAt: string;
   closedThrough: string | null; error: string | null;
 }
 interface DailyDay { repository: string; timeZone: string; reportDate: string; revisions: string[] }
 export interface DailyProgressManifest { version: 1; generation: number; days: Record<string, DailyDay>; jobs: Record<string, DailyProgressJob> }
+export interface DailyProgressPublication { baseGeneration: number; manifestBody: string }
 
 /** Durable state deliberately does not resolve RMD_READ_MODEL_DB_DIR. */
 export const dailyProgressStorePath = (stateDir: string): string => join(stateDir, "daily-progress", "v1");
@@ -60,6 +61,12 @@ export function readDailyProgressManifest(stateDir: string): DailyProgressManife
     }
     throw error;
   }
+  return parseManifest(body);
+}
+
+function parseManifest(body: string): DailyProgressManifest {
+  // BACKSTOP: a short manifest commit cannot become an unbounded projector transaction.
+  if (Buffer.byteLength(body) > 8 * 1024 * 1024) throw new Error("daily manifest exceeds its bounded publication size");
   const m = JSON.parse(body) as DailyProgressManifest;
   if (!m || m.version !== 1 || !Number.isSafeInteger(m.generation) || m.generation < 1 || !m.days || !m.jobs ||
       Array.isArray(m.days) || Array.isArray(m.jobs) || Object.entries(m.days).some(([key, day]) =>
@@ -80,7 +87,7 @@ export function readDailyProgressRevision(stateDir: string, day: DailyDay, revis
   const body = read(join(dailyProgressStorePath(stateDir), `${digest}.json`));
   if (hash(body) !== digest) throw new Error("daily history checksum differs; preserved for diagnosis");
   const value = JSON.parse(body) as DailyProgressRevision;
-  if (!value || !value.report || !Array.isArray(value.events) || value.report.revision !== revision || value.report.scope.kind !== "repository" ||
+  if (!value || !Number.isSafeInteger(value.generation) || value.generation < 1 || !value.report || !Array.isArray(value.events) || value.report.revision !== revision || value.report.scope.kind !== "repository" ||
       value.report.scope.repository !== day.repository || value.report.timeZone !== day.timeZone || value.report.reportDate !== day.reportDate) throw new Error("daily history identity differs; preserved for diagnosis");
   for (let offset = 0; offset < Math.max(1, value.events.length); offset += 200) {
     const valid = validateDailyProgressReport({ ...value.report, events: value.events.slice(offset, offset + 200), page: { totalEvents: value.events.length, nextCursor: offset + 200 < value.events.length ? "retained" : null } });
@@ -94,6 +101,7 @@ const eventContent = ({ observedAt: _observedAt, ...event }: DailyProgressEvent)
 /** Stage immutable objects before taking the short SQLite ownership fence. Manifest is the authority. */
 export function prepareDailyProgressPublication(stateDir: string, records: readonly DailyProgressRecord[], jobs: readonly DailyProgressJob[]): {
   manifest: DailyProgressManifest;
+  publication: DailyProgressPublication;
   commit(db: ReadModelDb, lease: ReadModelLease, stillCurrent?: () => boolean): void;
 } {
   const base = readDailyProgressManifest(stateDir), manifest = structuredClone(base);
@@ -129,7 +137,7 @@ export function prepareDailyProgressPublication(stateDir: string, records: reado
     }
     const report = { ...core, revision: (day?.revisions.length ?? 0) + 1, correctionReason: old && Date.parse(input.windowEnd) <= Date.parse(input.generatedAt) ? "Source evidence changed after this day ended." : null };
     if (report.correctionReason && report.phase === "complete") report.phase = "corrected";
-    const value: DailyProgressRevision = { report, events: all };
+    const value: DailyProgressRevision = { generation: base.generation + 1, report, events: all };
     // Validate every retained event, not only the first public page.
     for (let offset = 0; offset < Math.max(1, all.length); offset += 200) {
       const valid = validateDailyProgressReport({ ...report, events: all.slice(offset, offset + 200), page: { totalEvents: all.length, nextCursor: offset + 200 < all.length ? "retained" : null } });
@@ -142,17 +150,24 @@ export function prepareDailyProgressPublication(stateDir: string, records: reado
   }
   for (const job of jobs) manifest.jobs[job.id] = structuredClone(job);
   manifest.generation++;
-  const body = JSON.stringify(manifest);
+  const publication: DailyProgressPublication = { baseGeneration: base.generation, manifestBody: JSON.stringify(manifest) };
+  parseManifest(publication.manifestBody);
   // Immutable objects must be durable before the manifest can name them.
   syncDirectory(root);
-  return { manifest, commit(db, lease, stillCurrent = () => true) {
-    withWriteTransaction(db, lease, () => {
-      if (!stillCurrent()) throw new Error("daily publication lost its source ownership epoch");
-      const manifestPath = join(root, "manifest.json");
-      const currentGeneration = !existsSync(manifestPath) && base.generation === 0 ? 0 : readDailyProgressManifest(stateDir).generation;
-      if (currentGeneration !== base.generation) throw new Error("daily publication was superseded by another writer");
-      durableWrite(join(root, "manifest.json"), body);
-      syncDirectory(root);
-    });
-  } };
+  return { manifest, publication, commit: (db, lease, stillCurrent) => commitDailyProgressPublication(stateDir, publication, db, lease, stillCurrent) };
+}
+
+/** Called by the owning projector with its already-open DB, never by the HTTP reader. */
+export function commitDailyProgressPublication(stateDir: string, publication: DailyProgressPublication, db: ReadModelDb, lease: ReadModelLease, stillCurrent: () => boolean = () => true): void {
+  if (!Number.isSafeInteger(publication.baseGeneration) || publication.baseGeneration < 0 ||
+      parseManifest(publication.manifestBody).generation !== publication.baseGeneration + 1) throw new Error("invalid staged daily publication generation");
+  const root = dailyProgressStorePath(stateDir);
+  withWriteTransaction(db, lease, () => {
+    if (!stillCurrent()) throw new Error("daily publication lost its source ownership epoch");
+    const manifestPath = join(root, "manifest.json");
+    const currentGeneration = !existsSync(manifestPath) && publication.baseGeneration === 0 ? 0 : readDailyProgressManifest(stateDir).generation;
+    if (currentGeneration !== publication.baseGeneration) throw new Error("daily publication was superseded by another writer");
+    durableWrite(manifestPath, publication.manifestBody);
+    syncDirectory(root);
+  });
 }
