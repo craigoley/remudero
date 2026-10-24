@@ -850,7 +850,7 @@ export function acquireLease(
     }
     const epochKey = `lease-ownership-epoch:${lease.name}`;
     // A renewed holder keeps its epoch; a new acquisition gets an opaque token even if the clock repeats.
-    if (!row || row.holder !== lease.holder || db.meta(epochKey) === undefined) {
+    if (!row || row.holder !== lease.holder || Number(row.expires_ms) <= now || db.meta(epochKey) === undefined) {
       db.prepare("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v").run(epochKey, randomUUID());
     }
     db.prepare(`INSERT INTO lease(name, holder, pid, host, acquired_ms, expires_ms) VALUES(?, ?, ?, ?, ?, ?)
