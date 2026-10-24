@@ -9,8 +9,8 @@ const runTaskSrc = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
 const modulePath = join(REPO_ROOT, "src/cli/commands/fix.ts");
 const fixSrc = existsSync(modulePath) ? readFileSync(modulePath, "utf8") : "";
 
-function topLevelFunction(source: string, name: string): string {
-  const header = `export async function ${name}(`;
+function topLevelFunction(source: string, name: string, declaration = "export async function"): string {
+  const header = `${declaration} ${name}(`;
   const start = source.indexOf(header);
   assert.notEqual(start, -1, `${header} is declared`);
   const end = source.indexOf("\n}\n", start);
@@ -30,6 +30,11 @@ test("W1-T9337: runFixRung is defined in its module and src/run-task.ts only del
     assert.match(runTaskSrc, new RegExp(`${name} as ${name}FromModule`));
     assert.equal(runTaskSrc.match(new RegExp(`^export async function ${name}\\(`, "gm"))?.length, 1);
   }
+  const requeueWrapper = topLevelFunction(runTaskSrc, "requeueActionsJobOutcome", "export function");
+  const requeueImplementation = topLevelFunction(fixSrc, "requeueActionsJobOutcome", "function");
+  assert.doesNotMatch(requeueWrapper, /\bghExec\b/, "the wrapper leaves the synchronous default in its source owner");
+  assert.match(requeueImplementation, /\bexec\s*:[^\n]*=\s*ghExec\s*,/, "the module retains the real executor default");
+  assert.match(requeueWrapper, /return fixCommandHelpers\(fixCommandHost\(\)\)\.requeueActionsJobOutcome\(/);
 });
 
 test("W1-T9337: the fix module imports nothing from src/run-task.ts", () => {
