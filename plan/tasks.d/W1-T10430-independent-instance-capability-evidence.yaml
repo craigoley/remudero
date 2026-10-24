@@ -7,7 +7,7 @@
   priority: 2.5
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "console-followup:instance-capability-evidence-20261022"

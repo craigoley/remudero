@@ -9,7 +9,7 @@
   band_meaning: blast-radius
   budget_usd: 5.00
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-22: #13008 producer identity race"
   plan_refs: [ W1-T10258, W1-T3060 ]

@@ -633,6 +633,7 @@ test("terminal run directories are pruned beyond the newest, and a live one neve
 test("the daemon's runOne starts a child only under mode on, and falls back with a reason otherwise", async () => {
   const { runInChildWhenOn } = await import("../src/run-task.js");
   const root = tmp("wiring");
+  mkdirSync(join(root, "state"));
   const config = { claudeBin: "/bin/true", root, installRoot: process.cwd() } as never;
   const rows: Row[] = [];
   const base = {
