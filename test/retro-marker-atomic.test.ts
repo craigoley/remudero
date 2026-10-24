@@ -25,7 +25,7 @@ import {
 } from "../src/lib/retro.js";
 import { configPath } from "../src/lib/config.js";
 import { resolveRepoRoot, retroCommand } from "../src/run-task.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { workerExecutionForProvider, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
 import { runDaemon } from "../src/lib/daemon.js";
 // W1-T2981 — the retro is DETACHED, so `runDaemon` returns while it is still in flight. A test
 // asserting on what the retro DID must drain that action first; the assertions are unchanged.
@@ -34,7 +34,7 @@ import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { offlineGithub } from "./setup/offline-github.js";
 import { withHealthyRetroProbeGh } from "./helpers/w4226-g1-retro-probe-gh.js";
-import type { RunRetroPrepublishPreflightOptions, RetroPrepublishResult } from "../src/lib/retro-preflight.js";
+import { runRetroPrepublishPreflight, type RunRetroPrepublishPreflightOptions, type RetroPrepublishResult } from "#src/lib/retro-preflight.js";
 
 /**
  * ONE offline gateway for every `retroCommand` call in this file — 24 of them, each of which used
@@ -743,7 +743,14 @@ function setupFakeRetroFixture(
     compactionEvents: [],
     qualitySuspect: false,
     };
-    return args?.resumeSessionId ? { ...result, ...opts.repairWorkerResult } : result;
+    if (!args?.resumeSessionId) return result;
+    // Use the producer's REAL policy: Codex writers start fresh; Claude resumes. The
+    // result overrides below model hostile adapter receipts, not another policy copy.
+    const execution = workerExecutionForProvider(args, result.provider!);
+    return { ...result,
+      sessionId: execution.resumeSessionId ?? "fresh-retro-fixture",
+      continuation: execution.receipt,
+      ...opts.repairWorkerResult };
   };
 
   const prepublishPreflight = async (preflight: RunRetroPrepublishPreflightOptions): Promise<RetroPrepublishResult> => {
@@ -963,6 +970,116 @@ test("retroCommand: the one repair resumes the producing session and reruns pref
     const repair = ledgerLines.find((l) => l.step === "retro.preflight_repair");
     assert.equal(repair?.provider, "claude");
     assert.equal(repair?.resumed_session_id, "s-retro-fixture");
+  });
+});
+
+// Drive both production layers, not the fixture's simplified preflight protocol:
+// retroCommand supplies its actual repair callback, and the real preflight decides
+// whether to run attempt two and publish. Only the external suite runner is scripted.
+function continuationPreflight(fx: FakeRetroFixture, secondPasses = true) {
+  let suites = 0;
+  const preflight = (options: RunRetroPrepublishPreflightOptions) => runRetroPrepublishPreflight({
+    ...options,
+    deps: {
+      changedFiles: async () => ({ files: [] }),
+      testSlot: { dir: join(fx.root, "fixture-suite-slots"), slots: 1,
+        load: () => ({ cores: 2, load1: 0 }), memoryHeadroom: () => undefined,
+        binaryExists: () => false, log: () => {} },
+      run: (_command, args) => {
+        if (args.includes("--list-plan-reading-suites")) {
+          return { status: 0, signal: null, stdout: "test/retro-marker-atomic.test.ts\n", stderr: "" };
+        }
+        assert.ok(args.includes("--test"), "only the actual preflight suite spawn is scripted");
+        assert.equal(fx.publicationGateCalls().length, 0, "no publication before the second gate passes");
+        assert.equal(existsSync(join(fx.root, "state", "last-retro.json")), false);
+        suites += 1;
+        const pass = suites === 2 && secondPasses;
+        return { status: pass ? 0 : 1, signal: null, stderr: "",
+          stdout: pass ? "# tests 1\n# pass 1\n# fail 0\n"
+            : "not ok 1 - fixture prepublication assertion\n# tests 1\n# pass 0\n# fail 1\n" };
+      },
+    },
+  });
+  return { preflight, suiteCalls: () => suites };
+}
+
+test("retroCommand accepts the validated Codex fresh-writer handoff only after the second prepublication gate passes", async (t) => {
+  const fx = setupFakeRetroFixture(t, { workerProvider: "codex" });
+  const gate = continuationPreflight(fx);
+  await fx.run(async () => {
+    const code = await withLiveWritesAllowed(() => retroCommand([], {
+      repoRoot: fx.gatherRoot, spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: gate.preflight,
+    }));
+    assert.equal(code, 1, "the fixture stops at public CI red, AFTER the real local gates and publication");
+    assert.equal(gate.suiteCalls(), 2, "the approved fresh handoff must reach the real second attempt");
+    const repairs = fx.spawnArgs.filter(args => args.resumeSessionId !== undefined);
+    assert.equal(repairs.length, 1, "one repair, not an unbounded retry");
+    assert.equal(repairs[0].resumeSessionId, "s-retro-fixture");
+    assert.deepEqual(repairs[0].config?.workerProviders?.enabled, ["codex"]);
+    assert.ok(repairs[0].tools?.includes("Edit"), "this is the real writer surface, not a synthetic read-only resume");
+    assert.match(repairs[0].continuation?.contextPrompt ?? "", /Fresh-session handoff.*[\s\S]*Workspace:/);
+    const rows = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    const repaired = rows.find(row => row.step === "retro.preflight_repair");
+    assert.deepEqual(repaired.continuation, { mode: "fresh-handoff", reason: "provider-fresh-only", from: "codex", to: "codex" });
+    assert.equal(repaired.session_id, "fresh-retro-fixture");
+    assert.deepEqual(rows.filter(row => /retro\.preflight_(failed|passed)$/.test(row.step)).map(row => [row.step, row.attempt]),
+      [["retro.preflight_failed", 1], ["retro.preflight_passed", 2]]);
+    assert.ok(fx.publicationGateCalls().length > 0, "publication still runs the harness-owned push gate");
+    assert.ok(existsSync(join(fx.root, "state", "last-retro.json")), "only the passing second gate permits the marker write");
+  });
+});
+
+test("retroCommand keeps a failed second gate terminal even after a validated Codex handoff", async (t) => {
+  const fx = setupFakeRetroFixture(t, { workerProvider: "codex" });
+  const gate = continuationPreflight(fx, false);
+  await fx.run(async () => {
+    const code = await withLiveWritesAllowed(() => retroCommand([], {
+      repoRoot: fx.gatherRoot, spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: gate.preflight,
+    }));
+    assert.equal(code, 1);
+    assert.equal(gate.suiteCalls(), 2);
+    assert.equal(fx.spawnArgs.filter(args => args.resumeSessionId !== undefined).length, 1);
+    assert.deepEqual(fx.publicationGateCalls(), []);
+    assert.equal(existsSync(join(fx.root, "state", "last-retro.json")), false);
+  });
+});
+
+test("retroCommand refuses absent inconsistent and foreign continuation receipts before rerunning gates", async (t) => {
+  const fresh = { mode: "fresh-handoff", reason: "provider-fresh-only", from: "codex", to: "codex" } as const;
+  const variants: Array<{ name: string; provider: "claude" | "codex"; result: Partial<WorkerResult> }> = [
+    { name: "missing fresh receipt", provider: "codex", result: { continuation: undefined } },
+    { name: "foreign origin", provider: "codex", result: { continuation: { ...fresh, from: "claude" } } },
+    { name: "foreign destination", provider: "codex", result: { continuation: { ...fresh, to: "claude" } } },
+    { name: "wrong reason", provider: "codex", result: { continuation: { ...fresh, reason: "provider-changed" } } },
+    { name: "writer masquerades as resume", provider: "codex", result: { sessionId: "s-retro-fixture",
+      continuation: { ...fresh, mode: "resumed", reason: "same-provider" } } },
+    { name: "fresh reuses old identity", provider: "codex", result: { sessionId: "s-retro-fixture" } },
+    { name: "missing fresh identity", provider: "codex", result: { sessionId: "" } },
+    { name: "blank fresh identity", provider: "codex", result: { sessionId: "  " } },
+    { name: "missing provider", provider: "codex", result: { provider: undefined } },
+    { name: "foreign provider", provider: "codex", result: { provider: "claude" } },
+    { name: "failed fresh worker", provider: "codex", result: { isError: true, subtype: "error_during_execution" } },
+    { name: "missing resume receipt", provider: "claude", result: { continuation: undefined } },
+    { name: "resume changes identity", provider: "claude", result: { sessionId: "foreign-session" } },
+    { name: "missing resume identity", provider: "claude", result: { sessionId: "" } },
+    { name: "Claude may not claim fresh-only", provider: "claude", result: { sessionId: "fresh-retro-fixture",
+      continuation: { ...fresh, from: "claude", to: "claude" } } },
+  ];
+  for (const variant of variants) await t.test(variant.name, async t => {
+    const fx = setupFakeRetroFixture(t, { workerProvider: variant.provider, repairWorkerResult: variant.result });
+    const gate = continuationPreflight(fx);
+    await fx.run(async () => {
+      const code = await withLiveWritesAllowed(() => retroCommand([], {
+        repoRoot: fx.gatherRoot, spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: gate.preflight,
+      }));
+      assert.equal(code, 1);
+      assert.equal(gate.suiteCalls(), 1, "invalid receipts cannot earn a second gate attempt");
+      assert.equal(fx.spawnArgs.filter(args => args.resumeSessionId !== undefined).length, 1);
+      assert.deepEqual(fx.publicationGateCalls(), []);
+      assert.equal(existsSync(join(fx.root, "state", "last-retro.json")), false);
+      const rows = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+      assert.equal(rows.findLast(row => row.step === "retro.preflight_failed")?.exit_class, "repair_spawn_failed");
+    });
   });
 });
 

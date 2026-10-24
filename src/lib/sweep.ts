@@ -16710,7 +16710,12 @@ export async function runSweep(
     // W1-T9971: the fix rung writes `fix.dispatch` when a round ENDS, so a round an EARLIER pass handed to it
     // (still queued in memory admission, or running) has no qualifying row yet. Read it as the dedup does: this
     // head is in the dispatched set and its seed's rung has not ended. Only a seed since the stage began counts.
-    const roundInFlight = prior.fixed.has(`${pr.prNumber}@${pr.headSha}`) &&
+    // Preparation writes fix.* before the end-of-round fix.dispatch row. The live registry owns
+    // admission and worker phases even when the ledger-only seed reader cannot yet prove that.
+    const detachedOwner = detachedFixHolder(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`, now);
+    const liveDetachedRound = detachedOwner !== undefined &&
+      (detachedOwner.fields.in_flight_phase === "admission" || detachedOwner.fields.in_flight_phase === "worker");
+    const roundInFlight = liveDetachedRound || prior.fixed.has(`${pr.prNumber}@${pr.headSha}`) &&
       (fixSeedRead(ledgerLines, pr, deps.runId)?.kind ?? "live") === "live" &&
       ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber && row.acted === true &&
         row.head_sha === pr.headSha && Date.parse(String(row.ts)) >= since);

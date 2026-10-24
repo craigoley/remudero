@@ -11,6 +11,9 @@
   origin: "operator approval 2026-10-13: the run-task.ts serialization finding; one step of the split, in measured-churn order W1-T9332 (run-task), W1-T9333 (daemon), W1-T9337 (fix), W1-T9338 (sweep) and W1-T9339 (review)"
   plan_refs: [W1-T9331, W1-T2893, W1-T2883, W1-T2892, W1-T2894, W1-T2325, W1-T3138, W1-T8502]
   files: [src/run-task.ts, src/cli/commands/fix.ts, test/the-fix-verb-lives-in-its-own-module.test.ts]
+  # refusal-amendment (W1-T9337, run DAEMON-1792797246750@7ecddddd77f973a141331e2d6bba6dc421d8994e, 2026-10-24T00:28:15.288Z): the worker refused criterion 4 [contradicts-another-criterion] — proposed re-scope-criteria: reconcile the contradicting criteria — re-scope one so both can hold at once
+  #   worker evidence: Existing source-text tests require moved fix-rung statements in `src/run-task.ts`, while criteria 1 and 3 require those statements in `fix.ts` behind thin delegates.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 1
   attempts: 0
