@@ -45,13 +45,14 @@ export function buildCodeHealthOpportunities(input: CodeHealthProjectionInput, r
     const group = groups.get(finding.ruleId) ?? new Set<string>(); group.add(fingerprint); groups.set(finding.ruleId, group);
   }
   // The source scan IDs and normalized content, not the time a page read them, pin this briefing.
-  const normalizedScans = [...input.scans].sort((a, b) => a.kind.localeCompare(b.kind)).map(value => {
+  const normalizedScans = (scans: readonly CodeHealthProjectionInput["scans"][number][]) => [...scans].sort((a, b) => a.kind.localeCompare(b.kind)).map(value => {
     const findings = new Map(value.findings.map(finding => [codeHealthFindingFingerprint(assessment.repository, value.kind, finding),
       [finding.id, finding.ruleId, finding.status, finding.severity, finding.category, finding.path, finding.title, finding.effortMinutes]]));
     return [value.kind, value.scanId, [...findings].sort(([a], [b]) => a.localeCompare(b))];
   });
   const snapshotId = createHash("sha256").update(JSON.stringify([assessment.repository, assessment.currentSha, assessment.baselineSha,
-    assessment.policyVersion, assessment.sources, assessment.checks, assessment.findings, normalizedScans])).digest("hex");
+    assessment.policyVersion, assessment.sources, assessment.checks, assessment.findings,
+    normalizedScans(input.scans), normalizedScans(input.baseline?.scans ?? [])])).digest("hex");
   const scopedRelated = (proposalId: string): CodeHealthRelatedWork[] => {
     const rows = relatedWork.filter(work => work.repository.toLowerCase() === assessment.repository && work.proposalId === proposalId).map(work => {
       const value: CodeHealthRelatedWork = { repository: assessment.repository, proposalId };
