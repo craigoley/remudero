@@ -1,5 +1,5 @@
 /** The fix verb and its exclusive helpers, moved from the entrypoint (W1-T9337). */
-import { type RunTaskCommandHost, type GitRunner, type CiGateOutcome, type ReviewRunResult, type FixRungOutcome, type LiveHeadResult, type WorktreeSnapshot, type FixRebaseMergeFacts, type FixRoundCommit, type CensusPushRefusal, type FixRoundPushReceipt } from "./run-task-verb.js";
+import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
 import { judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "../../lib/fix-progress-judge.js";
 import { BASE_REPRODUCTION_MAX_FILES, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, type BaseProbeResult } from "../../lib/base-reproduction.js";
