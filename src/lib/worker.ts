@@ -6625,7 +6625,8 @@ export function reviewWorktreeHoldState(worktreePath: string): "held" | "unknown
   let names: string[];
   try { names = readdirSync(claimsDir); }
   catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "unheld" : "unknown";
+    const status = (error as NodeJS.ErrnoException).code === "ENOENT" ? "unheld" : "unknown";
+    return status;
   }
   let unknown = false;
   for (const name of names) {
