@@ -1,6 +1,7 @@
 import type { ContractResult } from "./code-health-contract.js";
 import { codeHealthSourceRequirements } from "./code-health-contract.js";
 import type { ManagedRepo } from "./managed-repos.js";
+import { fixedClock } from "./clock.js";
 
 export const DAILY_PROGRESS_VERSION = "daily-progress-v1" as const;
 export type EvidenceState = "complete" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized";
@@ -59,7 +60,11 @@ type Fields = Record<string, unknown>;
 const text = (v: unknown, max = 256): v is string => typeof v === "string" && v.length > 0 && v.length <= max && !v.includes("\0");
 const record = (v: unknown): v is Fields => v !== null && typeof v === "object" && !Array.isArray(v);
 const only = (v: Fields, keys: string): boolean => Object.keys(v).every((k) => keys.split(" ").includes(k));
-const instant = (v: unknown): v is string => typeof v === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(v) && Number.isFinite(Date.parse(v)) && [new Date(v).toISOString(), new Date(v).toISOString().replace(".000Z", "Z")].includes(v);
+function instant(v: unknown): v is string {
+  if (typeof v !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(v) || !Number.isFinite(Date.parse(v))) return false;
+  const canonical = fixedClock(Date.parse(v)).iso();
+  return v === canonical || v === canonical.replace(".000Z", "Z");
+}
 const natural = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
 const repository = (v: unknown): v is string => text(v, 140) && /^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/i.test(v) && ![".", ".."].includes(v.split("/")[1]!);
 const repoKey = (v: string): string => v.toLowerCase();
@@ -67,19 +72,20 @@ const repoList = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 
 const states: readonly string[] = ["complete", "partial", "stale", "not_collected", "unavailable", "unauthorized"];
 
 /** Validate exact local midnight bounds, including real 23- and 25-hour days. */
-function calendarWindow(report: DailyProgressReport): boolean {
-  if (!/^\d{4}-\d\d-\d\d$/.test(report.reportDate) || !instant(`${report.reportDate}T00:00:00.000Z`) || !/^[A-Za-z][A-Za-z0-9_+/-]*$/.test(report.timeZone)) return false;
-  const next = new Date(`${report.reportDate}T00:00:00.000Z`); next.setUTCDate(next.getUTCDate() + 1);
+function calendarWindow(report: DailyProgressReport): ContractResult<true> {
+  if (!/^\d{4}-\d\d-\d\d$/.test(report.reportDate) || !instant(`${report.reportDate}T00:00:00.000Z`) || !/^[A-Za-z][A-Za-z0-9_+/-]*$/.test(report.timeZone)) return { ok: false, reason: "invalid calendar date or zone" };
+  const next = fixedClock(Date.parse(`${report.reportDate}T00:00:00.000Z`)).date(); next.setUTCDate(next.getUTCDate() + 1);
   const nextDate = next.toISOString().slice(0, 10);
   try {
     const formatter = new Intl.DateTimeFormat("en-CA", { timeZone: report.timeZone, calendar: "iso8601", numberingSystem: "latn", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
     const localMidnight = (stamp: string, date: string) => {
-      const p = Object.fromEntries(formatter.formatToParts(new Date(stamp)).map((part) => [part.type, part.value]));
+      const p = Object.fromEntries(formatter.formatToParts(fixedClock(Date.parse(stamp)).date()).map((part) => [part.type, part.value]));
       return `${p.year}-${p.month}-${p.day}` === date && p.hour === "00" && p.minute === "00" && p.second === "00" && Date.parse(stamp) % 1000 === 0;
     };
-    return localMidnight(report.windowStart, report.reportDate) && localMidnight(report.windowEnd, nextDate);
-  } catch {
-    return false; // unknown zones remain invalid, never silently interpreted in the host zone
+    return localMidnight(report.windowStart, report.reportDate) && localMidnight(report.windowEnd, nextDate)
+      ? { ok: true, value: true } : { ok: false, reason: "report bounds are not the named local calendar day" };
+  } catch (error) {
+    return { ok: false, reason: error instanceof RangeError ? "unsupported reporting time zone" : "calendar conversion unavailable" };
   }
 }
 
@@ -104,8 +110,9 @@ function count(v: unknown): v is MeasuredCount {
 
 function link(v: unknown): v is string | null {
   if (v === null) return true;
-  if (!text(v, 2048)) return false;
-  try { const u = new URL(v); return u.protocol === "https:" && !u.username && !u.password; } catch { return false; }
+  if (!text(v, 2048) || !URL.canParse(v)) return false;
+  const u = new URL(v);
+  return u.protocol === "https:" && !u.username && !u.password;
 }
 
 function eventShape(v: unknown): v is DailyProgressEvent {
@@ -121,7 +128,9 @@ export function validateDailyProgressReport(value: unknown): ContractResult<Dail
   if (!record(value) || !only(value, "version scope reportDate timeZone windowStart windowEnd revision correctionReason generatedAt phase coverage totals events page currentWork")) return fail("invalid report fields");
   if (value.version !== DAILY_PROGRESS_VERSION || !text(value.reportDate, 10) || !text(value.timeZone, 128) || !instant(value.windowStart) || !instant(value.windowEnd) || !instant(value.generatedAt)) return fail("invalid report identity or clock");
   const report = value as unknown as DailyProgressReport;
-  if (Date.parse(report.windowStart) >= Date.parse(report.windowEnd) || !calendarWindow(report)) return fail("report bounds are not the named local calendar day");
+  if (Date.parse(report.windowStart) >= Date.parse(report.windowEnd)) return fail("report ends before it starts");
+  const calendar = calendarWindow(report);
+  if (!calendar.ok) return fail(calendar.reason);
   if (!natural(report.revision) || report.revision < 1 || !(report.correctionReason === null || text(report.correctionReason, 2048)) || !["provisional", "finalizing", "complete", "corrected"].includes(report.phase)) return fail("invalid report revision or phase");
   if (report.phase === "corrected" && (report.revision < 2 || !text(report.correctionReason, 2048))) return fail("corrected reports need a new revision and reason");
   const scope = report.scope, c = report.coverage;

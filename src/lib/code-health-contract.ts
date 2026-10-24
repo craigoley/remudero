@@ -1,3 +1,5 @@
+import { fixedClock } from "./clock.js";
+
 export const CODE_HEALTH_VERSION = "code-health-v1" as const;
 export const CODE_HEALTH_SOURCE_KINDS = ["quality", "coverage"] as const;
 export type ContractResult<T> = { ok: true; value: T } | { ok: false; reason: string };
@@ -34,7 +36,11 @@ const record = (v: unknown): v is Fields => v !== null && typeof v === "object" 
 const only = (v: Fields, keys: string): boolean => Object.keys(v).every((k) => keys.split(" ").includes(k));
 const sha = (v: unknown): v is string => typeof v === "string" && /^[a-f0-9]{40}$/i.test(v);
 const natural = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
-const timestamp = (v: unknown): v is string => typeof v === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(v) && Number.isFinite(Date.parse(v)) && [new Date(v).toISOString(), new Date(v).toISOString().replace(".000Z", "Z")].includes(v);
+function timestamp(v: unknown): v is string {
+  if (typeof v !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(v) || !Number.isFinite(Date.parse(v))) return false;
+  const canonical = fixedClock(Date.parse(v)).iso();
+  return v === canonical || v === canonical.replace(".000Z", "Z");
+}
 const strings = (v: unknown, max = 128): v is string[] => Array.isArray(v) && v.length <= max && v.every((s) => text(s));
 const unique = (values: readonly string[]): boolean => new Set(values).size === values.length;
 const repository = (v: unknown): v is string => text(v, 140) && /^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/i.test(v) && ![".", ".."].includes(v.split("/")[1]!);
