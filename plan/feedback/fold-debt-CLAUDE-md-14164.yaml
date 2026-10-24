@@ -1,13 +1,23 @@
 id: fold-debt-CLAUDE-md-14164
 ts: 2026-10-15T18:38:41.449Z
 origin: gate
-status: new
-raw: >-
-  CLAUDE.md is over its size budget and the fold has not happened yet. The change that tripped this
-  LANDED — this is the follow-up, not a refusal (W1-T3320, operator ruling 2026-09-10).
-  Size 14164 bytes; fold-debt ceiling 18400; headroom 4236.
-  FINDING: CLAUDE.md grew by 302 bytes (base 13862 at 6b938114dc9d61a034511909cc639c1b08c7c3c8 via git merge-base HEAD origin/main -> head 14164 at working tree) — MASTER-PLAN §8A: compression is a deliverable, not just accretion. Fold, sharpen or migrate something out in the SAME change so the diff is byte-neutral or smaller. Content that names a concrete repo path belongs in learnings/*.yaml, whose files: glob delivers it to the task that governs it.
-  Cheapest destinations, in order: a rule naming ONE concrete repo path belongs in learnings/*.yaml,
-  whose files: glob delivers it to the task that governs that path; a rule with no single governing
-  path stays and something else folds. Do NOT raise the cap: at 43685 against 44000 a +315-byte
-  change passes the cap and is still refused by the per-PR net rule, so a raise buys nothing.
+status: rejected
+raw: "CLAUDE.md is over its size budget and the fold has not happened yet. The
+  change that tripped this LANDED — this is the follow-up, not a refusal
+  (W1-T3320, operator ruling 2026-09-10). Size 14164 bytes; fold-debt ceiling
+  18400; headroom 4236. FINDING: CLAUDE.md grew by 302 bytes (base 13862 at
+  6b938114dc9d61a034511909cc639c1b08c7c3c8 via git merge-base HEAD origin/main
+  -> head 14164 at working tree) — MASTER-PLAN §8A: compression is a
+  deliverable, not just accretion. Fold, sharpen or migrate something out in the
+  SAME change so the diff is byte-neutral or smaller. Content that names a
+  concrete repo path belongs in learnings/*.yaml, whose files: glob delivers it
+  to the task that governs it. Cheapest destinations, in order: a rule naming
+  ONE concrete repo path belongs in learnings/*.yaml, whose files: glob delivers
+  it to the task that governs that path; a rule with no single governing path
+  stays and something else folds. Do NOT raise the cap: at 43685 against 44000 a
+  +315-byte change passes the cap and is still refused by the per-PR net rule,
+  so a raise buys nothing."
+attachments: []
+proposal_pr: null
+summary: null
+answered_by: null
