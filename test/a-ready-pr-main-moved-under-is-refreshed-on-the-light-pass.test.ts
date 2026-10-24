@@ -265,7 +265,7 @@ test("the production light hook refreshes an approved contract held at the old h
     const hook = buildSweepLightHook("o", "r", { root, claudeBin: "/bin/false" } as never, ledger,
       "HEAD-CONTRACT-HOOK", plan as never, (step, extra) => logs.push({ step, extra }));
     await withLiveWritesAllowed(() => hook({ reviewOnly: true, scope: "pause" }));
-    await withLiveWritesAllowed(() => hook({ admit: () => false }));
+    await withLiveWritesAllowed(() => hook({ reviewOnly: false, admit: () => false }));
     assert.equal(shim.calls().filter(call => call.includes("pulls/7214/update-branch")).length, 0,
       "review-only and restart-admission holds remain closed");
     await withLiveWritesAllowed(() => hook());
