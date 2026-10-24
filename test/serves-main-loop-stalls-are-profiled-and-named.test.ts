@@ -113,7 +113,7 @@ test("W1-T10074: a failing inspector disables serve's watchdog and says why", as
 });
 
 // LAST: a profile enables V8's Profiler domain, whose disconnect resets this process's precise coverage.
-async function verifyProfiledStall(startDelayMs: number): Promise<void> {
+async function verifyProfiledStall(startDelayMs: number): Promise<Frame> {
   const profiling = new Int32Array(new SharedArrayBuffer(4));
   const { tick, stop, written } = armServeMonitor({
     spawn: (source, workerData) => new Worker(`
@@ -141,8 +141,7 @@ ${source}`, { eval: true, execArgv: [], workerData: { ...workerData, profilerTes
     assert.equal(await readyWithin(stop.stallProfiler), true);
     await sleep(boundMs);
     stallTheLoop(1500, profiling);
-    const row = await waitFor(() => written.find((line) => line.step === "runtime.loop_stall_profile"
-      && (line.top_frames as Frame[] | undefined)?.[0]?.function === "serveBusyFrame"));
+    const row = await waitFor(() => written.find((line) => line.step === "runtime.loop_stall_profile"));
     const frames = row.top_frames as Frame[];
     assert.match(frames[0]!.url, /serves-main-loop-stalls-are-profiled-and-named\.test\.ts/);
     assert.ok(frames[0]!.self_ms > 0);
@@ -151,11 +150,18 @@ ${source}`, { eval: true, execArgv: [], workerData: { ...workerData, profilerTes
     assert.equal(row.task_id, "INCIDENT");
     assert.match(String(row.run_id), /^RUNTIME-/);
     assert.equal(written.filter((line) => line.step === "runtime.loop_stall_profile_failed").length, 0);
+    return frames[0]!;
   } finally {
     v8.takeCoverage();
     stop();
   }
 }
 
-test("W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame", () => verifyProfiledStall(0));
-test("a delayed real V8 sampling start still profiles the named serve workload", () => verifyProfiledStall(2000));
+test("W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame", async () => {
+  const frame = await verifyProfiledStall(0);
+  assert.equal(frame.function, "serveBusyFrame");
+});
+test("a delayed real V8 sampling start still profiles the named serve workload", async () => {
+  const frame = await verifyProfiledStall(2000);
+  assert.equal(frame.function, "serveBusyFrame");
+});
