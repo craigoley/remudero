@@ -302,6 +302,7 @@ def activity(workspace):
  original(workspace)
 ns['main'].__globals__['inactive']=activity`, true, true, cwdReadError);
     assert.equal(held.status, 0, held.stderr + held.stdout); assert.ok(existsSync(cache)); assert.match(held.stdout, /active-after-staging/);
+    const restoredPayload = readFileSync(join(cache, "v16/0001.sst"), "utf8");
     const changed = fx.run(liveness + String.raw`original=ns['shutil'].rmtree
 def deletion(path):
  original(path)
@@ -310,12 +311,27 @@ def deletion(path):
 deletion.avoids_symlink_attacks=original.avoids_symlink_attacks
 ns['shutil'].rmtree=deletion`, true, true, cwdReadError);
     assert.equal(changed.status, 2, changed.stderr + changed.stdout); assert.match(changed.stdout, /removed-unverified/);
+    return {
+      restoredPayload,
+      cacheExistsAfterRemoval: existsSync(cache),
+      sourceAfterRemoval: readFileSync(join(p, "after-removal.txt"), "utf8"),
+    };
   } finally { rmSync(fx.home, { recursive: true, force: true }); }
 }
 
-test("artifact cache cleanup restores staging when activity appears and reports post-removal uncertainty honestly", () => stagingAndRemovalCase());
+test("artifact cache cleanup restores staging when activity appears and reports post-removal uncertainty honestly", () => {
+  const result = stagingAndRemovalCase();
+  assert.equal(result.restoredPayload, "generated compiler DB\n");
+  assert.equal(result.cacheExistsAfterRemoval, false);
+  assert.equal(result.sourceAfterRemoval, "external source writer");
+});
 
-test("the cache staging fixture reaches its lifecycle controls despite an unread host cwd inventory", () => stagingAndRemovalCase(true));
+test("the cache staging fixture reaches its lifecycle controls despite an unread host cwd inventory", () => {
+  const result = stagingAndRemovalCase(true);
+  assert.equal(result.restoredPayload, "generated compiler DB\n");
+  assert.equal(result.cacheExistsAfterRemoval, false);
+  assert.equal(result.sourceAfterRemoval, "external source writer");
+});
 
 test("artifact cache probe errors retain data and never become successful deletions", () => {
   const fx = fixture();
