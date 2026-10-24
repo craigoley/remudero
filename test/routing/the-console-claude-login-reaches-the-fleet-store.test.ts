@@ -20,7 +20,7 @@ function launcherFixture(t: TestContext) {
   const bin = join(root, "bin");
   const fleet = join(home, ".claude", "fleet-auth");
   for (const dir of [join(install, "deploy"), home, state, bin, fleet]) mkdirSync(dir, { recursive: true });
-  for (const file of ["serve-container.sh", "scratch-mounts.sh"]) {
+  for (const file of ["serve-container.sh", "scratch-mounts.sh", "claude-directory.sh"]) {
     copyFileSync(join(REPO_ROOT, "deploy", file), join(install, "deploy", file));
   }
   const mounts = join(root, "daemon-mounts");
@@ -77,6 +77,16 @@ test("W1-T10511: the serve launcher binds only the fleet-auth directory the daem
   assert.ok(missing.binds.every((bind) => bind.split(":")[1] !== DEST));
   assert.match(missing.output, /NOTE/);
   assert.equal(existsSync(absent), false);
+  const shared = join(f.root, "shared-claude");
+  mkdirSync(join(shared, "fleet-auth"), { recursive: true });
+  writeFileSync(join(f.install, "deploy", "claude-directory.sh"), `claude_host_directory() { printf '%s\\n' '${shared}'; }\n`);
+  writeFileSync(f.mounts, "");
+  assert.ok(f.launch().binds.includes(`${shared}/fleet-auth:${DEST}`), "serve uses the shared daemon directory resolver");
+  writeFileSync(join(f.install, "deploy", "claude-directory.sh"), "claude_host_directory() { return 17; }\n");
+  const failed = spawnSync("bash", [join(f.install, "deploy", "serve-container.sh"), "--fleet-auth-plan"], {
+    env: f.env, encoding: "utf8",
+  });
+  assert.equal(failed.status, 17, "a failed shared resolver cannot produce a fleet bind");
 });
 
 test("W1-T10511: a Claude login that cannot reach the fleet store answers unavailable and creates nothing", async (t) => {

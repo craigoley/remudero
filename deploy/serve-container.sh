@@ -118,6 +118,11 @@ TAG="${TAG:-latest}"
 REF="${REGISTRY}.azurecr.io/${IMAGE}:${TAG}"
 
 SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CLAUDE_DIRECTORY_FILE="${SCRIPT_ROOT}/deploy/claude-directory.sh"
+if [ ! -r "${CLAUDE_DIRECTORY_FILE}" ]; then
+  CLAUDE_DIRECTORY_FILE="${PWD}/deploy/claude-directory.sh"
+fi
+source "${CLAUDE_DIRECTORY_FILE}"
 INSTANCE_NAME="${RMD_SERVE_INSTANCE:-}"
 INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY:-${SCRIPT_ROOT}/.remudero/daemon-instances.yaml}"
 INSTANCE_STATE_DIR=""
@@ -186,7 +191,8 @@ claude_fleet_auth_plan() {
   CLAUDE_FLEET_AUTH_HOST="${RMD_CLAUDE_FLEET_AUTH_HOST_DIR:-}"
   CLAUDE_FLEET_AUTH_DEST="/home/node/.claude/fleet-auth"
   CLAUDE_FLEET_AUTH_ARGS=()
-  local configured="${RMD_CLAUDE_DIR:-${HOME:-/root}/.claude}/fleet-auth" hint=""
+  local configured="" hint=""
+  configured="$(claude_host_directory)/fleet-auth"
   if [ -z "${CLAUDE_FLEET_AUTH_HOST}" ]; then
     hint="$(daemon_host_path_for "${CLAUDE_FLEET_AUTH_DEST}" || true)"
     if [ -d "${configured}" ]; then
