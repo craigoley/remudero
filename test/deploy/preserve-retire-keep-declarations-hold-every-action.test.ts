@@ -1,0 +1,237 @@
+/** Keep declarations and seed stores hold every preserve-retire action, against private fixture homes.
+ * Runs the real helper on its default roots; nothing here writes inside a node_modules folder. */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+const HELPER = join(REPO_ROOT, "deploy/mac/preserve-retire.py");
+const HOUR = 3600;
+// The helper's clock runs two days ahead, so every fixture file is idle unless a test dates it later.
+const NOW = Math.floor(Date.now() / 1000) + 48 * HOUR;
+const GIT_ENV = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_AUTHOR_NAME: "fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+  GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+};
+
+interface Fx { root: string; home: string; origin: string; bin: string }
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8", env: GIT_ENV }).trim();
+}
+
+function setup(config: Record<string, unknown>): Fx {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-preserve-keep-")));
+  const home = join(root, "home");
+  mkdirSync(join(home, ".local/state/remudero"), { recursive: true, mode: 0o700 });
+  for (const dir of [home, join(home, ".local"), join(home, ".local/state"), join(home, ".local/state/remudero")]) chmodSync(dir, 0o700);
+  const origin = join(root, "origin.git");
+  git(root, "init", "--quiet", "--bare", "-b", "main", origin);
+  const seed = join(root, "seed");
+  git(root, "clone", "--quiet", origin, seed);
+  writeFileSync(join(seed, "README"), "published\n");
+  git(seed, "add", "README"); git(seed, "commit", "--quiet", "-m", "published base");
+  git(seed, "push", "--quiet", "origin", "HEAD:main");
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "ps"), '#!/bin/bash\nprintf "%s\\n" /bin/sh\n', { mode: 0o755 });
+  writeFileSync(join(bin, "lsof"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+  const path = join(home, ".local/state/remudero/preserve-retire.json");
+  writeFileSync(path, JSON.stringify({ enabled: true, idle_hours: 24, retain_days: 7, interval_hours: 0,
+    published_remotes: [origin], ...config }));
+  chmodSync(path, 0o600);
+  return { root, home, origin, bin };
+}
+
+function clone(fx: Fx, rel: string): string {
+  const path = join(fx.home, rel);
+  mkdirSync(join(path, ".."), { recursive: true });
+  git(fx.root, "clone", "--quiet", fx.origin, path);
+  return path;
+}
+
+function commit(repo: string, file: string, text: string, message: string) {
+  writeFileSync(join(repo, file), text);
+  git(repo, "add", file); git(repo, "commit", "--quiet", "-m", message);
+}
+
+function helper(fx: Fx, now = NOW) {
+  return spawnSync("python3", ["-I", HELPER, "--home", fx.home, "--now", String(now), "--apply"], {
+    encoding: "utf8", timeout: 120_000, env: { ...GIT_ENV, PATH: `${fx.bin}:${process.env.PATH}` },
+  });
+}
+
+/** A seed generation shaped like materializeDependencySeed's, with a consumer record naming `checkout`.
+ * Its node_modules stays empty: the scoped author sandbox forbids writes inside any node_modules. */
+function seedGeneration(dir: string, checkout: string) {
+  mkdirSync(join(dir, "consumers"), { recursive: true });
+  mkdirSync(join(dir, "node_modules"));
+  writeFileSync(join(dir, "ready.json"), JSON.stringify({ key: dir.split("/").pop(), version: 1, lastUsed: 0 }));
+  writeFileSync(join(dir, "consumers/7b7974c6.json"), JSON.stringify({ checkout, mountNamespace: "host" }));
+}
+
+/** Every entry under `top` — Git objects, refs, index and worktree admin included — by path, type,
+ * mode and SHA-256 of its bytes (or its link target), read without running Git. */
+function bytes(top: string): string[] {
+  if (!existsSync(top) && !(() => { try { return lstatSync(top).isSymbolicLink(); } catch { return false; } })()) return ["<removed>"];
+  const out: string[] = [];
+  const visit = (path: string) => {
+    const st = lstatSync(path), rel = path.slice(top.length) || "/";
+    if (st.isSymbolicLink()) out.push(`${rel} link ${readlinkSync(path)}`);
+    else if (st.isDirectory()) { out.push(`${rel} dir ${st.mode}`); for (const name of readdirSync(path).sort()) visit(join(path, name)); }
+    else out.push(`${rel} file ${st.mode} ${createHash("sha256").update(readFileSync(path)).digest("hex")}`);
+  };
+  visit(top);
+  return out;
+}
+
+test("loose-folder housekeeping leaves seed stores, seed generations and keep-declared folders whole, and still removes an unreferenced build dir", () => {
+  const fx = setup({ dump_min_mb: 1, dump_retain_days: 1 });
+  const recovery = join(fx.home, ".local/share/remudero/source-recovery/20261019");
+  const blind = join(recovery, "blind");
+  try {
+    const consumer = clone(fx, "Remudero/consumer");
+    const big = "[" + '"subject",'.repeat(150_000) + '"end"]';
+    const store = join(recovery, "private-foundation-dependencies");
+    const marked = join(store, "5741d32373be98b605347f2875306b1e1a59cbd67484ab25bf8cd08b1f0287c1");
+    seedGeneration(marked, consumer);
+    writeFileSync(join(store, ".rmd-dependency-seed-root.json"), '{"version":1}');
+    writeFileSync(join(marked, "subjects.json"), big);
+    const unmarked = join(recovery, "private-foundation-dependencies-restored/b312649b2eb9f1579951d385ec71b609d85833d1396b9e2d84ac4ec7f3699a99");
+    seedGeneration(unmarked, consumer);
+    const kept = join(recovery, "kept");
+    for (const dir of [join(kept, "proj/node_modules"), join(recovery, "scratch-kept/node_modules"),
+      join(recovery, "vendored/coverage"), join(recovery, "disposable/node_modules"), join(blind, "node_modules")]) {
+      mkdirSync(dir, { recursive: true });
+    }
+    writeFileSync(join(kept, ".rmd-janitor-keep"), "foundation inputs\n");
+    writeFileSync(join(kept, "proj/run.json"), big);
+    writeFileSync(join(kept, "old.json.gz"), "compressed earlier\n");
+    utimesSync(join(kept, "old.json.gz"), NOW - 20 * 24 * HOUR, NOW - 20 * 24 * HOUR);
+    symlinkSync(join(fx.root, "absent-marker-target"), join(recovery, "scratch-kept/.rmd-scratch-keep"));
+    writeFileSync(join(recovery, "vendored/package.json"), "{}\n");
+    writeFileSync(join(recovery, "vendored/coverage/.rmd-dependency-seed-root.json"), '{"version":1}');
+    writeFileSync(join(blind, ".rmd-janitor-keep"), "cannot be inspected\n");
+    chmodSync(blind, 0o600); // listable, but nothing inside can be looked at
+    const before = [store, unmarked, kept].map(bytes);
+
+    const r = helper(fx);
+    chmodSync(blind, 0o700);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /housekeeping repacked=0 compressed=0 dumps-expired=0 build-dirs-removed=1 /);
+    assert.match(r.stdout, /REMOVED build-dir .*source-recovery\/20261019\/disposable\/node_modules/);
+    assert.equal(existsSync(join(recovery, "disposable/node_modules")), false);
+    assert.deepEqual([store, unmarked, kept].map(bytes), before, "every byte of a store, generation or kept folder is unchanged");
+    for (const path of [join(recovery, "scratch-kept/node_modules"), join(recovery, "vendored/coverage/.rmd-dependency-seed-root.json"), join(blind, "node_modules")]) {
+      assert.equal(existsSync(path), true, `${path}\n${r.stdout}`);
+    }
+    assert.match(r.stdout, /HOLD keep-declared \(\.rmd-dependency-seed-root\.json\) at .*vendored\/coverage/);
+  } finally { if (existsSync(blind)) chmodSync(blind, 0o700); rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a ready.json beside a dangling, linked or non-folder consumers entry holds as seed-shaped evidence", () => {
+  const fx = setup({});
+  try {
+    const recovery = join(fx.home, ".local/share/remudero/source-recovery/20261019");
+    const cases = { dangling: "", linked: "", file: "" };
+    for (const name of Object.keys(cases) as (keyof typeof cases)[]) {
+      const generation = join(recovery, `restored-${name}/4f2a`);
+      mkdirSync(join(generation, "node_modules"), { recursive: true });
+      writeFileSync(join(generation, "ready.json"), '{"version":1}');
+      cases[name] = generation;
+    }
+    symlinkSync(join(fx.root, "absent-consumers"), join(cases.dangling, "consumers"));
+    mkdirSync(join(fx.root, "consumers-elsewhere"));
+    symlinkSync(join(fx.root, "consumers-elsewhere"), join(cases.linked, "consumers"));
+    writeFileSync(join(cases.file, "consumers"), "not a folder\n");
+    mkdirSync(join(recovery, "disposable/node_modules"), { recursive: true });
+
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    for (const generation of Object.values(cases)) assert.equal(existsSync(join(generation, "node_modules")), true, `${generation}\n${r.stdout}`);
+    assert.equal(existsSync(join(recovery, "disposable/node_modules")), false, "an unmarked build dir beside them still goes");
+    assert.match(r.stdout, /build-dirs-removed=1 /);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("discovery never preserves, retires, repacks or prunes a repository under, inside or sharing a store with a keep declaration, and still retires an unmarked idle clone", () => {
+  const fx = setup({ repack_min_packs: 1 });
+  try {
+    const control = clone(fx, "Remudero/idle-control");
+    commit(control, "work.ts", "export const work = 1;\n", "unpublished control work");
+    const under = clone(fx, "Remudero/kept-tree/repo");
+    writeFileSync(join(fx.home, "Remudero/kept-tree/.rmd-janitor-keep"), "");
+    commit(under, "kept.ts", "export const kept = 1;\n", "unpublished work under a keep declaration");
+    const worktree = join(fx.home, "Remudero/worktree-of-kept");
+    git(under, "worktree", "add", "--quiet", "-b", "side", worktree);
+    commit(worktree, "side.ts", "export const side = 1;\n", "unpublished work in a worktree of a kept store");
+    const containing = clone(fx, "Remudero/has-inner");
+    mkdirSync(join(containing, "vendor"));
+    writeFileSync(join(containing, "vendor/.rmd-scratch-keep"), "");
+    // A worktree elsewhere of a store whose main checkout holds a marker: its path and store show none.
+    const sibling = join(fx.home, "Remudero/worktree-of-has-inner");
+    git(containing, "worktree", "add", "--quiet", "-b", "sibling", sibling);
+    commit(sibling, "sibling.ts", "export const sibling = 1;\n", "unpublished work in a sibling worktree");
+    const seeded = clone(fx, ".local/share/remudero/source-recovery/store/5741d323/packages/pkg");
+    writeFileSync(join(fx.home, ".local/share/remudero/source-recovery/store/.rmd-dependency-seed-root.json"), '{"version":1}');
+    for (const repo of [under, containing, seeded]) git(repo, "repack", "-a", "-d", "-q"); // one pack each: a repack candidate
+    const held = [join(fx.home, "Remudero/kept-tree"), worktree, containing, sibling, seeded];
+    const before = held.map(bytes);
+
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.deepEqual(held.map(bytes), before, "every byte of a held repository — objects, refs, index, worktree admin, working files — is unchanged");
+    assert.match(r.stdout, /RETIRED clone .*Remudero\/idle-control/);
+    assert.equal(existsSync(control), false);
+    assert.match(r.stdout, /HOLD keep-declared \(\.rmd-janitor-keep\) at .*Remudero\/kept-tree .*Remudero\/kept-tree\/repo/);
+    assert.match(r.stdout, /HOLD keep-declared \(\.rmd-janitor-keep\) at .*Remudero\/kept-tree .*Remudero\/worktree-of-kept/);
+    assert.match(r.stdout, /HOLD keep-declared \(\.rmd-scratch-keep\) at .*has-inner\/vendor .*Remudero\/has-inner/);
+    assert.match(r.stdout, /HOLD store-of-a-keep-scoped-checkout .*Remudero\/worktree-of-has-inner/);
+    assert.match(r.stdout, /HOLD keep-declared \(\.rmd-dependency-seed-root\.json\) at .*source-recovery\/store .*packages\/pkg/);
+    assert.doesNotMatch(r.stdout, /REPACKED .*(kept-tree|has-inner|source-recovery)/);
+    assert.doesNotMatch(r.stdout, /PRESERVED .*(kept-tree|worktree-of|has-inner|packages__pkg)/, "a held repository is never even a candidate");
+    git(under, "fsck", "--no-progress");
+    git(containing, "fsck", "--no-progress");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a keep declaration above a scan root holds the whole root, and a kept Codex log or preserved copy is never removed", () => {
+  const fx = setup({ codex_session_days: 7 });
+  try {
+    const recovery = join(fx.home, ".local/share/remudero/source-recovery");
+    mkdirSync(recovery, { recursive: true });
+    writeFileSync(join(fx.home, ".local/share/remudero/.rmd-scratch-keep"), "every recovery input\n");
+    mkdirSync(join(recovery, "disposable/node_modules"), { recursive: true });
+    const inside = clone(fx, ".local/share/remudero/source-recovery/repo");
+    const sessions = join(fx.home, ".codex/sessions/2026/09/20"), archived = join(fx.home, ".codex/archived_sessions");
+    mkdirSync(sessions, { recursive: true }); mkdirSync(archived, { recursive: true });
+    writeFileSync(join(fx.home, ".codex/sessions/.rmd-janitor-keep"), "");
+    const keptLog = join(sessions, "rollout-2026-09-20T18-19-07-kept.jsonl"), idleLog = join(archived, "rollout-2026-09-24T12-43-58-idle.jsonl");
+    for (const p of [keptLog, idleLog]) writeFileSync(p, "{}\n");
+    const later = NOW + 8 * 24 * HOUR;
+    const copies = join(fx.home, "Remudero-preserved");
+    const stamped = (name: string) => {
+      mkdirSync(join(copies, name), { recursive: true });
+      writeFileSync(join(copies, name, "manifest.json"), JSON.stringify({ preserved_at: later - 9 * 24 * HOUR }));
+      return join(copies, name);
+    };
+    const keptCopy = stamped("Remudero__kept@20260101T000000Z"), oldCopy = stamped("Remudero__old@20260101T000000Z");
+    writeFileSync(join(keptCopy, ".rmd-janitor-keep"), "");
+    const before = [inside, keptCopy].map(bytes);
+
+    const r = helper(fx, later);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(join(recovery, "disposable/node_modules")), true, r.stdout);
+    assert.deepEqual([inside, keptCopy].map(bytes), before, "the held clone and the kept copy are byte-for-byte unchanged");
+    assert.match(r.stdout, /HOLD keep-declared \(\.rmd-scratch-keep\) at .*\.local\/share\/remudero .*source-recovery\/repo/);
+    assert.equal(readFileSync(keptLog, "utf8"), "{}\n", r.stdout);
+    assert.equal(existsSync(idleLog), false, "an unkept idle log still goes");
+    assert.equal(existsSync(oldCopy), false, "an unkept old copy still expires");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
