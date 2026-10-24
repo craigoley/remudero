@@ -3,14 +3,16 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
-import { fixedClock } from "#src/lib/clock.js";
+import { fixedClock, systemClock } from "#src/lib/clock.js";
+import { dailyDateAt, dailyWindow, shiftDailyDate } from "#src/lib/daily-progress-calendar.js";
 import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
 import { collectDailyProgress } from "#src/lib/daily-progress-collector.js";
 import { dailyProgressDayKey, prepareDailyProgressPublication, readDailyProgressManifest, readDailyProgressRevision } from "#src/lib/daily-progress-store.js";
 import { acquireLease, openReadModel, readModelLeaseEpoch, releaseLease } from "#src/lib/read-model-db.js";
 import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "#src/lib/ledger-projector.js";
 import { withTempDir } from "#src/lib/tmp.js";
-import { createReadModelTicker } from "#src/lib/read-model-worker.js";
+import { createReadModelTicker, createReadModelWorker, readModelSwitchesPath } from "#src/lib/read-model-worker.js";
+import { createRepositoriesSourcePublisher } from "#src/lib/repositories-view.js";
 import { runSlowLaneWorker, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
 import { readModelInstances } from "#src/lib/serve.js";
 import { mapBoardPr, type BoardPrRest } from "#src/lib/open-prs-rest.js";
@@ -21,6 +23,38 @@ test("daily progress uses server board roots instead of guessing from ledger loc
     assert.equal(core.boardRoot, join(root, "operator-root"));
     assert.notEqual(core.boardRoot, root, "a separately configured ledger parent is not the board snapshot root");
     assert.equal(core.ledgerDir, join(root, "independent-ledger"));
+  });
+});
+
+test("daily default projector publishes through the real parent and slow-lane threads with all page views off", { timeout: 30_000 }, async () => {
+  await withTempDir("daily-default-threads", async root => {
+    const stateDir = join(root, "ledger"), boardRoot = join(root, "snapshot-owner");
+    mkdirSync(stateDir); mkdirSync(boardRoot); writeFileSync(join(stateDir, "ledger.ndjson"), "");
+    const now = systemClock.now(), date = shiftDailyDate(dailyDateAt(now), -1), window = dailyWindow(date);
+    const cache = createBoardSnapshotCache(boardRoot, "acme", "app", { clock: fixedClock(now) });
+    const occurredAt = fixedClock(Date.parse(window.windowStart) + 3_600_000).iso();
+    cache.recordClosedAttempt!({ ok: true, persisted: cache.commitClosed([{ number: 7, url: "https://github.com/acme/app/pull/7", state: "MERGED",
+      headRefName: "run-W1-T7-1234567890123", headRefOid: "a".repeat(40), body: "Remudero-Task: W1-T7", title: "Repair", autoMergeRequest: null,
+      updatedAt: fixedClock(now).iso(), mergedAt: occurredAt }]) });
+    createRepositoriesSourcePublisher({ stateDir, instances: () => [{ instanceId: "core", options: { root: boardRoot, instanceRepository: { owner: "acme", repo: "app" } } }] })();
+    writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { analytics: "off", "daily-progress": "off" } }));
+    let committed = false; const failures: string[] = [];
+    const worker = createReadModelWorker({ stateDir, instances: [{ name: "core", repo: "acme/app", ledgerDir: stateDir, boardRoot }], tickMs: 50,
+      log(step, extra) {
+        if (step === "read_model.daily_committed") committed = true;
+        if (/daily.*(?:failed|refused)|worker_error/.test(step)) failures.push(`${step}: ${String(extra?.reason ?? extra?.error ?? "unknown")}`);
+      } });
+    worker.start();
+    try {
+      // BACKSTOP: wait for the actual parent persistence receipt, never a staged worker verdict.
+      for (let attempt = 0; !committed && attempt < 600; attempt++) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.ok(committed, `default thread wiring did not commit: ${failures.slice(-5).join("; ")}`);
+      const day = readDailyProgressManifest(stateDir).days[dailyProgressDayKey("acme/app", "America/New_York", date)]; assert.ok(day);
+      const report = readDailyProgressRevision(stateDir, day);
+      assert.deepEqual(report.report.totals.mergedChanges, { value: 1, precision: "exact" });
+      assert.equal(report.events[0]!.repository, "acme/app");
+      assert.equal(worker.switches().views.analytics, "off"); assert.equal(worker.switches().views["daily-progress"], "off");
+    } finally { assert.equal(worker.stop(), true, "the real worker confirms shutdown and releases its own leases"); }
   });
 });
 
