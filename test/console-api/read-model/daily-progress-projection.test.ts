@@ -7,7 +7,7 @@ import { dailyDateAt, dailyWindow, nextDailyDue, resolveDailyDate, shiftDailyDat
 import { dailyProgressDayKey, dailyProgressStorePath, prepareDailyProgressPublication, readDailyProgressManifest, readDailyProgressRevision, type DailyProgressRecord } from "#src/lib/daily-progress-store.js";
 import { acquireLease, openReadModel } from "#src/lib/read-model-db.js";
 import { withTempDir } from "#src/lib/tmp.js";
-import { boardClosedRowsDigest, createBoardSnapshotCache, readBoardClosedCollectionReceipt } from "#src/lib/board-snapshot-cache.js";
+import { boardClosedCollectionPath, boardClosedRowsDigest, createBoardSnapshotCache, readBoardClosedCollectionReceipt } from "#src/lib/board-snapshot-cache.js";
 import { buildBatchedGithub } from "#src/lib/status.js";
 
 function record(size = 205): DailyProgressRecord {
@@ -155,5 +155,20 @@ test("daily collection receipts are reached by the normal synchronous PR gateway
     assert.equal(gateway.listMergedHeadBranches!(), null);
     read = readBoardClosedCollectionReceipt(root, "acme", "app", rows.values()); assert.ok(read.ok);
     if (read.ok) { assert.equal(read.receipt.state, "unavailable"); assert.equal(read.receipt.lastAttemptAt, clock.iso()); assert.notEqual(read.receipt.lastSuccessAt, clock.iso()); }
+  });
+});
+
+test("daily source receipt IO failures stay unavailable and preserve source data", async () => {
+  await withTempDir("daily-source-io", async root => {
+    const missing = readBoardClosedCollectionReceipt(root, "acme", "app", []);
+    assert.equal(missing.ok, false); if (!missing.ok) assert.match(missing.reason, /unavailable/);
+    const logs: string[] = [];
+    const cache = createBoardSnapshotCache(root, "acme", "app", { log: step => logs.push(step) });
+    assert.equal(cache.commitClosed([]), true);
+    const path = boardClosedCollectionPath(root, "acme", "app"); mkdirSync(path);
+    cache.recordClosedAttempt!({ ok: true, persisted: true });
+    assert.ok(logs.includes("board_snapshot.collection_receipt_failed"));
+    assert.equal(cache.closedSeed()!.size, 0, "a failed receipt write does not replace the known empty corpus");
+    assert.equal(readBoardClosedCollectionReceipt(root, "acme", "app", []).ok, false);
   });
 });

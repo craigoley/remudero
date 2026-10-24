@@ -60,7 +60,7 @@ async function activity(source: DailyProgressInstance, since: string, now: numbe
 /** Reconcile cached sources only. The existing PR collector remains the sole GitHub fetcher. */
 export async function collectDailyProgress(config: DailyProgressCollectionConfig, clock: Clock = systemClock, signal?: AbortSignal):
   Promise<ReturnType<typeof prepareDailyProgressPublication> | undefined> {
-  const now = clock.now(), at = clock.iso(), timeZone = config.timeZone ?? DEFAULT_DAILY_PROGRESS_ZONE;
+  const now = clock.now(), at = fixedClock(now).iso(), timeZone = config.timeZone ?? DEFAULT_DAILY_PROGRESS_ZONE;
   const today = dailyDateAt(now, timeZone), yesterday = shiftDailyDate(today, -1);
   const expected = [...new Set([...(config.expectedRepositories ?? []), ...config.instances.map(s => s.repository)].map(r => r.toLowerCase()))].sort();
   if (!expected.length || expected.length > 256 || expected.some(r => !REPOSITORY.test(r))) throw new Error("invalid server-owned daily repository inventory");
@@ -107,7 +107,7 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
           lastAttemptAt: validClock ? attempted : null, lastSuccessAt: sane && validClock ? success : null,
           coverageStart: sane && validClock && Date.parse(success) >= start ? window.windowStart : null,
           coverageThrough: sane && validClock && Date.parse(success) >= start ? fixedClock(Math.min(Date.parse(success), end)).iso() : null,
-          nextDueAt: fixedClock(nextDailyDue(now, timeZone)).iso(), reason: full ? null : !validClock ? "The source clock is ahead of the report clock." : receipt?.reason === "fetch_failed" ? "The latest PR collection failed; saved evidence is retained." : "The saved PR source does not certify complete coverage through this report's cutoff." };
+          nextDueAt: fixedClock(nextDailyDue(now, timeZone)).iso(), reason: full ? null : !validClock ? "The source receipt is newer than this report's cutoff." : receipt?.reason === "fetch_failed" ? "The latest PR collection failed; saved evidence is retained." : "The saved PR source does not certify complete coverage through this report's cutoff." };
         sources.push(coverage);
         if (!chosen || coverage.state === "complete" && chosen.state !== "complete" || coverage.state === chosen.state && (coverage.lastSuccessAt ?? "") > (chosen.lastSuccessAt ?? "")) chosen = coverage;
         for (const pr of source.rows) {
