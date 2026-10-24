@@ -267,23 +267,30 @@ function validateCompact(compact: CompactCosts): void {
   }
 }
 
-export async function captureGardenerSpendSource(stateDir: string, clock: Clock = systemClock): Promise<GardenerSpendSource> {
+export async function captureGardenerSpendSource(stateDir: string, clock: Clock = systemClock,
+  opts: { signal?: AbortSignal; repository?: string } = {}): Promise<GardenerSpendSource> {
+  opts.signal?.throwIfAborted();
   let runtime: ReturnType<typeof parseGardenerRuntime>;
   try {
     runtime = await readGardenerRuntime(stateDir);
   } catch (error) {
+    opts.signal?.throwIfAborted();
     const missing = error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT";
     return { reason: missing ? "missing_registry" : error instanceof Error && /bound/.test(error.message)
       ? "over_budget" : "invalid_registry" };
   }
   const observedAt = clock.iso();
+  if (opts.repository !== undefined && runtime.repository !== opts.repository ||
+    Date.parse(runtime.configuredAt) > Date.parse(observedAt) || Date.parse(runtime.observedAt) > Date.parse(observedAt)) {
+    return { reason: "invalid_registry" };
+  }
   const costs = costAccumulator(runtime, observedAt);
   const calls = callAccumulator(runtime, observedAt);
   const seen = new Set<string>();
   let complete = true, liveObserved = false, overflow = false;
   const small = (value: unknown): string | undefined => typeof value === "string" && value.length <= 128 ? value : undefined;
   // Keep canonical raw-line fingerprints, never raw lines or provider/config payloads (W1-T8484).
-  const stream = openLedgerUnion(stateDir, { since: runtime.configuredAt, dedupe: false,
+  const stream = openLedgerUnion(stateDir, { since: runtime.configuredAt, dedupe: false, signal: opts.signal,
     onUnreadArchive: () => { complete = false; }, onUnreadLive: () => { complete = false; },
     onUnreadDirectory: () => { complete = false; },
     onMalformedRow: () => { complete = false; }, onLiveRead: () => { liveObserved = true; },
@@ -309,8 +316,21 @@ export async function captureGardenerSpendSource(stateDir: string, clock: Clock 
     } });
   for await (const row of stream) {
     void row;
+    opts.signal?.throwIfAborted();
     if (overflow) return { reason: "over_budget" };
   }
+  opts.signal?.throwIfAborted();
+  // Counters may advance during collection; identity, generation and enabled inventory may not.
+  // Re-read the real registry, rather than certifying a generation that was replaced or revoked.
+  const identity = (value: typeof runtime) => JSON.stringify([value.repository, value.daemonRunId,
+    value.configuredAt, value.codeSha, value.gardens.map(g => [g.name, g.enabled, g.scope]).sort()]);
+  try {
+    if (identity(await readGardenerRuntime(stateDir)) !== identity(runtime)) return { reason: "invalid_registry" };
+  } catch {
+    opts.signal?.throwIfAborted();
+    return { reason: "invalid_registry" };
+  }
+  opts.signal?.throwIfAborted();
   const source: GardenerSpendSource = { runtime, compact: costs.compact, observedAt, corpusComplete: complete && liveObserved,
     workerCalls: calls.finish(costs.hasParent, complete && liveObserved) };
   // Usage has its own bounded index and may never crowd independently valid money out.

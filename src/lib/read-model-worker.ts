@@ -24,7 +24,6 @@ import { captureSelectedRegistryIntent, copySelectedRegistryIntent, selectedRegi
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { AGENT_QUALIFICATION_GENERATION, AGENT_VIEW_NAME, createAgentView } from "./agent-view.js";
 import { ANALYTICS_VIEW_NAME, ANALYTICS_SOURCE_CONSOLE_V1, createAnalyticsView, type HostModelApprovalConfig } from "./analytics-view.js";
-import { captureGardenerSpendSource } from "./gardener-spend.js";
 import { captureRepositoryFlow } from "./repository-flow.js";
 import { createGithubKeepWarm, type GithubKeepWarm } from "./github-refresh-pacer.js";
 import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type IssueGateway } from "./escalate.js";
@@ -2148,12 +2147,11 @@ export function runReadModelWorker(
     snapshotWrites = snapshotWrites.then(async () => {
       if (stopRequested()) return;
       const instance = data.instances.find(i => i.name === write.instance);
-      if (!write.ok || !instance) return views.snapshot(write);
-      const source = await captureGardenerSpendSource(instance.ledgerDir);
+      if (!write.ok || !instance || !write.bodies.some(body => body.name === ANALYTICS_SOURCE_CONSOLE_V1)) return views.snapshot(write);
       const repositoryFlow = await captureRepositoryFlow(dirname(instance.ledgerDir), instance.ledgerDir, instance.repo, clock);
       if (stopRequested()) return;
       views.snapshot({ ...write, bodies: write.bodies.map(body => body.name === ANALYTICS_SOURCE_CONSOLE_V1
-        ? { ...body, body: { ...(body.body as object), gardenerSpendSource: source,
+        ? { ...body, body: { ...(body.body as object),
           ...(repositoryFlow ? { repositoryFlow } : {}) } } : body) });
     });
   } });
