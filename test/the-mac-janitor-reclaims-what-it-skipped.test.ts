@@ -171,16 +171,30 @@ test("residual cleanup holds activity, failed probes, fresh ctime and cache evid
   }
 });
 
-test("real open-file probes retain a residual cache while its idle sibling is removed", () => {
-  const fx = setup(); let fd: number | undefined;
+function realOpenFileFixture(launcherParent = false): { held: boolean; idle: boolean; output: string } {
+  const fx = setup(); const originalCwd = process.cwd(); let fd: number | undefined;
   try {
     const held = payload(join(fx.home, ".cache/remudero-held/old")); age(dirname(held));
     const idle = payload(join(fx.home, ".cache/remudero-idle/old")); age(dirname(idle));
     rmSync(join(fx.root, "bin/lsof"));
+    rmSync(join(fx.root, "bin/ps"));
     fd = openSync(held, "r");
+    if (launcherParent) process.chdir(dirname(fx.root));
     const output = run(fx);
-    assert.equal(existsSync(held), true, output); assert.equal(existsSync(idle), false, output);
-  } finally { if (fd !== undefined) closeSync(fd); rmSync(fx.root, { recursive: true, force: true }); }
+    return { held: existsSync(held), idle: existsSync(idle), output };
+  } finally { process.chdir(originalCwd); if (fd !== undefined) closeSync(fd); rmSync(fx.root, { recursive: true, force: true }); }
+}
+
+test("real open-file probes retain a residual cache while its idle sibling is removed", () => {
+  const result = realOpenFileFixture();
+  assert.equal(result.held, true, result.output);
+  assert.equal(result.idle, false, result.output);
+});
+
+test("real ps and lsof retain an open cache from a launcher directory and reclaim its idle peer", () => {
+  const result = realOpenFileFixture(true);
+  assert.equal(result.held, true, result.output);
+  assert.equal(result.idle, false, result.output);
 });
 
 test("cron without npm falls back to six-hour whole-tree cleanup and keeps mixed-age caches", () => {

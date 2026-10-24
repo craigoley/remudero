@@ -15165,6 +15165,17 @@ export function fixSeedRead(
   if (pr.taskId === undefined && !window.some(line => line.step === "fix.dispatch" &&
       line.task_id === taskId && line.head_sha === pr.headSha)) return undefined;
   const rung = (line: Record<string, unknown>) => line.task_id === taskId && String(line.step).startsWith("fix.");
+  const dispatchAt = window.findLastIndex(line => rung(line) && line.step === "fix.dispatch");
+  const dispatchOwner = dispatchAt < 0 ? undefined : window[dispatchAt].run_id;
+  // A previous daemon's pre-seed rung is not a dispatch by this seed's producer; judgment is not a worker start.
+  if (typeof seed.runId === "string" && /^DAEMON-[0-9]+$/.test(seed.runId) && seed.runId !== runId && dispatchAt >= 0 && dispatchAt < seedAt - from &&
+      window[dispatchAt].head_sha === pr.headSha && typeof dispatchOwner === "string" && /^DAEMON-[0-9]+$/.test(dispatchOwner) &&
+      dispatchOwner !== seed.runId && !dispatchOwner.startsWith(`${seed.runId}-`) &&
+      dispatchOwner !== runId && !dispatchOwner.startsWith(`${runId}-`) &&
+      window.slice(dispatchAt + 1).filter(rung).every(line =>
+        line.step === "fix.progress_judged" || line.step === "fix.progress_reused")) {
+    return { kind: "orphaned", seed };
+  }
   if (!window.some(rung)) {
     // An earlier run's detached dispatch died with its process; this run's is owned by the in-process claim.
     if (seed.runId !== undefined && seed.runId !== runId) return { kind: "orphaned", seed };
@@ -16479,6 +16490,12 @@ export function noteReviewDuration(ms: number): void {
   if (!Number.isFinite(ms) || ms < 0) return;
   idleMemo.reviewMs.push(ms);
   if (idleMemo.reviewMs.length > IDLE_MEMO_WINDOW) idleMemo.reviewMs.shift();
+}
+
+/** Completed review timing remains available when ledger rotation or zero current demand hides it. */
+export function readObservedReviewMedianMs(): number | undefined {
+  return deriveIdleLightCadenceMs({ reviewDurationsMs: idleMemo.reviewMs.filter(ms => ms > 0),
+    headPushes: 0, openPrs: 0, windowMs: 0 }).medianReviewMs;
 }
 
 /** W1-T8167: the steps that end a `sweep.review_admitted` review's life. */

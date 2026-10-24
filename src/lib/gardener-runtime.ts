@@ -18,7 +18,7 @@ export interface GardenerRuntimeEvent {
   queueMs: number | null;
   executionMs: number | null;
   exit: number | null;
-  reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | "memory-budget-shortfall" | null;
+  reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | "memory-budget-shortfall" | "admission-rank" | null;
   /** W1-T9975: on a finished pass, how long the garden went from its previous completion to the first ask of this
    *  pass's due period. Admission and pass-pool wait are not in it. Absent when the loop had no earlier completion. */
   dueIntervalMs?: number;
@@ -48,7 +48,7 @@ export interface GardenerRuntimeSnapshot {
 }
 
 const phases: readonly unknown[] = ["scheduled", "queued", "running", "completed", "failed", "cancelled", "idle"];
-const reasons: readonly unknown[] = [null, "inputs-unchanged", "process-completed", "process-failed", "signal-or-cancelled", "spawn-failed", "memory-budget-shortfall"];
+const reasons: readonly unknown[] = [null, "inputs-unchanged", "process-completed", "process-failed", "signal-or-cancelled", "spawn-failed", "memory-budget-shortfall", "admission-rank"];
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const time = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
 const count = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;

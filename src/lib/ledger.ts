@@ -775,6 +775,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T4207: `lastCommitRefusalPromptLines` (run-task.ts) reads its `subtype` to name the last refused paths.
   "fix.done",
   "fix.progress_judged", // the sweep labels each judged PR from its newest judgement; rotated away, the label reverts to the stale strike ratio.
+  "fix.progress_reused", // fixSeedRead distinguishes reused judgment metadata from an owning worker rung.
   "fix.needs_design", // W1-T5532: preserve the explicit hand-off for the next fix-lane decision.
   "fix.scope_amendment", // W1-T5534: runFixRung and lookupIdentity resume pending amendments after rotation.
   "fix.resolved",
