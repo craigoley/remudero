@@ -39576,7 +39576,7 @@ export function buildSweepLightHook(
       }
       // W1-T9595: a held head main has fixed is refreshed only through this one admission, never the fan-out below.
       const admitted = reviewOnly ? [] : await runLightPassRefreshAdmission(openPrs, { ...effects, ledgerPath, runId });
-      const headContractRefresh = reviewOnly ? {} : await lightPassHeadContractRefresh(openPrs, { ...effects, ledgerPath });
+      const headContractRefresh = reviewOnly || !fixAdmitted ? {} : await lightPassHeadContractRefresh(openPrs, { ...effects, ledgerPath });
       const ratchetRefreshed = reviewOnly ? [] : await runArmedRatchetRejudge(openPrs, { ...effects, ledgerPath, runId });
       const passPrs = openPrs.filter((pr) => pr.prNumber !== readyRefreshed && !admitted.includes(pr.prNumber) && !ratchetRefreshed.includes(pr.prNumber));
       const requeueOnlyPrs = reviewOnly ? [] : passPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
