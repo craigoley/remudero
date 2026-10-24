@@ -1,0 +1,29 @@
+id: incident-0dce811a2dc839ec
+ts: 2026-10-24T17:57:31.233Z
+raw: >-
+  Incident 0dce811a2dc8: intervention
+  awaiting-arm:arm:review-success-required-checks-green-a-p
+
+  First seen: 2026-10-24T17:53:23.307Z
+
+  Last seen: 2026-10-24T17:57:26.326Z
+
+  Count: 5, burn: 5.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=merge target=pr#11487@merge actor=cao825 cause=awaiting-arm:arm:review-success-required-checks-green-a-p — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#0dce811a2dc839ec0793bac12f4d8ae794fc255107eb6681524433b50352b094
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

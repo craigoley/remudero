@@ -1,0 +1,29 @@
+id: incident-a7aaae95a99ff25e
+ts: 2026-10-24T18:04:16.394Z
+raw: >-
+  Incident a7aaae95a99f: intervention
+  review-failed:fix-lane:unmet-criteria-strike-mergeability-unrea
+
+  First seen: 2026-10-24T18:04:10.743Z
+
+  Last seen: 2026-10-24T18:04:10.743Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10344@1b2201527 actor=cao825 cause=review-failed:fix-lane:unmet-criteria-strike-mergeability-unrea — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#a7aaae95a99ff25efc9cf9e55638a29bc52742dea612caf8e209793180f28891
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

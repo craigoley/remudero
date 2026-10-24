@@ -1,0 +1,30 @@
+id: incident-c8a3da614a27bb2d
+ts: 2026-10-24T17:47:51.479Z
+raw: >-
+  Incident c8a3da614a27: intervention
+  own-red:fix-lane:rule-checks-failed-on-refused-retrying-t
+
+  First seen: 2026-10-24T17:19:34.446Z
+
+  Last seen: 2026-10-24T17:47:48.747Z
+
+  Count: 12, burn: 12.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#11904@d4035c1e5 actor=cao825 cause=own-red:fix-lane:rule-checks-failed-on-refused-retrying-t — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#11904@48a728474 actor=cao825 cause=own-red:fix-lane:rule-checks-failed-on-refused-retrying-t — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#c8a3da614a27bb2df500c33c72946cc0ce277442abaa864f32c8607b5e9e05bb
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
