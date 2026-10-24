@@ -8564,6 +8564,8 @@ async function runReview(args: {
   }
 }
 
+// ── THE blocked_review FIX RUNG — implementation: src/cli/commands/fix.ts ─────────────────────
+
 /**
  * W1-T2293 (AN INFRASTRUCTURE FAULT HAS NO DISPOSITION EXCEPT BUILD). Every one of
  * {@link FIX_MODE_RULES}' five rows — and `deriveFixMode`'s own fallback — resolves to a BUILD

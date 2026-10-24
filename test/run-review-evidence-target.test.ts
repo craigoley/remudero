@@ -160,5 +160,8 @@ test("W1-T3529: every pre-existing judgeReview evidence field remains in the run
 });
 
 function readRunTaskSource(): string {
-  return readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  // W1-T9337: runReview stays in the entrypoint; its fix-rung caller moved.
+  return ["run-task.ts", "cli/commands/fix.ts"]
+    .map((owner) => readFileSync(fileURLToPath(new URL(`../src/${owner}`, import.meta.url)), "utf8").replace(/\bhost\./g, ""))
+    .join("\n");
 }
