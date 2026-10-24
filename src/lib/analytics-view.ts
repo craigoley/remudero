@@ -150,6 +150,8 @@ export function analyticsDetails(asOf: string, signals: unknown, usage: unknown)
 export const ANALYTICS_SOURCE_CONSOLE_V1 = "console-v1";
 export const ANALYTICS_SOURCE_SIGNALS = "signals";
 export const ANALYTICS_SOURCE_USAGE = "usage-v1";
+/** Independent current-generation stream; never failed or advanced by the historical scan. */
+export const GARDENER_SPEND_SOURCE_NAME = "gardener-spend-v1";
 export const ANALYTICS_SOURCE_NAMES: readonly string[] = [ANALYTICS_SOURCE_CONSOLE_V1, ANALYTICS_SOURCE_SIGNALS, ANALYTICS_SOURCE_USAGE];
 
 /** A snapshot older than two refresh cycles plus a timed-out scan has missed a refresh (the nav badge's bound). */
@@ -368,6 +370,7 @@ export function createAnalyticsView(opts: { modelApprovalConfig?: HostModelAppro
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: { instance: string }; db?: ReadModelDb }> }): Array<{ key: string; data: AnalyticsViewData; sources: ViewSource[] }>;
 } {
   const parsed = new WeakMap<ReadModelDb, Map<string, { asOf: string; console: AnalyticsConsoleSource; detailsKey?: string; details?: AnalyticsDetails }>>();
+  const gardenerParsed = new WeakMap<ReadModelDb, Map<string, { asOf: string; repository?: string; source?: GardenerSpendSource; error?: string }>>();
   return {
     name: ANALYTICS_VIEW_NAME,
     version: ANALYTICS_VIEW_VERSION,
@@ -378,6 +381,9 @@ export function createAnalyticsView(opts: { modelApprovalConfig?: HostModelAppro
       const states = sourceSnapshotStates(db, ANALYTICS_SOURCE_CONSOLE_V1);
       const signalStates = sourceSnapshotStates(db, ANALYTICS_SOURCE_SIGNALS);
       const usageStates = sourceSnapshotStates(db, ANALYTICS_SOURCE_USAGE);
+      const gardenerStates = sourceSnapshotStates(db, GARDENER_SPEND_SOURCE_NAME);
+      let gardenerHeld = gardenerParsed.get(db);
+      if (!gardenerHeld) gardenerParsed.set(db, (gardenerHeld = new Map()));
       let held = parsed.get(db);
       if (!held) parsed.set(db, (held = new Map()));
       const inputs = instances.map(({ state }): AnalyticsInstanceInput => {
@@ -414,20 +420,51 @@ export function createAnalyticsView(opts: { modelApprovalConfig?: HostModelAppro
       const callCoverage = new Map<number, GardenerWorkerCalls>();
       merged.data.instances = merged.data.instances.map((instance, index) => {
         const snapshot = inputs[index]?.snapshot;
-        if (snapshot === undefined || snapshot.console.gardenerSpendSource === undefined) return instance;
-        let gardenerSpend = foldGardenerSpend(snapshot.console.gardenerSpendSource, instance.repository, snapshot.asOf);
+        const row = gardenerStates.find(candidate => candidate.instance === instance.instanceId);
+        if (row?.asOf && gardenerHeld.get(instance.instanceId)?.asOf !== row.asOf) {
+          try {
+            const body = readSourceSnapshotBody(db, instance.instanceId, GARDENER_SPEND_SOURCE_NAME);
+            const valid = object(body) && repositoryName(body.repository) && object(body.source) &&
+              body.source.observedAt === row.asOf && body.source.corpusComplete === true;
+            gardenerHeld.set(instance.instanceId, valid
+              ? { asOf: row.asOf, repository: repositoryName(body.repository), source: body.source as GardenerSpendSource }
+              : { asOf: row.asOf, error: "stored independent gardener evidence is unsupported or incomplete" });
+          } catch (error) {
+            gardenerHeld.set(instance.instanceId, { asOf: row.asOf, error: error instanceof SyntaxError
+              ? "stored independent gardener evidence is not valid JSON" : "stored independent gardener evidence could not be read" });
+          }
+        }
+        const captured = row?.asOf ? gardenerHeld.get(instance.instanceId) : undefined;
+        if (row) {
+          const lagMs = row.asOf ? now - Date.parse(row.asOf) : undefined;
+          const failed = !!row.error || captured?.error !== undefined || lagMs !== undefined && (!Number.isFinite(lagMs) || lagMs < 0);
+          const behind = lagMs !== undefined && lagMs > ANALYTICS_STALE_AFTER_MS;
+          merged.sources.push({ name: `gardener-spend:${instance.instanceId}`, kind: "analytics", instance: instance.instanceId,
+            asOf: row.asOf, budgetMs: ANALYTICS_STALE_AFTER_MS, ...(lagMs !== undefined ? { lagMs: Math.max(0, lagMs) } : {}),
+            state: row.asOf ? failed || behind ? "stale" : "fresh" : "unavailable",
+            ...(failed ? { phase: "failed", reason: row.error ?? captured?.error ?? "independent gardener evidence is invalid" }
+              : behind ? { phase: "behind", reason: "independent gardener evidence is past its refresh bound" } : {}) });
+        }
+        // Once an independent row exists, even a failed first capture forbids embedded fallback.
+        // Old pre-upgrade rows keep their historical clock; a cold history may still show recent money.
+        const source = row ? captured?.error ? { reason: "invalid_registry" as const } : captured?.source ?? { reason: "ledger_unavailable" as const }
+          : snapshot?.console.gardenerSpendSource;
+        if (source === undefined) return instance;
+        const repository = instance.repository ?? captured?.repository;
+        const materializedAt = row ? row.asOf : snapshot!.asOf;
+        let gardenerSpend = foldGardenerSpend(source, repository, materializedAt);
         if (gardenerSpend.workerCalls !== undefined) {
           callCoverage.set(index, gardenerSpend.workerCalls);
           const { workerCalls: _calls, ...money } = gardenerSpend;
           gardenerSpend = money;
         }
         if (spendBytes + Buffer.byteLength(JSON.stringify(gardenerSpend)) > GARDENER_SPEND_MAX_BYTES) {
-          gardenerSpend = foldGardenerSpend({ reason: "over_budget" }, instance.repository, snapshot.asOf);
+          gardenerSpend = foldGardenerSpend({ reason: "over_budget" }, repository, materializedAt);
         }
         const bytes = Buffer.byteLength(JSON.stringify(gardenerSpend));
         if (spendBytes + bytes > GARDENER_SPEND_MAX_BYTES) return instance;
         spendBytes += bytes;
-        return { ...instance, gardenerSpend };
+        return { ...instance, ...(repository ? { repository } : {}), gardenerSpend };
       });
       // Reserve the original monetary allocation across EVERY repository first. Optional
       // call coverage may consume only the remainder, never another repository's money.

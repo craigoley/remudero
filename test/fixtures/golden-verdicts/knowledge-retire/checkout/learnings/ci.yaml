@@ -1,3 +1,3 @@
-- id: commitlint-pr-title-lane
-  # knowledge gardener: retire commitlint-pr-title-lane
+- id: ci-gate-refusals-repaired-by-hand
+  # knowledge gardener: retire ci-gate-refusals-repaired-by-hand
   lifecycle: superseded

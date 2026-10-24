@@ -3005,7 +3005,7 @@ export function handedOffHeadRiskJudge(
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
-import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, workerContinuation } from "./lib/worker.js";
+import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, workerContinuation, workerExecutionForProvider } from "./lib/worker.js";
 import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
@@ -18079,7 +18079,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           runId,
           openTaskIds,
           ...(shadow ? { shadow: true } : {}),
-        })),
+        }), join(config.root, "state", "inflight")),
       ),
     baseProof?.baseIsGrepTree ? (_repo, tree) => rmSync(tree, { recursive: true, force: true }) : undefined,
   );
@@ -29007,7 +29007,7 @@ async function retroCommand(
               workerProviders: { ...config.workerProviders, enabled: [worker.provider] },
             }
           : config;
-        const repaired = await spawn({
+        const repairArgs: SpawnWorkerArgs = {
           cwd: worktreePath,
           permissionMode: "bypassPermissions",
           // W1-T3616: the repair pass is the SAME lane as the retro spawn above, so it resolves the
@@ -29023,17 +29023,32 @@ async function retroCommand(
           prompt: repairPrompt,
           resumeSessionId: worker.sessionId,
           continuation: workerContinuation(worker, prompt, worktreePath),
-        });
+        };
+        const repaired = await spawn(repairArgs);
         log("retro.preflight_repair", {
           session_id: repaired.sessionId,
           resumed_session_id: worker.sessionId,
           ...workerLedgerFields(repaired),
         });
-        if (repaired.sessionId && repaired.sessionId !== worker.sessionId) {
-          throw new Error(`retro preflight repair returned a different session (${repaired.sessionId})`);
+        if (!worker.provider || !repaired.provider || repaired.provider !== worker.provider) {
+          throw new Error(`retro preflight repair has missing or different provider provenance (expected ${worker.provider ?? "missing"}, got ${repaired.provider ?? "missing"})`);
         }
-        if (worker.provider && repaired.provider && repaired.provider !== worker.provider) {
-          throw new Error(`retro preflight repair switched provider from ${worker.provider} to ${repaired.provider}`);
+        // Validate against the producer's policy, not another handwritten policy table.
+        // Codex writers deliberately cannot resume their original sandbox. Only that
+        // exact same-provider fresh-writer receipt permits a new nonempty session.
+        const expected = workerExecutionForProvider(repairArgs, worker.provider).receipt;
+        const receipt = repaired.continuation;
+        if (!expected || !receipt || receipt.mode !== expected.mode || receipt.reason !== expected.reason ||
+            receipt.from !== expected.from || receipt.to !== expected.to) {
+          throw new Error("retro preflight repair returned an invalid continuation receipt");
+        }
+        const resumed = expected.mode === "resumed" && expected.reason === "same-provider";
+        const freshWriter = worker.provider === "codex" && expected.mode === "fresh-handoff" &&
+          expected.reason === "provider-fresh-only";
+        if (!worker.sessionId || !repaired.sessionId ||
+            worker.sessionId.trim() === "" || repaired.sessionId.trim() === "" ||
+            (resumed ? repaired.sessionId !== worker.sessionId : !freshWriter || repaired.sessionId === worker.sessionId)) {
+          throw new Error("retro preflight repair returned an inconsistent session identity");
         }
         if (repaired.isError) {
           throw new Error(`retro preflight repair failed: ${repaired.subtype}`);
@@ -33504,14 +33519,18 @@ export function buildDaemonReadRefresher(options: {
 /** W1-T5998 — run ids of workers this process spawned and has not reaped. A review takes no
  *  inflight lock, so only this registry tells the orphan sweep its worker is still running. */
 const liveWorkerRunIds = new Set<string>();
+const reviewWorkerLockId = (runId: string) => `review-worker-${createHash("sha256").update(runId).digest("hex")}`;
 
 /** W1-T5998 — hold `runId` in {@link liveWorkerRunIds} for as long as `spawn` runs its worker. */
-export async function whileWorkerRunLive<T>(runId: string, spawn: () => Promise<T>): Promise<T> {
+export async function whileWorkerRunLive<T>(runId: string, spawn: () => Promise<T>, inflightDir?: string): Promise<T> {
+  const held = inflightDir === undefined ? undefined : acquireInflightLock(join(inflightDir, "review-workers"),
+    reviewWorkerLockId(runId), { run_id: runId, reclaim: false });
   liveWorkerRunIds.add(runId);
   try {
     return await spawn();
   } finally {
     liveWorkerRunIds.delete(runId);
+    held?.release();
   }
 }
 
@@ -33524,10 +33543,15 @@ export function orphanSweepRunActive(
   isPidAlive?: (pid: number) => boolean,
   adoptedRunIds: ReadonlySet<string> = new Set(),
 ): (runId: string) => boolean {
+  const reviewIsLive = (runId: string) => {
+    const held = readInflightLock(join(inflightDir, "review-workers"), reviewWorkerLockId(runId));
+    return held?.run_id === runId && sameHost(held.host, hostname()) && (isPidAlive ?? defaultIsPidAlive)(held.pid);
+  };
   return (runId) =>
     runId === ownRunId ||
     liveWorkerRunIds.has(runId) ||
     adoptedRunIds.has(runId) ||
+    reviewIsLive(runId) ||
     liveInflightRuns(inflightDir, isPidAlive).some((r) => r.runId === runId || r.runId.startsWith(`${runId}:fix-claim:`));
 }
 
@@ -37699,7 +37723,11 @@ export function runInflightLockSweepRung(
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): InflightSweepResult {
   try {
-    const swept = sweepInflightLocksWithReceipts(join(config.root, "state", "inflight"), ledgerPathFor(config));
+    const inflightDir = join(config.root, "state", "inflight");
+    const results = [inflightDir, join(inflightDir, "review-workers")]
+      .map((dir) => sweepInflightLocksWithReceipts(dir, ledgerPathFor(config)));
+    const swept = { reaped: results.flatMap((r) => r.reaped), kept: results.flatMap((r) => r.kept),
+      live: results.flatMap((r) => r.live), unverifiableForeignHost: results.flatMap((r) => r.unverifiableForeignHost) };
     // `kept` alone conflates a confirmed-live holder with an unverifiable-foreign-host one
     // (W1-T461) — the per-poll site the boot sweep's own doc calls out as the one that must not
     // stay silent (design clause iii), so `live`/`unverifiable_foreign_host` ride the same line.

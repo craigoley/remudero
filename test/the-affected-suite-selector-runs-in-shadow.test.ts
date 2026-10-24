@@ -84,6 +84,7 @@ test("W1-T4940: the declared-sender census is selected for each source-reading e
   const suite = "test/every-message-names-one-declared-sender.test.ts";
   const files = new Map([...Object.entries(TREE), [suite, ""]]);
   for (const changed of ["src/lib/inbox-bakeoff.ts", "src/run-task.ts", "src/new-producer.ts"]) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
     const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
     assert.equal(selection.fullRun, false, changed);
     assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
@@ -101,6 +102,7 @@ test("W1-T4940: the declared-sender census is selected for each source-reading e
     "scripts/tool.mjs",
     "src/not-typescript.js",
   ]) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
     const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
     assert.equal(selection.fullRun, false, changed);
     assert.ok(!selection.suites.includes(suite), `${changed} is outside the census population`);
@@ -121,6 +123,7 @@ test("the claims-check suite is selected for each recorded plan-validation edge"
     "src/run-task.ts",
     "test/one-bad-plan-shard-never-takes-the-daemon-down.test.ts",
   ]) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
     const selection = selectAffectedSuites([changed], { files, pathReaders: [] });
     assert.ok(selection.suites.includes(claimsCheck), `${changed} must select ${claimsCheck}`);
     assert.ok(selection.reasons.includes(`${claimsCheck}: reads a changed file by path`), changed);
@@ -135,6 +138,7 @@ test("the run-task git-leaf suite is selected for each recorded edge", () => {
     "test/check-proof-grep-cause.test.ts",
     "test/check-proof-warns-when-its-target-differs-from-head.test.ts",
   ]) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
     const selection = selectAffectedSuites([changed], { files, pathReaders: [] });
     assert.ok(selection.suites.includes(suite), `${changed} must select ${suite}`);
   }
@@ -152,6 +156,7 @@ test("W1-T6924: the now-view rederivation suite is selected for each recorded mi
     drift: { distance: 0, changedSinceMap: [] },
   };
   for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
     const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
     assert.equal(selection.fullRun, false, changed);
     assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
@@ -179,6 +184,7 @@ test("W1-T7212: the prompt-render suite is selected for each recorded miss edge"
     drift: { distance: 0, changedSinceMap: [] },
   };
   for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
     const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
     assert.equal(selection.fullRun, false, changed);
     assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
@@ -201,6 +207,7 @@ test("W1-T7475: the red-branch strike suite is selected for each recorded miss e
     drift: { distance: 0, changedSinceMap: [] },
   };
   for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
     const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
     assert.equal(selection.fullRun, false, changed);
     assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
@@ -224,6 +231,7 @@ test("W1-T4894: the wall-clock bound suite is selected for each recorded miss ed
     drift: { distance: 0, changedSinceMap: [] },
   };
   for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
     const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
     assert.equal(selection.fullRun, false, changed);
     assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
@@ -245,6 +253,7 @@ test("W1-T7763: the refusal-amendment suite is selected for each recorded miss e
     drift: { distance: 0, changedSinceMap: [] },
   };
   for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
     const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
     assert.equal(selection.fullRun, false, changed);
     assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
@@ -266,6 +275,7 @@ test("W1-T6751: the precheck census is selected for each recorded miss edge", ()
     drift: { distance: 0, changedSinceMap: [] },
   };
   for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
     const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
     assert.equal(selection.fullRun, false, changed);
     assert.ok(selection.suites.includes(census), `${changed} must select ${census} in the floor`);

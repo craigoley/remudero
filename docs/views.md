@@ -543,6 +543,29 @@ The optional signal/usage payload is capped at 256 KiB per instance and 1.5 MiB 
 leaving space under the console's existing 2 MiB view ceiling. Later over-budget instances retain their
 metrics and identity but get a visible details refusal, not silent truncation or a complete-spend claim.
 
+### Independently qualified recent gardener evidence
+
+The existing serial slow lane also captures `gardener-spend-v1` once per analytics refresh interval.
+It scans the registered daemon generation's complete retained window, with the existing scan timeout,
+abort signal and source/lease/switch fences. Historical scan continuation does not trigger a new
+gardener capture on every leg. Collection happens neither on the projector thread nor on a request.
+Registry identity and enabled inventory must agree before and after collection; missing, revoked,
+malformed, unreadable, cancelled or changed-generation evidence cannot publish a verified zero.
+
+`instances[].gardenerSpend` uses its own persisted source time and `gardener-spend:<instance>` source
+reading. Consumers must judge that source for this metric, rather than treating a fresh gardener
+reading as fresh historical analytics. Historical `analytics:<instance>`, benchmark incompleteness,
+old snapshot clocks and damaged archives remain unchanged. Cold historical analytics may therefore
+carry recent gardener evidence while historical coverage remains missing and the envelope stale.
+Unknown prices remain unknown; reported worker prices and subscription calls are not new invoices.
+
+Before any independent source row exists, old embedded spend can retain its historical clock. Once
+an independent row exists, including a failed first capture, old embedded success cannot substitute
+for it. Later failures retain the last committed evidence with an explicitly failed source. The
+existing 64-KiB fleet budget reserves monetary payloads before optional worker-call coverage.
+Cached restart and HTTP reads require no ledger scan. Legacy/shadow disagreement remains subject
+to the existing parity gates; this source separation does not promote a view or authorize adoption.
+
 ## Console latency: `POST /v1/console/telemetry` (Phase 2)
 
 The console's hops (stream relay, refetch, render) are measured into core's own ledger
