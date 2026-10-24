@@ -190,7 +190,7 @@ test("the semantic reviewer receives the exact local report and diff without Git
         const match = args.prompt.match(/exact review input JSON at ("[^\n]+")\./);
         assert.ok(match, "the real orchestrator supplies a local evidence path");
         evidencePath = JSON.parse(match[1]);
-        assert.ok(args.sandboxReadRoots?.includes(evidencePath), "the read-only sandbox can read this exact file");
+        assert.equal(evidencePath, join(args.cwd, ".git", "rmd-review-input.json"), "the evidence stays within the existing disposable checkout read boundary");
         assert.deepEqual(JSON.parse(readFileSync(evidencePath, "utf8")), {
           headSha: fixture.headSha,
           diff: "diff --git a/src/example.ts b/src/example.ts\n+export const fixed = true;\n",
