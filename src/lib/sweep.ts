@@ -1913,9 +1913,8 @@ export async function regenerateConflictViaGit(
   worktreePath: string,
   pr: Pick<OpenPrView, "prNumber" | "headRefName" | "headSha" | "taskId">,
   mainSha: string,
-  deps: {
+  deps: Pick<BuildSweepEffectsDeps, "worktreeRemoveImpl"> & {
     git?: (cwd: string, args: readonly string[]) => string | Promise<string>;
-    worktreeRemoveImpl?: typeof worktreeRemove;
   } = {},
 ): Promise<ConflictRegenerationOutcome> {
   const run = async (cwd: string, args: readonly string[]) => {
