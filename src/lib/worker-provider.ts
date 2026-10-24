@@ -3215,7 +3215,10 @@ async function cashBadRequestEvidence(response: Response, signal: AbortSignal): 
     evidence = { body_diagnostics: "unreadable" };
   } finally {
     try { reader?.releaseLock(); }
-    catch { evidence = { body_diagnostics: "unreadable" }; }
+    catch {
+      // A broken stream lock invalidates classification; retain only unreadability, never its exception text.
+      evidence = { body_diagnostics: "unreadable" };
+    }
   }
   return evidence;
 }
