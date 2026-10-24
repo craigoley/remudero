@@ -27,6 +27,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import { loadLearningsForTaskFiles, selectLearnings } from "../src/lib/learnings.js";
 import {
@@ -459,6 +460,22 @@ test("GOLDEN — SESSION RETRO LEARNINGS: all five evidence-backed rules execute
   const { verdict, golden } = judgeCase("session-retro-learnings");
   assert.equal(golden.violation, "none");
   assertGolden(verdict, golden);
+});
+
+test("GOLDEN — SQLITE FIXTURE CLEANUP LESSON: diagnostic publication guidance reaches database fixture work", () => {
+  const { verdict, golden } = judgeCase("sqlite-fixture-cleanup-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  for (const taskFile of ["test/read-model-consistency.test.ts", "test/board-projection.test.ts", "src/lib/read-model-db.ts"]) {
+    const entries = loadLearningsForTaskFiles(join(REPO_ROOT, "learnings"), [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    const lesson = selected.find((entry) => entry.id === "sqlite-fixture-cleanup-waits-for-diagnostic-publication");
+    assert.ok(lesson, taskFile);
+    assert.equal(lesson.lifecycle, "active");
+    assert.match(lesson.fact, /close the database, await flushReadModelTransactions\(\), then remove/);
+    assert.match(lesson.fact, /Preserve the directory if close or flush fails/);
+  }
 });
 
 test("GOLDEN — SESSION RETRO 2026-10-17: the five component-scoped rules execute from their active shards", () => {

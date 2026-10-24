@@ -35,6 +35,17 @@ enter (mode and ACL). Missing or unreadable evidence keeps the generation. `--ap
 the Mac janitor passes it on every apply pass. A root that is URL-encoded (`%20` for a space) is
 refused: on 2026-10-22 one wrote a 506 MiB store to `Library/Application%20Support` that no sweep
 saw. The Mac janitor also sweeps that exact stray root when it holds a seed store marker.
+
+An account whose home others can enter (on this host `craigoleyagent`, whose home is
+group-readable so another account's clones can borrow its objects) cannot prove with its own lsof
+that no other account holds a seed file open, and running its sweeper as root would run
+account-owned code as root. Instead, `sudo bash deploy/mac/install-seed-open-files.sh STORE...`
+installs a root-owned launchd job (`com.remudero.seed-open-files`, every 5 minutes) that runs only
+the root-owned `seed-open-files.py`: one `lsof +D` per named store, written as JSON under
+`/Library/Application Support/Remudero/open-files`. The account's sweeper accepts that scan in place
+of an administrator scan only when the file and every folder above it are root-owned and writable
+by root alone, the scan names the generation's store, and it is under 15 minutes old. Otherwise
+the generation is kept as before. Names compare case-insensitively, as APFS does here.
 Consumer records bind the mount namespace too: a host collector must not mistake
 a container's invisible checkout paths for deleted checkouts. Foreign namespaces are retained
 for operator review, and so are older records without namespace evidence, except on macOS for

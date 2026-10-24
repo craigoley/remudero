@@ -3,13 +3,14 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   principles: {tdd: strict}
   budget_usd: 14.00
-  risk: medium  # one concern: which remote reservations a reap deletes; dry-run by default, leased, and nothing automated runs --apply
+  risk: high  # operator-reviewed cross-system deletion/audit recovery; no automated --apply
+  band_meaning: blast-radius
   origin: "operator 2026-10-14 (\"go with your recommendations\"): the refs/rmd-id census and reaper proposal of the rmd-id leak session (PR #11707)"
   plan_refs: [W1-T3300, W1-T9488, W1-T5279, W1-T1055]
-  files: [src/run-task.ts, test/the-reservation-audit-reaps-only-its-orphaned-candidates.test.ts]
+  files: [src/run-task.ts, test/the-reservation-audit-reaps-only-its-orphaned-candidates.test.ts, docs/cli-reference.md]
   status: queued
   priority: 1
   attempts: 0
@@ -63,11 +64,24 @@
         `src/lib/task-id-release.ts` primitive, batched, behind `assertClaimRefPushAllowed`. A ref that
         moved since the read is rejected by its own lease and survives. Split the push into more than one
         only when the refspec list would exceed the platform's argument limit.
-    (vii) ONE LEDGER ROW PER ID. A deleted id writes `task_id.reservation_released` with lane "reap",
-        `reason: "reaped: no shard/branch/PR; age <a> > bound <b>"`, the observed sha and the anchor's
-        holder line. A lease-rejected or failed id writes `task_id.reservation_release_skipped` with its
-        outcome. A ref is never deleted without its row, so the anchor stays recoverable: its message and
-        sha are in the row.
+    (vii) TRUTHFUL PER-ID INTENTS AND OUTCOMES. Git's leased push and a local ledger append are not one
+        transaction. Before any --apply deletion, write and verify a pending intent for EVERY selected
+        id, containing the batch identity, exact ref and observed sha, anchor message/holder line,
+        eligibility evidence and the derived age bar. An intent is explicitly PENDING, never released
+        or credited as a deletion. If any intent cannot be written and read back completely, delete
+        nothing. Keep the existing lease and claim-ref push guards; never prewrite a released outcome.
+        After the push, confirmed per-id results use the existing released/skipped outcomes. If the
+        push result or a subsequent outcome write is unavailable, report UNKNOWN and return nonzero;
+        the verified pending intent remains recoverable instead of claiming successful journaling.
+        An unresolved batch prevents another deletion batch for that repository/state root until
+        reconciliation completes. Read pending intents and outcomes through the complete compressed,
+        rotated-plain and live ledger union, refusing unread/torn history under the existing bounds.
+        Reconciliation freshly reads each exact ref: an absent ref may be recorded as observed absent
+        with actor UNKNOWN, never attributed to this process without evidence; a moved ref survives,
+        and an unchanged ref is not deleted by reconciliation. Append a truthful resolution only;
+        another deletion still requires a fresh complete audit and explicit --reap --apply. Preserve
+        every pending intent until it has a recorded resolution. No history eviction or new read-limit
+        increase is authorized, and neither --apply nor reconciliation is added to a gardener or cron.
     (viii) DRY-RUN FIRST. `--reap` without `--apply` deletes nothing. It prints every row it would reap,
         plus the bar and its basis, and writes one `task_id.reservation_reap_planned` summary row (counts,
         bar, basis), never one per id. Only `--reap --apply` deletes. This task wires `--apply` into
@@ -84,9 +98,18 @@
       proof: 'grep: test("the reap bar is derived from the measured reserve-to-PR delays" in test/the-reservation-audit-reaps-only-its-orphaned-candidates.test.ts'
     - claim: "a reservation whose anchor's holder branch is live is HELD, never a candidate"
       proof: 'grep: test("a live holder branch holds a reservation" in test/the-reservation-audit-reaps-only-its-orphaned-candidates.test.ts'
-    - claim: "--reap without --apply deletes nothing and writes one summary row; with --apply each deleted id writes one ledger row"
+    - claim: "--reap without --apply deletes nothing and writes one summary row; with --apply every selected id has a verified pending intent before deletion and a truthful confirmed or UNKNOWN outcome"
       proof: 'grep: test("a reap is a dry run unless applied, and an applied reap ledgers every id" in test/the-reservation-audit-reaps-only-its-orphaned-candidates.test.ts'
+    - claim: "an intent write or readback failure prevents every deletion; a post-push outcome-write failure remains UNKNOWN with recoverable intents"
+      proof: 'unit test: a reap refuses unwritten intents and preserves unknown post-push outcomes'
+    - claim: "a fresh reconciliation resolves pending intents without deleting unchanged or moved refs or inventing the deleting actor"
+      proof: 'unit test: pending reap intents reconcile truthfully across ledger rotation without another deletion'
   falsifier: |
     Delete the CANDIDATE filter, or let a degraded surface through. The first two tests must fail with a
     HELD, UNKNOWN or moved ref deleted from the fixture origin. Replace the derived bar with the 14-day
     default, and the bar test must fail.
+    Inject an intent append/readback failure: no leased delete is attempted. Let the leased push
+    succeed and fail its first outcome append: the command returns nonzero with UNKNOWN, and every
+    candidate's exact anchor remains in a verified pending intent. In a fresh invocation after ledger
+    rotation, reconcile absent, unchanged and moved refs without deleting any ref or attributing an
+    unproven actor; unread or torn history must refuse the reconciliation and any new deletion batch.
