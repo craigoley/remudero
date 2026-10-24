@@ -54,6 +54,10 @@ test("code health separates fixes from changed measurement scope", () => {
   const positive = compareCodeHealthEvidence(value);
   assert.equal(positive.state, "comparable");
   assert.equal(positive.fixedFindings.length, 1);
+  const moved = input(); moved.baseline!.scans[0]!.findings = [finding()];
+  moved.scans[0]!.findings = [{ ...finding(), path: "src/moved.ts", title: "Updated source explanation." }];
+  assert.equal(projectCodeHealth(moved).findings[0]!.status, "existing", "a moved or reworded source finding keeps its identity");
+  assert.equal(compareCodeHealthEvidence(moved).existingFindings.length, 1);
   const mutations: Array<(value: CodeHealthProjectionInput) => void> = [
     item => { item.scans[0]!.scopeHash = "smaller"; },
     item => { item.scans[0]!.toolVersion = "different"; },
