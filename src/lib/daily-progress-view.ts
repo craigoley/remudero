@@ -14,6 +14,8 @@ export const DAILY_PROGRESS_VIEW_NAME = "daily-progress";
 export const DAILY_PROGRESS_SCOPE_KEY = "__daily_progress_scope";
 /** BACKSTOP: a page bounds returned evidence, never the stored or counted population. */
 export const DAILY_PROGRESS_PAGE_BYTES = 1024 * 1024;
+/** PRIMARY CONTROL: source age follows the agreed hourly cadence; retry scheduling cannot renew it. */
+const DAILY_SOURCE_FRESHNESS_MS = 3_600_000;
 class DailyProgressNotReady extends Error {}
 interface Page { r: number; o: number; k: string }
 interface Request { repository: string; timeZone: string; reportDate: string; revision?: number; page?: Page }
@@ -117,8 +119,7 @@ export function readDailyProgressReport(opts: { stateDir: string; params: URLSea
   const checked = validateDailyProgressReport(data);
   if (!checked.ok) throw new Error(`Daily progress cached report refused: ${checked.reason}`);
   const sources = sourceEvidence.filter(s => s.required).map((source): ViewSource => {
-    const budgetMs = source.lastSuccessAt && source.nextDueAt ? Math.max(1, Date.parse(source.nextDueAt) - Date.parse(source.lastSuccessAt)) : 3_600_000;
-    return judgeSource({ name: `github:daily:${source.id}`, kind: "github", asOf: source.lastSuccessAt, budgetMs,
+    return judgeSource({ name: `github:daily:${source.id}`, kind: "github", asOf: source.lastSuccessAt, budgetMs: DAILY_SOURCE_FRESHNESS_MS,
       state: source.state === "unavailable" || source.state === "not_collected" || source.lastSuccessAt === null ? "unavailable" : source.state === "stale" ? "stale" : "fresh",
       ...(source.reason ? { reason: source.reason } : {}) }, opts.now);
   });
