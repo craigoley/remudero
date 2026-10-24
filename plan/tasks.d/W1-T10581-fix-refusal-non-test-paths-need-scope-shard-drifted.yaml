@@ -1,0 +1,48 @@
+- id: W1-T10581
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — fix_refusal:non-test-paths-need-scope-shard-drifted cost 52 PR minute(s) across 5 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.11
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:fix_refusal:non-test-paths-need-scope-shard-drifted"
+  files:
+    - src/run-task.ts
+    - test/worker/run-task/fix-refusal-non-test-paths-need-scope-shard-drifted.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on fix_refusal:non-test-paths-need-scope-shard-drifted"
+      proof: "grep: test(\"W1-T10581: fix_refusal:non-test-paths-need-scope-shard-drifted is prevented, not retried\" in test/worker/run-task/fix-refusal-non-test-paths-need-scope-shard-drifted.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures fix_refusal:non-test-paths-need-scope-shard-drifted's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: fix_refusal:non-test-paths-need-scope-shard-drifted cost 52 PR minute(s) (seven-day half-life) across 5 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/run-task.ts: names "non-test paths need scope" (2 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #13868 at 2026-10-24T09:10:58.152Z: non-test paths need scope (shard-drifted: the amendment base differs from the observed task shard)
+    - PR #13513 (https://github.com/craigoley/remudero/pull/13513) at 2026-10-22T04:23:46.099Z: non-test paths need scope (shard-drifted: the amendment base differs from the observed task shard)
+        failing tests: W1-T10227: board_snapshot.observation_refused no longer recurs
+        log excerpt:
+          | grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-7.log" || : > "$FLAKE_RETRY_DIR/shard-7.log"
+          | not ok 202 - W1-T10227: board_snapshot.observation_refused no longer recurs
+          |   ---
+          |   duration_ms: 13.53634
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/gardeners/scout-board-snapshot-observation-refused.test.ts:1:743'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     the stale sidecar was removed with the replaced data
+          | 
+          |     true !== false
+          | 
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
