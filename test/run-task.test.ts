@@ -9240,7 +9240,10 @@ test("collector handoff preserves held implementation accounting after a real fi
     branch: `run-T-FOLLOWUP-${fixed}`,
     // A pending fix-round check reaches the external-wait boundary. Terminal red
     // correctly returns before freshness checks and cannot exercise this handoff.
-    ciSeq: [[{ name: "ci", conclusion: "SUCCESS" }], [{ name: "ci", conclusion: "IN_PROGRESS" }]],
+    // If the callback wire is removed, the following poll is terminal red. The
+    // negative control then fails an assertion instead of waiting on fake CI.
+    ciSeq: [[{ name: "ci", conclusion: "SUCCESS" }], [{ name: "ci", conclusion: "IN_PROGRESS" }],
+      [{ name: "ci", conclusion: "FAILURE" }]],
   });
   const priorPath = process.env.PATH;
   process.env.PATH = `${fakeBinDir}:${priorPath}`;
