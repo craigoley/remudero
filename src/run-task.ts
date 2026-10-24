@@ -5248,7 +5248,7 @@ export function withdrawArmIfVerdictRefuses(
     ledgerPath: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
   },
-  deps: { disarm?: (prUrl: string) => DisarmOutcome | void; ledgerLines?: () => Array<Record<string, unknown>> } = {},
+  deps: Parameters<typeof withdrawArmIfVerdictRefusesFromModule>[2] = {},
 ): boolean {
   return withdrawArmIfVerdictRefusesFromModule(verdict, ctx, deps);
 }
@@ -16104,7 +16104,7 @@ export function resolveReviewSubjectCheckout(args: {
   exists?: (path: string) => boolean;
   isDirectory?: (path: string) => boolean;
 }): ReviewSubjectCheckout {
-  return resolveReviewSubjectCheckoutFromModule(args);
+  return resolveReviewSubjectCheckoutFromModule(reviewCommandHost(), args);
 }
 
 export function reviewSubjectFallbackAllowed(deps: ReviewCommandDeps): boolean {
@@ -16320,7 +16320,7 @@ export function resolvePlanCriteriaForReview(
 }
 
 export function planTreeIsBehindMain(source: string, repoDir: string): boolean {
-  return planTreeIsBehindMainFromModule(source, repoDir);
+  return planTreeIsBehindMainFromModule(reviewCommandHost(), source, repoDir);
 }
 
 export { feedbackLandingSweepRungs };
@@ -47435,9 +47435,19 @@ function reviewCommandHost(): ReviewCommandHost {
     liveWorkerRunIds,
     materializeReviewWorktree,
     readHeadShaRest,
+    readMainPlanTreeSha: (repoDir) => {
+      const planTreePath = relative(repoDir, join(resolveRepoLayout(repoDir).planDir, "tasks.d")).split(sep).join("/");
+      return execFileSync("git", ["-C", repoDir, "rev-parse", `origin/main:${planTreePath}`], {
+        encoding: "utf8",
+        stdio: "pipe",
+      }).trim();
+    },
     realDeps,
     reviewPostedDescription,
     reviewWorkerLockId,
+    reviewerClockBoundMs: (reviewerClockBoundMs) => reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon,
+    reviewSubjectGit: (dir, argv) =>
+      execFileSync("git", ["-C", dir, ...argv], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim(),
     withMaterializedWorktree,
   };
 }

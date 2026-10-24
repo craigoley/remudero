@@ -9,6 +9,7 @@ import { existsSync, lstatSync, realpathSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { loadConfig, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
+import { systemClock } from "../../lib/clock.js";
 import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermits, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
 import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
 import { SPECIALIST_TOOLS } from "../../lib/specialist-panel.js";
@@ -27,7 +28,6 @@ import { observeAdmissionDisposition } from "../../lib/action-executor.js";
 import { readLedgerUnionRawLinesAsync } from "../../lib/ledger-union.js";
 import { visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk } from "../../lib/plan.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
-import { loadDefaultPolicy } from "../../lib/policy.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, applyVerdictStability, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance } from "../../lib/review.js";
@@ -61,9 +61,12 @@ export interface ReviewCommandHost {
   readonly liveWorkerRunIds: Set<string>;
   materializeReviewWorktree(config: Config, repoDir: string, prNumber: number, headSha: string, deps?: ReviewWorktreeDeps): MaterializeReviewWorktreeResult;
   readHeadShaRest(prUrl: string, fetch?: GhApiFetcher): string;
+  readMainPlanTreeSha(repoDir: string): string;
   realDeps(): ComposedRealGraph;
   reviewPostedDescription(verdict: Pick<ReviewVerdict, "summary" | "capped"> & Partial<Pick<ReviewVerdict, "criteria">>, materializationFailure?: MaterializationFailure): string;
   reviewWorkerLockId(runId: string): string;
+  reviewerClockBoundMs(override?: number): number;
+  reviewSubjectGit(repoDir: string, argv: string[]): string;
   withMaterializedWorktree<T>(worktreePath: string | undefined, repoDir: string, body: () => Promise<T>, remove?: (repoDir: string, worktreePath: string) => void): Promise<T>;
 }
 
@@ -746,7 +749,7 @@ export async function runReview(host: ReviewCommandHost, args: {
         const stopTelemetry = args.workerTelemetry?.startPolling();
         let reviewer: WorkerResult;
         const reviewerClockBoundMs =
-          args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon;
+          host.reviewerClockBoundMs(args.reviewerClockBoundMs);
         const reviewerClockBound = { clockBound: { boundMs: reviewerClockBoundMs } };
         const reviewerSpawnWorker = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review");
         // W1-T4615: assigned before the provider call, so every later stream event names the routed model.
@@ -1530,7 +1533,7 @@ function ownerRepoEqual(a: { owner: string; repo: string }, b: { owner: string; 
   return a.owner === b.owner && a.repo === b.repo;
 }
 
-export function resolveReviewSubjectCheckout(args: {
+export function resolveReviewSubjectCheckout(host: ReviewCommandHost, args: {
   config: Config;
   rest: string[];
   self: { owner: string; repo: string };
@@ -1558,10 +1561,7 @@ export function resolveReviewSubjectCheckout(args: {
         return false;
       }
     });
-  const git =
-    args.git ??
-    ((dir: string, argv: string[]) =>
-      execFileSync("git", ["-C", dir, ...argv], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim());
+  const git = args.git ?? host.reviewSubjectGit;
 
   if (!exists(repoDir) || !isDirectory(repoDir)) {
     return {
@@ -1629,21 +1629,18 @@ export function reviewSubjectFallbackAllowed(deps: ReviewCommandDeps): boolean {
 }
 
 /**
- * Whether the `plan/tasks.d` tree that supplied `source` predates the one on `origin/main`.
+ * Whether the plan shard tree that supplied `source` predates the one on `origin/main`.
  *
  * `resolvePlanCriteriaAtHead` already computed and printed this tree identity as part of its
  * read provenance. Reuse that value instead of asking git for a second identity for the PR head:
  * the only new git read is main's current tree.
  */
-export function planTreeIsBehindMain(source: string, repoDir: string): boolean {
+export function planTreeIsBehindMain(host: ReviewCommandHost, source: string, repoDir: string): boolean {
   const planTreeSha = /(?:^|\s)plan\/tasks\.d\/@([0-9a-f]{12,40})(?:\s|$)/.exec(source)?.[1];
   if (!planTreeSha) return false;
 
   try {
-    const mainPlanTreeSha = execFileSync("git", ["-C", repoDir, "rev-parse", "origin/main:plan/tasks.d"], {
-      encoding: "utf8",
-      stdio: "pipe",
-    }).trim();
+    const mainPlanTreeSha = host.readMainPlanTreeSha(repoDir);
     return !mainPlanTreeSha.startsWith(planTreeSha);
   } catch {
     // The advisory must not turn an otherwise reviewable PR into a failure when main is unreadable.
@@ -1715,7 +1712,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     // The decline is a review outcome too: ledger it so a skipped closed PR is not a silent gap.
     const closed = raw as RestPullRow;
     appendLedger(ledgerPathFor(loadConfigDep()), {
-      run_id: `review-PR${closed.number}-${Date.now()}`, task_id: `PR-${closed.number}`, lane: "review",
+      run_id: `review-PR${closed.number}-${systemClock.now()}`, task_id: `PR-${closed.number}`, lane: "review",
       step: "review.skipped_closed_before_review", pr_number: closed.number, pr_url: closed.html_url,
       head_sha: closed.head?.sha, merged: typeof closed.merged_at === "string",
     });
@@ -1745,7 +1742,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url),
   );
   const reviewKey = reviewLedgerKeyFor(taskId, view.number);
-  const runId = `review-PR${view.number}-${Date.now()}`;
+  const runId = `review-PR${view.number}-${systemClock.now()}`;
   const reviewAttemptId = acceptedReviewAttemptId(deps.reviewAttemptId, view.number);
   // W1-T10269: a shadow review publishes nothing and its rows are renamed; every terminal row names the judging code's sha.
   const shadow = rest.includes(REVIEWER_SHADOW_FLAG);
@@ -1761,7 +1758,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
       ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
   }
-  const reviewSubject = resolveReviewSubjectCheckout({
+  const reviewSubject = resolveReviewSubjectCheckout(host, {
     config,
     rest,
     self: selfTarget,
@@ -1817,7 +1814,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // W1-T2462: `resolvePlanCriteriaAtHead` (lib/review.ts) resolves this trailered PR's criteria
   // from the plan AS IT STANDS AT `view.headRefOid` rather than `resolvePlanCriteriaForReview`'s
   // `loadPlan(planPath)` read of the container's checked-out working tree. That working-tree read
-  // is what let a `plan/tasks.d/` shard that merged between two daemon boots stay invisible to a
+  // is what let a plan shard that merged between two daemon boots stay invisible to a
   // review of the very PR head that shard reached (W1-T2432's shipped, previously-uncalled fix).
   //
   // W1-T2511: AND THE FETCH THAT MAKES THAT SHA READABLE NOW RUNS FIRST. This comment used to say
@@ -2172,7 +2169,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   );
   if (verdict.verdictWithheld) return 2;
 
-  if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(source, subjectRepoDir)) {
+  if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(host, source, subjectRepoDir)) {
     console.log(
       "NOTE: the criteria came from a plan tree older than origin/main; merge origin/main into the branch " +
         "before treating this unmet verdict as a diff defect",
