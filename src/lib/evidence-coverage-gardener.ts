@@ -10,8 +10,8 @@ import {
   type BenchmarkTerminalEvidence,
 } from "./benchmark-evidence.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { feedbackEntryPath, feedbackEntryRepoPath, readFeedbackEntry, stageFeedbackCapture } from "./feedback.js";
-import { landFeedbackStatusContent, type LandFeedbackOpts } from "./feedback-landing.js";
+import { feedbackEntryPath, feedbackEntryRepoPath, readFeedbackEntry, stageFeedbackCapture, type FeedbackEntry } from "./feedback.js";
+import { landFeedbackStatusContent, readQueuedFeedbackRecords, type LandFeedbackOpts } from "./feedback-landing.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 
@@ -343,7 +343,9 @@ export interface EvidenceCoverageFollowup {
   raw: string;
 }
 
-export type EvidenceCoverageFiler = (followup: EvidenceCoverageFollowup) => void;
+export type EvidenceCoverageFiler = ((followup: EvidenceCoverageFollowup) => void) & {
+  needsUpdate?: (followup: Omit<EvidenceCoverageFollowup, "action">) => boolean;
+};
 
 export type EvidenceRowsRead = { ok: true; rows: readonly Row[] } | { ok: false; reason: string };
 
@@ -453,14 +455,14 @@ export function runEvidenceCoverageGardener(deps: EvidenceCoverageInput): Eviden
 
   let budget = EVIDENCE_COVERAGE_MAX_FILINGS_PER_PASS;
   const fileOnce = (open: OpenGap, digest: string, followup: Omit<EvidenceCoverageFollowup, "action">): void => {
-    if (open.filedDigest === digest) return;
-    if (budget <= 0) {
-      result.deferred += 1;
-      return;
-    }
-    budget -= 1;
     const action = open.filedDigest === undefined ? "file" : "update";
     try {
+      if (open.filedDigest !== undefined && (deps.file.needsUpdate ? !deps.file.needsUpdate(followup) : open.filedDigest === digest)) return;
+      if (budget <= 0) {
+        result.deferred += 1;
+        return;
+      }
+      budget -= 1;
       deps.file({ ...followup, action });
       open.filedDigest = digest;
       (action === "file" ? result.filed : result.updated).push(followup.id);
@@ -511,8 +513,8 @@ export function runEvidenceCoverageGardener(deps: EvidenceCoverageInput): Eviden
         state.cells[key] = { ...cell, gap: open };
         const gap: EvidenceCoverageGap = { lane, field, kind: open.kind, ...count, floor, firstSeenAt: open.firstSeenAt, ...(cell.baseline !== undefined ? { baseline: cell.baseline } : {}) };
         result.gaps.push(gap);
-        // The digest moves on a whole-percent change, not on every new row, so a persisting gap
-        // re-lands a handful of times rather than once per pass.
+        // Filers without a record reader retain whole-percent dedup; the production filer checks
+        // the record's measured coverage even when this digest has not moved.
         const digest = `${open.kind}|${open.firstSeenAt}|${Math.round((count.observed / count.denominator) * 100)}`;
         fileOnce(open, digest, { id: evidenceCoverageFollowupId(lane, field), lane, field, raw: gapFollowupRaw(gap) });
       }
@@ -533,18 +535,32 @@ export function runEvidenceCoverageGardener(deps: EvidenceCoverageInput): Eviden
   return result;
 }
 
-/** The production filer: a new gap is captured as a feedback entry under its dedup id; an entry that
- *  already exists is updated in place — its `raw` only, status untouched — through the landing path,
- *  because a local rewrite of a tracked entry is checkout dirt (feedback.ts's `setFeedbackStatus`). */
+/** Compare against the checkout or pending record, so lost landings can be retried without rewriting
+ *  tracked entries. Landing failures must reach the pass's retry path. */
 export function feedbackEvidenceCoverageFiler(root: string, land: LandFeedbackOpts = {}): EvidenceCoverageFiler {
-  return (followup) => {
-    if (existsSync(feedbackEntryPath(root, followup.id))) {
-      const entry = readFeedbackEntry(root, followup.id);
-      landFeedbackStatusContent(root, feedbackEntryRepoPath(followup.id), stringifyYaml({ ...entry, raw: followup.raw }), land);
+  const current = (id: string): FeedbackEntry | undefined => {
+    const queued = land.stateRoot === undefined ? undefined : readQueuedFeedbackRecords(land.stateRoot).get(feedbackEntryRepoPath(id));
+    return (queued as unknown as FeedbackEntry | undefined) ?? (existsSync(feedbackEntryPath(root, id)) ? readFeedbackEntry(root, id) : undefined);
+  };
+  const coverageLine = (raw: string): string => raw.split("\n").find((line) => line.startsWith("Coverage:")) ?? raw;
+  const file: EvidenceCoverageFiler = (followup) => {
+    const entry = current(followup.id);
+    if (entry) {
+      const result = landFeedbackStatusContent(root, feedbackEntryRepoPath(followup.id), stringifyYaml({ ...entry, raw: followup.raw }), land);
+      const queued = result.queued !== undefined && result.queued.includes(feedbackEntryRepoPath(followup.id));
+      if (!result.landed && !queued) {
+        throw new Error(result.error ?? `feedback landing did not land or queue ${followup.id}`);
+      }
       return;
     }
-    stageFeedbackCapture(root, land.stateRoot, { raw: followup.raw, origin: "cli", id: followup.id });
+    const captured = stageFeedbackCapture(root, land.stateRoot, { raw: followup.raw, origin: "cli", id: followup.id });
+    if (captured.error) throw new Error(captured.error);
   };
+  file.needsUpdate = (followup) => {
+    const entry = current(followup.id);
+    return entry === undefined || coverageLine(entry.raw) !== coverageLine(followup.raw);
+  };
+  return file;
 }
 
 /** The daemon's deps (src/run-task.ts): the windowed ledger union, refused whole when any file in the
