@@ -3175,9 +3175,54 @@ class CashHttpFailure extends RmdError {
   }
 }
 
-/** Keep bounded Azure rate evidence, never response bodies, arbitrary headers or credentials. */
-function cashHttpFailure(response: Response, source: string): Error {
-  const evidence: Record<string, number | string> = {};
+const CASH_ERROR_CATEGORY_TYPES = new Set(["invalid_request_error", "authentication_error", "permission_error",
+  "not_found_error", "request_too_large", "rate_limit_error", "api_error", "overloaded_error", "billing_error", "timeout_error"]);
+/** Operator-approved retained/decoded byte bound, not a transport-buffer/RSS cap or another request's authority. */
+const CASH_ERROR_BODY_BYTES = 8 * 1024;
+type CashBadRequestEvidence = { error_category?: string; context_too_long?: true; body_diagnostics?: "oversized" | "unreadable" };
+
+/** Interpret only a complete bounded HTTP400 envelope. No body/message or arbitrary value leaves this reader. */
+async function cashBadRequestEvidence(response: Response, signal: AbortSignal): Promise<CashBadRequestEvidence> {
+  if (response.status !== 400) return {};
+  let evidence: CashBadRequestEvidence = {}, reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    reader = response.body?.getReader();
+    if (reader) {
+      const chunks: Uint8Array[] = []; let length = 0, complete = false;
+      for (;;) {
+        const part = await cashAbortable(signal, () => reader!.read());
+        if (part.done) { complete = true; break; }
+        if (!(part.value instanceof Uint8Array) || part.value.byteLength === 0) throw new Error("invalid error-envelope chunk");
+        length += part.value.byteLength;
+        // Never classify a valid-looking prefix or trust the server's Content-Length.
+        if (length > CASH_ERROR_BODY_BYTES) { evidence = { body_diagnostics: "oversized" }; break; }
+        chunks.push(part.value);
+      }
+      if (complete) {
+        const payload: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, length)));
+        const error = payload !== null && typeof payload === "object" && !Array.isArray(payload)
+          ? (payload as { error?: unknown }).error : undefined;
+        if (error !== null && typeof error === "object" && !Array.isArray(error)) {
+          const { type, message } = error as { type?: unknown; message?: unknown };
+          if (typeof type === "string" && CASH_ERROR_CATEGORY_TYPES.has(type)) evidence.error_category = type;
+          // Signature inference is advisory only; it never changes HTTP status, retries or allowance accounting.
+          if (evidence.error_category && typeof message === "string" && message.includes("prompt is too long")) evidence.context_too_long = true;
+        }
+      }
+    }
+  } catch {
+    signal.throwIfAborted(); // Diagnostics cannot absorb caller cancellation or extend the existing request window.
+    evidence = { body_diagnostics: "unreadable" };
+  } finally {
+    try { reader?.releaseLock(); }
+    catch { evidence = { body_diagnostics: "unreadable" }; }
+  }
+  return evidence;
+}
+
+/** Keep bounded allowlisted diagnostics, never response bodies, arbitrary headers or credentials. */
+async function cashHttpFailure(response: Response, source: string, signal: AbortSignal): Promise<Error> {
+  const evidence: Record<string, number | string | boolean> = {};
   let continuationDelay: number | undefined;
   try {
     const unsigned = (name: string): number | undefined => {
@@ -3204,6 +3249,7 @@ function cashHttpFailure(response: Response, source: string): Error {
     evidence.diagnostics = "unreadable";
     continuationDelay = undefined;
   }
+  Object.assign(evidence, await cashBadRequestEvidence(response, signal));
   const suffix = Object.keys(evidence).length > 0 ? ` ${JSON.stringify(evidence)}` : "";
   return new CashHttpFailure(`${source} request failed with HTTP ${response.status}${suffix}`, response.status, continuationDelay);
 }
@@ -3258,12 +3304,18 @@ async function cashRequestJson<T>(input: {
         });
         if (response.status === 404) throw new OpenWeightDeploymentNotFoundError(input.deployment);
         if (!response.ok) {
-          const failure = cashHttpFailure(response, input.source);
-          // Release unread error bodies without interpreting untrusted content; failure accounting remains unchanged.
-          void response.body?.cancel().catch(() => {
-            console.error(JSON.stringify({ event: "cash.error_body_cancel_failed", status: response.status }));
-          });
-          throw failure;
+          try {
+            const failure = await cashHttpFailure(response, input.source, controller.signal);
+            checkActive();
+            throw failure;
+          } finally {
+            // The bounded reader releases its lock first; unread or oversized tails are never retained.
+            try { void response.body?.cancel().catch(() => {
+              console.error(JSON.stringify({ event: "cash.error_body_cancel_failed", status: response.status }));
+            }); } catch {
+              console.error(JSON.stringify({ event: "cash.error_body_cancel_failed", status: response.status }));
+            }
+          }
         }
         const envelope = await cashAbortable(controller.signal, () => response.json());
         checkActive();
