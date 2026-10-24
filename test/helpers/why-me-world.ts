@@ -1,3 +1,5 @@
+import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
+import { retainFixture } from "#test/setup/retained-fixtures.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -18,9 +20,27 @@ const operator: IdentityProvider = { name: "test-operator", grant: () => undefin
   if (req.headers.authorization === "Bearer bob") return { scopes: new Set(["read", "write"]), tier: "low", actor: "operator:bob" };
   return undefined;
 } };
-export async function world(t: T, options: { root?: string; instance?: string; repository?: string; native?: boolean; planSource?: PanelGraphDeps["readPlanSource"] } = {}) {
+export async function world(scope: T, options: { root?: string; instance?: string; repository?: string; native?: boolean; planSource?: PanelGraphDeps["readPlanSource"]; retirementBarrier?: () => Promise<void> } = {}) {
   const instance = options.instance ?? INSTANCE, repository = options.repository ?? REPOSITORY;
-  const root = options.root ?? makeTempDir("why-me"); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = options.root ?? makeTempDir("why-me");
+  const closures: Array<() => void | Promise<void>> = [];
+  const t: T = { after: (close) => { closures.push(close); } };
+  scope.after(async () => {
+    const failures: unknown[] = [];
+    for (const close of closures.reverse()) {
+      try { await close(); } catch (error) { failures.push(error); }
+    }
+    try { await (options.retirementBarrier ?? flushReadModelTransactions)(); }
+    catch (error) { failures.push(error); }
+    try {
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) throw new AggregateError(failures, "why-me fixture release failed");
+      rmSync(root, { recursive: true, force: true });
+    } catch (error) {
+      retainFixture(root, "why-me fixture retirement failed");
+      throw error;
+    }
+  });
   const state = join(root, "state"); mkdirSync(state);
   const sourceRoot = options.native ? join(root, "repos", repository.split("/")[1]!) : root;
   mkdirSync(join(sourceRoot, "plan"), { recursive: true });
@@ -43,7 +63,7 @@ export async function world(t: T, options: { root?: string; instance?: string; r
         readPlanSnapshot: () => { throw new Error("GET must read the maintained snapshot"); } })], ...binding });
     const server = createService({ tokens: { read: "read", write: "shared" }, providers: [operator], routes, enforceWriteTiers: true });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-    t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+    t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     return async (body?: unknown, token = "alice", query = "") => {
       const res = await fetch(base + `/v1/i/${instance}/inbox/${body === undefined ? "attention-census" : "why-me-correction"}${query}`, {
@@ -55,6 +75,6 @@ export async function world(t: T, options: { root?: string; instance?: string; r
   };
   const request = (intentId: string, correction = "fleet_can_handle") => ({ repository, instance,
     proposalId: PROPOSAL, threadId: inboxThreadId(PROPOSAL), snapshotKey: key(), intentId, correction });
-  return { root, state, instance, repository, planPath, ledgerPath, registry, plan, deps, refresh, key, served, request, call: await served() };
+  return { after: t.after, root, state, instance, repository, planPath, ledgerPath, registry, plan, deps, refresh, key, served, request, call: await served() };
 }
 

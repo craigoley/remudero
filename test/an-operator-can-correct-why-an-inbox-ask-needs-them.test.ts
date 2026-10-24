@@ -668,3 +668,79 @@ test("why-me receipt FIFOs are refused without waiting for a writer", t => {
   const view = JSON.parse(child.stdout);
   assert.equal(view.state, "partial"); assert.equal(view.total, 0);
 });
+
+
+test("why-me fixture resources close and diagnostics settle before its owned root retires", async (t) => {
+  const { openProjectorReadModel } = await import("#src/lib/ledger-projector.js");
+  const { flushReadModelTransactions } = await import("#src/lib/read-model-db.js");
+  let retirement!: () => void | Promise<void>, release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let closed = false, observedBarrier = false, retired = false;
+  const w = await world({ after: (finish) => {
+    retirement = finish;
+    t.after(async () => { if (!retired) { retired = true; await finish(); } });
+  } }, {
+    retirementBarrier: async () => {
+      assert.equal(closed, true, "the actual SQLite owner closes before the diagnostic barrier");
+      await assert.rejects(() => w.call(), "the real HTTP owner is closed before the barrier");
+      await flushReadModelTransactions(); observedBarrier = true; await gate;
+    },
+  });
+  const db = openProjectorReadModel(w.state, "core", fixedClock(Date.now()));
+  w.after(() => { db.close(); closed = true; });
+  retired = true;
+  const finishing = Promise.resolve(retirement());
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.ok(existsSync(w.root), "retirement keeps the real root while diagnostics are held");
+    release(); await finishing;
+    assert.equal(observedBarrier, true);
+    assert.throws(() => db.prepare("SELECT 1"));
+    assert.equal(existsSync(w.root), false);
+  } finally {
+    release(); await finishing.catch(() => {});
+    rmSync(w.root, { recursive: true, force: true });
+  }
+});
+
+test("why-me fixture release and barrier failures retain real SQLite evidence after the standard exit sweep", async (t) => {
+  const { REPO_ROOT } = await import("#test/helpers/repo-root.js");
+  const { openProjectorReadModel } = await import("#src/lib/ledger-projector.js");
+  const { flushReadModelTransactions } = await import("#src/lib/read-model-db.js");
+  const mode = process.env.RMD_WHY_ME_RETIREMENT_MODE;
+  if (mode) {
+    assert.ok(mode === "release" || mode === "barrier");
+    let retirement!: () => void | Promise<void>, retired = false;
+    const failure = new Error(`why-me ${mode} failure`);
+    const w = await world({ after: (finish) => {
+      retirement = finish;
+      t.after(async () => { if (!retired) { retired = true; await finish(); } });
+    } }, {
+      retirementBarrier: async () => { await flushReadModelTransactions(); if (mode === "barrier") throw failure; },
+    });
+    const db = openProjectorReadModel(w.state, "core", fixedClock(Date.now())), dbPath = db.path;
+    w.after(() => { db.close(); if (mode === "release") throw failure; });
+    retired = true;
+    await assert.rejects(async () => retirement(), error => error === failure);
+    const unretained = makeTempDir("why-me-unretained-control");
+    writeFileSync(process.env.RMD_WHY_ME_RETIREMENT_RECEIPT!, JSON.stringify({ root: w.root, dbPath, unretained }));
+    return;
+  }
+  for (const failureMode of ["release", "barrier"]) {
+    const childTmp = makeTempDir(`why-me-retirement-${failureMode}`), receiptPath = join(childTmp, "receipt.json");
+    t.after(() => rmSync(childTmp, { recursive: true, force: true }));
+    const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: childTmp,
+      RMD_WHY_ME_RETIREMENT_MODE: failureMode, RMD_WHY_ME_RETIREMENT_RECEIPT: receiptPath };
+    delete env.NODE_TEST_CONTEXT;
+    env.NODE_V8_COVERAGE = undefined;
+    const run = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
+      "--test-name-pattern", `^${t.name}$`, "test/an-operator-can-correct-why-an-inbox-ask-needs-them.test.ts"],
+      { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 30_000 });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /^# tests 1$/m);
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+    assert.equal(existsSync(receipt.root), true, `${failureMode}: the actual exit sweep preserves retained ownership evidence`);
+    assert.deepEqual(readFileSync(receipt.dbPath).subarray(0, 16), Buffer.from([...Buffer.from("SQLite format 3"), 0]));
+    assert.equal(existsSync(receipt.unretained), false, "the same standard exit sweep removes its unretained control");
+  }
+});
