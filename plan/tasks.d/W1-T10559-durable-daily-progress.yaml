@@ -1,4 +1,5 @@
-- repo: remudero
+- id: W1-T10559
+  repo: remudero
   type: implement
   verify: auto
   principles:
@@ -9,7 +10,6 @@
     eight-slice delivery"
   status: queued
   attempts: 0
-  id: W1-T10559
   title: Collect and serve durable timezone-aware Daily progress independently of page visits
   depends_on:
     - W1-T10558

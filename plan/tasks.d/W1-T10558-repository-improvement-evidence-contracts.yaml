@@ -1,4 +1,5 @@
-- repo: remudero
+- id: W1-T10558
+  repo: remudero
   type: implement
   verify: auto
   principles:
@@ -9,7 +10,6 @@
     eight-slice delivery"
   status: queued
   attempts: 0
-  id: W1-T10558
   title: Define repository improvement evidence and calendar-day report contracts
   depends_on: []
   priority: 1

@@ -1,4 +1,5 @@
-- repo: remudero
+- id: W1-T10562
+  repo: remudero
   type: implement
   verify: auto
   principles:
@@ -9,7 +10,6 @@
     eight-slice delivery"
   status: queued
   attempts: 0
-  id: W1-T10562
   title: Measure whether planned improvements helped using comparable before-and-after evidence
   depends_on:
     - W1-T10560
