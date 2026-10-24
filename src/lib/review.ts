@@ -6493,7 +6493,45 @@ export function reviewStatusEntryFromCombined(payload: unknown): ReviewStatusEnt
 export async function readReviewStatusEntry(owner: string, repo: string, sha: string,
   fetch: GhApiFetcher = (args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit),
 ): Promise<ReviewStatusEntry | undefined> {
-  return reviewStatusEntryFromCombined(await fetch(combinedStatusRestArgs(owner, repo, sha)));
+  const entry = reviewStatusEntryFromCombined(await fetch(combinedStatusRestArgs(owner, repo, sha)));
+  if (entry === undefined || (typeof entry.posterLogin === "string" && entry.posterLogin.trim() &&
+      (entry.posterType === "Bot" || entry.posterType === "User"))) return entry;
+  // Combined REST statuses omit creator. One named context supplies the server actor without
+  // scanning status history; bind its repository and commit before using that identity.
+  const query = `query($owner:String!,$name:String!,$sha:GitObjectID!){
+    repository(owner:$owner,name:$name){nameWithOwner object(oid:$sha){... on Commit{
+      oid status{context(name:"remudero-review"){context state creator{login __typename}}}
+    }}}
+  }`;
+  const raw = await fetch(["api", "graphql", "-f", `query=${query}`, "-f", `owner=${owner}`,
+    "-f", `name=${repo}`, "-f", `sha=${sha}`]) as {
+    errors?: unknown[];
+    data?: { repository?: { nameWithOwner?: string; object?: { oid?: string;
+      status?: { context?: { context?: string; state?: string; creator?: { login?: string; __typename?: string } | null } | null } | null;
+    } | null } | null };
+  };
+  const repository = raw?.data?.repository;
+  const commit = repository?.object;
+  if (raw?.errors !== undefined || repository?.nameWithOwner?.toLowerCase() !== `${owner}/${repo}`.toLowerCase() || commit?.oid !== sha) {
+    throw new Error("live review publisher context is unreadable or belongs to a different repository or commit");
+  }
+  if (!Object.hasOwn(commit, "status") || (commit.status !== null &&
+      (typeof commit.status !== "object" || !Object.hasOwn(commit.status, "context")))) {
+    throw new Error("live review publisher context is incomplete");
+  }
+  const context = commit.status?.context;
+  if (context == null) throw new Error("live review publisher status disappeared during its identity read");
+  if (context.context !== REVIEW_CONTEXT) throw new Error("live review publisher context does not match remudero-review");
+  const actor = context.creator;
+  // GraphQL Bot.login is an App slug; REST creator.login adds [bot]. Translate only a
+  // server-typed Bot to the existing vocabulary, never a User or an unknown actor.
+  const login = actor?.__typename === "Bot" && typeof actor.login === "string" && /^[a-z0-9-]+$/i.test(actor.login)
+    ? `${actor.login}[bot]` : actor?.login;
+  const identified = reviewStatusEntryFromCombined({ statuses: [{ context: context.context,
+    state: typeof context.state === "string" ? context.state.toLowerCase() : context.state,
+    creator: { login, type: actor?.__typename } }] });
+  if (identified?.state !== entry.state) throw new Error("live review publisher status changed during its identity read");
+  return identified;
 }
 
 export interface ReviewReplayPublisherEvidence {

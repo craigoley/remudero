@@ -1,3 +1,4 @@
+import type { LifetimeIndexFailure } from "../../lib/lifetime-identity-index.js";
 /**
  * W1-T9333 — the `daemon` verb's handler, moved out of `src/run-task.ts` (decomposition: one verb per module).
  * `daemonCommand` is the unchanged body; the run-task.ts symbols it reaches arrive through {@link DaemonCommandHost}
@@ -792,12 +793,15 @@ export async function daemonCommand(
   };
   // W1-T3758: one bounded archive scan before the daemon starts dispatching. The live ledger is
   // still read at each gate consultation; unread history retains the old live-only behaviour.
-  const archivedLifetime = await auditedLifetimeTalliesFromArchives(dirname(ledgerPath));
+  const archivedLifetime = await auditedLifetimeTalliesFromArchives(dirname(ledgerPath), undefined,
+    (failure: LifetimeIndexFailure) => log("dispatch.lifetime_history_unavailable", { ...failure, phase: "index" }));
+  try {
   if (archivedLifetime.history === undefined) {
     log("dispatch.lifetime_history_unavailable", {
       archive_count: archivedLifetime.archiveCount,
       unread_archives: archivedLifetime.unread,
       reason: archivedLifetime.unavailableReason,
+      ...(archivedLifetime.indexError === undefined ? {} : { detail: archivedLifetime.indexError }),
     });
   } else {
     log("dispatch.lifetime_history_loaded", {
@@ -920,6 +924,7 @@ export async function daemonCommand(
   });
   const processKill = deps.processKill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const onSignal = (sig: NodeJS.Signals) => {
+    archivedLifetime.history?.close?.();
     githubEventWake.close();
     consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
     drainLock.release();
@@ -1981,5 +1986,8 @@ export async function daemonCommand(
     }));
     consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
     drainLock.release();
+  }
+  } finally {
+    archivedLifetime.history?.close?.();
   }
 }
