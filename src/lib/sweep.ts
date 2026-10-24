@@ -16710,7 +16710,13 @@ export async function runSweep(
     const belongs = (row: Record<string, unknown>) => row.pr_number === pr.prNumber || row.pr_url === pr.prUrl ||
       (row.pr_number === undefined && row.pr_url === undefined && pr.taskId !== undefined && row.task_id === pr.taskId);
     const since = Date.parse(fields.blocker_since);
-    const currentRows = readLedger(deps.ledgerPath);
+    let currentRows = ledgerLines;
+    let stageHistoryError: string | undefined;
+    try { currentRows = readLedger(deps.ledgerPath); }
+    catch (error) {
+      stageHistoryError = String(error);
+      log("sweep.stuck_history_unavailable", { pr_number: pr.prNumber, reason: stageHistoryError });
+    }
     const reportedStage = currentRows.find(row => row.step === "pr.stuck" && stageKey(row) === key);
     if (reportedStage) { stuckStages.set(key, reportedStage); return; }
     const stageRows = currentRows.filter(row => belongs(row) && Date.parse(String(row.ts)) >= since);
@@ -16749,7 +16755,8 @@ export async function runSweep(
     }
     const repeated = [...repeats].filter(([, count]) => count > 1).sort((a, b) => b[1] - a[1])[0];
     const repeatDiagnosis = repeated ? `repeat: ${JSON.stringify(repeated[0])} x${repeated[1]}` : undefined;
-    const boundFields = ownerless ? { owner: "none" } : { bound_minutes: bound?.minutes, bound_kind: bound?.kind };
+    const boundFields = { ...(ownerless ? { owner: "none" } : { bound_minutes: bound?.minutes, bound_kind: bound?.kind }),
+      ...(stageHistoryError ? { stage_history_error: stageHistoryError } : {}) };
     const recordStuck = (row: Record<string, unknown> & { diagnosis: string }): void => {
       record("pr.stuck", row);
       stuckStages.set(key, row);
@@ -16761,6 +16768,7 @@ export async function runSweep(
       });
     };
     const diagnoses: string[] = fields.blocker_cause ? [fields.blocker_cause] : [];
+    if (stageHistoryError) diagnoses.push(`stage history unreadable (${stageHistoryError})`);
     if (repeatDiagnosis) diagnoses.push(repeatDiagnosis);
     // W1-T8167: a review admitted for this head and not yet posted/failed/refused is a live owner, not a stall.
     // It is overdue only past the longest review this process has observed (the 30-minute bound stands in).
@@ -18182,7 +18190,10 @@ export async function runSweep(
     if (armOutcome !== "armed" && armOutcome !== "direct-merged" && !gardenRecordRefusals.has(pr.prNumber)) {
       const repairStarted = acted && spent !== false && (disposition === "conflicted" || disposition === "blocked-fixable");
       const escalationHandled = (disposition === "blocked-ambiguous" || disposition === "refused-escalate") &&
-        (acted || deduped || actionError !== undefined || (pr.isPlanFiling === true && !pr.taskId));
+        (acted || deduped || actionError !== undefined || (pr.isPlanFiling === true && !pr.taskId)) ||
+        // Ownerless stages still report immediately; the disposition owns repairs, waits and prior escalations.
+        (blockerRow.blocker_owner === "NONE" && (acted || deduped || actionError !== undefined || disposition === "wait" ||
+          (standDownReason !== undefined && (deps.actionable?.(disposition) ?? true))));
       const stageStandDown = disposition === "stale" && acted ? "CLOSED" : standDownReason;
       await reportStuckStage(pr, blockerRow, repairStarted, stageStandDown, escalationHandled);
     }

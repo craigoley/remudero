@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, FIX_DISPATCH_FAILED_BACKSTOP, PLAN_REPAIR_DISPATCH_STEP,
+  runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { incidentEventFromLedgerRow } from "#src/lib/sre-lane.js";
 
 const NOW = Date.now();
@@ -154,4 +155,75 @@ test("W1-T8267: a PR closed by its disposition has no stalled stage", async () =
   assert.equal(f.rows("pr.stuck").length, 0);
   assert.equal(f.rows("incident.event").length, 0);
   assert.equal(f.escalations.length, 0);
+});
+
+test("W1-T8267: an ownerless stage preserves a repair judge's wait and recovery", async () => {
+  const view = pr(7243, { reviewState: "success", priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap });
+  const proof = { claim: "a repair discriminates", proof: "unit test: a repair discriminates",
+    met: true, reason: "keyword floor", proof_exec: "not_executable" };
+  let recovered = false;
+  let repairs = 0;
+  const f = fixture([
+    { task_id: view.taskId, step: "review.posted", pr_url: view.prUrl, head_sha: view.headSha,
+      state: "success", capped: true, plan_only: false,
+      decision_verdict: { state: "success", capped: true, planOnly: false, criteria: [proof] } },
+    ...Array.from({ length: 2 }, () => ({ task_id: view.taskId, step: PLAN_REPAIR_DISPATCH_STEP,
+      pr_number: view.prNumber, outcome: "dispatched" })),
+  ], {
+    actionable: () => true,
+    fixProgressJudge: async () => recovered ? { verdict: "continue", reason: "new proof evidence" } : undefined,
+    dispatchPlanOnlyRepair: () => { repairs++; return true; },
+  });
+  const held = await runSweep([view], f.deps);
+  assert.equal(held.actions[0].disposition, "wait");
+  assert.equal(repairs, 0);
+  assert.equal(f.escalations.length, 0);
+  assert.equal(f.rows("pr.stuck")[0].owner, "none");
+  assert.equal(f.rows("incident.event").length, 1);
+  recovered = true;
+  await runSweep([view], f.deps);
+  assert.equal(repairs, 1);
+  assert.equal(f.escalations.length, 0);
+});
+
+test("W1-T8267: a dispatch backstop owns its escalation while the ownerless stage records an incident", async () => {
+  const view = pr(7243, { checksState: "red", reviewState: "pending",
+    ciFailures: [{ name: "ci", logTail: "test failed" }] });
+  const f = fixture(Array.from({ length: FIX_DISPATCH_FAILED_BACKSTOP }, () => ({
+    task_id: view.taskId, step: "sweep.fix.dispatch_failed", pr_number: view.prNumber,
+    head_sha: view.headSha, error: "worker launch failed",
+  })), { actionable: () => true });
+  await runSweep([view], f.deps);
+  assert.equal(f.escalations.length, 1);
+  assert.match(f.escalations[0].reason, /FIX_DISPATCH_FAILED_BACKSTOP/);
+  assert.equal(f.rows("pr.stuck")[0].owner, "none");
+  assert.equal(f.rows("incident.event").length, 1);
+  await runSweep([view], f.deps);
+  assert.equal(f.escalations.length, 1);
+  assert.equal(f.rows("pr.stuck").length, 1);
+});
+
+test("W1-T8267: an unreadable stage history preserves a completed review and names the read failure", async () => {
+  let reviewed = false;
+  const observations: Row[] = [];
+  const f = fixture([], {
+    actionable: () => true,
+    postReview: () => { reviewed = true; },
+    reviewerCodeStaleThisPass: () => ({ oldSha: "old", newSha: "new" }),
+    log: (step, fields) => { observations.push({ step, ...fields }); },
+    readLedger: () => {
+      if (reviewed) throw new Error("stage history unavailable");
+      return [];
+    },
+  });
+  const result = await runSweep([pr()], f.deps);
+  assert.equal(result.actions[0].acted, true);
+  assert.equal(result.actions[0].actionError, undefined);
+  assert.equal(f.escalations.length, 0);
+  assert.equal(f.rows("pr.stuck")[0].stage_history_error, "Error: stage history unavailable");
+  assert.match(String(f.rows("pr.stuck")[0].diagnosis), /stage history unavailable/);
+  assert.equal(f.rows("incident.event").length, 1);
+  assert.deepEqual(observations.find(row => row.step === "sweep.stuck_history_unavailable"), {
+    step: "sweep.stuck_history_unavailable", pr_number: 10783, reason: "Error: stage history unavailable",
+  });
 });
