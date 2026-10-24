@@ -761,6 +761,7 @@ test("agent fixture release and barrier failures preserve real evidence after th
     t.after(() => rmSync(childTmp, { recursive: true, force: true }));
     const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: childTmp, RMD_AGENT_FIXTURE_FAILURE_MODE: failureMode, RMD_AGENT_FIXTURE_RECEIPT: receipt };
     delete env.NODE_TEST_CONTEXT;
+    env.NODE_V8_COVERAGE = undefined;
     const child = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test-name-pattern", `^${t.name}$`, "test/agent-view.test.ts"], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 30_000 });
     assert.equal(child.error, undefined, child.stderr);
     assert.equal(child.signal, null, child.stderr);
