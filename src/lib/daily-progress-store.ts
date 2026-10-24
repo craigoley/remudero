@@ -98,6 +98,15 @@ export function readDailyProgressRevision(stateDir: string, day: DailyDay, revis
 
 const eventContent = ({ observedAt: _observedAt, ...event }: DailyProgressEvent): string => JSON.stringify(event);
 
+/** Re-observation clocks live in job receipts; unchanged closed-day evidence keeps its original revision. */
+function closedEvidence(metadata: Omit<DailyProgressRecord, "events">): unknown {
+  const { generatedAt: _generatedAt, ...rest } = metadata;
+  return { ...rest, coverage: { ...rest.coverage, sources: rest.coverage.sources.map(source => {
+    const { lastAttemptAt: _attempt, lastSuccessAt: _success, nextDueAt: _due, ...evidence } = source;
+    return evidence;
+  }) } };
+}
+
 /** Stage immutable objects before taking the short SQLite ownership fence. Manifest is the authority. */
 export function prepareDailyProgressPublication(stateDir: string, records: readonly DailyProgressRecord[], jobs: readonly DailyProgressJob[]): {
   manifest: DailyProgressManifest;
@@ -134,8 +143,10 @@ export function prepareDailyProgressPublication(stateDir: string, records: reado
       const { revision: _revision, correctionReason: _reason, ...previous } = old.report;
       if (previous.phase === "corrected") previous.phase = "complete";
       if (isDeepStrictEqual(previous, core) && isDeepStrictEqual(old.events, all)) continue;
+      if (Date.parse(old.report.generatedAt) >= Date.parse(input.windowEnd) && Date.parse(input.generatedAt) >= Date.parse(input.windowEnd) &&
+          isDeepStrictEqual(closedEvidence(previous), closedEvidence(core)) && isDeepStrictEqual(old.events, all)) continue;
     }
-    const report = { ...core, revision: (day?.revisions.length ?? 0) + 1, correctionReason: old && Date.parse(input.windowEnd) <= Date.parse(input.generatedAt) ? "Source evidence changed after this day ended." : null };
+    const report = { ...core, revision: (day?.revisions.length ?? 0) + 1, correctionReason: old && Date.parse(input.windowEnd) <= Date.parse(old.report.generatedAt) ? "Source evidence changed after this day ended." : null };
     if (report.correctionReason && report.phase === "complete") report.phase = "corrected";
     const value: DailyProgressRevision = { generation: base.generation + 1, report, events: all };
     // Validate every retained event, not only the first public page.
