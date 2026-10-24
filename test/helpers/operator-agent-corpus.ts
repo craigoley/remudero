@@ -114,8 +114,9 @@ export function stopRow(id: string): string {
  * A corpus every GET has something in: the first half written through the routes and then rotated
  * into a gzip archive, the second half written to the new live file.
  */
-export async function corpus(t: { after: (fn: () => void) => void }): Promise<{ stateDir: string; ledgerPath: string }> {
+export async function corpus(t: { after: (fn: () => void) => void; ownRoot?: (root: string) => void }): Promise<{ stateDir: string; ledgerPath: string }> {
   const root = makeTempDir("e17-operator-agent");
+  t.ownRoot?.(root);
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const stateDir = join(root, "state");
   mkdirSync(stateDir, { recursive: true });
