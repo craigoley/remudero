@@ -15,7 +15,9 @@ function record(size = 205): DailyProgressRecord {
     generatedAt: at, phase: "complete", coverage: { state: "partial", expectedRepositories: ["acme/app"], includedRepositories: ["acme/app"], sources: [{
       id: "acme/app:prs", repository: "acme/app", kind: "pull_requests", required: true, state: "complete", lastAttemptAt: at, lastSuccessAt: at,
       coverageStart: window.windowStart, coverageThrough: window.windowEnd, nextDueAt: "2026-11-02T07:00:00.000Z", reason: null,
-    }, { id: "acme/app:deployments", repository: "acme/app", kind: "deployments", required: false, state: "not_collected", lastAttemptAt: null,
+    }, { id: "acme/app:ledger", repository: "acme/app", kind: "ledger_activity", required: false, state: "not_collected", lastAttemptAt: null,
+      lastSuccessAt: null, coverageStart: null, coverageThrough: null, nextDueAt: null, reason: "Activity evidence is not collected." },
+    { id: "acme/app:deployments", repository: "acme/app", kind: "deployments", required: false, state: "not_collected", lastAttemptAt: null,
       lastSuccessAt: null, coverageStart: null, coverageThrough: null, nextDueAt: null, reason: "Deployment evidence is not collected." }] },
     totals: { mergedChanges: { value: size, precision: "exact" }, completedTasks: { value: size, precision: "exact" } }, currentWork: null,
     events: Array.from({ length: size }, (_, i) => ({ id: `acme/app:pr:${i + 1}`, repository: "acme/app", kind: "merged", sourceId: "acme/app:prs",
