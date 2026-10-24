@@ -191,6 +191,32 @@ test("W1-T6406: the modules a test imports are the source its failure could come
   assert.deepEqual(testSourcePaths("test/a.test.ts", undefined), []);
 });
 
+test("package-alias source attribution is independent of the test folder and preserves script candidates", () => {
+  const source = `import { x } from "#src/lib/x.js";
+export { y } from "#src/lib/y.ts";
+import "#test/helpers/setup.js";
+const a = await import("#scripts/a.mjs");
+const b = require("#scripts/b");
+import { x2 } from "../../src/lib/x.js";`;
+  assert.deepEqual(testSourcePaths("test/nested/a.test.ts", source), [
+    "scripts/a.mjs", "scripts/a.mts", "scripts/b", "scripts/b.ts",
+    "src/lib/x.ts", "src/lib/y.ts", "test/helpers/setup.ts",
+  ]);
+  assert.deepEqual(testSourcePaths("test/another/deeper/a.test.ts", source.replace("../../src/lib/x.js", "../../../src/lib/x.js")),
+    testSourcePaths("test/nested/a.test.ts", source));
+});
+
+test("package-alias source attribution ignores unknown packages and invalid alias segments", () => {
+  assert.deepEqual(testSourcePaths("test/a.test.ts", `import "#unknown/src/x.js";
+import "#srcx/lib/x.js";
+import "node:fs";
+import "zod";
+import "#src/../scripts/other.js";
+import "#src/./other.js";
+import "#scripts//other.mjs";
+import "#src/node_modules/other.js";`), []);
+});
+
 test("W1-T6406: the coverage-shard logs yield the PR, titles and retry outcome, including a retry that also failed", async () => {
   const shard = (n: number, conclusion: string, lines: string[]) => [
     `coverage-shard (${n}/8)\tSELECTOR-SHADOW-JOB: conclusion=${conclusion}`,
