@@ -259,3 +259,27 @@ test("W1-T9578: a throwing resolver is receipted and reaches the worker", async 
   assert.equal(f.receipts()[0]!.reason, "resolver unavailable");
   assert.equal(f.counts().workers, 1);
 });
+
+
+test("W1-T9578: generated conflict dependencies use the async Git port and refuse invalid seed configuration", async (t) => {
+  const f = await fixture(t, "generated");
+  const previous = process.env.RMD_DEPENDENCY_SEED_ROOT;
+  t.after(() => {
+    if (previous === undefined) delete process.env.RMD_DEPENDENCY_SEED_ROOT;
+    else process.env.RMD_DEPENDENCY_SEED_ROOT = previous;
+  });
+  process.env.RMD_DEPENDENCY_SEED_ROOT = "relative-seed-root";
+  let commonDirReads = 0;
+  const result = await withLiveWritesAllowed(() => sweep.regenerateConflictViaGit(
+    f.repo.dir, join(f.repo.dir, "resolution"), f.pr, f.mainSha, {
+      git: async (cwd, args) => {
+        if (args.includes("--git-common-dir")) commonDirReads++;
+        return execFileSync("git", [...args], { cwd, encoding: "utf8", stdio: "pipe" });
+      },
+    }));
+  assert.equal(commonDirReads, 1, "common-dir lookup uses the awaited Git port");
+  assert.equal(result.outcome, "error", "invalid configured dependency policy cannot be silently bypassed");
+  assert.match(result.reason!, /RMD_DEPENDENCY_SEED_ROOT must be absolute/);
+  assert.equal(f.remoteHead(), f.headSha);
+  assert.equal(existsSync(join(f.repo.dir, "resolution")), false);
+});

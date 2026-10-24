@@ -229,7 +229,7 @@ import {
   renderWorkerSettings,
   STDERR_EXCERPT_CAP,
   excludeNodeModulesFromGit,
-  linkWorktreeNodeModules,
+  provisionWorktreeNodeModules,
   worktreeAdd,
   worktreeRemove,
   worktreeRemoveAsync,
@@ -1969,8 +1969,10 @@ export async function regenerateConflictViaGit(
         }
       }
       if (paths.some(({ action }) => action !== "deleted-on-main")) {
-        excludeNodeModulesFromGit(worktreePath);
-        linkWorktreeNodeModules(repoDir, worktreePath);
+        const commonDir = (await run(worktreePath,
+          ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+        excludeNodeModulesFromGit(worktreePath, { commonDir: () => commonDir });
+        await provisionWorktreeNodeModules(repoDir, worktreePath);
       }
       for (const { path, action } of paths) {
         if (action === "deleted-on-main") continue;
