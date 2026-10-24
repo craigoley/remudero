@@ -104,3 +104,11 @@ test("W1-T9633: a later arm or another head's refusal leaves awaiting-arm", asyn
   assert.equal(blockers.finalBlocker("awaiting-arm", { mergeable: true, operatorHold: true, securityArmRefusal: refusal }), "operator-hold");
   assert.equal(blockers.finalBlocker("own-red", { securityArmRefusal: refusal }), "own-red");
 });
+
+
+test("a security UNKNOWN asks for complete evidence without prescribing a policy relaxation", () => {
+ const text = blockers.securityHoldReason({ state: "unknown", reason: "security-analysis-failed-or-unrecognized" });
+ assert.match(text, /restore complete trusted exact-head evidence and re-evaluate the policy/);
+ assert.match(text, /hold remains until qualified/);
+ assert.doesNotMatch(text, /policy, not the arm, must change/);
+});
