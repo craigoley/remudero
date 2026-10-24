@@ -1,3 +1,5 @@
+import { recordOperatorRelease } from "#src/lib/machine-filing-judge.js";
+import { operatorReleasePin } from "#src/lib/operator-release.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -710,10 +712,10 @@ test("W1-T4014: an unreadable operator release file makes the parked-proposal co
 });
 
 /** A plan mixing machine filings parked for a ruling with ordinary backlog. Only the first shape is a proposal. */
-const proposalPlan = (tasks: Array<{ id: string; author_class?: string; verify?: string; status?: string }>): Plan =>
-  ({
-    tasks: tasks.map((t) => ({ title: t.id, repo: "remudero", type: "implement", depends_on: [], status: "queued", ...t })),
-  }) as unknown as Plan;
+const proposalPlan = (records: Array<{ id: string; author_class?: string; verify?: string; status?: string }>): Plan => {
+  const tasks = records.map(t => ({ title: t.id, repo: "remudero", type: "implement", depends_on: [], status: "queued", ...t }));
+  return { tasks, byId: new Map(tasks.map(task => [task.id, task])) } as unknown as Plan;
+};
 
 test("W1-T4014: parked proposals are counted for the operator", () => {
   const model = buildStatusBoard(
@@ -763,10 +765,15 @@ test("W1-T4014: parked is not conflated with queued", () => {
 
 test("W1-T4014: only a person or the ratified judge releases a proposal", () => {
   const root = tmpRoot();
+  const approvedPlan = proposalPlan([
+    { id: "W1-T9020", author_class: "machine", verify: "human" },
+    { id: "W1-T9021", author_class: "machine", verify: "human" },
+    { id: "W1-T9022", author_class: "machine", verify: "human" },
+  ]);
   // `rmd approve` (a person, or the ratified machine-filing judge acting through it) leaves both records.
-  writeFileSync(join(root, "state", "operator-releases.json"), JSON.stringify({ releases: { "W1-T9021": NOW_ISO } }) + "\n");
+  recordOperatorRelease(join(root, "state"), approvedPlan.byId.get("W1-T9021")!, NOW_ISO);
   const ledger = writeLedger([
-    ledgerLine({ step: "ratify.approved", task_id: "W1-T9020" }),
+    ledgerLine({ step: "ratify.approved", task_id: "W1-T9020", release_pin: operatorReleasePin(approvedPlan.byId.get("W1-T9020")!) }),
     // Activity that is not a ruling: a run, a review and a gardener pass touching the proposal release nothing.
     ledgerLine({ step: "run.start", task_id: "W1-T9022" }),
     ledgerLine({ step: "review.posted", task_id: "W1-T9022" }),
@@ -776,11 +783,7 @@ test("W1-T4014: only a person or the ratified judge releases a proposal", () => 
     root,
     ledger,
     baseDeps({
-      plan: proposalPlan([
-        { id: "W1-T9020", author_class: "machine", verify: "human" },
-        { id: "W1-T9021", author_class: "machine", verify: "human" },
-        { id: "W1-T9022", author_class: "machine", verify: "human" },
-      ]),
+      plan: approvedPlan,
       github: fakeGithub(),
     }),
   );
