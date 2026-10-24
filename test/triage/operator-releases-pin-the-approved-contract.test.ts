@@ -8,7 +8,7 @@ import { resolveReleases, runnableCandidates } from "#src/lib/drain.js";
 import { renderMachineShard } from "#src/lib/machine-filing.js";
 import * as machineJudge from "#src/lib/machine-filing-judge.js";
 import { assertRunnable, loadPlan, type Task } from "#src/lib/plan.js";
-import { approveParkedTask, releaseReadersFor } from "#src/run-task.js";
+import { approveParkedTask, productionMachineFilingJudgePorts, releaseReadersFor } from "#src/run-task.js";
 
 const ID = "W1-T9901";
 const CLOCK = fixedClock(Date.parse("2026-10-24T10:00:00Z"));
@@ -178,7 +178,7 @@ test("a landed operator ruling cannot authorize a later narrative change", async
   assert.equal(f.task().risk_ruling?.operator_release_pin, operatorReleasePin(f.task()));
 });
 
-test("unread operator history cannot be overruled by a machine receipt", t => {
+test("unread operator history cannot be overruled by a machine receipt", async t => {
   const f = fixture(t);
   const row = { step: "ratify.approved", task_id: ID, author_class: "machine", release_pin: operatorReleasePin(f.task()) };
   writeFileSync(f.ledger, JSON.stringify(row) + "\n");
@@ -190,6 +190,46 @@ test("unread operator history cannot be overruled by a machine receipt", t => {
   writeFileSync(f.ledger, JSON.stringify({ ...row, author_class: "operator" }) + "\n");
   assert.equal(resolveReleases(releaseReadersFor(f.ledger), f.plan()).ids.has(ID), true,
     "a matching explicit operator receipt remains positive authority independently of the failed reader");
+
+  writeFileSync(join(f.stateDir, "operator-releases.json"), JSON.stringify({ releases: {} }));
+  writeFileSync(f.ledger, JSON.stringify(row) + "\n");
+  assert.equal(resolveReleases(releaseReadersFor(f.ledger), f.plan()).ids.has(ID), true,
+    "a current machine receipt can release when both history stores are readable");
+  rmSync(f.ledger);
+  mkdirSync(f.ledger);
+  const unread = resolveReleases(releaseReadersFor(f.ledger), f.plan());
+  assert.equal(unread.ids.has(ID), false);
+  assert.match(unread.ledgerUnreadable!, /EISDIR/,
+    "the production reader must preserve a real I/O failure rather than report empty history");
+
+  const before = readFileSync(f.path, "utf8");
+  let modelCalls = 0;
+  const production = productionMachineFilingJudgePorts({ repoRoot: f.root, stateDir: f.stateDir,
+    worktreesRoot: f.root, owner: "fixture", repo: "fixture", clock: CLOCK, log: () => {} });
+  await assert.rejects(runMachineFilingJudge({ ...production, plan: f.plan, isMerged: () => false,
+    openWorkspace: undefined, writeRoot: f.root, stageProposal: () => {},
+    riskJudge: async () => { modelCalls++; return { verdict: "low", confidence: 1, reasons: ["low"] }; },
+  }), { code: "EISDIR" });
+  assert.equal(modelCalls, 0, "the real judge reader must stop before a model can replace unread human history");
+  assert.equal(readFileSync(f.path, "utf8"), before);
+
+  const written: unknown[] = [];
+  assert.throws(() => approveParkedTask(ID, { plan: f.plan(), ledgerPath: f.ledger, runId: "machine-unread",
+    provenance: { author_class: "machine" }, riskPolicy: { verifyHumanReleaseEnabled: true } as never,
+    append: (_path, receipt) => { written.push(receipt); },
+  }), { code: "EISDIR" });
+  assert.deepEqual(written, [], "the approval writer cannot emit a machine receipt against unread history");
+
+  recordOperatorRelease(f.stateDir, f.task(), CLOCK.iso());
+  assert.equal(resolveReleases(releaseReadersFor(f.ledger), f.plan()).ids.has(ID), true,
+    "a matching durable operator approval remains independent authority when the ledger cannot be read");
+  rmSync(f.ledger, { recursive: true });
+  assert.deepEqual(production.releaseLedgerLines!(), [], "a ledger that has never been created is empty history");
+  assert.equal(resolveReleases(releaseReadersFor(f.ledger), f.plan()).ledgerUnreadable, undefined);
+  writeFileSync(f.ledger, "");
+  writeFileSync(join(f.stateDir, "operator-releases.json"), JSON.stringify({ releases: {} }));
+  assert.deepEqual((await f.judge()).proceeded, [ID], "readable empty history permits normal machine judgement");
+  assert.equal(f.modelCalls(), 1);
 });
 
 

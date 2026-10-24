@@ -43333,7 +43333,7 @@ export function productionMachineFilingJudgePorts(opts: {
     riskPolicy: () => readRiskPolicy(policyPath(opts.repoRoot)),
     gardenRecord: (family) => gardenFamilyRecord(opts.stateDir, family),
     operatorReleases: () => readOperatorReleaseRecords(opts.stateDir),
-    releaseLedgerLines: () => readLedgerRawLines(join(opts.stateDir, LEDGER_FILENAME)),
+    releaseLedgerLines: () => readReleaseLedgerLines(join(opts.stateDir, LEDGER_FILENAME)),
     // W1-T9043: a ledgered release, `rmd release`, or an `rmd note` on a parked escalation is a ruling that stops its withdrawal.
     operatorRulings: () => {
       // ledger-read-intent: live — `dispatch.breaker_released` is in the retention set, and `rmd approve` is durable in operator-releases.json.
@@ -43867,7 +43867,7 @@ export function approveParkedTask(
   if (deps.provenance !== undefined && task.risk === "high") {
     return { code: 2, message: `rmd approve: ${taskId} is high-risk in the plan — a machine cannot release its human verification` };
   }
-  const releaseEvidence = qualifyReleaseEvidence(deps.ledgerLines ?? readLedgerRawLines(deps.ledgerPath),
+  const releaseEvidence = qualifyReleaseEvidence(deps.ledgerLines ?? readReleaseLedgerLines(deps.ledgerPath),
     deps.readDurableReleaseEvidence?.() ?? readOperatorReleaseRecords(dirname(deps.ledgerPath)), releaseContractPins(deps.plan.tasks));
   if (deps.provenance && (releaseEvidence.reapproval.has(taskId) || operatorReleaseContractChanged(task))) return { code: 2,
     message: `rmd approve: ${taskId} requires explicit operator reapproval of its current contract` };
@@ -43904,7 +43904,12 @@ export function approveParkedTask(
 
 /** W1-T10348: the two release records beside a ledger, for the shared resolver (drain.ts `resolveReleases`). */
 export function releaseReadersFor(ledgerPath: string): ReleaseReaders {
-  return { readLedgerLines: () => readLedgerRawLines(ledgerPath), readDurableReleases: () => readOperatorReleaseRecords(dirname(ledgerPath)) };
+  return { readLedgerLines: () => readReleaseLedgerLines(ledgerPath), readDurableReleases: () => readOperatorReleaseRecords(dirname(ledgerPath)) };
+}
+
+/** Missing history is empty; other read failures must reach the release authority boundary. */
+function readReleaseLedgerLines(path: string): readonly string[] {
+  return (readFileIfExists(path) ?? "").split("\n").filter(Boolean);
 }
 
 /** The ledger's RAW lines. `releasedTaskIds` parses them itself (it rejects on a cheap substring
