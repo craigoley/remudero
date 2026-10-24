@@ -1,7 +1,8 @@
+import { operatorReleasePin } from "#src/lib/operator-release.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { RELEASE_LEDGER_STEP, assertRunnable, parseTasksFromYaml, releasedTaskIds } from "../src/lib/plan.js";
+import { RELEASE_LEDGER_STEP, assertRunnable, parseTasksFromYaml, releasedTaskIds as readReleasedTaskIds } from "../src/lib/plan.js";
 import { nextRunnable, resolveReleasedIds, runDrain } from "../src/lib/drain.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,7 +24,11 @@ import { approveCommand, approveParkedTask, namesATask } from "../src/run-task.j
  * `verify:` field (which Standing rule 15 forbids anyway).
  */
 
-const row = (o: Record<string, unknown>) => JSON.stringify(o);
+const row = (o: Record<string, unknown>) => JSON.stringify({
+  ...(o.step === RELEASE_LEDGER_STEP && typeof o.task_id === "string" && o.task_id
+    ? { release_pin: operatorReleasePin(parked(o.task_id) as never) } : {}), ...o,
+});
+const releasedTaskIds = (lines: readonly string[]) => readReleasedTaskIds(lines, planOf([parked("W1-T1041"), parked("W1-T2983")]));
 
 test("W1-T3206: a ratify.approved row releases exactly the task it names", () => {
   const ids = releasedTaskIds([
@@ -173,7 +178,7 @@ test("W1-T3216: the branch is chosen by SHAPE, so a proposal id still reaches th
 test("W1-T3216: a released task is dispatch-eligible while an IDENTICAL unreleased one is refused", () => {
   const releasedIds = resolveReleasedIds({
     readLedgerLines: () => [row({ step: RELEASE_LEDGER_STEP, task_id: "W1-T1041" })],
-  });
+  }, planOf([parked("W1-T1041")]));
   // Through nextRunnable, the REAL selector every dispatch path calls — not a direct poke at the
   // predicate. Testing the predicate alone is exactly what let the unwired version ship.
   assert.equal(nextRunnable(planOf([parked("W1-T1041")]), NEVER_MERGED, { releasedIds } as never)?.id, "W1-T1041", "the released task is SELECTED by the real drain");
@@ -204,9 +209,9 @@ test("W1-T216: a task-scoped hold outranks a daemon judge release at selection a
   assert.equal(held?.dispatch_hold, true, "the hold must survive YAML loading");
   assert.throws(() => parseTasksFromYaml(yaml.replace("dispatch_hold: true", 'dispatch_hold: "true"'), "bad-hold"), /dispatch_hold must be a boolean/);
   const released = resolveReleasedIds({ readLedgerLines: () => [
-    row({ step: RELEASE_LEDGER_STEP, task_id: "W1-T216", actor: "daemon", released_by: "verify-human-judge" }),
+    row({ step: RELEASE_LEDGER_STEP, task_id: "W1-T216", actor: "daemon", released_by: "verify-human-judge", release_pin: operatorReleasePin(held!) }),
     row({ step: RELEASE_LEDGER_STEP, task_id: "W1-T2222" }),
-  ] });
+  ] }, planOf([held! as never, parked("W1-T2222")]));
   assert.equal(released.has("W1-T216"), true, "positive control: the prior judge row still reaches the selector");
   const plan = planOf([held as never, parked("W1-T2222")]);
   assert.equal(nextRunnable(plan, NEVER_MERGED, { releasedIds: released } as never)?.id, "W1-T2222", "unrelated released work still flows");
