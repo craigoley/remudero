@@ -67,6 +67,7 @@ import {
   peekLease,
   quickCheckReadModel,
   readReadModelTransactions,
+  readModelLeaseEpoch,
   releaseLease,
   SOURCE_SNAPSHOT_DDL,
   withWriteTransaction,
@@ -824,7 +825,8 @@ export interface ReadModelTicker {
   accept(built: SlowLaneBodies): void;
   acceptSnapshot(write: SourceSnapshotWrite): boolean;
   /** Publish staged daily history only through this projector's current home lease. */
-  publishDailyProgress(publication: DailyProgressPublication): void;
+  publishDailyProgress(publication: DailyProgressPublication, expectedLeaseIdentity: string): void;
+  homeLeaseIdentity(): string | undefined;
   /** A views-only ticker's instance states, as the projector thread last posted them. */
   observe(instances: readonly ReadModelInstanceState[]): void;
   /** Main asked for a key of a demand view. True when the key is new, and its view is due at once. */
@@ -933,6 +935,12 @@ function fileIno(path: string): string | undefined {
 export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTicker {
   const clock = opts.clock ?? systemClock;
   const holder = opts.holder ?? randomUUID();
+  const homeLeaseIdentity = (): string | undefined => {
+    const home = slots[0];
+    if (!home || !home.db || !home.lease || home.state.lease !== "held") return undefined;
+    const epoch = readModelLeaseEpoch(home.db, home.lease);
+    return epoch === undefined ? undefined : JSON.stringify([home.db.path, epoch]);
+  };
   const views = opts.views ?? READ_MODEL_VIEWS;
   const qualifications = Object.fromEntries(views.flatMap((view) => view.qualificationGeneration === undefined ? [] : [[view.name, view.qualificationGeneration]]));
   const tickMs = opts.tickMs ?? READ_MODEL_TICK_MS;
@@ -1781,12 +1789,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       lastEtag.set(`${entry.view}\u0000${entry.key}`, entry.etag);
       latest.set(`${entry.view}\u0000${entry.key}`, entry);
     },
-    publishDailyProgress(publication): void {
+    homeLeaseIdentity,
+    publishDailyProgress(publication, expectedLeaseIdentity): void {
       const home = slots[0];
       if (viewsOnly || !home || !home.db || !home.lease || home.state.lease !== "held" || stopRequested()) throw new Error("daily publication has no active home projector owner");
       const db = home.db;
       commitDailyProgressPublication(opts.stateDir, publication, db, home.lease,
-        () => !stopRequested() && currentReadModelPath(opts.stateDir, home.instance.name, LEDGER_PROJECTOR_SCHEMA_VERSION) === db.path);
+        () => !stopRequested() && homeLeaseIdentity() === expectedLeaseIdentity && currentReadModelPath(opts.stateDir, home.instance.name, LEDGER_PROJECTOR_SCHEMA_VERSION) === db.path);
     },
     acceptSnapshot(write: SourceSnapshotWrite): boolean {
       if (opts.lane !== "heavy" && !writeSnapshot(write)) return false;
@@ -2135,6 +2144,8 @@ export function runReadModelWorker(
   const escalation = owner && repo ? { issues: ghIssueGateway(owner, repo), ledgerPath: join(data.stateDir, LEDGER_FILENAME), runId: READ_MODEL_WORKER_KIND } : undefined;
   let slowLane: SlowLane | undefined;
   let dailyOwnershipEpoch = 0, dailyOwnershipKey = "";
+  let dailyOwnershipIdentity: string | undefined;
+  let readHomeLeaseIdentity: (() => string | undefined) | undefined;
   const log = readModelWorkerLog((message) => port.postMessage(message), false);
   setLedgerMemoRetentionContext({ thread: "projector", log, instances: data.instances });
   const holder = randomUUID();
@@ -2145,7 +2156,8 @@ export function runReadModelWorker(
   const post = (m: ReadModelWorkerMessage): void => {
     if (m.type === "state") {
       const owned = m.instances.filter(i => i.lease === "held").map(i => i.instance);
-      const ownershipKey = JSON.stringify([m.instances[0]?.lease === "held", owned]);
+      dailyOwnershipIdentity = readHomeLeaseIdentity?.();
+      const ownershipKey = JSON.stringify([m.instances[0]?.lease === "held", owned, dailyOwnershipIdentity]);
       if (dailyOwnershipKey !== ownershipKey) { dailyOwnershipEpoch++; dailyOwnershipKey = ownershipKey; }
       slowLane?.views(m.switches.views);
       slowLane?.lease(m.instances[0]?.lease === "held", owned, dailyOwnershipEpoch);
@@ -2172,8 +2184,8 @@ export function runReadModelWorker(
           ...(repositoryFlow ? { repositoryFlow } : {}) } } : body) });
     });
   }, onDailyProgress: (publication, ownershipEpoch) => {
-    if (stopRequested() || ownershipEpoch !== dailyOwnershipEpoch) return;
-    try { ticker.publishDailyProgress(publication); log("read_model.daily_committed", { generation: publication.baseGeneration + 1 }); }
+    if (stopRequested() || ownershipEpoch !== dailyOwnershipEpoch || dailyOwnershipIdentity === undefined) return;
+    try { ticker.publishDailyProgress(publication, dailyOwnershipIdentity); log("read_model.daily_committed", { generation: publication.baseGeneration + 1 }); }
     catch (error) { log("read_model.daily_publication_refused", { reason: String((error as Error).message).slice(0, 2048) }); }
   } });
   // C5: one short-lived child per slice, so a slice's memory leaves serve when it is done.
@@ -2182,6 +2194,7 @@ export function runReadModelWorker(
     stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder, stopRequested, post, views: [], oracleRunner,
     integrityCheck: threadIntegrityCheck(), ...(escalation ? { escalation } : {}),
   });
+  readHomeLeaseIdentity = () => ticker.homeLeaseIdentity();
   let timer: NodeJS.Timeout | undefined;
   let started = false;
   let finished = false;

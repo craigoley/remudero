@@ -6,8 +6,9 @@ import { test } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
 import { collectDailyProgress } from "#src/lib/daily-progress-collector.js";
-import { dailyProgressDayKey, readDailyProgressManifest, readDailyProgressRevision } from "#src/lib/daily-progress-store.js";
-import { acquireLease, openReadModel } from "#src/lib/read-model-db.js";
+import { dailyProgressDayKey, prepareDailyProgressPublication, readDailyProgressManifest, readDailyProgressRevision } from "#src/lib/daily-progress-store.js";
+import { acquireLease, openReadModel, readModelLeaseEpoch, releaseLease } from "#src/lib/read-model-db.js";
+import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "#src/lib/ledger-projector.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { createReadModelTicker } from "#src/lib/read-model-worker.js";
 import { runSlowLaneWorker, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
@@ -81,7 +82,7 @@ test("daily progress collects hourly and closes local days without page demand",
     const lane = runSlowLaneWorker({ on(_event, listener) { receive = listener; }, postMessage(value) {
       const message = value as SlowLaneMessage;
       if (message.type === "daily_progress") {
-        try { assert.equal(message.ownershipEpoch, 1); ticker.publishDailyProgress(structuredClone(message.publication)); commits++; notify(); }
+        try { assert.equal(message.ownershipEpoch, 1); ticker.publishDailyProgress(structuredClone(message.publication), ticker.homeLeaseIdentity()!); commits++; notify(); }
         catch (error) { rejection(error as Error); }
       }
       if (message.type === "log" && message.step === "read_model.daily_failed") rejection(new Error(String(message.extra.reason)));
@@ -109,6 +110,23 @@ test("daily progress collects hourly and closes local days without page demand",
       const aborted = new Promise<void>(resolve => { cancelled = resolve; });
       assert.ok(scheduled); scheduled(); receive({ type: "lease", held: false, instances: [], ownershipEpoch: 2 }); await aborted;
       assert.equal(readDailyProgressManifest(stateDir).generation, manifest.generation, "lost ownership cannot advance durable jobs or reports");
+      const oldIdentity = ticker.homeLeaseIdentity(); assert.ok(oldIdentity);
+      const staged = prepareDailyProgressPublication(stateDir, [], []);
+      const peer = openReadModel({ stateDir, instance: "core", schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION });
+      try {
+        const originalAcquisition = Number(peer.prepare("SELECT acquired_ms FROM lease WHERE name = 'projector'").get()!.acquired_ms);
+        now += 60_000;
+        const other = acquireLease(peer, { holder: "other-proof-owner", clock }); assert.ok(other.ok); if (!other.ok) return;
+        releaseLease(peer, other.lease);
+        now = originalAcquisition; // Same owner and repeated clock must still get a different epoch.
+        const regained = acquireLease(peer, { holder: "daily-worker-proof", clock }); assert.ok(regained.ok); if (!regained.ok) return;
+        const epoch = readModelLeaseEpoch(peer, regained.lease); assert.ok(epoch);
+        const renewal = acquireLease(peer, { holder: "daily-worker-proof", clock }); assert.ok(renewal.ok);
+        if (renewal.ok) assert.equal(readModelLeaseEpoch(peer, renewal.lease), epoch, "heartbeat renewal preserves ownership identity");
+        assert.notEqual(ticker.homeLeaseIdentity(), oldIdentity);
+        assert.throws(() => ticker.publishDailyProgress(staged.publication, oldIdentity), /ownership epoch/);
+        assert.equal(readDailyProgressManifest(stateDir).generation, manifest.generation);
+      } finally { peer.close(); }
     } finally { lane.stop(); ticker.release(); }
   });
 });
