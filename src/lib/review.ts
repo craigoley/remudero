@@ -125,7 +125,8 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
     engineRevision: input.engineRevision ?? REVIEW_ENGINE_REVISION,
     policyRevision: input.policyRevision ?? REVIEW_DECISION_POLICY_REVISION,
     headSha: input.headSha,
-    diff: input.diff,
+    // Transport-added newline delimiters are not diff content; keep hunk whitespace intact.
+    diff: input.diff.replace(/\n+$/, ""),
     report: input.report,
     ...(input.implementationReport !== undefined ? { implementationReport: input.implementationReport } : {}),
     ...(input.promisedFollowUpObservation !== undefined &&
