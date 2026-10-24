@@ -30,7 +30,7 @@ import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type I
 import { createHostView, HOST_VIEW_NAME, hostViewConfig, type HostViewConfig } from "./host-view.js";
 import { createIncidentsView, INCIDENTS_VIEW_NAME } from "./incidents-view.js";
 import { createInboxThreadView, INBOX_THREAD_VIEW_NAME } from "./inbox-thread-view.js";
-import { createInstancesView, INSTANCES_VIEW_NAME } from "./instances-view.js";
+import { createInstancesView, INSTANCES_VIEW_NAME, INSTANCES_QUALIFICATION_GENERATION } from "./instances-view.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
 import { createNavBadgeReadModelView, NAV_BADGE_VIEW_NAME } from "./nav-badge-view.js";
@@ -1926,7 +1926,7 @@ export function readModelLaneViews(
     { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView({ modelApprovalConfig: data.modelApprovalConfig }) },
     readModelStatusView,
     { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
-    { name: INSTANCES_VIEW_NAME, create: () => createInstancesView({ instances, ...data.registry, ledgerSource }) },
+    { name: INSTANCES_VIEW_NAME, qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION, create: () => createInstancesView({ instances, ...data.registry, ledgerSource }) },
     { name: TASK_VIEW_NAME, demand: true, create: () => createTaskView({ instances, ledgerSource, clock, demand, log }) },
     { name: INBOX_THREAD_VIEW_NAME, demand: true, create: () => createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log }) },
     { name: WORKSTREAMS_VIEW_NAME, create: () => createWorkstreamsView({ instances, ledgerSource, clock, log }) },
@@ -2385,7 +2385,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let driven: ShadowSample | undefined;
   /** Each `auto` view's effective mode as last ledgered; one entering auto starts as legacy (`shadow`). Routes read it via `autoMode`. */
   const autoModes = new Map<string, EffectiveViewMode>();
-  const qualificationGeneration = (view: string): string | undefined => view === AGENT_VIEW_NAME ? AGENT_QUALIFICATION_GENERATION : undefined;
+  const qualificationGeneration = (view: string): string | undefined => view === AGENT_VIEW_NAME ? AGENT_QUALIFICATION_GENERATION : view === INSTANCES_VIEW_NAME ? INSTANCES_QUALIFICATION_GENERATION : undefined;
   const noteAutoModes = (): void => {
     for (const view of autoModes.keys()) if (mainSwitches.views[view] !== "auto") autoModes.delete(view);
     for (const [view, mode] of Object.entries(mainSwitches.views)) {
