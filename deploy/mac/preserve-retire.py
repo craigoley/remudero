@@ -617,6 +617,18 @@ def remove(repo, roots, protected):
         shutil.rmtree(p)
 
 
+def prune_worktrees(stores, repos):
+    """`git worktree prune` each store, except one a keep-scoped checkout shares or one under a keep
+    declaration: its stale worktree records are admin data of a held store. Returns those pruned."""
+    pruned = []
+    for store in stores:
+        if any(q.scoped for q in repos if q.store == store) or keep_scope(store, below=False):
+            continue
+        run(["git", "--git-dir", store, "worktree", "prune"])
+        pruned.append(store)
+    return pruned
+
+
 def expire(cfg, now):
     root, cutoff = cfg["preserve_root"], now - cfg["retain_days"] * 86400
     if not os.path.isdir(root):
@@ -935,9 +947,7 @@ def main():
             keep[r.path] = f"remove-failed ({error.__class__.__name__})"
             keep_closure(repos, keep, borrowers, lenders_ok)
             say("HOLD", f"remove-failed ({error.__class__.__name__})", r.path)
-    for store in sorted({r.store for r in order if r.kind == "worktree" and r.store and os.path.isdir(r.store)}):
-        if not any(q.scoped for q in repos if q.store == store) and not keep_scope(store, below=False):
-            run(["git", "--git-dir", store, "worktree", "prune"])
+    prune_worktrees(sorted({r.store for r in order if r.kind == "worktree" and r.store and os.path.isdir(r.store)}), repos)
     tidy = housekeeping(cfg, protected, repos, fresh, now, a.apply)
     say("housekeeping", " ".join(f"{k}={v}" for k, v in tidy.items()) + f" apply={int(a.apply)}")
     if a.apply:

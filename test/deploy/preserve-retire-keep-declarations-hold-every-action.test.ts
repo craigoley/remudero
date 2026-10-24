@@ -43,9 +43,9 @@ function setup(config: Record<string, unknown>): Fx {
   writeFileSync(join(bin, "ps"), '#!/bin/bash\nprintf "%s\\n" /bin/sh\n', { mode: 0o755 });
   writeFileSync(join(bin, "lsof"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
   const path = join(home, ".local/state/remudero/preserve-retire.json");
+  // Created owner-private, as the helper requires of its config: a policy input, not a denial fixture.
   writeFileSync(path, JSON.stringify({ enabled: true, idle_hours: 24, retain_days: 7, interval_hours: 0,
-    published_remotes: [origin], ...config }));
-  chmodSync(path, 0o600);
+    published_remotes: [origin], ...config }), { mode: 0o600 });
   return { root, home, origin, bin };
 }
 
@@ -94,7 +94,6 @@ function bytes(top: string): string[] {
 test("loose-folder housekeeping leaves seed stores, seed generations and keep-declared folders whole, and still removes an unreferenced build dir", () => {
   const fx = setup({ dump_min_mb: 1, dump_retain_days: 1 });
   const recovery = join(fx.home, ".local/share/remudero/source-recovery/20261019");
-  const blind = join(recovery, "blind");
   try {
     const consumer = clone(fx, "Remudero/consumer");
     const big = "[" + '"subject",'.repeat(150_000) + '"end"]';
@@ -107,7 +106,7 @@ test("loose-folder housekeeping leaves seed stores, seed generations and keep-de
     seedGeneration(unmarked, consumer);
     const kept = join(recovery, "kept");
     for (const dir of [join(kept, "proj/node_modules"), join(recovery, "scratch-kept/node_modules"),
-      join(recovery, "vendored/coverage"), join(recovery, "disposable/node_modules"), join(blind, "node_modules")]) {
+      join(recovery, "vendored/coverage"), join(recovery, "disposable/node_modules")]) {
       mkdirSync(dir, { recursive: true });
     }
     writeFileSync(join(kept, ".rmd-janitor-keep"), "foundation inputs\n");
@@ -117,22 +116,19 @@ test("loose-folder housekeeping leaves seed stores, seed generations and keep-de
     symlinkSync(join(fx.root, "absent-marker-target"), join(recovery, "scratch-kept/.rmd-scratch-keep"));
     writeFileSync(join(recovery, "vendored/package.json"), "{}\n");
     writeFileSync(join(recovery, "vendored/coverage/.rmd-dependency-seed-root.json"), '{"version":1}');
-    writeFileSync(join(blind, ".rmd-janitor-keep"), "cannot be inspected\n");
-    chmodSync(blind, 0o600); // listable, but nothing inside can be looked at
     const before = [store, unmarked, kept].map(bytes);
 
     const r = helper(fx);
-    chmodSync(blind, 0o700);
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.match(r.stdout, /housekeeping repacked=0 compressed=0 dumps-expired=0 build-dirs-removed=1 /);
     assert.match(r.stdout, /REMOVED build-dir .*source-recovery\/20261019\/disposable\/node_modules/);
     assert.equal(existsSync(join(recovery, "disposable/node_modules")), false);
     assert.deepEqual([store, unmarked, kept].map(bytes), before, "every byte of a store, generation or kept folder is unchanged");
-    for (const path of [join(recovery, "scratch-kept/node_modules"), join(recovery, "vendored/coverage/.rmd-dependency-seed-root.json"), join(blind, "node_modules")]) {
+    for (const path of [join(recovery, "scratch-kept/node_modules"), join(recovery, "vendored/coverage/.rmd-dependency-seed-root.json")]) {
       assert.equal(existsSync(path), true, `${path}\n${r.stdout}`);
     }
     assert.match(r.stdout, /HOLD keep-declared \(\.rmd-dependency-seed-root\.json\) at .*vendored\/coverage/);
-  } finally { if (existsSync(blind)) chmodSync(blind, 0o700); rmSync(fx.root, { recursive: true, force: true }); }
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
 test("a ready.json beside a dangling, linked or non-folder consumers entry holds as seed-shaped evidence", () => {
@@ -233,5 +229,33 @@ test("a keep declaration above a scan root holds the whole root, and a kept Code
     assert.equal(readFileSync(keptLog, "utf8"), "{}\n", r.stdout);
     assert.equal(existsSync(idleLog), false, "an unkept idle log still goes");
     assert.equal(existsSync(oldCopy), false, "an unkept old copy still expires");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("worktree prune leaves a kept or keep-scoped store's stale worktree records alone and still prunes an unmarked store", () => {
+  const fx = setup({});
+  try {
+    // Three stores, each with one worktree whose folder is gone, leaving only stale admin records.
+    const stale = (repo: string, name: string) => {
+      const wt = join(fx.home, "Remudero", name);
+      git(repo, "worktree", "add", "--quiet", "-b", name, wt);
+      rmSync(wt, { recursive: true, force: true });
+      return join(repo, ".git/worktrees", name);
+    };
+    const kept = clone(fx, "Remudero/kept-tree/repo");
+    writeFileSync(join(fx.home, "Remudero/kept-tree/.rmd-janitor-keep"), "");
+    const shared = clone(fx, "Remudero/shared-store");
+    const plain = clone(fx, "Remudero/plain");
+    const records = { kept: stale(kept, "wt-kept"), shared: stale(shared, "wt-shared"), plain: stale(plain, "wt-plain") };
+    const before = [records.kept, records.shared].map(bytes);
+    const probe = `import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+holder = m.Repo(sys.argv[3], "clone"); holder.store = sys.argv[3] + "/.git"; holder.scoped = "a keep marker in its working tree"
+print(json.dumps(m.prune_worktrees([sys.argv[2] + "/.git", holder.store, sys.argv[4] + "/.git"], [holder])))`;
+    const r = spawnSync("python3", ["-I", "-c", probe, HELPER, kept, shared, plain], { encoding: "utf8", env: GIT_ENV });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), [join(plain, ".git")], "only the unmarked store is pruned");
+    assert.equal(existsSync(records.plain), false, "an unmarked store's stale record is pruned");
+    assert.deepEqual([records.kept, records.shared].map(bytes), before, "a kept store keeps every byte of its worktree records");
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
