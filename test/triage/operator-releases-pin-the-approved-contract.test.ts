@@ -6,13 +6,29 @@ import { test, type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import { resolveReleases, runnableCandidates } from "#src/lib/drain.js";
 import { renderMachineShard } from "#src/lib/machine-filing.js";
-import { readOperatorReleaseRecords, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge } from "#src/lib/machine-filing-judge.js";
-import { operatorReleasePin } from "#src/lib/operator-release.js";
+import * as machineJudge from "#src/lib/machine-filing-judge.js";
 import { assertRunnable, loadPlan, type Task } from "#src/lib/plan.js";
 import { approveParkedTask, releaseReadersFor } from "#src/run-task.js";
 
 const ID = "W1-T9901";
 const CLOCK = fixedClock(Date.parse("2026-10-24T10:00:00Z"));
+
+const { readOperatorReleases, recordOperatorRelease, runMachineFilingJudge } = machineJudge;
+function readOperatorReleaseRecords(stateDir: string) {
+  assert.equal(typeof machineJudge.readOperatorReleaseRecords, "function", "the existing public judge module exposes qualified release evidence");
+  return machineJudge.readOperatorReleaseRecords(stateDir);
+}
+
+function operatorReleasePin(task: Task): string {
+  const state = mkdtempSync(join(tmpdir(), "rmd-release-pin-witness-"));
+  try {
+    recordOperatorRelease(state, task, CLOCK.iso());
+    const record = JSON.parse(readFileSync(join(state, "operator-releases.json"), "utf8")).releases[task.id];
+    assert.equal(typeof record?.pin, "string", "the real approval writer records the current contract pin");
+    assert.match(record.pin, /^[0-9a-f]{64}$/);
+    return record.pin;
+  } finally { rmSync(state, { recursive: true, force: true }); }
+}
 
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "rmd-release-contract-"));
