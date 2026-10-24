@@ -9371,7 +9371,17 @@ function isMainRepairPrIn(pr: Pick<OpenPrView, "taskId" | "prUrl">, repairPrUrls
 
 /** W1-T8575 — required checks that judge only the PR's own body, title or proofs (each re-runs on
  *  `edited`). Main's red cannot reach them, so absence from main's run never makes them base red. */
-export const PR_BODY_SCOPED_CHECKS: readonly string[] = ["proof-discrimination", "acceptance-author-gate", "commitlint"];
+export const PR_BODY_SCOPED_CHECKS: readonly string[] = [
+  "proof-discrimination", // scripts/proof-discrimination-gate.mjs: the PR's acceptance proofs at head/base.
+  "acceptance-author-gate", // scripts/acceptance-author-gate.mjs: the PR event's body and task identity.
+  "commitlint", // .github/workflows/pr-title-lint.yml: the PR's live title.
+];
+
+/** W1-T9931: body- and diff-scoped checks that main's tree cannot turn red. */
+export const PR_OWN_INPUT_CHECKS: readonly string[] = [
+  ...PR_BODY_SCOPED_CHECKS,
+  "prompt-surface-gate", // scripts/prompt-surface-gate.mjs: git diff <base>...HEAD, the PR's own edits.
+];
 
 export type BaseRedDecision = { kind: "own" } | { kind: "wait" | "refresh"; check: string };
 
@@ -9392,15 +9402,15 @@ export function decideBaseRed(
     if (names.some((name) => main.observedChecks!.includes(name) && !main.failingChecks.includes(name))) return { kind: "own" };
     // W1-T7848: a red only a rule-suite probe saw names its one check; no other absent check is inherited from it.
     const absent = main.ciState !== undefined ? undefined
-      : names.find((name) => !main.observedChecks!.includes(name) && !PR_BODY_SCOPED_CHECKS.includes(name));
+      : names.find((name) => !main.observedChecks!.includes(name) && !PR_OWN_INPUT_CHECKS.includes(name));
     if (absent !== undefined) return { kind: "wait", check: absent };
   }
-  const shared = main?.state === "red" ? names.find((name) => main.failingChecks.includes(name)) : undefined;
+  const shared = main?.state === "red" ? names.find((name) => !PR_OWN_INPUT_CHECKS.includes(name) && main.failingChecks.includes(name)) : undefined;
   if (shared !== undefined) return { kind: "wait", check: shared };
   const key = `${pr.prNumber}@${pr.headSha}`;
   const recorded = history.stoodDown.get(key);
   if (history.refreshed.has(key)) return { kind: "own" };
-  if (recorded !== undefined && names.includes(recorded) && !PR_BODY_SCOPED_CHECKS.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
+  if (recorded !== undefined && names.includes(recorded) && !PR_OWN_INPUT_CHECKS.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
   // W1-T6024: a head whose failing tests a probe reproduced on main is main's red, whatever its check is called.
   const named = names[0];
   return main?.state === "green" && named !== undefined && history.reproducedBeforeGreen.has(key) ? { kind: "refresh", check: named } : { kind: "own" };
@@ -20367,7 +20377,9 @@ export async function runSweep(
                 // W1-T6405: main's fix can land BEFORE this head's first probe, so nothing was ever reproduced — a head
                 // behind that main, or of unread distance on a red main held or once failed, still takes it once.
                 const behindBy = deps.behindMainByPr?.get(pr.prNumber);
-                const inheritedBasis = behindBy !== undefined || verdict !== "clear" ? undefined : baseRedHistory.stoodDown.has(key) ? "stood-down"
+                const stoodDownCheck = baseRedHistory.stoodDown.get(key);
+                const inheritedBasis = behindBy !== undefined || verdict !== "clear" ? undefined
+                  : stoodDownCheck !== undefined && !PR_OWN_INPUT_CHECKS.includes(stoodDownCheck) ? "stood-down"
                   : reproductionFiles.every((file) => formerlyFailingOnMain.has(file)) ? "main-formerly-failing" : undefined;
                 const fixedOnMain = !previouslyReproduced && ((behindBy ?? 0) > 0 || inheritedBasis !== undefined);
                 if (fixedOnMain && inheritedBasis !== undefined && !inheritedRedNoted.has(key)) {
