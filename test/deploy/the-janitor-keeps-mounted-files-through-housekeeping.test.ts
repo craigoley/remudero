@@ -23,6 +23,7 @@ function file(path: string, body = "fixture\n", hours = 13): void {
 }
 
 function scope(fx: Fixture): Record<string, string> {
+  assert.equal(fx.env.RMD_CLEANUP_PRESERVE_ROOT, join(fx.root, "preserved"), "the fixture must not inherit a host preservation root");
   return { ...fx.env, RMD_CLEANUP_PRESERVE_ROOTS: "", RMD_CLEANUP_DUMP_ROOTS: "", RMD_CLEANUP_DUMP_RESUMABLE_ROOTS: "", RMD_CLEANUP_RETAIN_ROOTS: "", RMD_CLEANUP_NESTED_COVERAGE_ROOTS: "" };
 }
 
