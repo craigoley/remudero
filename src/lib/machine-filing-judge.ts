@@ -1147,9 +1147,12 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   const excluded = new Set(ports.excludeFamilies ?? []);
   const releaseEvidence = qualifyReleaseEvidence(ports.releaseLedgerLines?.() ?? [], ports.operatorReleases?.() ?? readOperatorReleaseRecords(ports.stateDir), releaseContractPins(plan.tasks));
   for (const task of plan.tasks) if (operatorReleaseContractChanged(task) && releaseEvidence.authors.get(task.id) !== "operator") releaseEvidence.reapproval.add(task.id);
+  const priorReapproval = new Set(state.operatorReapprovalRequired ?? []);
   state.operatorReapprovalRequired = [...releaseEvidence.reapproval].sort();
   const released = new Set([...releaseEvidence.authors].filter(([, author]) => author === "operator").map(([id]) => id));
-  for (const id of releaseEvidence.reapproval) ports.log("machine_judge.reapproval_required", { task_id: id, reason: "operator release is unpinned or the contract changed; explicit reapproval required" });
+  for (const id of releaseEvidence.reapproval) if (!priorReapproval.has(id) && plan.byId.get(id)?.verify === "human") {
+    ports.log("machine_judge.reapproval_required", { task_id: id, reason: "operator release is unpinned or the contract changed; explicit reapproval required" });
+  }
   const due = plan.tasks.filter(
     (t) =>
       !releaseEvidence.reapproval.has(t.id) && needsMachineJudgement(t, released) &&

@@ -60,7 +60,7 @@ import {
 } from "./operator-message.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { describeActorEvidence } from "./actor-evidence.js";
-import { IDLE_REASON_ID_CAP, resolveReleasedIds, runBranchTaskIds, runnableCandidates, type DispatchFilterReason, type MergedSet } from "./drain.js";
+import { IDLE_REASON_ID_CAP, resolveReleases, runBranchTaskIds, runnableCandidates, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import { heldDependencyRoots, type HeldDependencyRoot } from "./held-dependency-roots.js";
 import {
   drainNowFilePath,
@@ -2283,7 +2283,10 @@ export function deriveOperatorItems(
 
 function readOperatorReleaseRecordsForBoard(root: string, plan: Plan | undefined, lines: ReadonlyArray<Record<string, unknown>>): { ids: ReadonlySet<string>; reason?: string } {
   try {
-    return { ids: resolveReleasedIds({ readLedgerLines: () => lines.map(line => JSON.stringify(line)), readDurableReleases: () => readOperatorReleaseRecords(join(root, "state")) }, plan) };
+    const releases = resolveReleases({ readLedgerLines: () => lines.map(line => JSON.stringify(line)),
+      readDurableReleases: () => readOperatorReleaseRecords(join(root, "state")) }, plan);
+    const error = releases.durableUnreadable ?? releases.ledgerUnreadable;
+    return { ids: releases.ids, ...(error === undefined ? {} : { reason: `operator release state is unreadable (${error})` }) };
   } catch (error) {
     return {
       ids: new Set(),

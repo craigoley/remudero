@@ -151,6 +151,8 @@ test("an observed legacy reapproval hold survives rotation until an explicit new
   assert.equal(resolveReleases(releaseReadersFor(f.ledger), f.plan()).setAside.has(ID), true);
   assert.deepEqual((await f.judge()).proceeded, []);
   assert.equal(f.modelCalls(), 0);
+  assert.equal(f.rows.filter(row => row.step === "machine_judge.reapproval_required").length, 1,
+    "an unchanged hold is recorded once rather than flooding every garden pass");
   const outcome = approveParkedTask(ID, { plan: f.plan(), ledgerPath: f.ledger, runId: "operator",
     recordDurableRelease: task => recordOperatorRelease(f.stateDir, task, CLOCK.iso()) });
   assert.equal(outcome.released, true);
