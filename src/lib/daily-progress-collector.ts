@@ -56,7 +56,7 @@ function prIdentity(pr: BoardPrRest, repository: string, states: readonly string
 
 const activityLabel: Readonly<Record<string, string>> = {
   "worker.spawn": "Worker started", "worker.finished": "Worker finished", "worker.assignment": "Work assigned",
-  "fix.dispatch": "Repair requested", "pr.opened": "Pull request opened", "verdict": "Work status reported",
+  "fix.dispatch": "Repair attempt recorded", "pr.opened": "Pull request opened", "verdict": "Work status reported",
 };
 
 async function activity(source: DailyProgressInstance, since: string, now: number, signal?: AbortSignal): Promise<{ events: DailyProgressEvent[]; gaps: number; available: boolean }> {
