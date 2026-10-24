@@ -132,6 +132,43 @@ test("an inconclusive local probe falls to CI and a local proof names its files"
   assert.ok(f.requests.some((args) => args.includes("/dispatches")));
   assert.equal(f.local.filter((sha) => sha === C2).length, 1, "inconclusive local work is not repeated");
 
+  for (const boundary of [RED, GREEN]) {
+    for (const fallback of ["confirmed", "refused", "contradicted"]) {
+      const f = fixture(t);
+      f.ci(fallback === "contradicted" ? boundary !== RED : boundary === RED, fallback === "refused");
+      f.reproduce(async (sha, files) => result(sha === boundary ? "unrunnable"
+        : boundary === RED ? "passes" : "fails", files));
+      await f.observe();
+      await f.observe();
+      assert.equal(f.rows("main.repair.located").length, 0, "an inconclusive boundary is not a culprit proof");
+      assert.deepEqual(f.fixes, [], "repair waits for the boundary's CI fallback");
+      if (fallback !== "refused") {
+        const read = f.lane.probes!.read;
+        f.lane.probes!.read = async () => ({ status: "running" });
+        await f.observe();
+        await f.observe();
+        assert.equal(f.rows("main.repair.located").length, 0, "an in-flight CI boundary is not a culprit proof");
+        assert.deepEqual(f.fixes, []);
+        f.lane.probes!.read = read;
+      }
+      await f.settle();
+      assert.deepEqual(f.requests.filter((args) => args.includes("/dispatches")), [["/dispatches", boundary]],
+        "the inconclusive boundary itself must be sent to CI");
+      assert.equal(f.local.filter((sha) => sha === boundary).length, 1, "the boundary is not repeated locally");
+      const located = f.rows("main.repair.located")[0];
+      assert.equal(located?.method, fallback === "confirmed" ? "bisected-first-red" : "first-red-unattributed");
+      assert.equal(located?.offending_sha, fallback !== "confirmed" || boundary === RED ? RED : C1);
+      assert.equal(f.fixes.length, 1);
+      assert.deepEqual(f.reverts, [], "a CI boundary verdict is not a same-file local proof");
+      if (fallback === "confirmed") {
+        const runs = located.probe_runs as Array<Record<string, unknown>>;
+        assert.equal(runs.find((run) => run.sha === boundary)?.verdict, boundary === RED ? "red" : "green");
+        assert.equal(runs.find((run) => run.sha === boundary)?.method, undefined);
+        assert.equal(f.rows("main.repair.revert_withheld").length, 1);
+      }
+    }
+  }
+
   const proven = fixture(t);
   await proven.settle();
   const evidence = proven.rows("main.repair.located")[0]?.probe_runs as Array<Record<string, unknown>>;

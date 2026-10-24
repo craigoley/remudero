@@ -2053,8 +2053,8 @@ export function buildMainHealthRung(
         deps.log("main.repair.probe_ref_not_released", { ...at, probe_sha: probe.sha, ref: probe.ref, error: String((error as Error)?.message ?? error) });
       }
     }
-    const planFor = (concurrency: number) =>
-      planMainBisection({
+    const planFor = (concurrency: number): MainBisectionPlan => {
+      const plan = planMainBisection({
         green: first.afterGreenSha,
         red: first.headSha,
         span,
@@ -2062,29 +2062,37 @@ export function buildMainHealthRung(
         inFlight: new Set(state.inFlight.keys()),
         concurrency,
       });
+      if (plan.state !== "proven" || ![...state.evidence.values()].some((proof) => proof.method === "local-test")) return plan;
+      const needed = [plan.offendingSha, plan.parentSha].filter((sha) => !state.evidence.has(sha));
+      if (needed.length === 0) return plan;
+      const free = Math.max(0, concurrency - needed.filter((sha) => state.inFlight.has(sha)).length);
+      return { state: "probe", shas: needed.filter((sha) => !state.inFlight.has(sha)).slice(0, free),
+        strategy: "linear-newest-first", open: needed, estimatedProbes: needed.length, alternativeProbes: needed.length };
+    };
     let plan = planFor(1);
     if ([...state.inFlight.values()].some((probe) => probe.ref.startsWith("local-test/"))) return { kind: "probing" };
     if (lane.reproduceAt && testFiles.length > 0) {
       if (plan.state === "probe") {
         const local = plan.shas.filter((sha) => !state.localAttempts.has(sha));
         if (local.length > 0) { local.forEach(startLocal); return { kind: "probing" }; }
-      } else if ([...state.evidence.values()].some((proof) => proof.method === "local-test")) {
-        const needed = [plan.offendingSha, plan.parentSha].filter((sha) => !state.localAttempts.has(sha));
-        if (needed.length > 0) {
-          for (const sha of needed) if (!state.inFlight.has(sha)) startLocal(sha);
-          return { kind: "probing" };
-        }
       }
     }
     if (plan.state === "proven") {
+      const proven = plan;
+      const contradicted = [proven.offendingSha, proven.parentSha].filter((sha) =>
+        state.evidence.has(sha) && state.evidence.get(sha)!.verdict !== (sha === proven.offendingSha ? "red" : "green"));
+      if (contradicted.length > 0) {
+        return { ...asFirstRed, method: "first-red-unattributed",
+          fields: { ...at, unattributed_span: [...span], attribution_refused: contradicted.map((sha) =>
+            `${sha}: the probe contradicts the completed-run boundary`) } };
+      }
       const evidenceOf = (probed: string, fallbackUrl?: string) => ({
         sha: probed,
-        verdict: probed === first.headSha || probed === first.afterGreenSha ? (probed === first.headSha ? "red" : "green") : (state.evidence.get(probed)?.verdict ?? "unknown"),
+        verdict: state.evidence.get(probed)?.verdict ?? (probed === first.headSha ? "red" : probed === first.afterGreenSha ? "green" : "unknown"),
         run_url: state.evidence.get(probed)?.runUrl ?? fallbackUrl ?? null,
         ...(state.evidence.get(probed)?.method === "local-test" ? { method: "local-test",
           files: state.evidence.get(probed)?.files, outcomes: state.evidence.get(probed)?.outcomes } : {}),
       });
-      const proven = plan;
       return {
         kind: "named",
         sha: proven.offendingSha,
