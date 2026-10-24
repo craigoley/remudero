@@ -430,6 +430,8 @@ test("the real plan repair effect rechecks filed scope and head contract before 
       },
       worktreeRemoveImpl() {},
     };
+    assert.equal((await buildSweepEffects(deps).readPlanRepairFacts!(filed)).filedTaskRepairReady, true,
+      "the production fact reader supplies the scheduler's filed-task authority bit");
     assert.equal((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).outcome, "pushed");
     livePaths = [PATH, "plan/tasks.d/other.yaml"];
     assert.equal((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).outcome, "refused");
@@ -441,6 +443,7 @@ test("the real plan repair effect rechecks filed scope and head contract before 
     deps.resolveTaskContractAtHeadImpl = async () => ({ ...contract, taskDeclaredFiles: ["plan/tasks.d/other.yaml"] });
     assert.match((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).reason!, /contract differs/);
     task.verify = "human";
+    assert.equal((await buildSweepEffects(deps).readPlanRepairFacts!(filed)).filedTaskRepairReady, false);
     deps.resolveTaskContractAtHeadImpl = async () => contract;
     assert.equal((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).outcome, "refused");
     assert.equal(calls, 1, "refusals never reach a worker");
