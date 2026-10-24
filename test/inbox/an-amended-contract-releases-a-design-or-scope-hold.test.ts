@@ -11,6 +11,7 @@ import { parseTasksFromYaml } from "#src/lib/plan.js";
 import { renderFixPrompt } from "#src/lib/prompt-render.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
 
 /**
@@ -244,6 +245,49 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
       assert.equal(damaged.state.refreshed, 0, "an unattributed damaged row cannot prove an empty attempt history");
       assert.equal(damaged.state.dispatched, 0);
     }
+  });
+
+  test("the light-pass contract refresh refuses non-object rows in the real live ledger", async t => {
+    for (const row of [null, [], 42, "not a ledger object", true]) {
+      const { dir } = ownedFixtureDir(t, "contract-non-object-history");
+      const ledger = join(dir, "ledger.ndjson");
+      const hold = JSON.stringify(headContractHold()) + "\n";
+      writeFileSync(ledger, hold);
+      const f = fixture([headContractHold()]);
+      f.state.revision = "contract-B";
+      const deps = { ...f.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined };
+      const healthy = await lightPassHeadContractRefresh([pr()], deps);
+      assert.equal(healthy.headContractRefreshFor?.(pr()), f.deps.updateBranch,
+        "the real reader grants the amended head a capability when every live row is an object");
+
+      writeFileSync(ledger, hold + JSON.stringify(row) + "\n" +
+        JSON.stringify({ step: "unrelated.completed" }) + "\n");
+      const refused = await lightPassHeadContractRefresh([pr()], deps);
+      assert.deepEqual(refused, {}, `a non-object row ${JSON.stringify(row)} grants no capability`);
+      await runSweepLightPass([pr()], { ...deps, updateBranch: undefined, ...refused });
+      assert.equal(f.state.refreshed, 0);
+      assert.equal(f.state.dispatched, 0);
+      assert.equal(f.state.admissions, 0);
+    }
+  });
+
+  test("the light-pass contract refresh reports rejected history reads and grants no capability", async () => {
+    const f = fixture([headContractHold()]);
+    f.state.revision = "contract-B";
+    const logs: Array<{ step: string; extra: unknown }> = [];
+    const failure = new Error("contract history unavailable");
+    const refused = await lightPassHeadContractRefresh([pr()], {
+      ...f.deps,
+      readHeadContractRefreshHistory: async () => { throw failure; },
+      log: (step, extra) => { logs.push({ step, extra }); },
+    });
+    assert.deepEqual(refused, {});
+    assert.deepEqual(logs, [{ step: "sweep.head_contract_refresh.unreadable",
+      extra: { reason: String(failure) } }]);
+    await runSweepLightPass([pr()], { ...f.deps, updateBranch: undefined, ...refused });
+    assert.equal(f.state.refreshed, 0);
+    assert.equal(f.state.dispatched, 0);
+    assert.equal(f.state.admissions, 0);
   });
 
   test("the contract refresh reader preserves torn evidence and reuses exact rotation digests", async t => {
