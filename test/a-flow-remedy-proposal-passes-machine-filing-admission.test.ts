@@ -180,6 +180,7 @@ test("held proposals retain judge refusals and cannot dispatch even with a curre
     }), [], state);
     assert.equal(JSON.stringify(task), before, "filing admission cannot rewrite a ruling or hold");
     task.verify = "auto";
+    if (task.risk_ruling) task.risk_ruling.pin = taskRulingPin(task); // fixture's newly judged auto contract
     if (state !== "proceed") assert.ok(machineAuthorVerifyViolation(task), state);
     else assert.equal(machineAuthorVerifyViolation(task), undefined, "the positive judge control is current");
     assert.deepEqual(runnableCandidates(plan, () => false, 10, { releasedIds: new Set([task.id]) }), [], state);
