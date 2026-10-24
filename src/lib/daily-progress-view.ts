@@ -66,7 +66,7 @@ function count(values: MeasuredCount[], exact: boolean): MeasuredCount {
 /** Worker-side read: authorize scope before opening any day object or adding counts. */
 export function readDailyProgressReport(opts: { stateDir: string; params: URLSearchParams; now: number; timeZone?: string }): { data: DailyProgressReport; sources: ViewSource[] } {
   const input = request(opts.params, opts.now, opts.timeZone ?? DEFAULT_DAILY_PROGRESS_ZONE);
-  const inventory = readDailyProgressRepositories(opts.stateDir);
+  const inventory = [...new Set(Object.values(readDailyProgressManifest(opts.stateDir).days).map(day => day.repository))];
   if (input.repository !== "all" && !inventory.includes(input.repository)) throw new RangeError("unknown repository");
   const expected = input.repository === "all" ? inventory : [input.repository], identity = scopeKey(input, expected);
   if (input.page && input.page.k !== identity) throw new RangeError("report page belongs to another scope or reporting day");
