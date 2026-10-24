@@ -442,9 +442,15 @@ test("the real plan repair effect rechecks filed scope and head contract before 
     assert.match((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).reason!, /no head-contract resolver/);
     deps.resolveTaskContractAtHeadImpl = async () => ({ ...contract, taskDeclaredFiles: ["plan/tasks.d/other.yaml"] });
     assert.match((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).reason!, /contract differs/);
-    task.verify = "human";
-    assert.equal((await buildSweepEffects(deps).readPlanRepairFacts!(filed)).filedTaskRepairReady, false);
     deps.resolveTaskContractAtHeadImpl = async () => contract;
+    for (const hold of [{ verify: "human" }, { status: "blocked" }, { dispatch_hold: true }, { retirement: "withdrawn" }]) {
+      Object.assign(task, { verify: "auto", status: "queued", dispatch_hold: undefined, retirement: undefined }, hold);
+      assert.equal((await buildSweepEffects(deps).readPlanRepairFacts!(filed)).filedTaskRepairReady, false);
+      assert.equal((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).outcome, "refused");
+    }
+    Object.assign(task, { verify: "auto", status: "queued", dispatch_hold: undefined, retirement: undefined });
+    deps.ghJsonImpl = () => ({ head: { ref: "run-W1-T9772-1792847208999", sha: HEAD },
+      user: { login: "remudero-fleet[bot]" }, title: "fix(plan): retire target", body: BODY });
     assert.equal((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).outcome, "refused");
     assert.equal(calls, 1, "refusals never reach a worker");
   } finally { rmSync(root, { recursive: true, force: true }); }
