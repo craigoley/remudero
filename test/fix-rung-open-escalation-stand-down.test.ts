@@ -29,9 +29,9 @@
  * sequence (three workers, three issues expected).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { runFixRung, openEscalationStandDownReason, taskContractRevision } from "./helpers/run-task-test.js";
@@ -442,6 +442,22 @@ test("W1-T3579 preserves same-head stand-down for unchanged contract", async () 
   for (const outcome of outcomes.slice(1)) {
     assert.equal(outcome.outcome, "stood_down", "every later sweep, still on the SAME contract, stands down exactly as W1-T2799 intended");
   }
+});
+
+test("an escalation hold records the contract the head actually refused", async t => {
+  const issues = fakeIssueStore();
+  const ledgerPath = tmpLedgerPath();
+  t.after(() => rmSync(dirname(ledgerPath), { recursive: true, force: true }));
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const task = { files: ["a.ts"], acceptance: [{ claim: "original", proof: "unit test: original" }] };
+  await sweep({ issues, ledgerPath, headSha: HEAD_3, spawnCalls, task });
+  const held = await sweep({ issues, ledgerPath, headSha: HEAD_3, spawnCalls, task, logs });
+  assert.equal(held.outcome, "stood_down");
+  assert.equal(spawnCalls.length, 1);
+  const receipt = logs.find(row => row.step === "fix.contract_hold")?.extra;
+  assert.deepEqual(receipt, { kind: "open-escalation", pr_url: PR_URL, head_sha: HEAD_3,
+    contract_revision: taskContractRevision({ id: TASK_ID, ...task }), issue_url: issues.created[0].url });
 });
 
 test("W1-T3579 ignores unrelated task contract revision", () => {
