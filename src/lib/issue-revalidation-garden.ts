@@ -25,7 +25,8 @@
 import { createHash } from "node:crypto";
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
-import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.js";
+import { attemptAssignmentJoin, benchmarkEvidenceLedgerPath, benchmarkNonDispatchSpawn, benchmarkWorkerAttemptResources, withReceiptIdentity } from "./benchmark-run.js";
+import type { Config } from "./config.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { ghIssueGatewayAsync, splitConcatenatedJsonPages, type AsyncIssueGateway } from "./escalate.js";
 import { feedbackCaptured, stageFeedbackCapture } from "./feedback.js";
@@ -33,9 +34,10 @@ import { overseerStatePath } from "./gardener-overseer.js";
 import { ghTextAsync } from "./github-transport.js";
 import { issueFeedbackId, renderIssueRaw } from "./issues-intake.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { appendLedger } from "./ledger.js";
 import type { Mount } from "./mounts.js";
 import { installPolicyPath } from "./policy.js";
-import type { spawnWorker } from "./worker.js";
+import type { spawnWorker, WorkerResult } from "./worker.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 
 export const ISSUE_REVALIDATION_VERDICT_STEP = "issue_revalidation.verdict";
@@ -796,14 +798,55 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
   };
 }
 
-/** The judge's raw text from one spawn on the escalation judge's mount (cheapest routed cell), with no
- *  tools: everything it may use is in the prompt. Untested by unit (it spawns); the prompt and
- *  {@link parseIssueRevalidationVerdict} carry the contract. */
-export function issueRevalidationJudgeText(opts: { mount: Mount; cwd: string; settingsFile: string; spawn?: typeof spawnWorker }): (prompt: string, issueNumber: number) => Promise<string> {
+/** The existing single judge spawn, with best-effort monetary receipts before parsing can discard a
+ * paid result. The optional config names only the evidence sink, never the router or child environment. */
+export function issueRevalidationJudgeText(opts: { mount: Mount; cwd: string; settingsFile: string; spawn?: typeof spawnWorker; config?: Config }): (prompt: string, issueNumber: number) => Promise<string> {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("escalation-summary");
-  return async (prompt, issueNumber) => (await spawn(withReceiptIdentity({
-    cwd: opts.cwd, permissionMode: "bypassPermissions", settingsFile: opts.settingsFile, prompt,
-    model: opts.mount.model, effort: opts.mount.effort, maxTurns: opts.mount.maxTurns, tools: [],
-    ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
-  }, { taskId: "ISSUE-REVALIDATION", runId: `issue-revalidation-${issueNumber}-${createHash("sha256").update(prompt).digest("hex").slice(0, 12)}` }))).text;
+  return async (prompt, issueNumber) => {
+    const identity = { taskId: "ISSUE-REVALIDATION", runId: `issue-revalidation-${issueNumber}-${createHash("sha256").update(prompt).digest("hex").slice(0, 12)}` };
+    let assignmentId: string | undefined, unstartedRecorded = false;
+    const recordedIds = new Set<string>(), unkeyedResults = new WeakSet<WorkerResult>(), keyedResults = new WeakSet<WorkerResult>();
+    const record = (result: WorkerResult | undefined, id: string | undefined): void => {
+      if (id !== undefined && recordedIds.has(id)) return;
+      if (result && (unkeyedResults.has(result) || id === undefined && keyedResults.has(result))) {
+        if (id !== undefined) recordedIds.add(id);
+        return;
+      }
+      if (id !== undefined) recordedIds.add(id);
+      if (result) (id === undefined ? unkeyedResults : keyedResults).add(result);
+      else if (id === undefined) { if (unstartedRecorded) return; unstartedRecorded = true; }
+      try {
+        let resources: ReturnType<typeof benchmarkWorkerAttemptResources> | undefined;
+        try { if (result) resources = benchmarkWorkerAttemptResources(result); }
+        catch { /* unreportable worker accounting is unknown, not a free call */ }
+        const { billing_mode = "unknown" } = resources ?? {};
+        const price = resources?.total_cost_usd, notional = resources?.notional_cost_usd;
+        const priced = typeof price === "number" && Number.isFinite(price) && price >= 0;
+        const path = benchmarkEvidenceLedgerPath(opts.config);
+        if (path === undefined) return;
+        appendLedger(path, {
+          run_id: identity.runId, task_id: identity.taskId, step: "issue_revalidation.attempt_spend",
+          ...attemptAssignmentJoin(id, result === undefined),
+          attempt_state: result ? "result" : id ? "failed" : "not-started",
+          accounting_source: "worker-result-estimate-not-invoice",
+          provider: result?.provider === "claude" || result?.provider === "codex" || result?.provider === "cash" ? result.provider : "unknown",
+          billing_mode, price_state: priced ? "reported" : "unknown",
+          ...(priced ? { total_cost_usd: price } : {}),
+          ...(typeof notional === "number" && Number.isFinite(notional) && notional >= 0 ? { notional_cost_usd: notional } : {}),
+        });
+      } catch { /* monetary telemetry must not change the result, rejection or existing retry flow */ }
+    };
+    let result: WorkerResult;
+    try {
+      result = await spawn(withReceiptIdentity({
+        cwd: opts.cwd, permissionMode: "bypassPermissions", settingsFile: opts.settingsFile, prompt,
+        model: opts.mount.model, effort: opts.mount.effort, maxTurns: opts.mount.maxTurns, tools: [],
+        ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
+        onSelectionAssignment: assignment => { assignmentId = assignment.id; },
+        onModelFallbackAttempt: attempt => record(attempt.result, attempt.selectionAssignmentId ?? attempt.result?.selectionAssignmentId),
+      }, identity));
+    } catch (error) { record(undefined, assignmentId); throw error; }
+    record(result, result.selectionAssignmentId ?? assignmentId);
+    return result.text;
+  };
 }
