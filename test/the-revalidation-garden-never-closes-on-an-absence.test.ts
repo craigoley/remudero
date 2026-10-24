@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import {
-  buildIssueRevalidationPrompt, conditionReobserved, evidenceNames, isAbsenceOnlyCitation, ISSUE_REVALIDATION_VERDICT_STEP,
+  buildIssueRevalidationPrompt, conditionReobserved, decideAction, evidenceNames, isAbsenceOnlyCitation, ISSUE_REVALIDATION_VERDICT_STEP,
   parseIssueRevalidationVerdict, productionIssueRevalidationPorts, runIssueRevalidationGarden,
   type IssueRevalidationPorts, type PriorVerdict, type RevalidationComment, type RevalidationIssue, type RevalidationVerdict,
 } from "#src/lib/issue-revalidation-garden.js";
@@ -142,4 +142,9 @@ test("positive still-true evidence keeps the ordinary refresh and operator prote
   const prompt = buildIssueRevalidationPrompt(blocked(10269), "escalation", { facts: [citation] });
   assert.match(prompt, /still-true.*positive current evidence/);
   assert.match(prompt, /unknown.*absence-only/);
+  const input = { verdict, escalationClass: "BLOCKED", operatorSpokeLast: false, prior: undefined, nowMs: NOW };
+  assert.deepEqual(decideAction(input), { action: "refresh" });
+  assert.deepEqual(decideAction({ ...input, operatorSpokeLast: true }), { action: "keep", guard: "newer-operator-comment" });
+  assert.deepEqual(decideAction({ ...input, operatorSpokeLast: undefined }), { action: "keep", guard: "comments-unread" });
+  assert.deepEqual(decideAction({ ...input, verdict: { ...verdict, verdict: "resolved" }, escalationClass: "GRILL" }), { action: "refresh", guard: "operator-owned-class" });
 });
