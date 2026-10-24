@@ -6455,7 +6455,8 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
       const message = parseReport(report)?.commitMessage;
       if (!message || checkCommitMessage(message).length) return refuse("the plan round needs a valid COMMIT_MESSAGE");
       git(["add", "-A", "--", ...changed]);
-      git(["commit", "-m", message]);
+      const filedTask = taskIdFromRunBranch(pr.headRefName) === input.task.id && namesATask(input.task.id);
+      git(["commit", "-m", message, ...(filedTask ? ["-m", `Remudero-Task: ${input.task.id}`] : [])]);
       sha = git(["rev-parse", "HEAD"]).trim();
     } else if (metadata.title === input.title && metadata.body === input.body) return refuse("the worker changed nothing");
     const verdict = await preflight(worktreePath, sha, metadata);

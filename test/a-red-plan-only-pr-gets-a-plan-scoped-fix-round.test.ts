@@ -369,3 +369,101 @@ test("the sweep adapter feeds CI tails and writes validated metadata through RES
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test("a fleet filed plan task reaches only its exact plan repair grant", async () => {
+  const filed = { ...pr, taskId: "W1-T9772", headRefName: "run-W1-T9772-1792847208006", mergeState: "clean",
+    taskExistsOnMain: true, taskDeclaredFiles: [PATH], changedFiles: [PATH] } as OpenPrView;
+  for (const scenario of ["valid", "foreign-author", "unknown-task", "unknown-scope", "outside-grant", "product-grant", "wrong-branch", "unknown-merge", "dry-run", "admission"] as const) {
+    const ledger: Record<string, unknown>[] = [];
+    let rounds = 0;
+    const candidate = { ...filed,
+      ...(scenario === "unknown-task" ? { taskExistsOnMain: undefined } : {}),
+      ...(scenario === "unknown-scope" ? { taskDeclaredFiles: undefined } : {}),
+      ...(scenario === "outside-grant" ? { changedFiles: [PATH, "plan/tasks.d/other.yaml"] } : {}),
+      ...(scenario === "product-grant" ? { taskDeclaredFiles: [PATH, "src/x.ts"] } : {}),
+      ...(scenario === "wrong-branch" ? { headRefName: "run-W1-TOTHER-1792847208006" } : {}),
+      ...(scenario === "unknown-merge" ? { mergeState: "unknown" as const } : {}),
+    };
+    const deps = { runId: "filed-plan-route", ledgerPath: "/dev/null/ledger", readLedger: () => ledger,
+      appendLine: (_: string, row: Record<string, unknown>) => ledger.push(row),
+      arm() {}, close() {}, escalate() {}, dispatchFix() { assert.fail("never enter the code lane"); },
+      readPlanRepairFacts: () => ({ authorLogin: scenario === "foreign-author" ? "cao825" : "remudero-fleet[bot]" }),
+      repairPlanPr() {}, dryRun: scenario === "dry-run",
+      claimFixAdmission: () => scenario === "admission" ? { admitted: false, reason: "capacity held" } : { admitted: true },
+      dispatchPlanGateRound: async () => { rounds++; return { outcome: "pushed", headSha: NEXT }; },
+    } as unknown as SweepDeps;
+    await runSweep([candidate], deps, DEFAULT_SWEEP_POLICY);
+    assert.equal(rounds, scenario === "valid" ? 1 : 0, scenario);
+  }
+});
+
+test("the real plan repair effect rechecks filed scope and head contract before a worker", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-filed-plan-effect-"));
+  const task = { id: "W1-T9772", title: "retire the obsolete target", files: [PATH], risk: "medium" as const,
+    acceptance: [], design: "preserve the reason", budget_usd: 10 };
+  const filed = { ...pr, taskId: task.id, headRefName: "run-W1-T9772-1792847208006", mergeState: "clean",
+    taskExistsOnMain: true, taskDeclaredFiles: [PATH], changedFiles: [PATH] } as OpenPrView;
+  let calls = 0;
+  let livePaths = [PATH];
+  const contract = { criteria: task.acceptance, taskDeclaredFiles: task.files, taskRisk: task.risk,
+    taskBudgetUsd: task.budget_usd, taskNarrative: { design: task.design } };
+  try {
+    const deps: Parameters<typeof buildSweepEffects>[0] = {
+      owner: "acme", repo: "remudero", config: { root } as Config, repoRoot: process.cwd(),
+      ledgerPath: join(root, "ledger.ndjson"), runId: "filed-plan-effect", log() {},
+      plan: { tasks: [task], byId: new Map([[task.id, task]]) } as never, policy: DEFAULT_SWEEP_POLICY,
+      dispatchFixPreflightStandDownImpl: async () => undefined,
+      ghJsonImpl: () => ({ head: { ref: filed.headRefName, sha: HEAD }, user: { login: "remudero-fleet[bot]" }, title: "fix(plan): retire target", body: BODY }),
+      fetchPrDiffFilesImpl: async () => livePaths,
+      fixBranchClaimKeyImpl: () => "filed-plan-effect",
+      materializePlanRoundWorktreeImpl: () => ({ worktreePath: join(root, "tree") }),
+      resolveTaskContractAtHeadImpl: async () => contract,
+      restRollupForImpl: async () => [], fetchCiFailuresImpl: () => filed.ciFailures,
+      runPlanScopedFixRoundImpl: async input => {
+        calls++;
+        assert.equal(input.task.id, task.id);
+        assert.deepEqual(input.task.files, [PATH]);
+        assert.equal(input.task.budget_usd, 10);
+        return { outcome: "pushed", headSha: NEXT, preflight: clean };
+      },
+      worktreeRemoveImpl() {},
+    };
+    assert.equal((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).outcome, "pushed");
+    livePaths = [PATH, "plan/tasks.d/other.yaml"];
+    assert.equal((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).outcome, "refused");
+    livePaths = [PATH];
+    deps.resolveTaskContractAtHeadImpl = async () => undefined;
+    assert.match((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).reason!, /unreadable/);
+    deps.resolveTaskContractAtHeadImpl = undefined;
+    assert.match((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).reason!, /no head-contract resolver/);
+    deps.resolveTaskContractAtHeadImpl = async () => ({ ...contract, taskDeclaredFiles: ["plan/tasks.d/other.yaml"] });
+    assert.match((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).reason!, /contract differs/);
+    assert.equal(calls, 1, "refusals never reach a worker");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a filed plan repair's real commit retains its task identity", async () => {
+  const repo = gitRepo({ seedCommit: false, kind: "filed-plan-commit" });
+  try {
+    repo.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
+    repo.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
+    mkdirSync(dirname(join(repo.dir, PATH)), { recursive: true });
+    writeFileSync(join(repo.dir, PATH), "- id: W1-T5543\n");
+    repo.git("add", "."); repo.git("commit", "-qm", "chore(test): seed target");
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    const sha = repo.git("rev-parse", "HEAD");
+    const f = roundFixture();
+    const result = await runner.runPlanScopedFixRound({ ...f.input,
+      pr: { ...pr, headSha: sha, taskId: "W1-T9772", headRefName: "run-W1-T9772-1792847208006" },
+      task: { ...f.input.task, id: "W1-T9772" }, worktreePath: repo.dir,
+      deps: { ...f.input.deps, runGit: undefined, spawn: async () => {
+        writeFileSync(join(repo.dir, PATH), "- id: W1-T5543\n  retirement: retired # obsolete target\n");
+        return "COMMIT_MESSAGE: fix(plan): retire the obsolete target";
+      } },
+    });
+    assert.equal(result.outcome, "pushed", result.reason);
+    assert.match(repo.git("show", "-s", "--format=%B", "HEAD"), /^Remudero-Task: W1-T9772$/m);
+    assert.deepEqual(repo.git("diff", "--name-only", sha, "HEAD").split("\n"), [PATH]);
+  } finally { repo.cleanup(); }
+});
