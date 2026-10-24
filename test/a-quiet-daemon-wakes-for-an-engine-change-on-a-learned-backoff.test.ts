@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { gzipSync } from "node:zlib";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -25,7 +26,7 @@ function emptyWake(at: number, duration = 70, admitted = false): Row[] {
 }
 
 function fixture(t: TestContext, history: Row[]) {
-  const root = mkdtempSync(join(tmpdir(), "quiet-engine-backoff-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}quiet-engine-backoff-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const github = ghShim([{ when: "api", stdoutEnv: "FIXTURE_BOARD" }]);
   t.after(() => rmSync(github.dir, { recursive: true, force: true }));
