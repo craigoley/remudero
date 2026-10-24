@@ -147,6 +147,7 @@ export function validateDailyProgressRequest(params: URLSearchParams, source: Vi
     const scoped = input.repository === "all" ? expected : [input.repository];
     if (input.page && input.page.k !== scopeKey(input, scoped)) throw new RangeError("report page belongs to another scope or reporting day");
     const key = viewKey(params), entry = source.body(DAILY_PROGRESS_VIEW_NAME, key)?.body.data as DailyProgressReport | undefined;
+    if (!entry) { source.want?.(DAILY_PROGRESS_VIEW_NAME, key); return { error: "view_not_ready", status: 503, detail: "Daily progress is preparing the selected report." }; }
     if (entry && JSON.stringify(entry.coverage.expectedRepositories) !== JSON.stringify(scoped)) { source.want?.(DAILY_PROGRESS_VIEW_NAME, key); return { error: "view_not_ready", status: 503, detail: "Repository scope changed; the cached report is being rebuilt." }; }
     return undefined;
   } catch (error) {
