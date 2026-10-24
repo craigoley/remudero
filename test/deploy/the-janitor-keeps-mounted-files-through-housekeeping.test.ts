@@ -128,3 +128,27 @@ test("filesystem aliases of container mounts remain protected while unmounted pe
   assert.equal(existsSync(join(peer, "dumps", "idle.json.gz")), true, "unmounted compression control");
   assert.match(r.stdout, /running container mount through filesystem identity/);
 });
+
+test("an unreadable container mount identity keeps file candidates instead of trusting an incomplete snapshot", () => {
+  const fx = fixture();
+  file(join(fx.scratch, "rmd-idle", "payload")); age(join(fx.scratch, "rmd-idle"));
+  mount(fx, join(fx.root, "missing-mount-source"));
+  const r = run(fx, { ...scope(fx), RMD_CLEANUP_TMP_GLOBS: "rmd-idle" });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(readFileSync(join(fx.scratch, "rmd-idle", "payload"), "utf8"), "fixture\n");
+  assert.match(r.stdout, /Docker mount identity unreadable \(fail closed\)/);
+});
+
+test("an unreadable archive destination identity leaves its source transcript while an unmounted peer is reaped", () => {
+  const fx = fixture();
+  const source = join(fx.home, "agent", ".claude", "projects", "session", "history.jsonl");
+  const mounted = join(fx.root, "mounted-elsewhere"); mkdirSync(mounted); mount(fx, mounted);
+  file(source, "{}\n");
+  symlinkSync(join(fx.root, "missing-archive-target"), fx.archive, "dir");
+  file(join(fx.scratch, "rmd-idle", "payload")); age(join(fx.scratch, "rmd-idle"));
+  const r = run(fx, { ...scope(fx), RMD_CLEANUP_TMP_GLOBS: "rmd-idle" });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(readFileSync(source, "utf8"), "{}\n");
+  assert.equal(existsSync(join(fx.scratch, "rmd-idle")), false, "unmounted positive control");
+  assert.match(r.stdout, /Docker mount identity unreadable \(fail closed\)/);
+});

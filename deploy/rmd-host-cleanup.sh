@@ -655,6 +655,7 @@ fs_id() {
 DOCKER_OK=1
 DOCKER_MOUNTS=""
 container_path_identity() {
+  [ -e "$1" ] || return 1
   stat -Lc '%d:%i' -- "$1" 2>/dev/null || stat -Lf '%d:%i' -- "$1" 2>/dev/null
 }
 snapshot_docker() {
