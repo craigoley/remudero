@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 // @source-text-subject: this test inventories model-worker call sites in source text;
 // its planted-site control proves the census can detect a newly unclassified caller.
+// @census-reads: src/** — worker call sites and lane registrations across the source tree.
 const root = fileURLToPath(new URL("..", import.meta.url));
 type Kind = "call" | "parameter-default" | "injected-default";
 type Site = { file: string; line: number; kind: Kind };
@@ -57,10 +58,13 @@ test("benchmark worker caller census catches an unclassified spawn", () => {
   const planted = sites("src/lib/new-caller.ts", "export const call = () => spawnWorker({});");
   assert.deepEqual(unclassified(planted), [{ file: "src/lib/new-caller.ts", line: 1, kind: "call" }]);
 
-  const actual = sources(join(root, "src")).flatMap((path) => sites(relative(root, path).replaceAll("\\", "/"), readFileSync(path, "utf8")));
+  const sourceTexts = sources(join(root, "src")).map((path) => ({
+    file: relative(root, path).replaceAll("\\", "/"), text: readFileSync(path, "utf8"),
+  }));
+  const actual = sourceTexts.flatMap(({ file, text }) => sites(file, text));
   assert.ok(actual.filter((site) => site.file === "src/lib/worker.ts" && site.kind === "call").length >= 3,
     "positive control: the census sees the three known recursive provider fallbacks");
-  const orchestration = readFileSync(join(root, "src/run-task.ts"), "utf8");
+  const orchestration = sourceTexts.map(({ text }) => text).join("\n");
   for (const lane of ["inbox-draft", "review", "triage", "risk-judge"]) {
     assert.ok(orchestration.includes(`ledgeredNonDispatchSpawn("${lane}"`)
       || orchestration.includes(`benchmarkNonDispatchSpawn("${lane}"`), `${lane} is in the worker population`);
