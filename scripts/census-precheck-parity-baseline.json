@@ -37,7 +37,6 @@
     "test/config-fixture-path-parity.test.ts",
     "test/console-parity-ratchet.test.ts",
     "test/coverage-ratchet.test.ts",
-    "test/coverage-session-blanking.test.ts",
     "test/dependency-declarations-match-use.test.ts",
     "test/deploy-scripts-use-mktemp.test.ts",
     "test/enforcement-data-carveout.test.ts",

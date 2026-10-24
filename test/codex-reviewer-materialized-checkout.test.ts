@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -106,6 +106,10 @@ async function review(
     report?: string;
     reportIsSubstitute?: boolean;
     implementationReport?: string;
+    requireSemanticReview?: boolean;
+    proof?: string;
+    baseCheckoutDir?: string;
+    baseIsCheckout?: boolean;
   },
 ) {
   return runReview({
@@ -115,7 +119,7 @@ async function review(
     task: {
       id: "W1-T2868",
       files: ["src/example.ts"],
-      acceptance: [{ claim: "the fixed source is present", proof: "grep: fixed in src/example.ts" }],
+      acceptance: [{ claim: "the fixed source is present", proof: options.proof ?? "grep: fixed in src/example.ts" }],
     },
     report: options.report ?? "the fixed source is present",
     reportIsSubstitute: options.reportIsSubstitute,
@@ -126,9 +130,12 @@ async function review(
     say: () => {},
     account: (worker: WorkerResult) => worker,
     spawnReviewer: true,
+    requireSemanticReview: options.requireSemanticReview,
     reviewerSpawnWorker: options.spawn as typeof import("../src/lib/worker.js").spawnWorker,
     reviewerMount: { model: "sonnet", effort: "high", maxTurns: 10, contextBudget: 120_000 },
     headCheckoutDir: options.headCheckoutDir,
+    baseCheckoutDir: options.baseCheckoutDir,
+    baseIsCheckout: options.baseIsCheckout,
     ledgerPath: fixture.ledgerPath,
     runId: `RUN-W1-T2868-${fixture.headSha.slice(0, 8)}`,
     disarm: () => "not-armed" as const,
@@ -338,4 +345,93 @@ test("W1-T2868: a reviewer spawn error still removes the materialized checkout",
     assert.ok(logs.some((row) => row.step === "review.reviewer.error"));
     assert.equal(existsSync(reviewerCwd), false);
   });
+});
+
+
+test("semantic review receives actual head proof receipts before judging while original report evidence stays intact", async () => {
+  await withFixture(async (fixture) => {
+    let receiptPath = "";
+    const logs: LogRow[] = [];
+    const baseDir = join(fixture.root, "base");
+    mkdirSync(join(baseDir, "src"), {recursive:true});
+    writeFileSync(join(baseDir, "src/example.ts"), "export const before = true;\n");
+    const verdict = await review(fixture, {headCheckoutDir:fixture.sourceDir, requireSemanticReview:true, logs,
+      baseCheckoutDir:baseDir, baseIsCheckout:false,
+      spawn:async (args) => {
+        const match = args.prompt.match(/proof execution JSON at ("[^\n]+")\./);
+        assert.ok(match, "the orchestrator supplies exact execution evidence before model judgment");
+        receiptPath = JSON.parse(match[1]);
+        assert.equal(receiptPath, join(args.cwd, ".git", "rmd-review-proofs.json"));
+        assert.equal(statSync(receiptPath).mode & 0o777, 0o600);
+        const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+        assert.equal(receipt.headSha, fixture.headSha);
+        assert.equal(receipt.phase, "pre-semantic");
+        assert.equal(receipt.mergeVerdict, false);
+        assert.equal(receipt.baseProvided, true);
+        assert.equal(receipt.baseIsCheckout, false, "this grep base is honestly labeled a blob tree");
+        assert.deepEqual(receipt.executions.map((execution: {side:string; outcome:string}) => [execution.side, execution.outcome]),
+          [["head", "pass"], ["base", "fail"]], "the real head/base outcomes precede semantic judgment");
+        assert.equal(receipt.criteria[0].proof, "grep: fixed in src/example.ts");
+        assert.equal(receipt.criteria[0].proof_exec, "executed_pass", "the real grep already ran against the exact head");
+        assert.equal(receipt.criteria[0].floorMet, true);
+        assert.equal(receipt.capped, false);
+        assert.ok(existsSync(join(args.cwd, ".git", "rmd-review-input.json")));
+        assert.match(args.prompt, /permission refusal before assertions execute/);
+        assert.match(args.prompt, /passing execution cannot waive a logical gap/);
+        return reviewerResult("claude", "REVIEW_VERDICT 1: PASS");
+      }});
+    assert.equal(verdict.state, "success", JSON.stringify({verdict, errors:logs.filter(row => /error|failed|refused/.test(row.step))}));
+    assert.equal(verdict.criteria[0]!.proof_exec, "executed_pass");
+    assert.equal(verdict.proofUniqueRuns, 2, "the real head and base execute once each for the whole decision");
+    assert.equal(verdict.proofReuses, 2, "the final fold reuses those exact two observations");
+    assert.equal(existsSync(receiptPath), false, "normal owned snapshot teardown removes the receipt");
+  });
+});
+
+test("trusted proof receipts never override a semantic failure or missing required reviewer", async () => {
+  for (const mode of ["semantic-failure", "reviewer-refusal"] as const) {
+    await withFixture(async (fixture) => {
+      const verdict = await review(fixture, {headCheckoutDir:fixture.sourceDir, requireSemanticReview:true, logs:[],
+        spawn:async (args) => {
+          const match = args.prompt.match(/proof execution JSON at ("[^\n]+")\./);
+          assert.ok(match);
+          const receipt = JSON.parse(readFileSync(JSON.parse(match[1]), "utf8"));
+          assert.equal(receipt.criteria[0].proof_exec, "executed_pass");
+          if (mode === "reviewer-refusal") throw Object.assign(new Error("controlled sandbox EPERM"), {code:"EPERM"});
+          return reviewerResult("claude", "REVIEW_VERDICT 1: FAIL — concrete source-level counterexample control");
+        }});
+      assert.equal(verdict.state, "failure", "an execution receipt is never a replacement for required semantics");
+      if (mode === "semantic-failure") {
+        assert.equal(verdict.criteria[0]!.proof_exec, "executed_pass", "the actual execution fact stays separate from semantics");
+        assert.equal(verdict.criteria[0]!.met, false);
+      } else {
+        assert.deepEqual(verdict.criteria, [], "the existing required-review refusal withholds binding criteria");
+        assert.match(verdict.verdictWithheld ?? "", /^required-semantic-/);
+      }
+    });
+  }
+});
+
+
+test("a passing semantic response cannot upgrade an actually failed preliminary proof", async () => {
+  await withFixture(async (fixture) => {
+    const verdict = await review(fixture, {headCheckoutDir:fixture.sourceDir, requireSemanticReview:true, logs:[],
+      proof:"grep: absent-proof-token in src/example.ts", spawn:async (args) => {
+        const match = args.prompt.match(/proof execution JSON at ("[^\n]+")\./);
+        assert.ok(match);
+        const receipt = JSON.parse(readFileSync(JSON.parse(match[1]), "utf8"));
+        assert.equal(receipt.criteria[0].proof_exec, "executed_fail", "the real grep failure is available before judgment");
+        return reviewerResult("claude", "REVIEW_VERDICT 1: PASS");
+      }});
+    assert.equal(verdict.state, "failure");
+    assert.equal(verdict.criteria[0]!.proof_exec, "executed_fail");
+    assert.equal(verdict.criteria[0]!.met, false);
+  });
+});
+
+
+test("the proof-receipt contract cannot replay an earlier engine's semantic verdict", () => {
+  const input = {headSha:"a".repeat(40), diff:"diff --git a/src/x.ts b/src/x.ts\n+x", report:"x",
+    acceptance:[{claim:"x is present", proof:"grep: x in src/x.ts"}], declaredFiles:["src/x.ts"]};
+  assert.notEqual(reviewDecisionDigest(input), reviewDecisionDigest({...input, engineRevision:"explained-semantic-failures-v1"}));
 });

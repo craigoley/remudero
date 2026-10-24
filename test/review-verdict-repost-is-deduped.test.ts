@@ -31,13 +31,13 @@ import {
  * own bytes against a fresh read of GitHub's live state on every call.
  */
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/review.ts", import.meta.url)), "utf8");
 
 // ── wiring: runReview's comment site calls the guarded poster, not a raw execFileSync ─────────
 
 test("W1-T2419 wiring: runReview posts the verdict comment via postReviewCommentGuarded, not a raw `gh pr comment` execFileSync", () => {
   const start = runTaskSrc.indexOf("async function runReview(");
-  const end = runTaskSrc.indexOf("// ── THE blocked_review FIX RUNG");
+  const end = runTaskSrc.indexOf("\n}\n", start) + 3;
   assert.ok(start > -1 && end > start, "could not locate runReview's body in run-task.ts");
   const body = runTaskSrc.slice(start, end);
 

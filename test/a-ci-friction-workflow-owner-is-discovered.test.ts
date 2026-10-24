@@ -339,3 +339,51 @@ test("CI friction expands a workflow matrix the way GitHub does, and says why wh
   assert.equal(workflowJobCheckNames("t (${{ matrix.os }})", { os: [] }), "matrix expands to no combination");
   assert.equal(workflowJobCheckNames("t (${{ matrix.os }})", "${{ fromJSON(x) }}"), "matrix is not a literal mapping");
 });
+
+
+test("CI friction locates a templated refusal by its literal prefix only after full signatures miss", () => {
+  const f = fixture();
+  f.put("src/refusal.ts", 'throw new Error(`non-test paths need scope (${reason}: ${detail})`);\n');
+  f.commit();
+  const key = "fix_refusal:non-test-paths-need-scope-path-not-changed";
+  const details = ["non-test paths need scope (path-not-changed: src/lib/feedback-record-merge.ts)"];
+  const owner = locateCiFrictionOwner(key, details, f.search());
+  assert.deepEqual(owner?.files, ["src/refusal.ts"]);
+  assert.match(owner!.why[0]!, /names "non-test paths need scope"/);
+  f.put("scripts/exact.mjs", 'throw new Error("non-test paths need scope (path-not-changed");\n');
+  f.commit();
+  assert.deepEqual(locateCiFrictionOwner(key, details, f.search())?.files, ["scripts/exact.mjs"],
+    "an existing full diagnostic match wins without adding the prefix owner");
+  assert.equal(locateCiFrictionOwner("check:non-test-paths", details, f.search()), undefined);
+  assert.equal(locateCiFrictionOwner(key, ["no matching literal (detail: value)"], f.search()), undefined);
+  f.put("src/short.ts", 'throw new Error(`denied (${detail})`);\n');
+  f.commit();
+  assert.equal(locateCiFrictionOwner("fix_refusal:denied-detail", ["denied (detail: value)"], f.search()), undefined);
+  assert.throws(() => locateCiFrictionOwner(key, details, {
+    filesContaining: () => { throw new Error("source corpus unreadable"); }, fileExists: () => false,
+  }), /source corpus unreadable/);
+});
+
+test("a newly located refusal prefix keeps cause identity and operator holds while rechecking a no-owner witness", () => {
+  const f = fixture();
+  f.put("src/refusal.ts", 'throw new Error(`non-test paths need scope (${reason}: ${detail})`);\n');
+  f.commit();
+  const name = "non-test-paths-need-scope-path-not-changed";
+  const key = `fix_refusal:${name}`, origin = `ci-friction:${key}`;
+  const detail = "non-test paths need scope (path-not-changed: src/lib/feedback-record-merge.ts)";
+  const hold = { step: "ci-friction.remedy_escalated", origin, why: "no code owner", hold_reason: "no-owner",
+    ownership_evidence: { revision: "0".repeat(40), fingerprint: "0".repeat(64) } };
+  const input = {
+    priced: [{ cause: { kind: "fix_refusal" as const, name }, minutes: 45.1, rounds: 3, prs: 1 }],
+    rounds: [{ pr: 13868, cause: { kind: "fix_refusal" as const, name }, minutes: 45.1, detail }],
+    tasks: [], receipts: new Set<string>(), escalated: new Set([origin]), ownerSearch: f.search(), nowMs: NOW,
+  };
+  const result = ciFrictionLadder({ ...input, holds: [hold] });
+  assert.equal(result.next?.origin, origin);
+  assert.equal(result.next?.price.minutes, 45.1);
+  assert.equal(result.next?.decision.kind, "draft");
+  if (result.next?.decision.kind !== "draft") assert.fail("expected changed no-owner witness");
+  assert.deepEqual(result.next.decision.reconsideration?.owner.files, ["src/refusal.ts"]);
+  assert.equal(ciFrictionLadder({ ...input, holds: [{ ...hold, hold_reason: "operator" }] }).next, undefined);
+  assert.equal(ciFrictionLadder({ ...input, receipts: new Set([origin]), holds: [hold] }).next, undefined);
+});

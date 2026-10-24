@@ -13,7 +13,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-check-that-judges-only-the-prs-own-diff-is-never-mains-red.test.ts
-  status: queued
+  status: merged
   priority: 1  # a red main is when the most PRs are open; a learnings or prompt PR red on its own evidence loses its fix lane for the whole outage
   attempts: 0
   rationale: |

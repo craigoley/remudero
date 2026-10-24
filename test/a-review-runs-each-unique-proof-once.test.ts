@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { memoizeAsyncProofExecutor } from "#src/lib/review.js";
 import {
   judgeReview,
   memoizeProofExecutor,
@@ -221,4 +225,62 @@ test("W1-T2743 (acceptance 5c): existing per-criterion outcomes stay index-align
   assert.equal(verdict.proofUniqueRuns, 4, "two proofs x (head + base)");
   assert.equal(verdict.proofReuses, 2, "the duplicate's head and base calls");
   assert.deepEqual(rec.calls.filter((c) => c.label === "test/alpha.test.ts").length, 2, "alpha ran twice, not four times");
+});
+
+
+test("prepared proof memo separates head base argv and decision identity while replaying exact failure evidence", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-proof-decision-memo-"));
+  t.after(() => rmSync(root, {recursive:true, force:true}));
+  const head = join(root, "head"), base = join(root, "base");
+  mkdirSync(head); mkdirSync(base);
+  let calls = 0;
+  const exec = async (proof: WhitelistedProof) => {
+    calls++; proof.matchedLines = ["exact match"]; proof.loadError = "exact load failure";
+    proof.failureOutput = "exact failed assertion"; proof.failureTail = "exact tail";
+    return "fail" as const;
+  };
+  const proof = (): WhitelistedProof => ({kind:"grep", command:"grep", args:["-arn", "--", "x", "source"], label:"source"});
+  const memo = memoizeAsyncProofExecutor(exec);
+  const first = proof();
+  assert.equal(await memo(first, head), "fail");
+  first.matchedLines!.push("caller mutation");
+  const reused = proof();
+  assert.equal(await memo(reused, head), "fail");
+  assert.deepEqual(reused.matchedLines, ["exact match"]);
+  assert.equal(reused.loadError, "exact load failure");
+  assert.equal(reused.failureOutput, "exact failed assertion");
+  assert.equal(reused.failureTail, "exact tail");
+  assert.equal(calls, 1);
+  await memo(proof(), base);
+  await memo({...proof(), args:["-arn", "--", "different", "source"]}, head);
+  await memo({...proof(), command:"ugrep"}, head);
+  await memoizeAsyncProofExecutor(exec)(proof(), head);
+  assert.equal(calls, 5, "base, argv, executable and another decision never inherit the head result");
+  assert.equal(memo.uniqueRuns(), 4);
+  assert.equal(memo.reuses(), 1);
+  let throws = 0;
+  const failure = new Error("exact executor failure");
+  const rejecting = memoizeAsyncProofExecutor(async () => {throws++; throw failure;});
+  await assert.rejects(rejecting(proof(), head), error => error === failure);
+  await assert.rejects(rejecting(proof(), head), error => error === failure);
+  assert.equal(throws, 1, "a thrown observation is shared rather than changed by another execution");
+  assert.equal(rejecting.uniqueRuns(), 1);
+  assert.equal(rejecting.reuses(), 1);
+});
+
+test("a removed or replaced checkout cannot inherit an earlier passing proof receipt", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-proof-decision-identity-"));
+  t.after(() => rmSync(root, {recursive:true, force:true}));
+  const head = join(root, "head"); mkdirSync(head); writeFileSync(join(head, "answer"), "pass");
+  let calls = 0;
+  const memo = memoizeAsyncProofExecutor(async (_proof, cwd) => {
+    calls++; return readFileSync(join(cwd, "answer"), "utf8") === "pass" ? "pass" : "fail";
+  });
+  const proof = (): WhitelistedProof => ({kind:"grep", command:"grep", args:["-arn", "--", "pass", "answer"], label:"answer"});
+  assert.equal(await memo(proof(), head), "pass");
+  renameSync(head, join(root, "original"));
+  await assert.rejects(memo(proof(), head), {code:"ENOENT"});
+  mkdirSync(head); writeFileSync(join(head, "answer"), "fail");
+  assert.equal(await memo(proof(), head), "fail");
+  assert.equal(calls, 3, "missing identity delegates and replacement executes rather than replaying PASS");
 });

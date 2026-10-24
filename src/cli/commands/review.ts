@@ -1,9 +1,9 @@
 import type { WorkerStreamEvent } from "../../lib/worker.js";
 import type { GhApiFetcher } from "../../lib/open-prs-rest.js";
-import { type WorkerStateSensor, type ReviewRunResult, type MaterializationErrorClass, type MaterializationFailure } from "./run-task-verb.js";
+import { type WorkerStateSensor, type ReviewRunResult, type MaterializationErrorClass, type MaterializationFailure, type CensusChildResult } from "./run-task-verb.js";
 import { buildBaseProofDir, hostWorktreeGitAtTopLevel } from "../../lib/check-proof.js";
 import { execFileSync, spawn } from "node:child_process";
-import { withheldReviewRefusalRow } from "../../lib/sweep.js";
+import { currentReviewSignal, withheldReviewRefusalRow } from "../../lib/sweep.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -57,7 +57,12 @@ export interface ReviewCommandHost {
   acceptedReviewAttemptId(value: unknown, prNumber?: number): string | undefined;
   attributeWorkerStreamEvent(event: WorkerStreamEvent, assignment: Pick<WorkerSelectionAssignment, "id" | "selected"> | undefined): WorkerStreamEvent;
   ledgeredNonDispatchSpawn(lane: string, raw?: typeof spawnWorker): typeof spawnWorker;
-  lintPlanForReview(headCheckoutDir: string | undefined): Promise<PlanLintOutcome>;
+  lintPlanForReview(
+    headCheckoutDir: string | undefined,
+    git?: (cwd: string, args: string[]) => string | Promise<string>,
+    run?: (argv: string[], options: { cwd: string; signal?: AbortSignal }) => Promise<CensusChildResult>,
+    options?: { signal?: AbortSignal; log?: (step: string, extra?: Record<string, unknown>) => void },
+  ): Promise<PlanLintOutcome>;
   readonly liveWorkerRunIds: Set<string>;
   materializeReviewWorktree(config: Config, repoDir: string, prNumber: number, headSha: string, deps?: ReviewWorktreeDeps): MaterializeReviewWorktreeResult;
   readHeadShaRest(prUrl: string, fetch?: GhApiFetcher): string;
@@ -460,6 +465,7 @@ export async function runReview(host: ReviewCommandHost, args: {
    *  resolved the run policy pass it through; the fallback keeps direct review invocations on
    *  the same policy row without inventing a second timeout. */
   reviewerClockBoundMs?: number;
+  signal?: AbortSignal;
   /**
    * PR-HEAD checkout dir the deterministic FLOOR executes whitelisted proofs in
    * (W1-T65, ratifies P15 — HEAD DISCIPLINE: never the operator's working
@@ -540,6 +546,8 @@ export async function runReview(host: ReviewCommandHost, args: {
 }): Promise<ReviewRunResult> {
   const { attributeWorkerStreamEvent, ledgeredNonDispatchSpawn, lintPlanForReview, readHeadShaRest, reviewPostedDescription } = host;
   const { owner, repo, prUrl, task, report, log, say } = args;
+  const laneSignal = currentReviewSignal();
+  const signal = args.signal && laneSignal ? AbortSignal.any([args.signal, laneSignal]) : args.signal ?? laneSignal;
   const headSha = readHeadShaRest(prUrl);
   let replayInput: ReviewReplayInput = args.reviewReplaySetupInput ?? {
     stage: "setup", plan_only: false, required_semantic: args.requireSemanticReview === true,
@@ -713,6 +721,27 @@ export async function runReview(host: ReviewCommandHost, args: {
     sessionId: null,
   };
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
+  const proofEvidence: Parameters<typeof preparedDecision.judge>[0] = {
+    diff,
+    report,
+    headRefName: args.headRefName,
+    reservationOwnership: ownership,
+    baseTaskIdDeclarations: taskIdEvidence.baseDeclarations,
+    implementationReport: args.implementationReport,
+    target: { owner, repo },
+    // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
+    reportIsSubstitute: args.reportIsSubstitute,
+    reportSubstituteCause: args.reportSubstituteCause,
+    headCheckoutDir: args.headCheckoutDir,
+    baseCheckoutDir: args.baseCheckoutDir,
+    baseUnreadablePaths: args.baseUnreadablePaths,
+    baseIsCheckout: args.baseIsCheckout,
+    addedTestFiles: args.addedTestFiles,
+    // W1-T322: advisory-only inputs — see ReviewEvidence's own doc for both fields.
+    taskDeclaredFiles: task.files,
+    openTaskIds: args.openTaskIds,
+  };
+  const preliminaryProofs = attemptReviewer ? await preparedDecision.judge(proofEvidence) : undefined;
   let reviewerSubtype: string | undefined;
   let reviewerExit: WorkerResult["exit"];
   let reviewerSpawnFailed = false;
@@ -740,6 +769,16 @@ export async function runReview(host: ReviewCommandHost, args: {
           headSha, diff, report, reportIsSubstitute: args.reportIsSubstitute === true,
           ...(args.implementationReport === undefined ? {} : { implementationReport: args.implementationReport }),
         }), { mode: 0o600 });
+        const proofEvidencePath = join(snapshot.cwd, ".git", "rmd-review-proofs.json");
+        writeFileSync(proofEvidencePath, JSON.stringify({
+          headSha, phase: "pre-semantic", mergeVerdict: false,
+          baseProvided: args.baseCheckoutDir !== undefined, baseIsCheckout: args.baseIsCheckout === true,
+          executions: preparedDecision.proofExecutions().map(({ cwd, ...execution }) => ({ ...execution,
+            side: cwd === args.headCheckoutDir ? "head" : cwd === args.baseCheckoutDir ? "base" : "other" })),
+          capped: preliminaryProofs!.capped, floorDegraded: preliminaryProofs!.floorDegraded,
+          criteria: preliminaryProofs!.criteria.map((criterion, index) => ({ index: index + 1,
+            proof: criterion.proof, proof_exec: criterion.proof_exec, floorMet: criterion.floorMet, reason: criterion.reason })),
+        }), { mode: 0o600 });
         const prompt =
           buildReviewPrompt({
             task: { id: task.id, acceptance: criteria, ...narrative },
@@ -748,6 +787,7 @@ export async function runReview(host: ReviewCommandHost, args: {
             repo,
             headSha,
             evidencePath,
+            proofEvidencePath,
             ...scopeContext,
           }) +
           "\n" +
@@ -929,27 +969,14 @@ export async function runReview(host: ReviewCommandHost, args: {
   // gate observes repo state whether or not the advisory reviewer above ever
   // completed.
   // W1-T4423: a plan-only PASS names lint-plan, so the review runs it on the target repo's plan at this head.
-  const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir) : undefined;
+  const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir,
+    undefined, undefined, { signal, log }) : undefined;
   const computed = await preparedDecision.judge({
-    diff,
-    report,
-    planLint,
-    headRefName: args.headRefName,
-    reservationOwnership: ownership,
-    baseTaskIdDeclarations: taskIdEvidence.baseDeclarations,
-    implementationReport: args.implementationReport,
+    ...proofEvidence, planLint, semantic, semanticClauses,
+    diff, report,
     target: { owner, repo },
-    // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
-    reportIsSubstitute: args.reportIsSubstitute,
-    reportSubstituteCause: args.reportSubstituteCause,
-    semantic,
-    semanticClauses,
     headCheckoutDir: args.headCheckoutDir,
     baseCheckoutDir: args.baseCheckoutDir,
-    baseUnreadablePaths: args.baseUnreadablePaths,
-    baseIsCheckout: args.baseIsCheckout,
-    addedTestFiles: args.addedTestFiles,
-    // W1-T322: advisory-only inputs — see ReviewEvidence's own doc for both fields.
     taskDeclaredFiles: task.files,
     openTaskIds: args.openTaskIds,
   });
