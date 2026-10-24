@@ -45,7 +45,7 @@ test("daily progress uses calendar days across DST and midnight", () => {
 
 test("daily progress retains complete history and immutable late corrections", async () => {
   await withTempDir("daily-progress-history", async root => {
-    const db = openReadModel({ stateDir: root, instance: "proof", schemaVersion: 1 });
+    let db = openReadModel({ stateDir: root, instance: "proof", schemaVersion: 1 });
     try {
       const clock = fixedClock(Date.parse("2026-11-02T06:00:00Z")), got = acquireLease(db, { holder: "first", clock });
       assert.ok(got.ok); if (!got.ok) return;
@@ -57,10 +57,18 @@ test("daily progress retains complete history and immutable late corrections", a
       assert.equal(first.events.length, 205);
       assert.equal(first.report.totals.mergedChanges.value, 205);
       assert.equal(first.report.totals.completedTasks.value, 205);
+      db.close(); db = openReadModel({ stateDir: root, instance: "proof", schemaVersion: 1 });
       // A new store reader after a scratch-only rebuild still reads canonical history.
       const scratch = join(root, "scratch"); mkdirSync(scratch);
       writeFileSync(join(scratch, "unrelated-cache"), "rebuilt");
-      assert.equal(readDailyProgressRevision(root, readDailyProgressManifest(root).days[key]!).events.length, 205);
+      const mapping = process.env.RMD_READ_MODEL_DB_DIR;
+      try {
+        process.env.RMD_READ_MODEL_DB_DIR = `${root}:${scratch}`;
+        assert.equal(readDailyProgressRevision(root, readDailyProgressManifest(root).days[key]!).events.length, 205);
+      } finally {
+        if (mapping === undefined) delete process.env.RMD_READ_MODEL_DB_DIR;
+        else process.env.RMD_READ_MODEL_DB_DIR = mapping;
+      }
       const late = record(206); late.generatedAt = "2026-11-02T07:00:00.000Z";
       for (const source of late.coverage.sources) if (source.required) source.lastAttemptAt = source.lastSuccessAt = late.generatedAt;
       for (const event of late.events) event.observedAt = late.generatedAt;
@@ -95,7 +103,9 @@ test("daily history refuses real filesystem failures and preserves corrupt evide
       prepareDailyProgressPublication(root, [record(1)], []).commit(db, got.lease);
       const store = dailyProgressStorePath(root), manifest = join(store, "manifest.json"), preserved = readFileSync(manifest, "utf8");
       const staged = prepareDailyProgressPublication(root, [], []);
-      renameSync(manifest, join(store, "preserved-manifest.json")); mkdirSync(manifest);
+      renameSync(manifest, join(store, "preserved-manifest.json"));
+      assert.throws(() => readDailyProgressManifest(root), /manifest is missing beside retained evidence/);
+      mkdirSync(manifest);
       assert.throws(() => staged.commit(db, got.lease), /regular file|directory|EISDIR/);
       assert.equal(readFileSync(join(store, "preserved-manifest.json"), "utf8"), preserved);
       assert.ok(readdirSync(store).includes("manifest.json"));

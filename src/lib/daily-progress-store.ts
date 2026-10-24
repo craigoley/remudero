@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { validateDailyProgressReport, type DailyProgressEvent, type DailyProgressReport } from "./daily-progress-contract.js";
 import { withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
 
@@ -52,7 +53,11 @@ export function readDailyProgressManifest(stateDir: string): DailyProgressManife
   let body: string;
   try { body = read(path); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, generation: 0, days: {}, jobs: {} };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      const root = dailyProgressStorePath(stateDir);
+      if (existsSync(root) && readdirSync(root).some(name => name.endsWith(".json"))) throw new Error("daily history manifest is missing beside retained evidence; preserved for diagnosis");
+      return { version: 1, generation: 0, days: {}, jobs: {} };
+    }
     throw error;
   }
   const m = JSON.parse(body) as DailyProgressManifest;
@@ -113,10 +118,16 @@ export function prepareDailyProgressPublication(stateDir: string, records: reado
     const all = [...events.values()].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.id.localeCompare(b.id));
     const confirmed = all.filter(e => e.kind === "merged" && e.fleetAttribution === "confirmed");
     const tasks = new Set(confirmed.flatMap(e => e.taskIds.map(id => JSON.stringify([e.repository.toLowerCase(), id]))));
-    const report = { ...metadata, scope: { kind: "repository" as const, repository }, totals: {
+    const core = { ...metadata, scope: { kind: "repository" as const, repository }, totals: {
       mergedChanges: { ...metadata.totals.mergedChanges, value: metadata.totals.mergedChanges.precision === "unavailable" ? null : confirmed.length },
       completedTasks: { ...metadata.totals.completedTasks, value: metadata.totals.completedTasks.precision === "unavailable" ? null : tasks.size },
-    }, revision: (day?.revisions.length ?? 0) + 1, correctionReason: old && Date.parse(input.windowEnd) <= Date.parse(input.generatedAt) ? "Source evidence changed after this day ended." : null };
+    } };
+    if (old) {
+      const { revision: _revision, correctionReason: _reason, ...previous } = old.report;
+      if (previous.phase === "corrected") previous.phase = "complete";
+      if (isDeepStrictEqual(previous, core) && isDeepStrictEqual(old.events, all)) continue;
+    }
+    const report = { ...core, revision: (day?.revisions.length ?? 0) + 1, correctionReason: old && Date.parse(input.windowEnd) <= Date.parse(input.generatedAt) ? "Source evidence changed after this day ended." : null };
     if (report.correctionReason && report.phase === "complete") report.phase = "corrected";
     const value: DailyProgressRevision = { report, events: all };
     // Validate every retained event, not only the first public page.
@@ -137,7 +148,9 @@ export function prepareDailyProgressPublication(stateDir: string, records: reado
   return { manifest, commit(db, lease, stillCurrent = () => true) {
     withWriteTransaction(db, lease, () => {
       if (!stillCurrent()) throw new Error("daily publication lost its source ownership epoch");
-      if (readDailyProgressManifest(stateDir).generation !== base.generation) throw new Error("daily publication was superseded by another writer");
+      const manifestPath = join(root, "manifest.json");
+      const currentGeneration = !existsSync(manifestPath) && base.generation === 0 ? 0 : readDailyProgressManifest(stateDir).generation;
+      if (currentGeneration !== base.generation) throw new Error("daily publication was superseded by another writer");
       durableWrite(join(root, "manifest.json"), body);
       syncDirectory(root);
     });
