@@ -434,6 +434,7 @@ is_protected_worktree() {
 # One decision per path: keep-with-reason, or remove.
 sweep_path() {
   local p="$1" idle_status seed_reason entries bytes
+  keep_container_path "$p" && return
   # Generic temp globs must not bypass Git safety for a checkout or a unit
   # containing one. Incomplete walks are not permission to remove a tree.
   if [ -d "$p" ] && [ ! -L "$p" ]; then
@@ -664,6 +665,12 @@ snapshot_docker() {
     DOCKER_MOUNTS="$(printf '%s\n%s' "$DOCKER_MOUNTS" "$mounts")"
   done <<< "$ids"
 }
+keep_container_path() {
+  local p="$1"
+  if [ "$DOCKER_OK" != 1 ]; then log "KEEP $p: Docker mount snapshot failed (fail closed)"; return 0; fi
+  if is_docker_mount "$p"; then log "KEEP $p: running container mount"; return 0; fi
+  return 1
+}
 is_docker_mount() {
   local p="$1" mount
   while IFS= read -r mount; do
@@ -845,6 +852,7 @@ TSX_PRUNED_BYTES=0
 prune_tsx_cache() {
   local dir="$1" minutes stats count bytes
   minutes="$TSX_MAX_AGE_MINUTES"
+  keep_container_path "$dir" && return
   if [ -L "$dir" ] || [ ! -d "$dir" ]; then log "KEEP $dir: not a regular directory"; return; fi
   if [ "$OPEN_OK" != 1 ]; then log "KEEP $dir: $OPEN_FAILURE (fail closed)"; return; fi
   if ! stats="$(find "$dir" -xdev -type f -mmin "+$minutes" -exec du -k {} + 2>/dev/null \
@@ -1133,6 +1141,7 @@ sweep_nested_coverage() {
     ruling_namespace "$p" && continue
     case "$NESTED_COVERAGE_SEEN" in *"|$p|"*) continue ;; esac
     NESTED_COVERAGE_SEEN="$NESTED_COVERAGE_SEEN|$p|"
+    keep_container_path "$p" && continue
     [ -d "$p" ] && [ ! -L "$p" ] || continue
     is_idle "$p"; idle_status=$?
     case "$idle_status" in
@@ -1151,6 +1160,8 @@ sweep_nested_coverage() {
 ARCHIVE_OK=0
 check_archive_root() {
   local a b probe="$ARCHIVE_ROOT"
+  ARCHIVE_OK=0
+  keep_container_path "$ARCHIVE_ROOT" && return
   # The archive root may not exist yet: judge the nearest existing ancestor.
   while [ ! -e "$probe" ] && [ "$probe" != "/" ] && [ "$probe" != "." ]; do probe="$(dirname "$probe")"; done
   a="$(fs_id "$probe")"; b="$(fs_id "$ROOT_FS")"
@@ -1164,6 +1175,7 @@ check_archive_root() {
 }
 archive_transcript() {
   local f="$1" rel dest idle_status
+  keep_container_path "$f" && return
   is_idle "$f"; idle_status=$?
   case "$idle_status" in
     0) ;;
@@ -1678,6 +1690,7 @@ dump_walk() {   # dump_walk <root> <unit> <resumable 0|1>
   if [ "$only" != 1 ]; then
     while IFS= read -r f; do
       [ -n "$f" ] && [ -f "$f" ] && [ ! -L "$f" ] || continue
+      keep_container_path "$f" && continue
       dump_excluded "$f" "$root" && continue
       [ "$(owner_uid "$f")" = "$RUN_UID" ] || continue
       case "$f" in *.gz|*.zst) dump_receipted "$f" || continue ;; esac
@@ -1690,6 +1703,7 @@ dump_walk() {   # dump_walk <root> <unit> <resumable 0|1>
   fi
   while IFS= read -r f; do
     [ -n "$f" ] && [ -f "$f" ] && [ ! -L "$f" ] || continue
+    keep_container_path "$f" && continue
     dump_excluded "$f" "$root" && continue
     [ "$(owner_uid "$f")" = "$RUN_UID" ] || continue
     if is_open "$f"; then log "KEEP $f: held open by a process"; continue; fi
@@ -1740,6 +1754,7 @@ retain_root_ok() {
 }
 expire_entry() {   # expire_entry <entry> <days> <tally key> <why>
   local e="$1" days="$2" key="$3" why="$4" m recent bytes
+  keep_container_path "$e" && return
   [ -e "$e" ] && [ ! -L "$e" ] || return 0
   case "${e##*/}" in host-cleanup-validation-bundles-*) return 0 ;; esac
   m=$(( days * 1440 ))
@@ -1759,6 +1774,7 @@ expire_dated_root() {
   for e in "$root"/* "$root"/.[!.]* "$root"/..?*; do
     [ -e "$e" ] && [ ! -L "$e" ] || continue
     case "${e##*/}" in host-cleanup-validation-bundles-*) continue ;; esac
+    keep_container_path "$e" && continue
     if [ -d "$e" ]; then
       if [ "$RUN_UID" != 0 ] && [ ! -w "$e" ]; then log "KEEP $e: its expired entries are the root pass's (folder not writable by uid $RUN_UID)"; continue; fi
       for c in "$e"/* "$e"/.[!.]* "$e"/..?*; do
@@ -1779,6 +1795,7 @@ expire_preserved_copies() {
   [ -d "$PRESERVE_ROOT" ] && [ ! -L "$PRESERVE_ROOT" ] || return 0
   for e in "$PRESERVE_ROOT"/*@[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z "$PRESERVE_ROOT"/.incoming-*; do
     [ -d "$e" ] && [ ! -L "$e" ] || continue
+    keep_container_path "$e" && continue
     [ "$(owner_uid "$e")" = "$RUN_UID" ] || continue   # only copies this identity made
     case "${e##*/}" in
       .incoming-*)   # an interrupted copy never counted as one; it goes once idle
@@ -1957,6 +1974,7 @@ if [ "$ONLY_TMP" != 1 ]; then
     if [ -d "$ARCHIVE_ROOT" ] && [ ! -L "$ARCHIVE_ROOT" ]; then
       while IFS= read -r old; do
         [ -n "$old" ] || continue
+        keep_container_path "$old" && continue
         bytes="$(du_bytes "$old")"
         log "REMOVE $old: archive older than ${ARCHIVE_DAYS} days"
         act rm -f -- "$old" && tally "archive-expire $ARCHIVE_ROOT" "$bytes"

@@ -375,7 +375,14 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
   const signatures = distinctive.filter(term => !generic(term)).map(term => ({ term, files: search.filesContaining(term) })).filter(m => m.files.length > 0);
   const workflow = signatures.length === 0 && family ? search.workflowOwner?.(family) : undefined;
   if (workflow) return { ...workflow, ...(testPath ? { failingTest: testPath } : {}) };
-  const matches = signatures.length > 0 ? signatures : terms.filter(term => !generic(term)).map((term) => ({ term, files: search.filesContaining(term) })).filter((m) => m.files.length > 0);
+  let matches = signatures.length > 0 ? signatures : terms.filter(term => !generic(term)).map((term) => ({ term, files: search.filesContaining(term) })).filter((m) => m.files.length > 0);
+  if (matches.length === 0 && key.startsWith("fix_refusal:")) {
+    const prefixes = [...new Set(terms.flatMap((term) => {
+      const diagnostic = term.indexOf(" (");
+      return diagnostic >= 12 ? [term.slice(0, diagnostic)] : [];
+    }))];
+    matches = prefixes.map((term) => ({ term, files: search.filesContaining(term) })).filter((match) => match.files.length > 0);
+  }
   // Specificity is relative to this cause's own search, measured in distinct files, not hit volume.
   const breadth = (m: typeof matches[number]) => new Set(m.files.map((f) => f.file)).size;
   const narrowest = Math.min(...matches.map(breadth));
