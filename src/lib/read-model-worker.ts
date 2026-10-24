@@ -1798,7 +1798,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       if (viewsOnly || !home || !home.db || !home.lease || home.state.lease !== "held" || stopRequested()) throw new Error("daily publication has no active home projector owner");
       const db = home.db;
       commitDailyProgressPublication(opts.stateDir, publication, db, home.lease,
-        () => !stopRequested() && currentReadModelPath(opts.stateDir, home.instance.name, LEDGER_PROJECTOR_SCHEMA_VERSION) === db.path);
+        () => !stopRequested() && homeLeaseIdentity() === expectedLeaseIdentity && currentReadModelPath(opts.stateDir, home.instance.name, LEDGER_PROJECTOR_SCHEMA_VERSION) === db.path);
     },
     acceptSnapshot(write: SourceSnapshotWrite): boolean {
       if (opts.lane !== "heavy" && !writeSnapshot(write)) return false;
