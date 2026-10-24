@@ -1,6 +1,7 @@
 import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
 import { retainFixture } from "#test/setup/retained-fixtures.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { fixedClock } from "../../src/lib/clock.js";
@@ -20,7 +21,7 @@ const operator: IdentityProvider = { name: "test-operator", grant: () => undefin
   if (req.headers.authorization === "Bearer bob") return { scopes: new Set(["read", "write"]), tier: "low", actor: "operator:bob" };
   return undefined;
 } };
-export async function world(scope: T, options: { root?: string; instance?: string; repository?: string; native?: boolean; planSource?: PanelGraphDeps["readPlanSource"]; retirementBarrier?: () => Promise<void> } = {}) {
+export async function world(scope: T, options: { root?: string; instance?: string; repository?: string; native?: boolean; planSource?: PanelGraphDeps["readPlanSource"]; retirementBarrier?: () => Promise<void>; httpTransport?: "unix" } = {}) {
   const instance = options.instance ?? INSTANCE, repository = options.repository ?? REPOSITORY;
   const root = options.root ?? makeTempDir("why-me");
   const closures: Array<() => void | Promise<void>> = [];
@@ -62,14 +63,28 @@ export async function world(scope: T, options: { root?: string; instance?: strin
       routes: options.native ? defaultInstanceInboxSources({ instance, root, planPath, ledgerPath }, repository, fakeGitHub()) : [buildInboxAttentionCensusRoute({ ...deps, inboxFromSlowLane: true,
         readPlanSnapshot: () => { throw new Error("GET must read the maintained snapshot"); } })], ...binding });
     const server = createService({ tokens: { read: "read", write: "shared" }, providers: [operator], routes, enforceWriteTiers: true });
-    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const socketPath = options.httpTransport === "unix" ? join(root, `http-${closures.length}.sock`) : undefined;
+    await new Promise<void>(resolve => socketPath
+      ? server.listen(socketPath, resolve)
+      : server.listen(0, "127.0.0.1", resolve));
     t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
-    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const base = socketPath ? undefined : `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     return async (body?: unknown, token = "alice", query = "") => {
-      const res = await fetch(base + `/v1/i/${instance}/inbox/${body === undefined ? "attention-census" : "why-me-correction"}${query}`, {
-        method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      const path = `/v1/i/${instance}/inbox/${body === undefined ? "attention-census" : "why-me-correction"}${query}`;
+      const method = body === undefined ? "GET" : "POST";
+      const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+      if (socketPath) return new Promise<{ status: number; body: Record<string, any> }>((resolve, reject) => {
+        const req = httpRequest({ socketPath, path, method, headers, agent: false }, res => {
+          const chunks: Buffer[] = [];
+          res.on("data", chunk => chunks.push(Buffer.from(chunk)));
+          res.on("end", () => resolve({ status: res.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString()) }));
+          res.on("error", reject);
+        });
+        req.on("error", reject);
+        req.end(body === undefined ? undefined : JSON.stringify(body));
       });
+      const res = await fetch(base + path, { method, headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }), });
       return { status: res.status, body: await res.json() as Record<string, any> };
     };
   };

@@ -680,12 +680,16 @@ test("why-me fixture resources close and diagnostics settle before its owned roo
     retirement = finish;
     t.after(async () => { if (!retired) { retired = true; await finish(); } });
   } }, {
+    httpTransport: "unix",
     retirementBarrier: async () => {
       assert.equal(closed, true, "the actual SQLite owner closes before the diagnostic barrier");
-      await assert.rejects(() => w.call(), "the real HTTP owner is closed before the barrier");
+      await assert.rejects(() => w.call(), error =>
+        error instanceof Error && "code" in error && ["ENOENT", "ECONNREFUSED"].includes(String(error.code)),
+      "the real HTTP owner is closed before the barrier");
       await flushReadModelTransactions(); observedBarrier = true; await gate;
     },
   });
+  assert.equal((await w.call()).status, 200, "the real HTTP owner serves a request before retirement");
   const db = openProjectorReadModel(w.state, "core", fixedClock(Date.now()));
   w.after(() => { db.close(); closed = true; });
   retired = true;
@@ -716,6 +720,7 @@ test("why-me fixture release and barrier failures retain real SQLite evidence af
       retirement = finish;
       t.after(async () => { if (!retired) { retired = true; await finish(); } });
     } }, {
+      httpTransport: "unix",
       retirementBarrier: async () => { await flushReadModelTransactions(); if (mode === "barrier") throw failure; },
     });
     const db = openProjectorReadModel(w.state, "core", fixedClock(Date.now())), dbPath = db.path;
