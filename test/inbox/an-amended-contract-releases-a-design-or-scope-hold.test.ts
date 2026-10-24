@@ -151,6 +151,19 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
     assert.equal(next.headContractRefreshFor?.(second), f.deps.updateBranch);
   });
 
+  test("the light pass reports a failed contract read and grants no refresh", async () => {
+    const f = fixture([headContractHold()]);
+    const logged: Array<{ step: string; reason: unknown }> = [];
+    const capability = await lightPassHeadContractRefresh([pr()], {
+      ...f.deps,
+      readTaskContractRevision: () => { throw new Error("contract read failed"); },
+      log: (step, detail) => { logged.push({ step, reason: detail?.reason }); },
+    });
+    assert.deepEqual(capability, {});
+    assert.deepEqual(logged, [{ step: "sweep.head_contract_refresh.unreadable", reason: "Error: contract read failed" }]);
+    assert.equal(f.state.refreshed, 0);
+  });
+
   test("a contract refresh refuses incomplete history and records intent before its effect", async t => {
     const rows: Record<string, unknown>[] = [headContractHold()];
     const f = fixture(rows);
@@ -243,6 +256,31 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
       await runSweep([pr()], { ...damaged.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined });
       assert.equal(damaged.state.refreshed, 0, "an unattributed damaged row cannot prove an empty attempt history");
       assert.equal(damaged.state.dispatched, 0);
+    }
+  });
+
+  test("the real contract-refresh reader refuses live JSON values that are not ledger rows", async t => {
+    const repo = gitRepo({ scope: t, kind: "contract-non-row-history" });
+    const dir = join(repo.dir, "state");
+    mkdirSync(dir);
+    const ledger = join(dir, "ledger.ndjson");
+    const hold = JSON.stringify(headContractHold()) + "\n";
+    writeFileSync(ledger, hold);
+    const healthy = fixture([headContractHold()]);
+    healthy.state.revision = "contract-B";
+    const allowed = await lightPassHeadContractRefresh([pr()], {
+      ...healthy.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined,
+    });
+    assert.equal(allowed.headContractRefreshFor?.(pr()), healthy.deps.updateBranch);
+    for (const value of ["null", "[]", "42"]) {
+      writeFileSync(ledger, hold + value + "\n");
+      const f = fixture([headContractHold()]);
+      f.state.revision = "contract-B";
+      const capability = await lightPassHeadContractRefresh([pr()], {
+        ...f.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined,
+      });
+      assert.deepEqual(capability, {}, `${value} cannot authorize a contract refresh`);
+      assert.equal(f.state.refreshed, 0);
     }
   });
 
