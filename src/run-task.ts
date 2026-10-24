@@ -9399,6 +9399,7 @@ export function openEscalationStandDownReason(
   current?: { conflictEvidenceCaptured: boolean; baseSha?: string },
 ): { reason: string } | undefined {
   if (!candidate) return undefined; // nothing open on this key — the ordinary path
+  if (/(?:^|\n\n)PR stage stalled:/.test(candidate.body ?? "")) return undefined;
   const candidateHead = escalationHeadSha(candidate.body);
   // STRICTER THAN THE MATCHER (both arms): a candidate naming NO head, or naming a DIFFERENT one,
   // never refuses a worker. The first arm is the legacy-issue case, the second is a genuinely new
