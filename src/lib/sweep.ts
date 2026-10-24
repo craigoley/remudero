@@ -11,7 +11,8 @@ import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehome
 import { argmaxTypedJudgmentOption, runTypedJudgment } from "./typed-judgment.js";
 import { diffCoverageTargets } from "./diff-coverage-targets.js";
 import { execFileSync } from "node:child_process";
-import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from "./worktree-git.js";
+import { HOST_GIT_CONFIG, hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError } from "./worktree-git.js";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -87,7 +88,7 @@ import {
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
-import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
+import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync, type GhJsonReadOptions } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
@@ -188,6 +189,9 @@ import {
   judgeReviewAsync,
   parseAcceptanceBlock,
   parseWhitelistedProof,
+  proofChildEnv,
+  proofSandboxArgv,
+  proofSandboxStatus,
   postedArmFactsFromLedger,
   REVIEW_CONTEXT,
   reviewLedgerKeyFor,
@@ -195,6 +199,7 @@ import {
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
 } from "./review.js";
+import { withTempDir } from "./tmp.js";
 import type {
   ArmDecision,
   AutomergeHold,
@@ -227,8 +232,11 @@ import {
   listRegisteredWorktrees,
   renderWorkerSettings,
   STDERR_EXCERPT_CAP,
+  excludeNodeModulesFromGit,
+  provisionWorktreeNodeModules,
   worktreeAdd,
   worktreeRemove,
+  worktreeRemoveAsync,
   worktreesDir,
   type QuestionEntry,
   type SpawnWorkerArgs,
@@ -1896,6 +1904,136 @@ export function rebaseDirtyFleetBranchViaGit(
   }
 }
 
+export interface ConflictRegenerationOutcome {
+  outcome: "pushed" | "fell-through" | "lease-mismatch" | "error";
+  paths: Array<{ path: string; action: string }>;
+  newHeadSha?: string;
+  reason?: string;
+  cleanupError?: string;
+}
+
+const inFlightConflictRegenerations = new Set<string>();
+
+export async function regenerateConflictViaGit(
+  repoDir: string,
+  worktreePath: string,
+  pr: Pick<OpenPrView, "prNumber" | "headRefName" | "headSha" | "taskId">,
+  mainSha: string,
+  deps: Pick<BuildSweepEffectsDeps, "worktreeRemoveImpl"> & {
+    git?: (cwd: string, args: readonly string[]) => string | Promise<string>;
+  } = {},
+): Promise<ConflictRegenerationOutcome> {
+  const run = async (cwd: string, args: readonly string[]) => {
+    if (deps.git) return deps.git(cwd, args);
+    return hostWorktreeGitAsync(cwd, args, { maxBuffer: 1 << 24 });
+  };
+  const paths: ConflictRegenerationOutcome["paths"] = [];
+  let created = false;
+  const result = await (async (): Promise<ConflictRegenerationOutcome> => {
+    try {
+      if (!pr.taskId || !fixHeadAcceptable(pr.headRefName, pr.taskId, false)) {
+        return { outcome: "fell-through", paths, reason: "head is not this task's run branch" };
+      }
+      const ref = `refs/heads/${pr.headRefName}`;
+      const remoteRef = `refs/remotes/origin/${pr.headRefName}`;
+      await run(repoDir, ["fetch", "--no-tags", "--quiet", "origin",
+        "+refs/heads/main:refs/remotes/origin/main", `+${ref}:${remoteRef}`]);
+      if ((await run(repoDir, ["rev-parse", remoteRef])).trim() !== pr.headSha ||
+          (await run(repoDir, ["rev-parse", "origin/main"])).trim() !== mainSha) {
+        return { outcome: "lease-mismatch", paths, reason: "head or main moved before conflict regeneration" };
+      }
+      mkdirSync(dirname(worktreePath), { recursive: true });
+      await run(repoDir, ["worktree", "add", "--detach", worktreePath, pr.headSha]);
+      created = true;
+      let mergeError: string | undefined;
+      try { await run(worktreePath, ["merge", "--no-edit", "--no-commit", mainSha]); }
+      catch (error) {
+        const reason = spawnFailureText(error);
+        mergeError = reason;
+      }
+      const unmerged = [...new Set((await run(worktreePath, ["ls-files", "-u", "-z"])).split("\0")
+        .filter(Boolean).map(entry => entry.slice(entry.indexOf("\t") + 1)))];
+      if (unmerged.length === 0) {
+        return { outcome: "error", paths, reason: mergeError === undefined
+          ? "probe conflict no longer has unmerged paths" : mergeError };
+      }
+      const outside = unmerged.filter(path => !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path));
+      if (outside.length > 0) {
+        await run(worktreePath, ["merge", "--abort"]);
+        return { outcome: "fell-through", paths, reason: `unmerged paths outside the registry: ${outside.join(", ")}` };
+      }
+      for (const path of unmerged) {
+        const present = (await run(worktreePath, ["ls-tree", "-r", "--name-only", "-z", mainSha, "--", path])).length > 0;
+        if (!present) {
+          await run(worktreePath, ["rm", "--", path]);
+          paths.push({ path, action: "deleted-on-main" });
+        } else {
+          await run(worktreePath, ["checkout", mainSha, "--", path]);
+          paths.push({ path, action: REGENERABLE_ARTIFACT_GENERATORS[path]! });
+        }
+      }
+      if (paths.some(({ action }) => action !== "deleted-on-main")) {
+        const commonDir = (await run(worktreePath,
+          ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+        excludeNodeModulesFromGit(worktreePath, { commonDir: () => commonDir });
+        await provisionWorktreeNodeModules(repoDir, worktreePath);
+      }
+      for (const { path, action } of paths) {
+        if (action === "deleted-on-main") continue;
+        await withTempDir("conflict-generator-home", async (home) => {
+          const status = proofSandboxStatus();
+          if (status.mode !== "bwrap") throw new Error(`conflict generator sandbox unavailable: ${status.reason}`);
+          const sandbox = proofSandboxArgv({ cwd: worktreePath, home });
+          await execFileLoopBounded(status.binary, [...sandbox, "npm", "run", "--silent", action], {
+            cwd: worktreePath, env: { ...proofChildEnv(home), TMPDIR: "/tmp" }, encoding: "utf8",
+          });
+        });
+        await run(worktreePath, ["add", "--", path]);
+      }
+      const unexpected = (await run(worktreePath, ["diff", "--name-only", "-z"])).split("\0").filter(Boolean);
+      if (unexpected.length > 0) {
+        return { outcome: "error", paths, reason: `generator left unstaged edits: ${unexpected.join(", ")}` };
+      }
+      await run(worktreePath, ["commit", "-m", "fix(sweep): regenerate merge-conflicted artifacts",
+        "-m", `Remudero-Task: ${pr.taskId}`]);
+      const newHeadSha = (await run(worktreePath, ["rev-parse", "HEAD"])).trim();
+      const observed = new Map((await run(worktreePath, ["ls-remote", "origin", ref, "refs/heads/main"]))
+        .trim().split("\n").map(line => { const [sha, name] = line.split(/\s+/); return [name, sha]; }));
+      if (observed.get(ref) !== pr.headSha || observed.get("refs/heads/main") !== mainSha) {
+        return { outcome: "lease-mismatch", paths, reason: "head or main moved during conflict regeneration" };
+      }
+      await run(worktreePath, ["merge-base", "--is-ancestor", pr.headSha, newHeadSha]);
+      assertLiveWriteAllowed("git-push", `regenerating conflicts on ${pr.headRefName}`);
+      try {
+        const lease = `--force-with-lease=${ref}:${pr.headSha}`;
+        if (deps.git) await run(worktreePath, ["push", lease, "origin", `HEAD:${ref}`]);
+        else await gitPushRunBranchAsync(worktreePath, {
+          destination: pr.headRefName, expectedHeadSha: newHeadSha,
+          exec: (file, args, opts) => worktreePushExecAsync(worktreePath)(file,
+            [...args.slice(0, 3), lease, ...args.slice(3)], opts),
+        });
+      }
+      catch (error) { return { outcome: "lease-mismatch", paths, reason: spawnFailureText(error) }; }
+      const pushed = (await run(worktreePath, ["ls-remote", "origin", ref])).trim().split(/\s+/)[0];
+      return pushed === newHeadSha ? { outcome: "pushed", paths, newHeadSha }
+        : { outcome: "lease-mismatch", paths, reason: `remote head after push is ${pushed}, expected ${newHeadSha}` };
+    } catch (error) {
+      return { outcome: "error", paths, reason: capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP) };
+    }
+  })();
+  if (created) {
+    try {
+      if (deps.worktreeRemoveImpl) deps.worktreeRemoveImpl(repoDir, worktreePath);
+      else await worktreeRemoveAsync(repoDir, worktreePath);
+    }
+    catch (error) {
+      const reason = spawnFailureText(error);
+      result.cleanupError = reason;
+    }
+  }
+  return result;
+}
+
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
 const settledMutationVerdictArtifacts = new Set<number>();
 const settledFoldDebtArtifacts = new Set<number>(); // W1-T7853, the same per-process settle
@@ -1978,6 +2116,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "repairMissingTaskTrailer",
   "repairMetadata",
   "rebaseDirtyFleetBranch",
+  "regenerateConflict",
   // W1-T3618: the reviewer-code freshness reading, hoisted in FRONT of reviewCommand so a stale
   // daemon never pays for a review it cannot publish. It is an effect, not a plain value, because
   // buildSweepEffects caches the read once per sweep cycle rather than once per PR.
@@ -2132,6 +2271,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "releaseStaleRed"
   | "releaseBaseCausedStandDown"
   | "rebaseDirtyFleetBranch"
+  | "regenerateConflict"
   | "selectAdaptiveReviewWidth"
   | "repairRecordableRatchet"
   | "repairMissingTaskTrailer"
@@ -4529,6 +4669,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             pr,
             { worktreeRemoveImpl: worktreeRemoveForBuild },
           ),
+
+    regenerateConflict: (pr, mainSha) => regenerateConflictViaGit(repoDir,
+      join(worktreesDir(config), `conflict-regenerate-${pr.prNumber}-${nowMsImpl()}`), pr, mainSha,
+      { worktreeRemoveImpl: worktreeRemoveForBuild }),
 
     // W1-T905 — "repair the instance, FILE THE CLASS". `runSweep` calls this AT MOST ONCE per
     // due surface, best-effort — see `SweepDeps.captureRepairFeedback`'s own doc.
@@ -13695,6 +13839,7 @@ export interface SweepDeps {
    *  through to the existing escalation, preserving human visibility and never clobbering a
    *  branch another writer advanced. */
   rebaseDirtyFleetBranch?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
+  regenerateConflict?: (pr: OpenPrView, mainSha: string) => ConflictRegenerationOutcome | Promise<ConflictRegenerationOutcome>;
   /** W1-T528: task ids with a LIVE in-flight run right now, consulted by
    *  {@link selectUpdateBranchTarget} to skip a head a live worker is still pushing to. Omitted
    *  means an empty set, exactly as if every PR's worker had already finished. */
@@ -20767,6 +20912,49 @@ export async function runSweep(
                 acted = false;
                 standDownReason = terminal;
                 break;
+              }
+              if (mainTipSha !== undefined && deps.regenerateConflict && pr.taskId !== undefined &&
+                  fixHeadAcceptable(pr.headRefName, pr.taskId, false)) {
+                const probe = ledgerLines.findLast(row => row.step === "sweep.merge_probe" &&
+                  row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.main_sha === mainTipSha);
+                const conflictPaths = probe?.conflict_paths;
+                if (probe?.verdict === "conflict" && Array.isArray(conflictPaths) && conflictPaths.length > 0 &&
+                    conflictPaths.every(path => typeof path === "string" && Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path))) {
+                  const regenerationKey = `${deps.ledgerPath}:${pr.prNumber}:${pr.headSha}:${mainTipSha}`;
+                  if (inFlightConflictRegenerations.has(regenerationKey)) {
+                    acted = false;
+                    standDownReason = "conflict regeneration already in flight for this head and main";
+                    break;
+                  }
+                  let receipt = readLedger(deps.ledgerPath).findLast(row => row.step === "sweep.conflict_regenerated" &&
+                    row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.main_sha === mainTipSha);
+                  const alreadyAttempted = receipt !== undefined;
+                  if (receipt === undefined) {
+                    inFlightConflictRegenerations.add(regenerationKey);
+                    try {
+                      let result: ConflictRegenerationOutcome;
+                      try { result = await deps.regenerateConflict(pr, mainTipSha); }
+                      catch (error) { result = { outcome: "error", paths: [], reason: spawnFailureText(error) }; }
+                      const written: LedgerLine = { run_id: deps.runId, task_id: pr.taskId, step: "sweep.conflict_regenerated",
+                        pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha,
+                        new_head_sha: result.newHeadSha ?? null, paths: result.paths, outcome: result.outcome,
+                        ...(result.reason ? { reason: result.reason } : {}),
+                        ...(result.cleanupError ? { cleanup_error: result.cleanupError } : {}) };
+                      appendLine(deps.ledgerPath, written);
+                      receipt = written;
+                    } finally {
+                      inFlightConflictRegenerations.delete(regenerationKey);
+                    }
+                  }
+                  if (receipt.outcome === "pushed" || receipt.outcome === "lease-mismatch") {
+                    acted = !alreadyAttempted && receipt.outcome === "pushed";
+                    spent = false;
+                    standDownReason = receipt.outcome === "pushed"
+                      ? `regenerated conflict at ${receipt.new_head_sha}; awaiting fresh review and CI`
+                      : `conflict regeneration lease mismatch: ${receipt.reason}; awaiting a fresh snapshot`;
+                    break;
+                  }
+                }
               }
               // The "conflicted" row already gated this on the admission predicates, so the
               // dispatch carries merge-conflict evidence and never a mix. W1-T2231: the
