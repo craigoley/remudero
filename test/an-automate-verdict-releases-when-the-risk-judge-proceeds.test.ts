@@ -1,3 +1,4 @@
+import { operatorReleasePin } from "#src/lib/operator-release.js";
 /**
  * THE VERIFY-HUMAN JUDGE'S CONTINUE ARM (operator ruling 2026-09-22).
  *
@@ -306,7 +307,7 @@ test("THE ROUTER backfills an EARLIER automate verdict through its release arm",
 const parked = { id: SHARD.id, title: "t", repo: "remudero", type: "implement", verify: "human", status: "queued", depends_on: [] };
 const planOf = (t: Record<string, unknown>) => ({ tasks: [t], byId: new Map([[t.id as string, t]]) }) as never;
 
-test("THE OPERATOR'S OWN RELEASE ROW is byte-identical when no provenance is supplied", () => {
+test("THE OPERATOR'S OWN RELEASE ROW retains its fields and pins the approved contract", () => {
   const rows: Record<string, unknown>[] = [];
   approveParkedTask(SHARD.id, {
     plan: planOf(parked),
@@ -315,7 +316,7 @@ test("THE OPERATOR'S OWN RELEASE ROW is byte-identical when no provenance is sup
     ledgerLines: [],
     append: ((_: string, r: Record<string, unknown>) => void rows.push(r)) as never,
   });
-  assert.deepEqual(rows[0], { run_id: "APPROVE", task_id: SHARD.id, step: RELEASE_LEDGER_STEP, released: "verify-human" });
+  assert.deepEqual(rows[0], { run_id: "APPROVE", task_id: SHARD.id, step: RELEASE_LEDGER_STEP, released: "verify-human", release_pin: operatorReleasePin(parked as never) });
 });
 
 test("A MACHINE release row carries its author, and the dispatcher's own reader still honours it", () => {
@@ -331,7 +332,7 @@ test("A MACHINE release row carries its author, and the dispatcher's own reader 
   assert.equal(rows[0]!.author_class, "machine");
   assert.equal(rows[0]!.released_by, "verify-human-judge");
   // isDispatchEligible admits a verify:human task whose id this reader returns.
-  assert.ok(releasedTaskIds([JSON.stringify(rows[0])]).has(SHARD.id));
+  assert.ok(releasedTaskIds([JSON.stringify(rows[0])], planOf(parked)).has(SHARD.id));
 });
 
 // ── productionVerifyHumanRelease: the real ledger write, end to end ───────────────────────────────
@@ -350,7 +351,7 @@ test("PRODUCTION WIRING writes a real ratify.approved row the dispatcher reads, 
     const out = await hook(SHARD, AUTOMATE);
     assert.equal(out.kind, "released");
     const lines = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean);
-    assert.ok(releasedTaskIds(lines).has(SHARD.id), "the dispatcher's own reader sees the release");
+    assert.ok(releasedTaskIds(lines, plan).has(SHARD.id), "the dispatcher's own reader sees the release");
     const row = JSON.parse(lines.find((l) => l.includes(RELEASE_LEDGER_STEP))!);
     assert.equal(row.author_class, "machine");
     assert.equal(row.released_by, "verify-human-judge");
@@ -384,7 +385,7 @@ test("PRODUCTION WIRING, REAL JUDGE CONSTRUCTION: this repo's mounts resolve and
     const out = await hook(SHARD, AUTOMATE);
     assert.equal(out.kind, "released", JSON.stringify(out));
     assert.equal(spawned, 1, "exactly one judge spawn");
-    assert.ok(releasedTaskIds(readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean)).has(SHARD.id));
+    assert.ok(releasedTaskIds(readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean), plan).has(SHARD.id));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
