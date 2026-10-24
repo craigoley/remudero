@@ -1,0 +1,69 @@
+- repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: span
+  origin: "operator request 2026-10-24: fleet cockpit code health and daily progress; approved researched
+    eight-slice delivery"
+  status: queued
+  attempts: 0
+  id: W1-T10560
+  title: Publish comparable code-health assessments and evidence-backed improvement opportunities
+  depends_on:
+    - W1-T10558
+  priority: 2
+  budget_usd: 50
+  files:
+    - src/lib/code-health-projection.ts
+    - src/lib/codeql-quality-intake.ts
+    - src/lib/coverage-nightly-intake.ts
+    - src/lib/opportunity-intake.ts
+    - src/lib/read-model-worker.ts
+    - src/lib/views.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - test/**/code-health-projection.test.ts
+    - test/**/code-health-opportunities.test.ts
+  rationale: Existing quality and coverage intake discovers useful debt but exposes no comparable per-repository
+    assessment. Operators approved explainable code quality separately from delivery friction; a missing
+    scanner or scope reduction must not improve the score.
+  design: >-
+    Adapt verified CodeQL maintainability and measured coverage artifacts to code-health-v1. Inventory
+    configured/required sources before assessing; pin scanner SHA, baseline, tool/rules/configuration,
+    exclusions and measured scope with independent own-source clocks. Unknown or unavailable sources remain
+    explicit; the existing maintainability subset is not comprehensive security analysis. Publish a versioned
+    transparent registry of applicable checks and met/assessed/expected counts with reasons, not an arbitrary
+    weighted 0-100 or productivity grade. Preserve urgent findings independently of other checks. New versus
+    existing issues and trends require comparable baselines/config/scope; rule changes, missing alerts,
+    dismissals or narrower coverage cannot count as fixes.
+
+
+    Use stable repository-qualified findings and existing opportunity intake/risk/deduplication to propose
+    bounded improvements with practical consequence, evidence, uncertainty, effort estimates marked modeled,
+    expected result and acceptance/falsifier ideas. Reuse related task/PR/thread links before offering new
+    work. Collect on the existing bounded gardener/read-model machinery without page demand; do not add
+    scanners, licensing, model mounts or silently repair repositories. Publish authenticated cached
+    code-health read/view contract and OpenAPI; gate activation through normal policy. Delivery-friction facts
+    retain their own windows/units and never offset code quality.
+  falsifier: "Remove source SHA/coverage validation, comparable-scope guard and stable finding identity in
+    separate legs: their dedicated tests must fail while positive real-source fixture controls still pass.
+    Repeated page loads must not trigger scanning, ranking/model spend or filing. Restore and verify actual
+    title matches."
+  acceptance:
+    - claim: incomplete or mismatched scan evidence cannot become a healthy code assessment
+      proof: "unit test: code health rejects incomplete scans and mismatched source revisions"
+    - claim: scope or policy changes cannot masquerade as improvement
+      proof: "unit test: code health separates fixes from changed measurement scope"
+    - claim: repeated findings share one evidenced opportunity without hiding critical issues
+      proof: "unit test: code health deduplicates opportunities and preserves urgent findings"
+    - claim: the evidence mechanism is reached by its production caller
+      proof: "grep: createCodeHealthView( in src/lib/read-model-worker.ts"
+  note: Reviewed core c18e7e4c48cee7cb19d2fc96fa93273ef63d85a5 and console
+    c57646ea3636341cc1fad8847df8b144e169d3f1. Before filing, all 10 open core PR heads and main were compared
+    by subject; each head had the same subject counts as main, with more than 4,370 plan shards as corpus
+    controls. No new daily report or code-health producer exists. Refresh main, all open heads, exact
+    merged-task credit and dispatch/run claims before implementation. Reservations belong to
+    codex/file-console-improvement-20261024; preserve contested claims. Reserved W1-T10560 through rmd
+    next-task-id; this filing does not claim implementation or deployment.
