@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { cpSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import * as sweep from "#src/lib/sweep.js";
 import { probeMerge } from "#src/lib/merge-probe.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 async function fixture(t: TestContext, kind: "deletion" | "generated" | "mixed" = "deletion", brokenGenerator = false) {
   const origin = gitRepo({ bare: true });
@@ -15,22 +16,27 @@ async function fixture(t: TestContext, kind: "deletion" | "generated" | "mixed" 
   repo.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
   repo.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
   repo.addRemote("origin", origin.dir);
-  const path = kind === "deletion" ? "learnings/index.json" : "docs/docs-index.json";
+  const path = "learnings/index.json";
   const write = (path: string, value: string) => {
     mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
     writeFileSync(join(repo.dir, path), value);
   };
   write(path, "base\n");
   write("handwritten.txt", "base\n");
-  write("package.json", JSON.stringify({ scripts: { "docs-index": "node generate.cjs" } }));
-  write("generate.cjs", brokenGenerator ? 'throw new Error("generator unavailable");' :
-    'const fs = require("node:fs"); fs.writeFileSync("docs/docs-index.json", fs.readFileSync("head.txt", "utf8") + fs.readFileSync("main.txt", "utf8"));');
+  write("package.json", JSON.stringify({ scripts: { "learnings-index": "node scripts/generate-learnings-index.mjs" } }));
+  for (const script of ["generate-learnings-index.mjs", "lib/learnings-files.mjs", "lib/argv.mjs"]) {
+    const dest = join(repo.dir, "scripts", script);
+    mkdirSync(dirname(dest), { recursive: true });
+    cpSync(join(REPO_ROOT, "scripts", script), dest);
+  }
+  if (brokenGenerator) write("scripts/generate-learnings-index.mjs", 'throw new Error("generator unavailable");');
   repo.git("add", ".");
   repo.git("commit", "-qm", `chore(test): seed artifacts ${repo.dir}`);
   const branch = "run-W1-T9578-1792839891250";
   repo.git("checkout", "-qb", branch);
   write(path, "head\n");
   write("head.txt", "head input\n");
+  write("learnings/head.yaml", "- id: head-input\n  fact: head input\n  src: fixture\n  files: [head.txt]\n");
   if (kind === "mixed") write("handwritten.txt", "head\n");
   repo.git("add", ".");
   repo.git("commit", "-qm", "chore(test): edit head");
@@ -42,6 +48,7 @@ async function fixture(t: TestContext, kind: "deletion" | "generated" | "mixed" 
     write(".gitignore", `${path}\n`);
   } else write(path, "main\n");
   write("main.txt", "main input\n");
+  write("learnings/main.yaml", "- id: main-input\n  fact: main input\n  src: fixture\n  files: [main.txt]\n");
   if (kind === "mixed") write("handwritten.txt", "main\n");
   repo.git("add", ".");
   repo.git("commit", "-qm", "chore(test): edit main");
@@ -122,10 +129,18 @@ test("W1-T9578: an unmerged path outside the registry falls through to the confl
 
 test("W1-T9578: a registry path both sides edited resolves to the generator output on the merged tree", async (t) => {
   const f = await fixture(t, "generated");
+  assert.equal(existsSync(join(f.repo.dir, "node_modules")), false, "exercise the fleet's install-root fallback");
   await f.run();
+  assert.equal(f.receipts()[0]!.outcome, "pushed", String(f.receipts()[0]!.reason));
   assert.notEqual(f.remoteHead(), f.headSha);
-  assert.equal(f.origin.git("show", `${f.remoteHead()}:${f.path}`), "head input\nmain input");
-  assert.deepEqual(f.receipts()[0]!.paths, [{ path: f.path, action: "docs-index" }]);
+  assert.deepEqual(JSON.parse(f.origin.git("show", `${f.remoteHead()}:${f.path}`)), {
+    files: {
+      "head.yaml": { entries: ["head-input"], globs: ["head.txt"], symbols: [], error_signatures: [] },
+      "main.yaml": { entries: ["main-input"], globs: ["main.txt"], symbols: [], error_signatures: [] },
+    },
+    bySubsystem: {},
+  });
+  assert.deepEqual(f.receipts()[0]!.paths, [{ path: f.path, action: "learnings-index" }]);
   assert.deepEqual(f.counts(), { workers: 0, admissions: 0, attempts: 1 });
 });
 

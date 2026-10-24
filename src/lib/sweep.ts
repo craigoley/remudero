@@ -228,6 +228,8 @@ import {
   listRegisteredWorktrees,
   renderWorkerSettings,
   STDERR_EXCERPT_CAP,
+  excludeNodeModulesFromGit,
+  linkWorktreeNodeModules,
   worktreeAdd,
   worktreeRemove,
   worktreeRemoveAsync,
@@ -1965,6 +1967,10 @@ export async function regenerateConflictViaGit(
           await run(worktreePath, ["checkout", mainSha, "--", path]);
           paths.push({ path, action: REGENERABLE_ARTIFACT_GENERATORS[path]! });
         }
+      }
+      if (paths.some(({ action }) => action !== "deleted-on-main")) {
+        excludeNodeModulesFromGit(worktreePath);
+        linkWorktreeNodeModules(repoDir, worktreePath);
       }
       for (const { path, action } of paths) {
         if (action === "deleted-on-main") continue;
