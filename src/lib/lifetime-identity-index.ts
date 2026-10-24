@@ -3,7 +3,7 @@ import type { LifetimeDispatchTally } from "./status.js";
 
 // Proposed private policy: 32 MiB of main-database pages; rollback journal stays in memory.
 export const LIFETIME_INDEX_PAGE_BYTES = 4_096;
-export const LIFETIME_INDEX_MAX_PAGES = 8_192;
+export const LIFETIME_INDEX_MAX_PAGES = 8_192; // BACKSTOP: proposed 32 MiB main-database page budget; exhaustion invalidates history.
 // SQLite's cache_size is an advisory page-cache target, not a hard RSS ceiling.
 export const LIFETIME_INDEX_CACHE_KIB = 256;
 
@@ -87,7 +87,10 @@ export function createIndexedLifetimeAccounting(
       started INTEGER NOT NULL, terminal INTEGER, charged INTEGER NOT NULL) WITHOUT ROWID;
       CREATE INDEX pending_by_task ON identities(task_id, started, terminal);`);
     sql = statements(db);
-  } catch (error) { fail(error); }
+  } catch (error) {
+    // Invalidate the complete projection and retain the underlying error for the caller's UNKNOWN report.
+    fail(error);
+  }
   const admit = (taskId: string): boolean => {
     if (!sql) return false;
     sql.ensureTask.run(taskId);
@@ -122,7 +125,10 @@ export function createIndexedLifetimeAccounting(
           pageBytes: Number(db.prepare("PRAGMA page_size").get()?.page_size),
           cacheKiBHint: -Number(db.prepare("PRAGMA cache_size").get()?.cache_size),
           residentKeys: residentKeys(), residentLimit: identitiesPerTask };
-      } catch (error) { fail(error); return undefined; }
+      } catch (error) {
+        // A failed resource query invalidates the history; fail retains its error for the caller.
+        fail(error); return undefined;
+      }
     },
     record(row: Record<string, unknown>, identity: string | undefined, excluded: boolean) {
       if (!sql || unavailable) return;
@@ -169,7 +175,10 @@ export function createIndexedLifetimeAccounting(
         sql.addIdentity.run(identity, taskId, runId, 1, terminal === undefined ? null : Number(terminal), charged);
         sql.countIdentity.run(taskId);
         tally.starts += charged;
-      } catch (error) { fail(error); }
+      } catch (error) {
+        // A failed write discards every tally; fail retains the error and closes the partial index.
+        fail(error);
+      }
     },
     tallyFor(taskId: string, visible: ReadonlySet<unknown>, orphans: ReadonlySet<string>): LifetimeDispatchTally | undefined {
       if (!sql || unavailable) return undefined;
@@ -183,7 +192,10 @@ export function createIndexedLifetimeAccounting(
           sql.pendingCharge.run(charged, run.identity!);
         }
         return { ...(tallies.get(taskId) ?? { starts: 0, capacityBlocked: 0 }) };
-      } catch (error) { fail(error); return undefined; }
+      } catch (error) {
+        // An attribution read failure is UNKNOWN, never a measured zero; fail retains the error.
+        fail(error); return undefined;
+      }
     },
   };
 }
