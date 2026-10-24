@@ -1,3 +1,8 @@
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
+import { fixtureRetentionReason, retainFixture } from "#test/setup/retained-fixtures.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // W1-T5051 (arch Phase 4 P4-T12): the `agent` view family. Each part must equal its GET /v1/operator-agent/*
 // route over the same ledger (archive included), `proposals` must equal the nav badge's engine over the same
 // analytics, and the per-instance fold must spread a large panel fact delta over passes, resuming from its
@@ -264,22 +269,26 @@ function busySnapshot(): AnalyticsSnapshot {
   } as AnalyticsSnapshot;
 }
 
-type FixtureHooks = { after: (fn: () => void) => void };
+type FixtureHooks = { after: (fn: () => void) => void; ownRoot?: (root: string) => void };
 
 /** These directory fixtures register removal first, then resources in acquisition order. */
-function ownedDirectoryFixture(t: FixtureHooks): FixtureHooks {
-  const cleanup: Array<() => void> = [];
+function ownedDirectoryFixture(t: FixtureHooks, settle = flushReadModelTransactions): FixtureHooks & { ownRoot(root: string): void } {
+  const cleanup: Array<() => void> = [], roots = new Set<string>();
   t.after(async () => {
-    const failures: unknown[] = [];
-    // Finish every resource hook, even when one fails. Keep its directory as
-    // evidence if a close failed instead of deleting underneath an open handle.
-    for (let i = cleanup.length - 1; i > 0; i--) {
-      try { await cleanup[i]!(); } catch (error) { failures.push(error); }
+    try {
+      const failures: unknown[] = [];
+      for (let i = cleanup.length - 1; i > 0; i--) {
+        try { await cleanup[i]!(); } catch (error) { failures.push(error); }
+      }
+      if (failures.length) throw new AggregateError(failures, "agent fixture resources did not close");
+      await settle();
+      await cleanup[0]?.();
+    } catch (error) {
+      for (const root of roots) if (existsSync(root)) retainFixture(root, "agent fixture retirement failed");
+      throw error;
     }
-    if (failures.length) throw new AggregateError(failures, "agent fixture resources did not close");
-    await cleanup[0]?.();
   });
-  return { after: (fn) => void cleanup.push(fn) };
+  return { after: (fn) => void cleanup.push(fn), ownRoot: (root) => void roots.add(root) };
 }
 
 async function projectedCorpus(t: FixtureHooks) {
@@ -293,9 +302,10 @@ test("W1-T10430: an agent directory fixture closes real SQLite before removing i
   const root = makeTempDir("agent-fixture-order");
   const db = openProjectorReadModel(join(root, "state"), "core", fixedClock(NOW));
   let closed = false;
-  t.after(() => { if (!closed) db.close(); rmSync(root, { recursive: true, force: true }); });
+  t.after(async () => { if (!closed) db.close(); await flushReadModelTransactions(); rmSync(root, { recursive: true, force: true }); });
   const cleanup: Array<() => void> = [];
   const fixture = ownedDirectoryFixture({ after: (fn) => void cleanup.push(fn) });
+  fixture.ownRoot(root);
   fixture.after(() => {
     assert.equal(closed, true, "the resource closes before directory removal");
     rmSync(root, { recursive: true, force: true });
@@ -315,9 +325,10 @@ test("W1-T10430: a failed agent resource close preserves its directory and attem
   const root = makeTempDir("agent-fixture-failed-close");
   const db = openProjectorReadModel(join(root, "state"), "core", fixedClock(NOW));
   let closed = false;
-  t.after(() => { if (!closed) db.close(); rmSync(root, { recursive: true, force: true }); });
+  t.after(async () => { if (!closed) db.close(); await flushReadModelTransactions(); rmSync(root, { recursive: true, force: true }); });
   const cleanup: Array<() => void> = [], events: string[] = [];
   const fixture = ownedDirectoryFixture({ after: (fn) => void cleanup.push(fn) });
+  fixture.ownRoot(root);
   const failure = new Error("owned fixture close failed");
   fixture.after(() => { events.push("remove"); rmSync(root, { recursive: true, force: true }); });
   fixture.after(() => { db.close(); closed = true; events.push("closed SQLite"); });
@@ -450,14 +461,18 @@ test("the nav badge reads the agent view's fold, so its count never folds past t
 // ---- the persisted fold ----
 
 /** A store holding `n` panel facts (and one non-panel fact per 1,000), written straight into `fact`. */
-function factStore(t: { after: (fn: () => void) => void }, n: number): { db: ReadModelDb; lease: ReadModelLease; root: string } {
+function factStore(t: { after: (fn: () => void) => void }, n: number, settle = flushReadModelTransactions): { db: ReadModelDb; lease: ReadModelLease; root: string } {
   const root = makeTempDir("agent-fold");
   let db: ReadModelDb | undefined;
-  t.after(() => {
-    // SQLite may checkpoint and remove its WAL on close. Keep the directory until
-    // close completes; if close fails, preserve the fixture and the failure.
-    db?.close();
-    rmSync(root, { recursive: true, force: true });
+  t.after(async () => {
+    try {
+      db?.close();
+      await settle();
+      rmSync(root, { recursive: true, force: true });
+    } catch (error) {
+      if (existsSync(root)) retainFixture(root, "agent fold retirement failed");
+      throw error;
+    }
   });
   mkdirSync(join(root, "state"), { recursive: true });
   db = openProjectorReadModel(join(root, "state"), "core", fixedClock(NOW));
@@ -467,7 +482,7 @@ function factStore(t: { after: (fn: () => void) => void }, n: number): { db: Rea
   return { db, lease: got.lease, root };
 }
 
-test("W1-T10430: agent fold teardown closes SQLite before deleting its directory", () => {
+test("W1-T10430: agent fold teardown closes SQLite before deleting its directory", async () => {
   const cleanup: Array<() => void> = [];
   const { db, root } = factStore({ after: (fn) => void cleanup.push(fn) }, 0);
   const close = db.close.bind(db);
@@ -480,7 +495,7 @@ test("W1-T10430: agent fold teardown closes SQLite before deleting its directory
   // Run every registered hook even on the negative control, so the real store is
   // closed after a reversed-order deletion fails. No external resource is faked.
   for (const finish of cleanup) {
-    try { finish(); } catch (error) { failures.push(error); }
+    try { await finish(); } catch (error) { failures.push(error); }
   }
   assert.deepEqual(failures, [], "fixture teardown completes without hiding a failure");
   assert.equal(directoryPresentAtClose, true, "the real SQLite close runs before any directory removal");
@@ -676,4 +691,131 @@ test("repository-scoped agent builds retain home analytics and refuse foreign ev
   assert.ok(refused.records && refused.records.length > 0, "ranks remain visible without relabeling foreign evidence");
   assert.ok(refused.records.every((record) => record.detail.state === "unavailable"));
   assert.equal(refused.coverage?.complete, 0);
+});
+
+
+test("agent fixture diagnostics settle after real release and before owned directory removal", async (t) => {
+  const root = makeTempDir("agent-fixture-diagnostic-barrier");
+  const db = openProjectorReadModel(join(root, "state"), "core", fixedClock(NOW));
+  const cleanup: Array<() => void> = [];
+  let settled = false, closed = false;
+  const fixture = ownedDirectoryFixture({ after: (fn) => void cleanup.push(fn) }, async () => {
+    await flushReadModelTransactions();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    writeFileSync(join(root, "settled"), "real queued diagnostic barrier completed");
+    settled = true;
+  });
+  fixture.ownRoot(root);
+  t.after(async () => { if (!closed) db.close(); await flushReadModelTransactions(); rmSync(root, { recursive: true, force: true }); });
+  fixture.after(() => {
+    assert.equal(settled, true, "retirement must await diagnostics after the actual resource close");
+    assert.equal(readFileSync(join(root, "settled"), "utf8"), "real queued diagnostic barrier completed");
+    rmSync(root, { recursive: true, force: true });
+  });
+  fixture.after(() => { db.close(); closed = true; });
+  await cleanup[0]!();
+  assert.equal(existsSync(root), false);
+  const foldCleanup: Array<() => void> = [];
+  let foldSettled = false;
+  const fold = factStore({ after: (fn) => void foldCleanup.push(fn) }, 0, async () => {
+    assert.equal(existsSync(fold.root), true);
+    assert.throws(() => fold.db.prepare("SELECT 1"), "the real fold store closes before diagnostics settle");
+    await flushReadModelTransactions();
+    foldSettled = true;
+  });
+  t.after(async () => { await flushReadModelTransactions(); rmSync(fold.root, { recursive: true, force: true }); });
+  await foldCleanup[0]!();
+  assert.equal(foldSettled, true, "fold cleanup also awaits its diagnostic barrier");
+  assert.equal(existsSync(fold.root), false);
+
+});
+
+test("agent fixture release and barrier failures preserve real evidence after the standard exit sweep", async (t) => {
+  const mode = process.env.RMD_AGENT_FIXTURE_FAILURE_MODE;
+  if (mode) {
+    assert.ok(["release", "barrier", "fold-release", "fold-barrier"].includes(mode));
+    const foldFailure = mode.startsWith("fold-");
+    let root: string, db: ReadModelDb;
+    if (foldFailure) {
+      const fold = factStore(t, 0, async () => { await flushReadModelTransactions(); throw new Error("injected agent barrier failure"); });
+      ({ root, db } = fold);
+      if (mode === "fold-release") {
+        const close = db.close.bind(db);
+        db.close = () => { close(); throw new Error("injected agent release failure"); };
+      }
+    } else {
+      root = makeTempDir("agent-fixture-exit-evidence");
+      db = openProjectorReadModel(join(root, "state"), "core", fixedClock(NOW));
+      const fixture = ownedDirectoryFixture(t, async () => { await flushReadModelTransactions(); throw new Error("injected agent barrier failure"); });
+      fixture.ownRoot(root);
+      fixture.after(() => rmSync(root, { recursive: true, force: true }));
+      fixture.after(() => { db.close(); if (mode === "release") throw new Error("injected agent release failure"); });
+    }
+    writeFileSync(join(root, "evidence"), "owned agent evidence");
+    const control = makeTempDir("agent-fixture-unretained-control");
+    writeFileSync(process.env.RMD_AGENT_FIXTURE_RECEIPT!, JSON.stringify({ root, dbPath: db.path, control }));
+    return;
+  }
+  for (const failureMode of ["release", "barrier", "fold-release", "fold-barrier"]) {
+    const childTmp = makeTempDir(`agent-fixture-child-${failureMode}`), receipt = join(childTmp, "receipt.json");
+    t.after(() => rmSync(childTmp, { recursive: true, force: true }));
+    const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: childTmp, RMD_AGENT_FIXTURE_FAILURE_MODE: failureMode, RMD_AGENT_FIXTURE_RECEIPT: receipt };
+    delete env.NODE_TEST_CONTEXT;
+    env.NODE_V8_COVERAGE = undefined;
+    const child = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test-name-pattern", `^${t.name}$`, "test/agent-view.test.ts"], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 30_000 });
+    assert.equal(child.error, undefined, child.stderr);
+    assert.equal(child.signal, null, child.stderr);
+    assert.equal(child.status, 1, child.stdout + child.stderr);
+    assert.match(child.stdout, /^# fail 1$/m);
+    assert.match(child.stdout, failureMode === "release" ? /agent fixture resources did not close/ : failureMode === "fold-release" ? /injected agent release failure/ : /injected agent barrier failure/);
+    const { root, dbPath, control } = JSON.parse(readFileSync(receipt, "utf8"));
+    assert.equal(existsSync(control), false, "positive control: the standard exit sweep ran");
+    assert.equal(readFileSync(join(root, "evidence"), "utf8"), "owned agent evidence");
+    assert.equal(readFileSync(dbPath).subarray(0, 16).toString(), "SQLite format 3\0");
+  }
+});
+
+
+test("agent corpus enrolls its owned root before asynchronous resources acquire it", async (t) => {
+  const cleanup: Array<() => void> = [];
+  const acquisitionFailure = new Error("corpus acquisition failed after opening SQLite");
+  const barrierFailure = new Error("corpus diagnostic barrier failed");
+  const fixture = ownedDirectoryFixture({ after: (fn) => void cleanup.push(fn) }, async () => {
+    await flushReadModelTransactions();
+    throw barrierFailure;
+  });
+  let captured: string | undefined, enrolledBeforeFirstHook: boolean | undefined;
+  let db: ReadModelDb | undefined, closed = false;
+  t.after(async () => {
+    if (db && !closed) db.close();
+    await flushReadModelTransactions();
+    if (captured) rmSync(captured, { recursive: true, force: true });
+  });
+  await assert.rejects(corpus({
+    ownRoot: (root) => { captured = root; fixture.ownRoot(root); },
+    after: (finish) => {
+      enrolledBeforeFirstHook ??= captured !== undefined;
+      fixture.after(finish);
+    },
+  }, async (hooks) => {
+    assert.ok(captured, "the actual corpus enrolls its root before starting acquisition");
+    const stateDir = join(captured, "state");
+    assert.equal(existsSync(stateDir), true, "acquisition uses the corpus-created state directory");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    db = openProjectorReadModel(stateDir, "core", fixedClock(NOW));
+    writeFileSync(join(captured, "evidence"), "partially acquired corpus");
+    hooks.after(() => { db!.close(); closed = true; });
+    throw acquisitionFailure;
+  }), (error) => error === acquisitionFailure);
+  assert.equal(enrolledBeforeFirstHook, true);
+  assert.ok(captured);
+  assert.ok(db);
+  assert.equal(closed, false, "the asynchronous acquisition actually opened a resource");
+  assert.equal(cleanup.length, 1);
+  await assert.rejects(async () => cleanup[0]!(), (error) => error === barrierFailure);
+  assert.equal(closed, true, "partial acquisition releases its real resource before the barrier");
+  assert.throws(() => db!.prepare("SELECT 1"));
+  assert.equal(fixtureRetentionReason(captured), "agent fixture retirement failed");
+  assert.equal(readFileSync(join(captured, "evidence"), "utf8"), "partially acquired corpus");
+  assert.equal(readFileSync(db.path).subarray(0, 16).toString(), "SQLite format 3\0");
 });

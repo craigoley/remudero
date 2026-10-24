@@ -41,6 +41,7 @@ export function phaseFixture(): PhaseFixture {
     env: {
       ...fx.env,
       RMD_CLEANUP_STATE_DISK: state,
+      RMD_CLEANUP_PRESERVE_ROOT: join(disk, "host-cleanup-preserved"),
       RMD_SCRATCH_ROOT: disk,
       // the fixture's archive roots are the state disk's own, as on the host
       RMD_CLEANUP_ARCHIVE_ROOT: "",

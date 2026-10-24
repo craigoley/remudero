@@ -808,6 +808,7 @@ export interface LedgerUnionRawReadOptions extends LedgerUnionOptions {
   keep?: (line: string) => boolean;
   dedupe?: boolean;
   requireArchives?: boolean;
+  /** Refuse unread archives or an unenumerated directory; `unread` names the directory when listing fails. */
   refuseIncomplete?: boolean;
 }
 
@@ -907,13 +908,15 @@ export function readLedgerUnionRawLinesSync(
   opts: LedgerUnionRawReadOptions = {},
   fsDeps: LedgerGrepFsDeps = realLedgerFs,
 ): LedgerUnionRawRead {
-  const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, fsDeps);
+  const unread: string[] = [];
+  const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, fsDeps, (path) => {
+    if (opts.refuseIncomplete) unread.push(path);
+  });
   const archiveFiles = rotations.map((e) => e.path);
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = fsDeps.existsSync(livePath);
   const minimumTs = sinceMs(opts);
   const { rawLines, scan } = rawLineCollector(opts);
-  const unread: string[] = [];
   let filesRead = 0;
 
   const readEntry = (entry: LedgerCorpusEntry): void => {
@@ -973,13 +976,15 @@ const yieldTurn = (): Promise<void> => new Promise<void>((resolve) => setImmedia
  * yielded between slices, so a corpus of hundreds of rotations never holds the loop for one whole file.
  */
 export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: LedgerUnionRawReadOptions = {}): Promise<LedgerUnionRawRead> {
-  const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, realLedgerFs);
+  const unread: string[] = [];
+  const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, realLedgerFs, (path) => {
+    if (opts.refuseIncomplete) unread.push(path);
+  });
   const archiveFiles = rotations.map((e) => e.path);
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = nodeExistsSync(livePath);
   const minimumTs = sinceMs(opts);
   const { rawLines, scan } = rawLineCollector(opts);
-  const unread: string[] = [];
   let filesRead = 0;
 
   const scanInSlices = async (buf: Buffer): Promise<void> => {
@@ -1646,14 +1651,16 @@ export function readLedgerUnionRecordsSync(
   opts: LedgerUnionRecordReadOptions = {},
   fsDeps: LedgerGrepFsDeps = realLedgerFs,
 ): LedgerUnionRecordRead {
-  const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, fsDeps);
+  const unread: string[] = [];
+  const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, fsDeps, (path) => {
+    if (opts.refuseIncomplete) unread.push(path);
+  });
   const archiveFiles = rotations.map((e) => e.path);
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = opts.readLiveRecords !== undefined ? true : fsDeps.existsSync(livePath);
   const minimumTs = sinceMs(opts);
   const seen = createLedgerLineSeen();
   const rows: Array<Record<string, unknown>> = [];
-  const unread: string[] = [];
   const stepsSeen = new Set<string>();
   let torn = 0;
   let filesRead = 0;
@@ -2023,7 +2030,8 @@ export function createIncrementalLedgerUnion(
       return size;
     };
 
-    const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, fsDeps);
+    let directoryUnread = false;
+    const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, fsDeps, () => { directoryUnread = true; });
     const keys = new Map<string, string>();
     for (const entry of rotations) {
       try {
@@ -2045,7 +2053,7 @@ export function createIncrementalLedgerUnion(
       liveKey = undefined;
     }
     const signature = JSON.stringify([unclassified, auxiliary, rotations.map((entry) => [entry.path, keys.get(entry.path) ?? null]), liveKey ?? null]);
-    if (liveKey !== undefined && state.last?.signature === signature) return state.last.result;
+    if (!(refuseIncomplete && directoryUnread) && liveKey !== undefined && state.last?.signature === signature) return state.last.result;
     if (liveKey === "absent") state.live = undefined;
 
     const reduce = (rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> => {

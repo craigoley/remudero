@@ -21,6 +21,8 @@
     - src/lib/deployer.ts
     - test/routing/the-console-signs-the-fleet-into-claude.test.ts
     - test/routing/the-console-claude-login-reaches-the-fleet-store.test.ts
+    - "deploy/claude-directory.sh"
+    - "deploy/recycle-container.sh"
   rationale: |
     RE-VERIFIED 2026-10-23 on origin/main 69522863e and on `ssh remudero` (read-only: mount tables printed
     as Source/Destination/RW only, `ls -ld`, `stat`).

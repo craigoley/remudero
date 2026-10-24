@@ -102,7 +102,7 @@ function installHook(dir: string): void {
     "fixture-copy-census.mjs",
     "house-layout-census.mjs",
     "deps-interface-census.mjs",
-    "test-repo-root-codemod.mjs",
+    "test-repo-root-codemod.mjs", "coverage-session-blanking-check.mjs",
   ]) {
     copyFileSync(join(REPO_ROOT, "scripts", script), join(dir, "scripts", script));
   }

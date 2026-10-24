@@ -7,7 +7,7 @@
   priority: 2.5
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "console-followup:issue-revalidation-price-receipt-20261020"

@@ -55,8 +55,45 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { approveCommand, daemonCommand, parkedVerifyHumanShards, productionMachineFilingJudgePorts } from "../src/run-task.js";
 import { releaseAutomatedShard } from "../src/lib/verify-human-release.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { machineJudgeInputsAsync } from "#src/lib/machine-filing-judge.js";
 
 const CLOCK = fixedClock(1790700000000);
+
+test("the production machine judge reads an approved amendment from main while its checkout stays behind", async t => {
+  const seed = gitRepo({ kind: "judge-main-plan-seed", scope: t });
+  const origin = gitRepo({ bare: true, kind: "judge-main-plan-origin", scope: t });
+  const id = "W1-T9068";
+  const path = "plan/tasks.d/W1-T9068-x.yaml";
+  mkdirSync(join(seed.dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "[]\n");
+  const old = machineShard(id).replace("verify: human", "verify: auto");
+  writeFileSync(join(seed.dir, path), old);
+  seed.git("add", "-A"); seed.git("commit", "-qm", "original");
+  seed.addRemote("origin", origin.dir); seed.git("push", "-q", "origin", "HEAD:main");
+  const local = gitRepo({ cloneFrom: origin.dir, kind: "judge-main-plan-local", scope: t });
+  const head = local.git("rev-parse", "HEAD");
+  const stateDir = join(local.dir, "state"); mkdirSync(stateDir);
+  recordOperatorRelease(stateDir, id, CLOCK.iso());
+  const before = await machineJudgeInputsAsync(local.dir, stateDir, "origin/main");
+  const amended = machineShard(id, { files: ["docs/ci-friction-remedies.md", "docs/approved-companion.md"] });
+  writeFileSync(join(seed.dir, path), amended);
+  seed.git("add", "-A"); seed.git("commit", "-qm", "approved amendment"); seed.git("push", "-q", "origin", "HEAD:main");
+  writeFileSync(join(local.dir, path), old + "# private dirty bytes must survive\n");
+  const ports = productionMachineFilingJudgePorts({ repoRoot: local.dir, stateDir,
+    worktreesRoot: join(local.dir, "worktrees"), owner: "acme", repo: "remudero", log: () => {}, mainFailures: () => [] });
+  const plan = await ports.plan();
+  const task = plan.byId.get(id)!;
+  assert.equal(task.verify, "human");
+  assert.deepEqual(task.files, ["docs/ci-friction-remedies.md", "docs/approved-companion.md"]);
+  assert.equal(task.sourcePath, join(local.dir, path));
+  assert.equal(needsMachineJudgement(task, ports.operatorReleases!()), true);
+  assert.notEqual(await machineJudgeInputsAsync(local.dir, stateDir, "origin/main"), before);
+  assert.equal(local.git("rev-parse", "HEAD"), head);
+  assert.equal(readFileSync(join(local.dir, path), "utf8"), old + "# private dirty bytes must survive\n");
+  local.git("remote", "set-url", "origin", join(local.dir, "missing-origin"));
+  await assert.rejects(() => Promise.resolve(ports.plan()), /fetch|origin|repository|Git/i);
+  assert.equal(readFileSync(join(local.dir, path), "utf8"), old + "# private dirty bytes must survive\n");
+});
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const telemetryInput: RiskJudgeInput = { change: { description: "private-prompt-sentinel" },

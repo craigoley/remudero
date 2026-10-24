@@ -78,7 +78,7 @@ export function securityHoldReason(refusal: SecurityArmRefusal,
     ? `security hold: the code-scanning merge policy refused the arm at this head on a new high or critical alert` +
       `${named} (security merge blocked: ${refusal.reason}) — owner fix-lane${standDown ? `; this pass: ${standDown}` : ""}`
     : `security hold: the code-scanning merge policy could not classify this head's CodeQL result ` +
-      `(security merge unknown: ${refusal.reason}) — owner security-policy; the policy, not the arm, must change`;
+      `(security merge unknown: ${refusal.reason}) — owner security-policy; restore complete trusted exact-head evidence and re-evaluate the policy; the hold remains until qualified`;
 }
 
 export function finalBlocker(ruleBlocker: PrBlocker, facts: BlockerFacts): PrBlocker {

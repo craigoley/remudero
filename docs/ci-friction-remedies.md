@@ -303,3 +303,166 @@ The implementation needs `src/run-task.ts` in its declared scope; this section r
 the proposal only. Validate it with an over-ceiling fixture that cannot publish until an
 authoritative result exists, and compare later head-linked precheck/CI dispositions before
 claiming fewer fix rounds.
+
+## PR-13834 tested-merge-parent observation
+
+W1-T10529 fixes the cohort at **PR #13834 only**, from 2026-10-23 21:29:15Z through
+21:42:14Z. Its disposition is **refresh observed; identical material subtrees verified;
+necessity and causal delay not established**. This packet records an observation, not a
+landed refresh remedy. Existing remedies and other PR dispositions above remain applicable.
+
+### Checkout and refresh provenance
+
+The trusted checkout evidence is the `actions/checkout` step in
+[CI run 40027123854, job 120666003041](https://github.com/craigoley/remudero/actions/runs/40027123854/job/120666003041).
+The retrieved log explicitly fetches the fixed SHA into `refs/remotes/pull/13834/merge`;
+its `git log -1 --format=%H` output at **21:29:34.8817714Z** is
+`4c25bdf9ac1717701f9fde8372486bb9096d9293`. The immutable
+[checkout commit object](https://api.github.com/repos/craigoley/remudero/git/commits/4c25bdf9ac1717701f9fde8372486bb9096d9293)
+independently supplies these ordered parents and tree:
+
+| Object | SHA |
+| --- | --- |
+| Exact reviewed PR head | `f6d321730212dfae23dda6d4688fd71f0c5d5c2d` |
+| Checkout first parent, tested main | `358ab4af0c10e845281c657fbfec5edb9ba1ef3b` |
+| Checkout second parent | `f6d321730212dfae23dda6d4688fd71f0c5d5c2d` |
+| Checkout root tree | `49f1c3179442194c7da22978afffcaeb09c081ae` |
+| Actual refreshed head | `7fb436e4ed6f376f2136fe5ad79e8353b09f1704` |
+| Refresh first parent | `f6d321730212dfae23dda6d4688fd71f0c5d5c2d` |
+| Refresh second parent, new main | `28bced98f83bf1a35eab0419b507b11538b419ae` |
+| Refresh root tree | `112027c8d2fed6c3ddded025cf32fa8037a6513a` |
+
+The [refresh commit object](https://api.github.com/repos/craigoley/remudero/git/commits/7fb436e4ed6f376f2136fe5ad79e8353b09f1704)
+timestamps the merge at 21:42:12Z, verified at 21:42:13Z. Both objects name the same
+reviewed head, despite opposite parent ordering. The
+[run metadata](https://api.github.com/repos/craigoley/remudero/actions/runs/40027123854)
+says attempt 1, event `pull_request`, head `f6d3217`, and ultimately `cancelled`, updated
+21:44:06Z. That head field alone does not identify the tested main parent. A rerun needs
+its own attempt/job checkout evidence; a moving pull merge ref or current main cannot
+substitute for the SHA logged by the actual job. Missing, contradictory or unmatched
+head/parent evidence is UNKNOWN. Checkout evidence establishes the tree used, not that
+every check completed or passed on it.
+
+The task's pinned rationale records this decision sequence on 2026-10-23:
+
+| UTC time | Recorded event and disposition |
+| --- | --- |
+| 21:41:31 | `sweep.update_branch.pending_guard` |
+| 21:42:11 | `sweep.refresh.decided`: `path: general`, `ci_in_flight: true`, `decision: refresh`, judge `overlap` |
+| 21:42:13 | `sweep.update_branch.updated` |
+
+That exact decision is reported with `strict: false`, `update_reason: distance-unknown`,
+`overlap_count: 0`, `overlap_files: []`, `predicted_cost_ci_min: 36.6`, and
+`predicted_benefit: 0.005`. These fields are **secondary evidence from the filed task**;
+the raw daemon ledger was not available to this worker. Historical branch-protection
+strictness is recorded false there, not independently certified from a historical protection
+snapshot. The judge's generated reason is **UNKNOWN**; the policy's generic sentence
+"the judge ruled overlap" is not the model's explanation. The native machine-filing
+judge's separate, real `proceed` ruling is in the task's `risk_ruling`, judged
+2026-10-24T00:14:35.499Z, pin
+`543e6bf3ccbd66bef26821cd16a5553e1640a3ffabe9723dece8972d1fddebd9`.
+It authorizes this bounded documentation task, not a refresh-policy change.
+
+### Control: already-tested source is not new main overlap
+
+Direct Git Trees API reads of both root trees give identical mode/type/SHA entries
+everywhere except `plan`. The following subtree IDs are equal at checkout and refresh:
+
+| Subtree | Object ID at both endpoints |
+| --- | --- |
+| `src` | `92e7d80c1bfe89fc84af0f6137af693b5df104db` |
+| `test` | `9d7bf4e8aca61b364d69c38a7ded1c587d32c4ce` |
+| `scripts` | `48dab399af991e7ae916e1b7db042ccb8fd25666` |
+| `.github` | `a7f0c85d3bb6b33df2cea302eb5337f2160216fa` |
+
+Walking the differing `plan` trees (`cc0d556659bc384107f9c49847ae73f09ea7d5ae` and
+`d3c02ad14f44102c4e3fda2492e83943b35ef14d`) finds only `feedback` different. Both feedback
+responses contain 466 entries and `truncated: false`; their sole differing entry is
+**`plan/feedback/incident-ac8200367eff4984.yaml`**, blob
+`1f4d0d7e8b68994fb54d778e5266a4fb24549564` becoming
+`65390af44c24b3dd81beac872cd709f0b251f8aa`. Root and plan responses are also untruncated.
+This is the complete endpoint path delta, with the differing feedback blob as a positive
+control that the traversal detects change. Equal material trees do not prove a plan-file
+change cannot affect a check that reads plan data.
+
+The ordinary [three-dot comparison](https://github.com/craigoley/remudero/compare/4c25bdf9ac1717701f9fde8372486bb9096d9293...7fb436e4ed6f376f2136fe5ad79e8353b09f1704)
+instead reports a diverged history with merge base `358ab4a`, and lists the feedback file,
+`src/lib/review.ts`, `src/run-task.ts`, and
+`test/review/a-reviewers-explanation-reaches-the-binding-verdict.test.ts`.
+It includes the PR's own changes relative to that ancestor; it is not the endpoint tree
+delta. The equal subtree objects are the control against treating that list or a branch's
+behind-count as proof that running CI missed source changes.
+
+Keep a separate **controlled counterexample**, not another observed fleet disposition:
+a tested checkout contains version A of a PR path `src/mine.ts`; subsequent main changes
+that path to version B, and the proposed merge retains B. Its endpoint blob and `src` tree
+then differ, so the running checkout genuinely has not tested B. Such a reaching change
+must not be removed merely because the PR head is unchanged or some other subtrees match.
+An in-memory Git-object control was executed with A = `export const value = 1;\n` and
+B = `export const value = 2;\n` (each escape denotes one newline). SHA-1 of the Git object
+header plus body gives these independently reproducible objects:
+
+| Constructed object | A, present in checkout | B, only in proposed merge |
+| --- | --- | --- |
+| `src/mine.ts` blob | `efeee5db16c087416d13e29bc506c998eeaf0827` | `44439d586e1d6f28c15c50f049a1dd236a64c2c6` |
+| `src` tree | `e0fa89872730f07aa4ab773082d39c4c4401913f` | `c9e36d9512e114c69d5f22b80f72000ab6e70737` |
+
+Each tree body is `100644 mine.ts`, NUL, then the raw 20-byte blob ID; object headers are
+`<type> <body-byte-length>` followed by NUL. Assertions verified A/A tree equality,
+A/B tree inequality, and the exact endpoint delta `["src/mine.ts"]`. This constructed
+counterexample has a new main version absent from the modeled checkout, not merely an
+ancestry distance. It is not a second historical case or evidence of CI completion.
+The installed test `a ready PR 2 commits behind whose own file main changed is selected
+with reason ready-overlap` in
+`test/a-ready-pr-is-refreshed-when-main-changed-its-files-since-its-ci-ran.test.ts`
+provides the behavioral reach control: `src/mine.ts` appears in both the PR paths and the
+main delta, and the sweep updates that PR with `matching_base_files: ["src/mine.ts"]`.
+This fixture verifies reach behavior; it does not reconstruct historical checkout objects
+or establish a second live occurrence. Its ready state also differs from #13834's pending CI.
+
+### UNKNOWN and separate refresh-policy decision
+
+At this checkout, `buildBehindMainByPr` in `src/lib/tick-read-worker.ts` reads
+`compare/<pr-head>...main`, and records a main list only when a files array and finite distance
+are available; 300 or more files marks it truncated. `buildRefreshValueGate` in
+`src/lib/sweep.ts` sends those files and `view.changedFiles` to the judge, with no tested
+checkout or tested parent. Missing PR files become `[]`; missing main files become `[]`
+with `baseTruncated: true`. `refreshOverlapOf` treats unknown/truncated lists as ambiguous.
+`decideRefresh` in `src/lib/refresh-value.ts` allows the in-flight arm to refresh after an
+overlap ruling. `parseRefreshJudgeReply` retains the verdict, not the model reason.
+These symbols still exist; the filed task cites symbols rather than file:line locations.
+
+For the historical decision, PR files are **UNKNOWN** (availability and completeness both
+unknown); main-delta files are **UNKNOWN** (availability and truncation both unknown).
+Neither list is certified known-empty. The recorded empty overlap is an intersection/reach
+result, not a snapshot of either input. Current PR file lists or reconstructed tree deltas
+cannot certify what the judge received then. The input mismatch is therefore a plausible
+mechanism supported by the installed wiring, not proof of the model's reasoning.
+
+Exact corpus opened for this packet: the local instructions, task shard, existing guide,
+the named source functions and reach-control test; remote main copies of the shard and
+guide; task-ID PR search results #13844/#13861; PR #13834 metadata; run 40027123854 metadata;
+job 120666003041's decoded log; both immutable commit objects; both root trees, both plan
+trees and both feedback trees; and the three-dot comparison above. The log ends at
+2026-10-23T21:38:46.0020522Z, before the decision; the run's metadata extends to 21:44:06Z.
+The newest timestamp in this selected historical corpus is PR #13834's `updated_at`,
+2026-10-24T01:30:53Z. It merged at 01:30:50Z as `49192236f733b419c470769c047c703635a06a7f`.
+The corpus answers what this job checked out and how its tree differs from this refresh;
+it does not cover the daemon's ledger union, other jobs' completed checks, or the fleet.
+No fleet-wide absence, recurrence count, saved-run count or measured latency follows.
+
+The unnecessary-source-refresh hypothesis is falsified by a mismatched head/parent pair,
+a differing allegedly equal subtree, or evidence that this refresh served a distinct
+mandatory repair or strict-protection trigger. A second case with another mechanism keeps
+its own disposition and defeats grouping it into this explanation. The run's cancellation
+is observed, but attributing final PR delay to this refresh is an inference: later pin
+repairs, additional pushes and reconciliation confound the interval to merge.
+
+A possible separately reviewed input is the exact tested merge parent plus checkout tree,
+joined to head, run attempt and job, followed by the proposed merge's endpoint tree delta.
+Only verified equality can identify already-tested material. Missing, truncated,
+contradictory or unmatched evidence must remain **UNKNOWN**, retaining existing refresh
+evaluation rather than granting an equality-based exemption. Assess plan-data reach too.
+Any class-wide implementation requires its own reviewed proposal after this observation.
+This packet changes no runtime, automatic refresh, judging, budget, check or assertion,
+and authorizes no worker, claim, service, model-routing or main-protection action.

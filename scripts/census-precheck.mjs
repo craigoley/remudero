@@ -45,6 +45,7 @@ import { git } from "./lib/git.mjs";
 // A static import keeps the codemod an ES module: require()-ing it under tsx compiles it as
 // CommonJS, which reports a synthetic scripts/<define:import.meta> coverage source.
 import { analyzeSource } from "./test-repo-root-codemod.mjs";
+import { scanSource as scanChildCoverage } from "./coverage-session-blanking-check.mjs";
 import { captureStepSync } from "./lib/author-step-capture.mjs";
 import { retainFixture } from "./lib/retained-fixtures.mjs";
 import { measureTree } from "./lib/instrument-surface-census.mjs";
@@ -1096,6 +1097,11 @@ export function worktreeCreationTrigger({ changed, readHead, readBase }) {
     rawWorktreeAddSiteKeys(readHead(p)).join("\n") !== rawWorktreeAddSiteKeys(readBase(p)).join("\n"));
 }
 
+function childCoverageFindings(text) {
+  const { defects, suspects } = scanChildCoverage(text, "test/changed.ts");
+  return [...defects.map((finding) => `delete:${finding.expr}`), ...suspects.map((finding) => `strip:${finding.ident}`)];
+}
+
 /** W1-T5692: these slower censuses join the same child when changed source adds a literal. */
 export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/ci/gates/no-draft-census-startup.test.ts", script: "census:no-draft-startup",
@@ -1166,6 +1172,10 @@ export const PRECHECK_TRIGGERED_SUITES = [
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
+  { testFile: "test/coverage-session-blanking.test.ts",
+    trigger: (input) => input.changed.some((path) => ["scripts/coverage-session-blanking-check.mjs",
+      "test/coverage-session-blanking.test.ts"].includes(path)) || addsMatch(input, TEST_TS_SCOPE_RE, childCoverageFindings),
+    remedy: "explicitly blank NODE_V8_COVERAGE on the child environment when stripping NODE_TEST_CONTEXT; deleting the coverage variable is ineffective" },
   { testFile: "test/rules/the-root-scratch-ignore-stays-root-only.test.ts",
     trigger: ({ changed }) => changed.some((p) => [".gitignore", "scripts/census-precheck.mjs",
       "test/rules/the-root-scratch-ignore-stays-root-only.test.ts"].includes(p)),
