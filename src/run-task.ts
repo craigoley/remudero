@@ -22951,6 +22951,7 @@ function buildReservationReapReport(
   opts: { planPath: string; self: { owner: string; repo: string }; deps: NextTaskIdReserveDeps },
   run: ReturnType<typeof gitRunAdapter>,
 ): ReservationAuditReport {
+  const clock = clockFromMillisFn(opts.deps.auditNowMs);
   const degraded: string[] = [];
   const read = <T>(surface: string, fn: () => T, fallback: T): T => {
     try { return fn(); }
@@ -23039,7 +23040,7 @@ function buildReservationReapReport(
   }
   const classify = (thresholdDays: number) => classifyReservationAuditRows({
     reservations, declaredIds, historicalIds, openRunBranchesById: heads.branches,
-    openPrTrailerIds, liveHolderBranches: heads.live, strictAge: true, thresholdDays, nowMs: opts.deps.auditNowMs?.() ?? Date.now(),
+    openPrTrailerIds, liveHolderBranches: heads.live, strictAge: true, thresholdDays, nowMs: clock.now(),
   });
   const held = new Set(classify(0).filter(r => r.status === "HELD").map(r => r.taskId));
   const firstByBranch = new Map<string, number>();
@@ -23061,7 +23062,7 @@ function buildReservationReapReport(
     const firstOpen = Math.min(firstByTask.get(r.taskId) ?? Infinity,
       holder ? firstByBranch.get(holder) ?? Infinity : Infinity,
       ...(heads.branches.get(r.taskId) ?? []).map(b => firstByBranch.get(b) ?? Infinity));
-    if (firstOpen >= anchorTime && firstOpen <= (opts.deps.auditNowMs?.() ?? Date.now())) delays.push({ taskId: r.taskId, ms: firstOpen - anchorTime });
+    if (firstOpen >= anchorTime && firstOpen <= clock.now()) delays.push({ taskId: r.taskId, ms: firstOpen - anchorTime });
   }
   const values = delays.map(d => d.ms).sort((a, b) => a - b);
   const n = values.length;
