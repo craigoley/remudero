@@ -7504,7 +7504,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           writeFixCensusSnapshot: writeFixCensusSnapshotAsync,
           // W1-T3718: the SAME repair-ladder tracking the sweep's fix spawn carries.
           spawn: trackRepairLadder(spawn, { config, log }),
-          waitForCiGreen: (url, waitLog) => waitForCiGreen(url, waitLog, 6, { externalWaitRecycle: opts.externalWaitRecycle }),
+          waitForCiGreen: (url, waitLog) => waitForCiGreen(url, waitLog, 6, {
+            externalWaitFreshness: opts.externalWaitFreshness,
+            externalWaitRecycle: opts.externalWaitRecycle,
+          }),
           // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
           // non-green — see runFixRung's own doc for why this must happen on
           // every strike, not just the first.
