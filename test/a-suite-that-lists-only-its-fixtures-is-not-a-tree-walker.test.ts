@@ -14,12 +14,11 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
  * root is the repository, or a root this scan cannot resolve (a helper's parameter) — the W1-T4787
  * walkers-through-a-helper case.
  *
- * The idioms below are ASSEMBLED, never spelled: the census recognizers grep test text for them, and
- * this file's subject is fixture strings, not a walk of the tree.
+ * The idioms below occur in fixture strings; executable-code discovery does not enroll them.
  */
-const RD = ["readdir", "Sync"].join("");
-const LS = ["ls", "files"].join("-");
-const GL = ["glob", "Sync"].join("");
+const RD = "readdirSync";
+const LS = "ls-files";
+const GL = "globSync";
 /** A directory-read call over `arg`. */
 const rd = (arg: string): string => `${RD}(${arg})`;
 /** A tracked-file listing, optionally with a `cwd` option. */

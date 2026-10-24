@@ -21,6 +21,7 @@ test("W1-T9050: a suite that names ls-files only in a comment or fixture string 
     'execFileSync("git", ["grep", "ls-files", "--", "src/"]);',
     'execFileSync("node", ["ls-files", "src/"]);',
     'execFileSync("git", ["ls-files", "--", "deploy/"]); import "#src/lib/x.js";',
+    'readdirSync(join(REPO_ROOT, "deploy")); import "#src/lib/x.js";',
   ]) {
     assert.deepEqual(censusCandidateWalks(text), [], text);
     assert.deepEqual(candidates(text), [], text);
@@ -40,7 +41,7 @@ test("W1-T9050: executable walks use their own repository scope across lines", (
   for (const text of [
     'execFileSync(\n "git",\n ["ls-files", "--", "test/"],\n { cwd: REPO_ROOT }\n); import "#src/lib/x.js";',
     'readdirSync(\n join(REPO_ROOT, "test")\n); import "#src/lib/x.js";',
-    'const area = join(REPO_ROOT, "test"); readdirSync(area); import "#src/lib/x.js";',
+    'const area = join(REPO_ROOT, "test"); readdirSync(area, { recursive: true }); import "#src/lib/x.js";',
     'const argv = ["ls-files", "--", "test/"]; execFileSync("git", argv);',
   ]) assert.deepEqual(censusCandidateWalks(text), ["test/"], text);
   assert.deepEqual(censusCandidateWalks('globSync("test/**/*.ts", { cwd: REPO_ROOT })'), ["test/**/*.ts"]);
@@ -63,6 +64,8 @@ test("W1-T9050: an enumeration rooted in a temporary fixture is not a repository
 test("W1-T9050: an unfiltered repository listing covers each tracked corpus", () => {
   assert.deepEqual(censusCandidateWalks('execFileSync("git", ["ls-files"], { cwd: REPO_ROOT })'),
     ["plan/tasks.d/", "scripts/", "src/", "test/"]);
+  assert.deepEqual(censusCandidateWalks('execFileSync("git", ["ls-files", "--", "*.ts"], { cwd: REPO_ROOT })'),
+    ["plan/tasks.d/", "scripts/", "src/", "test/"]);
 });
 
 test("W1-T9050: fixture mentions do not change the executable enumeration idiom", () => {
@@ -75,4 +78,7 @@ test("W1-T9050: a helper directory walk retains its repository caller scope", ()
     ["src/"]);
   assert.deepEqual(censusCandidateWalks('function walk(dir) { return readdirSync(dir); } walk(join(REPO_ROOT, "src"));\n' +
     'test("fixture", () => { const dir = mkdtempSync(join(tmpdir(), "r-")); });'), ["src/"]);
+  assert.deepEqual(censusCandidateWalks(
+    'const files = (dir: string): string[] => readdirSync(dir); files(join(REPO_ROOT, "src"));'),
+  ["src/"]);
 });

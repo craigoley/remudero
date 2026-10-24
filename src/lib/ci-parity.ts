@@ -2657,7 +2657,8 @@ function censusExecutableWalks(source: string): { idiom: CensusEnumerationIdiom;
       : dirWalk ? args[0] ?? "" : pathspecs.join(",");
     const walks = censusWalksFromText(target);
     if (dirWalk && walks.length === 0 && /^[A-Za-z_$][\w$]*$/.test(args[0] ?? "")) {
-      const helper = new RegExp(`\\bfunction\\s+(\\w+)\\s*\\(\\s*${args[0]}\\b`).exec(code);
+      const helper = new RegExp(`\\bfunction\\s+(\\w+)\\s*\\(\\s*${args[0]}\\b`).exec(code) ??
+        new RegExp(`\\b(?:const|let)\\s+(\\w+)\\s*=\\s*\\(\\s*${args[0]}\\b[^)]*\\)\\s*(?::[^=]+)?=>`).exec(code);
       if (helper) {
         for (const call of code.matchAll(new RegExp(`\\b${helper[1]}\\s*\\(`, "g"))) {
           if (call.index === helper.index + helper[0].indexOf(helper[1])) continue;
@@ -2669,8 +2670,9 @@ function censusExecutableWalks(source: string): { idiom: CensusEnumerationIdiom;
         }
       }
     }
-    if (walks.length === 0 && (dirWalk ? /\bREPO_ROOT\b|\brepoRoot\b|\bprocess\.cwd\s*\(/.test(root)
-      : shell ? /^(['"`])git\s+ls-files\1$/.test(args[0] ?? "") : pathspecs.length === 0)) {
+    if (walks.length === 0 && (dirWalk ? /\bREPO_ROOT\b|\brepoRoot\b|\bprocess\.cwd\s*\(/.test(root) && !/\b(?:join|resolve)\s*\(/.test(args[0] ?? "")
+      : shell ? /^(['"`])git\s+ls-files\1$/.test(args[0] ?? "") : pathspecs.length === 0 ||
+        pathspecs.some((element) => /^[*?][^/]*$/.test(value(element) ?? "")))) {
       // An unfiltered tracked-file listing walks all corpora; an unrelated import adds none.
       walks.push("src/", "test/", "scripts/", "plan/tasks.d/");
     }
