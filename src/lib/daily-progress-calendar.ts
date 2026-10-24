@@ -54,7 +54,7 @@ function midnight(date: string, timeZone: string): number {
 }
 
 export function dailyWindow(date: string, timeZone = DEFAULT_DAILY_PROGRESS_ZONE): { reportDate: string; timeZone: string; windowStart: string; windowEnd: string } {
-  const start = midnight(date, timeZone), end = midnight(shiftDailyDate(date, 1), timeZone);
+  const start = midnight(date, timeZone), end = start + 86_400_000;
   if (end <= start) throw new RangeError("invalid reporting interval");
   return { reportDate: date, timeZone, windowStart: fixedClock(start).iso(), windowEnd: fixedClock(end).iso() };
 }
