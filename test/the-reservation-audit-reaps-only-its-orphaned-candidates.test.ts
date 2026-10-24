@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { nextTaskIdCommand, type NextTaskIdReserveDeps } from "#src/run-task.js";
 import { formatReservationAnchorMessage, RESERVATION_PUSH_GRACE_MS } from "#src/lib/task-id-reservation.js";
+import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const NOW = Date.parse("2026-10-24T12:00:00.000Z");
@@ -31,11 +32,16 @@ function fixture(t: TestContext) {
     const r = spawnSync("git", ["-C", repo.dir, ...args], { encoding: "utf8" });
     return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   };
+  const ledgerPath = join(repo.dir, "state", "ledger.ndjson");
+  const readRows = () => readFileSync(ledgerPath, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
   const deps = {
-    repoRoot: repo.dir, runGit, auditNowMs: () => NOW,
+    repoRoot: repo.dir, runGit, auditNowMs: () => NOW, reapLedgerPath: ledgerPath,
     auditPullRequests: (() => pulls) as NextTaskIdReserveDeps["auditPullRequests"],
     auditPrFetch: undefined as NextTaskIdReserveDeps["auditPrFetch"],
-    log: (step: string, fields: Record<string, unknown>) => { logs.push({ step, fields }); },
+    log: (step: string, fields: Record<string, unknown>) => {
+      appendLedger(ledgerPath, { run_id: "reap-test", task_id: "REAP", step, ...fields });
+      logs.push({ step, fields });
+    },
   };
   function anchor(id: number, ageDays = 20, branch = `lost-${id}`) {
     const message = formatReservationAnchorMessage({ branch, startedAt: new Date(NOW - ageDays * DAY).toISOString() });
@@ -66,7 +72,7 @@ function fixture(t: TestContext) {
       console.error = oldError;
     }
   }
-  return { origin, repo, plan, anchor, sample, anchors, pulls, calls, logs, runGit, deps, remoteIds, invoke };
+  return { origin, repo, plan, anchor, sample, anchors, pulls, calls, logs, runGit, deps, remoteIds, invoke, ledgerPath, readRows };
 }
 
 test("a reap deletes only candidate reservations past the bar in one leased push", async (t) => {
@@ -91,7 +97,7 @@ test("a reap deletes only candidate reservations past the bar in one leased push
   assert.ok(pushes[0].includes("--porcelain"));
   assert.ok(pushes[0].includes(`--force-with-lease=refs/rmd-id/W1-T105:${f.anchors.get(105)!.sha}`));
   assert.equal(f.origin.git("rev-parse", "refs/rmd-id/W1-T107"), moved);
-  assert.equal(f.logs.find(l => l.fields.reserved_id === "W1-T107")?.fields.outcome, "foreign");
+  assert.equal(f.logs.find(l => l.step === "task_id.reservation_release_skipped" && l.fields.reserved_id === "W1-T107")?.fields.outcome, "foreign");
   assert.equal(f.calls.filter(a => a[0] === "fetch").length, 1);
   assert.equal(f.repo.git("for-each-ref", "--format=%(refname)", "refs/rmd-reap/"), "");
 });
@@ -185,12 +191,39 @@ test("a reap is a dry run unless applied, and an applied reap ledgers every id",
   assert.equal(f.logs[0].step, "task_id.reservation_reap_planned");
   assert.equal(f.logs[0].fields.candidates, 2);
   assert.match(dry.text, /dry.run/);
-  const applied = await f.invoke(["--audit", "--reap", "--apply"]);
+  const applied = await f.invoke(["--audit", "--reap", "--apply"], {
+    runGit: args => {
+      if (args[0] === "push") {
+        const rows = f.readRows();
+        const pending = rows.filter(row => row.step === "task_id.reservation_reap_pending");
+        assert.deepEqual(pending.map(row => row.reserved_id), ["W1-T105", "W1-T106"]);
+        assert.equal(rows.filter(row => row.step === "task_id.reservation_released").length, 0);
+        assert.equal(new Set(pending.map(row => row.batch_id)).size, 1);
+        for (const row of pending) {
+          const anchor = f.anchors.get(Number(row.reserved_id.slice(4)))!;
+          assert.equal(row.intent_status, "PENDING");
+          assert.match(row.reason, /^eligible:/);
+          assert.equal(row.ref, `refs/rmd-id/${row.reserved_id}`);
+          assert.equal(row.sha, anchor.sha);
+          assert.equal(row.anchor, anchor.message);
+          assert.match(row.holder, /^rmd-id holder /);
+          assert.equal(row.repository, f.origin.dir);
+          assert.equal(row.bound_ms, DAY);
+          assert.deepEqual(row.basis, { n: 1, max_ms: DAY, p50_ms: DAY, population: ["W1-T110"] });
+          assert.deepEqual(row.eligibility, { status: "CANDIDATE", age_ms: 20 * DAY,
+            reasons: ["no holding evidence older than threshold"] });
+        }
+      }
+      return f.runGit(args);
+    },
+  });
   assert.equal(applied.code, 0, applied.text);
   const released = f.logs.filter(l => l.step === "task_id.reservation_released");
   assert.deepEqual(released.map(l => l.fields.reserved_id), ["W1-T105", "W1-T106"]);
   for (const row of released) {
     const id = Number(String(row.fields.reserved_id).slice(4));
+    assert.equal(row.fields.intent_status, "RESOLVED");
+    assert.equal(row.fields.deletion_actor, row.fields.batch_id);
     assert.equal(row.fields.lane, "reap");
     assert.equal(row.fields.sha, f.anchors.get(id)!.sha);
     assert.equal(row.fields.anchor, f.anchors.get(id)!.message);
@@ -203,7 +236,9 @@ test("a reap is a dry run unless applied, and an applied reap ledgers every id",
 test("a reap refuses offline, missing audit, an unpaired apply, and a fixed age override", async (t) => {
   const f = fixture(t);
   for (const flags of [["--audit", "--reap", "--offline"], ["--reap"], ["--apply"],
-    ["--audit", "--apply"], ["--audit", "--reap", "--audit-age-days", "0"]]) {
+    ["--audit", "--apply"], ["--audit", "--reap", "--audit-age-days", "0"],
+    ["--reconcile"], ["--audit", "--reap", "--reconcile", "--apply"],
+    ["--audit", "--reap", "--reconcile", "--offline"]]) {
     assert.equal((await f.invoke(flags)).code, 2);
   }
   assert.equal(f.calls.length, 0);
@@ -219,45 +254,16 @@ test("a reap's default git runner reads and deletes against the supplied fixture
   assert.equal(f.logs.filter(l => l.step === "task_id.reservation_released").length, 1);
 });
 
-test("a reap journals recovery before pushing and refuses a failed journal", async (t) => {
+test("a reap records guarded and explicitly rejected pushes as skips", async (t) => {
   const f = fixture(t);
   f.sample(110, DAY);
   f.anchor(105);
   const before = f.remoteIds();
-  const refused = await f.invoke(["--audit", "--reap", "--apply"], {
-    log: () => { throw new Error("journal full"); },
-  });
-  assert.equal(refused.code, 2);
-  assert.match(refused.text, /journal full/);
-  assert.deepEqual(f.remoteIds(), before);
-  assert.equal(f.calls.filter(a => a[0] === "push").length, 0);
-  const applied = await f.invoke(["--audit", "--reap", "--apply"], {
-    runGit: args => {
-      if (args[0] === "push") {
-        const recovery = f.logs[0].fields.recovery as { sha: string; anchor: string }[];
-        assert.equal(recovery[0].sha, f.anchors.get(105)!.sha);
-        assert.equal(recovery[0].anchor, f.anchors.get(105)!.message);
-      }
-      return f.runGit(args);
-    },
-  });
-  assert.equal(applied.code, 0, applied.text);
-});
-
-test("a reap records guarded, thrown and failed pushes as skips", async (t) => {
-  const f = fixture(t);
-  f.sample(110, DAY);
-  f.anchor(105);
-  const before = f.remoteIds();
-  for (const mode of ["guard", "throw", "failed", "rejected"]) {
+  for (const mode of ["guard", "rejected"]) {
     const r = await f.invoke(["--audit", "--reap", "--apply"], {
       runGit: args => {
         if (mode === "guard" && args[0] === "remote") return { status: 0, stdout: "https://example.invalid/live.git", stderr: "" };
-        if (args[0] === "push") {
-          if (mode === "throw") throw new Error("push threw");
-          if (mode === "rejected") return { status: 1, stdout: "!\t:refs/rmd-id/W1-T105\t[remote rejected] (hook declined)\n", stderr: "" };
-          return { status: 1, stdout: "", stderr: "push unavailable" };
-        }
+        if (args[0] === "push") return { status: 1, stdout: "!\t:refs/rmd-id/W1-T105\t[remote rejected] (hook declined)\n", stderr: "" };
         return f.runGit(args);
       },
     });
@@ -265,7 +271,9 @@ test("a reap records guarded, thrown and failed pushes as skips", async (t) => {
     assert.deepEqual(f.remoteIds(), before);
     assert.equal(f.logs.at(-1)!.step, "task_id.reservation_release_skipped");
     assert.equal(f.logs.at(-1)!.fields.outcome, "failed");
-    assert.match(String(f.logs.at(-1)!.fields.detail), /REFUSED|push threw|push unavailable|hook declined/);
+    assert.equal(f.logs.at(-1)!.fields.intent_status, "RESOLVED");
+    assert.match(String(f.logs.at(-1)!.fields.reason), /^reap skipped/);
+    assert.match(String(f.logs.at(-1)!.fields.detail), /REFUSED|hook declined/);
   }
 });
 
@@ -331,26 +339,20 @@ test("a reap pages the complete PR population and fails closed on a malformed pa
   assert.ok(f.remoteIds().includes("refs/rmd-id/W1-T105"));
 });
 
-test("a reap's default logger persists recovery and per-id outcomes in a contained ledger", async (t) => {
+test("a reap's default logger persists verified per-id intents and outcomes in a contained ledger", async (t) => {
   const f = fixture(t);
   f.sample(110, DAY);
   f.anchor(105);
-  const configDir = join(homedir(), ".config", "remudero");
-  const config = join(configDir, "config.json");
-  const original = existsSync(config) ? readFileSync(config, "utf8") : undefined;
-  mkdirSync(configDir, { recursive: true });
-  writeFileSync(config, JSON.stringify({ root: f.repo.dir, claudeBin: process.execPath }));
-  try {
-    const r = await f.invoke(["--audit", "--reap", "--apply"], { log: undefined });
-    assert.equal(r.code, 0, r.text);
-    const rows = readFileSync(join(f.repo.dir, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
-    assert.deepEqual(rows.map(row => row.step), ["task_id.reservation_reap_planned", "task_id.reservation_released"]);
-    assert.equal(rows[1].sha, f.anchors.get(105)!.sha);
-    assert.equal(rows[0].recovery[0].anchor, f.anchors.get(105)!.message);
-  } finally {
-    if (original === undefined) rmSync(config);
-    else writeFileSync(config, original);
-  }
+  const r = await f.invoke(["--audit", "--reap", "--apply"], { log: undefined });
+  assert.equal(r.code, 0, r.text);
+  const rows = f.readRows();
+  assert.deepEqual(rows.map(row => row.step), ["task_id.reservation_reap_planned",
+    "task_id.reservation_reap_pending", "task_id.reservation_released"]);
+  assert.equal(rows[1].sha, f.anchors.get(105)!.sha);
+  assert.equal(rows[1].anchor, f.anchors.get(105)!.message);
+  assert.equal(rows[1].intent_status, "PENDING");
+  assert.equal(rows[2].intent_status, "RESOLVED");
+  assert.equal(rows[1].batch_id, rows[2].batch_id);
 });
 
 test("a reap treats malformed readings, shallow history and failed cleanup as unreadable", async (t) => {
@@ -395,4 +397,192 @@ test("a reap measures encoded hand-mint timestamps and preserves malformed holde
   assert.equal(f.logs[0].fields.bound_ms, 3 * DAY);
   assert.match(r.text, /W1-T106 UNKNOWN anchor holder unreadable/);
   assert.deepEqual(f.remoteIds(), ["refs/rmd-id/W1-T106", "refs/rmd-id/W1-T110"]);
+});
+
+test("a reap refuses unwritten intents and preserves unknown post-push outcomes", async (t) => {
+  for (const mode of ["first-write", "second-write", "readback-missing", "readback-partial", "readback-torn", "readback-unreadable", "earlier-lost", "first-outcome", "second-outcome", "outcome-readback"]) {
+    await t.test(mode, async t => {
+      const f = fixture(t);
+      f.sample(110, DAY);
+      f.anchor(105);
+      f.anchor(106);
+      const before = f.remoteIds();
+      let intents = 0, outcomes = 0;
+      const afterPush = mode.includes("outcome");
+      const r = await f.invoke(["--audit", "--reap", "--apply"], {
+        log: (step, fields) => {
+          if (step === "task_id.reservation_reap_pending") {
+            intents++;
+            if ((mode === "first-write" && intents === 1) || (mode === "second-write" && intents === 2)) throw new Error("intent disk full");
+            if (mode === "readback-missing") return;
+            if (mode === "readback-partial") { f.deps.log(step, { ...fields, holder: null }); return; }
+          }
+          if (step === "task_id.reservation_released") {
+            outcomes++;
+            if ((mode === "first-outcome" && outcomes === 1) || (mode === "second-outcome" && outcomes === 2)) throw new Error("outcome disk full");
+            if (mode === "outcome-readback") return;
+          }
+          f.deps.log(step, fields);
+          if (step === "task_id.reservation_reap_pending") {
+            if (mode === "readback-torn") appendFileSync(f.ledgerPath, '{"step":');
+            if (mode === "readback-unreadable") { rmSync(f.ledgerPath); mkdirSync(f.ledgerPath); }
+            if (mode === "earlier-lost" && intents === 2) writeFileSync(f.ledgerPath,
+              f.readRows().filter(row => row.reserved_id !== "W1-T105").map(row => JSON.stringify(row) + "\n").join(""));
+          }
+        },
+      });
+      assert.equal(r.code, 2, r.text);
+      assert.match(r.text, /UNKNOWN/);
+      if (afterPush) {
+        assert.deepEqual(f.remoteIds(), ["refs/rmd-id/W1-T110"]);
+        assert.equal(f.readRows().filter(row => row.step === "task_id.reservation_reap_pending").length, 2);
+        f.anchor(107);
+        const pushed = f.calls.filter(args => args[0] === "push").length;
+        const retry = await f.invoke(["--audit", "--reap", "--apply"]);
+        assert.equal(retry.code, 2, retry.text);
+        assert.match(retry.text, /unresolved batch/);
+        assert.equal(f.calls.filter(args => args[0] === "push").length, pushed);
+      } else {
+        assert.deepEqual(f.remoteIds(), before);
+        assert.equal(f.calls.filter(args => args[0] === "push").length, 0);
+      }
+    });
+  }
+});
+
+test("an unavailable reap push stays unknown with its pending intents", async (t) => {
+  for (const mode of ["throw", "failed", "missing-success", "lost-after-delete", "malformed-status"]) {
+    await t.test(mode, async t => {
+      const f = fixture(t);
+      f.sample(110, DAY);
+      f.anchor(105);
+      const r = await f.invoke(["--audit", "--reap", "--apply"], {
+        runGit: args => {
+          if (args[0] === "push") {
+            if (mode === "throw") throw new Error("push result lost");
+            if (mode === "lost-after-delete") f.runGit(args);
+            if (mode === "malformed-status") return { status: 1, stdout: "x\t:refs/rmd-id/W1-T105\t[rejected] (stale info)\n", stderr: "" };
+            return { status: mode === "missing-success" ? 0 : 1, stdout: "", stderr: "push result unavailable" };
+          }
+          return f.runGit(args);
+        },
+      });
+      assert.equal(r.code, 2, r.text);
+      assert.match(r.text, /W1-T105 UNKNOWN/);
+      const outcome = f.readRows().at(-1);
+      assert.equal(outcome.outcome, "unknown");
+      assert.equal(outcome.intent_status, "PENDING");
+      assert.match(outcome.reason, /^reap outcome unknown:/);
+      assert.equal(f.readRows().filter(row => row.step === "task_id.reservation_released").length, 0);
+      f.anchor(106);
+      const pushes = f.calls.filter(args => args[0] === "push").length;
+      assert.equal((await f.invoke(["--audit", "--reap", "--apply"])).code, 2);
+      assert.equal(f.calls.filter(args => args[0] === "push").length, pushes);
+    });
+  }
+});
+
+test("pending reap intents reconcile truthfully across ledger rotation without another deletion", async (t) => {
+  const f = fixture(t);
+  f.sample(110, DAY);
+  for (const id of [105, 106, 107]) f.anchor(id);
+  const interrupted = await f.invoke(["--audit", "--reap", "--apply"], {
+    runGit: args => args[0] === "push" ? { status: 1, stdout: "", stderr: "result unavailable" } : f.runGit(args),
+  });
+  assert.equal(interrupted.code, 2, interrupted.text);
+  const pending = f.readRows().filter(row => row.step === "task_id.reservation_reap_pending");
+  assert.equal(pending.length, 3);
+  const state = join(f.repo.dir, "state");
+  // Real rotation must preserve the pending records even though the live file need not carry them.
+  rotateLedger(f.ledgerPath, { ceilingBytes: 1 });
+  writeFileSync(join(state, "ledger.2026-10-22T00-00-00-000Z.ndjson.gz"), gzipSync(JSON.stringify(pending[0]) + "\n"));
+  writeFileSync(join(state, "ledger.2026-10-23T00-00-00-000Z.ndjson"), pending.slice(1).map(row => JSON.stringify(row) + "\n").join(""));
+  f.origin.git("update-ref", "-d", "refs/rmd-id/W1-T105");
+  const moved = f.repo.git("rev-parse", "HEAD");
+  f.origin.git("update-ref", "refs/rmd-id/W1-T106", moved);
+  f.calls.length = 0;
+  const reconcileFlags = ["--audit", "--reap", "--reconcile"];
+  const reconciled = await f.invoke(reconcileFlags, { log: undefined });
+  assert.equal(reconciled.code, 0, reconciled.text);
+  const resolutions = f.readRows().filter(row => row.step === "task_id.reservation_reap_reconciled");
+  assert.deepEqual(resolutions.map(row => [row.reserved_id, row.outcome, row.deletion_actor, row.intent_status]), [
+    ["W1-T105", "observed_absent", "UNKNOWN", "RESOLVED"],
+    ["W1-T106", "foreign", "UNKNOWN", "RESOLVED"],
+    ["W1-T107", "unchanged", "UNKNOWN", "RESOLVED"],
+  ]);
+  assert.equal(resolutions[0].observed_sha, null);
+  assert.equal(resolutions[1].observed_sha, moved);
+  assert.equal(resolutions[2].observed_sha, f.anchors.get(107)!.sha);
+  assert.deepEqual(f.calls, [105, 106, 107].map(id => ["ls-remote", "origin", `refs/rmd-id/W1-T${id}`]).toSpliced(0, 0, ["remote", "get-url", "origin"]));
+  assert.equal(f.origin.git("rev-parse", "refs/rmd-id/W1-T106"), moved);
+  assert.equal(f.origin.git("rev-parse", "refs/rmd-id/W1-T107"), f.anchors.get(107)!.sha);
+  const again = await f.invoke(reconcileFlags);
+  assert.equal(again.code, 0, again.text);
+  assert.match(again.text, /0 pending intent/);
+  assert.equal(f.readRows().filter(row => row.step === "task_id.reservation_reap_reconciled").length, 3);
+  assert.equal(f.calls.filter(args => args[0] === "push").length, 0);
+  // A subsequent explicit apply performs a fresh complete audit rather than replaying the old batch.
+  const fresh = await f.invoke(["--audit", "--reap", "--apply"]);
+  assert.equal(fresh.code, 0, fresh.text);
+  assert.deepEqual(f.remoteIds(), ["refs/rmd-id/W1-T106", "refs/rmd-id/W1-T110"]);
+});
+
+test("reconciliation refuses incomplete ledger history and unknown exact-ref readings", async (t) => {
+  for (const mode of ["gzip", "plain", "unread-plain", "live", "unknown-file", "ref", "malformed-ref", "resolution-write", "resolution-readback"]) {
+    await t.test(mode, async t => {
+      const f = fixture(t);
+      f.sample(110, DAY);
+      f.anchor(105);
+      assert.equal((await f.invoke(["--audit", "--reap", "--apply"], {
+        runGit: args => args[0] === "push" ? { status: 1, stdout: "", stderr: "unknown" } : f.runGit(args),
+      })).code, 2);
+      assert.equal(f.readRows().filter(row => row.step === "task_id.reservation_reap_pending").length, 1);
+      const before = f.remoteIds();
+      const archive = join(f.repo.dir, "state", `ledger.2026-10-23T00-00-00-000Z.ndjson${mode === "gzip" ? ".gz" : ""}`);
+      if (mode === "gzip") writeFileSync(archive, "invalid gzip");
+      if (mode === "plain") writeFileSync(archive, '{"step":');
+      if (mode === "unread-plain") mkdirSync(archive);
+      if (mode === "live") appendFileSync(f.ledgerPath, '{"step":');
+      if (mode === "unknown-file") writeFileSync(join(f.repo.dir, "state", "ledger.unknown"), "unknown history");
+      f.calls.length = 0;
+      const refusedApply = await f.invoke(["--audit", "--reap", "--apply"]);
+      assert.equal(refusedApply.code, 2, refusedApply.text);
+      assert.deepEqual(f.remoteIds(), before);
+      assert.equal(f.calls.filter(args => args[0] === "push").length, 0);
+      const result = await f.invoke(["--audit", "--reap", "--reconcile"], {
+        runGit: args => {
+          if (args[0] === "ls-remote" && mode === "ref") return { status: 1, stdout: "", stderr: "remote unavailable" };
+          if (args[0] === "ls-remote" && mode === "malformed-ref") return { status: 0, stdout: "garbled", stderr: "" };
+          return f.runGit(args);
+        },
+        log: (step, fields) => {
+          if (step === "task_id.reservation_reap_reconciled") {
+            if (mode === "resolution-write") throw new Error("resolution unavailable");
+            if (mode === "resolution-readback") return;
+          }
+          f.deps.log(step, fields);
+        },
+      });
+      assert.equal(result.code, 2, `${mode}: ${result.text}`);
+      assert.match(result.text, /UNKNOWN/);
+      assert.deepEqual(f.remoteIds(), before);
+      assert.equal(f.calls.filter(args => args[0] === "push").length, 0);
+      assert.equal(readFileSync(f.ledgerPath, "utf8").includes('"step":"task_id.reservation_reap_reconciled"'), false);
+    });
+  }
+});
+
+test("reconciliation's default git reader observes the fixture without deleting", async t => {
+  const f = fixture(t);
+  f.sample(110, DAY);
+  f.anchor(105);
+  assert.equal((await f.invoke(["--audit", "--reap", "--apply"], {
+    runGit: args => args[0] === "push" ? { status: 1, stdout: "", stderr: "unknown" } : f.runGit(args),
+  })).code, 2);
+  const before = f.remoteIds();
+  const result = await f.invoke(["--audit", "--reap", "--reconcile"], { runGit: undefined, log: undefined });
+  assert.equal(result.code, 0, result.text);
+  assert.match(result.text, /W1-T105 unchanged; actor UNKNOWN/);
+  assert.deepEqual(f.remoteIds(), before);
+  assert.equal(f.readRows().at(-1).outcome, "unchanged");
 });
