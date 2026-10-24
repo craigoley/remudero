@@ -52,7 +52,10 @@ test("daily progress retains complete history and immutable late corrections", a
       const clock = fixedClock(Date.parse("2026-11-02T06:00:00Z")), got = acquireLease(db, { holder: "first", clock });
       assert.ok(got.ok); if (!got.ok) return;
       const input = record(), key = dailyProgressDayKey("acme/app", input.timeZone, input.reportDate);
-      prepareDailyProgressPublication(root, [input], []).commit(db, got.lease);
+      const prepared = prepareDailyProgressPublication(root, [input], []);
+      assert.ok("publication" in prepared, "the slow lane must stage a serializable publication for the owning projector");
+      assert.doesNotThrow(() => structuredClone(prepared.publication));
+      prepared.commit(db, got.lease);
       let manifest = readDailyProgressManifest(root);
       const originalHash = manifest.days[key]!.revisions[0]!;
       const first = readDailyProgressRevision(root, manifest.days[key]!);
