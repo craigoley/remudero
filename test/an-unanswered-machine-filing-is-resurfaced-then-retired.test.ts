@@ -11,7 +11,7 @@ import {
   operatorRulingTimes,
   machineJudgeFoundWork,
   recordOperatorRelease,
-  readOperatorReleases,
+  readOperatorReleaseRecords,
   renderRuledShard,
   runMachineFilingJudge,
   type MachineJudgePorts,
@@ -142,8 +142,8 @@ test("W1-T9043: an escalation unanswered for 30 days is retired, never released"
 test("W1-T9043: an operator ruling inside the window stops the retirement", async (t) => {
   const f = fixture(t, [31, 31, 31, 31, 31]);
   const at = new Date(NOW - 20 * DAY).toISOString();
-  recordOperatorRelease(f.ports.stateDir, f.ids[0]!, at);
-  f.ports.operatorReleases = () => readOperatorReleases(f.ports.stateDir);
+  recordOperatorRelease(f.ports.stateDir, f.plan().byId.get(f.ids[0]!)!, at);
+  f.ports.operatorReleases = () => readOperatorReleaseRecords(f.ports.stateDir);
   const times = operatorRulingTimes([
     { step: "dispatch.breaker_released", task_id: f.ids[1], ts: at },
     { step: "ratify.approved", task_id: f.ids[2], ts: at },

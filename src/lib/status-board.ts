@@ -60,7 +60,7 @@ import {
 } from "./operator-message.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { describeActorEvidence } from "./actor-evidence.js";
-import { IDLE_REASON_ID_CAP, runBranchTaskIds, runnableCandidates, type DispatchFilterReason, type MergedSet } from "./drain.js";
+import { IDLE_REASON_ID_CAP, resolveReleasedIds, runBranchTaskIds, runnableCandidates, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import { heldDependencyRoots, type HeldDependencyRoot } from "./held-dependency-roots.js";
 import {
   drainNowFilePath,
@@ -90,7 +90,7 @@ import {
   type ReadinessContext,
 } from "./inbox.js";
 import { loadPlan, type MergedResolver, type Plan, type RetirementReason, type Task } from "./plan.js";
-import { escalationAgeDays, machineFamily, MACHINE_JUDGE_UNANSWERED_WITHDRAW_DAYS, readOperatorReleases } from "./machine-filing-judge.js";
+import { escalationAgeDays, machineFamily, MACHINE_JUDGE_UNANSWERED_WITHDRAW_DAYS, readOperatorReleaseRecords } from "./machine-filing-judge.js";
 import { automergeHoldFromLedger, describeHoldSetter, holdClaimMismatch, type AutomergeHold, type MergeHoldActor } from "./review.js";
 import {
   buildLedgerIndex,
@@ -2178,12 +2178,9 @@ function deriveNeedsMe(
     !plan || !projections || releaseReadError
       ? { taskIds: [], unknownReason: releaseReadError ?? (!plan ? "plan is unreadable" : "merge state is unavailable") }
       : (() => {
-          const ledgerReleased = new Set(
-            lines.filter((line) => line.step === "ratify.approved" && typeof line.task_id === "string").map((line) => line.task_id as string),
-          );
           const parked = plan.tasks.filter((task) =>
             task.author_class === "machine" && task.verify === "human" && task.status === "queued" &&
-            projections.get(task.id)?.merged === false && !operatorReleasedIds.has(task.id) && !ledgerReleased.has(task.id),
+            projections.get(task.id)?.merged === false && !operatorReleasedIds.has(task.id),
           );
           parkedDigest = parkedFamilyDigest(parked, nowMs);
           const taskIds = parked.map((task) => task.id).sort();
@@ -2284,9 +2281,9 @@ export function deriveOperatorItems(
   return { costAnomaly, imageDrift, uncreditedBuilds, ...(tokenFallback ? { tokenFallback } : {}) };
 }
 
-function readOperatorReleasesForBoard(root: string): { ids: ReadonlySet<string>; reason?: string } {
+function readOperatorReleaseRecordsForBoard(root: string, plan: Plan | undefined, lines: ReadonlyArray<Record<string, unknown>>): { ids: ReadonlySet<string>; reason?: string } {
   try {
-    return { ids: readOperatorReleases(join(root, "state")) };
+    return { ids: resolveReleasedIds({ readLedgerLines: () => lines.map(line => JSON.stringify(line)), readDurableReleases: () => readOperatorReleaseRecords(join(root, "state")) }, plan) };
   } catch (error) {
     return {
       ids: new Set(),
@@ -2495,7 +2492,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
 
   // ── W1-T931: NEEDS ME — same `lines` window every other section above already read, one
   // extra pure fold (deriveNeedsMe), no second ledger read. ──────────────────────────────────
-  const operatorReleases = readOperatorReleasesForBoard(root);
+  const operatorReleases = readOperatorReleaseRecordsForBoard(root, plan, lines);
   const needsMe = deriveNeedsMe(lines, blockedPrSections.mergeHeld, projections, plan, operatorReleases.ids, operatorReleases.reason, nowMs);
   needsMe.dispatchClaims = staleDispatchClaimEscalations(
     dispatchClaims.status === "held" ? dispatchClaims.claims : [], nowMs, deps.localHost ?? hostname(),

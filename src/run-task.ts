@@ -1,3 +1,4 @@
+import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
   runTask as runTaskFromModule,
   runTaskBody as runTaskBodyFromModule,
@@ -311,7 +312,7 @@ import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import {
-  gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, operatorRulingTimes, parkedEscalation, readOperatorReleases,
+  gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, operatorRulingTimes, parkedEscalation, readOperatorReleaseRecords,
   recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts,
 } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
@@ -25003,7 +25004,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   if (scope && !offline) {
     try {
       const config = (deps.loadConfig ?? loadConfig)();
-      releasedIdsForAdmission = releasedTaskIds(readLedgerRawLines(ledgerPathFor(config)));
+      releasedIdsForAdmission = new Set(resolveReleasedIds(releaseReadersFor(ledgerPathFor(config)), plan));
     } catch {
       // An unreadable ledger releases nothing. That is the safe direction for a machine filing:
       // it must not become dispatchable by guessing that an operator approved it.
@@ -27603,7 +27604,7 @@ export async function defaultVerifyHumanCadenceResult(
       appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
       runId,
       release: productionVerifyHumanRelease(plan, repoRoot, ledgerPath, runId),
-      releasedIds: releasedTaskIds(readLedgerRawLines(ledgerPath)),
+      releasedIds: resolveReleasedIds(releaseReadersFor(ledgerPath), plan),
       releaseEscalatedKeys: releaseEscalatedKeys(rows),
     });
     // W1-T4083: measure the release judge over the board's week of rotations, remembering what older
@@ -43331,7 +43332,8 @@ export function productionMachineFilingJudgePorts(opts: {
     },
     riskPolicy: () => readRiskPolicy(policyPath(opts.repoRoot)),
     gardenRecord: (family) => gardenFamilyRecord(opts.stateDir, family),
-    operatorReleases: () => readOperatorReleases(opts.stateDir),
+    operatorReleases: () => readOperatorReleaseRecords(opts.stateDir),
+    releaseLedgerLines: () => readLedgerRawLines(join(opts.stateDir, LEDGER_FILENAME)),
     // W1-T9043: a ledgered release, `rmd release`, or an `rmd note` on a parked escalation is a ruling that stops its withdrawal.
     operatorRulings: () => {
       // ledger-read-intent: live — `dispatch.breaker_released` is in the retention set, and `rmd approve` is durable in operator-releases.json.
@@ -43452,7 +43454,7 @@ export async function verifyHumanSweepCommand(
     const deferred = due.length - selected.length;
     console.log(`verify-human-sweep --dry-run: ${shards.length} parked shard(s), ${selected.length} would be judged, ${shards.length - due.length} already settled, ${deferred} deferred due. Nothing spent.`);
     for (const d of selected) console.log(`  would judge ${d.id} (${observedStateKey(d)})`);
-    const pending = awaitingRelease(shards, priorVerdicts, releasedTaskIds(readLedgerRawLines(ledgerPath)), releaseEscalatedKeys(rows));
+    const pending = awaitingRelease(shards, priorVerdicts, resolveReleasedIds(releaseReadersFor(ledgerPath), plan), releaseEscalatedKeys(rows));
     console.log(`verify-human-sweep --dry-run: ${pending.length} earlier automate verdict(s) would be put to the risk judge for release.`);
     for (const d of pending) console.log(`  would release-check ${d.id}`);
     return 0;
@@ -43479,7 +43481,7 @@ export async function verifyHumanSweepCommand(
     appendRow: (row) => appendLedger(ledgerPath, row),
     runId: sweepRunId,
     release: productionVerifyHumanRelease(plan, root, ledgerPath, sweepRunId),
-    releasedIds: releasedTaskIds(readLedgerRawLines(ledgerPath)),
+    releasedIds: resolveReleasedIds(releaseReadersFor(ledgerPath), plan),
     releaseEscalatedKeys: releaseEscalatedKeys(rows),
   });
 
@@ -43834,11 +43836,12 @@ export function approveParkedTask(
     riskPolicy?: RiskPolicy;
     stageProposal?: (proposal: Proposal) => void;
     /** A MACHINE-written release carries who decided it and why (Law 5: the author class rides
-     *  the record). Absent — the operator's own `rmd approve` — the row is byte-identical to before. */
+     *  the record). Both classes carry the exact release contract pin. */
     provenance?: Record<string, unknown>;
     /** The operator's own release, kept where rotation cannot shed it until the machine-filing
      *  judge pins it on the record (operator ruling 2026-09-29). */
-    recordDurableRelease?: (taskId: string) => void;
+    recordDurableRelease?: (task: Task) => void;
+    readDurableReleaseEvidence?: () => ReleaseEvidence;
     /** W1-T9252: told of the release row once it is written, so the release lands on every open ask about the
      *  task; a failure here never fails the release. */
     recordThreadRow?: (row: Record<string, unknown>) => void;
@@ -43864,9 +43867,13 @@ export function approveParkedTask(
   if (deps.provenance !== undefined && task.risk === "high") {
     return { code: 2, message: `rmd approve: ${taskId} is high-risk in the plan — a machine cannot release its human verification` };
   }
-  const already = releasedTaskIds(deps.ledgerLines ?? readLedgerRawLines(deps.ledgerPath));
+  const releaseEvidence = qualifyReleaseEvidence(deps.ledgerLines ?? readLedgerRawLines(deps.ledgerPath),
+    deps.readDurableReleaseEvidence?.() ?? readOperatorReleaseRecords(dirname(deps.ledgerPath)), releaseContractPins(deps.plan.tasks));
+  if (deps.provenance && (releaseEvidence.reapproval.has(taskId) || operatorReleaseContractChanged(task))) return { code: 2,
+    message: `rmd approve: ${taskId} requires explicit operator reapproval of its current contract` };
+  const already = new Set(releaseEvidence.authors.keys());
   if (already.has(taskId)) {
-    if (!deps.provenance) deps.recordDurableRelease?.(taskId);
+    if (!deps.provenance) deps.recordDurableRelease?.(task);
     return { code: 0, released: true, message: `rmd approve: ${taskId} is already released — no second row written` };
   }
   const riskPolicy = deps.riskPolicy ?? DEFAULT_RISK_POLICY;
@@ -43887,16 +43894,17 @@ export function approveParkedTask(
     step: RELEASE_LEDGER_STEP,
     released: "verify-human",
     ...(deps.provenance ?? {}),
+    release_pin: operatorReleasePin(task),
   };
   (deps.append ?? appendLedger)(deps.ledgerPath, releaseRow);
   deps.recordThreadRow?.(releaseRow);
-  if (!deps.provenance) deps.recordDurableRelease?.(taskId);
+  if (!deps.provenance) deps.recordDurableRelease?.(task);
   return { code: 0, released: true, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
 }
 
 /** W1-T10348: the two release records beside a ledger, for the shared resolver (drain.ts `resolveReleases`). */
 export function releaseReadersFor(ledgerPath: string): ReleaseReaders {
-  return { readLedgerLines: () => readLedgerRawLines(ledgerPath), readDurableReleases: () => readOperatorReleases(dirname(ledgerPath)) };
+  return { readLedgerLines: () => readLedgerRawLines(ledgerPath), readDurableReleases: () => readOperatorReleaseRecords(dirname(ledgerPath)) };
 }
 
 /** The ledger's RAW lines. `releasedTaskIds` parses them itself (it rejects on a cheap substring
@@ -44049,7 +44057,7 @@ export async function approveCommand(
       riskPolicy: readRiskPolicy(policyPath(repoRoot)),
       stageProposal: (proposal) =>
         void stageInboxProposalOnce(join(config.root, "state", "inbox-proposals.json"), proposal),
-      recordDurableRelease: (taskId) => recordOperatorRelease(join(config.root, "state"), taskId, (deps.clock ?? systemClock).iso()),
+      recordDurableRelease: (task) => recordOperatorRelease(join(config.root, "state"), task, (deps.clock ?? systemClock).iso()),
       recordThreadRow: (row) =>
         void recordRowThreadEvents(
           // The row as the ledger stamped it: the event's key is the stored row's `ts`, which this call never chose.
@@ -44096,7 +44104,7 @@ export async function approveCommand(
 
   if (classification.state === "ready" && classification.releaseTaskId) {
     const code = await approveCommand([classification.releaseTaskId], deps);
-    if (code === 0 && releasedTaskIds(readLedgerRawLines(ledgerPath)).has(classification.releaseTaskId)) {
+    if (code === 0 && releasedTaskIds(readLedgerRawLines(ledgerPath), loadPlan(planPath)).has(classification.releaseTaskId)) {
       appendLedger(ledgerPath, { run_id: `APPROVE-${proposalId}`, task_id: proposalId,
         step: "ratify.approved", release_task_id: classification.releaseTaskId });
       approveNoteChain(rest, proposalId, config, deps);
