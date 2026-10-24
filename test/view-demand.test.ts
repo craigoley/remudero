@@ -514,13 +514,41 @@ test("view-demand fixture retires its real ticker before directory deletion and 
   let released = false;
   made.release = () => {
     assert.equal(existsSync(stateDir), true, "the real ticker still owns its directory when released");
+    assert.equal(existsSync(ledgerDir), true, "the ledger directory survives until ticker release");
+    const count = release();
+    assert.equal(count, 1, "the fixture released its real projector lease");
     released = true;
-    return release();
+    return count;
   };
   const owned = retirement(t);
-  await retireFixture(owned);
+  let allowPublication!: () => void;
+  const publicationGate = new Promise<void>((resolve) => { allowPublication = resolve; });
+  let started!: () => void;
+  const publicationStarted = new Promise<void>((resolve) => { started = resolve; });
+  let publicationSettled = false;
+  let retired = false;
+  const retiring = retireFixture(owned, async () => {
+    started();
+    assert.equal(released, true, "ticker release precedes the diagnostic publication barrier");
+    await publicationGate;
+    await flushReadModelTransactions();
+    publicationSettled = true;
+  }).then(() => { retired = true; });
+  try {
+    await Promise.race([publicationStarted, retiring]);
+    assert.equal(released, true);
+    assert.equal(retired, false, "retirement waits for diagnostic publication to settle");
+    assert.equal(publicationSettled, false);
+    assert.equal(existsSync(stateDir), true, "pending diagnostics retain the state directory");
+    assert.equal(existsSync(ledgerDir), true, "pending diagnostics retain the ledger directory");
+  } finally {
+    allowPublication();
+    await retiring;
+  }
   assert.equal(released, true);
+  assert.equal(publicationSettled, true);
   assert.equal(existsSync(stateDir), false);
+  assert.equal(existsSync(ledgerDir), false);
   await flushReadModelTransactions();
   assert.equal(existsSync(stateDir), false, "settled diagnostic writes do not recreate the directory");
   owned.releases.length = 0;
