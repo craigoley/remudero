@@ -1,3 +1,6 @@
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -118,4 +121,43 @@ test("the two triggered censuses have executable scripts, parity entries and CI 
     assert.ok(precheck.ciCensusPopulation(listRuleSuites(fileURLToPath(new URL("..", import.meta.url)))).includes(testFile));
     assert.ok(!ciOnly.includes(testFile));
   }
+});
+
+
+test("pre-push asks the real child-coverage guard for a newly unblanked nested test runner", async () => {
+  const suite = "test/coverage-session-blanking.test.ts";
+  const path = "test/fixtures/new-child.test.ts";
+  const bad = "const env = { ...process.env };\ndelete env.NODE_TEST_CONTEXT;";
+  const corrected = bad + "\nenv.NODE_V8_COVERAGE = undefined;";
+  const scanner = await import(pathToFileURL(join(REPO_ROOT, "scripts/coverage-session-blanking-check.mjs")).href);
+  const classified = scanner.scanSource(bad, path);
+  assert.equal(classified.suspects.length, 1, "positive control: the actual CI classifier sees the observed defect");
+  const red = evaluate(path, bad, "", [suite]);
+  assert.deepEqual(red.runs, [[suite]]);
+  assert.ok(red.result.violations.some((row: string) => row.startsWith(`census-suite: ${suite} fails`)));
+  const green = evaluate(path, corrected);
+  assert.deepEqual(scanner.scanSource(corrected, path), { defects: [], suspects: [] });
+  assert.deepEqual(green.runs, []);
+  assert.deepEqual(green.result, { violations: [], unmeasured: null });
+  assert.deepEqual(evaluate(path, bad, corrected).runs, [[suite]], "removing effective blanking is a new defect");
+  assert.deepEqual(evaluate(path, `function first() { ${bad} }\nfunction second() { ${bad} }`, `function first() { ${bad} }`).runs, [[suite]], "a second site on the same identifier is not deduplicated away");
+  for (const unchanged of [bad, bad + "\nconst unrelated = 1;"]) assert.deepEqual(evaluate(path, unchanged, bad).runs, []);
+  assert.deepEqual(evaluate(path, null, bad).runs, [], "removing a site does not introduce it");
+  assert.deepEqual(evaluate(path, "// " + bad.replaceAll("\n", "\n// ")).runs, []);
+  assert.deepEqual(evaluate(path, JSON.stringify(bad)).runs, []);
+  assert.deepEqual(evaluate("docs/example.md", bad).runs, []);
+  assert.deepEqual(evaluate("src/lib/example.ts", bad).runs, []);
+});
+
+test("pre-push keeps the actual child-coverage scanner and suite enrolled and unread input unmeasured", () => {
+  const suite = "test/coverage-session-blanking.test.ts";
+  for (const path of [suite, "scripts/coverage-session-blanking-check.mjs"]) assert.ok(evaluate(path, "").started.includes(suite));
+  const deletedCoverage = evaluate("test/new-child.test.ts", "const env = { ...process.env }; delete env.NODE_V8_COVERAGE;");
+  assert.deepEqual(deletedCoverage.runs, [[suite]]);
+  const result = precheck.evaluateAdmittedCensusSuites({
+    changed: ["test/new-child.test.ts"], loadMembers: () => [],
+    readHead: () => { throw new Error("source unreadable"); }, readBase: () => "",
+    runSuites: () => { throw new Error("must not run after an unread measurement"); },
+  });
+  assert.deepEqual(result, { violations: [], unmeasured: "source unreadable" });
 });

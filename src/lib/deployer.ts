@@ -263,17 +263,19 @@ export function readMountPlanDrift(
   try {
     const plan = exec("bash", [
       "-c",
-      'source "$1" || exit 2; scratch_plan "$2" "$3" || exit 3; ' + // off is UNKNOWN, never "remove binds"
+      '(source "$1" || exit 2; scratch_plan "$2" "$3" || exit 3; ' +
         'for d in "${SCRATCH_DIRS[@]}"; do [ "$d" = "$(scratch_test_slot_dir)" ] && continue; p="$d"; ' +
         'while [ ! -e "$p" ]; do p="$(dirname "$p")"; done; { [ -d "$p" ] && [ -w "$p" ]; } || exit 4; done; ' +
         "printf '%s\\n' \"$SCRATCH_BINDS\" | while IFS=\"$(printf '\\t')\" read -r s t; do " +
         "[ -n \"$s\" ] && printf 'bind\\t%s\\t%s\\n' \"$s\" \"$t\"; done; " +
         'i=0; while [ "$i" -lt "${#SCRATCH_ARGS[@]}" ]; do [ "${SCRATCH_ARGS[$i]}" = -e ] && ' +
-        "printf 'env\\t%s\\n' \"${SCRATCH_ARGS[$((i + 1))]}\"; i=$((i + 2)); done; exit 0",
+        "printf 'env\\t%s\\n' \"${SCRATCH_ARGS[$((i + 1))]}\"; i=$((i + 2)); done); " +
+        'if [ "$3" = remudero-serve ] && [ -f "$4" ]; then bash "$4" --fleet-auth-plan || exit 5; fi; exit 0',
       "scratch-mounts",
       join(installPath, "deploy", "scratch-mounts.sh"),
       stateDir,
       container,
+      join(installPath, "deploy", "serve-container.sh"),
     ]);
     return mountPlanDriftFrom(
       plan,

@@ -191,7 +191,6 @@ const CLAUDE_REFRESH_LOCK_STALE_MS = 60_000;
  *  `CLAUDE_CONFIG_DIR`. Never the store itself and never `<realHome>/.claude`. */
 export function createClaudeFleetLoginStagingDir(realHome: string): string {
   const parent = dirname(sharedClaudeCredentialDir(realHome));
-  mkdirSync(parent, { recursive: true, mode: 0o700 });
   const dir = mkdtempSync(join(parent, ".claude-login-"));
   chmodSync(dir, 0o700);
   return dir;
@@ -324,7 +323,8 @@ export async function replaceClaudeFleetCredential(opts: {
   });
   if (verdict.kind !== "usable") return { kind: "refused", reasonClass: verdict.reasonClass };
   const store = sharedClaudeCredentialDir(opts.realHome);
-  mkdirSync(store, { recursive: true, mode: 0o700 });
+  if (!existsSync(dirname(store))) return { kind: "refused", reasonClass: "fleet-store-unreachable" };
+  if (!existsSync(store)) mkdirSync(store, { mode: 0o700 });
   const locks = [join(store, CLAUDE_REFRESH_LOCK_NAME), `${realpathSync(store)}.lock`];
   const clock = opts.clock ?? systemClock;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));

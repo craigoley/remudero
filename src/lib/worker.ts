@@ -6614,8 +6614,39 @@ export function releaseReviewWorktree(worktreePath: string): void {
   heldReviewWorktrees.delete(resolve(worktreePath));
 }
 
+/** Read existing review-worker ownership across processes; never reclaim or mutate a claim.
+ * A matching claim is held until its owner releases it or the existing inflight sweep retires it.
+ * Unreadable or malformed ownership cannot authorize deleting a review checkout. */
+export function reviewWorktreeHoldState(worktreePath: string): "held" | "unknown" | "unheld" {
+  if (heldReviewWorktrees.has(resolve(worktreePath))) return "held";
+  const candidate = /^review-PR(\d+)-(\d+)$/.exec(basename(worktreePath));
+  if (!candidate) return "unheld";
+  const claimsDir = join(dirname(dirname(resolve(worktreePath))), "state", "inflight", "review-workers");
+  let names: string[];
+  try { names = readdirSync(claimsDir); }
+  catch (error) {
+    const status = (error as NodeJS.ErrnoException).code === "ENOENT" ? "unheld" : "unknown";
+    return status;
+  }
+  let unknown = false;
+  for (const name of names) {
+    if (!name.endsWith(".lock")) continue;
+    try {
+      const holder = JSON.parse(readFileSync(join(claimsDir, name), "utf8"));
+      const run = typeof holder?.run_id === "string" ? /^review-PR(\d+)-\d+$/.exec(holder.run_id) : null;
+      const expected = run && `review-worker-${createHash("sha256").update(holder.run_id).digest("hex")}.lock`;
+      if (!run || expected !== name || !Number.isSafeInteger(holder.pid) || holder.pid <= 0) unknown = true;
+      else if (run[1] === candidate[1]) return "held";
+    } catch (error) {
+      // A concurrently released file is absence; every other failed read is UNKNOWN.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") unknown = true;
+    }
+  }
+  return unknown ? "unknown" : "unheld";
+}
+
 export function reviewWorktreeIsHeld(worktreePath: string): boolean {
-  return heldReviewWorktrees.has(resolve(worktreePath));
+  return reviewWorktreeHoldState(worktreePath) !== "unheld";
 }
 
 /** Directory names never descended into by {@link newestActivityMs} — see its doc. */
@@ -6628,6 +6659,8 @@ export const ACTIVITY_WALK_ENTRY_CAP = 20_000;
 export type WorktreeKeepReason =
   /** This process still owns the review using this exact checkout. */
   | "live-review"
+  /** Shared review ownership could not be read; absence is not proven. */
+  | "review-ownership-unknown"
   /** A run lock naming a pid that is currently alive. */
   | "live-pid"
   /** Registered on a branch still live upstream (an open, unmerged PR). */
@@ -7013,8 +7046,9 @@ function* worktreeReapPass(
     if (!isDir) continue;
     yield entryPath;
 
-    if (reviewWorktreeIsHeld(entryPath)) {
-      keep(name, "live-review");
+    const reviewHold = reviewWorktreeHoldState(entryPath);
+    if (reviewHold !== "unheld") {
+      keep(name, reviewHold === "held" ? "live-review" : "review-ownership-unknown");
       continue;
     }
 
