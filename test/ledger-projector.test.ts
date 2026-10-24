@@ -721,6 +721,7 @@ test("projector fixture retirement awaits diagnostics after release and preserve
       const childTmp = scratch(childT, `projector-exit-${mode}`), receipt = join(childTmp, "receipt.json");
       const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: childTmp, RMD_PROJECTOR_RETIREMENT_MODE: mode, RMD_PROJECTOR_RETIREMENT_RECEIPT: receipt };
       delete env.NODE_TEST_CONTEXT;
+      env.NODE_V8_COVERAGE = undefined;
       const run = spawnSync(process.execPath, [
         "--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
         "--test-name-pattern", `^${t.name}$`, "test/ledger-projector.test.ts",
