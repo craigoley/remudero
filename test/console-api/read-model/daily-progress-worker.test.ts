@@ -138,6 +138,9 @@ test("daily progress collects hourly and closes local days without page demand",
         assert.notEqual(ticker.homeLeaseIdentity(), oldIdentity);
         assert.throws(() => ticker.publishDailyProgress(staged.publication, oldIdentity), /ownership epoch/);
         assert.equal(readDailyProgressManifest(stateDir).generation, manifest.generation);
+        now += 60_000;
+        const afterExpiry = acquireLease(peer, { holder: "daily-worker-proof", clock }); assert.ok(afterExpiry.ok);
+        if (afterExpiry.ok) assert.notEqual(readModelLeaseEpoch(peer, afterExpiry.lease), epoch, "an expired lease starts a new ownership epoch even without an intervening holder");
       } finally { peer.close(); }
     } finally { lane.stop(); ticker.release(); }
   });
