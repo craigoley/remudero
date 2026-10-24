@@ -25,8 +25,8 @@
     - src/lib/panel-graph.ts
     - src/lib/serve.ts
     - openapi/daemon.yaml
-    - test/inbox/improvement-thread.test.ts
-    - test/console-api/serve/improvement-thread-route.test.ts
+    - test/**/improvement-thread.test.ts
+    - test/**/improvement-thread-route.test.ts
   rationale: Native Ask turns are temporary and read-only, existing Inbox routes only read/reply to existing
     conversations, and the intent-plan gateway is explicitly unserved. The approved Plan this improvement
     action needs durable core creation and subsequent reviewed task drafting, not a capture-only success
@@ -60,6 +60,8 @@
       proof: "unit test: improvement planning refuses stale foreign and missing findings"
     - claim: thread creation does not file tasks and later reviewed filing returns its own receipts
       proof: "unit test: improvement planning separates conversation drafting filing and execution"
+    - claim: the evidence mechanism is reached by its production caller
+      proof: "grep: buildImprovementThreadRoutes( in src/lib/serve.ts"
   note: Reviewed core c18e7e4c48cee7cb19d2fc96fa93273ef63d85a5 and console
     c57646ea3636341cc1fad8847df8b144e169d3f1. Before filing, all 10 open core PR heads and main were compared
     by subject; each head had the same subject counts as main, with more than 4,370 plan shards as corpus

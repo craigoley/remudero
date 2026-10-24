@@ -27,9 +27,9 @@
     - src/lib/views.ts
     - src/lib/serve.ts
     - openapi/daemon.yaml
-    - test/console-api/read-model/daily-progress-projection.test.ts
-    - test/console-api/read-model/daily-progress-worker.test.ts
-    - test/console-api/views/daily-progress-view.test.ts
+    - test/**/daily-progress-projection.test.ts
+    - test/**/daily-progress-worker.test.ts
+    - test/**/daily-progress-view.test.ts
   rationale: A complete Today/Yesterday report must survive Recent feed truncation, read-model scratch deletion,
     browser closure and restart. Existing Analytics collection is view-switch dependent, existing windows are
     UTC, and current open PRs do not reconstruct yesterday midnight. Operators need each repository and the
@@ -78,6 +78,8 @@
       proof: "unit test: daily progress uses calendar days across DST and midnight"
     - claim: served reports validate scope before counts and preserve partial or stale evidence
       proof: "unit test: daily progress served scope preserves partial evidence and rejects foreign repositories"
+    - claim: the evidence mechanism is reached by its production caller
+      proof: "grep: createDailyProgressView( in src/lib/read-model-worker.ts"
   note: Reviewed core c18e7e4c48cee7cb19d2fc96fa93273ef63d85a5 and console
     c57646ea3636341cc1fad8847df8b144e169d3f1. Before filing, all 10 open core PR heads and main were compared
     by subject; each head had the same subject counts as main, with more than 4,370 plan shards as corpus

@@ -24,8 +24,8 @@
     - src/lib/views.ts
     - src/lib/serve.ts
     - openapi/daemon.yaml
-    - test/console-api/read-model/code-health-projection.test.ts
-    - test/gardeners/code-health-opportunities.test.ts
+    - test/**/code-health-projection.test.ts
+    - test/**/code-health-opportunities.test.ts
   rationale: Existing quality and coverage intake discovers useful debt but exposes no comparable per-repository
     assessment. Operators approved explainable code quality separately from delivery friction; a missing
     scanner or scope reduction must not improve the score.
@@ -58,6 +58,8 @@
       proof: "unit test: code health separates fixes from changed measurement scope"
     - claim: repeated findings share one evidenced opportunity without hiding critical issues
       proof: "unit test: code health deduplicates opportunities and preserves urgent findings"
+    - claim: the evidence mechanism is reached by its production caller
+      proof: "grep: createCodeHealthView( in src/lib/read-model-worker.ts"
   note: Reviewed core c18e7e4c48cee7cb19d2fc96fa93273ef63d85a5 and console
     c57646ea3636341cc1fad8847df8b144e169d3f1. Before filing, all 10 open core PR heads and main were compared
     by subject; each head had the same subject counts as main, with more than 4,370 plan shards as corpus

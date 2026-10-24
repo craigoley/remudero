@@ -17,8 +17,9 @@
   files:
     - src/lib/daily-progress-contract.ts
     - src/lib/code-health-contract.ts
-    - test/console-api/read-model/daily-progress-contract.test.ts
-    - test/console-api/read-model/code-health-contract.test.ts
+    - test/**/daily-progress-contract.test.ts
+    - test/**/code-health-contract.test.ts
+    - src/lib/repositories-view.ts
   rationale: Daily progress and Code health have no source-owned versioned contract. Current UTC 7/30-day flow
     buckets and a 200-entry Recent feed cannot establish a complete local-day report. Code quality must remain
     separate from delivery friction. Establish expected evidence independently of rows observed, so missing
@@ -44,6 +45,14 @@
     collection, scheduling, paid model calls or writes. Validate the contract through direct fixtures and
     negative cases. New tests use computed rmd test-place folders and package aliases; adjust proposed test
     paths to the computed locations before filing implementation scope changes.
+
+
+    Expose a source-owned expected evidence inventory through the existing repositories source publisher.
+    buildRepositoryEvidenceInventory is called in repositories-view.ts using server-selected
+    repository/instance configuration, independently of observed scan/event rows; retain backward-compatible
+    missing-inventory state as not collected. Contract validators are used by this production inventory
+    boundary and the following collectors, not only test imports. Do not claim a scanner ran or a source is
+    configured merely because it is expected. Keep current repository summary fields and clocks unchanged.
   falsifier: "Remove coverage/identity validation while keeping its fixtures: missing expected repositories,
     invalid day bounds or contradictory source scope must be accepted and the first test fail. Remove
     assessed/comparability validation and the second test must fail. Restore each guard and require real
@@ -53,6 +62,8 @@
       proof: "unit test: daily contracts preserve coverage and reject contradictory day identity"
     - claim: quality contracts keep incomplete and incomparable assessments from healthy scores
       proof: "unit test: quality contracts reject healthy scores from incomplete or incomparable evidence"
+    - claim: the evidence mechanism is reached by its production caller
+      proof: "grep: buildRepositoryEvidenceInventory( in src/lib/repositories-view.ts"
   note: Reviewed core c18e7e4c48cee7cb19d2fc96fa93273ef63d85a5 and console
     c57646ea3636341cc1fad8847df8b144e169d3f1. Before filing, all 10 open core PR heads and main were compared
     by subject; each head had the same subject counts as main, with more than 4,370 plan shards as corpus
