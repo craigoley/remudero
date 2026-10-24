@@ -168,3 +168,19 @@ test("a metadata-only seed recovery still lets the normal live checkout claim re
   assert.equal(claims, 1);
   assert.equal(readLedgerLines(ledgerPath).findLast(row => row.step === "sweep.disposed")?.acted, false);
 });
+
+
+test("a metadata-only fix seed retains its reused judgment through real ledger rotation", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-seed-reused-rotation-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ledgerPath = join(dir, "ledger.ndjson"), previous = "DAEMON-1792390000000";
+  const rows = [{ ...seed, run_id: previous }, { ...dispatch, run_id: previous }, seed,
+    { step: "fix.progress_reused", task_id: TASK, run_id: OLD, ts: "2026-10-19T08:10:00.000Z" },
+    { ...adoption, live: 1, adopted: 1 }, boot];
+  const core = rows.map(row => JSON.stringify(row)).join("\n") + "\n", bytes = Buffer.byteLength(core);
+  writeFileSync(ledgerPath, core + JSON.stringify({ step: "ci.polling", padding: "x".repeat(bytes * 4) }) + "\n");
+  assert.equal(rotateLedger(ledgerPath, { ceilingBytes: bytes * 2 }).rotated, true);
+  const after = readLedgerLines(ledgerPath);
+  assert.ok(after.some(row => row.step === "fix.progress_reused"));
+  assert.equal(fixSeedRead(after, pr, CURRENT)?.kind, "orphaned");
+});
