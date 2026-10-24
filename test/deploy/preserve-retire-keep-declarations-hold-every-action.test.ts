@@ -61,8 +61,8 @@ function commit(repo: string, file: string, text: string, message: string) {
   git(repo, "add", file); git(repo, "commit", "--quiet", "-m", message);
 }
 
-function helper(fx: Fx, now = NOW) {
-  return spawnSync("python3", ["-I", HELPER, "--home", fx.home, "--now", String(now), "--apply"], {
+function helper(fx: Fx, now = NOW, apply = true) {
+  return spawnSync("python3", ["-I", HELPER, "--home", fx.home, "--now", String(now), ...(apply ? ["--apply"] : [])], {
     encoding: "utf8", timeout: 120_000, env: { ...GIT_ENV, PATH: `${fx.bin}:${process.env.PATH}` },
   });
 }
@@ -258,5 +258,71 @@ print(json.dumps(m.prune_worktrees([sys.argv[2] + "/.git", holder.store, sys.arg
     assert.deepEqual(JSON.parse(r.stdout), [join(plain, ".git")], "only the unmarked store is pruned");
     assert.equal(existsSync(records.plain), false, "an unmarked store's stale record is pruned");
     assert.deepEqual([records.kept, records.shared].map(bytes), before, "a kept store keeps every byte of its worktree records");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a dry run never prunes worktree records, and an apply run still prunes an unmarked store's stale record", () => {
+  const fx = setup({});
+  try {
+    const repo = clone(fx, "Remudero/plain");
+    const live = join(fx.home, "Remudero/wt-live"), gone = join(fx.home, "Remudero/wt-gone");
+    git(repo, "worktree", "add", "--quiet", "-b", "live", live); // healthy and idle: a retirement candidate
+    git(repo, "worktree", "add", "--quiet", "-b", "gone", gone);
+    rmSync(gone, { recursive: true, force: true }); // its folder is gone; only the stale record remains
+    // The main checkout stays active, so its store survives and only prune can remove the stale record.
+    utimesSync(join(repo, "README"), NOW - HOUR, NOW - HOUR);
+    const admin = join(repo, ".git/worktrees");
+    const before = bytes(admin);
+
+    const dry = helper(fx, NOW, false);
+    assert.equal(dry.status, 0, dry.stderr + dry.stdout);
+    assert.match(dry.stdout, /WOULD-RETIRE worktree .*Remudero\/wt-live/);
+    assert.deepEqual(bytes(admin), before, "a dry run leaves every worktree administration byte unchanged");
+    assert.equal(existsSync(live), true);
+
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /RETIRED worktree .*Remudero\/wt-live/);
+    assert.equal(existsSync(repo), true, r.stdout);
+    assert.match(r.stdout, /HOLD active <24h .*Remudero\/plain/);
+    assert.equal(existsSync(join(admin, "gone")), false, "the apply run prunes the stale record");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("an inspection that raises PermissionError holds the path, for every uid", () => {
+  const fx = setup({});
+  try {
+    const top = join(fx.home, "probe"), inner = join(top, "inner");
+    mkdirSync(join(inner, "deeper"), { recursive: true });
+    // The denial is injected at the os seam, so root and every other uid see the same refusal.
+    const probe = `import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+top, inner = sys.argv[2], sys.argv[3]
+real_lstat, real_scandir = os.lstat, os.scandir
+def lstat(path, *a, **k):
+    if os.path.basename(str(path)) == ".rmd-janitor-keep" and os.path.dirname(str(path)) == top:
+        raise PermissionError(13, "denied", str(path))
+    return real_lstat(path, *a, **k)
+def scandir(path=".", *a, **k):
+    if str(path) == inner:
+        raise PermissionError(13, "denied", str(path))
+    return real_scandir(path, *a, **k)
+out = {}
+os.lstat = lstat
+out["marker"] = m.keep_here(top)
+out["below"] = m.keep_scope(os.path.join(top, "inner", "deeper"))
+os.lstat = real_lstat
+os.scandir = scandir
+out["walk"] = m.keep_scope(top)
+os.scandir = real_scandir
+out["clean"] = m.keep_scope(os.path.join(inner, "deeper"))
+print(json.dumps(out))`;
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, top, inner], { encoding: "utf8", env: GIT_ENV });
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.match(out.marker, /^keep-inspection-unknown \(\.rmd-janitor-keep: PermissionError\)/, "an unreadable marker holds its folder");
+    assert.match(out.below, /^keep-inspection-unknown \(\.rmd-janitor-keep: PermissionError\) at .*\/probe$/, "and everything below it");
+    assert.match(out.walk, /^keep-inspection-unknown \(PermissionError\) in .*\/probe$/, "a subtree that cannot be listed holds the whole path");
+    assert.equal(out.clean, "", "with nothing denied the same folders are not held");
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });

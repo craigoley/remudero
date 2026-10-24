@@ -947,7 +947,8 @@ def main():
             keep[r.path] = f"remove-failed ({error.__class__.__name__})"
             keep_closure(repos, keep, borrowers, lenders_ok)
             say("HOLD", f"remove-failed ({error.__class__.__name__})", r.path)
-    prune_worktrees(sorted({r.store for r in order if r.kind == "worktree" and r.store and os.path.isdir(r.store)}), repos)
+    if a.apply:  # a dry run plans only: pruning stale worktree records is a write
+        prune_worktrees(sorted({r.store for r in order if r.kind == "worktree" and r.store and os.path.isdir(r.store)}), repos)
     tidy = housekeeping(cfg, protected, repos, fresh, now, a.apply)
     say("housekeeping", " ".join(f"{k}={v}" for k, v in tidy.items()) + f" apply={int(a.apply)}")
     if a.apply:
