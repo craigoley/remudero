@@ -12185,8 +12185,17 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         const prerequisiteWorkerId = fixWorkerRunId(opts.runId, "prerequisite", systemClock.now());
         const prerequisiteReceipt = fixWorkerReceipt(deps.spawn, deps.log, prerequisiteWorkerId, fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
           { prUrl: opts.prUrl, roundId: prerequisiteWorkerId });
-        const spawnOutcome = await spawnFixWorkerBounded({ ...deps, spawn: prerequisiteReceipt.spawn }, dispatchArgs, { runId: opts.runId, taskId: opts.taskId });
+        const spawnOutcome = await withPredecessorTranscriptCopies(dispatchArgs, {
+          root: opts.config.root, taskId: opts.taskId, excludeRunId: prerequisiteWorkerId,
+        }, (args) => spawnFixWorkerBounded({ ...deps, spawn: prerequisiteReceipt.spawn }, args, {
+          runId: opts.runId, taskId: opts.taskId,
+        }), deps.log);
         const prerequisiteWorker = spawnOutcome.kind === "spawned" ? deps.account(spawnOutcome.result) : undefined;
+        if (prerequisiteWorker) archiveWorkerTranscript({
+          root: opts.config.root, taskId: opts.taskId, runId: prerequisiteWorkerId,
+          rung: "fix-prerequisite", text: workerTranscript(prerequisiteWorker),
+          model: opts.mount.model, verdict: prerequisiteWorker.subtype, worker: prerequisiteWorker,
+        }, deps.log);
         const prerequisiteUrl = prerequisiteWorker ? parseReport(workerTranscript(prerequisiteWorker))?.prUrl : undefined;
         const target = prerequisiteUrl ? mergeTargetFromPrUrl(prerequisiteUrl) : undefined;
         if (!target) {
