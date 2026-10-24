@@ -130,7 +130,7 @@ test("W1-T2809: the control is falsifiable BY CONSTRUCTION — restore the singl
 
 // ── (2) the two populations are disjoint, so the blindness is structural ────────────────────────
 
-test("W1-T2809: the ls-files and dir-walk populations are DISJOINT at head — the blindness is structural", () => {
+test("W1-T2809: both executable enumeration populations remain visible at head", () => {
   const found = candidates();
   const lsFiles = found.filter((c) => c.idiom === "ls-files").map((c) => c.testFile);
   const dirWalk = found.filter((c) => c.idiom === "dir-walk").map((c) => c.testFile);
@@ -145,21 +145,10 @@ test("W1-T2809: the ls-files and dir-walk populations are DISJOINT at head — t
   assert.ok(!lsFiles.includes(CANONICAL_INSTANCE), "the canonical instance is invisible to the ls-files population");
   assert.ok(dirWalk.includes(CANONICAL_INSTANCE), "and visible only through the dir-walk population");
 
-  const mentions = (pattern: RegExp): string[] =>
-    execFileSync("git", ["ls-files", "test/*.test.ts"], { cwd: REPO_ROOT, encoding: "utf8" })
-      .split("\n")
-      .filter(Boolean)
-      .filter((f) => {
-        const text = readTracked(f);
-        return /src\//.test(text) && pattern.test(text);
-      });
-  const rawLsFiles = mentions(/ls-files/);
-  const rawDirWalk = mentions(/readdirSync|globSync/);
-  const overlap = rawLsFiles.filter((f) => rawDirWalk.includes(f)).sort();
-  const refused = new Set(CENSUS_POPULATION.filter((m) => m.verdict.status === "REFUSED").map((m) => m.testFile));
-  for (const f of overlap) {
-    assert.ok(refused.has(f), `${f} carries both idiom tokens as source text and is not a refused fixture/meta suite`);
-  }
+  assert.ok(
+    !found.some((c) => c.testFile === "test/the-tree-walk-recognizer-admits-by-what-a-suite-executes.test.ts"),
+    "synthetic walk fixtures must not admit the recognizer's own regression suite",
+  );
 });
 
 // ── (3) the stopgap is labelled, and the label cannot be silently dropped ───────────────────────
@@ -226,7 +215,7 @@ test("W1-T2809: every discovered candidate is placed or NAMED — widening never
 
 test("W1-T2809: discovered-but-unplaceable callers from BOTH idioms are reported in unknownCoverage", () => {
   const files: Record<string, string> = {
-    "test/future-dir-walk.test.ts": 'const files = readDirectory(join(root, "src/lib")); readdirSync',
+    "test/future-dir-walk.test.ts": 'const files = readdirSync(join(REPO_ROOT, "src/lib"));',
     "test/future-ls-files.test.ts": 'execFileSync("git", ["ls-files", "src/lib"])',
   };
   const report = censusSuiteMembershipFor([], "/fake/repo", listSpawn(Object.keys(files)), (p) => files[p] ?? "");
@@ -240,10 +229,10 @@ test("W1-T2809: an unreadable hit is still KEPT, tagged with the gated idiom —
   assert.deepEqual(found, [{ testFile: "test/unreadable.test.ts", idiom: "ls-files", walks: ["src/"] }]);
 });
 
-test("W1-T2809: a hit that mentions neither src/ nor an idiom token is still filtered out", () => {
+test("W1-T2809: executable walk scope ignores unrelated imports and fixture mentions", () => {
   const files: Record<string, string> = {
-    "test/walks-src.test.ts": 'readDirectory(join(root, "src/lib")); readdirSync',
-    "test/walks-deploy.test.ts": 'readDirectory(join(root, "deploy")); readdirSync',
+    "test/walks-src.test.ts": 'readdirSync(join(REPO_ROOT, "src/lib"));',
+    "test/walks-deploy.test.ts": 'readdirSync(join(REPO_ROOT, "deploy")); import "#src/lib/x.js";',
     "test/uses-ls-files.test.ts": 'execFileSync("git", ["ls-files", "src/*.ts"])',
   };
   const found = discoverCensusCandidates("/fake/repo", listSpawn(Object.keys(files)), (p) => files[p] ?? "");
@@ -253,7 +242,7 @@ test("W1-T2809: a hit that mentions neither src/ nor an idiom token is still fil
   ]);
 });
 
-test("W1-T2809: ls-files takes precedence for a file carrying both tokens, so the gated projection is unchanged", () => {
-  const found = discoverCensusCandidates("/fake/repo", listSpawn(["test/both.test.ts"]), () => 'ls-files src/ and readdirSync("src/lib")');
+test("W1-T2809: executable ls-files takes precedence when both enumeration calls run", () => {
+  const found = discoverCensusCandidates("/fake/repo", listSpawn(["test/both.test.ts"]), () => 'execFileSync("git", ["ls-files", "src/lib"]); readdirSync("src/lib");');
   assert.deepEqual(found, [{ testFile: "test/both.test.ts", idiom: "ls-files", walks: ["src/lib"] }]);
 });

@@ -2669,8 +2669,9 @@ function censusExecutableWalks(source: string): { idiom: CensusEnumerationIdiom;
         }
       }
     }
-    if (walks.length === 0 && (dirWalk ? /\bREPO_ROOT\b|\brepoRoot\b|\bprocess\.cwd\s*\(/.test(root)
-      : shell ? /^(['"`])git\s+ls-files\1$/.test(args[0] ?? "") : pathspecs.length === 0)) {
+    if (walks.length === 0 && (dirWalk ? /^(?:REPO_ROOT|repoRoot(?:\(\))?|process\.cwd\(\))$/.test(args[0] ?? "")
+      : shell ? /^(['"`])git\s+ls-files\1$/.test(args[0] ?? "")
+        : pathspecs.length === 0 || pathspecs.some((element) => /^[*?][^/]*$/.test(value(element) ?? "")))) {
       // An unfiltered tracked-file listing walks all corpora; an unrelated import adds none.
       walks.push("src/", "test/", "scripts/", "plan/tasks.d/");
     }

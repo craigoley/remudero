@@ -96,8 +96,8 @@ test("censusPopulationDrift: a census-shaped file the live tree's recognizer fin
     return { status: 0, stdout: "", stderr: "" };
   };
   const files: Record<string, string> = {
-    "test/bound-kind-declared.test.ts": "git ls-files -- src/",
-    "test/a-new-unclassified-census-suite.test.ts": "git ls-files scoped to src/, asserts every file walked",
+    "test/bound-kind-declared.test.ts": 'execFileSync("git", ["ls-files", "--", "src/"]);',
+    "test/a-new-unclassified-census-suite.test.ts": 'execFileSync("git", ["ls-files", "--", "src/"]);',
   };
   const report = censusPopulationDrift("/fake/repo", spawn, (p) => files[p] ?? "");
   assert.deepEqual(report.unknown, ["test/a-new-unclassified-census-suite.test.ts"]);

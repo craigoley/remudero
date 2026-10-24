@@ -337,6 +337,14 @@ function scanForForbiddenFlagHits(root: string, dirs: string[]): FlagHit[] {
 
 const SCOPE_A_DIRS = ["src", "scripts", "deploy", ".github/workflows"];
 
+test("trackedFiles enumerates the complete repository scope used by the shallow-clone census", () => {
+  const files = execFileSync("git", ["ls-files", "-z", "--", "src", "scripts", "deploy", ".github/workflows"], {
+    cwd: REPO_ROOT, encoding: "utf8",
+  }).split("\0").filter(Boolean);
+  assert.ok(files.length > 100, "the completeness control must enumerate the real repository");
+  assert.deepEqual(trackedFiles(REPO_ROOT, SCOPE_A_DIRS), files);
+});
+
 // ════════════════════════════════════════ acceptance (1) ══════════════════════════════════════
 // "a source scan refuses any depth-limiting flag on a git invocation in the shipped sources, and
 // the refused flag set is a data table rather than a branch"

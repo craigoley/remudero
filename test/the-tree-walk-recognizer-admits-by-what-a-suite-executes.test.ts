@@ -21,6 +21,8 @@ test("W1-T9050: a suite that names ls-files only in a comment or fixture string 
     'execFileSync("git", ["grep", "ls-files", "--", "src/"]);',
     'execFileSync("node", ["ls-files", "src/"]);',
     'execFileSync("git", ["ls-files", "--", "deploy/"]); import "#src/lib/x.js";',
+    'readdirSync(join(REPO_ROOT, "deploy")); import "#src/lib/x.js";',
+    'globSync("deploy/**/*.sh", { cwd: REPO_ROOT }); import "#src/lib/x.js";',
   ]) {
     assert.deepEqual(censusCandidateWalks(text), [], text);
     assert.deepEqual(candidates(text), [], text);
@@ -45,6 +47,8 @@ test("W1-T9050: executable walks use their own repository scope across lines", (
   ]) assert.deepEqual(censusCandidateWalks(text), ["test/"], text);
   assert.deepEqual(censusCandidateWalks('globSync("test/**/*.ts", { cwd: REPO_ROOT })'), ["test/**/*.ts"]);
   assert.deepEqual(censusCandidateWalks('execSync("git ls-files -- scripts/")'), ["scripts/"]);
+  assert.deepEqual(candidates('execFileSync("git", ["ls-files", "--", "scripts/"])'),
+    [{ testFile: "test/example.test.ts", idiom: "ls-files", walks: ["scripts/"] }]);
   assert.deepEqual(censusCandidateWalks('`${readdirSync("src/").length}`'), ["src/"]);
 });
 
@@ -63,6 +67,9 @@ test("W1-T9050: an enumeration rooted in a temporary fixture is not a repository
 test("W1-T9050: an unfiltered repository listing covers each tracked corpus", () => {
   assert.deepEqual(censusCandidateWalks('execFileSync("git", ["ls-files"], { cwd: REPO_ROOT })'),
     ["plan/tasks.d/", "scripts/", "src/", "test/"]);
+  assert.deepEqual(censusCandidateWalks('execFileSync("git", ["ls-files", "--", "*.ts", "*.mjs"], { cwd: REPO_ROOT })'),
+    ["plan/tasks.d/", "scripts/", "src/", "test/"]);
+  assert.deepEqual(censusCandidateWalks('readdirSync(REPO_ROOT)'), ["plan/tasks.d/", "scripts/", "src/", "test/"]);
 });
 
 test("W1-T9050: fixture mentions do not change the executable enumeration idiom", () => {
