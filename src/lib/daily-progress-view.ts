@@ -134,7 +134,9 @@ export function validateDailyProgressRequest(params: URLSearchParams, source: Vi
     if (!source) return undefined; // Native off/shadow policy answers without a report.
     let roster = held;
     const currentDate = dailyDateAt(now, held?.timeZone ?? DEFAULT_DAILY_PROGRESS_ZONE);
-    if (!roster || roster.reportDate !== currentDate) {
+    // A retained roster authorizes known scope across midnight. Date aliases have already resolved
+    // independently, so yesterday remains readable while the new today's body is still being built.
+    if (!roster) {
       const currentKey = dailyProgressRequestKey(new URLSearchParams({ repository: "all", date: "today", timeZone: held?.timeZone ?? DEFAULT_DAILY_PROGRESS_ZONE }), now);
       roster = source.body(DAILY_PROGRESS_VIEW_NAME, currentKey)?.body.data as DailyProgressReport | undefined;
       if (!roster || roster.reportDate !== currentDate) { source.want?.(DAILY_PROGRESS_VIEW_NAME, currentKey); return { error: "view_not_ready", status: 503, detail: "Daily progress is waiting for the current reporting day." }; }
