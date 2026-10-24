@@ -1,5 +1,5 @@
 import type { ContractResult } from "./code-health-contract.js";
-import { codeHealthSourceRequirements } from "./code-health-contract.js";
+import { codeHealthSourceRequirements, validateCodeHealthSourceRequirements } from "./code-health-contract.js";
 import type { ManagedRepo } from "./managed-repos.js";
 import { fixedClock } from "./clock.js";
 
@@ -38,12 +38,12 @@ export interface RepositoryEvidenceInventory {
 }
 
 /** Expected sources are configuration, not evidence that a collector has run. */
-export function buildRepositoryEvidenceInventory(instances: ReadonlyArray<{ instanceId: string; options: { instanceRepository?: ManagedRepo } }>): RepositoryEvidenceInventory {
+export function buildRepositoryEvidenceInventory(instances: ReadonlyArray<{ instanceId: string; evidenceRepository?: string; options: { instanceRepository?: ManagedRepo } }>): RepositoryEvidenceInventory {
   const repos = new Map<string, Set<string>>(), unresolved = new Set<string>();
   for (const instance of instances) {
     if (!text(instance.instanceId, 128)) throw new TypeError("invalid configured instance identity");
     const r = instance.options.instanceRepository;
-    const id = r && typeof r.owner === "string" && typeof r.repo === "string" ? `${r.owner}/${r.repo}`.toLowerCase() : undefined;
+    const id = instance.evidenceRepository?.toLowerCase() ?? (r && typeof r.owner === "string" && typeof r.repo === "string" ? `${r.owner}/${r.repo}`.toLowerCase() : undefined);
     if (!repository(id)) { unresolved.add(instance.instanceId); continue; }
     const members = repos.get(id) ?? new Set<string>(); members.add(instance.instanceId); repos.set(id, members);
   }
@@ -70,6 +70,32 @@ const repository = (v: unknown): v is string => text(v, 140) && /^[a-z0-9][a-z0-
 const repoKey = (v: string): string => v.toLowerCase();
 const repoList = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 256 && v.every(repository) && new Set(v.map(repoKey)).size === v.length;
 const states: readonly string[] = ["complete", "partial", "stale", "not_collected", "unavailable", "unauthorized"];
+
+/** Inventory validates expectations only; no report or scan receipt is implied. */
+export function validateRepositoryEvidenceInventory(value: unknown): ContractResult<RepositoryEvidenceInventory> {
+  const fail = (reason: string): ContractResult<RepositoryEvidenceInventory> => ({ ok: false, reason });
+  if (!record(value) || !only(value, "version repositories unresolvedInstances measurementState") || value.version !== "repository-evidence-inventory-v1" || value.measurementState !== "not_collected") return fail("invalid evidence inventory identity or measurement state");
+  if (!Array.isArray(value.repositories) || !Array.isArray(value.unresolvedInstances) || !value.unresolvedInstances.every((id) => text(id, 128))) return fail("invalid evidence inventory members");
+  const repositories = new Set<string>(), instances = new Set<string>();
+  for (const entry of value.repositories) {
+    if (!record(entry) || !only(entry, "repository instanceIds expectedDailySources expectedQualitySources") || !repository(entry.repository) || !Array.isArray(entry.instanceIds) || !entry.instanceIds.length || !entry.instanceIds.every((id) => text(id, 128))) return fail("invalid expected repository identity");
+    if (repositories.has(repoKey(entry.repository))) return fail("duplicate expected repository");
+    repositories.add(repoKey(entry.repository));
+    const daily = entry.expectedDailySources;
+    if (!Array.isArray(daily) || daily.length !== 3 || !["pull_requests", "ledger_activity", "deployments"].every((kind) => daily.includes(kind))) return fail("invalid expected daily sources");
+    const quality = validateCodeHealthSourceRequirements(entry.expectedQualitySources);
+    if (!quality.ok) return fail(quality.reason);
+    for (const id of entry.instanceIds) {
+      if (instances.has(id)) return fail("instance belongs to multiple inventory entries");
+      instances.add(id);
+    }
+  }
+  for (const id of value.unresolvedInstances) {
+    if (instances.has(id)) return fail("duplicate or contradictory unresolved instance");
+    instances.add(id);
+  }
+  return { ok: true, value: value as unknown as RepositoryEvidenceInventory };
+}
 
 /** Validate exact local midnight bounds, including real 23- and 25-hour days. */
 function calendarWindow(report: DailyProgressReport): ContractResult<true> {
@@ -149,6 +175,7 @@ export function validateDailyProgressReport(value: unknown): ContractResult<Dail
   if (ended && Date.parse(report.generatedAt) < Date.parse(report.windowEnd)) return fail("a finished day cannot precede its ending instant");
   const through = Math.min(Date.parse(report.generatedAt), Date.parse(report.windowEnd));
   const coversWindow = (s: SourceCoverage) => s.state === "complete" && s.coverageStart !== null && s.coverageThrough !== null && Date.parse(s.coverageStart) <= Date.parse(report.windowStart) && Date.parse(s.coverageThrough) >= through;
+  if (c.state === "complete" && !c.sources.every(coversWindow)) return fail("complete coverage lacks a full source window");
   const exactMerges = fullScope && [...included].every((r) => c.sources.some((s) => repoKey(s.repository) === r && s.kind === "pull_requests" && s.required && coversWindow(s)));
   if (ended && c.sources.some((s) => s.required && !coversWindow(s))) return fail("finished report lacks its required source window");
   if (!record(report.totals) || !only(report.totals, "mergedChanges completedTasks") || !Object.values(report.totals).every(count) || !count(report.totals.mergedChanges) || !count(report.totals.completedTasks)) return fail("invalid measured totals");

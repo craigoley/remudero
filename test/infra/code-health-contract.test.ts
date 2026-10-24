@@ -31,12 +31,24 @@ test("quality contracts reject healthy scores from incomplete or incomparable ev
     (a) => { a.summary.assessed = 1; }, (a) => { a.summary.met = 3; },
     (a) => { a.checks[0]!.sourceIds = ["missing"]; },
     (a) => { a.checks[1]!.state = "not_measured"; },
-    (a) => { a.findings.push({ fingerprint: "quality:1", sourceId: "quality", severity: "critical", category: "reliability", status: "new", path: "src/example.ts", title: "Critical issue", effortMinutes: 20, estimateKind: "modeled" }); },
+    (a) => { a.checks[0]!.state = "not_met"; a.summary.met = 1; },
   ];
   for (const mutate of mutations) { const a = assessment(); mutate(a); assert.equal(validateCodeHealthAssessment(a).ok, false, JSON.stringify(a)); }
   const unknown = assessment(); unknown.state = "partial"; unknown.summary = { met: 1, assessed: 1, expected: 2, healthy: null };
   unknown.checks[1]!.state = "not_measured"; unknown.sources[1]!.state = "not_collected"; unknown.sources[1]!.reason = "No coverage result";
   assert.equal(validateCodeHealthAssessment(unknown).ok, true, "unmeasured coverage remains an explicit gap");
+  for (const severity of ["low", "medium", "high", "critical"] as const) {
+    const policy = assessment();
+    policy.findings = [{ fingerprint: "quality:1", sourceId: "quality", severity, category: "reliability", status: "existing",
+      path: "src/example.ts", title: "Finding assessed by declared policy", effortMinutes: 20, estimateKind: "modeled" }];
+    policy.checks[0]!.reason = "The versioned policy accepts this existing finding";
+    assert.equal(validateCodeHealthAssessment(policy).ok, true, "severity alone does not override declared policy checks");
+    policy.summary.healthy = false;
+    assert.equal(validateCodeHealthAssessment(policy).ok, false, "severity alone cannot invent a failing policy check");
+    policy.checks[0]!.state = "not_met"; policy.checks[0]!.reason = "The versioned policy rejects this finding";
+    policy.summary.met = 1;
+    assert.equal(validateCodeHealthAssessment(policy).ok, true, "declared failing checks establish unhealthy at every severity");
+  }
 });
 
 test("expected code quality sources are present before any scan is observed", () => {

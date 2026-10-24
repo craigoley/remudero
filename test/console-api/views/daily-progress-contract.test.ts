@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { buildRepositoryEvidenceInventory, validateDailyProgressReport, type DailyProgressReport } from "#src/lib/daily-progress-contract.js";
+import { buildRepositoryEvidenceInventory, validateRepositoryEvidenceInventory, validateDailyProgressReport, type DailyProgressReport } from "#src/lib/daily-progress-contract.js";
 import { createRepositoriesSourcePublisher, repositoriesSourcesPath } from "#src/lib/repositories-view.js";
 import { withTempDir } from "#src/lib/tmp.js";
+import { repositoriesSources, type ServeDeps } from "#src/lib/serve.js";
 
 function report(): DailyProgressReport {
   return {
@@ -25,6 +26,20 @@ function report(): DailyProgressReport {
 
 test("daily contracts preserve coverage and reject contradictory day identity", () => {
   assert.equal(validateDailyProgressReport(report()).ok, true, "measured merge totals and a 25-hour day are valid while other source gaps remain visible");
+  const complete = report(); complete.coverage.state = "complete";
+  for (const source of complete.coverage.sources) {
+    Object.assign(source, { state: "complete", lastAttemptAt: complete.generatedAt, lastSuccessAt: complete.generatedAt,
+      coverageStart: complete.windowStart, coverageThrough: complete.windowEnd, reason: null });
+  }
+  assert.equal(validateDailyProgressReport(complete).ok, true, "every source covers the entire 25-hour day");
+  for (const index of [1, 2]) {
+    for (const patch of [{ coverageStart: "2026-11-02T04:00:00.000Z" }, { coverageThrough: "2026-11-01T05:00:00.000Z" }]) {
+      const short = structuredClone(complete); Object.assign(short.coverage.sources[index]!, patch);
+      assert.equal(validateDailyProgressReport(short).ok, false, "optional receipts cannot make a one-hour window complete");
+      short.coverage.state = "partial";
+      assert.equal(validateDailyProgressReport(short).ok, true, "partial aggregate coverage preserves the optional source's actual window");
+    }
+  }
   const invalid = [
     { ...report(), version: "unknown" },
     { ...report(), reportDate: "2026-02-30" },
@@ -44,6 +59,68 @@ test("daily contracts preserve coverage and reject contradictory day identity", 
   partial.coverage.expectedRepositories.push("acme/beacon");
   partial.totals = { mergedChanges: { value: 0, precision: "at_least" }, completedTasks: { value: null, precision: "unavailable" } };
   assert.equal(validateDailyProgressReport(partial).ok, true, "missing data is retained as partial, not converted to a healthy zero");
+});
+
+test("the production publisher retains configured core identity separately from summary options", async () => {
+  await withTempDir("core-evidence", async (root) => {
+    const deps = { questionsRoot: root, ledgerPath: join(root, "state", "ledger.ndjson"),
+      panelGraph: { planPath: join(root, "plan", "tasks.yaml") },
+      instances: { coreInstance: "primary", stateBase: join(root, "instances") },
+      assistantRepository: "Acme/Atlas" } as unknown as ServeDeps;
+    const instances = repositoriesSources(deps);
+    assert.equal(instances[0]!.options.instanceRepository, undefined, "core summary options retain their current meaning");
+    const path = repositoriesSourcesPath(root); mkdirSync(dirname(path), { recursive: true });
+    const publish = createRepositoriesSourcePublisher({ stateDir: root, instances: () => repositoriesSources(deps) });
+    assert.equal(publish(), true); assert.equal(publish(), false);
+    const value = JSON.parse(readFileSync(path, "utf8"));
+    assert.deepEqual(value.instances[0].options, JSON.parse(JSON.stringify(instances[0]!.options)));
+    assert.deepEqual(value.improvementEvidence.repositories, [{ repository: "acme/atlas", instanceIds: ["primary"],
+      expectedDailySources: ["pull_requests", "ledger_activity", "deployments"], expectedQualitySources: ["quality", "coverage"] }]);
+    assert.deepEqual(value.improvementEvidence.unresolvedInstances, []);
+    assert.equal(value.improvementEvidence.measurementState, "not_collected");
+    deps.assistantRepository = "Acme/Beacon";
+    assert.equal(publish(), true, "inventory follows server configuration changes without changing summary options");
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).improvementEvidence.repositories[0].repository, "acme/beacon");
+    deps.assistantRepository = undefined;
+    assert.equal(publish(), true);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).improvementEvidence.unresolvedInstances, ["primary"]);
+  });
+});
+
+test("the publisher rejects contradictory inventory before replacing its last valid publication", async () => {
+  await withTempDir("inventory-boundary", async (root) => {
+    const instances = [{ instanceId: "one", options: { root, instanceRepository: { owner: "acme", repo: "atlas" } } }];
+    const path = repositoriesSourcesPath(root); mkdirSync(dirname(path), { recursive: true });
+    const publish = createRepositoriesSourcePublisher({ stateDir: root, instances: () => instances });
+    assert.equal(publish(), true);
+    const before = readFileSync(path, "utf8");
+    instances.push({ instanceId: "one", options: { root, instanceRepository: { owner: "acme", repo: "beacon" } } });
+    assert.throws(publish, /instance belongs to multiple inventory entries/);
+    assert.equal(readFileSync(path, "utf8"), before, "invalid expectations do not replace the published source");
+    instances.pop();
+    assert.equal(publish(), false, "a rejected publication does not advance the publisher's cache");
+  });
+});
+
+test("inventory contracts validate both daily and quality expectations without asserting observations", () => {
+  const inventory = buildRepositoryEvidenceInventory([{ instanceId: "one", options: { instanceRepository: { owner: "acme", repo: "atlas" } } }]);
+  assert.deepEqual(validateRepositoryEvidenceInventory(inventory), { ok: true, value: inventory });
+  for (const value of [null, [], {}, { ...inventory, measurementState: "complete" }, { ...inventory, version: "unknown" },
+    { ...inventory, repositories: null }, { ...inventory, unresolvedInstances: [""] }]) {
+    assert.equal(validateRepositoryEvidenceInventory(value).ok, false);
+  }
+  const changes: Array<(v: typeof inventory) => void> = [
+    (v) => { v.repositories[0]!.repository = "acme/.."; },
+    (v) => { v.repositories[0]!.instanceIds = []; },
+    (v) => { v.repositories[0]!.expectedDailySources = ["pull_requests", "pull_requests", "deployments"]; },
+    (v) => { v.repositories[0]!.expectedQualitySources = ["quality"]; },
+    (v) => { v.repositories[0]!.expectedQualitySources = ["quality", "quality"]; },
+    (v) => { v.repositories[0]!.expectedQualitySources.push("scanner-that-never-ran"); },
+    (v) => { v.repositories.push({ ...v.repositories[0]!, repository: "ACME/ATLAS" }); },
+    (v) => { v.unresolvedInstances = ["one"]; },
+    (v) => { v.unresolvedInstances = ["unknown", "unknown"]; },
+  ];
+  for (const change of changes) { const v = structuredClone(inventory); change(v); assert.equal(validateRepositoryEvidenceInventory(v).ok, false); }
 });
 
 test("the repositories publisher exposes expected inventory independently of observed events", async () => {

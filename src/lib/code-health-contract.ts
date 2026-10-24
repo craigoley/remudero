@@ -30,6 +30,12 @@ export function codeHealthSourceRequirements(): readonly string[] {
   return [...CODE_HEALTH_SOURCE_KINDS];
 }
 
+/** Required expectations do not assert that any scanner is configured or has run. */
+export function validateCodeHealthSourceRequirements(value: unknown): ContractResult<string[]> {
+  return Array.isArray(value) && value.length === CODE_HEALTH_SOURCE_KINDS.length && CODE_HEALTH_SOURCE_KINDS.every((kind) => value.includes(kind))
+    ? { ok: true, value } : { ok: false, reason: "invalid expected code health sources" };
+}
+
 type Fields = Record<string, unknown>;
 const text = (v: unknown, max = 256): v is string => typeof v === "string" && v.length > 0 && v.length <= max && !v.includes("\0");
 const record = (v: unknown): v is Fields => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -105,9 +111,8 @@ export function validateCodeHealthAssessment(value: unknown): ContractResult<Cod
   if (!record(s) || !only(s, "met assessed expected healthy") || !natural(s.met) || !natural(s.assessed) || !natural(s.expected) || ![true, false, null].includes(s.healthy)) return fail("invalid assessment summary");
   if (s.met !== a.checks.filter((c) => c.state === "met").length || s.assessed !== a.checks.filter((c) => c.state !== "not_measured").length || s.expected !== a.checks.length) return fail("summary must count the declared checks without dropping missing ones");
   const complete = a.currentSha === a.analyzedSha && CODE_HEALTH_SOURCE_KINDS.every((kind) => a.sources.some((source) => source.kind === kind && source.required && comparable(source, a))) && a.sources.filter((source) => source.required).every((source) => comparable(source, a));
-  const urgent = a.findings.some((f) => f.severity === "critical" || f.severity === "high");
   if (a.state === "measured" && (!complete || s.assessed !== s.expected || !s.expected)) return fail("measured assessment has missing or incomparable evidence");
-  if (s.healthy === true && (a.state !== "measured" || !complete || !s.expected || s.met !== s.expected || urgent)) return fail("healthy assessment requires complete comparable evidence and no urgent findings");
-  if (s.healthy === false && s.met === s.assessed && !urgent) return fail("unhealthy assessment needs an observed failing check or urgent finding");
+  if (s.healthy === true && (a.state !== "measured" || !complete || !s.expected || s.met !== s.expected)) return fail("healthy assessment requires complete comparable evidence and passing policy checks");
+  if (s.healthy === false && s.met === s.assessed) return fail("unhealthy assessment needs an observed failing policy check");
   return { ok: true, value: a };
 }

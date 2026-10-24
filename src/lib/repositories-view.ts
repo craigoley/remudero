@@ -36,7 +36,7 @@ import type { RepoLedgerWatermark } from "./repo-ledger-index.js";
 import type { ShadowLegacy } from "./view-shadow.js";
 import type { ViewSource } from "./views.js";
 import { createViewHoldBook, type ThreadHolds } from "./worker-heaps.js";
-import { buildRepositoryEvidenceInventory, type RepositoryEvidenceInventory } from "./daily-progress-contract.js";
+import { buildRepositoryEvidenceInventory, validateRepositoryEvidenceInventory, type RepositoryEvidenceInventory } from "./daily-progress-contract.js";
 
 /** 2: each summary's `generated_at` left `data` for its `repositories:<instance>` source's `asOf`, so the ETag moves only with content. */
 export const REPOSITORIES_VIEW_VERSION = 2;
@@ -49,7 +49,7 @@ export type RepositoriesInstanceOptions = Pick<
 >;
 
 export interface RepositoriesSources {
-  instances: Array<{ instanceId: string; options: RepositoriesInstanceOptions }>;
+  instances: Array<{ instanceId: string; evidenceRepository?: string; options: RepositoriesInstanceOptions }>;
   /** Optional on older publishers; missing means inventory has not been collected, never an empty measured set. */
   improvementEvidence?: RepositoryEvidenceInventory;
 }
@@ -117,7 +117,9 @@ export function createRepositoriesSourcePublisher(opts: { stateDir: string; inst
   let written: string | undefined;
   return () => {
     const instances = opts.instances();
-    const text = JSON.stringify({ instances, improvementEvidence: buildRepositoryEvidenceInventory(instances) } satisfies RepositoriesSources);
+    const inventory = validateRepositoryEvidenceInventory(buildRepositoryEvidenceInventory(instances));
+    if (!inventory.ok) throw new TypeError(inventory.reason);
+    const text = JSON.stringify({ instances, improvementEvidence: inventory.value } satisfies RepositoriesSources);
     if (text === written) return false;
     writeAtomic(path, text);
     written = text;

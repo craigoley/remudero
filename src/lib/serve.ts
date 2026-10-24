@@ -3593,7 +3593,7 @@ export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questio
 export function repositoriesSources(deps: ServeDeps): RepositoriesSources["instances"] {
   const core = deps.instances?.coreInstance ?? CORE_INSTANCE;
   return [
-    { instanceId: core, options: {
+    { instanceId: core, ...(deps.assistantRepository ? { evidenceRepository: deps.assistantRepository } : {}), options: {
       root: deps.questionsRoot, repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), ownInstance: core,
       controlRoot: deps.fleetControlRoot, incidentsDir: deps.incidents?.stateDir ?? dirname(deps.ledgerPath), ledgerPath: deps.ledgerPath, planPath: deps.panelGraph.planPath,
     } },
