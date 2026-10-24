@@ -76,6 +76,7 @@ import {
   type SourceSnapshotWrite,
 } from "./read-model-db.js";
 import { threadSlowLane, type SlowLane, type SlowLaneBodies, type SlowLaneConfig } from "./read-model-slow-lane.js";
+import { commitDailyProgressPublication, type DailyProgressPublication } from "./daily-progress-store.js";
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
@@ -822,6 +823,8 @@ export interface ReadModelTicker {
   /** Takes every key of a view the slow lane built: each is served like a materialized body, and a key not among them is dropped. */
   accept(built: SlowLaneBodies): void;
   acceptSnapshot(write: SourceSnapshotWrite): boolean;
+  /** Publish staged daily history only through this projector's current home lease. */
+  publishDailyProgress(publication: DailyProgressPublication): void;
   /** A views-only ticker's instance states, as the projector thread last posted them. */
   observe(instances: readonly ReadModelInstanceState[]): void;
   /** Main asked for a key of a demand view. True when the key is new, and its view is due at once. */
@@ -1778,6 +1781,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       lastEtag.set(`${entry.view}\u0000${entry.key}`, entry.etag);
       latest.set(`${entry.view}\u0000${entry.key}`, entry);
     },
+    publishDailyProgress(publication): void {
+      const home = slots[0];
+      if (viewsOnly || !home || !home.db || !home.lease || home.state.lease !== "held" || stopRequested()) throw new Error("daily publication has no active home projector owner");
+      const db = home.db;
+      commitDailyProgressPublication(opts.stateDir, publication, db, home.lease,
+        () => !stopRequested() && currentReadModelPath(opts.stateDir, home.instance.name, LEDGER_PROJECTOR_SCHEMA_VERSION) === db.path);
+    },
     acceptSnapshot(write: SourceSnapshotWrite): boolean {
       if (opts.lane !== "heavy" && !writeSnapshot(write)) return false;
       for (const unit of units) if (unit.view.snapshotSourced) unit.dueAt = 0;
@@ -2124,6 +2134,7 @@ export function runReadModelWorker(
   const [owner, repo] = data.escalationRepository?.split("/") ?? [];
   const escalation = owner && repo ? { issues: ghIssueGateway(owner, repo), ledgerPath: join(data.stateDir, LEDGER_FILENAME), runId: READ_MODEL_WORKER_KIND } : undefined;
   let slowLane: SlowLane | undefined;
+  let dailyOwnershipEpoch = 0, dailyOwnershipKey = "";
   const log = readModelWorkerLog((message) => port.postMessage(message), false);
   setLedgerMemoRetentionContext({ thread: "projector", log, instances: data.instances });
   const holder = randomUUID();
@@ -2133,15 +2144,21 @@ export function runReadModelWorker(
   });
   const post = (m: ReadModelWorkerMessage): void => {
     if (m.type === "state") {
+      const owned = m.instances.filter(i => i.lease === "held").map(i => i.instance);
+      const ownershipKey = JSON.stringify([m.instances[0]?.lease === "held", owned]);
+      if (dailyOwnershipKey !== ownershipKey) { dailyOwnershipEpoch++; dailyOwnershipKey = ownershipKey; }
       slowLane?.views(m.switches.views);
-      slowLane?.lease(m.instances[0]?.lease === "held", m.instances.filter(i => i.lease === "held").map(i => i.instance));
+      slowLane?.lease(m.instances[0]?.lease === "held", owned, dailyOwnershipEpoch);
       views.state(m.instances);
     }
     port.postMessage(m);
   };
-  const slowLaneConfig = data.slowLane && { ...data.slowLane,
-    instanceInboxes: data.instances.flatMap(i => i.inbox ? [i.inbox] : []),
-    analytics: data.slowLane.analytics ?? { instances: data.instances.map((i) => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) } };
+  const dailyInstances = data.instances.flatMap(i => i.repo ? [{ name: i.name, repository: i.repo, root: dirname(i.ledgerDir), stateDir: i.ledgerDir }] : []);
+  const dailyProgress = data.slowLane?.dailyProgress ?? (dailyInstances.length ? { stateDir: data.stateDir, instances: dailyInstances } : undefined);
+  const slowLaneConfig: SlowLaneConfig | undefined = data.slowLane || dailyProgress ? { ...data.slowLane,
+    ...(data.slowLane ? { instanceInboxes: data.instances.flatMap(i => i.inbox ? [i.inbox] : []),
+      analytics: data.slowLane.analytics ?? { instances: data.instances.map(i => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) } } : {}),
+    ...(dailyProgress ? { dailyProgress } : {}) } : undefined;
   let snapshotWrites = Promise.resolve();
   if (slowLaneConfig) slowLane = threadSlowLane({ config: slowLaneConfig, log, onBodies: (built) => views.accept(built), onSnapshot: (write) => {
     snapshotWrites = snapshotWrites.then(async () => {
@@ -2154,6 +2171,10 @@ export function runReadModelWorker(
         ? { ...body, body: { ...(body.body as object),
           ...(repositoryFlow ? { repositoryFlow } : {}) } } : body) });
     });
+  }, onDailyProgress: (publication, ownershipEpoch) => {
+    if (stopRequested() || ownershipEpoch !== dailyOwnershipEpoch) return;
+    try { ticker.publishDailyProgress(publication); log("read_model.daily_committed", { generation: publication.baseGeneration + 1 }); }
+    catch (error) { log("read_model.daily_publication_refused", { reason: String((error as Error).message).slice(0, 2048) }); }
   } });
   // C5: one short-lived child per slice, so a slice's memory leaves serve when it is done.
   const oracleRunner = childOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log });

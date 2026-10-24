@@ -9,6 +9,8 @@ import { collectDailyProgress } from "#src/lib/daily-progress-collector.js";
 import { dailyProgressDayKey, readDailyProgressManifest, readDailyProgressRevision } from "#src/lib/daily-progress-store.js";
 import { acquireLease, openReadModel } from "#src/lib/read-model-db.js";
 import { withTempDir } from "#src/lib/tmp.js";
+import { createReadModelTicker } from "#src/lib/read-model-worker.js";
+import { runSlowLaneWorker, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
 
 test("daily progress collector reuses complete snapshots with truthful attribution and source clocks", async () => {
   await withTempDir("daily-collector", async root => {
@@ -58,5 +60,55 @@ test("daily progress collector reuses complete snapshots with truthful attributi
       assert.equal(retained.report.totals.mergedChanges.value, 206);
       assert.equal(retained.report.coverage.sources.find(s => s.kind === "pull_requests")!.state, "unavailable");
     } finally { db.close(); }
+  });
+});
+
+test("daily progress collects hourly and closes local days without page demand", { timeout: 15_000 }, async () => {
+  await withTempDir("daily-worker", async root => {
+    const stateDir = join(root, "state"); mkdirSync(stateDir, { recursive: true }); writeFileSync(join(stateDir, "ledger.ndjson"), "");
+    let now = Date.parse("2026-11-01T04:25:00Z");
+    const clock = { now: () => now, iso: () => fixedClock(now).iso(), date: () => fixedClock(now).date() };
+    const cache = createBoardSnapshotCache(root, "acme", "app", { clock });
+    cache.recordClosedAttempt!({ ok: true, persisted: cache.commitClosed([]) }); cache.commitOpen!([], now);
+    const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [], oracle: "off", holder: "daily-worker-proof", clock, post: () => {} });
+    ticker.start();
+    let receive: (msg: { type: string; held?: boolean; instances?: string[]; ownershipEpoch?: number; modes?: Record<string, string> }) => void = () => { throw new Error("worker port not attached"); };
+    let scheduled: (() => void) | undefined;
+    let notify: () => void = () => {}, cancelled: () => void = () => {};
+    let rejection: (error: Error) => void = () => {};
+    const nextCommit = () => new Promise<void>((resolve, reject) => { notify = resolve; rejection = reject; });
+    let commits = 0;
+    const lane = runSlowLaneWorker({ on(_event, listener) { receive = listener; }, postMessage(value) {
+      const message = value as SlowLaneMessage;
+      if (message.type === "daily_progress") {
+        try { assert.equal(message.ownershipEpoch, 1); ticker.publishDailyProgress(structuredClone(message.publication)); commits++; notify(); }
+        catch (error) { rejection(error as Error); }
+      }
+      if (message.type === "log" && message.step === "read_model.daily_failed") rejection(new Error(String(message.extra.reason)));
+      if (message.type === "log" && message.step === "read_model.daily_cancelled") cancelled();
+    } }, { dailyProgress: { stateDir, expectedRepositories: ["acme/app"], instances: [{ name: "core", repository: "acme/app", stateDir, root }] } }, {
+      clock, schedule(run) { scheduled = run; return () => { if (scheduled === run) scheduled = undefined; }; },
+    });
+    try {
+      receive({ type: "views", modes: { analytics: "off", "daily-progress": "off" } });
+      const first = nextCommit(); receive({ type: "lease", held: true, instances: ["core"], ownershipEpoch: 1 }); await first;
+      assert.equal(commits, 1);
+      assert.ok(readDailyProgressManifest(stateDir).days[dailyProgressDayKey("acme/app", "America/New_York", "2026-11-01")]);
+      now = Date.parse("2026-11-01T05:00:00Z"); ticker.tick();
+      const hourly = nextCommit(); assert.ok(scheduled); scheduled(); await hourly;
+      assert.equal(commits, 2, "the repeated local hour remains a distinct hourly collection slot");
+      now = Date.parse("2026-11-02T05:00:00Z"); ticker.tick();
+      cache.recordClosedAttempt!({ ok: true, persisted: cache.commitClosed([]) });
+      const midnight = nextCommit(); assert.ok(scheduled); scheduled(); await midnight;
+      const manifest = readDailyProgressManifest(stateDir);
+      const closed = readDailyProgressRevision(stateDir, manifest.days[dailyProgressDayKey("acme/app", "America/New_York", "2026-11-01")]!);
+      assert.equal(closed.report.windowEnd, "2026-11-02T05:00:00.000Z");
+      assert.ok(["complete", "corrected"].includes(closed.report.phase));
+      assert.ok(manifest.days[dailyProgressDayKey("acme/app", "America/New_York", "2026-11-02")]);
+      now += 3_600_000; ticker.tick();
+      const aborted = new Promise<void>(resolve => { cancelled = resolve; });
+      assert.ok(scheduled); scheduled(); receive({ type: "lease", held: false, instances: [], ownershipEpoch: 2 }); await aborted;
+      assert.equal(readDailyProgressManifest(stateDir).generation, manifest.generation, "lost ownership cannot advance durable jobs or reports");
+    } finally { lane.stop(); ticker.release(); }
   });
 });
