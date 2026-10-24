@@ -11,7 +11,9 @@ const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 /** The tracked source of `name` (relative to `src/`), read fresh each call — never cached, so a
  *  structural assertion always reads what is actually on disk in this worktree. */
 function readSrc(name: string): string {
-  return readFileSync(join(SRC_DIR, name), "utf8");
+  // W1-T9337: resolver call-site counts span the entrypoint and extracted fix rung.
+  const owners = name === "run-task.ts" ? [name, "cli/commands/fix.ts"] : [name];
+  return owners.map((owner) => readFileSync(join(SRC_DIR, owner), "utf8").replace(/\bhost\./g, "")).join("\n");
 }
 
 // W1-T2315 — TWO RESOLVERS DECIDE WHETHER A PR BODY IS JUDGED AND NOTHING RECONCILES THEM.

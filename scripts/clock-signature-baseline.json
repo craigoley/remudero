@@ -4,6 +4,11 @@
     "dateNow": 2,
     "newDate": 1
   },
+  "src/cli/commands/fix.ts": {
+    "legacy": 0,
+    "dateNow": 1,
+    "newDate": 0
+  },
   "src/lib/account-usage.ts": {
     "legacy": 1,
     "dateNow": 0,
@@ -421,7 +426,7 @@
   },
   "src/run-task.ts": {
     "legacy": 20,
-    "dateNow": 48,
+    "dateNow": 47,
     "newDate": 32
   },
   "src/spike.ts": {
