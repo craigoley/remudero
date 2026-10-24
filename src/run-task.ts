@@ -2458,6 +2458,17 @@ export async function mainTipViaGit(repoDir: string): Promise<string> {
   return (await hostWorktreeGitAsync(repoDir, ["rev-parse", "origin/main"])).trim();
 }
 
+export function buildRequiredFixReviewRunner(
+  next: typeof runReview,
+  readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
+): typeof runReview {
+  return async (args) => {
+    const startFreshness = await ownStartFreshness(readFreshness);
+    return next({ ...args, requireSemanticReview: true,
+      reviewerCodeFreshness: reviewerFreshnessForPublication(startFreshness, readFreshness) });
+  };
+}
+
 export function buildSweepEffects(
   deps: BuildSweepEffectsDeps & {
     /** W1-T3618 test seam: override the reviewer-code freshness read the review gate below uses.
@@ -2571,8 +2582,9 @@ export function buildSweepEffects(
     worktreeRoot: join(repoRoot, "..", "worktrees"),
     spawnReview: spawnRmdReviewForFreshTree,
   };
+  const readReviewerCodeFreshness = reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshnessAsync(repoRoot, process.env));
   const reviewerCodeGate = buildReviewerCodeFreshnessGate(
-    reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshnessAsync(repoRoot, process.env)),
+    readReviewerCodeFreshness,
     deps.log,
     reviewCommand,
     buildFreshTreeReviewRunner(repoRoot, freshTreeSeams),
@@ -2827,7 +2839,7 @@ export function buildSweepEffects(
     waitForCiGreenImpl: waitForCiGreen,
     restRollupForImpl: restRollupFor,
     fetchCiFailuresImpl: fetchCiFailuresAsync,
-    runReviewImpl: runReview,
+    runReviewImpl: buildRequiredFixReviewRunner(runReview, readReviewerCodeFreshness),
     fetchPrBodyImpl: fetchPrBodyViaGh,
     // W1-T3869: the missing-trailer repair's writer. Unwired, `requiredSweepRuntime` throws
     // `buildSweepEffects requires updatePrBodyImpl from its entrypoint adapter` the moment
