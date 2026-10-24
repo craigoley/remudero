@@ -75,7 +75,9 @@ function judgePorts(planRoot: string, writeRoot: string, judge: (input: RiskJudg
 test("a machine record whose depends_on names a task in another shard is judged and lands", async () => {
   const root = planTree({ "W1-T9300-x.yaml": mergedOperatorShard("W1-T9300"), "W1-T9301-x.yaml": machineShard("W1-T9301", ["W1-T9300"]) });
   try {
-    const report = await runMachineFilingJudge(judgePorts(root, root, low).p);
+    const { p } = judgePorts(root, root, low);
+    p.isMerged = id => id === "W1-T9300";
+    const report = await runMachineFilingJudge(p);
     assert.deepEqual(report.proceeded, ["W1-T9301"], "the dependency resolves against the whole plan");
     const task = readPlan(root).byId.get("W1-T9301")!;
     assert.equal(task.verify, "auto");

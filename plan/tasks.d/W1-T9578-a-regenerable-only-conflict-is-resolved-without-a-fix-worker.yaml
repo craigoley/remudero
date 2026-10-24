@@ -14,6 +14,9 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/a-regenerable-only-conflict-is-resolved-without-a-fix-worker.test.ts
+    - src/lib/worktree-sites.ts
+    - test/worktree-creation-census.test.ts
+    - src/lib/ledger.ts
   status: queued
   priority: 1
   attempts: 0
@@ -57,6 +60,14 @@
     lint-plan's duplicate-surface check pairs this with W1-T100 (tasks.yaml, queued, src/lib/sweep.ts and src/run-task.ts).
     That task routes blocked_ci to the ci-log fix path, a different concern. This task touches only the conflicted path.
   design: |
+    Operator-bounded creation-contract amendment: permit exactly one named WORKTREE_SITE_REGISTRY
+    exemption for src/lib/sweep.ts::regenerateConflictViaGit, whose detached tree starts at the leased
+    PR head rather than a new origin/main branch. The original eleven entries and reasons remain;
+    the two exact creation-census inventories may add only this site (eleven exemptions to twelve).
+    Both head and main leases, unknown/refusal paths, temporary-tree ownership and cleanup remain.
+    Declare src/lib/ledger.ts only for sweep.merge_probe and sweep.conflict_regenerated retention;
+    no retention limit, retry, timeout, budget, original acceptance/falsifier or other gate changes.
+    This permits neither a generic raw-worktree exemption nor weaker dependency/sandbox provisioning.
     No new bound. A conflict git can name, and the registry can resolve, is resolved by the pass that sees it.
     1. TRIGGER. For a PR the sweep would disposition `conflicted` on its own task's run branch (fixHeadAcceptable), the
        pass reads its sweep.merge_probe row for the PR's exact head_sha and the pass's main_sha. When the verdict is
@@ -91,3 +102,11 @@
     worker", and pushes nothing, so the first title test fails. Drop the subset check on `git ls-files -u` and the
     hand-written fixture is pushed with conflict markers or one side discarded, so the second test fails. Resolve a
     both-sides registry edit by taking either side's bytes and the third test's generator-output comparison fails.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-24T16:30:38.137Z"
+    pin: "9f698b4ea5269c026030080d4059f72a0f99101872b771e03139355a71ba08e5"

@@ -1,0 +1,31 @@
+id: incident-b832369201e03f4e
+ts: 2026-10-24T17:12:18.388Z
+raw: >-
+  Incident b832369201e0: intervention
+  conflict:conflict-rebase:mergeability-unknown-merge-conflict-read
+
+  First seen: 2026-10-24T17:09:08.632Z
+
+  Last seen: 2026-10-24T17:12:17.140Z
+
+  Count: 12, burn: 12.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10988@5e057c422 actor=cao825 cause=conflict:conflict-rebase:mergeability-unknown-merge-conflict-read — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#11049@8bb6c0d1c actor=cao825 cause=conflict:conflict-rebase:mergeability-unknown-merge-conflict-read — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#11759@218ee6529 actor=cao825 cause=conflict:conflict-rebase:mergeability-unknown-merge-conflict-read — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#b832369201e03f4edf98af3f43e16be0e6fa9f0a304f210a161ec1c570e9be81
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

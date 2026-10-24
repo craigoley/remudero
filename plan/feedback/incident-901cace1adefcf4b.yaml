@@ -1,0 +1,31 @@
+id: incident-901cace1adefcf4b
+ts: 2026-10-24T16:54:47.655Z
+raw: >-
+  Incident 901cace1adef: intervention
+  awaiting-ci:ci:checks-pending-waiting-re-deriving-next
+
+  First seen: 2026-10-24T16:52:39.577Z
+
+  Last seen: 2026-10-24T16:54:46.708Z
+
+  Count: 55, burn: 55.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10350@5ea106f83 actor=cao825 cause=awaiting-ci:ci:checks-pending-waiting-re-deriving-next — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10350@805648bfa actor=cao825 cause=awaiting-ci:ci:checks-pending-waiting-re-deriving-next — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10350@d8db21ddc actor=cao825 cause=awaiting-ci:ci:checks-pending-waiting-re-deriving-next — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#901cace1adefcf4bcd13ff9437a56058808283d3c765039c2fea573046c23468
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

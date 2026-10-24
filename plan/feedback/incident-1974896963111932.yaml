@@ -1,0 +1,31 @@
+id: incident-1974896963111932
+ts: 2026-10-24T17:02:01.648Z
+raw: >-
+  Incident 197489696311: intervention
+  awaiting-ci:ci:checks-pending-review-never-posted-runni
+
+  First seen: 2026-10-24T16:59:54.504Z
+
+  Last seen: 2026-10-24T17:01:55.431Z
+
+  Count: 33, burn: 33.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10350@b96cfc011 actor=cao825 cause=awaiting-ci:ci:checks-pending-review-never-posted-runni — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10350@1a0631ba2 actor=cao825 cause=awaiting-ci:ci:checks-pending-review-never-posted-runni — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10350@92d77da56 actor=cao825 cause=awaiting-ci:ci:checks-pending-review-never-posted-runni — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#1974896963111932996e15b69a776adc3498c86bea50bf57d4df3a9f2d82896c
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

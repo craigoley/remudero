@@ -120,7 +120,9 @@ test("W1-T10511: a Claude login that cannot reach the fleet store answers unavai
   assert.equal(existsSync(fleet), false);
   mkdirSync(fleet, { recursive: true });
   assert.ok(createClaudeFleetLoginStagingDir(realHome).startsWith(`${fleet}/.claude-login-`));
-  assert.deepEqual(await replaceClaudeFleetCredential({ realHome, stagingDir: staged }), { kind: "replaced", expiresAtMs: expiresAt });
+  assert.deepEqual(await replaceClaudeFleetCredential({ realHome, stagingDir: staged }), {
+    kind: "replaced", identity: "staged-identity-missing", expiresAtMs: expiresAt,
+  });
 });
 
 test("W1-T10511: a serve container without the fleet-auth bind is mount drift", (t) => {
