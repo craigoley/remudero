@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { userInfo } from "node:os";
 import { test, type TestContext } from "node:test";
@@ -185,9 +185,12 @@ test("W1-T10507: the installer reports a live checkout whose hooks dir lacks the
   assert.equal(r.status, 0, r.stderr);
   assert.equal(config().stdout.trim(), absolute);
   assert.equal(readFileSync(alternate, "utf8"), before, "install must not replace a hook");
-  copyFileSync(HOOK, alternate);
-  chmodSync(alternate, 0o644);
-  assert.ok(run().stdout.includes(`MISSING ${f.dir} post-checkout`));
+  unlinkSync(alternate);
+  // No execute bits makes a regular hook non-executable even for root; this is not a read denial.
+  writeFileSync(alternate, readFileSync(HOOK), { mode: 0o644, flag: "wx" });
+  r = run();
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.ok(r.stdout.includes(`MISSING ${f.dir} post-checkout`), r.stdout);
   chmodSync(alternate, 0o755);
   assert.equal(run().status, 0);
   f.git(["config", "core.hooksPath", "installer/absolute hooks"]);
