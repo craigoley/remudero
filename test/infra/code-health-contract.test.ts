@@ -45,3 +45,29 @@ test("expected code quality sources are present before any scan is observed", ()
   assert.equal(value.measurementState, "not_collected");
   assert.deepEqual(buildRepositoryEvidenceInventory([{ instanceId: "one", options: { instanceRepository: { owner: "..", repo: "not-a-repo" } } }]).unresolvedInstances, ["one"]);
 });
+
+test("quality evidence preserves known failures and rejects malformed provenance", () => {
+  for (const value of [null, [], {}, { ...assessment(), daemonUrl: "https://private.invalid" }]) assert.equal(validateCodeHealthAssessment(value).ok, false);
+  const changes: Array<(a: CodeHealthAssessment) => void> = [
+    (a) => { a.repository = "acme/.."; }, (a) => { a.analyzedSha = "bad"; },
+    (a) => { a.observedAt = "2026-02-30T05:00:00.000Z"; },
+    (a) => { a.sources[0]!.observedAt = "2026-11-02T06:00:00.000Z"; },
+    (a) => { a.sources[0]!.scopeHash = null; },
+    (a) => { a.sources[0]!.baseline!.sha = "c".repeat(40); },
+    (a) => { a.sources.push(a.sources[0]!); },
+    (a) => { a.checks.push(a.checks[0]!); },
+    (a) => { a.checks[0]!.sourceIds = []; },
+    (a) => { a.checks[0]!.sourceIds.push("quality"); },
+    (a) => { a.summary.expected = 1; },
+    (a) => { a.summary.healthy = false; },
+  ];
+  for (const change of changes) { const a = assessment(); change(a); assert.equal(validateCodeHealthAssessment(a).ok, false, JSON.stringify(a)); }
+  const failing = assessment(); failing.checks[0]!.state = "not_met"; failing.summary = { met: 1, assessed: 2, expected: 2, healthy: false };
+  failing.findings = [{ fingerprint: "quality:1", sourceId: "quality", severity: "high", category: "reliability", status: "existing", path: "src/example.ts", title: "Observed issue", effortMinutes: null, estimateKind: null }];
+  assert.equal(validateCodeHealthAssessment(failing).ok, true, "a measured failure does not disappear because its score is poor");
+  for (const patch of [{ sourceId: "missing" }, { path: "../private" }, { effortMinutes: 20, estimateKind: null }, { effortMinutes: -1, estimateKind: "modeled" }]) {
+    const a = structuredClone(failing); Object.assign(a.findings[0]!, patch); assert.equal(validateCodeHealthAssessment(a).ok, false);
+  }
+  const unknown = structuredClone(failing); unknown.state = "partial"; unknown.sources[0]!.baseline = null; unknown.findings[0]!.status = "unknown";
+  assert.equal(validateCodeHealthAssessment(unknown).ok, true, "a known finding can remain unclassified until comparable baseline evidence exists");
+});
