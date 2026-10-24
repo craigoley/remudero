@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { Clock } from "../src/lib/clock.js";
 import { openReadModel } from "../src/lib/read-model-db.js";
+import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
 import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "../src/lib/ledger-projector.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
@@ -24,11 +25,32 @@ import { buildReadModelViewRoutes, viewEtag, type ViewBodySource } from "../src/
 const T0 = Date.parse("2026-10-02T12:00:00.000Z");
 const KEY = "id=W1-T1&instance=core";
 
-type TestCtx = { after: (fn: () => void) => void };
+type TestCtx = { after: (fn: () => unknown) => void };
+type Retirement = { roots: string[]; releases: Array<() => unknown> };
+const retirements = new WeakMap<TestCtx, Retirement>();
+
+async function retireFixture(owned: Retirement, settle = flushReadModelTransactions): Promise<void> {
+  const errors: unknown[] = [];
+  for (const release of [...owned.releases].reverse()) {
+    try { await release(); } catch (error) { errors.push(error); }
+  }
+  if (errors.length) throw new AggregateError(errors, "view-demand fixture release failed; directories preserved");
+  await settle();
+  for (const root of owned.roots) rmSync(root, { recursive: true, force: true });
+}
+
+function retirement(t: TestCtx): Retirement {
+  let owned = retirements.get(t);
+  if (owned) return owned;
+  owned = { roots: [], releases: [] };
+  retirements.set(t, owned);
+  t.after(() => retireFixture(owned!));
+  return owned;
+}
 
 function scratch(t: TestCtx, kind: string): string {
   const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  retirement(t).roots.push(dir);
   return dir;
 }
 
@@ -104,7 +126,7 @@ function ticker(t: TestCtx, opts: { clock: Clock; stateDir: string; ledgerDir: s
     stateDir: opts.stateDir, instances: [{ name: "core", ledgerDir: opts.ledgerDir }], clock: opts.clock, holder: "view-demand", oracle: "off",
     demand: opts.book, views: [demandView(opts.book, opts.builds)], post: opts.post,
   });
-  t.after(() => made.release());
+  retirement(t).releases.push(() => made.release());
   made.start();
   return made;
 }
@@ -412,7 +434,7 @@ parentPort.on("message", (m) => {
 setInterval(() => {}, 1000);
 `);
   const handle = createReadModelWorker({ stateDir: dir, instances: [{ name: "core", ledgerDir: dir }], workerUrl: pathToFileURL(workerPath), stopWaitMs: 20, every: () => () => {} });
-  t.after(() => handle.stop());
+  retirement(t).releases.push(() => { handle.stop(); });
   assert.equal(handle.want?.("task", KEY), false, "before start there is no worker to ask");
   handle.start();
   const answer = await awaitViewDemand(handle, "task", KEY, {
@@ -434,7 +456,7 @@ test("W1-T5048: the view thread builds a wanted task key in the pass its want me
   // The projector thread's side: it holds the lease and posts the instance state the view thread waits for.
   const posted: ReadModelWorkerMessage[] = [];
   const projector = createReadModelTicker({ stateDir, instances, oracle: "off", holder: "vdw-projector", views: [], post: (m) => void posted.push(m) });
-  t.after(() => projector.release());
+  retirement(t).releases.push(() => projector.release());
   projector.start();
   projector.tick();
   const state = posted.find((m) => m.type === "state");
@@ -448,7 +470,7 @@ test("W1-T5048: the view thread builds a wanted task key in the pass its want me
     { stateDir, instances, tickMs: 60_000, holder: "vdw-projector" },
   );
   const send = (msg: ReadModelViewsInput): void => handlers.forEach((run) => run(msg));
-  t.after(() => send({ type: "stop" }));
+  retirement(t).releases.push(() => send({ type: "stop" }));
   await sleep(50); // the thread finishes starting; messages before that are queued
   send({ type: "state", instances: state.instances });
   const taskBodies = (): ReadModelBodyEntry[] => out.flatMap((m) => (m.type === "body" && m.entry.view === "task" ? [m.entry] : []));
@@ -459,4 +481,48 @@ test("W1-T5048: the view thread builds a wanted task key in the pass its want me
   for (let waited = 0; waited < 5_000 && taskBodies().length === 0; waited += 20) await sleep(20);
   assert.equal(taskBodies().filter((entry) => entry.key === KEY).length, 1, "the want message built the key in a pass of its own, long before the next timer tick");
   assert.equal((taskBodies()[0]!.body.data as { id: string; instance: string }).id, "W1-T1");
+});
+
+
+test("view-demand retirement releases every owner before removing any fixture directory", async () => {
+  const root = makeTempDir("view-demand-retirement-control");
+  let released = false;
+  const owned: Retirement = { roots: [root], releases: [() => { assert.equal(existsSync(root), true); released = true; }] };
+  await retireFixture(owned);
+  assert.equal(released, true);
+  assert.equal(existsSync(root), false);
+});
+
+test("view-demand retirement preserves evidence after a release or diagnostic failure", async () => {
+  const root = makeTempDir("view-demand-retirement-refusal");
+  let attempted = false;
+  try {
+    await assert.rejects(retireFixture({ roots: [root], releases: [() => { attempted = true; }, () => { throw new Error("release refused"); }] }), /release failed/);
+    assert.equal(attempted, true);
+    assert.equal(existsSync(root), true);
+    await assert.rejects(retireFixture({ roots: [root], releases: [] }, async () => { throw new Error("diagnostic refused"); }), /diagnostic refused/);
+    assert.equal(existsSync(root), true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("view-demand fixture retires its real ticker before directory deletion and diagnostic publication settles", async (t) => {
+  const stateDir = scratch(t, "view-demand-owned-state");
+  const ledgerDir = seeded(t, "view-demand-owned-ledger");
+  const made = ticker(t, { clock: mutableClock(), stateDir, ledgerDir, book: createDemandBook(), builds: [], post: () => {} });
+  const release = made.release.bind(made);
+  let released = false;
+  made.release = () => {
+    assert.equal(existsSync(stateDir), true, "the real ticker still owns its directory when released");
+    released = true;
+    return release();
+  };
+  const owned = retirement(t);
+  await retireFixture(owned);
+  assert.equal(released, true);
+  assert.equal(existsSync(stateDir), false);
+  await flushReadModelTransactions();
+  assert.equal(existsSync(stateDir), false, "settled diagnostic writes do not recreate the directory");
+  owned.releases.length = 0;
+  owned.roots.length = 0;
 });
