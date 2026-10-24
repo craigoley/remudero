@@ -159,6 +159,26 @@ test("daily first publication can abandon staged evidence without blocking its s
   });
 });
 
+test("daily publication serializes independent projector databases and releases refused writers", async () => {
+  await withTempDir("daily-publication-serialization", async root => {
+    const first = openReadModel({ stateDir: root, instance: "first-generation", schemaVersion: 1 });
+    const second = openReadModel({ stateDir: root, instance: "second-generation", schemaVersion: 1 });
+    try {
+      const a = acquireLease(first), b = acquireLease(second); assert.ok(a.ok && b.ok); if (!a.ok || !b.ok) return;
+      const earlier = prepareDailyProgressPublication(root, [record(1)], []), overlapping = prepareDailyProgressPublication(root, [record(2)], []);
+      earlier.commit(first, a.lease, () => {
+        assert.throws(() => overlapping.commit(second, b.lease), /locked|busy/i, "a second valid database lease cannot overlap the durable manifest publication");
+        return true;
+      });
+      assert.throws(() => overlapping.commit(second, b.lease), /superseded/, "after the first writer releases, the generation check still refuses stale content");
+      const retry = prepareDailyProgressPublication(root, [record(2)], []); retry.commit(second, b.lease);
+      const key = dailyProgressDayKey("acme/app", "America/New_York", "2026-11-01");
+      const report = readDailyProgressRevision(root, readDailyProgressManifest(root).days[key]!);
+      assert.equal(report.events.length, 2); assert.equal(report.report.revision, 2, "a refused writer releases the lock for a fresh publication");
+    } finally { first.close(); second.close(); }
+  });
+});
+
 test("daily PR source records complete truncated and failed attempts separately from saved rows", async () => {
   await withTempDir("daily-source-receipts", async root => {
     const cache = createBoardSnapshotCache(root, "acme", "app", { clock: fixedClock(Date.parse("2026-11-02T06:00:00Z")) });
