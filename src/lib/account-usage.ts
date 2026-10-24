@@ -600,6 +600,7 @@ export function readAccountUsageFile(path: string = join(homedir(), ".claude.jso
   } catch {
     return { unreadable: true };
   }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { unreadable: true };
   const out: AccountUsageInput = {};
   const email = str(parsed.oauthAccount?.emailAddress);
   if (email) out.email = email;

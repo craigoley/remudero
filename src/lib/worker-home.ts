@@ -199,8 +199,46 @@ export function createClaudeFleetLoginStagingDir(realHome: string): string {
 
 /** What {@link replaceClaudeFleetCredential} did. `refused` left the store's bytes exactly as they were. */
 export type ClaudeFleetCredentialReplacement =
-  | { kind: "replaced"; expiresAtMs?: number }
+  | { kind: "replaced"; identity: "carried" | "staged-identity-missing" | "store-config-unreadable" | "store-config-write-failed"; expiresAtMs?: number }
   | { kind: "refused"; reasonClass: string };
+
+function isClaudeConfigObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** W1-T10512: carry only the staged identity; the store owns every other config key. Locks are held. */
+function carryClaudeFleetIdentity(stagingDir: string, store: string): Extract<ClaudeFleetCredentialReplacement, { kind: "replaced" }>["identity"] {
+  let staged: unknown;
+  try {
+    staged = JSON.parse(readFileSync(join(stagingDir, ".claude.json"), "utf8"));
+  } catch {
+    // Missing and malformed staged identities both require another login, never a guessed identity.
+    return "staged-identity-missing";
+  }
+  if (!isClaudeConfigObject(staged) || !isClaudeConfigObject(staged.oauthAccount)) return "staged-identity-missing";
+  const configFile = join(store, ".claude.json");
+  let config: unknown;
+  try {
+    config = JSON.parse(readFileSync(configFile, "utf8"));
+  } catch (error) {
+    // Only absence starts a new config; other read or parse failures must preserve the store's bytes.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return "store-config-unreadable";
+    config = {};
+  }
+  if (!isClaudeConfigObject(config)) return "store-config-unreadable";
+  const temp = join(store, `.claude.json.login-${randomUUID()}`);
+  try {
+    writeFileSync(temp, JSON.stringify({ ...config, oauthAccount: staged.oauthAccount }), { mode: 0o600, flag: "wx" });
+    chmodSync(temp, 0o600);
+    renameSync(temp, configFile);
+  } catch {
+    // The credential is already installed; an identity write failure cannot undo that swap.
+    return "store-config-write-failed";
+  } finally {
+    rmSync(temp, { force: true });
+  }
+  return "carried";
+}
 
 /** One proper-lockfile-compatible directory lock: `true` when held, `false` while a live peer holds it.
  *  A holder whose mtime is past the CLI's own stale bound is reclaimed, as the CLI itself would. */
@@ -276,11 +314,12 @@ export async function replaceClaudeFleetCredential(opts: {
     writeFileSync(temp, bytes!, { mode: 0o600, flag: "wx" });
     chmodSync(temp, 0o600);
     renameSync(temp, join(store, ".credentials.json"));
+    const identity = carryClaudeFleetIdentity(opts.stagingDir, store);
+    return { kind: "replaced", identity, ...(verdict.expiresAtMs === undefined ? {} : { expiresAtMs: verdict.expiresAtMs }) };
   } finally {
     rmSync(temp, { force: true });
     release();
   }
-  return { kind: "replaced", ...(verdict.expiresAtMs === undefined ? {} : { expiresAtMs: verdict.expiresAtMs }) };
 }
 
 /** Where Playwright keeps its browser builds. `PLAYWRIGHT_BROWSERS_PATH` wins when set to a real path, which is how CI
@@ -1264,7 +1303,7 @@ export function classifyCredentialSidecar(
 /** Where the non-darwin credential store lives — the path the CLI documents, and the SAME directory
  *  `WORKER_HOME_SYMLINKS` already grants into every per-run worker HOME (measured at spawn time: the
  *  grant materialises and the file is readable from inside the worker). */
-function sharedClaudeCredentialDir(realHome: string): string {
+export function sharedClaudeCredentialDir(realHome: string): string {
   return join(realHome, CLAUDE_REL, "fleet-auth", "claude");
 }
 

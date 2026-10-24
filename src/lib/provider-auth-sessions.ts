@@ -6,7 +6,7 @@
  * intentionally small boundary between the console gateway and provider-specific auth flows.
  */
 
-import { accessSync, constants as fsConstants, readFileSync, rmSync } from "node:fs";
+import { accessSync, constants as fsConstants, rmSync } from "node:fs";
 import { spawn as spawnProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -14,7 +14,8 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { readBoundedRawBody, RawBodyTooLargeError, type Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
-import { createClaudeFleetLoginStagingDir, replaceClaudeFleetCredential, type ClaudeFleetCredentialReplacement } from "./worker-home.js";
+import { createClaudeFleetLoginStagingDir, replaceClaudeFleetCredential, sharedClaudeCredentialDir, type ClaudeFleetCredentialReplacement } from "./worker-home.js";
+import { readAccountUsageFile, redactedAccountLabel } from "./account-usage.js";
 
 export const PROVIDER_AUTH_VERSION = "provider-auth-v1" as const;
 export const PROVIDER_AUTH_TTL_MS = 10 * 60 * 1000;
@@ -277,21 +278,6 @@ function claudeAuthUrl(text: string): string | null {
   return null;
 }
 
-/** A redacted label for the account the CLI signed in (`j***@example.com`), from the staged `.claude.json`. */
-function redactedClaudeAccount(stagingDir: string): string | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(join(stagingDir, ".claude.json"), "utf8"));
-  } catch {
-    // The label annotates a completed login and never gates it: an absent or unparseable file has none.
-    return undefined;
-  }
-  const email = (parsed as { oauthAccount?: { emailAddress?: unknown } } | null)?.oauthAccount?.emailAddress;
-  if (typeof email !== "string") return undefined;
-  const at = email.lastIndexOf("@");
-  return at > 0 ? `${email[0]}***${email.slice(at)}`.slice(0, MAX_LABEL_LENGTH) : undefined;
-}
-
 function writeRpc(child: ProviderAuthChild, message: Record<string, unknown>): void {
   child.stdin.write(`${JSON.stringify(message)}\n`);
 }
@@ -480,8 +466,9 @@ export class ProviderAuthSessionStore {
       finishChild(record, live() ? "failed" : "expired", `The Claude login did not produce a usable fleet credential (${result.reasonClass}).`);
       return;
     }
-    const accountLabel = redactedClaudeAccount(stagingDir);
-    if (accountLabel) record.projection = { ...record.projection, accountLabel };
+    console.error(`provider-auth: Claude fleet credential replaced (identity: ${result.identity}).`);
+    const accountLabel = redactedAccountLabel(readAccountUsageFile(join(sharedClaudeCredentialDir(this.claudeRealHome), ".claude.json")));
+    if (accountLabel !== "unknown") record.projection = { ...record.projection, accountLabel: accountLabel.slice(0, MAX_LABEL_LENGTH) };
     finishChild(record, "complete");
   }
 
