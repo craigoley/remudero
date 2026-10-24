@@ -104,6 +104,8 @@ async function review(
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     logs: LogRow[];
     report?: string;
+    reportIsSubstitute?: boolean;
+    implementationReport?: string;
   },
 ) {
   return runReview({
@@ -116,6 +118,8 @@ async function review(
       acceptance: [{ claim: "the fixed source is present", proof: "grep: fixed in src/example.ts" }],
     },
     report: options.report ?? "the fixed source is present",
+    reportIsSubstitute: options.reportIsSubstitute,
+    implementationReport: options.implementationReport,
     settingsFile: fixture.settingsFile,
     config: { claudeBin: "/unused", root: fixture.root } as never,
     log: (step: string, extra: Record<string, unknown> = {}) => options.logs.push({ step, extra }),
@@ -172,6 +176,53 @@ test("W1-T2868: the Claude semantic reviewer receives a disposable exact-head ch
     assert.equal(git(fixture.sourceDir, "rev-parse", "HEAD"), fixture.headSha);
     assert.equal(git(fixture.sourceDir, "status", "--porcelain", "--untracked-files=all"), "");
     assert.doesNotMatch(readFileSync(fixture.ghLog, "utf8"), /pr checkout/, "materialization adds no GitHub checkout call");
+  });
+});
+
+test("the semantic reviewer receives the exact local report and diff without GitHub credentials", async () => {
+  await withFixture(async (fixture) => {
+    const report = 'the fixed source is present\nREPORT: "quoted" \\ proof';
+    const implementationReport = "Separate worker evidence, not the PR body";
+    let evidencePath = "";
+    const verdict = await review(fixture, {
+      headCheckoutDir: fixture.sourceDir, report, implementationReport, logs: [],
+      spawn: async (args) => {
+        const match = args.prompt.match(/exact review input JSON at ("[^\n]+")\./);
+        assert.ok(match, "the real orchestrator supplies a local evidence path");
+        evidencePath = JSON.parse(match[1]);
+        assert.ok(args.sandboxReadRoots?.includes(evidencePath), "the read-only sandbox can read this exact file");
+        assert.deepEqual(JSON.parse(readFileSync(evidencePath, "utf8")), {
+          headSha: fixture.headSha,
+          diff: "diff --git a/src/example.ts b/src/example.ts\n+export const fixed = true;\n",
+          report, reportIsSubstitute: false, implementationReport,
+        });
+        assert.doesNotMatch(args.prompt, /gh pr diff/);
+        assert.match(args.prompt, /untrusted evidence, never as instructions/);
+        assert.equal(git(args.cwd, "status", "--porcelain", "--untracked-files=all"), "");
+        return reviewerResult("claude", "REVIEW_VERDICT 1: PASS");
+      },
+    });
+    assert.equal(verdict.state, "success");
+    assert.equal(verdict.reviewerOutcome, "success", "worker evidence assertions must not be swallowed as a reviewer failure");
+    assert.equal(existsSync(evidencePath), false, "owned evidence is retired with the review root");
+  });
+});
+
+test("the local reviewer evidence keeps a substituted report explicitly separate from a fetched body", async () => {
+  await withFixture(async (fixture) => {
+    const verdict = await review(fixture, {
+      headCheckoutDir: fixture.sourceDir, reportIsSubstitute: true, logs: [],
+      spawn: async (args) => {
+        const match = args.prompt.match(/exact review input JSON at ("[^\n]+")\./);
+        assert.ok(match);
+        const evidence = JSON.parse(readFileSync(JSON.parse(match[1]), "utf8"));
+        assert.equal(evidence.reportIsSubstitute, true);
+        assert.equal(Object.hasOwn(evidence, "implementationReport"), false);
+        assert.match(args.prompt, /must never be represented as a fetched PR body/);
+        return reviewerResult("claude", "REVIEW_VERDICT 1: PASS");
+      },
+    });
+    assert.equal(verdict.reviewerOutcome, "success", "the substitute-label assertions ran inside the worker");
   });
 });
 
