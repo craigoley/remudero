@@ -9,7 +9,7 @@
   # refusal-amendment (W1-T9341, run W1-T9341-1792576971565, 2026-10-21T10:34:58.963Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
   #   worker evidence: The only declared file, `docs/forensics/cash-actuals.md`, and the acceptance test `tests/pr_description_links_cash_actuals` are absent at this HEAD. The retirement task also records that the target PR body is already merged and the document does not exist.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
   retirement: retired # in plan/tasks.d/W1-T9341-update-pr-description-to-link-to-cash-actuals-documentation.yaml — PR #5907's body is already merged, and docs/forensics/cash-actuals.md is absent; there is no live description or document to update.
   # backlog gardener: band=4 evidence=b402dc3581f35d1c
   attempts: 0
