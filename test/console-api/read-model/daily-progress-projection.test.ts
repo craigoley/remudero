@@ -7,6 +7,7 @@ import { dailyDateAt, dailyWindow, nextDailyDue, resolveDailyDate, shiftDailyDat
 import { dailyProgressDayKey, dailyProgressStorePath, prepareDailyProgressPublication, readDailyProgressManifest, readDailyProgressRevision, type DailyProgressRecord } from "#src/lib/daily-progress-store.js";
 import { acquireLease, openReadModel } from "#src/lib/read-model-db.js";
 import { withTempDir } from "#src/lib/tmp.js";
+import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
 
 function record(size = 205): DailyProgressRecord {
   const window = dailyWindow("2026-11-01");
@@ -110,5 +111,12 @@ test("daily history refuses real filesystem failures and preserves corrupt evide
       assert.equal(readFileSync(join(store, "preserved-manifest.json"), "utf8"), preserved);
       assert.ok(readdirSync(store).includes("manifest.json"));
     } finally { db.close(); }
+  });
+});
+
+test("daily PR source records complete truncated and failed attempts separately from saved rows", async () => {
+  await withTempDir("daily-source-receipts", async root => {
+    const cache = createBoardSnapshotCache(root, "acme", "app", { clock: fixedClock(Date.parse("2026-11-02T06:00:00Z")) });
+    assert.ok(cache.recordClosedAttempt, "the production snapshot cache must expose collection receipts");
   });
 });
