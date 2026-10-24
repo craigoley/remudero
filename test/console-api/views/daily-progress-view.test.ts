@@ -71,16 +71,20 @@ test("daily progress served scope preserves partial evidence and rejects foreign
       const routes = buildReadModelViewRoutes({ legacy: [], readModelViews: [DAILY_PROGRESS_VIEW_NAME], readModel: source,
         validateRequests: { [DAILY_PROGRESS_VIEW_NAME]: (query, model) => validateDailyProgressRequest(query, model, routeClock.now()) }, clock: routeClock });
       const route = routes[0]!; assert.equal(route.scope, "read");
-      const request = (query: string) => {
+      const request = (query: string, headers: Record<string, string> = {}) => {
         let status = 0, body = "";
-        route.handler({ url: `/v1/views/daily-progress?${query}`, headers: {} } as Parameters<typeof route.handler>[0], {
+        route.handler({ url: `/v1/views/daily-progress?${query}`, headers } as Parameters<typeof route.handler>[0], {
           writeHead(code: number) { status = code; }, end(value: string) { body = value; }, once() {},
         } as unknown as Parameters<typeof route.handler>[1], { params: {} });
         return { status, body };
       };
       assert.equal(request("repository=acme%2Fa&date=today").status, 200, "positive control reaches the actual cached route");
+      const conditional = { "if-none-match": entries.get(key)!.etag };
+      assert.equal(request("repository=acme%2Fa&date=today", conditional).status, 304, "the held body conditional-read path is reached");
       const foreign = request("repository=evil%2Fhidden&date=today"); assert.equal(foreign.status, 400); assert.ok(!foreign.body.includes("totals"));
+      assert.equal(request("repository=evil%2Fhidden&date=today", conditional).status, 400, "scope is checked before a held body or ETag can answer");
       assert.equal(request("repository=acme%2Fa&date=today&url=https://evil.example").status, 400);
+      assert.equal(request("repository=acme%2Fa&repository=evil%2Fhidden&date=today").status, 400);
       requestNow = Date.parse("2026-11-02T05:00:00Z");
       assert.equal(request("repository=acme%2Fa&date=today").status, 503, "midnight resolves the new date before an old cached body can answer");
       assert.ok(reads.some(read => read.includes("2026-11-02")), "the new civil date is actually queried");
