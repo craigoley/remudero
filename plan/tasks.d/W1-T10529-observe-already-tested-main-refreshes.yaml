@@ -9,7 +9,7 @@
   risk: low
   band_meaning: blast-radius
   budget_usd: 4
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:refresh-tested-tree:PR-13834"

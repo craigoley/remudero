@@ -6,7 +6,7 @@
   verify: auto
   priority: 4
   risk: low
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-learning:6062:coverage-shard (1/4)"

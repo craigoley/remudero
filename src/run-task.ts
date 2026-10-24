@@ -1077,7 +1077,7 @@ import {
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
-import type { ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
+import { childEntryArgv, childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, type ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
 import {
   bodyWithFailingProofAtOpen,
   checkProofLaunchArgv,
@@ -1666,7 +1666,7 @@ import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
+import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
   terminalUnionScans } from "./lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
@@ -2458,6 +2458,17 @@ export async function mainTipViaGit(repoDir: string): Promise<string> {
   return (await hostWorktreeGitAsync(repoDir, ["rev-parse", "origin/main"])).trim();
 }
 
+export function buildRequiredFixReviewRunner(
+  next: typeof runReview,
+  readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
+): typeof runReview {
+  return async (args) => {
+    const startFreshness = await ownStartFreshness(readFreshness);
+    return next({ ...args, requireSemanticReview: true,
+      reviewerCodeFreshness: reviewerFreshnessForPublication(startFreshness, readFreshness) });
+  };
+}
+
 export function buildSweepEffects(
   deps: BuildSweepEffectsDeps & {
     /** W1-T3618 test seam: override the reviewer-code freshness read the review gate below uses.
@@ -2571,8 +2582,9 @@ export function buildSweepEffects(
     worktreeRoot: join(repoRoot, "..", "worktrees"),
     spawnReview: spawnRmdReviewForFreshTree,
   };
+  const readReviewerCodeFreshness = reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshnessAsync(repoRoot, process.env));
   const reviewerCodeGate = buildReviewerCodeFreshnessGate(
-    reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshnessAsync(repoRoot, process.env)),
+    readReviewerCodeFreshness,
     deps.log,
     reviewCommand,
     buildFreshTreeReviewRunner(repoRoot, freshTreeSeams),
@@ -2827,7 +2839,7 @@ export function buildSweepEffects(
     waitForCiGreenImpl: waitForCiGreen,
     restRollupForImpl: restRollupFor,
     fetchCiFailuresImpl: fetchCiFailuresAsync,
-    runReviewImpl: runReview,
+    runReviewImpl: buildRequiredFixReviewRunner(runReview, readReviewerCodeFreshness),
     fetchPrBodyImpl: fetchPrBodyViaGh,
     // W1-T3869: the missing-trailer repair's writer. Unwired, `requiredSweepRuntime` throws
     // `buildSweepEffects requires updatePrBodyImpl from its entrypoint adapter` the moment
@@ -7822,6 +7834,8 @@ async function runReview(args: {
    *  resolved the run policy pass it through; the fallback keeps direct review invocations on
    *  the same policy row without inventing a second timeout. */
   reviewerClockBoundMs?: number;
+  /** Cancellation of this review also stops its plan-lint process group. */
+  signal?: AbortSignal;
   /**
    * PR-HEAD checkout dir the deterministic FLOOR executes whitelisted proofs in
    * (W1-T65, ratifies P15 — HEAD DISCIPLINE: never the operator's working
@@ -7901,6 +7915,8 @@ async function runReview(args: {
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
 }): Promise<ReviewRunResult> {
   const { owner, repo, prUrl, task, report, log, say } = args;
+  const laneSignal = currentReviewSignal();
+  const signal = args.signal && laneSignal ? AbortSignal.any([args.signal, laneSignal]) : args.signal ?? laneSignal;
   const headSha = readHeadShaRest(prUrl);
   let replayInput: ReviewReplayInput = args.reviewReplaySetupInput ?? {
     stage: "setup", plan_only: false, required_semantic: args.requireSemanticReview === true,
@@ -8290,7 +8306,8 @@ async function runReview(args: {
   // gate observes repo state whether or not the advisory reviewer above ever
   // completed.
   // W1-T4423: a plan-only PASS names lint-plan, so the review runs it on the target repo's plan at this head.
-  const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir) : undefined;
+  const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir,
+    undefined, undefined, { signal, log }) : undefined;
   const computed = await preparedDecision.judge({
     diff,
     report,
@@ -23057,26 +23074,39 @@ function buildReservationReapReport(
     openPrTrailerIds, liveHolderBranches: heads.live, strictAge: true, thresholdDays, nowMs: clock.now(),
   });
   const held = new Set(classify(0).filter(r => r.status === "HELD").map(r => r.taskId));
-  const firstByBranch = new Map<string, number>();
+  const anchorTimes = new Map<string, number>();
+  const holderTasks = new Map<string, Set<string>>();
+  for (const reservation of reservations) {
+    if (!held.has(reservation.taskId)) continue;
+    const anchorTime = reservationAnchorTimestamp(reservation.anchor);
+    if (!Number.isFinite(anchorTime)) continue;
+    anchorTimes.set(reservation.taskId, anchorTime);
+    const holder = reservationHolderBranch(reservation.anchor);
+    for (const branch of [...(holder ? [holder] : []), ...(heads.branches.get(reservation.taskId) ?? [])]) {
+      const ids = holderTasks.get(branch) ?? new Set<string>();
+      ids.add(reservation.taskId);
+      holderTasks.set(branch, ids);
+    }
+  }
   const firstByTask = new Map<string, number>();
-  for (const p of pulls) {
-    const opened = Date.parse(p.created_at);
-    firstByBranch.set(p.head.ref, Math.min(firstByBranch.get(p.head.ref) ?? Infinity, opened));
-    const ids = idsFromOpenPrTrailers([p.body ?? ""]);
-    const runTask = RUN_BRANCH_TASK_REF_RE.exec(`refs/heads/${p.head.ref}`)?.[1];
+  const observedNow = clock.now();
+  for (const pull of pulls) {
+    const opened = Date.parse(pull.created_at);
+    const ids = idsFromOpenPrTrailers([pull.body ?? ""]);
+    const runTask = RUN_BRANCH_TASK_REF_RE.exec(`refs/heads/${pull.head.ref}`)?.[1];
     if (runTask) ids.add(runTask);
-    for (const id of ids) firstByTask.set(id, Math.min(firstByTask.get(id) ?? Infinity, opened));
+    for (const id of holderTasks.get(pull.head.ref) ?? []) ids.add(id);
+    for (const id of ids) {
+      const anchorTime = anchorTimes.get(id);
+      if (anchorTime !== undefined && opened >= anchorTime && opened <= observedNow) {
+        firstByTask.set(id, Math.min(firstByTask.get(id) ?? Infinity, opened));
+      }
+    }
   }
   const delays: { taskId: string; ms: number }[] = [];
-  for (const r of reservations) {
-    if (!held.has(r.taskId)) continue;
-    const anchorTime = reservationAnchorTimestamp(r.anchor);
-    const holder = reservationHolderBranch(r.anchor);
-    if (!Number.isFinite(anchorTime)) continue;
-    const firstOpen = Math.min(firstByTask.get(r.taskId) ?? Infinity,
-      holder ? firstByBranch.get(holder) ?? Infinity : Infinity,
-      ...(heads.branches.get(r.taskId) ?? []).map(b => firstByBranch.get(b) ?? Infinity));
-    if (firstOpen >= anchorTime && firstOpen <= clock.now()) delays.push({ taskId: r.taskId, ms: firstOpen - anchorTime });
+  for (const [taskId, anchorTime] of anchorTimes) {
+    const firstOpen = firstByTask.get(taskId);
+    if (firstOpen !== undefined) delays.push({ taskId, ms: firstOpen - anchorTime });
   }
   const values = delays.map(d => d.ms).sort((a, b) => a - b);
   const n = values.length;
@@ -24560,47 +24590,64 @@ export function lintScopeMergeBase(
  * W1-T4423 — THE LINT A PLAN-ONLY PASS NAMES, RUN BY THE REVIEW ITSELF. A consumer repo's CI has no lint-plan job,
  * so remudero-site #133 merged PORTAL-T27 with two violations under a status claiming lint-plan had gated it. This
  * runs `lint-plan:fast`'s selection, {@link lintPlanCommand} offline over the tasks the PR changed against its merge
- * base, on the TARGET repo's plan at the PR head. In-process: the body has no `await`, so every line it prints is
- * written before the console is restored, and a missing summary line reads as "could not run", never as clean.
+ * base, on the TARGET repo's plan at the PR head. Git preparation and the lint child are awaited so the
+ * daemon loop stays available. A missing summary reads as "could not run", never as clean.
  */
 export async function lintPlanForReview(
   headCheckoutDir: string | undefined,
-  git: (cwd: string, args: string[]) => string = (cwd, args) => hostWorktreeGit(cwd, args, { timeout: 120_000 }),
-  lint: typeof lintPlanCommand = lintPlanCommand,
+  git: (cwd: string, args: string[]) => string | Promise<string> = (cwd, args) => hostWorktreeGitAsync(cwd, args, { timeout: 120_000 }),
+  run: (argv: string[], options: { cwd: string; signal?: AbortSignal }) => Promise<CensusChildResult> = spawnReviewPlanLint,
+  options: { signal?: AbortSignal; log?: (step: string, extra?: Record<string, unknown>) => void } = {},
 ): Promise<PlanLintOutcome> {
   if (!headCheckoutDir) return { ran: false, reason: "no PR-head checkout" };
   try {
     // A stale origin/main moves the merge base back and widens the changed-task scope onto other filings.
-    git(headCheckoutDir, ["fetch", "--quiet", "--no-tags", "origin", "main"]);
+    await git(headCheckoutDir, ["fetch", "--quiet", "--no-tags", "origin", "main"]);
   } catch (e) {
     console.error(`### lint-plan for review: origin/main not refreshed (${String((e as Error).message).split("\n")[0]})`);
   }
   let mergeBase: string;
   try {
-    mergeBase = git(headCheckoutDir, ["merge-base", "origin/main", "HEAD"]).trim();
+    mergeBase = (await git(headCheckoutDir, ["merge-base", "origin/main", "HEAD"])).trim();
   } catch (e) {
     return { ran: false, reason: `no merge base: ${String((e as Error).message).split("\n")[0]}` };
   }
-  const lines: string[] = [];
-  const saved = { log: console.log, error: console.error, warn: console.warn };
-  const capture = (...parts: unknown[]): void => void lines.push(parts.map(String).join(" "));
-  let pending: Promise<number>;
-  console.log = console.error = console.warn = capture;
   try {
-    pending = lint(["--plan", join(headCheckoutDir, "plan", "tasks.yaml"), "--base", mergeBase], {
-      offline: true,
-      repoRoot: headCheckoutDir,
-    });
-  } finally {
-    Object.assign(console, saved);
-  }
-  let code: number;
-  try {
-    code = await pending;
+    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted" };
+    const launch = childEntryArgv(repoRoot, "run-task", "src/run-task.ts", ["lint-plan", "--plan",
+      join(headCheckoutDir, "plan", "tasks.yaml"), "--base", mergeBase, "--offline", "--repo-root", headCheckoutDir],
+      undefined, { log: options.log });
+    options.log?.(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow("run-task", "lint-plan", launch));
+    const result = await run(launch.argv, { cwd: repoRoot, signal: options.signal });
+    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted" };
+    if (result.error) return { ran: false, reason: `lint-plan could not start: ${result.error.message}` };
+    if (result.signal) return { ran: false, reason: `lint-plan killed by ${result.signal}` };
+    if (result.status === null) return { ran: false, reason: "lint-plan exited without a status" };
+    const lines = `${result.stdout}\n${result.stderr}`.split(/\r?\n/);
+    return planLintOutcomeFromOutput(result.status, lines, mergeBase, existsSync(join(headCheckoutDir, "plan", "tasks.d")));
   } catch (e) {
     return { ran: false, reason: `lint-plan threw: ${String((e as Error).message).split("\n")[0]}` };
   }
-  return planLintOutcomeFromOutput(code, lines, mergeBase, existsSync(join(headCheckoutDir, "plan", "tasks.d")));
+}
+
+/** The lint leads its own process group, so cancellation reaches its Git descendants too. No new timeout. */
+function spawnReviewPlanLint(argv: string[], options: { cwd: string; signal?: AbortSignal }): Promise<CensusChildResult> {
+  return new Promise((resolveChild) => {
+    const child = spawn(process.execPath, argv, { cwd: options.cwd, detached: true, stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, RMD_SELF_SYNC_DONE: "1" } });
+    let stdout = "", stderr = "";
+    let error: Error | undefined;
+    child.stdout.setEncoding("utf8").on("data", (text: string) => { stdout += text; });
+    child.stderr.setEncoding("utf8").on("data", (text: string) => { stderr += text; });
+    child.once("error", (cause: Error) => { error = cause; });
+    child.once("close", (status, signal) => {
+      options.signal?.removeEventListener("abort", abort);
+      resolveChild({ status, signal, stdout, stderr, ...(error ? { error } : {}) });
+    });
+    const abort = (): void => { if (child.pid !== undefined) killProcessGroup(child.pid); };
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
+  });
 }
 
 /** W1-T4423: read {@link lintPlanCommand}'s printed report back into violations. `monolith-filing` is dropped for a
@@ -24633,7 +24680,7 @@ export function planLintOutcomeFromOutput(code: number, lines: string[], mergeBa
 }
 
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
-  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], ["--all", "--merge-base"]);
+  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base", "--repo-root"], ["--all", "--merge-base", "--offline"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -24641,8 +24688,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // W1-T324: a standalone token, never a substring match on a proof body quoting "--all".
   // Ignored in --base mode, whose own scope already defines what is in-bounds.
   const allFlag = rest.includes("--all");
-  const offline = deps.offline === true;
-  const checkoutRoot = deps.repoRoot ?? repoRoot;
+  const offline = deps.offline === true || rest.includes("--offline");
+  const checkoutRoot = deps.repoRoot ?? resolve(flagValue(rest, "--repo-root") ?? repoRoot);
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show

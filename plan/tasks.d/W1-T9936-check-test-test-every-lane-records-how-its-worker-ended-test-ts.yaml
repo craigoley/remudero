@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.21
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/every-lane-records-how-its-worker-ended.test.ts"

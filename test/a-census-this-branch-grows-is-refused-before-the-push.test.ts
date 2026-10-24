@@ -13,7 +13,7 @@ import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-ignore the executable .mjs module has no declaration file.
@@ -126,7 +126,7 @@ function installHook(dir: string): void {
   copyFileSync(join(REPO_ROOT, "src", "lib", "rule-suites.ts"), join(dir, "src", "lib", "rule-suites.ts"));
   copyFileSync(join(REPO_ROOT, "hooks", "pre-push"), join(dir, "hooks", "pre-push"));
   chmodSync(join(dir, "hooks", "pre-push"), 0o755);
-  for (const script of ["census-precheck.mjs", "clock-signature-ratchet.mjs", "comment-load-ratchet.mjs", "fixture-copy-census.mjs", "house-layout-census.mjs", "deps-interface-census.mjs", "test-repo-root-codemod.mjs"]) {
+  for (const script of ["census-precheck.mjs", "clock-signature-ratchet.mjs", "comment-load-ratchet.mjs", "fixture-copy-census.mjs", "house-layout-census.mjs", "deps-interface-census.mjs", "test-repo-root-codemod.mjs", "coverage-session-blanking-check.mjs"]) {
     copyFileSync(join(REPO_ROOT, "scripts", script), join(dir, "scripts", script));
   }
   for (const lib of ["argv.mjs", "git.mjs", "author-step-capture.mjs", "json-duplicate-keys.mjs", "instrument-surface-census.mjs", "git-spawn-shapes.mjs", "repo-root.mjs", "retained-fixtures.mjs"]) {
@@ -239,4 +239,34 @@ test("census precheck main(): an unknown base or an unknown flag is 2, could-not
   assert.equal(main(["--root", dir, "--base", "no-such-ref"]), 2);
   assert.equal(main(["--no-such-flag"]), 2);
   assert.ok(errors.mock.calls.every((c) => /could not measure/.test(String(c.arguments[0]))));
+});
+
+
+test("a real push refuses a newly unblanked child coverage session and accepts effective blanking", () => {
+  const bad = "const childEnv = { ...process.env }; delete childEnv.NODE_TEST_CONTEXT;\n";
+  const good = bad + "childEnv.NODE_V8_COVERAGE = undefined;\n";
+  const guard = `import assert from "node:assert/strict";
+import { test } from "node:test";
+import { scanRepo } from "#scripts/coverage-session-blanking-check.mjs";
+test("the actual classifier sees a complete owned corpus", () => {
+  const measured = scanRepo(process.cwd());
+  assert.ok(measured.filesScanned >= 2);
+  assert.deepEqual(measured.defects, []);
+  assert.deepEqual(measured.suspects, []);
+});
+`;
+  const seed = {
+    ...baselines,
+    "package.json": JSON.stringify({ type: "module", imports: { "#scripts/*": "./scripts/*" } }),
+    "test/coverage-session-blanking.test.ts": guard,
+    "test/setup/tmp-hygiene.ts": `import ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "test/setup/tmp-hygiene.ts")).href)};\n`,
+    "test/child.ts": good,
+  };
+  const refused = pushFixture(seed, { "test/child.ts": bad })();
+  assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /census-suite: test\/coverage-session-blanking\.test\.ts fails/);
+  assert.match(refused.stderr, /pre-push REFUSED/);
+  const accepted = pushFixture(seed, { "test/coverage-session-blanking.test.ts": guard + "\n// a fresh clean measurement\n" })();
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.match(accepted.stdout + accepted.stderr, /census-precheck: OK/);
 });

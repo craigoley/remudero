@@ -9,7 +9,7 @@
   band_meaning: blast-radius
   budget_usd: 6.00
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-23: logind lost its systemd subscription after a 208 s PID 1 reload"
   plan_refs: [ W1-T3269, W1-T2953, W1-T2877, W1-T9795 ]

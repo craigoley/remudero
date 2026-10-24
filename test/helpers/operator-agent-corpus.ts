@@ -114,13 +114,14 @@ export function stopRow(id: string): string {
  * A corpus every GET has something in: the first half written through the routes and then rotated
  * into a gzip archive, the second half written to the new live file.
  */
-export async function corpus(t: { after: (fn: () => void) => void }): Promise<{ stateDir: string; ledgerPath: string }> {
+export async function corpus(t: { after: (fn: () => void) => void; ownRoot?: (root: string) => void }, start = listen): Promise<{ stateDir: string; ledgerPath: string }> {
   const root = makeTempDir("e17-operator-agent");
+  t.ownRoot?.(root);
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const stateDir = join(root, "state");
   mkdirSync(stateDir, { recursive: true });
   const ledgerPath = join(stateDir, "ledger.ndjson");
-  const base = await listen(t, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW }));
+  const base = await start(t, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW }));
   const proposal = {
     proposalId: "operator-agent:repo:scale:queue-pressure", repo: "owner/repo", proposalText: "Increase the worker pool for owner/repo.", confidence: 0.96,
     reasoning: "The queue and p50 latency crossed the conservative threshold together.", category: "scale", status: "pending",
