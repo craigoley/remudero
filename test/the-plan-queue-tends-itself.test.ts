@@ -45,6 +45,7 @@ interface ShardSpec {
   status?: string;
   retirement?: string;
   proof?: string;
+  type?: "implement" | "recon";
 }
 
 function shard(t: ShardSpec): string {
@@ -53,7 +54,7 @@ function shard(t: ShardSpec): string {
     `  title: "${t.title}"`,
     "  repo: remudero",
     `  depends_on: [${(t.depends_on ?? []).join(", ")}]`,
-    "  type: implement",
+    `  type: ${t.type ?? "implement"}`,
     `  status: ${t.status ?? "queued"}`,
     ...(t.retirement ? [`  retirement: ${t.retirement}`] : []),
     `  files: [${(t.files ?? ["learnings/ci-gate-lessons.yaml"]).join(", ")}]`,
@@ -342,6 +343,40 @@ test("a dependency closed because its work shipped is satisfied, never a reason 
   const actions = retirementCandidates(planInventory(root, join(root, "state")), root);
   assert.deepEqual(actions.map((a) => a.target).sort(), ["W1-T4", "W1-T6"]);
   assert.deepEqual([...ABANDONED_RETIREMENTS].sort(), ["retired", "withdrawn"]);
+});
+
+test("an abandoned research subject alone never retires its independent recon finding", () => {
+  const root = planRepo([
+    { id: "W1-T1", title: "abandoned subject", status: "blocked", retirement: "retired" },
+    { id: "W1-T2", title: "verify whether the subject PR merged", type: "recon", depends_on: ["W1-T1"] },
+    { id: "W1-T3", title: "implement after the abandoned output", depends_on: ["W1-T1"] },
+    { id: "W1-T4", title: "withdrawn subject", status: "blocked", retirement: "withdrawn" },
+    { id: "W1-T5", title: "locate the withdrawn subject's documentation", type: "recon", depends_on: ["W1-T4"] },
+  ]);
+  const inv = planInventory(root, join(root, "state"));
+  const before = inv.open.filter((t) => t.type === "recon").map((t) => [t.id, t.depends_on, t.status]);
+  const actions = retirementCandidates(inv, root);
+  assert.deepEqual(actions.map((a) => [a.target, a.retirement]), [["W1-T3", "retired"]]);
+  assert.deepEqual(inv.open.filter((t) => t.type === "recon").map((t) => [t.id, t.depends_on, t.status]), before,
+    "withholding retirement does not clear dependencies or grant eligibility");
+  assert.deepEqual(applyPlanActions(root, inv.shards, actions), ["plan/tasks.d/W1-T3-x.yaml"]);
+  const persisted = loadPlan(join(root, "plan", "tasks.yaml"));
+  assert.deepEqual(persisted.tasks.filter((t) => t.type === "recon").map((t) => [t.id, t.depends_on, t.status, t.retirement]),
+    [["W1-T2", ["W1-T1"], "queued", undefined], ["W1-T5", ["W1-T4"], "queued", undefined]]);
+});
+
+test("an abandoned subject does not prevent evidence-backed completion of its recon finding", () => {
+  const root = planRepo([
+    { id: "W1-T1", title: "abandoned subject", status: "blocked", retirement: "retired" },
+    { id: "W1-T2", title: "a research finding actually landed", type: "recon", depends_on: ["W1-T1"],
+      proof: "grep: shipped-lesson in learnings/ci-gate-lessons.yaml" },
+  ]);
+  const inv = planInventory(root, join(root, "state"));
+  const actions = retirementCandidates(inv, root);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0]!.target, "W1-T2");
+  assert.equal(actions[0]!.retirement, "closed");
+  assert.equal(actions[0]!.landingCommit, execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim());
 });
 
 test("a task whose proofs already held when it was filed is never proposed as closed", () => {

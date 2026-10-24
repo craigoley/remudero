@@ -22,6 +22,7 @@
     - src/lib/daily-progress-view.ts
     - src/lib/read-model-worker.ts
     - src/lib/read-model-slow-lane.ts
+    - src/lib/read-model-db.ts
     - src/lib/status.ts
     - src/lib/board-snapshot-cache.ts
     - src/lib/views.ts
