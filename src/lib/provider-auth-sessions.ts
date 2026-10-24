@@ -455,7 +455,9 @@ export class ProviderAuthSessionStore {
       });
     } catch {
       // A spawn or staging failure ends the session; its message may carry a path, so it stays server-side.
-      finishChild(record, "unavailable", "The Claude login could not start on the daemon.");
+      finishChild(record, "unavailable", record.stagingDir
+        ? "The Claude login could not start on the daemon."
+        : "The fleet credential store is not reachable from this daemon.");
     }
     return projection(record);
   }
