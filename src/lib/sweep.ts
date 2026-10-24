@@ -16349,6 +16349,12 @@ export function noteReviewDuration(ms: number): void {
   if (idleMemo.reviewMs.length > IDLE_MEMO_WINDOW) idleMemo.reviewMs.shift();
 }
 
+/** Completed review timing remains available when ledger rotation or zero current demand hides it. */
+export function readObservedReviewMedianMs(): number | undefined {
+  return deriveIdleLightCadenceMs({ reviewDurationsMs: idleMemo.reviewMs.filter(ms => ms > 0),
+    headPushes: 0, openPrs: 0, windowMs: 0 }).medianReviewMs;
+}
+
 /** W1-T8167: the steps that end a `sweep.review_admitted` review's life. */
 const LIVE_REVIEW_CLOSING_STEPS: ReadonlySet<string> = new Set(["review.posted", "review.post_failed", "review.post_refused"]);
 
