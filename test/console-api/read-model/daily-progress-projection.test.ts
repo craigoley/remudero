@@ -7,7 +7,7 @@ import { dailyDateAt, dailyWindow, nextDailyDue, resolveDailyDate, shiftDailyDat
 import { dailyProgressDayKey, dailyProgressStorePath, prepareDailyProgressPublication, readDailyProgressManifest, readDailyProgressRevision, type DailyProgressRecord } from "#src/lib/daily-progress-store.js";
 import { acquireLease, openReadModel } from "#src/lib/read-model-db.js";
 import { withTempDir } from "#src/lib/tmp.js";
-import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
+import { boardClosedRowsDigest, createBoardSnapshotCache, readBoardClosedCollectionReceipt } from "#src/lib/board-snapshot-cache.js";
 
 function record(size = 205): DailyProgressRecord {
   const window = dailyWindow("2026-11-01");
@@ -118,5 +118,18 @@ test("daily PR source records complete truncated and failed attempts separately 
   await withTempDir("daily-source-receipts", async root => {
     const cache = createBoardSnapshotCache(root, "acme", "app", { clock: fixedClock(Date.parse("2026-11-02T06:00:00Z")) });
     assert.ok(cache.recordClosedAttempt, "the production snapshot cache must expose collection receipts");
+    const rows = [{ number: 1, url: "https://github.com/acme/app/pull/1", state: "MERGED", headRefName: "run-W1-T1-1234567890123", headRefOid: "a".repeat(40),
+      body: "Remudero-Task: W1-T1", autoMergeRequest: null, title: "Repair", updatedAt: "2026-11-02T05:00:00.000Z", mergedAt: "2026-11-01T15:00:00.000Z" }];
+    cache.recordClosedAttempt({ ok: true, persisted: cache.commitClosed(rows) });
+    let read = readBoardClosedCollectionReceipt(root, "acme", "app", rows); assert.ok(read.ok); if (!read.ok) return;
+    assert.equal(read.receipt.state, "complete"); assert.equal(read.receipt.rowsDigest, boardClosedRowsDigest(rows));
+    const success = read.receipt.lastSuccessAt;
+    cache.recordClosedAttempt({ ok: true, truncated: true });
+    read = readBoardClosedCollectionReceipt(root, "acme", "app", rows); assert.ok(read.ok); if (!read.ok) return;
+    assert.equal(read.receipt.state, "partial"); assert.equal(read.receipt.reason, "truncated"); assert.equal(read.receipt.lastSuccessAt, success);
+    cache.recordClosedAttempt({ ok: false });
+    read = readBoardClosedCollectionReceipt(root, "acme", "app", rows); assert.ok(read.ok); if (!read.ok) return;
+    assert.equal(read.receipt.state, "unavailable"); assert.equal(read.receipt.lastSuccessAt, success);
+    assert.equal(readBoardClosedCollectionReceipt(root, "acme", "app", []).ok, false, "a receipt cannot certify another corpus");
   });
 });

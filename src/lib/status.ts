@@ -5068,7 +5068,8 @@ export function buildBatchedGithub(
       const fetched = fetchBoardPrsRest(owner, repo, fetchJson, known, half);
       if (half !== "open") {
         knownBoardPrs = new Map(fetched.rows.map((r) => [r.number, r]));
-        if (!fetched.truncated) snapshotCache?.commitClosed(fetched.rows);
+        const persisted = !fetched.truncated && snapshotCache?.commitClosed(fetched.rows) === true;
+        snapshotCache?.recordClosedAttempt?.({ ok: true, truncated: fetched.truncated, persisted });
       }
       // W1-T415: ledgered on every successful fetch and RETAINED so `readTruncated()` can surface it — a
       // truncated view is a SUCCESS that still hit the page ceiling, distinct from a failure, which the catch
@@ -5146,6 +5147,7 @@ export function buildBatchedGithub(
       } catch (err) {
         lastIssueFetchFailed = true;
         const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
+        if (channel !== "open") snapshotCache?.recordClosedAttempt?.({ ok: false });
         lastIssueFetchFailureReason = classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code);
         console.error(`board gateway: batched issue fetch failed (${lastIssueFetchFailureReason}): ${e?.message ?? String(err)}`);
         log("board_gateway.issue_fetch_failed", { reason: lastIssueFetchFailureReason, message: e?.message ?? String(err) });
@@ -5470,6 +5472,7 @@ export function buildBatchedGithub(
     mergedFetchDurationMs = elapsedMs;
     lastClosedFloor = undefined;
     if (!outcome.ok) {
+      snapshotCache?.recordClosedAttempt?.({ ok: false });
       mergedOutcome = { failed: true, reason: outcome.reason };
       console.error(`board gateway: batched PR fetch failed (${outcome.reason}): ${outcome.message}`);
       failedChannels.add("merged");
@@ -5481,7 +5484,8 @@ export function buildBatchedGithub(
     mergedEpoch += 1;
     lastClosedTruncated = outcome.truncated;
     knownBoardPrs = new Map(outcome.rows.map((r) => [r.number, r]));
-    if (!outcome.truncated) snapshotCache?.commitClosed(outcome.rows);
+    const persisted = !outcome.truncated && snapshotCache?.commitClosed(outcome.rows) === true;
+    snapshotCache?.recordClosedAttempt?.({ ok: true, truncated: outcome.truncated, persisted });
     recordFetchOk(outcome.rows.length, "merged");
     recordFetchBytes(outcome.bytes, outcome.calls, outcome.mode, outcome.truncated, "closed");
   };

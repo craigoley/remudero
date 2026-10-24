@@ -271,6 +271,41 @@ export function boardObservationPath(root: string, owner: string, repo: string):
   return boardSnapshotPath(root, owner, repo).replace(/\.ndjson$/, ".observed.json");
 }
 
+export function boardClosedCollectionPath(root: string, owner: string, repo: string): string {
+  return boardSnapshotPath(root, owner, repo).replace(/\.ndjson$/, ".collection.json");
+}
+
+export interface BoardClosedCollectionReceipt {
+  version: 1; repository: string; lastAttemptAt: string; lastSuccessAt: string | null;
+  state: "complete" | "partial" | "unavailable"; reason: "fetch_failed" | "truncated" | "snapshot_unavailable" | null;
+  rowsDigest: string | null;
+}
+
+/** A closed-row identity survives unrelated issue updates in the shared snapshot file. */
+export function boardClosedRowsDigest(rows: Iterable<BoardPrRest>): string {
+  const digest = createHash("sha256");
+  for (const row of [...rows].sort((a, b) => a.number - b.number)) digest.update(JSON.stringify(closedForDisk(row)) + "\n");
+  return digest.digest("hex");
+}
+
+export function readBoardClosedCollectionReceipt(root: string, owner: string, repo: string, rows: Iterable<BoardPrRest>):
+  { ok: true; receipt: BoardClosedCollectionReceipt } | { ok: false; reason: string } {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(boardClosedCollectionPath(root, owner, repo), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > OBSERVATION_MAX_BYTES) return { ok: false, reason: "collection receipt is not a bounded regular file" };
+    const value = JSON.parse(fs.readFileSync(fd, "utf8")) as BoardClosedCollectionReceipt;
+    if (!value || value.version !== 1 || value.repository !== `${owner}/${repo}` || stampMs(value.lastAttemptAt) === undefined ||
+        !(value.lastSuccessAt === null || stampMs(value.lastSuccessAt) !== undefined && value.lastSuccessAt <= value.lastAttemptAt) ||
+        !["complete", "partial", "unavailable"].includes(value.state) || ![null, "fetch_failed", "truncated", "snapshot_unavailable"].includes(value.reason) ||
+        value.rowsDigest !== boardClosedRowsDigest(rows) || value.state === "complete" && (value.lastSuccessAt === null || value.reason !== null)) return { ok: false, reason: "collection receipt does not certify these saved rows" };
+    return { ok: true, receipt: value };
+  } catch (error) {
+    return { ok: false, reason: `collection receipt unavailable (${(error as NodeJS.ErrnoException).code ?? "invalid data"})` };
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+
 function stampMs(value: unknown): number | undefined {
   if (typeof value !== "string" || value.length > 64) return undefined;
   const ms = Date.parse(value);
@@ -717,7 +752,31 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     }
   };
 
+  let collectionSuccessAt = state.closedObservedAt ?? null;
+  let digestRows: ReadonlyMap<number, BoardPrRest> | undefined;
+  let rowsDigest: string | null = null;
   const cache: BoardSnapshotCache = {
+    recordClosedAttempt(outcome) {
+      const at = clock.iso(), complete = outcome.ok && outcome.truncated !== true && outcome.persisted === true && state.closed !== undefined;
+      if (complete) collectionSuccessAt = at;
+      if (state.closed !== digestRows) {
+        digestRows = state.closed;
+        rowsDigest = digestRows ? boardClosedRowsDigest(digestRows.values()) : null;
+      }
+      const receipt: BoardClosedCollectionReceipt = { version: 1, repository, lastAttemptAt: at, lastSuccessAt: collectionSuccessAt,
+        state: complete ? "complete" : outcome.ok && outcome.truncated ? "partial" : "unavailable",
+        reason: complete ? null : !outcome.ok ? "fetch_failed" : outcome.truncated ? "truncated" : "snapshot_unavailable", rowsDigest };
+      const target = boardClosedCollectionPath(root, owner, repo), stage = `${target}.tmp-${process.pid}-${randomUUID()}`;
+      let fd: number | undefined;
+      try {
+        io.mkdir(dirname(target), 0o700); fd = io.openWrite(stage, 0o600);
+        writeFully(io, fd, Buffer.from(JSON.stringify(receipt))); io.fsync(fd); io.close(fd); fd = undefined;
+        io.rename(stage, target);
+      } catch {
+        safeClose(io, fd); safeUnlink(io, stage);
+        emit("board_snapshot.collection_receipt_failed", { repository, channel: "closed", reason: "write_failed" });
+      }
+    },
     commitOpen,
     rows: () => state,
     closedSeed() {
@@ -778,6 +837,7 @@ export interface BoardSnapshotIo {
 }
 
 export interface BoardSnapshotCache {
+  recordClosedAttempt?(outcome: { ok: boolean; truncated?: boolean; persisted?: boolean }): void;
   closedSeed(): Map<number, BoardPrRest> | undefined;
   issueSeed(): Map<number, BoardIssueRest> | undefined;
   commitClosed(rows: readonly BoardPrRest[]): boolean;
