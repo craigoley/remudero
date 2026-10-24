@@ -13,7 +13,7 @@
   files:
     - src/lib/retro-preflight.ts
     - test/learning/the-retro-preflight-failure-row-keeps-the-failures.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
