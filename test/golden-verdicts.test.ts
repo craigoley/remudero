@@ -27,6 +27,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import { loadLearningsForTaskFiles, selectLearnings } from "../src/lib/learnings.js";
 import {
@@ -202,6 +203,12 @@ test("GOLDEN — HEALTHY CONTROL: a correct PR with no planted violation arms �
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — COVERAGE REPORTER AND STACKED PR LESSONS: both CI learning proofs execute and arm", () => {
+  const { verdict, golden } = judgeCase("ci-coverage-reporter-stacked-pr-lessons");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
 test("GOLDEN — KNOWLEDGE REPAIR: retargeting an existing operator-impact learning arms, and the coverage items do not mistake an edit for an addition", () => {
   const { verdict, golden } = judgeCase("knowledge-repair");
   assert.equal(golden.violation, "none");
@@ -359,6 +366,18 @@ test("GOLDEN — CI SHARD SEVEN-EIGHT LESSON: the cited proof executes and task 
   }
 });
 
+test("GOLDEN — COVERAGE SHARD ONE-FOUR LESSON: the cited proof executes and task authors receive guidance", () => {
+  const { verdict, golden } = judgeCase("ci-coverage-shard-one-four-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const taskFile = "plan/tasks.d/W1-T3829.yaml";
+  const learningsDir = join(HERE, "..", "learnings");
+  const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+  const selected = selectLearnings(entries, [taskFile]).selected;
+  assert.ok(selected.some((entry) => entry.id === "coverage-shard-one-four-refusal-repair-lane"), taskFile);
+});
+
 test("GOLDEN — SCAN LESSON: the cited incident executes and the matched lane arms (W1-T7651)", () => {
   const { verdict, golden } = judgeCase("ci-scan-lesson");
   assert.equal(golden.violation, "none");
@@ -441,6 +460,22 @@ test("GOLDEN — SESSION RETRO LEARNINGS: all five evidence-backed rules execute
   const { verdict, golden } = judgeCase("session-retro-learnings");
   assert.equal(golden.violation, "none");
   assertGolden(verdict, golden);
+});
+
+test("GOLDEN — SQLITE FIXTURE CLEANUP LESSON: diagnostic publication guidance reaches database fixture work", () => {
+  const { verdict, golden } = judgeCase("sqlite-fixture-cleanup-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  for (const taskFile of ["test/read-model-consistency.test.ts", "test/board-projection.test.ts", "src/lib/read-model-db.ts"]) {
+    const entries = loadLearningsForTaskFiles(join(REPO_ROOT, "learnings"), [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    const lesson = selected.find((entry) => entry.id === "sqlite-fixture-cleanup-waits-for-diagnostic-publication");
+    assert.ok(lesson, taskFile);
+    assert.equal(lesson.lifecycle, "active");
+    assert.match(lesson.fact, /close the database, await flushReadModelTransactions\(\), then remove/);
+    assert.match(lesson.fact, /Preserve the directory if close or flush fails/);
+  }
 });
 
 test("GOLDEN — SESSION RETRO 2026-10-17: the five component-scoped rules execute from their active shards", () => {

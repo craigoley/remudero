@@ -9,6 +9,7 @@ import {
 } from "./typecheck-buildinfo.js";
 import { dirIsWritable, prepareTypecheckRun } from "./typecheck-run.js";
 import { acquireTestSlot, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
+import { observeSynchronousPreflightPhase, type PreflightPhaseReporter } from "./preflight-phase-progress.js";
 
 /**
  * Conventional-Commits shaping for commit messages the harness builds (MASTER-PLAN §6A, the
@@ -31,6 +32,27 @@ export const CONVENTIONAL_LIMITS = {
   headerMaxLength: 100,
   bodyMaxLineLength: 100,
 } as const;
+
+const WIP_HEAD = /^(?:wip(\([^)]*\))?|([a-z]+)\(wip\))(!?):\s*/i;
+const CHECKPOINT_HEAD = /^chore\(checkpoint\)(!?):\s*/i;
+
+/** Only `chore(checkpoint)` is reserved; `fix(checkpoint)` is final. Legacy wip markers still resume. */
+export function isWipSubject(subject: string): boolean {
+  return CHECKPOINT_HEAD.test(subject.trim()) || WIP_HEAD.test(subject.trim());
+}
+
+/** `chore(wip): x` -> `chore: x`; `wip: x` -> `chore: x`; `wip(s): x` -> `chore(s): x`. */
+export function stripWipMarker(subject: string): string {
+  const trimmed = subject.trim();
+  const checkpoint = CHECKPOINT_HEAD.exec(trimmed);
+  if (checkpoint) return `chore${checkpoint[1]}: ${trimmed.slice(checkpoint[0].length)}`;
+  const match = WIP_HEAD.exec(trimmed);
+  if (!match) return trimmed;
+  const rest = trimmed.slice(match[0].length);
+  const type = match[2] ?? "chore";
+  const scope = match[1] ?? "";
+  return `${type.toLowerCase()}${scope}${match[3]}: ${rest}`;
+}
 
 /** Marker appended to a header whose subject had to be trimmed. */
 const ELLIPSIS = "…";
@@ -168,9 +190,7 @@ export function checkCommitMessage(
     });
   }
 
-  // `type(scope): subject`, split like commitlint's own parser. No `type:` prefix, or a
-  // capitalised type (`type-case`, see CONVENTIONAL_RULE_COVERAGE), falls back to type-empty
-  // plus checking the whole header as the subject.
+  // Split `type(scope): subject` like commitlint; a missing `type:` prefix or capitalised type (`type-case`, see CONVENTIONAL_RULE_COVERAGE) falls back to type-empty plus checking the whole header as the subject.
   const match = header.match(/^([a-z][a-z0-9-]*)(?:\([^)]*\))?!?:\s*(.*)$/);
   const type = match ? match[1] : "";
   const subject = (match ? match[2] : header).trim();
@@ -519,6 +539,21 @@ export function commitlintStep(
   try {
     const bin = join(repoRoot, "node_modules", ".bin", "commitlint");
     const config = join(repoRoot, "commitlint.config.mjs");
+    const messages = readCommitMessages(repoRoot, range, spawn, "commitlint");
+    const skipped = skippedCheckpointDetails(messages);
+    if (skipped.length > 0) {
+      const failures: string[] = [];
+      for (const [i, message] of messages.entries()) {
+        if (isWipSubject(message.split("\n", 1)[0]!)) continue;
+        const res = spawn(process.execPath, [bin, "--config", config], { cwd: repoRoot, input: `${message}\n` });
+        const failed = spawnFailureDetail("commitlint", res);
+        if (failed || res.status !== 0) failures.push(`commit ${i + 1}/${messages.length}: ${failed ?? (res.stdout + res.stderr).trim()}`);
+      }
+      return {
+        name: "commitlint", ok: failures.length === 0,
+        detail: [`commitlint: ${failures.length === 0 ? "PASS" : "FAIL"} — ${range.from}..${range.to}`, ...failures, ...skipped].join("\n"),
+      };
+    }
     const res = spawn(process.execPath, [bin, "--config", config, "--from", range.from, "--to", range.to], {
       cwd: repoRoot,
     });
@@ -533,7 +568,8 @@ export function commitlintStep(
         : `commitlint: FAIL — ${range.from}..${range.to}\n${(res.stdout + res.stderr).trim()}`,
     };
   } catch (e) {
-    return { name: "commitlint", ok: false, detail: `commitlint: FAIL — ${String((e as Error)?.message ?? e)}` };
+    const detail = String((e as Error)?.message ?? e);
+    return { name: "commitlint", ok: false, detail: detail.startsWith("commitlint: ") ? detail : `commitlint: FAIL — ${detail}` };
   }
 }
 
@@ -599,17 +635,30 @@ export function readRangeCommitMessages(
   range: PreflightRange = DEFAULT_PREFLIGHT_RANGE,
   spawn: PreflightSpawn = defaultPreflightSpawn,
 ): string[] {
-  const res = spawn("git", ["log", "--no-merges", "--format=%x00%B", `${range.from}..${range.to}`], { cwd: repoRoot });
+  return readCommitMessages(repoRoot, range, spawn, "emitter-checks");
+}
+
+function readCommitMessages(
+  repoRoot: string, range: PreflightRange, spawn: PreflightSpawn, step: "commitlint" | "emitter-checks",
+): string[] {
+  const res = spawn("git", ["log", ...(step === "emitter-checks" ? ["--no-merges"] : []), "--format=%x00%B", `${range.from}..${range.to}`], { cwd: repoRoot });
   // A `git log` that never ran also returns empty stdout, the same shape as a genuinely empty
   // range — spawnFailureDetail (which reads status, not stdout) is what tells them apart;
   // skipping it would let a never-run spawn read as zero messages, a vacuous pass.
-  const spawnFailed = spawnFailureDetail("emitter-checks", res);
+  const spawnFailed = spawnFailureDetail(step, res);
   if (spawnFailed) throw new Error(spawnFailed);
   if (res.status !== 0) {
     const diagnostic = res.stderr.trim().slice(0, 512) || "no Git stderr captured";
-    throw new Error(`emitter-checks: Git range read FAILED (exit ${res.status}); ${diagnostic}`);
+    throw new Error(`${step}: Git range read FAILED (exit ${res.status}); ${diagnostic}`);
   }
   return splitRangeCommitMessages(res.stdout);
+}
+
+function skippedCheckpointDetails(messages: readonly string[]): string[] {
+  return messages.flatMap((message, i) => {
+    const subject = message.split("\n", 1)[0]!;
+    return isWipSubject(subject) ? [`skipped checkpoint commit ${i + 1}/${messages.length}: ${subject}`] : [];
+  });
 }
 
 /**
@@ -624,16 +673,19 @@ export function emitterChecksStep(
 ): PreflightStepResult {
   try {
     const messages = readRangeCommitMessages(repoRoot, range, spawn);
+    const skipped = skippedCheckpointDetails(messages);
     const violations = messages.flatMap((message, i) =>
-      checkCommitMessage(message).map((v) => `commit ${i + 1}/${messages.length} (${v.rule}): ${v.message}`),
+      isWipSubject(message.split("\n", 1)[0]!) ? [] :
+        checkCommitMessage(message).map((v) => `commit ${i + 1}/${messages.length} (${v.rule}): ${v.message}`),
     );
     const ok = violations.length === 0;
     return {
       name: "emitter-checks",
       ok,
-      detail: ok
-        ? `emitter-checks: PASS — ${messages.length} commit message(s) in ${range.from}..${range.to} match lib/commit-message.ts`
+      detail: [ok
+        ? `emitter-checks: PASS — ${messages.length - skipped.length} commit message(s) in ${range.from}..${range.to} checked against lib/commit-message.ts`
         : `emitter-checks: FAIL — lib/commit-message.ts rejects ${violations.length} thing(s)\n${violations.join("\n")}`,
+      ...skipped].join("\n"),
     };
   } catch (e) {
     return { name: "emitter-checks", ok: false, detail: `emitter-checks: FAIL — ${String((e as Error)?.message ?? e)}` };
@@ -648,6 +700,7 @@ export interface PreflightResult {
 export interface PreflightDeps {
   range?: PreflightRange;
   spawn?: PreflightSpawn;
+  onPhase?: PreflightPhaseReporter;
 }
 
 /**
@@ -660,9 +713,9 @@ export function runPreflight(repoRoot: string, deps: PreflightDeps = {}): Prefli
   const range = deps.range ?? DEFAULT_PREFLIGHT_RANGE;
   const spawn = deps.spawn ?? defaultPreflightSpawn;
   const steps: PreflightStepResult[] = [
-    commitlintStep(repoRoot, range, spawn),
-    typecheckStep(repoRoot, spawn),
-    emitterChecksStep(repoRoot, range, spawn),
+    observeSynchronousPreflightPhase("commitlint", () => commitlintStep(repoRoot, range, spawn), deps.onPhase),
+    observeSynchronousPreflightPhase("typecheck", () => typecheckStep(repoRoot, spawn), deps.onPhase),
+    observeSynchronousPreflightPhase("emitter-checks", () => emitterChecksStep(repoRoot, range, spawn), deps.onPhase),
   ];
   return { steps, ok: steps.every((s) => s.ok) };
 }

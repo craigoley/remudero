@@ -219,7 +219,12 @@ test("W1-T9443: the draft rung prunes through the off-loop reader", async (t) =>
 
   // The next pass reads no shard again: the reader is held for the hook's life, and nothing moved.
   logs.length = 0;
+  writeFileSync(join(root, "state", "inbox-draft-completions.json"), "{}");
+  const nextReadFileSyncSpy = t.mock.method(fs, "readFileSync");
   await hook();
+  const nextShardSyncReads = nextReadFileSyncSpy.mock.calls.filter((c) => String(c.arguments[0]).startsWith(shardDir));
+  t.mock.restoreAll();
+  assert.equal(nextShardSyncReads.length, 0, "an empty completion outbox also avoids synchronous shard reads");
   const again = logs.filter((l) => l.step === "proposal_shards.refreshed");
   assert.ok(again.length >= 1);
   assert.ok(again.every((l) => l.extra.read === 0 && l.extra.unchanged === 1), JSON.stringify(again));

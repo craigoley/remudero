@@ -1,5 +1,6 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 
 /**
  * W1-T2494: join an escalation to the answer it provoked.
@@ -81,6 +82,112 @@ export interface ThreadMessageExtra {
   question?: boolean;
   operator?: string;
   replyId?: string;
+  input?: InboxInputReference;
+  response?: InboxResponseReference;
+}
+
+export interface InboxInputReference {
+  id: string;
+  repository: string;
+  proposalId: string;
+  threadId: string;
+  contentSha256: string;
+}
+
+export interface InboxResponseReference {
+  id: string;
+  repository: string;
+  proposalId: string;
+  threadId: string;
+  inputs: InboxInputReference[];
+  outcome: "queued" | "completed" | "unknown";
+}
+
+export type InboxCausalScope = { repository: string; instance?: string };
+
+export function captureInboxInput(scope: InboxCausalScope, proposalId: string, text: string, id: string = randomUUID()): InboxInputReference {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(scope.repository) || !proposalId || !/^[A-Za-z0-9._:-]+$/.test(id) || id.length > 256) {
+    throw new Error("inbox input capture requires verified repository, proposal and distinct input identity");
+  }
+  return { id, repository: scope.repository, proposalId, threadId: inboxThreadId(proposalId),
+    contentSha256: createHash("sha256").update(text).digest("hex") };
+}
+
+export function verifiedInboxInput(value: unknown, scope: InboxCausalScope, proposalId: string, text?: string): value is InboxInputReference {
+  if (typeof value !== "object" || value === null) return false;
+  const input = value as Partial<InboxInputReference>;
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(scope.repository) && typeof input.id === "string" && /^[A-Za-z0-9._:-]+$/.test(input.id) && input.id.length <= 256 &&
+    input.repository === scope.repository && input.proposalId === proposalId && input.threadId === inboxThreadId(proposalId) &&
+    typeof input.contentSha256 === "string" && /^[a-f0-9]{64}$/.test(input.contentSha256) &&
+    (text === undefined || input.contentSha256 === createHash("sha256").update(text).digest("hex"));
+}
+
+function verifiedInboxResponse(value: unknown, scope: InboxCausalScope, proposalId: string): value is InboxResponseReference {
+  if (!value || typeof value !== "object") return false;
+  const response = value as Partial<InboxResponseReference>;
+  return typeof response.id === "string" && response.id.length > 0 && response.repository === scope.repository &&
+    response.proposalId === proposalId && response.threadId === inboxThreadId(proposalId) &&
+    ["queued", "completed", "unknown"].includes(String(response.outcome)) && Array.isArray(response.inputs) && response.inputs.length > 0 &&
+    new Set(response.inputs.map(input => input?.id)).size === response.inputs.length &&
+    response.inputs.every(input => verifiedInboxInput(input, scope, proposalId));
+}
+
+function responseFingerprint(response: InboxResponseReference): string {
+  const inputs = response.inputs.map(input => [input.id, input.repository, input.proposalId, input.threadId, input.contentSha256])
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+  return JSON.stringify([response.id, response.repository, response.proposalId, response.threadId, response.outcome, inputs]);
+}
+
+export function causalThreadInputs(messages: readonly ThreadMessage[], scope: InboxCausalScope, proposalId: string,
+  history: readonly { feedback?: unknown; input?: unknown; retracted?: unknown }[] = []) {
+  const candidates = messages.filter(message => message.role === "reply" && (!hasThreadEvent(message.extra) || message.extra?.event?.kind === "reframed"));
+  const counts = new Map<string, number>();
+  const verified = candidates.flatMap(message => {
+    const input = message.extra?.input;
+    if (!verifiedInboxInput(input, scope, proposalId, message.body)) return [];
+    counts.set(input.id, (counts.get(input.id) ?? 0) + 1);
+    return [{ ...message, extra: { ...message.extra, input } }];
+  });
+  const captured = verified.filter(message => counts.get(message.extra.input.id) === 1);
+  const byId = new Map(captured.map(message => [message.extra.input.id, message.extra.input]));
+  const acknowledged = new Set<string>();
+  const queued = new Set<string>(), completed = new Set<string>();
+  const responseBodies = new Map<string, string>(), conflictingResponses = new Set<string>();
+  for (const message of messages) {
+    const response = message.extra?.response;
+    if (message.role !== "escalation" || !verifiedInboxResponse(response, scope, proposalId)) continue;
+    const body = responseFingerprint(response), previous = responseBodies.get(response.id);
+    if (previous !== undefined && previous !== body) conflictingResponses.add(response.id);
+    else responseBodies.set(response.id, body);
+  }
+  let unknown = captured.length !== candidates.length;
+  for (const message of messages) {
+    const response = message.extra?.response;
+    if (response === undefined) continue;
+    if (message.role !== "escalation" || !verifiedInboxResponse(response, scope, proposalId) || conflictingResponses.has(response.id) ||
+      response.inputs.some(input => {
+        const capturedInput = byId.get(input.id);
+        return capturedInput === undefined || capturedInput.contentSha256 !== input.contentSha256;
+      })) {
+      unknown = true; continue;
+    }
+    if (response.outcome === "unknown") { unknown = true; continue; }
+    for (const input of response.inputs) {
+      acknowledged.add(input.id);
+      if (response.outcome === "queued") queued.add(input.id);
+      else completed.add(input.id);
+    }
+  }
+  const historyIds = new Map<string, number>();
+  for (const round of history) {
+    const id = (round.input as Partial<InboxInputReference> | undefined)?.id;
+    if (typeof id === "string") historyIds.set(id, (historyIds.get(id) ?? 0) + 1);
+  }
+  const retracted = new Set(history.flatMap(round => round.retracted === true && typeof round.feedback === "string" &&
+    verifiedInboxInput(round.input, scope, proposalId, round.feedback) && historyIds.get(round.input.id) === 1 ? [round.input.id] : []));
+  const active = captured.filter(message => !retracted.has(message.extra.input.id));
+  return { captured, pending: active.filter(message => !acknowledged.has(message.extra.input.id)),
+    pendingWork: active.filter(message => queued.has(message.extra.input.id) && !completed.has(message.extra.input.id)), unknown };
 }
 
 export type InboxThreadAction = "approve" | "decline" | "edit" | "restore";
@@ -226,13 +333,32 @@ export function appendThreadEvent(
   text: string,
   deps: ThreadStoreDeps,
   ts?: number,
+  extra: Pick<ThreadMessageExtra, "input" | "response"> = {},
 ): "appended" | "existing" {
   const current = readThread(inboxThreadId(proposalId), deps);
   if (current.status === "unresolved") throw new Error(`inbox-thread: ${current.reason}`);
   if (current.messages.some((message) => message.extra?.event?.key === event.key)) return "existing";
+  if (extra.response) {
+    const response = extra.response, scope = { repository: response.repository };
+    if (!verifiedInboxResponse(response, scope, proposalId)) throw new Error("inbox-thread: invalid scoped completion");
+    const sameIdentity = current.messages.filter(message => {
+      const previous = message.extra?.response;
+      return previous !== undefined && previous.id === response.id && previous.repository === response.repository &&
+        previous.proposalId === proposalId && previous.threadId === response.threadId;
+    });
+    if (sameIdentity.length > 0) {
+      if (sameIdentity.some(message => {
+        const previous = message.extra?.response;
+        return message.role !== "escalation" || !verifiedInboxResponse(previous, scope, proposalId) || responseFingerprint(previous) !== responseFingerprint(response);
+      })) throw new Error("inbox-thread: completion identity reused for different inputs or outcome");
+      return "existing";
+    }
+  }
   const operator = OPERATOR_EVENT_KINDS.has(event.kind);
-  if (operator && current.messages.some((message) => message.role === "reply" && !hasThreadEvent(message.extra) && message.body.trim() === text.trim())) return "existing";
-  appendThreadMessage(inboxThreadIdentity(proposalId), operator ? "reply" : "escalation", text, { ...deps, now: ts === undefined ? deps.now : () => ts }, { event });
+  if (operator && current.messages.some(message => message.role === "reply" && !hasThreadEvent(message.extra) &&
+    (extra.input ? verifiedInboxInput(message.extra?.input, { repository: extra.input.repository }, proposalId, message.body) && message.extra?.input?.id === extra.input.id
+      : message.body.trim() === text.trim()))) return "existing";
+  appendThreadMessage(inboxThreadIdentity(proposalId), operator ? "reply" : "escalation", text, { ...deps, now: ts === undefined ? deps.now : () => ts }, { event, ...extra });
   return "appended";
 }
 

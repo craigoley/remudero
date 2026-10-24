@@ -595,6 +595,10 @@ function watchGitStub(): string {
     '    for b in ${STUB_CRASH:-}; do',
     '      if [ "$b" = "$ref" ]; then printf "crash_loop_verdict=CRASH_LOOP — 2026-10-11T07:00:00Z 6 consecutive revivals from exit 1\\n"; fi',
     "    done",
+    // 2026-10-23: STUB_REAPER is `name:verdict-word` pairs; the beat carries that reaper verdict.
+    '    for e in ${STUB_REAPER:-}; do',
+    '      if [ "${e%%:*}" = "$ref" ]; then printf "session_reaper_verdict=%s — REFUSE systemd-logind.service: sessions 3 -> 3 did not drop\\n" "${e#*:}"; fi',
+    "    done",
     "    ;;",
     "esac",
     "exit 0",
@@ -624,6 +628,8 @@ function runWatch(opts: {
   spool?: string;
   /** Branches whose beat carries the launcher's crash-loop marker. */
   crash?: string;
+  /** `name:verdict` pairs: the session reaper verdict each branch's beat carries. */
+  reaper?: string;
   mutate?: [string, string];
 }): Watch {
   const dir = mkdtempSync(join(tmpdir(), "heartbeat-watch-"));
@@ -660,6 +666,7 @@ function runWatch(opts: {
       STUB_STALLED: opts.stalledBranches ?? "",
       STUB_SPOOL: opts.spool ?? "",
       STUB_CRASH: opts.crash ?? "",
+      STUB_REAPER: opts.reaper ?? "",
     },
   });
   const reportPath = join(dir, "heartbeat-report.txt");
@@ -1134,6 +1141,22 @@ test("a fresh beat carrying UNDELIVERED host-side escalations raises its own arm
   assert.equal(pending.state, `${HOST_A}\tFRESH\n`);
   const { calls } = runDeliver(`${HOST_A}\tSPOOL_UNDELIVERED\n`, { branchReports: { [HOST_A]: "a\n" } });
   assert.ok(calls.some((c) => c.includes(`fleet-heartbeat:${HOST_A}`) && c.includes("host-side escalations are not reaching GitHub")), JSON.stringify(calls));
+});
+
+test("a fresh beat carrying a refused or unfinished session reaper pass raises its own arm; a clean or running one does not", () => {
+  const w = runWatch({ branches: HOST_A, stub: `${HOST_A}:60`, reaper: `${HOST_A}:REFUSED` });
+  assert.equal(w.status, 1, "a refused reaper pass is a finding");
+  assert.match(w.stderr, /SESSION REAPER ALARM — 'heartbeat-azure': REFUSED — REFUSE systemd-logind\.service/);
+  assert.equal(w.state, `${HOST_A}\tREAPER_ALARM\n`);
+  assert.match(w.branchReports[HOST_A] ?? "", /^Condition: SESSION REAPER ALARM/m);
+  assert.equal(runWatch({ branches: HOST_A, stub: `${HOST_A}:60`, reaper: `${HOST_A}:INCOMPLETE` }).state, `${HOST_A}\tREAPER_ALARM\n`);
+  for (const quiet of ["ok", "running", "unknown"]) {
+    const q = runWatch({ branches: HOST_A, stub: `${HOST_A}:60`, reaper: `${HOST_A}:${quiet}` });
+    assert.equal(q.status, 0, `${quiet} is not a finding`);
+    assert.equal(q.state, `${HOST_A}\tFRESH\n`);
+  }
+  const { calls } = runDeliver(`${HOST_A}\tREAPER_ALARM\n`, { branchReports: { [HOST_A]: "a\n" } });
+  assert.ok(calls.some((c) => c.includes(`fleet-heartbeat:${HOST_A}`) && c.includes("the session reaper refused or did not finish a pass")), JSON.stringify(calls));
 });
 
 test("a fresh beat carrying the launcher's crash-loop marker raises its own arm on a daemon host, under a stale beat only", () => {

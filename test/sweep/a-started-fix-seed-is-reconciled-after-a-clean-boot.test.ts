@@ -120,3 +120,67 @@ test("a started fix seed preserves both empty and uncertain adoption evidence th
       "rotation cannot manufacture either a surviving child or its absence");
   }
 });
+
+
+test("a previous daemon rung cannot keep a later metadata-only fix seed live", () => {
+  const previous = "DAEMON-1792390000000";
+  const earlier = { ...seed, run_id: previous };
+  const oldDispatch = { ...dispatch, run_id: previous };
+  const rows = [earlier, oldDispatch, seed, { step: "fix.progress_judged", task_id: TASK, run_id: OLD },
+    { ...adoption, live: 1, adopted: 1 }, boot];
+  assert.equal(fixSeedRead(rows, pr, CURRENT)?.kind, "orphaned");
+  for (const owner of [undefined, "", "DAEMON-", "not-a-daemon", CURRENT, `${CURRENT}-fix1`, OLD, `${OLD}-fix1`]) {
+    assert.equal(fixSeedRead([earlier, { ...oldDispatch, run_id: owner }, seed,
+      { step: "fix.progress_judged", task_id: TASK, run_id: OLD }, { ...adoption, live: 1, adopted: 1 }, boot], pr, CURRENT)?.kind,
+    "live", String(owner));
+  }
+  assert.equal(fixSeedRead([...rows, { ...dispatch, run_id: CURRENT }], pr, CURRENT)?.kind, "live");
+  assert.equal(fixSeedRead([...rows, oldDispatch], pr, CURRENT)?.kind, "live");
+  assert.equal(fixSeedRead([earlier, { ...oldDispatch, head_sha: "a".repeat(40) }, seed, { ...adoption, live: 1, adopted: 1 }, boot], pr, CURRENT)?.kind, "live");
+  assert.equal(fixSeedRead(rows, pr, OLD)?.kind, "live");
+  for (const step of ["fix.unknown_worker_stage", "fix.review"]) {
+    assert.equal(fixSeedRead([...rows, { step, task_id: TASK, run_id: previous, state: "success" }], pr, CURRENT)?.kind, "live", step);
+  }
+  const scopeWait = [...rows, { step: "fix.scope_amendment", task_id: TASK, run_id: previous, amendmentNumber: 13941 },
+    { step: "fix.done", task_id: TASK, run_id: previous, subtype: "scope_amendment_pending" }];
+  assert.equal(fixSeedRead(scopeWait, pr, CURRENT)?.kind, "live", "a pending scope decision remains a wait");
+  assert.equal(fixSeedRead([...rows, { step: "fix.stood_down", task_id: TASK, run_id: previous, outcome: "handed_off" }], pr, CURRENT)?.kind,
+    "live", "an unreceived handoff remains a wait");
+});
+
+test("a metadata-only seed recovery still lets the normal live checkout claim refuse", async (t) => {
+  const previous = "DAEMON-1792390000000", dir = mkdtempSync(join(tmpdir(), "rmd-seed-rung-owner-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const rows = [{ ...seed, run_id: previous }, { ...dispatch, run_id: previous }, seed,
+    { step: "fix.progress_judged", task_id: TASK, run_id: OLD }, { ...adoption, live: 1, adopted: 1 }, boot];
+  const view: OpenPrView = { ...pr, prUrl: "https://github.com/example/fixture/pull/12904",
+    headRefName: "run-W1-T9739-1792389480000", reviewState: "failure", checksState: "green",
+    unmetCriteria: [{ claim: "a criterion", proof: "unit test: fixture", met: false,
+      reason: "not done", proof_exec: "not_executable" }], priorStrikes: 0,
+    lastActivityAt: seed.ts, autoMergeArmed: false };
+  let claims = 0;
+  await runSweep([view], { runId: CURRENT, ledgerPath, now: () => Date.parse(boot.ts),
+    arm: () => assert.fail("red cannot arm"), close: () => assert.fail("not stale"), escalate: () => {},
+    readLedger: () => rows,
+    dispatchFix: () => { claims++; return { claimDeclined: true, ownerRecoveryReason: "live_claim" }; },
+  });
+  assert.equal(claims, 1);
+  assert.equal(readLedgerLines(ledgerPath).findLast(row => row.step === "sweep.disposed")?.acted, false);
+});
+
+
+test("a metadata-only fix seed retains its reused judgment through real ledger rotation", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-seed-reused-rotation-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ledgerPath = join(dir, "ledger.ndjson"), previous = "DAEMON-1792390000000";
+  const rows = [{ ...seed, run_id: previous }, { ...dispatch, run_id: previous }, seed,
+    { step: "fix.progress_reused", task_id: TASK, run_id: OLD, ts: "2026-10-19T08:10:00.000Z" },
+    { ...adoption, live: 1, adopted: 1 }, boot];
+  const core = rows.map(row => JSON.stringify(row)).join("\n") + "\n", bytes = Buffer.byteLength(core);
+  writeFileSync(ledgerPath, core + JSON.stringify({ step: "ci.polling", padding: "x".repeat(bytes * 4) }) + "\n");
+  assert.equal(rotateLedger(ledgerPath, { ceilingBytes: bytes * 2 }).rotated, true);
+  const after = readLedgerLines(ledgerPath);
+  assert.ok(after.some(row => row.step === "fix.progress_reused"));
+  assert.equal(fixSeedRead(after, pr, CURRENT)?.kind, "orphaned");
+});

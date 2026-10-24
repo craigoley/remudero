@@ -84,7 +84,17 @@ test("commitlint: a child that never started is reported as a SPAWN FAILURE, not
 
 test("commitlint: a GENUINE header-max-length violation is still reported verbatim — the control", () => {
   const real = "✖   header must not be longer than 100 characters, current length is 106 [header-max-length]";
-  const r = commitlintStep("/repo", { from: "origin/main", to: "HEAD" }, ranAndFailed(real));
+  let lintCalls = 0;
+  const r = commitlintStep("/repo", { from: "origin/main", to: "HEAD" }, (file, args) => {
+    if (file === "git") {
+      assert.equal(args[0], "log");
+      return { status: 0, stdout: `\0fix(x): ${"y".repeat(120)}\n`, stderr: "" };
+    }
+    lintCalls++;
+    assert.ok(args.some(arg => arg.endsWith("commitlint.config.mjs")));
+    return { status: 1, stdout: real, stderr: "" };
+  });
+  assert.equal(lintCalls, 1, "the successful range read must reach the real lint verdict");
   assert.equal(r.ok, false);
   assert.match(r.detail, /header-max-length/, "a real violation must survive the change untouched");
   assert.match(r.detail, /FAIL — origin\/main\.\.HEAD/);

@@ -15,7 +15,7 @@
     - src/lib/panel-graph.ts
     - src/run-task.ts
     - test/a-decline-holds-until-the-state-it-judged-changes.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator 2026-10-17: a declined item must stay declined until restored or materially changed
   attempts: 0
   rationale: |

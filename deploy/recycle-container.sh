@@ -349,7 +349,13 @@ else
   STATE_DIR_RESOLUTION="the default \${HOME:-/root}/rmd-state (HOME=${HOME:-<unset>})"
 fi
 STATE_MOUNT_DEST="/home/node/Remudero"
-CRED_DIR="${RMD_CLAUDE_DIR:-${HOME:-/root}/.claude}"
+CLAUDE_DIRECTORY_FILE="${SCRIPT_DIR}/claude-directory.sh"
+# Keep copied-script fixtures on the same resolver as an ordinary checkout.
+if [ ! -r "${CLAUDE_DIRECTORY_FILE}" ]; then
+  CLAUDE_DIRECTORY_FILE="${PWD}/deploy/claude-directory.sh"
+fi
+source "${CLAUDE_DIRECTORY_FILE}"
+CRED_DIR="$(claude_host_directory)"
 CRED_MOUNT_DEST="/home/node/.claude"
 CODEX_DIR="${RMD_CODEX_DIR:-${HOME:-/root}/.codex}"
 CODEX_MOUNT_DEST="/home/node/.codex"

@@ -300,7 +300,7 @@ test("commitlint: a child that never produced an exit status is reported as a SP
 });
 
 test("commitlint: a GENUINE violation is still reported verbatim, so the spawn guard removes no detection", () => {
-  const spawn: PreflightSpawn = () => ({
+  const spawn: PreflightSpawn = file => file === "git" ? { status: 0, stdout: "", stderr: "" } : ({
     status: 1,
     stdout: "✖   header must not be longer than 100 characters, current length is 106 [header-max-length]",
     stderr: "",

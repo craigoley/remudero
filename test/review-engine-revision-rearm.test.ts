@@ -184,9 +184,12 @@ test("W1-T2872: the current engine owns a new decision instead of replaying PR #
 
 test("the semantic scope-context bump rearms both identities while operational churn changes neither", () => {
   const previousRevision = "w1-t2946-codex-disposable-review-v1";
-  assert.equal(REVIEW_ENGINE_REVISION, "promised-followups-named-execution-v4");
+  assert.equal(REVIEW_ENGINE_REVISION, "trusted-proof-receipts-promised-followups-and-explained-failures-v6");
   const currentInput = reviewInputDigest(HEAD_4042, PR_BODY_4042, REVIEW_ENGINE_REVISION);
   assert.notEqual(currentInput, reviewInputDigest(HEAD_4042, PR_BODY_4042, previousRevision));
+  for (const prior of ["trusted-proof-receipts-v1", "promised-followups-and-explained-semantic-failures-v5"]) {
+    assert.notEqual(currentInput, reviewInputDigest(HEAD_4042, PR_BODY_4042, prior));
+  }
   assert.notEqual(currentInput, reviewInputDigest(`${HEAD_4042}a`, PR_BODY_4042, REVIEW_ENGINE_REVISION));
   assert.notEqual(currentInput, reviewInputDigest(HEAD_4042, `${PR_BODY_4042}edited`, REVIEW_ENGINE_REVISION));
 
@@ -200,6 +203,9 @@ test("the semantic scope-context bump rearms both identities while operational c
   };
   const currentDecision = reviewDecisionDigest({ ...material, engineRevision: REVIEW_ENGINE_REVISION });
   assert.notEqual(currentDecision, reviewDecisionDigest({ ...material, engineRevision: previousRevision }));
+  for (const prior of ["trusted-proof-receipts-v1", "promised-followups-and-explained-semantic-failures-v5"]) {
+    assert.notEqual(currentDecision, reviewDecisionDigest({ ...material, engineRevision: prior }));
+  }
   assert.equal(
     currentDecision,
     reviewDecisionDigest({

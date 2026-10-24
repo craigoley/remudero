@@ -10,7 +10,7 @@
   plan_refs: [W1-T10144, W1-T10298, W1-T10299]
   files:
     - docs/forensics/author-preflight-tests-fail-in-the-retro-container.md
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED, core ledger (read-only): `retro.preflight_failed` at 2026-10-19T15:49Z and 2026-10-20T06:31Z each list

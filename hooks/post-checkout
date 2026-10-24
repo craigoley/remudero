@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -u
+
+[ "${1:-}" = 0000000000000000000000000000000000000000 ] && [ "${3:-}" = 1 ] || exit 0
+git_dir=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+common_dir=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
+[ "$git_dir" != "$common_dir" ] || exit 0
+kernel=$(uname -s 2>/dev/null) || exit 0
+[ "$kernel" != Darwin ] || exit 0
+[ -f package-lock.json ] || exit 0
+[ ! -e node_modules ] && [ ! -L node_modules ] || exit 0
+
+tool=$(command -v remudero-dependencies 2>/dev/null) || tool="${HOME:-}/.local/bin/remudero-dependencies"
+[ -x "$tool" ] || exit 0
+main_worktree=""
+while IFS= read -r line; do
+  case "$line" in
+    'worktree '*) main_worktree=${line#worktree }; break ;;
+  esac
+done < <(git worktree list --porcelain 2>/dev/null)
+[ -n "$main_worktree" ] || exit 0
+
+echo 'post-checkout: linking dependencies from the account seed store' >&2
+if ! outcome=$("$tool" prime "$PWD" --source "$main_worktree" 2>&1); then
+  case "$outcome" in
+    *'donor inputs do not match'*) outcome=$("$tool" prime "$PWD" 2>&1) || : ;;
+  esac
+fi
+printf '%s\n' "${outcome%%$'\n'*}" >&2
+exit 0

@@ -25,7 +25,7 @@
 //   node scripts/comment-load-ratchet.mjs --json | --print | --check | --no-record | --strict
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import { assertNoDuplicateKeys } from "./lib/json-duplicate-keys.mjs";
@@ -355,6 +355,19 @@ function readBaseDiff(root, baseRef) {
   return { base, diff: git(root, ["diff", "--unified=0", `${base}...HEAD`, "--", ...MEASURED_ROOTS], "read the base diff") };
 }
 
+/** A missing legacy row must not replace a stricter ceiling with the implicit bucket. */
+function deletedLegacyCeilings(root, base, baselinePath, currentComments, baseline) {
+  const path = relative(root, baselinePath).split("\\").join("/");
+  if (isAbsolute(path) || path === ".." || path.startsWith("../")) return [];
+  const tracked = git(root, ["ls-tree", "--name-only", "-z", base, "--", path], "locate base baseline");
+  if (!tracked) return [];
+  const previous = readBaseline(git(root, ["show", `${base}:${path}`], "read base baseline"), `${base}:${path}`);
+  return Object.entries(previous)
+    .filter(([file, ceiling]) => file in currentComments && !Object.hasOwn(baseline, file) &&
+      Number.isInteger(ceiling) && ceiling >= 0 && ceiling < CEILING_BUCKET_COMMENTS)
+    .map(([path, ceiling]) => ({ path, ceiling, implicit: CEILING_BUCKET_COMMENTS }));
+}
+
 function measureAll(root, files) {
   const comments = {};
   const totals = { comments: 0, code: 0 };
@@ -499,9 +512,11 @@ export function main(argv) {
 
   let blocks = [];
   let base = null;
+  let deletedCeilings = [];
   try {
     const read = readBaseDiff(root, values.base);
     base = read.base;
+    deletedCeilings = deletedLegacyCeilings(root, base, baselinePath, measured.comments, baseline);
     const measuredSet = new Set(files);
     blocks = findOversizedAddedBlocks(read.diff, (f) => measuredSet.has(f));
   } catch (e) {
@@ -528,12 +543,13 @@ export function main(argv) {
       violations: causedViolations,
       inherited_from_base: split.inherited,
       oversized_added_blocks: blocks,
+      deleted_legacy_ceilings: deletedCeilings,
       shrunk: verdict.shrunk,
       added: verdict.added,
       removed: verdict.removed,
       redundant: verdict.redundant,
     }));
-    return causedViolations.length === 0 && blocks.length === 0 ? 0 : 1;
+    return causedViolations.length === 0 && blocks.length === 0 && deletedCeilings.length === 0 ? 0 : 1;
   }
 
   for (const v of split.inherited) {
@@ -544,7 +560,10 @@ export function main(argv) {
   }
   if (causedViolations.length > 0) reportGrowth(causedViolations, baselineRelPath);
   if (blocks.length > 0) reportBlocks(blocks);
-  if (causedViolations.length > 0 || blocks.length > 0) {
+  for (const v of deletedCeilings) {
+    console.error(`comment-load-ratchet: BLOCKED -- deleting ${v.path} ceiling ${v.ceiling} raises it to implicit ${v.implicit}; restore the explicit ceiling.`);
+  }
+  if (causedViolations.length > 0 || blocks.length > 0 || deletedCeilings.length > 0) {
     reportUncommitted(uncommittedAmong(root, [...new Set([...causedViolations.map((v) => v.path), ...blocks.map((b) => b.file)])]), base);
     return 1;
   }

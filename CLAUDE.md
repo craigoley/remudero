@@ -1,16 +1,15 @@
 # remudero — Claude rules
 
-Always-on **workflow** rules by the question you're asking; knowledge lives in `learnings/*.yaml`,
-`plan/`, `MASTER-PLAN.md`, `DECISIONS.md`, `LEARNINGS.md`. Nothing here is a gate; a rule needing one
-gets a filed task.
+Workflow rules; knowledge: `learnings/*.yaml`, `plan/`, `MASTER-PLAN.md`, `DECISIONS.md`, `LEARNINGS.md`.
+Gates need filed tasks.
 
 **THIS FILE IS AN INDEX, AND THE ARROW IS AN INSTRUCTION TO YOU.** **The headline is the whole rule:
-obey it unopened.** Its `→ doctrine/<section>/<rule>.md` body is the evidence.
+obey it unopened.** `→ doctrine/...` points to evidence.
 
-**Upkeep (§8A):** workers never load it (`settingSources: []`). Rule: headline + pointer here, body (a 2–4 word slug),
-`npm run agents-md`. A fold keeps the instruction in the headline; a frozen W1-T3323 row leaves only
-VERBATIM in the body of the live rule carrying its instruction, its id (and a moved body's old path)
-aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the earning PR.
+**Upkeep (§8A):** workers use `settingSources: []`. Keep headline + pointer; run `npm run agents-md`.
+Use 2–4 word body slugs. Folds retain headline instructions. W1-T3323 bodies stay VERBATIM;
+ids and moved paths alias in
+`doctrine/merged-rules.json`. Cite symbols and the earning PR, not line numbers.
 
 ## Before you push
 
@@ -55,6 +54,7 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
 
 ## Plan and task hygiene
 
+- **On the Azure host a new worktree's dependencies are linked when it is cut — never run `npm ci` or `ln -s` node_modules in it.** → doctrine/plan-and-task-hygiene/host-worktrees-arrive-linked.md
 - **Every builder, reviewer and worker must clean up its own disposable workspace artifacts before
   finishing; preserve active/shared paths, unpublished work and durable evidence, and leave
   worktree retirement to the harness.** → doctrine/plan-and-task-hygiene/finish-owned-work.md

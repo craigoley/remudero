@@ -1,3 +1,4 @@
+import type { LifetimeIndexFailure } from "../../lib/lifetime-identity-index.js";
 /**
  * W1-T9333 — the `daemon` verb's handler, moved out of `src/run-task.ts` (decomposition: one verb per module).
  * `daemonCommand` is the unchanged body; the run-task.ts symbols it reaches arrive through {@link DaemonCommandHost}
@@ -32,8 +33,9 @@ import { createGardenerRuntimeWriter } from "../../lib/gardener-runtime.js";
 import { daemonSreLaneInput, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow } from "../../lib/sre-lane.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "../../lib/sre-runbooks.js";
 import { daemonBreakerRunbookHost } from "../../lib/breaker-release.js";
-import { inboxThreadStorePath } from "../../lib/panel-graph.js";
-import { createThreadEventSync, registryThreadItems } from "../../lib/inbox-responder.js";
+import { inboxThreadStorePath, type RatifyCliHandle } from "../../lib/panel-graph.js";
+import { createThreadEventSync, registryThreadItems, type InboxResponderDeps } from "../../lib/inbox-responder.js";
+import type { InboxCausalScope } from "../../lib/inbox-thread.js";
 import { gitRecommendationEvidence, RECOMMENDATION_SEED_PATH } from "../../lib/inbox-recommendation.js";
 import { censusRunDirs } from "../../lib/run-child-contract.js";
 import { plannedSequence, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
@@ -69,7 +71,7 @@ import { refreshReviewPublisherToken as refreshInstallationToken } from "../../l
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
 import { dispatchClaimRef, findClaimMintRow, releaseReplacedContainerClaims, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
 import { buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
-import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence } from "../../lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
 import { terminalUnionScans } from "../../lib/sweep.js";
@@ -215,6 +217,25 @@ export interface GardenBuildContext {
   repo: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
   raiseDuplicate: (e: Escalation) => string;
+}
+
+/** One production composition, using the boot's existing gateway and its in-flight ownership. */
+export function createDaemonInboxResponder(opts: {
+  root: string;
+  ledgerPath: string;
+  scope: InboxCausalScope;
+  ratify: Pick<RatifyCliHandle, "reframe">;
+  decide: InboxResponderDeps["decide"];
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}): InboxResponderDeps {
+  const scope = { ...opts.scope }, threadStorePath = inboxThreadStorePath(opts.root);
+  return {
+    scope, threadStorePath, ledgerPath: opts.ledgerPath,
+    readItems: () => registryThreadItems(join(opts.root, "state"), opts.ledgerPath, scope),
+    reframe: (proposalId, feedback, input) => opts.ratify.reframe(proposalId, feedback, input),
+    syncEvents: createThreadEventSync({ ledgerPath: opts.ledgerPath, threadStorePath, stateDir: join(opts.root, "state"), log: opts.log }).sync,
+    decide: opts.decide,
+  };
 }
 
 /** Render a {@link DaemonSummary} — "what happened, or is happening" — at a glance. */
@@ -515,7 +536,7 @@ export async function daemonCommand(
   // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
   onMainEntryStep = startMainEntryWatch({ log, root: daemonModuleRepoDir });
   // W1-T9065: the lane's approve and the responder's reframe run from a tree at origin/main.
-  const fleetRatify = fleetRatifyGateway(repoRoot, join(config.root, "state", "logs"), ledgerPath);
+  const fleetRatify = fleetRatifyGateway(repoRoot, join(config.root, "state", "logs"), ledgerPath, { stateRoot: config.root });
   const ciJudgeIo = deps.ciJudgeIo ?? (deps.repoRoot === undefined ? {} : undefined);
   const kickCiJudge = ciJudgeIo && singleFlightCiJudge(() => judgeCiEscalation(productionCiJudgePorts({
     owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log, ...ciJudgeIo,
@@ -772,12 +793,15 @@ export async function daemonCommand(
   };
   // W1-T3758: one bounded archive scan before the daemon starts dispatching. The live ledger is
   // still read at each gate consultation; unread history retains the old live-only behaviour.
-  const archivedLifetime = await auditedLifetimeTalliesFromArchives(dirname(ledgerPath));
+  const archivedLifetime = await auditedLifetimeTalliesFromArchives(dirname(ledgerPath), undefined,
+    (failure: LifetimeIndexFailure) => log("dispatch.lifetime_history_unavailable", { ...failure, phase: "index" }));
+  try {
   if (archivedLifetime.history === undefined) {
     log("dispatch.lifetime_history_unavailable", {
       archive_count: archivedLifetime.archiveCount,
       unread_archives: archivedLifetime.unread,
       reason: archivedLifetime.unavailableReason,
+      ...(archivedLifetime.indexError === undefined ? {} : { detail: archivedLifetime.indexError }),
     });
   } else {
     log("dispatch.lifetime_history_loaded", {
@@ -900,6 +924,7 @@ export async function daemonCommand(
   });
   const processKill = deps.processKill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const onSignal = (sig: NodeJS.Signals) => {
+    archivedLifetime.history?.close?.();
     githubEventWake.close();
     consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
     drainLock.release();
@@ -1677,15 +1702,8 @@ export async function daemonCommand(
           handoffInFlight: (proposalId) => fleetRatify.inFlight(proposalId),
           originMainSha: async () => (await hostWorktreeGitAsync(repoRoot, ["rev-parse", "origin/main"])).trim(),
         },
-        inboxResponder: {
-          threadStorePath: inboxThreadStorePath(config.root),
-          ledgerPath,
-          readItems: () => registryThreadItems(join(config.root, "state"), ledgerPath),
-          reframe: (proposalId, feedback) => void fleetRatify.reframe(proposalId, feedback),
-          // W1-T9252: the boot backfill, then the live tail, of operator actions and fleet outcomes onto threads.
-          syncEvents: createThreadEventSync({ ledgerPath, threadStorePath: inboxThreadStorePath(config.root), stateDir: join(config.root, "state"), log }).sync,
-          decide: inboxThreadDecider(config, log),
-        },
+        inboxResponder: createDaemonInboxResponder({ root: config.root, ledgerPath, scope: { repository: `${target.owner}/${target.repo}` },
+          ratify: fleetRatify, decide: inboxThreadDecider(config, log), log }),
         runPrAction: async (request) => {
           const args = [String(request.prNumber), "--repo", target.repo];
           const exitCode = request.action === "fix"
@@ -1780,6 +1798,7 @@ export async function daemonCommand(
         // W1-T7734: the idle sleep runs the light pass while review demand waits, at a cadence the sweep
         // derives from observed review duration and head churn. Reads the sweep's in-process memo only.
         readIdleReviewDemand: () => readIdleLightCadence(systemClock.now()),
+        readReviewMedianMs: readObservedReviewMedianMs,
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
         // ended BETWEEN polls (not only at the last boot) is still found within one cycle.
@@ -1968,5 +1987,8 @@ export async function daemonCommand(
     }));
     consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
     drainLock.release();
+  }
+  } finally {
+    archivedLifetime.history?.close?.();
   }
 }

@@ -82,10 +82,22 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "issue_revalidation.attempt_spend",
+    meaning: "One already-executed issue-revalidation judge attempt's own monetary evidence before verdict parsing, deduplicated by reported attempt identity. Unknown and unstarted prices stay unknown; API zero is reported evidence, subscription notional is separate, and no figure is an invoice or task outcome.",
+    writer: ["issueRevalidationJudgeText"],
+    outcomes: ["result", "failed", "not-started"],
+  },
+  {
     step: "model_canary.coding_observed",
     meaning: "An unregistered coding bridge attempted a redacted measured-or-unknown SDK receipt through the existing ledger. It is not executor qualification, successful grading, invoiced cost or a completed pair.",
     writer: ["codingLedgerSave"],
     outcomes: ["unregistered-mechanics-only"],
+  },
+  {
+    step: "machine_judge.attempt_spend",
+    meaning: "One machine-filing judge attempt's own reported monetary evidence, before parsing. Unknown prices and unstarted calls stay unknown; subscription notional is separate and no figure is an invoice. Assignment and attempt receipts do not produce additional spend.",
+    writer: ["productionMachineFilingJudgePorts"],
+    outcomes: ["result", "failed", "not-started"],
   },
   {
     step: "sweep.update_branch.pending_guard",

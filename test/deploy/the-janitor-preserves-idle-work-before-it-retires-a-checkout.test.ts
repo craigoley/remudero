@@ -420,8 +420,8 @@ test("outside any checkout an idle dump is compressed, an old one expires and id
     writeFileSync(join(run, "subjects.json"), big);
     writeFileSync(join(run, "open.json"), big);
     writeFileSync(join(run, "small.json"), "{}\n");
-    writeFileSync(join(run, "old.log"), "old\n");
-    touch(join(run, "old.log"), NOW - 20 * 24 * HOUR);
+    writeFileSync(join(run, "old.json.gz"), "compressed earlier\n");
+    touch(join(run, "old.json.gz"), NOW - 20 * 24 * HOUR);
     const kept = clone(fx, "Remudero/run-notes/checkout");
     writeFileSync(join(kept, "inside.json"), big);
     mkdirSync(join(kept, "node_modules"));
@@ -429,14 +429,14 @@ test("outside any checkout an idle dump is compressed, an old one expires and id
 
     const dry = helper(fx, []);
     assert.equal(dry.status, 0, dry.stderr + dry.stdout);
-    assert.match(dry.stdout, /housekeeping repacked=0 compressed=1 dumps-expired=1 build-dirs-removed=2 apply=0/);
+    assert.match(dry.stdout, /housekeeping repacked=0 compressed=1 dumps-expired=1 build-dirs-removed=2 codex-sessions-removed=0 apply=0/);
     assert.equal(existsSync(join(run, "subjects.json")), true, "a dry run changes nothing");
 
     const r = helper(fx);
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.equal(gunzipSync(readFileSync(join(run, "subjects.json.gz"))).toString("utf8"), big);
     assert.equal(existsSync(join(run, "subjects.json")), false);
-    assert.equal(existsSync(join(run, "old.log")), false, "unchanged for 14 days");
+    assert.equal(existsSync(join(run, "old.json.gz")), false, "unchanged for 14 days");
     assert.equal(existsSync(join(run, "node_modules")), false);
     assert.equal(existsSync(join(pkg, "coverage")), false);
     for (const path of [join(run, "open.json"), join(run, "small.json"), join(fixtures, "coverage/expected.txt"),
@@ -459,19 +459,146 @@ test("a root pattern scans every folder it matches and nothing beside them", () 
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
-test("the janitor sweeps unreferenced dependency seeds with the account's sweeper", () => {
+test("dump expiry spares small files, a package root's files and anything inside an application bundle", () => {
+  const fx = setup({ dump_min_mb: 1, dump_retain_days: 7 });
+  try {
+    const run = join(fx.home, "Remudero/run-notes");
+    const project = join(run, "unpacked-project"), bundle = join(run, "browsers/Chrome for Testing.app/Contents");
+    for (const dir of [project, bundle]) mkdirSync(dir, { recursive: true });
+    const big = "[" + '"subject",'.repeat(150_000) + '"end"]';
+    const files = {
+      dump: join(run, "subjects.json"), small: join(run, "build.log"), pkg: join(project, "package.json"),
+      lock: join(project, "package-lock.json"), bundled: join(bundle, "Resources.json"),
+    };
+    for (const [key, path] of Object.entries(files)) writeFileSync(path, key === "small" ? "ok\n" : big);
+    for (const path of Object.values(files)) touch(path, NOW - 20 * 24 * HOUR);
+
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /housekeeping .*dumps-expired=1 /);
+    assert.equal(existsSync(files.dump), false, r.stdout);
+    for (const key of ["small", "pkg", "lock", "bundled"] as const) assert.equal(existsSync(files[key]), true, `${key}\n${r.stdout}`);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("an owned temp root is scanned, a clone in a shared one is held, and a symlinked one is never a root", () => {
+  const fx = setup({ temp_roots: ["remudero-*"] });
+  try {
+    const tmp = join(fx.root, "tmp");
+    for (const [dir, mode] of [["remudero-shared", 0o755], ["remudero-private", 0o700], ["outside/remudero-elsewhere", 0o700]] as const) {
+      mkdirSync(join(tmp, dir), { recursive: true }); chmodSync(join(tmp, dir), mode);
+    }
+    execFileSync("ln", ["-s", join(tmp, "outside/remudero-elsewhere"), join(tmp, "remudero-link")]);
+    const shared = join(tmp, "remudero-shared/repo");
+    git(fx.root, "clone", "--quiet", fx.origin, shared);
+    const worktree = join(tmp, "remudero-shared/task");
+    git(shared, "worktree", "add", "--quiet", "-b", "task", worktree);
+    commit(worktree, "task.ts", "export const task = 1;\n", "unpublished task work");
+    const owned = join(tmp, "remudero-private/repo");
+    git(fx.root, "clone", "--quiet", fx.origin, owned);
+    const linked = join(tmp, "outside/remudero-elsewhere/repo");
+    git(fx.root, "clone", "--quiet", fx.origin, linked);
+
+    const r = helper(fx, ["--apply", "--temp-base", tmp]);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /RETIRED worktree .*remudero-shared\/task/);
+    assert.match(r.stdout, /RETIRED clone .*remudero-private\/repo/);
+    assert.match(r.stdout, /HOLD shared-temp-root .*remudero-shared\/repo/);
+    assert.equal(existsSync(worktree), false);
+    assert.equal(existsSync(owned), false);
+    assert.equal(existsSync(shared), true);
+    assert.equal(existsSync(linked), true, r.stdout);
+    assert.doesNotMatch(r.stdout, /remudero-link|outside\/remudero-elsewhere/);
+    const back = restore(fx, readdirSync(join(fx.home, "Remudero-preserved")).filter(n => n.includes("remudero-shared__task@"))
+      .map(n => join(fx.home, "Remudero-preserved", n))[0], join(fx.root, "restored"));
+    assert.equal(readFileSync(join(back, "task.ts"), "utf8"), "export const task = 1;\n");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("the borrower census walks the temp folder, so a home clone lending to a temp clone stays", () => {
+  const fx = setup({ temp_roots: ["remudero-*"] });
+  try {
+    const tmp = join(fx.root, "tmp");
+    mkdirSync(join(tmp, "unrelated-scratch"), { recursive: true });
+    const lender = clone(fx, "Remudero/lender");
+    commit(lender, "lent.ts", "export const lent = true;\n", "commit stored only in the lender");
+    const lent = git(lender, "rev-parse", "HEAD");
+    const borrower = join(tmp, "unrelated-scratch/borrower");
+    git(fx.root, "clone", "--quiet", "--reference", lender, fx.origin, borrower);
+    git(borrower, "fetch", "--quiet", lender, `${lent}:refs/heads/borrowed`);
+
+    const r = helper(fx, ["--apply", "--temp-base", tmp]);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /HOLD lends-objects-to-kept .*Remudero\/lender/);
+    assert.equal(existsSync(lender), true);
+    git(borrower, "cat-file", "-e", `${lent}^{commit}`);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("codex session logs idle past codex_session_days are removed; recent, open and other files stay", () => {
+  const fx = setup({ codex_session_days: 7 });
+  try {
+    const day = join(fx.home, ".codex/sessions/2026/09/20");
+    const archived = join(fx.home, ".codex/archived_sessions");
+    mkdirSync(day, { recursive: true }); mkdirSync(archived, { recursive: true });
+    const idle = join(day, "rollout-2026-09-20T18-19-07-idle.jsonl");
+    const idleArchived = join(archived, "rollout-2026-09-24T12-43-58-archived.jsonl");
+    const recent = join(day, "rollout-2026-09-20T19-00-00-recent.jsonl");
+    const open = join(day, "rollout-2026-09-20T20-00-00-open.jsonl");
+    const other = join(day, "notes.jsonl");
+    for (const p of [idle, idleArchived, recent, open, other]) writeFileSync(p, "{}\n");
+    // ctime cannot be set back, so the helper's clock runs ahead instead.
+    const later = NOW + 8 * 24 * HOUR;
+    touch(recent, later - HOUR);
+    writeFileSync(fx.lsof, open + "\n");
+
+    const dry = helper(fx, [], {}, later);
+    assert.match(dry.stdout, /housekeeping .*codex-sessions-removed=2 apply=0/);
+    assert.equal(existsSync(idle), true);
+    const r = helper(fx, ["--apply"], {}, later);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(idle), false, r.stdout);
+    assert.equal(existsSync(idleArchived), false, r.stdout);
+    for (const p of [recent, open, other]) assert.equal(existsSync(p), true, `${p}\n${r.stdout}`);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a failed preservation bundle is held with git's own reason", () => {
+  const fx = setup();
+  try {
+    const repo = clone(fx, "Remudero/task-run/repo");
+    commit(repo, "work.ts", "export const work = 1;\n", "unpublished local work");
+    const native = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    writeFileSync(join(fx.bin, "git"), `#!/bin/bash
+case " $* " in *" bundle create "*) echo "fatal: simulated pack failure" >&2; exit 128 ;; esac
+exec '${native}' "$@"
+`, { mode: 0o755 });
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /HOLD bundle-create-failed \(fatal: simulated pack failure\) .*Remudero\/task-run\/repo/);
+    assert.equal(existsSync(repo), true);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("the janitor sweeps unreferenced dependency seeds, and names a stray URL-encoded store with --root", () => {
   const fx = setup();
   try {
     mkdirSync(join(fx.home, ".local/bin"), { recursive: true });
     const calls = join(fx.root, "seed-calls");
     writeFileSync(join(fx.home, ".local/bin/remudero-dependencies"), `#!/bin/bash
-printf '%s\\n' "$*" >> '${calls}'
+printf '%s %s\\n' "\${RMD_DEPENDENCY_SEED_ROOT:-default}" "$*" >> '${calls}'
 echo '[{"seed":"/s/a","action":"remove","reason":"unreferenced and idle for six hours"},{"seed":"/s/b","action":"keep","reason":"referenced by checkout"}]'
 `, { mode: 0o755 });
     const r = janitor(fx, true);
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.match(r.stdout, /dependency-seeds: removed=1 kept=1/);
-    assert.equal(readFileSync(calls, "utf8"), "sweep --apply\n");
+    assert.equal(readFileSync(calls, "utf8"), "default sweep --apply\n", "no stray store, no stray sweep");
+    rmSync(calls);
+    const stray = join(fx.home, "Library/Application%20Support/Remudero/dependencies");
+    mkdirSync(stray, { recursive: true }); writeFileSync(join(stray, ".rmd-dependency-seed-root.json"), '{"version":1}');
+    const again = janitor(fx, true);
+    assert.match(again.stdout, /dependency-seeds-stray: removed=1 kept=1/);
+    assert.equal(readFileSync(calls, "utf8"), `default sweep --apply\ndefault sweep --root ${stray} --apply\n`);
     rmSync(calls);
     assert.equal(janitor(fx, false).status, 0);
     assert.equal(existsSync(calls), false, "a dry run never sweeps");

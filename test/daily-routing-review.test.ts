@@ -332,6 +332,37 @@ test("a daily row-budget breach remains partial evidence rather than a healthy z
   } finally { f.close(); }
 });
 
+test("large daily receipts hit the byte budget without losing independently observed routing assignments", async () => {
+  const f = fixture();
+  try {
+    const payload = "x".repeat(512 * 1024);
+    const rows = Array.from({ length: 80 }, (_, n) => ({
+      ts: "2026-10-02T10:00:00Z", step: "bounded.gardener_judged", task_id: `W1-T${n}`,
+      verdict: "credit", explanation: payload,
+    }));
+    const raw = ndjson([...rows, assignment("99001")]);
+    assert.ok(Buffer.byteLength(raw) > 32 * 1024 ** 2, "the real input exceeds the production byte budget");
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), "");
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.2026-10-02T11-00-00-000Z.ndjson.gz"), gzipSync(raw));
+    const source = (await dailyRoutingReview({ ...f, asOf })).snapshot.sources[0];
+    assert.equal(source.rowsRead, 81, "the bounded raw window does not stop the distinct corpus scan");
+    assert.equal(source.retention.rawWindowByteLimit, 32 * 1024 ** 2);
+    assert.ok(source.retention.rawWindowBytes <= source.retention.rawWindowByteLimit);
+    assert.ok(source.retention.rawWindowByteRowsOmitted > 0);
+    assert.equal(source.retention.rawWindowRowLimitOmitted, 0);
+    assert.equal(source.retention.rawWindowOmitted, source.retention.rawWindowByteRowsOmitted);
+    assert.equal(source.retention.distinctScanComplete, true);
+    assert.equal(source.state, "observed-partial");
+    assert.deepEqual(source.reasons, ["ledger-retention-byte-bound"]);
+    assert.equal(source.reviewFlow.sourceComplete, false);
+    assert.equal(source.selfImprovement.sourceComplete, false);
+    const report = source.reports.find((item: { id: string }) => item.id === epoch.id);
+    assert.equal(report.assignments, 1);
+    assert.equal(report.sourceQuality.state, "observed", "the independent compact observer saw the later assignment");
+    assert.equal(source.retention.rawWindowByteBasis, "retained-json-utf8-payload; not process RSS");
+  } finally { f.close(); }
+});
+
 
 test("the installed daily collector preserves lesson exposure identities from one latest firing over all ledger forms", async () => {
   const { judgeCiLessonEfficacy, summarizeCiLessonRecurrences } = await import("../src/lib/ci-lesson-recurrence.js");

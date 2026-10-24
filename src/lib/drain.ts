@@ -417,6 +417,8 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
   onDeferredForPriority?: (deferral: PriorityDeferral) => void;
   /** W1-T8514: fired once per reservation lifted by the measured backfill bound. */
   onPriorityReservationReleased?: (release: PriorityReservationRelease) => void;
+  /** W1-T8771: observation only, once for each eligible task a later collected task passes. */
+  onPassedOver?: (task: Task, detail: PassedOverDetail) => void;
   /** Called once per task whose CACHED in-flight snapshot this live re-check overturned — one
    *  PR-level observation, fired for every terminal state whatever the task's eligibility resolves
    *  to (W1-T1035's crediting MERGED read still fires it). The real wiring corrects the ledgered
@@ -901,13 +903,39 @@ function packDisjointFirst(
     collected.push(remaining[pickIndex]);
     remaining.splice(pickIndex, 1);
   }
+  if (reserve.onPassedOver) {
+    const positions = new Map(eligible.map((task, index) => [task.id, index]));
+    for (const task of remaining) {
+      const passedFor = collected.filter((pick) => positions.get(pick.id)! > positions.get(task.id)!).map((pick) => pick.id);
+      if (passedFor.length === 0) continue;
+      const holders = [...collected, ...inFlight].flatMap((holder) => {
+        const overlap = partitionByFileOverlap([holder, task], observedByTask).serialized[0];
+        return overlap ? [{ task: holder.id, paths: overlap.paths }] : [];
+      });
+      try {
+        reserve.onPassedOver(task, { passedFor, holders });
+      } catch (error) {
+        // An observer failure cannot change admission; its error is deliberately ignored (W1-T8771).
+        void error;
+      }
+    }
+  }
   return collected;
+}
+
+export type PassedOverDetail = { passedFor: string[]; holders: { task: string; paths: string[] }[] };
+
+/** Holder order and path order do not change the state; the changing passed-for set is not state. */
+export function passedOverStateKey(detail: PassedOverDetail): string {
+  return JSON.stringify(detail.holders.map((holder) => ({ task: holder.task, paths: [...holder.paths].sort() }))
+    .sort((a, b) => a.task.localeCompare(b.task)));
 }
 
 interface PriorityReserveOpts {
   priorityBackfill?: PriorityBackfillEstimates;
   onDeferredForPriority?: (deferral: PriorityDeferral) => void;
   onPriorityReservationReleased?: (release: PriorityReservationRelease) => void;
+  onPassedOver?: NextRunnableOpts["onPassedOver"];
 }
 
 /** `compareDispatch`'s priority order: an absent priority is the lowest. Strict. */
@@ -2264,6 +2292,14 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   const laneCount = Math.max(1, opts.laneCount ?? 1);
   const max = opts.max ?? DEFAULT_MAX;
   const log = deps.log ?? (() => {});
+  const passedOverStates = new Map<string, string>();
+  const onPassedOver: NonNullable<NextRunnableOpts["onPassedOver"]> = (task, detail) => {
+    const key = passedOverStateKey(detail);
+    if (passedOverStates.get(task.id) === key) return;
+    log("dispatch.passed_over", { task: task.id, priority: task.priority ?? null, site: "drain",
+      passed_for: detail.passedFor, holders: detail.holders });
+    passedOverStates.set(task.id, key);
+  };
   const attempted: string[] = [];
   const merged: string[] = [];
   /** Non-merged, non-halting outcomes (NON_HALTING_VERDICTS) — recorded, never credited. */
@@ -2451,6 +2487,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       ? await prefetchLiveStates(plan, isMerged, deps.isOpenPr, deps.readLiveState, deps.liveStateTimeoutMs)
       : undefined;
     const skipOpts: NextRunnableOpts = {
+      onPassedOver,
       beginSelectionPass: deps.beginSelectionPass,
       clock: deps.clock,
       readPrecondition: deps.readPrecondition,
@@ -2564,6 +2601,8 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     // hiccup three passes ago that has since cleared.
     indeterminateDeclines = 0;
     const candidates = runnableCandidates(plan, isMerged, passSize, skipOpts);
+    for (const task of candidates) passedOverStates.delete(task.id);
+    for (const id of passedOverStates.keys()) if (!plan.byId.has(id)) passedOverStates.delete(id);
     if (candidates.length === 0) {
       await flushLifetimePressure();
       return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));

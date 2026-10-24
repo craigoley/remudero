@@ -471,6 +471,28 @@ until then the console reads `/v1/incidents`, each instance's emergency status a
 
 ## `instances` (version 1)
 
+W1-T10430 adds optional per-entry `inboxCapabilityEvidence`. Its exact registered repository,
+instance, prefix, qualification generation and owned projector generation bind a real bounded
+conversation-contract observation. The matching `inbox-capability:<instance>` source is explicitly
+kind `inbox-store` and uses that existing 180-second budget. The worker revalidates the registry,
+contract file, mount, generation and live lease before publishing. A missing, malformed, unreadable,
+foreign, changed or unowned source is unavailable, never last-good positive evidence. Empty legacy
+registries (`[]` and `{ "proposals": [] }`) remain compatible, not a revoked capability set.
+
+This is separate from ledger/liveness health: both source readings remain visible, and the root
+envelope retains its conservative worst-source semantics. New consumers must require the exact
+supported evidence version, qualification identity, repository/instance/prefix and matching current
+source before considering contract support independently of unrelated ledger clocks. Old v1 readers
+keep their existing conservative behavior; missing new evidence is not a reason to ignore health.
+Observation time lives in `sources`, not `data`, so repeated real reads update freshness without
+changing content identity. Warm persisted auto-mode qualification from before this generation cannot
+authorize the new producer. No switch or service setting changes here.
+
+**Contract support is not reply authorization.** The existing server rechecks the mounted route,
+current contract, exact request scope, session/operator, current executable option and stable intent
+at write time. No action endpoint or permission is added; the Console consumer and live acceptance
+remain separately gated. No request-time ledger scan is introduced.
+
 `GET /v1/views/instances`: one instance list, saying what this serve actually serves (arch Phase 4 §4,
 W1-T5056, `src/lib/instances-view.ts`). Schema: `InstancesView` in `openapi/daemon.yaml`. Dark until
 `switches.json` sets `instances` to `serve`; until then it answers 404 (`view_disabled`, or `view_shadow`
@@ -520,6 +542,29 @@ parsed only when their source as-of keys change; there is no request-time ledger
 The optional signal/usage payload is capped at 256 KiB per instance and 1.5 MiB across the response,
 leaving space under the console's existing 2 MiB view ceiling. Later over-budget instances retain their
 metrics and identity but get a visible details refusal, not silent truncation or a complete-spend claim.
+
+### Independently qualified recent gardener evidence
+
+The existing serial slow lane also captures `gardener-spend-v1` once per analytics refresh interval.
+It scans the registered daemon generation's complete retained window, with the existing scan timeout,
+abort signal and source/lease/switch fences. Historical scan continuation does not trigger a new
+gardener capture on every leg. Collection happens neither on the projector thread nor on a request.
+Registry identity and enabled inventory must agree before and after collection; missing, revoked,
+malformed, unreadable, cancelled or changed-generation evidence cannot publish a verified zero.
+
+`instances[].gardenerSpend` uses its own persisted source time and `gardener-spend:<instance>` source
+reading. Consumers must judge that source for this metric, rather than treating a fresh gardener
+reading as fresh historical analytics. Historical `analytics:<instance>`, benchmark incompleteness,
+old snapshot clocks and damaged archives remain unchanged. Cold historical analytics may therefore
+carry recent gardener evidence while historical coverage remains missing and the envelope stale.
+Unknown prices remain unknown; reported worker prices and subscription calls are not new invoices.
+
+Before any independent source row exists, old embedded spend can retain its historical clock. Once
+an independent row exists, including a failed first capture, old embedded success cannot substitute
+for it. Later failures retain the last committed evidence with an explicitly failed source. The
+existing 64-KiB fleet budget reserves monetary payloads before optional worker-call coverage.
+Cached restart and HTTP reads require no ledger scan. Legacy/shadow disagreement remains subject
+to the existing parity gates; this source separation does not promote a view or authorize adoption.
 
 ## Console latency: `POST /v1/console/telemetry` (Phase 2)
 

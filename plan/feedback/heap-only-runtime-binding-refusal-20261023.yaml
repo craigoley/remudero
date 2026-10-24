@@ -1,0 +1,74 @@
+id: heap-only-runtime-binding-refusal-20261023
+ts: 2026-10-23T22:17:10.278Z
+origin: cli
+status: new
+attachments: []
+proposal_pr: null
+contribution: null
+raw: |
+  Machine-authored bounded observation for governed triage, not an operator ruling or permission
+  to change the deployed memory policy, bypass a guard, retry production or spend beyond a cap.
+  Preserve the existing operator-approved semi-space setting and all normal publication gates.
+
+  OBSERVED: natural RETRO-1792790657519 preflight attempt1 at2026-10-23T22:08:27.807Z
+  completed183suites after1893444ms with tests_failed, exit1, signalnull, has_summarytrue and
+  cancelled_count0. Its retained error block names this exact author test:
+  author deadline admission refuses a too-small real slot budget before starting static work
+  The actual exception is: runtime profile: NODE_OPTIONS instrumentation is not modelled.
+  Stack: runtimeBindings in scripts/lib/native-author-runtime.mjs, calibrateAuthorRuntime,
+  then test/author-preflight.test.ts. The total retained output is truncated, not an unlimited
+  full log; the named error block and complete summary are present. A prior natural run's
+  attempt1 at20:19:45.484 has the same exception. Neither is an OOM or descendant-reaping error.
+
+  READ, immutable main7428a8993b3e9faed5bb77d23d3907bb91bc01fb:
+  deploy/resource-policy.sh explicitly identifies --max-semi-space-size=16 as OPERATOR RULING
+  2026-10-19 (#12982), inherited by every Node child. withoutHeapCeiling in
+  src/lib/daemon-memory-policy.ts removes only max-old-space-size. authorEnvironment preserves
+  NODE_OPTIONS. runtimeBindings refuses EVERY nonempty NODE_OPTIONS before binding source,
+  runtime or corpus; it does not distinguish a known memory setting from instrumentation.
+  The actual current retro worktree's six relevant runtime/test/helper files were read22:10
+  and all SHA256 hashes equal the corresponding immutable main blobs. This is current-byte
+  corroboration after a repair was assigned, not proof of every earlier byte or environment.
+
+  OBSERVED, read-only direct-cgroup process inventory22:10 and22:17:
+  several current Node processes carry only --max-semi-space-size=16, with zero other option
+  tokens; other processes have no NODE_OPTIONS. Only whitelisted numeric flag values were
+  emitted. The original failed test child's exact identity/environment was not captured.
+  Do not promote this into an exact historical child-environment claim.
+
+  DIRECT GUARD REPLAY, not a test suite or paid/production trial:
+  the real unchanged runtimeBindings called with NODE_OPTIONS=--max-semi-space-size=16 throws
+  the identical instrumentation-not-modelled exception. Heap-only max-old-space-size=1792 and
+  experimental-test-coverage controls also refuse. This establishes the guard's conflation;
+  it does not establish that the rest of calibration or the author suite passes without it.
+
+  EXISTING OWNERS: W1-T10300's forensic document landed via #13760, but expressly reports the
+  substantive failure-text/reproduction criteria incomplete. Do not re-credit or rebuild it
+  as an unmerged task, or call its conditional no-tini explanation a diagnosed cause.
+  #13826/#13839 concern the separate provider-safe retro repair-handoff consumer. They do not
+  change this runtime binding. The current retro owns its one plan-only repair; do not edit
+  that branch or race its worker. Its separate standing-debt corpus and miniature batch-push
+  fixture failures are not explained or repaired by this observation.
+
+  NEXT, after exact child/source and open-head ownership reconciliation: determine a bounded
+  runtime-binding contract that represents the known memory configuration rather than removing
+  it. Keep unknown flags and instrumentation refused. A timing profile from different admitted
+  runtime options must remain incompatible, even on the same source/corpus; do not label an
+  instrumented run as instrumentation:none. Preserve memory admission, slots, pinned Node,
+  deadlines, exact closed captures, source/corpus provenance and all existing author gates.
+  Run real default binding/calibration controls under the measured heap-only context, prove
+  changed flags invalidate reuse, prove instrumentation/unknown flags still refuse, and delete
+  the correction to recover this specific failure before restoring green controls.
+
+  FALSIFIER: if the actual failed child carries additional instrumentation or a different
+  guard/source, preserve its refusal and diagnose that input instead. If unchanged source
+  with the same observed options already calibrates, supersede this framing. No broad
+  NODE_OPTIONS strip, test skip, fake timing profile, cap/resource-policy change, supervisor,
+  projection store, production restart/retry or manual merge is requested.
+
+  OWNERSHIP22:23:54.341 atmainc83d427316ec3b208420c5c971fe52339553de09:
+  Complete5APIopenheadspinnedagainst452remoteheads; four existing main subject records,
+  zero introduced/changed same-subject records and zero product overlaps on every openhead.
+  W1-T10298 is the delivered diagnostic capture, W1-T10300 the landed partial investigation,
+  W1-T10301 the separately owned backoff question, and13826 the handoff finding. No task is
+  minted or credited here. Refresh ownership before publication if these facts age or move.

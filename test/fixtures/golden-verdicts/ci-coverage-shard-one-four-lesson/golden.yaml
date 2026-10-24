@@ -1,0 +1,13 @@
+violation: none
+rule: >
+  W1-T3829: the cited coverage-shard (1/4) incident must execute as a proof
+  against an active learning matched to task-authoring work.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass

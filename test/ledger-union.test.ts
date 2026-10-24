@@ -1,3 +1,4 @@
+import { createIncrementalLedgerUnion, readLedgerUnionRawLinesAsync, readLedgerUnionRawLinesSync, realLedgerFs } from "#src/lib/ledger-union.js";
 import assert from "node:assert/strict";
 import { appendFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -336,4 +337,111 @@ test("a rotation window over archives with no parseable stamp reads them all", (
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+test("strict ledger readers refuse an unenumerated corpus while preserving best-effort live reads", async (t) => {
+  const dir = tmpStateDir();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "ledger.2026-01-01T00-00-00-000Z.ndjson.gz"), gzipSync(`${row("gzip")}\n`));
+  writeFileSync(join(dir, "ledger.2026-01-02T00-00-00-000Z.ndjson"), `${row("plain")}\n`);
+  writeFileSync(join(dir, LEDGER_FILENAME), `${row("live")}\n`);
+  const readers = [
+    () => readLedgerUnionRecordsSync(dir, { refuseIncomplete: true }),
+    () => readLedgerUnionRawLinesSync(dir, { refuseIncomplete: true }),
+    () => readLedgerUnionRawLinesAsync(dir, { refuseIncomplete: true }),
+  ];
+  for (const read of readers) {
+    const complete = await read();
+    assert.equal(complete.ok, true);
+    assert.equal(complete.archiveCount, 2);
+    assert.equal(complete.filesRead, 3);
+    assert.equal("rows" in complete ? complete.rows.length : complete.rawLines.length, 3);
+  }
+  for (const code of ["EACCES", "ENOENT"]) {
+    let denied = 0;
+    const listing = t.mock.method(realLedgerFs, "readdirSync", (path: string) => {
+      assert.equal(path, dir);
+      denied += 1;
+      throw Object.assign(new Error(`controlled ${code}`), { code });
+    });
+    try {
+      for (const read of readers) {
+        const partial = await read();
+        assert.equal(partial.ok, false, `${code}: a readable live path does not prove rotation absence`);
+        assert.deepEqual(partial.unread, [dir]);
+        assert.deepEqual("rows" in partial ? partial.rows : partial.rawLines, []);
+        assert.equal(partial.liveFileRead, true);
+      }
+      const bestEffort = readLedgerUnionRecordsSync(dir);
+      assert.equal(bestEffort.ok, true);
+      assert.deepEqual(bestEffort.unread, []);
+      assert.deepEqual(bestEffort.rows.map((record) => record.marker), ["live"]);
+      for (const best of [readLedgerUnionRawLinesSync(dir), await readLedgerUnionRawLinesAsync(dir)]) {
+        assert.equal(best.ok, true);
+        assert.deepEqual(best.unread, []);
+        assert.equal(best.rawLines.length, 1);
+        assert.equal(JSON.parse(best.rawLines[0]).marker, "live");
+      }
+      assert.equal(denied, 6, "all three strict and best-effort entrypoints attempted enumeration");
+    } finally { listing.mock.restore(); }
+  }
+  for (const read of readers) assert.equal((await read()).archiveCount, 2, "restored enumeration sees both archive forms");
+});
+
+test("strict ledger readers distinguish a readable empty directory from an actual non-directory", async (t) => {
+  const dir = tmpStateDir();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, "not-a-directory");
+  writeFileSync(file, "owned fixture");
+  for (const stateDir of [dir, file, join(dir, "absent")]) {
+    const reads = [
+      readLedgerUnionRecordsSync(stateDir, { refuseIncomplete: true }),
+      readLedgerUnionRawLinesSync(stateDir, { refuseIncomplete: true }),
+      await readLedgerUnionRawLinesAsync(stateDir, { refuseIncomplete: true }),
+    ];
+    for (const result of reads) {
+      assert.equal(result.ok, stateDir === dir);
+      assert.deepEqual(result.unread, stateDir === dir ? [] : [stateDir]);
+      assert.deepEqual("rows" in result ? result.rows : result.rawLines, []);
+    }
+  }
+});
+
+
+test("strict incremental ledger reads cannot reuse an empty corpus signature after directory denial", (t) => {
+  const dir = tmpStateDir();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  let denied = false;
+  const read = createIncrementalLedgerUnion({ holder: "strict-directory-test", reducerVersion: "1" }, {
+    ...realLedgerFs,
+    readdirSync: (path) => {
+      if (denied) throw Object.assign(new Error("controlled enumeration denial"), { code: "EACCES" });
+      return realLedgerFs.readdirSync(path);
+    },
+  });
+  const opts = { step: "run.start", refuseIncomplete: true };
+  const empty = read(dir, opts);
+  assert.equal(empty.ok, true);
+  assert.strictEqual(read(dir, opts), empty, "positive control: unchanged readable corpus uses the actual cache");
+  denied = true;
+  const refused = read(dir, opts);
+  assert.equal(refused.ok, false, "a matching signature cannot prove that enumeration succeeded");
+  assert.deepEqual(refused.unread, [dir]);
+  assert.deepEqual(refused.rows, []);
+  denied = false;
+  assert.equal(read(dir, opts).ok, true, "a denied result is not cached as complete");
+  writeFileSync(join(dir, "ledger.2026-01-01T00-00-00-000Z.ndjson.gz"), gzipSync(`${row("gzip")}\n`));
+  writeFileSync(join(dir, "ledger.2026-01-02T00-00-00-000Z.ndjson"), `${row("plain")}\n`);
+  writeFileSync(join(dir, LEDGER_FILENAME), `${row("live")}\n`);
+  const populated = read(dir, opts);
+  assert.deepEqual(populated.rows.map((record) => record.marker), ["gzip", "plain", "live"]);
+  assert.strictEqual(read(dir, opts), populated);
+  denied = true;
+  assert.equal(read(dir, opts).ok, false);
+  denied = false;
+  assert.deepEqual(read(dir, opts).rows, populated.rows);
+  const best = read(dir);
+  denied = true;
+  assert.equal(read(dir).ok, best.ok, "best-effort behavior remains available");
 });

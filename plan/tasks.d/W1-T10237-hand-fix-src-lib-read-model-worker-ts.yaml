@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.33
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:hand_fix:src/lib/read-model-worker.ts"

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { appendLedger } from "../src/lib/ledger.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
 const NOW = Date.now();
@@ -45,6 +45,54 @@ function appendWithheldReview(path: string, pr: OpenPrView, freshness: "stale" |
     reason: `reviewer-code freshness ${freshness}`,
   });
 }
+
+test("the light sweep admits completed exact-input review refusals within its existing filing bound", async (t) => {
+  const path = ledgerPath();
+  t.after(() => rmSync(dirname(path), { recursive: true, force: true }));
+  const filings = [3581, 3582].map(prNumber => ({
+    ...pendingReview(), prNumber, prUrl: `https://github.com/o/r/pull/${prNumber}`,
+    taskId: `W1-T${prNumber}`, isPlanFiling: true, reviewPendingOwnerDead: false,
+    reviewPendingSince: new Date(NOW - 15 * 60_000).toISOString(),
+  }));
+  for (const pr of filings) appendWithheldReview(path, pr, "stale", NOW - 10 * 60_000);
+  const posted: number[] = [];
+  await runSweepLightPass(filings, sweepDeps(path, posted, {
+    reviewerCodeRecovery: { loadedCodeSha: "older-code", isLoadedCodeAtOrAfter: () => false, freshTreeReviewAvailable: true },
+  }), { ...DEFAULT_SWEEP_POLICY, planFilingAdmissionBound: 1 });
+  assert.deepEqual(posted, [3581], "the completed oldest input reaches ordinary review, without increasing the filing bound");
+  const held = readLedgerLines(path).findLast(row => row.step === "sweep.disposed" && row.pr_number === 3582);
+  assert.match(String(held?.stand_down_reason), /not admitted this pass/);
+});
+
+test("light refusal recovery preserves newer pending, exact input, backoff and delivered guards", async (t) => {
+  for (const control of ["newer-pending", "other-head", "other-input", "backoff", "unreadable", "unattributed", "delivered"] as const) {
+    const path = ledgerPath();
+    t.after(() => rmSync(dirname(path), { recursive: true, force: true }));
+    const pr = {
+      ...pendingReview(), isPlanFiling: true, reviewPendingOwnerDead: false,
+      reviewPendingSince: new Date(NOW - (control === "newer-pending" ? 5 : 15) * 60_000).toISOString(),
+    };
+    const refused = { ...pr,
+      ...(control === "other-head" ? { headSha: "other-head" } : {}),
+      ...(control === "other-input" ? { reviewInputDigest: "other-input" } : {}),
+    };
+    if (control === "unattributed") {
+      appendLedger(path, { ts: new Date(NOW - 10 * 60_000).toISOString(), run_id: "REVIEW-OLD",
+        task_id: pr.taskId!, step: "review.post_refused", pr_url: pr.prUrl, head_sha: pr.headSha,
+        review_input_digest: pr.reviewInputDigest, reviewer_code_freshness: "stale" });
+    } else appendWithheldReview(path, refused, control === "unreadable" ? "unreadable" : "stale",
+      NOW - (control === "backoff" ? 2 : 10) * 60_000);
+    if (control === "delivered") appendLedger(path, {
+      ts: new Date(NOW - 5 * 60_000).toISOString(), run_id: "REVIEW-DELIVERED", task_id: pr.taskId!,
+      step: "review.posted", pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, state: "success",
+    });
+    const posted: number[] = [];
+    await runSweepLightPass([pr], sweepDeps(path, posted, {
+      reviewerCodeRecovery: { loadedCodeSha: "older-code", isLoadedCodeAtOrAfter: () => false, freshTreeReviewAvailable: true },
+    }), DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(posted, [], control);
+  }
+});
 
 test("a completed stale-code refusal releases its own pending status through the fresh-tree runner", async () => {
   const path = ledgerPath();

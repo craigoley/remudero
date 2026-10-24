@@ -214,3 +214,28 @@ test("buildLedgerCompactionDaemonHooks: an untrustworthy compactor outcome fails
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+
+test("daemonCommand supplies the bounded review timing memo independently of idle demand", async (t) => {
+  const memo = await import("#src/lib/sweep.js");
+  const { home, planPath } = fixtureHome(), oldHome = process.env.HOME;
+  memo.resetIdleReviewMemo(); process.env.HOME = home;
+  let captured: DaemonDeps | undefined;
+  t.after(() => { memo.resetIdleReviewMemo(); rmSync(home, { recursive: true, force: true }); });
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(typeof captured?.readReviewMedianMs, "function");
+    assert.equal(captured!.readReviewMedianMs!(), undefined);
+    memo.noteReviewDuration(480_000);
+    assert.equal(captured!.readIdleReviewDemand!(), undefined);
+    assert.equal(captured!.readReviewMedianMs!(), 480_000);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+  }
+});

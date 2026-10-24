@@ -140,7 +140,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   ghEscalationAnswerGateway: 1,
   ghExec: 4,
   ghExecFile: 4,
-  ghGateway: 1,
   ghIssueGateway: 1,
   ghIssueListGateway: 1,
   ghJson: 2,

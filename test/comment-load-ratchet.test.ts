@@ -535,3 +535,57 @@ test("main --no-record: growth this diff added is STILL refused — not writing 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test("deleting a stricter legacy comment ceiling cannot raise the implicit limit", () => {
+  for (const comments of [1, 181]) {
+    const root = fixtureRepo({ "src/a.ts": 180 }, `${"// c\n".repeat(comments)}${CLEAN}`);
+    try {
+      writeFileSync(join(root, "scripts/comment-load-baseline.json"), "{}\n");
+      const before = readFileSync(join(root, "scripts/comment-load-baseline.json"), "utf8");
+      const result = run(root, ["--json", "--no-record"]);
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      const report = JSON.parse(result.stdout);
+      assert.ok(report.files >= 2, "the real Git corpus includes the target and baseline");
+      assert.deepEqual(report.deleted_legacy_ceilings, [{ path: "src/a.ts", ceiling: 180, implicit: 250 }]);
+      assert.equal(readFileSync(join(root, "scripts/comment-load-baseline.json"), "utf8"), before);
+      const plain = run(root, ["--no-record"]);
+      assert.equal(plain.status, 1, plain.stdout + plain.stderr);
+      assert.match(plain.stderr, /deleting src\/a.ts ceiling 180 raises it to implicit 250/);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test("comment ceiling deletion preserves default, tightening and deleted-target controls", () => {
+  for (const ceiling of [180, 250, 500]) {
+    for (const deleted of [true, false]) {
+      if (ceiling === 180 && !deleted) continue;
+      const root = fixtureRepo({ "src/a.ts": ceiling }, `// c\n${CLEAN}`);
+      try {
+        writeFileSync(join(root, "scripts/comment-load-baseline.json"), "{}\n");
+        if (deleted) git(root, ["rm", "--quiet", "src/a.ts"]);
+        const result = run(root, ["--json", "--no-record"]);
+        assert.equal(result.status, 0, result.stdout + result.stderr);
+        assert.deepEqual(JSON.parse(result.stdout).deleted_legacy_ceilings, []);
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    }
+  }
+});
+
+test("comment ceiling history refuses malformed tracked evidence and permits a genuinely new baseline", () => {
+  for (const missing of [false, true]) {
+    const root = fixtureRepo({ "src/a.ts": 180 }, CLEAN);
+    try {
+      const path = join(root, "scripts/comment-load-baseline.json");
+      if (missing) git(root, ["rm", "--quiet", "scripts/comment-load-baseline.json"]);
+      else { writeFileSync(path, "{broken"); git(root, ["add", "-A"]); }
+      git(root, ["commit", "-qm", "historical baseline control"]);
+      mkdirSync(join(root, "scripts"), { recursive: true });
+      writeFileSync(path, "{}\n");
+      const result = run(root, ["--json", "--no-record"]);
+      assert.equal(result.status, missing ? 0 : 2, result.stdout + result.stderr);
+      if (missing) assert.deepEqual(JSON.parse(result.stdout).deleted_legacy_ceilings, []);
+      else assert.match(result.stderr, /MEASUREMENT FAILED.*not valid JSON/);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});

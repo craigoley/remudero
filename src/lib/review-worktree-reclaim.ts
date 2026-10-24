@@ -26,7 +26,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import type { Config } from "./config.js";
-import { DEFAULT_WORKTREE_REAP_GRACE_MS, reviewWorktreeIsHeld, worktreesDir, worktreeRemove } from "./worker.js";
+import { DEFAULT_WORKTREE_REAP_GRACE_MS, reviewWorktreeHoldState, worktreesDir, worktreeRemove } from "./worker.js";
 export { holdReviewWorktree, releaseReviewWorktree, reviewWorktreeIsHeld } from "./worker.js";
 
 /** Exactly what `materializeReviewWorktree` mints (src/run-task.ts): `review-PR<n>-<epochMs>`.
@@ -38,7 +38,7 @@ const REVIEW_WORKTREE_NAME = /^review-PR(\d+)-(\d+)$/;
 /** Reused rather than a second policy constant: the same "a linked worktree might still be doing
  *  something" grace window {@link DEFAULT_WORKTREE_REAP_GRACE_MS} already protects the general
  *  worktree reaper with (plan/policy.yaml's `worktreeReapGraceMs`, 30 minutes) — comfortably above
- *  how long `rmd review`'s fetch + checkout + whitelisted-proof run ever takes. Exported so a test
+ *  an abandoned checkout should remain. Shared worker ownership, not elapsed age, protects slow reviews. Exported so a test
  *  can assert the boundary without hand-duplicating the number. */
 export const DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS = DEFAULT_WORKTREE_REAP_GRACE_MS;
 
@@ -58,7 +58,9 @@ export type ReviewWorktreeSweepReason =
   /** Every gate passed but the removal itself failed — best-effort, the pass continues. */
   | "removal-failed"
   /** THIS process materialized it and has not torn it down — a live review, whatever its age. */
-  | "live-review";
+  | "live-review"
+  /** Shared ownership was unreadable; a missing owner has not been established. */
+  | "review-ownership-unknown";
 
 export interface ReviewWorktreeSweepOutcome {
   name: string;
@@ -101,7 +103,7 @@ export interface ReviewWorktreeSweepOptions {
  * live review: on 2026-10-10 PR #10741's review ran its reviewer for 37 minutes, the sweep removed
  * `review-PR10741-1791665021022` at 30.0 minutes from the same pid, and every proof then spawned
  * into a missing cwd (ENOENT, ledgered as "bwrap is not installed"), capping the verdict at 0/3.
- * A SIGKILL empties this set with the process, so a stranded worktree is still reclaimed later.
+ * Cross-process worker claims now protect the same checkout; their existing lifecycle handles stranded owners.
  */
 // The existing API above now shares worker.ts's hold with the general sync/async reaper.
 
@@ -135,7 +137,9 @@ export function sweepStrandedReviewWorktrees(
   const readHeadSha = opts.readHeadSha ?? defaultReadHeadSha;
   const readRemoteHeadSha = opts.readRemoteHeadSha ?? defaultReadRemoteHeadSha;
   const removeWorktree = opts.removeWorktree ?? worktreeRemove;
-  const isLive = opts.isLive ?? reviewWorktreeIsHeld;
+  const holdState = opts.isLive
+    ? (path: string) => opts.isLive!(path) ? "held" : "unheld"
+    : reviewWorktreeHoldState;
 
   const reclaimed: string[] = [];
   const kept: ReviewWorktreeSweepOutcome[] = [];
@@ -163,8 +167,9 @@ export function sweepStrandedReviewWorktrees(
       keep(name, path, "too-young");
       continue;
     }
-    if (isLive(path)) {
-      keep(name, path, "live-review");
+    const ownership = holdState(path);
+    if (ownership !== "unheld") {
+      keep(name, path, ownership === "held" ? "live-review" : "review-ownership-unknown");
       continue;
     }
 

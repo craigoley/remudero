@@ -42,6 +42,7 @@ const JOB = ci.jobs!.commitlint!;
 const QUEUE_BASE = "b45e0000000000000000000000000000000000b5";
 const GROUP_SHA = "9a0b0000000000000000000000000000000000c1";
 const PR_HEAD = "beadf00d0000000000000000000000000000ead5";
+const PR_MERGE = "5e5e000000000000000000000000000000000000";
 
 type Ctx = Record<string, string | undefined>;
 function eventContext(event: "merge_group" | "pull_request"): Ctx {
@@ -51,7 +52,7 @@ function eventContext(event: "merge_group" | "pull_request"): Ctx {
     "github.run_id": "7",
     "github.run_attempt": "1",
     "job.check_run_id": "11",
-    "github.sha": event === "merge_group" ? GROUP_SHA : "5e5e000000000000000000000000000000000000",
+    "github.sha": event === "merge_group" ? GROUP_SHA : PR_MERGE,
     "github.event.merge_group.base_sha": event === "merge_group" ? QUEUE_BASE : undefined,
     "github.event.pull_request.head.sha": event === "pull_request" ? PR_HEAD : undefined,
     "github.event.pull_request.base.sha": event === "pull_request" ? QUEUE_BASE : undefined,
@@ -105,6 +106,8 @@ echo "$tool $*" >> "$CALL_LOG"
 if [ "$tool" = npm ] && [ -n "\${BASE_SHA:-}" ]; then echo "env BASE_SHA=$BASE_SHA" >> "$CALL_LOG"; fi
 case "$tool $*" in
   "git rev-parse --verify ${QUEUE_BASE}^{commit}"|"git rev-parse --verify HEAD^1^{commit}") echo "${QUEUE_BASE}" ;;
+  "git rev-parse --verify HEAD^{commit}") echo ${PR_MERGE} ;;
+  "git rev-list --parents -n 1 HEAD") echo "${PR_MERGE} ${QUEUE_BASE} ${PR_HEAD}" ;;
   "git archive "*) exit 1 ;; # The modeled missing archive fails explicitly on BSD and GNU tar.
   *diff-class.mjs*) echo SOURCE ;;
   *containment-diff-trigger.ts*) echo "matched=false" >> "$GITHUB_OUTPUT" ;;
@@ -168,6 +171,8 @@ function runJob(event: "merge_group" | "pull_request", failOn = "", actionOutcom
         CALL_LOG: log,
         FAIL_ON: failOn,
         GITHUB_EVENT_NAME: event,
+        GITHUB_SHA: event === "merge_group" ? GROUP_SHA : PR_MERGE,
+        GITHUB_REF: event === "merge_group" ? "refs/heads/gh-readonly-queue/main/pr-7" : "refs/pull/7/merge",
         GITHUB_REPOSITORY: "o/r",
         GITHUB_OUTPUT: output,
         GITHUB_ENV: environment,
@@ -246,7 +251,13 @@ function posted(run: JobRun): Array<[string, string]> {
 // The argv each base-reading or PR-scoped step reaches today on pull_request, recorded verbatim.
 const PR_ARGV: Record<string, string[]> = {
   install: ["npm ci"],
-  "dependency-evidence": [`git rev-parse --verify ${QUEUE_BASE}^{commit}`, "git rev-parse --verify HEAD^1^{commit}", `git archive ${QUEUE_BASE}`],
+  "dependency-evidence": [
+    `git rev-parse --verify ${QUEUE_BASE}^{commit}`, "git rev-parse --verify HEAD^{commit}",
+    "git rev-list --parents -n 1 HEAD", "git rev-parse --verify HEAD^1^{commit}",
+    `git merge-base --is-ancestor ${QUEUE_BASE} ${QUEUE_BASE}`,
+    `git merge-base --is-ancestor ${QUEUE_BASE} refs/remotes/origin/main`,
+    "git rev-parse --verify HEAD^1^{commit}", `git archive ${QUEUE_BASE}`,
+  ],
   classify: ["git diff --name-only HEAD^1...HEAD", "node scripts/diff-class.mjs --changed-files changed-files.txt"],
   "rule-checks": ["node --import tsx scripts/list-rule-suites.mjs --run"],
   "leak-grep": ["leak-grep.sh "],

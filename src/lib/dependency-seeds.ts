@@ -19,6 +19,8 @@ export interface DependencySeedOptions {
   sourceDir?: string;
   /** Explicit managed generation reuse when only non-installing root scripts changed. */
   sourceSeed?: string;
+  /** Explicit reuse-only consumer: share sealed package inputs, even on APFS. */
+  readOnlyLinks?: boolean;
   proof?: boolean;
   platform?: NodeJS.Platform;
   npmVersion?: string;
@@ -39,14 +41,20 @@ export function configuredDependencySeedRoot(home = homedir(), env = process.env
   if (override === "") return undefined; // Explicitly disable account preferences for isolated test fixtures.
   if (override) {
     if (!isAbsolute(override)) throw new Error("RMD_DEPENDENCY_SEED_ROOT must be absolute");
-    return override;
+    return plainSeedRoot(override);
   }
   const file = dependencySeedConfigPath(home);
   if (!existsSync(file)) return undefined;
   const config = JSON.parse(readFileSync(file, "utf8")) as { enabled?: boolean; root?: string };
   if (!config.enabled) return undefined;
   if (!config.root || !isAbsolute(config.root)) throw new Error("dependency seed config requires an absolute root");
-  return config.root;
+  return plainSeedRoot(config.root);
+}
+
+/** A URL-encoded root ("Application%20Support") silently starts a second store nothing sweeps. */
+function plainSeedRoot(root: string): string {
+  if (/%[0-9A-Fa-f]{2}/.test(root)) throw new Error(`dependency seed root ${root} is URL-encoded; use the plain file path`);
+  return root;
 }
 
 export function defaultDependencySeedRoot(home = homedir(), platform: NodeJS.Platform = process.platform): string {
@@ -488,6 +496,7 @@ function compatibleSourceSeed(source: string, target: SeedMetadata, opts: Depend
 
 /** Existing installs, including dangling links, are never replaced. Publication fails if a concurrent installer wins. */
 export function materializeDependencySeed(checkout: string, opts: DependencySeedOptions = {}): DependencySeedResult {
+  if (opts.readOnlyLinks && !opts.sourceSeed) throw new Error("read-only dependency links require an explicit source seed");
   if (opts.sourceDir && opts.sourceSeed) throw new Error("choose a dependency donor or source seed, not both");
   if (opts.sourceSeed && !isAbsolute(opts.sourceSeed)) throw new Error("dependency source seed must be absolute");
   checkout = realpathSync(checkout);
@@ -516,6 +525,19 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
   const targetStage = join(checkout, `.rmd-dependency-stage-${randomUUID()}`);
   let sourceLock: string | undefined, reusedFrom: string | undefined;
   try {
+    // Explicit reuse must validate its declared input even when the target
+    // generation is already ready. The same generation is protected by our
+    // target lock; a different source retains its own nonblocking lock.
+    if (opts.readOnlyLinks && opts.sourceSeed && existsSync(join(seed, "ready.json"))) {
+      const source = resolve(opts.sourceSeed);
+      sourceSeedDirectory(source);
+      if (source !== seed) {
+        const lockPath = `${source}.lock`;
+        mkdirSync(lockPath, { mode: 0o700 });
+        sourceLock = lockPath;
+      }
+      compatibleSourceSeed(source, meta, opts);
+    }
     if (!existsSync(join(seed, "ready.json"))) {
       mkdirSync(stage, { mode: 0o700 });
       for (const [name, content] of Object.entries(meta.files)) {
@@ -572,7 +594,7 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
     const ready = JSON.parse(readFileSync(join(seed, "ready.json"), "utf8")) as SeedMetadata;
     if (ready.version !== VERSION || ready.key !== meta.key) throw new Error("dependency seed readiness metadata mismatch");
     verifyPackages(checkout, join(seed, "node_modules"));
-    const method: SeedMethod = meta.platform === "darwin" ? "apfs-clone" : opts.proof ? "private-copy" : "readonly-links";
+    const method: SeedMethod = opts.readOnlyLinks ? "readonly-links" : meta.platform === "darwin" ? "apfs-clone" : opts.proof ? "private-copy" : "readonly-links";
     if (method === "readonly-links") { linkPackages(join(seed, "node_modules"), targetStage); setWritable(targetStage, true); }
     else { copyModules(join(seed, "node_modules"), targetStage, method === "apfs-clone"); setWritable(targetStage, true); }
     workspaceLinks(checkout, targetStage);

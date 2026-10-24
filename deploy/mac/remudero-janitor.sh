@@ -452,8 +452,19 @@ refresh_process_snapshot() {
   [ "$rc" -le 1 ]
 }
 
+artifact_index_risk() {
+  local repo="$1" artifact="$2" relative tracked
+  relative="${artifact#"$repo"/}"
+  [ "$relative" != "$artifact" ] || { printf 'artifact path is outside its checkout'; return 0; }
+  tracked=$(GIT_LITERAL_PATHSPECS=1 rmd_retirement_git "$repo" ls-files -- "$relative" 2>/dev/null) || {
+    printf 'artifact Git index is unreadable'; return 0;
+  }
+  [ -z "$tracked" ] || { printf 'artifact contains tracked source'; return 0; }
+  return 1
+}
+
 clean_artifact() {
-  local artifact="$1" min_age="${2:-$AGE_HOURS}" policy="${3:-}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope activity_root="$1"
+  local artifact="$1" min_age="${2:-$AGE_HOURS}" policy="${3:-}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope activity_root="$1" artifact_repo="" index_risk
   # Dynamically scoped to log(): only reuse this candidate's existing size probe.
   local RMD_DECISION_KNOWN_BYTES=unknown
   [ -d "$artifact" ] && [ ! -L "$artifact" ] || return 0
@@ -473,6 +484,10 @@ clean_artifact() {
     [ "$policy" != residual ] || [ "$parent" != "${USER_HOME%/*}" ] || break
     if [ -e "$parent/.git" ]; then
       activity_root="$parent"
+      artifact_repo="$parent"
+      if index_risk=$(artifact_index_risk "$artifact_repo" "$artifact"); then
+        log "SKIP protected $artifact ($index_risk)"; return
+      fi
       status=$(rmd_retirement_git "$parent" status --porcelain --untracked-files=all 2>/dev/null) || {
         log "SKIP git-unverified $artifact"; return;
       }
@@ -533,6 +548,10 @@ clean_artifact() {
     stamp=$(artifact_mtime "$artifact") || stamp=0
     if [ "$stamp" -eq 0 ] || [ "$(( $(date +%s) - stamp ))" -lt "$((min_age * 3600))" ]; then
       log "SKIP recent-or-unverified-before-remove $artifact"; return
+    fi
+    # A concurrent author can add a cache-named source file after the first read.
+    if [ -n "$artifact_repo" ] && index_risk=$(artifact_index_risk "$artifact_repo" "$artifact"); then
+      log "SKIP changed protected $artifact ($index_risk)"; return
     fi
     # Immutable dependency snapshots may have read-only directories. Give
     # the owning account delete permission only on directories inside this
@@ -1477,14 +1496,24 @@ fi
 # helper reports "disabled" and changes nothing; a dry run only plans.
 # Dependency seed generations nothing references any more; the sweeper proves idle, unreferenced
 # and unopened per generation, and keeps anything it cannot prove (deploy/DEPENDENCY-SEEDS.md).
+# A store written under a URL-encoded root (2026-10-22: "Application%20Support") is swept too.
 seed_tool="$USER_HOME/.local/bin/remudero-dependencies"
-if [ "$APPLY" = 1 ] && [ -x "$seed_tool" ] && [ ! -L "$seed_tool" ] && [ -O "$seed_tool" ]; then
-  if seed_output=$("$seed_tool" sweep --apply 2>&1); then
-    log "dependency-seeds: $(printf '%s' "$seed_output" | python3 -I -c 'import json, sys
+seed_stray="$USER_HOME/Library/Application%20Support/Remudero/dependencies"
+sweep_seeds() { # $1 = label, $2 = seed root ("" for the account's own root)
+  local seed_output
+  # --root, not RMD_DEPENDENCY_SEED_ROOT: the tool refuses an encoded root from configuration.
+  if seed_output=$(if [ -n "$2" ]; then "$seed_tool" sweep --root "$2" --apply; else "$seed_tool" sweep --apply; fi 2>&1); then
+    log "$1: $(printf '%s' "$seed_output" | python3 -I -c 'import json, sys
 rows = json.load(sys.stdin)
 print("removed=%d kept=%d" % (sum(r["action"] == "remove" for r in rows), sum(r["action"] == "keep" for r in rows)))' 2>/dev/null || echo 'sweep output unreadable')"
   else
-    log "dependency-seeds: sweep failed: $(printf '%s' "$seed_output" | tail -n 1)"
+    log "$1: sweep failed: $(printf '%s' "$seed_output" | tail -n 1)"
+  fi
+}
+if [ "$APPLY" = 1 ] && [ -x "$seed_tool" ] && [ ! -L "$seed_tool" ] && [ -O "$seed_tool" ]; then
+  sweep_seeds dependency-seeds ""
+  if [ -d "$seed_stray" ] && [ ! -L "$seed_stray" ] && [ -O "$seed_stray" ] && [ -f "$seed_stray/.rmd-dependency-seed-root.json" ]; then
+    sweep_seeds dependency-seeds-stray "$seed_stray"
   fi
 fi
 

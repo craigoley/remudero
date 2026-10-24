@@ -123,7 +123,9 @@ test("W1-T8861: an unwritable audit log keeps the clone instead of removing it s
   assert.match(r.stdout, new RegExp(`KEEP ${plain}: audit log unwritable`));
 });
 
-test("W1-T8861: a dry run records its decision on the audit log and removes nothing", () => {
+// Operator 2026-10-23: a dry run writes nothing anywhere, so its decision is printed, never appended
+// to the audit log (W1-T8861 keeps that log for passes that act).
+test("W1-T8861: a dry run prints its decision, appends no audit line and removes nothing", () => {
   const fx = fixture();
   repos(fx);
   const clones = join(fx.scratch, "clones");
@@ -133,5 +135,6 @@ test("W1-T8861: a dry run records its decision on the audit log and removes noth
   const r = run(fx, { RMD_CLEANUP_WORKTREE_ROOTS: clones, DRY_RUN: "1" });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.equal(existsSync(plain), true, r.stdout);
-  assert.match(readFileSync(auditLog(fx), "utf8"), new RegExp(` dry_run=1 pid=\\d+ REMOVE ${plain} \\(standalone clone\\)`));
+  assert.match(r.stdout, new RegExp(`REMOVE ${plain} \\(standalone clone\\)`));
+  assert.equal(existsSync(auditLog(fx)), false, "a dry run creates no audit log");
 });

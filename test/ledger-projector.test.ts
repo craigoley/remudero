@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs, { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock, type Clock } from "../src/lib/clock.js";
 import { compactRotations, rotateLedger } from "../src/lib/ledger.js";
@@ -16,7 +16,7 @@ import {
   createLedgerProjector,
   isFactStep,
   ledgerLineIdentity,
-  openProjectorReadModel,
+  openProjectorReadModel as rawOpenProjectorReadModel,
   readModelDigest,
   readTaskActivity,
   RUN_WORKER_PROJECTION,
@@ -24,17 +24,60 @@ import {
   type LedgerProjectorOptions,
 } from "../src/lib/ledger-projector.js";
 import { acquireLease, ReadModelError, type ReadModelDb } from "../src/lib/read-model-db.js";
+import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { retainFixture } from "#test/setup/retained-fixtures.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";
 
-type TestCtx = { after: (fn: () => void) => void };
+type TestCtx = { after: (fn: () => unknown) => void };
+type Retirement = { roots: string[]; releases: Array<() => void> };
+const retirements = new WeakMap<TestCtx, Retirement>();
+const fixtureOwners = new Map<string, Retirement>();
+
+async function retireFixture(owned: Retirement, settle = flushReadModelTransactions): Promise<void> {
+  try {
+    const errors: unknown[] = [];
+    for (const release of [...owned.releases].reverse()) {
+      try { release(); } catch (error) { errors.push(error); }
+    }
+    if (errors.length) throw new AggregateError(errors, "projector fixture release failed; directories preserved");
+    await settle();
+  } catch (error) {
+    for (const root of owned.roots) retainFixture(root, `projector fixture retirement failed: ${String(error)}`);
+    throw error;
+  }
+  for (const root of owned.roots) {
+    rmSync(root, { recursive: true, force: true });
+    fixtureOwners.delete(root);
+  }
+}
+
+function retirement(t: TestCtx): Retirement {
+  const existing = retirements.get(t);
+  if (existing) return existing;
+  const owned: Retirement = { roots: [], releases: [] };
+  retirements.set(t, owned);
+  t.after(() => retireFixture(owned));
+  return owned;
+}
+
+function openProjectorReadModel(...args: Parameters<typeof rawOpenProjectorReadModel>): ReadModelDb {
+  const owned = fixtureOwners.get(args[0]);
+  if (!owned) throw new Error(`projector fixture does not own ${args[0]}`);
+  const db = rawOpenProjectorReadModel(...args);
+  let released = false;
+  owned.releases.push(() => { if (!released) { db.close(); released = true; } });
+  return db;
+}
 
 function scratch(t: TestCtx, kind: string): string {
   const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const owned = retirement(t);
+  owned.roots.push(dir);
+  fixtureOwners.set(dir, owned);
   return dir;
 }
 
@@ -57,7 +100,6 @@ interface Store {
 
 function store(t: TestCtx, ledgerDir: string, clock: Clock, extra: Partial<LedgerProjectorOptions> = {}, stateDir = scratch(t, "projector-state")): Store {
   const db = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => db.close());
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error(`lease held by ${got.heldBy}`);
   const projector = createLedgerProjector({ ledgerDir, db, lease: got.lease, clock, ...extra });
@@ -228,7 +270,6 @@ test("a second writer is refused by the lease and commits nothing", (t) => {
   const digest = readModelDigest(first.db);
 
   const second = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => second.close());
   const refused = acquireLease(second, { holder: "second-writer", clock });
   assert.equal(refused.ok, false, "the lease is held");
   appendFileSync(join(ledgerDir, LIVE), `${line(T0 - 5, "run.start", { task_id: "W1-T2" })}\n`);
@@ -502,7 +543,6 @@ test("a store built before the fact set bump is re-read in place and gains its n
   writeFileSync(join(ledgerDir, LIVE), body([line(T0, "run.start"), line(T0 + 1, "external_effect.reconciled")]));
   const clock = fixedClock(T0);
   const db = openProjectorReadModel(scratch(t, "projector-state"), "core", clock);
-  t.after(() => db.close());
   const got = acquireLease(db, { clock });
   assert.ok(got.ok);
   createLedgerProjector({ ledgerDir, db, lease: got.lease, clock, factStep: (step) => step === "run.start" }).tick();
@@ -552,7 +592,6 @@ test("a version-1 activity ring, ordered by hash, is rebuilt in place with the a
   writeFileSync(join(ledgerDir, LIVE), body(rows));
   const clock = fixedClock(T0 + 10_000);
   const db = openProjectorReadModel(scratch(t, "projector-state"), "core", clock);
-  t.after(() => db.close());
   const got = acquireLease(db, { clock });
   assert.ok(got.ok);
   createLedgerProjector({ ledgerDir, db, lease: got.lease, clock }).tick();
@@ -641,4 +680,79 @@ test("the run worker projection keeps each worker field's newest value per run i
   const before = seqs();
   for (const text of lines) RUN_WORKER_PROJECTION.apply(s.db, text, ledgerLineIdentity(text), () => JSON.parse(text) as Record<string, unknown>);
   assert.deepEqual(seqs(), before, "a line applied twice changes nothing, so the consistency oracle reads no drift");
+});
+
+test("projector fixture retirement closes the real database through its one registered cleanup before removing roots", async (t) => {
+  const hooks: Array<() => unknown> = [], ctx = { after: (fn: () => unknown) => { hooks.push(fn); } };
+  const ledgerDir = scratch(ctx, "projector-close-control");
+  writeFileSync(join(ledgerDir, LIVE), body([line(T0, "run.start", { task_id: "W1-T1" })]));
+  const s = store(ctx, ledgerDir, fixedClock(T0)); s.tick();
+  const owned = retirement(ctx);
+  t.after(() => retireFixture(owned));
+  assert.equal(hooks.length, 1, "all fixture resources share one ordered cleanup");
+  await hooks[0]!();
+  assert.throws(() => s.db.prepare("SELECT 1").get(), /closed|not open/i);
+  assert.ok(owned.roots.every(root => !fs.existsSync(root)));
+});
+
+test("projector fixture retirement awaits diagnostics after release and preserves roots on release or barrier failure", async (t) => {
+  const failureMode = process.env.RMD_PROJECTOR_RETIREMENT_MODE;
+  if (failureMode) {
+    assert.ok(failureMode === "release" || failureMode === "barrier");
+    const ctx = { after: (_fn: () => unknown) => {} };
+    const ledgerDir = scratch(ctx, "projector-exit-ledger");
+    const stateDir = scratch(ctx, "projector-exit-state");
+    const ledger = body([line(T0, "run.start", { task_id: "W1-T1" })]);
+    writeFileSync(join(ledgerDir, LIVE), ledger);
+    const s = store(ctx, ledgerDir, fixedClock(T0), {}, stateDir); s.tick();
+    writeFileSync(join(stateDir, "fixture-evidence"), "projector state evidence\n");
+    const control = makeTempDir("projector-unretained-control");
+    writeFileSync(join(control, "control"), "exit sweep must remove this\n");
+    writeFileSync(process.env.RMD_PROJECTOR_RETIREMENT_RECEIPT!, JSON.stringify({ ledgerDir, stateDir, dbPath: s.db.path, control }));
+    if (failureMode === "release") s.db.close = () => { throw new Error("injected projector close failure"); };
+    t.after(() => retireFixture(retirement(ctx), async () => {
+      await flushReadModelTransactions();
+      throw new Error("injected projector diagnostic failure");
+    }));
+    return;
+  }
+  for (const mode of ["release", "barrier"]) {
+    await t.test(`${mode} failure preserves evidence after exit`, (childT) => {
+      const childTmp = scratch(childT, `projector-exit-${mode}`), receipt = join(childTmp, "receipt.json");
+      const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: childTmp, RMD_PROJECTOR_RETIREMENT_MODE: mode, RMD_PROJECTOR_RETIREMENT_RECEIPT: receipt };
+      delete env.NODE_TEST_CONTEXT;
+      env.NODE_V8_COVERAGE = undefined;
+      const run = spawnSync(process.execPath, [
+        "--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
+        "--test-name-pattern", `^${t.name}$`, "test/ledger-projector.test.ts",
+      ], {
+        cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000,
+        env,
+      });
+      assert.equal(run.error, undefined, run.stderr);
+      assert.equal(run.signal, null, run.stderr);
+      assert.equal(run.status, 1, run.stdout + run.stderr);
+      assert.match(run.stdout, /^# fail 1$/m, "the child must fail its registered retirement hook");
+      assert.match(run.stdout, mode === "release" ? /projector fixture release failed/ : /injected projector diagnostic failure/);
+      const { ledgerDir, stateDir, dbPath, control } = JSON.parse(readFileSync(receipt, "utf8")) as { ledgerDir: string; stateDir: string; dbPath: string; control: string };
+      assert.equal(fs.existsSync(control), false, "the standard exit sweep actually removed its unretained control");
+      assert.equal(readFileSync(join(ledgerDir, LIVE), "utf8"), body([line(T0, "run.start", { task_id: "W1-T1" })]), `${mode} failure retains ledger evidence after process exit`);
+      assert.equal(readFileSync(join(stateDir, "fixture-evidence"), "utf8"), "projector state evidence\n", `${mode} failure retains state evidence after process exit`);
+      assert.equal(readFileSync(dbPath).subarray(0, 16).toString(), "SQLite format 3\0", "the actual database remains available for diagnosis");
+    });
+  }
+  const ctx = { after: (_fn: () => unknown) => {} }, ledgerDir = scratch(ctx, "projector-barrier-control");
+  writeFileSync(join(ledgerDir, LIVE), body([line(T0, "run.start", { task_id: "W1-T1" })]));
+  const s = store(ctx, ledgerDir, fixedClock(T0)), owned = retirement(ctx); s.tick();
+  t.after(() => retireFixture(owned));
+  let settled = false;
+  await retireFixture(owned, async () => {
+    assert.throws(() => s.db.prepare("SELECT 1").get(), /closed|not open/i);
+    await flushReadModelTransactions();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    writeFileSync(join(ledgerDir, "last-diagnostic-write"), "settled\n");
+    settled = true;
+  });
+  assert.equal(settled, true, "the barrier is load-bearing, never skipped to make cleanup green");
+  assert.ok(owned.roots.every(root => !fs.existsSync(root)));
 });

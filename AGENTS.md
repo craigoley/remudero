@@ -44,6 +44,7 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   restored is the evidence it is load-bearing.**
 - **ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK — a whole-file replace hits another
   file's identical line number and returns a FALSE `OK`.**
+- **On the Azure host a new worktree's dependencies are linked when it is cut — never run `npm ci` or `ln -s` node_modules in it.**
 - **Every builder, reviewer and worker must clean up its own disposable workspace artifacts before
   finishing; preserve active/shared paths, unpublished work and durable evidence, and leave
   worktree retirement to the harness.**

@@ -236,6 +236,12 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/a-declared-test-directory-and-the-fix-rung-scope-check.md",
+      "title": "A declared test directory and the fix rung's scope check",
+      "summary": "The fix rung refuses a newly added child of `test/` even though its caller explicitly",
+      "grepHint": "A declared test directory and the fix rung's scope check"
+    },
+    {
       "path": "docs/forensics/account-usage.md",
       "title": "account-usage.ts comment forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
@@ -246,6 +252,12 @@
       "title": "assertion-discrimination-check.mjs forensics",
       "summary": "The measured forensics, incident narrative and design arguments removed from",
       "grepHint": "assertion-discrimination-check.mjs forensics"
+    },
+    {
+      "path": "docs/forensics/author-preflight-tests-fail-in-the-retro-container.md",
+      "title": "Author preflight failures in the retro container",
+      "summary": "The daemon-specific cause remains unproven: the checked code exposes a process-group closure lead, but this worker cannot read the live failure evidence or rep…",
+      "grepHint": "Author preflight failures in the retro container"
     },
     {
       "path": "docs/forensics/auto-triage.md",

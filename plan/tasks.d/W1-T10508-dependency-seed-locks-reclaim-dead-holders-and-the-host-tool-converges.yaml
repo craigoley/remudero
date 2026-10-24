@@ -1,0 +1,185 @@
+- id: W1-T10508
+  title: "DEPENDENCY-SEED LOCKS RECLAIM DEAD HOLDERS AND THE HOST TOOL CONVERGES — a `<key>.lock` records nobody, so a prime SIGKILLed inside it strands the lock forever and every later prime of that lockfile waits 120 s and throws (three such locks sit in the Azure store since 10-15/10-17); and install-host-units.sh diffs only dependency-seed-guard.sh, so the host's remudero-dependencies is still the 10-14 build with no `report` and no fix ever reaches it"
+  repo: remudero
+  depends_on: [W1-T10501]
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern, the account dependency-seed tool's lock lifecycle and its delivery to the host; the seed identity, GC rules and janitor guard are unchanged
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-23: read-only host evidence of stranded seed locks and a lagging installed tool; re-verified by the coordinator's filing agent the same day"
+  plan_refs: [W1-T396, W1-T978, W1-T1067, W1-T5533, W1-T10501, W1-T10507, "PR #11801 (account dependency seeds)", "PR #13770 (session reaper, open)"]
+  files:
+    - src/lib/dependency-seeds.ts
+    - scripts/dependency-seeds.mjs
+    - deploy/install-dependency-seeds.sh
+    - deploy/install-host-units.sh
+    - deploy/DEPENDENCY-SEEDS.md
+    - test/dependency-seeds.test.ts
+    - test/dependency-seed-locks-reclaim-dead-holders.test.ts
+    - test/deploy/the-host-installer-converges-the-dependency-seed-tool.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-23 on origin/main 344e6b501 and on `ssh remudero` (read-only, niced, bounded).
+
+    DEFECT 1: A SEED LOCK NAMES NO HOLDER, SO A DEAD ONE IS NEVER RECLAIMED.
+    - src/lib/dependency-seeds.ts:319 `const lock = join(root, \`${meta.key}.lock\`)`. :321 says "Never reclaim
+      another installer's lock by timestamp". :323-328 loop on `mkdirSync(lock)`; on EEXIST they spin until
+      `lockWaitMs ?? 120_000` and then rethrow EEXIST. The lock directory is empty: nothing records pid, host
+      or start time, so nothing can ever prove the holder is gone.
+    - The lock is taken BEFORE the ready.json check (:333), so even a fully built seed cannot be reused while
+      its lock exists. Release is only the `finally` at :410-412.
+    - THE MECHANISM THAT STRANDS IT. src/lib/worker.ts:4956-4960 runs `dependency-seeds.mjs prime` with
+      `timeout: 120_000, killSignal: "SIGKILL"`. SIGKILL cannot run a `finally`, so a prime killed at its bound
+      leaves the lock behind. A waiter's own wait is the same 120 s, so a waiter queued behind a slow holder
+      is itself killed while holding nothing, or times out.
+    - sweepDependencySeeds (:424-458) enumerates only 64-hex seed directories. A locked seed is kept with
+      reason "installer or sweeper lock" (:431-433) on every pass, and a lock with no seed directory is never
+      even listed. `sweep --apply` therefore cannot reclaim either the lock or the generation behind it.
+    - deploy/DEPENDENCY-SEEDS.md says "Busy locks are never stolen by age. Interrupted locks require operator
+      investigation." No such investigation path exists, and nothing alerts.
+    HOST EVIDENCE, /mnt/scratch/remudero-dependencies/craigoleyagent:
+    - Three empty lock directories:
+        ed153d31….lock  2026-10-15 02:19:33  (seed ready, lastUsed 2026-10-14T21:23Z, 1 consumer)
+        561e6680….lock  2026-10-15 17:04:41  (seed ready, lastUsed 2026-10-15T14:37Z, 1 consumer)
+        cc6391d5….lock  2026-10-17 17:30:02  (seed ready, lastUsed 2026-10-17T17:30:02Z, 0 consumers)
+      For cc6391d5 the lock time equals the lastUsed stamp: the holder published ready.json and died before
+      its `finally`. All three generations are complete (ready.json present), and all three are unusable.
+    - No process on the host runs dependency-seeds.mjs (0 in the process listing). No container mounts the
+      store: the four daemon/serve containers' mounts were listed by Source/Destination only, and none names
+      /mnt/scratch/remudero-dependencies. Every holder is therefore a host process of this account.
+    - The account runs processes in 6 different pid namespaces and 6 mount namespaces. A bare pid is not
+      evidence across them. A lock must also record the namespace its pid belongs to.
+    - The host booted 2026-09-16 00:13:14, so these locks do not predate the boot. Boot evidence does not
+      clear them; holder evidence is needed.
+    - Not reproduced live, because the host is read-only. The 120 s wait-then-throw is :323-328 as written,
+      and test/dependency-seeds.test.ts:203-208 already pins it with an empty lock and `lockWaitMs: 0`
+      (EEXIST, lock left in place).
+
+    DEFECT 2: THE HOST'S INSTALLED TOOL LAGS MAIN, AND NOTHING CONVERGES IT.
+    - Host: ~/.local/bin/remudero-dependencies dated 2026-10-14 22:48:43 execs
+      ~/.local/share/remudero/dependency-seed-tools/43eba79e…/scripts/dependency-seeds.mjs. That copy's usage
+      line has no `report`; `grep -c report` on it prints 0. Its lock wait is the same 120 s loop.
+    - Main's tool version (the sha256 deploy/install-dependency-seeds.sh:6-12 computes over dependency-seeds.ts,
+      clock.ts, dependency-seeds.mjs and dependency-seed-guard.sh) is f68aefb2…, not 43eba79e…. Since #11801
+      (10-14), #12438 (10-16), #12997 (10-20, added `report`) and #13424 (10-21) changed the tool.
+    - deploy/install-host-units.sh:1988-1990 (check) and :2024 (install) diff and install ONLY
+      deploy/dependency-seed-guard.sh beside the janitor. Nothing in the file names remudero-dependencies,
+      dependency-seed-tools or install-dependency-seeds.sh. The host's guard is root-owned and dated 10-22
+      01:52, the last converge; the tool beside it is still 10-14.
+    - The launcher's units step (install-host-units.sh:1305-1330) already turns any `MISSING ` or `DRIFTED `
+      line into `sudo -n … --install`. One check-mode line for the tool is enough to deliver every future
+      seed fix, this task's own included, to the host with no hand step.
+    - That converge runs as root, and the tool, its wrapper and the store must belong to the account:
+      ownedDirectory refuses a store the caller does not own. The install must run as the service account.
+
+    WHY BOTH IN ONE TASK. The lock fix only helps the host once the host runs it. W1-T10507 (filed, #13771)
+    makes every host `git worktree add` call `remudero-dependencies prime`; with these locks in place each
+    such prime of the three lockfiles would stall 120 s and fail.
+
+    MERGE ORDER. deploy/install-host-units.sh is also changed by PR #13770 (the hourly session reaper,
+    run-unfiled, open) and by W1-T10501 (systemd reload only on a unit change, queued, priority 1).
+    W1-T10507 adds a live-checkout hook block to the same file. This build MUST merge after #13770 and
+    W1-T10501 (hence depends_on), and rebase onto whichever of them is newest by MERGING origin/main. Its
+    installer edit is confined to the janitor/guard block near :1984-2030 and does not touch the UNITS
+    write loop or the systemctl block that W1-T10501 owns.
+
+    OUT OF SCOPE, AND REPORTED SEPARATELY. Old tool versions under dependency-seed-tools/ (four on the host)
+    are not pruned. The live-holder wait bound (120 s) and worker.ts's SIGKILL bound are unchanged: the fix
+    is that a dead holder is provable, not a different timeout.
+  design: |
+    1. A LOCK RECORDS ITS HOLDER, AND IS NEVER VISIBLE WITHOUT IT. When prime or sweep takes `<key>.lock`,
+       the lock carries a holder record: pid, the process start time, hostname, the machine's boot identity
+       (Linux /proc/sys/kernel/random/boot_id; macOS `sysctl -n kern.bootsessionuuid`), the pid namespace
+       (Linux readlink /proc/self/ns/pid; "host" on macOS), a random nonce, and the command (prime or sweep).
+       Publish the lock complete, so no other process can observe a lock without its record. Note: POSIX
+       rename() REPLACES an existing empty directory, so a plain directory rename would silently steal an
+       empty legacy lock. Use an operation that fails when the lock exists (for example a holder file
+       staged and then link()ed to the lock path, or an exclusive create).
+    2. STALENESS IS DECIDED BY EVIDENCE, NEVER BY AGE. A lock is stale when any of these hold:
+       a. it records no holder (the pre-change empty directories, like the host's three);
+       b. its recorded boot identity is not this machine's current one: the holder ran on another host or
+          an earlier boot. The store is account-local, and no container mounts it, so such a record cannot
+          name a live holder;
+       c. its pid namespace is the reclaimer's own, and its pid is dead or was reused (the live pid started
+          after the recorded start time). Reuse the rungs of isHolderStale (src/lib/fs-race-safe.ts) where
+          they fit. The standalone tool ships only dependency-seeds.ts and clock.ts, so either inline the
+          predicate or add the file to the installer's tool set and version hash;
+       d. its pid namespace is not the reclaimer's, and no process of this account remains in that namespace
+          (Linux: no /proc/<pid>/ns/pid resolves to it).
+       Otherwise it is LIVE (same namespace, pid alive, start time matches) or UNVERIFIABLE (another live
+       namespace, or the evidence cannot be read). Neither is ever reclaimed.
+    3. RECLAIM IS ATOMIC AND NAMED. A reclaimer moves the judged lock aside (rename to a unique
+       `.reclaimed-*` name) and re-reads the moved record. If it is not the one it judged, it backs off and
+       retries. Only then does it remove the moved copy. Release removes the lock only when the record still
+       carries the releaser's own nonce. Residual risk to state in the doc: a still-running pre-change holder
+       of an empty legacy lock would remove the new lock in its own `finally`. The installer converges every
+       copy of the tool in this same change, and in-process callers run their checkout's own source.
+    4. PRIME. On an existing lock, prime reads the record. A stale lock is reclaimed at once and acquisition
+       retried, with no wait. A live or unverifiable lock is waited on as today; when the wait ends, the error
+       names the holder (pid, host, verdict) instead of a bare EEXIST.
+    5. SWEEP. sweepDependencySeeds also enumerates every `<64-hex>.lock`, with or without a seed directory,
+       and reports one row per lock: `{ lock, action: "reclaim" | "keep", reason, holder }`. The reason
+       names the evidence (no-holder, other-boot, dead-pid, reused-pid, namespace-gone, live, unverifiable).
+       Without --apply nothing changes: a dry run reports `reclaim` but leaves the lock, and keeps its seed
+       with the lock reason, as today. With --apply a stale lock is reclaimed first, and its generation is
+       then judged by the unchanged GC rules (six idle hours, no consumer, open-file scan) in the same pass.
+       The output stays one JSON array of rows with an `action` field, because deploy/mac/remudero-janitor.sh
+       :1500-1504 counts `remove` and `keep` rows from it.
+    6. THE HOST INSTALLER CONVERGES THE TOOL. deploy/install-dependency-seeds.sh gains a read-only check
+       mode that prints the repo's TOOL_VERSION and the installed one, computed once in that script, not
+       duplicated in install-host-units.sh. In the janitor block of deploy/install-host-units.sh, gated like
+       CLEANUP_PATH (default host layout core instance, or an explicit test override env such as
+       RMD_DEPENDENCY_TOOL_HOME, so temp trees never touch a real home):
+       - check mode prints `install-host-units: MISSING <home>/.local/bin/remudero-dependencies` when the
+         wrapper is absent, `install-host-units: DRIFTED dependency seed tool (installed <v> != repo <v>)`
+         when the wrapper's tool version or any installed file differs from the repo, and
+         `install-host-units: ok      dependency seed tool <v>` otherwise. MISSING and DRIFTED each count
+         as drift;
+       - --install runs deploy/install-dependency-seeds.sh AS the service account (runuser/sudo -u
+         $SERVICE_USER when root, directly when already that user), with the host-node pin as RMD_SEED_NODE.
+         It never runs as root into the account's home. The existing seed config is preserved: enable only
+         writes when none exists.
+    7. deploy/DEPENDENCY-SEEDS.md replaces "Busy locks are never stolen by age. Interrupted locks require
+       operator investigation." with the evidence rule above, and says the host installer converges the tool.
+  prompt: |
+    Write the two NEW test files first and watch each new test fail at base: restore base code with
+    `git show origin/main:<path>`, never stash. Every new test title starts with `W1-T10508: ` exactly as in
+    the acceptance proofs. Drive holder evidence through injectable seams (process liveness, start time,
+    boot identity, pid namespace), never by killing real processes or touching a real home. The
+    installer tests use temp trees and the override env only, and each asserts at least one MISSING or
+    DRIFTED line before convergence, so a gate that never runs fails loudly. Amend
+    test/dependency-seeds.test.ts:203-208 so its busy lock carries a LIVE holder record (this test process)
+    rather than an empty directory. That case is now the guard that a live lock is never stolen, and it
+    must still throw and leave the lock. Merge origin/main after #13770 and W1-T10501 land, and resolve
+    install-host-units.sh by keeping both sides. Run the targeted suites, test/host-units-install.test.ts,
+    and `rmd preflight --fast` on the committed tree before the first push.
+  acceptance:
+    - claim: "a prime whose seed lock records no holder, a holder from another boot, or a holder whose pid is dead in the reclaimer's own pid namespace reclaims the lock at once and materializes, while a lock whose recorded holder is live or unverifiable is waited on and its error names the holder"
+      proof: 'grep: test("W1-T10508: a prime reclaims a seed lock whose holder is provably dead and waits on a live one" in test/dependency-seed-locks-reclaim-dead-holders.test.ts'
+    - claim: "a lock is never observable without its holder record: a concurrent acquirer racing an empty legacy lock never replaces it, and two reclaimers of one stale lock leave exactly one holder"
+      proof: 'grep: test("W1-T10508: a seed lock is published with its holder and reclaimed by exactly one waiter" in test/dependency-seed-locks-reclaim-dead-holders.test.ts'
+    - claim: "sweep reports every seed lock, with or without a seed directory, as a reclaim or keep row naming its evidence; the dry run changes nothing, and --apply reclaims the stale ones and then judges their generations by the unchanged GC rules"
+      proof: 'grep: test("W1-T10508: sweep reports stale seed locks and reclaims them only with --apply" in test/dependency-seed-locks-reclaim-dead-holders.test.ts'
+    - claim: "install-host-units check mode prints MISSING for an absent account seed tool and DRIFTED when its installed version differs from the repo's, and --install converges it as the service account so the next check prints ok"
+      proof: 'grep: test("W1-T10508: the host installer reports and converges a lagging dependency seed tool" in test/deploy/the-host-installer-converges-the-dependency-seed-tool.test.ts'
+    - claim: "the seed doc states the evidence rule for reclaiming a lock"
+      proof: 'grep: reclaimed only when its recorded holder is provably gone in deploy/DEPENDENCY-SEEDS.md'
+  falsifier: |
+    Restore the empty-directory lock and the bare EEXIST wait: the prime and race cases must fail. Treat a
+    foreign-namespace live holder as dead: the prime case must fail on its unverifiable arm. Remove the lock
+    enumeration from sweep: the sweep case must fail on the seedless lock. Drop the tool lines from
+    install-host-units.sh check mode: the installer case must fail before convergence. GUARDS that held at
+    base and must still hold: a lock whose holder is LIVE is never stolen, and prime still throws on it and
+    leaves it (test/dependency-seeds.test.ts:203, amended to a live holder record); a dry sweep removes
+    nothing; GC still keeps referenced, recent, open and unverified generations
+    (test/dependency-seeds.test.ts:184); the sweep output is still one JSON array of rows with `action`,
+    which the Mac janitor parses; install-dependency-seeds.sh still preserves an existing configuration
+    (test/dependency-seeds.test.ts:290); the janitor, crontab and temp-sweep convergence beside the new
+    lines is unchanged (test/host-units-install.test.ts, the W1-T4770 crontab case and the hourly temp
+    sweep case); a temp-tree install with the override env unset never touches a real
+    home. Remove each guard's production branch in turn: its case must fail. Restore and require zero
+    failures.

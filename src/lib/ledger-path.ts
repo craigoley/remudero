@@ -19,7 +19,7 @@ export const LEDGER_STAGE_TAGS: readonly string[] = [LEDGER_ROTATE_STAGE_TAG, LE
  * — mechanical, behavior-preserving (the expression was already byte-identical at every
  * site), so a future rename/relocation of the ledger changes exactly one line.
  */
-export function ledgerPathFor(config: Config): string {
+export function ledgerPathFor<T extends Pick<Config, "root">>(config: T): string {
   return join(config.root, "state", LEDGER_FILENAME);
 }
 
