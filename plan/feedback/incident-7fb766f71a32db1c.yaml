@@ -1,0 +1,29 @@
+id: incident-7fb766f71a32db1c
+ts: 2026-10-24T17:54:29.180Z
+raw: >-
+  Incident 7fb766f71a32: intervention
+  plan-proof-unrunnable:plan-repair:proof-discrimination-failed-on-ci-log-fi
+
+  First seen: 2026-10-24T17:53:23.307Z
+
+  Last seen: 2026-10-24T17:54:24.535Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=close target=pr#11096@2026-10-12T15:44:03Z actor=cao825 cause=plan-proof-unrunnable:plan-repair:proof-discrimination-failed-on-ci-log-fi — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#7fb766f71a32db1cd50ac653561b3b0d4dbf8285d89295321f2db600e981259d
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

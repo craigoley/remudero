@@ -1,0 +1,29 @@
+id: incident-d2739c0cb62ec640
+ts: 2026-10-24T17:58:41.319Z
+raw: >-
+  Incident d2739c0cb62e: intervention
+  own-red:fix-lane:required-checks-red-refused-retrying-the
+
+  First seen: 2026-10-24T17:53:23.307Z
+
+  Last seen: 2026-10-24T17:58:38.147Z
+
+  Count: 6, burn: 6.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#11702@973d4efd8 actor=cao825 cause=own-red:fix-lane:required-checks-red-refused-retrying-the — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#d2739c0cb62ec6402b82a05aeae62225ff391e7111d8dca42cc2399efcade0ad
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
