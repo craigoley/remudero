@@ -11,7 +11,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
-import { baseReproductionFiles } from "./base-reproduction.js";
+import { baseProbeSetupFailure, baseReproductionFiles, type BaseProbeResult } from "./base-reproduction.js";
 import { selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { judgeFixProgress, type FixProgressInput, type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
 import {
@@ -453,6 +453,7 @@ export interface MainRepairLane {
   closePr?(prUrl: string, comment: string): Awaitable<void>;
   /** W1-T7760: runs CI on commits whose own push run was cancelled. Defaults to GitHub's REST over `fetch`. */
   probes?: MainRepairProbes;
+  reproduceAt?(sha: string, testFiles: readonly string[]): Awaitable<BaseProbeResult>;
 }
 
 /** W1-T7760 — the workflow a probe runs. It carries ci-gate's required checks, has a
@@ -501,6 +502,23 @@ export interface MainRepairProbes {
 }
 
 export type MainProbeVerdict = "green" | "red" | "inconclusive";
+
+interface MainProbeEvidence {
+  verdict: MainProbeVerdict;
+  runUrl?: string;
+  runId?: number;
+  failingChecks: string[];
+  method?: "local-test";
+  files?: readonly string[];
+  outcomes?: BaseProbeResult;
+}
+
+function localProbeVerdict(files: readonly string[], outcomes: BaseProbeResult): MainProbeVerdict {
+  const byFile = new Map(outcomes.map((outcome) => [outcome.file, outcome.outcome]));
+  if (files.some((file) => byFile.get(file) === "fails")) return "red";
+  return files.length > 0 && outcomes.reason === undefined && outcomes.setup_error === undefined &&
+    files.every((file) => byFile.get(file) === "passes" || byFile.get(file) === "absent") ? "green" : "inconclusive";
+}
 
 /** Probes in flight: one at a time while any CI job in the repo waits for a runner; otherwise as many
  *  as there are idle runners (at least one). No constant: both inputs are readings. */
@@ -605,7 +623,8 @@ export interface MainBisectionState {
   /** Concluded probes that said green or red, by commit. */
   readonly verdicts: Map<string, MainProbeVerdict>;
   /** Their evidence, by commit. */
-  readonly evidence: Map<string, { verdict: MainProbeVerdict; runUrl?: string; runId?: number; failingChecks: string[] }>;
+  readonly evidence: Map<string, MainProbeEvidence>;
+  readonly localAttempts: Set<string>;
   /** True once the bisection was dispatched at all. */
   readonly started: boolean;
   /** The located row that closed it, if one was written. */
@@ -618,7 +637,8 @@ export interface MainBisectionState {
 export function mainBisectionFromLedger(lines: readonly Record<string, unknown>[], firstRedSha: string): MainBisectionState {
   const inFlight = new Map<string, MainProbeHandle>();
   const verdicts = new Map<string, MainProbeVerdict>();
-  const evidence = new Map<string, { verdict: MainProbeVerdict; runUrl?: string; runId?: number; failingChecks: string[] }>();
+  const evidence = new Map<string, MainProbeEvidence>();
+  const localAttempts = new Set<string>();
   let started = false;
   let located = false;
   for (const line of lines) {
@@ -636,6 +656,7 @@ export function mainBisectionFromLedger(lines: readonly Record<string, unknown>[
       }
     } else if (line.step === "main.repair.probe_concluded" && typeof line.probe_sha === "string") {
       inFlight.delete(line.probe_sha);
+      if (line.method === "local-test") localAttempts.add(line.probe_sha);
       const verdict = line.verdict === "green" || line.verdict === "red" ? line.verdict : undefined;
       if (verdict) {
         verdicts.set(line.probe_sha, verdict);
@@ -644,6 +665,9 @@ export function mainBisectionFromLedger(lines: readonly Record<string, unknown>[
           ...(typeof line.run_url === "string" ? { runUrl: line.run_url } : {}),
           ...(typeof line.run_id === "number" ? { runId: line.run_id } : {}),
           failingChecks: Array.isArray(line.failing_checks) ? line.failing_checks.map(String) : [],
+          ...(line.method === "local-test" ? { method: "local-test" as const,
+            files: Array.isArray(line.files) ? line.files.map(String) : [],
+            outcomes: Array.isArray(line.outcomes) ? line.outcomes as BaseProbeResult : [] } : {}),
         });
       } else {
         verdicts.delete(line.probe_sha);
@@ -652,7 +676,7 @@ export function mainBisectionFromLedger(lines: readonly Record<string, unknown>[
       located = true;
     }
   }
-  return { inFlight, verdicts, evidence, started, located };
+  return { inFlight, verdicts, evidence, localAttempts, started, located };
 }
 
 /**
@@ -754,7 +778,7 @@ export interface MainRepairRecord {
   revertWithheld?: string;
   /** W1-T7760: set when the merge was located by probing CI on the cancelled commits before it; the
    *  probe runs, not main's push run history, are then its proof. */
-  bisected?: { parentSha: string; evidence: string; failingChecks: string[] };
+  bisected?: { parentSha: string; evidence: string; failingChecks: string[]; testFiles: string[]; localRuns?: Array<Record<string, unknown>> };
   /** W1-T8042: set when the sweep handed this red over from open PRs sharing it; `offendingSha` is then
    *  the merge base every affected PR contains and no green one does. */
   inherited?: { prs: number[]; testFiles: string[]; logExcerpt: string };
@@ -792,10 +816,13 @@ export function mainRepairRecordsFromLedger(lines: readonly Record<string, unkno
             ? {
                 bisected: {
                   parentSha: line.parent_sha,
+                  testFiles: Array.isArray(line.test_files) ? line.test_files.map(String) : [],
                   evidence: Array.isArray(line.probe_runs)
                     ? (line.probe_runs as Array<Record<string, unknown>>).map((probe) => `${String(probe.sha)} ${String(probe.verdict)} ${String(probe.run_url ?? "")}`.trim()).join("; ")
                     : "",
                   failingChecks: Array.isArray(line.probe_failing_checks) ? line.probe_failing_checks.map(String) : [],
+                  ...(Array.isArray(line.probe_runs) && line.probe_runs.some((probe) => probe?.method === "local-test")
+                    ? { localRuns: line.probe_runs as Array<Record<string, unknown>> } : {}),
                 },
               }
             : {}),
@@ -1432,6 +1459,7 @@ export function buildMainHealthRung(
   let resolvedSignature: string | undefined;
   let lastSuccessfulObservationAtMs: number | undefined;
   let inFlight: Promise<void> | undefined;
+  const localProbes = new Set<string>();
   let runHistoryCache: RunHistoryCache | undefined;
   let metPrCache: { sha: string; lookup: MetPrLookup } | undefined;
   // Which push workflows carry ci-gate's required checks, learned from the jobs pages read below and
@@ -1717,9 +1745,23 @@ export function buildMainHealthRung(
     record: MainRepairRecord,
     red: MainRedSignature,
     evidence: RepairEvidence | undefined,
+    testFiles: readonly string[],
   ): Promise<{ proven: true; detail: string } | { proven: false; reason: string } | { unreadable: string }> => {
     const sha = record.offendingSha;
     if (record.bisected) {
+      if (record.bisected.localRuns) {
+        const files = testFiles.length > 0 ? testFiles : record.bisected.testFiles;
+        const matches = (commit: string, verdict: MainProbeVerdict): boolean => {
+          const run = record.bisected!.localRuns!.find((probe) => probe.sha === commit);
+          const named = Array.isArray(run?.files) ? run.files : [];
+          return files.length > 0 && run?.method === "local-test" && run.verdict === verdict &&
+            named.length === files.length && files.every((file) => named.includes(file)) &&
+            Array.isArray(run.outcomes) && localProbeVerdict(files, run.outcomes as BaseProbeResult) === verdict;
+        };
+        if (!matches(sha, "red") || !matches(record.bisected.parentSha, "green")) {
+          return { proven: false, reason: "local culprit proof needs a failing culprit and a passing first parent on the same failing test files" };
+        }
+      }
       // Located by probing CI on the commits whose own push run was cancelled: the probe runs, recorded
       // on the located row, are the proof, because main's push run history holds none for them.
       const probed = record.bisected.failingChecks;
@@ -1862,7 +1904,7 @@ export function buildMainHealthRung(
       stalled = `${stalled}; the fix-progress judge ruled no further attempt: ${ruling.reason}`;
     }
     const at = { offending_sha: record.offendingSha, offending_pr: record.offendingPr, head_sha: sha };
-    const proof = await proveCulprit(record, red, ctx.evidence);
+    const proof = await proveCulprit(record, red, ctx.evidence, baseReproductionFiles(ctx.failures));
     if ("unreadable" in proof) {
       deps.log("main.repair.proof_unreadable", { ...at, error: proof.unreadable });
       return true;
@@ -1954,7 +1996,30 @@ export function buildMainHealthRung(
     const state = mainBisectionFromLedger(lines, first.headSha);
     const required = ctx.evidence?.required ?? new Set<string>();
     const at = { first_red_sha: first.headSha, after_green_sha: first.afterGreenSha };
+    const testFiles = baseReproductionFiles(ctx.failures);
+    const localKey = (sha: string) => `${first.headSha}:${sha}`;
+    const startLocal = (sha: string): void => {
+      localProbes.add(localKey(sha));
+      repairRow("main.repair.bisecting", { ...at, method: "local-test", head_sha: ctx.sha, span: [...span],
+        files: testFiles, probes: [{ sha, ref: `local-test/${sha}` }] });
+      void Promise.resolve().then(() => lane.reproduceAt!(sha, testFiles))
+        .catch((error: unknown) => {
+          const reason = String(error);
+          return baseProbeSetupFailure(testFiles, reason);
+        })
+        .then((outcomes) => {
+          repairRow("main.repair.probe_concluded", { ...at, method: "local-test", probe_sha: sha, ref: `local-test/${sha}`,
+            verdict: localProbeVerdict(testFiles, outcomes), files: testFiles, outcomes: [...outcomes],
+            ...(outcomes.setup_error ? { setup_error: outcomes.setup_error } : {}),
+            ...(outcomes.reason ? { reason: outcomes.reason } : {}) });
+        }).finally(() => localProbes.delete(localKey(sha)))
+        .catch((error: unknown) => deps.log("main.repair.probe_unreadable", { ...at, probe_sha: sha, error: String(error) }));
+    };
     for (const probe of [...state.inFlight.values()]) {
+      if (probe.ref.startsWith("local-test/")) {
+        if (!localProbes.has(localKey(probe.sha))) state.inFlight.delete(probe.sha);
+        continue;
+      }
       let reading: MainProbeReading;
       try {
         reading = await probes.read(probe);
@@ -1998,11 +2063,26 @@ export function buildMainHealthRung(
         concurrency,
       });
     let plan = planFor(1);
+    if ([...state.inFlight.values()].some((probe) => probe.ref.startsWith("local-test/"))) return { kind: "probing" };
+    if (lane.reproduceAt && testFiles.length > 0) {
+      if (plan.state === "probe") {
+        const local = plan.shas.filter((sha) => !state.localAttempts.has(sha));
+        if (local.length > 0) { local.forEach(startLocal); return { kind: "probing" }; }
+      } else if ([...state.evidence.values()].some((proof) => proof.method === "local-test")) {
+        const needed = [plan.offendingSha, plan.parentSha].filter((sha) => !state.localAttempts.has(sha));
+        if (needed.length > 0) {
+          for (const sha of needed) if (!state.inFlight.has(sha)) startLocal(sha);
+          return { kind: "probing" };
+        }
+      }
+    }
     if (plan.state === "proven") {
       const evidenceOf = (probed: string, fallbackUrl?: string) => ({
         sha: probed,
         verdict: probed === first.headSha || probed === first.afterGreenSha ? (probed === first.headSha ? "red" : "green") : (state.evidence.get(probed)?.verdict ?? "unknown"),
         run_url: state.evidence.get(probed)?.runUrl ?? fallbackUrl ?? null,
+        ...(state.evidence.get(probed)?.method === "local-test" ? { method: "local-test",
+          files: state.evidence.get(probed)?.files, outcomes: state.evidence.get(probed)?.outcomes } : {}),
       });
       const proven = plan;
       return {
@@ -2036,6 +2116,8 @@ export function buildMainHealthRung(
     const concurrency = load ? chooseProbeConcurrency(load) : 1;
     plan = planFor(concurrency);
     if (plan.state === "probe" && plan.shas.length > 0) {
+      const local = lane.reproduceAt && testFiles.length > 0 ? plan.shas.filter((sha) => !state.localAttempts.has(sha)) : [];
+      if (local.length > 0) { local.forEach(startLocal); return { kind: "probing" }; }
       const medianMs = medianCiRunMs(history);
       const started: MainProbeHandle[] = [];
       const refused: string[] = [];
