@@ -30075,6 +30075,7 @@ function lifetimeHistory(
     close: accounting.close,
     tallyFor(taskId, supplied) {
       const refreshed = refresh(supplied);
+      if (!refreshed.ok) return undefined;
       return accounting.tallyFor(taskId, refreshed.rows ?? []);
     },
   };

@@ -336,3 +336,19 @@ for (const loop of ["drain", "daemon"] as const) for (const outcome of ["stopped
     }
   });
 }
+
+test("an unread live ledger cannot turn an archive-only count into a complete lifetime measurement", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-lifetime-live-read-"));
+  let close: (() => boolean) | undefined;
+  try {
+    writeFileSync(join(root, "ledger.2026-09-17T00-00-00-000Z.ndjson"), JSON.stringify({ step: "run.start", task_id: "task", run_id: "run" }) + "\n");
+    const result = await auditedLifetimeTalliesFromArchives(root);
+    close = result.history?.close;
+    assert.ok(result.history);
+    mkdirSync(join(root, "ledger.ndjson"));
+    assert.equal(result.history.tallyFor("task"), undefined);
+    rmSync(join(root, "ledger.ndjson"), { recursive: true });
+    writeFileSync(join(root, "ledger.ndjson"), JSON.stringify({ step: "run.start", task_id: "task", run_id: "live" }) + "\n");
+    assert.deepEqual(result.history.tallyFor("task"), { starts: 2, capacityBlocked: 0 });
+  } finally { close?.(); rmSync(root, { recursive: true, force: true }); }
+});
