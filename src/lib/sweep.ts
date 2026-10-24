@@ -106,7 +106,7 @@ import {
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
-  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries,
+  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
   readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
@@ -9202,7 +9202,26 @@ async function headContractRefreshHistory(deps: Pick<SweepDeps, "ledgerPath" | "
       contract_revision: row.contract_revision, outcome: row.outcome }),
   } });
   const read = await headContractHistoryReader(dirname(deps.ledgerPath));
-  return { complete: read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0, lines: read.rows };
+  // The incremental step reader only parses live lines that mention a tracked step or have
+  // unfinished braces. An unattributed damaged row framed by braces can therefore disappear
+  // from its torn count. Absence authorizes an external write here, so validate every live row.
+  let liveComplete = false;
+  if (read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0) {
+    try {
+      liveComplete = true;
+      for await (const raw of ndjsonLines(fs.createReadStream(deps.ledgerPath))) {
+        if (!raw.trim()) continue;
+        const row: unknown = JSON.parse(raw);
+        if (row === null || typeof row !== "object" || Array.isArray(row)) {
+          liveComplete = false;
+          break;
+        }
+      }
+    } catch (error) {
+      return { complete: false, lines: read.rows, reason: `live ledger validation failed: ${String(error)}` };
+    }
+  }
+  return { complete: liveComplete, lines: read.rows };
 }
 
 function headContractRefreshAttempted(lines: readonly Record<string, unknown>[], pr: OpenPrView, revision: string) {

@@ -151,7 +151,7 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
     assert.equal(next.headContractRefreshFor?.(second), f.deps.updateBranch);
   });
 
-  test("a contract refresh refuses incomplete history and records intent before its effect", async () => {
+  test("a contract refresh refuses incomplete history and records intent before its effect", async t => {
     const rows: Record<string, unknown>[] = [headContractHold()];
     const f = fixture(rows);
     f.state.revision = "contract-B";
@@ -172,6 +172,19 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
     fresh.state.revision = "contract-B";
     await runSweep([pr()], fresh.deps);
     assert.equal(fresh.state.refreshed, 0, "a prior intent without an outcome stays UNKNOWN across a restart");
+
+    const repo = gitRepo({ scope: t, kind: "contract-incomplete-live" });
+    const dir = join(repo.dir, "state");
+    mkdirSync(dir);
+    const ledger = join(dir, "ledger.ndjson");
+    writeFileSync(ledger, JSON.stringify(headContractHold()) + "\n" +
+      '{"task_id":"' + TASK + '","contract_revision":"contract-B",}\n' +
+      JSON.stringify({ step: "unrelated.completed" }) + "\n");
+    const real = fixture([headContractHold()]);
+    real.state.revision = "contract-B";
+    await runSweep([pr()], { ...real.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined });
+    assert.equal(real.state.refreshed, 0, "a torn intent followed by a valid row cannot authorize the effect");
+    assert.equal(real.state.dispatched, 0);
   });
 
   test("a selected contract refresh rechecks authority and history at the action boundary", async () => {
@@ -223,12 +236,14 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
     healthy.state.revision = "contract-B";
     await runSweep([pr()], { ...healthy.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined });
     assert.equal(healthy.state.refreshed, 1, "the real readable corpus is a positive control for the history boundary");
-    writeFileSync(ledger, hold + '{"unknown-truncated-record":\n');
-    const damaged = fixture([headContractHold()]);
-    damaged.state.revision = "contract-B";
-    await runSweep([pr()], { ...damaged.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined });
-    assert.equal(damaged.state.refreshed, 0, "a torn row need not retain its step to make history incomplete");
-    assert.equal(damaged.state.dispatched, 0);
+    for (const broken of ['{"unknown-truncated-record":\n', '{"unknown":"malformed",}\n']) {
+      writeFileSync(ledger, hold + broken + JSON.stringify({ step: "unrelated.completed" }) + "\n");
+      const damaged = fixture([headContractHold()]);
+      damaged.state.revision = "contract-B";
+      await runSweep([pr()], { ...damaged.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined });
+      assert.equal(damaged.state.refreshed, 0, "an unattributed damaged row cannot prove an empty attempt history");
+      assert.equal(damaged.state.dispatched, 0);
+    }
   });
 
   test("the contract refresh reader preserves torn evidence and reuses exact rotation digests", async t => {
