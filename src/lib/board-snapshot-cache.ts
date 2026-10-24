@@ -126,10 +126,10 @@ const defaultIo: BoardSnapshotIo = {
   },
 };
 
-function sameVersions<T extends { number: number; updatedAt: string; createdAt?: string; mergedAt?: string }>(current: ReadonlyMap<number, T> | undefined, rows: readonly T[]): boolean {
+function sameVersions<T extends { number: number; updatedAt: string; createdAt?: string; mergedAt?: string; authorLogin?: string; authorType?: string }>(current: ReadonlyMap<number, T> | undefined, rows: readonly T[]): boolean {
   return current?.size === rows.length && rows.every((row) => {
     const held = current.get(row.number);
-    return held?.updatedAt === row.updatedAt && held.createdAt === row.createdAt && held.mergedAt === row.mergedAt;
+    return held?.updatedAt === row.updatedAt && held.createdAt === row.createdAt && held.mergedAt === row.mergedAt && held.authorLogin === row.authorLogin && held.authorType === row.authorType;
   });
 }
 
@@ -178,7 +178,9 @@ function isClosedDiskRow(value: unknown, maxStringBytes: number): value is Close
     boundedString(row.title, maxStringBytes) &&
     boundedString(row.updatedAt, maxStringBytes) &&
     (row.createdAt === undefined || boundedString(row.createdAt, maxStringBytes)) &&
-    (row.mergedAt === undefined || boundedString(row.mergedAt, maxStringBytes))
+    (row.mergedAt === undefined || boundedString(row.mergedAt, maxStringBytes)) &&
+    (row.authorLogin === undefined || boundedString(row.authorLogin, maxStringBytes)) &&
+    (row.authorType === undefined || boundedString(row.authorType, maxStringBytes))
   );
 }
 
@@ -206,6 +208,8 @@ function closedForDisk(row: BoardPrRest): ClosedDiskRow {
     updatedAt: row.updatedAt,
     ...(row.createdAt === undefined ? {} : { createdAt: row.createdAt }),
     ...(row.mergedAt === undefined ? {} : { mergedAt: row.mergedAt }),
+    ...(row.authorLogin === undefined ? {} : { authorLogin: row.authorLogin }),
+    ...(row.authorType === undefined ? {} : { authorType: row.authorType }),
   };
 }
 
@@ -323,7 +327,8 @@ export interface OpenBoardSnapshot {
 function isOpenDiskRow(value: unknown, maxStringBytes: number): value is BoardPrRest {
   const row = value as Record<string, unknown> | null;
   return !!row && typeof row === "object" && boundedInteger(row.number) && row.state === "OPEN" &&
-    ["url", "headRefName", "headRefOid", "body", "title", "updatedAt"].every((k) => boundedString(row[k], maxStringBytes));
+    ["url", "headRefName", "headRefOid", "body", "title", "updatedAt"].every((k) => boundedString(row[k], maxStringBytes)) &&
+    ["authorLogin", "authorType"].every(k => row[k] === undefined || boundedString(row[k], maxStringBytes));
 }
 
 export function readOpenBoardSnapshot(
@@ -921,6 +926,8 @@ interface ClosedDiskRow {
   updatedAt: string;
   createdAt?: string;
   mergedAt?: string;
+  authorLogin?: string;
+  authorType?: string;
 }
 
 interface SnapshotIdentity {

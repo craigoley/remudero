@@ -134,6 +134,7 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
         for (const pr of source.rows) {
           if (!prIdentity(pr, repository)) { invalid++; continue; }
           if (pr.state !== "MERGED") continue;
+          if (pr.authorType === "Bot" && ["dependabot[bot]", "renovate[bot]"].includes(pr.authorLogin?.toLowerCase() ?? "")) continue;
           const occurredAt = stamp(pr.mergedAt);
           if (!occurredAt || Date.parse(occurredAt) > now) { invalid++; continue; }
           if (Date.parse(occurredAt) < start || Date.parse(occurredAt) >= end) continue;

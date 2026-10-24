@@ -489,6 +489,9 @@ export interface BoardPrRest {
   updatedAt: string;
   mergedAt?: string;
   createdAt?: string;
+  /** GitHub-supplied author evidence; absent on older cached rows, never inferred from a branch. */
+  authorLogin?: string;
+  authorType?: string;
 }
 
 /** Translate one REST pull row to the board's row shape. Everything except `state` and `title` comes
@@ -510,6 +513,8 @@ export function mapBoardPr(row: RestPullRow): BoardPrRest {
     updatedAt: base.updatedAt,
     ...(base.createdAt === undefined ? {} : { createdAt: base.createdAt }),
     ...(typeof row.merged_at === "string" ? { mergedAt: row.merged_at } : {}),
+    ...(typeof row.user?.login === "string" ? { authorLogin: row.user.login } : {}),
+    ...(typeof row.user?.type === "string" ? { authorType: row.user.type } : {}),
   };
 }
 
