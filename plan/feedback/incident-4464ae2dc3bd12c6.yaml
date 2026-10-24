@@ -1,0 +1,31 @@
+id: incident-4464ae2dc3bd12c6
+ts: 2026-10-24T17:10:32.463Z
+raw: >-
+  Incident 4464ae2dc3bd: intervention
+  base-red:main-health:required-checks-red-ci-log-fix-fix-round
+
+  First seen: 2026-10-24T17:09:08.632Z
+
+  Last seen: 2026-10-24T17:10:11.502Z
+
+  Count: 6, burn: 6.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#10600@5a60a4f75 actor=cao825 cause=base-red:main-health:required-checks-red-ci-log-fix-fix-round — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#11852@993d6216a actor=cao825 cause=base-red:main-health:required-checks-red-ci-log-fix-fix-round — a hand action answered a fleet state no lane resolved
+    - surface=pr action=update-branch target=pr#12388@dedf16472 actor=cao825 cause=base-red:main-health:required-checks-red-ci-log-fix-fix-round — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#4464ae2dc3bd12c6372f40327a8244d303d46582702053352538fd72e6272687
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

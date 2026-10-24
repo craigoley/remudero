@@ -1,0 +1,31 @@
+id: incident-827b6d2c6d1640ae
+ts: 2026-10-24T17:05:07.033Z
+raw: >-
+  Incident 827b6d2c6d16: intervention
+  own-red:fix-lane:coverage-shard-failed-on-ci-log-fix-fix
+
+  First seen: 2026-10-24T16:59:54.504Z
+
+  Last seen: 2026-10-24T17:05:05.780Z
+
+  Count: 48, burn: 48.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10600@c1bb53295 actor=cao825 cause=own-red:fix-lane:coverage-shard-failed-on-ci-log-fix-fix — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10780@1b5d68243 actor=cao825 cause=own-red:fix-lane:coverage-shard-failed-on-ci-log-fix-fix — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10988@a9e0b2bea actor=cao825 cause=own-red:fix-lane:coverage-shard-failed-on-ci-log-fix-fix — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#827b6d2c6d1640ae18e5d676dc2d8d0ef9ff878edfad42f330caf575fd5dc873
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

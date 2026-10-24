@@ -1,0 +1,31 @@
+id: incident-4135f3eb1d2bcc81
+ts: 2026-10-24T17:07:08.268Z
+raw: >-
+  Incident 4135f3eb1d2b: intervention
+  review-failed:fix-lane:unmet-criterion-fix-round-judge-escalate
+
+  First seen: 2026-10-24T16:58:53.708Z
+
+  Last seen: 2026-10-24T17:07:06.746Z
+
+  Count: 45, burn: 45.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#12043@a718c75ff actor=cao825 cause=review-failed:fix-lane:unmet-criterion-fix-round-judge-escalate — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#12043@44a03f7b4 actor=cao825 cause=review-failed:fix-lane:unmet-criterion-fix-round-judge-escalate — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#12043@547559551 actor=cao825 cause=review-failed:fix-lane:unmet-criterion-fix-round-judge-escalate — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#4135f3eb1d2bcc8142371c22446ca4e7a06bb8b0e4d528fd03b3aa21f4c436e7
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

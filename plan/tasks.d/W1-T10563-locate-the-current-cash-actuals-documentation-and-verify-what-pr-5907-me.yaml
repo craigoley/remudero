@@ -6,9 +6,12 @@
   type: recon
   verify: auto
   risk: low
+  priority: 4
   status: blocked
   retirement: retired
   # plan gardener: retire W1-T10563 — It depends on W1-T9341, which will never be built.
+  # backlog gardener: band=4 evidence=46195aee2ed22e1a
+  # backlog gardener: placed=2026-10-24T17:39:57.656Z
   attempts: 0
   files:
     - plan/tasks.d/W1-T9341-update-pr-description-to-link-to-cash-actuals-documentation.yaml

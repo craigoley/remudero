@@ -1,0 +1,31 @@
+id: incident-f77a3c8b50ac33bd
+ts: 2026-10-24T17:18:38.177Z
+raw: >-
+  Incident f77a3c8b50ac: intervention
+  own-red:fix-lane:required-checks-red-ci-log-fix-strike-me
+
+  First seen: 2026-10-24T17:18:30.992Z
+
+  Last seen: 2026-10-24T17:18:30.992Z
+
+  Count: 3, burn: 3.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core, /home/node/Remudero/remudero
+
+  Sample events:
+    - surface=pr action=push target=pr#10491@819d77e49 actor=cao825 cause=own-red:fix-lane:required-checks-red-ci-log-fix-strike-me — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10516@8f2c9efa3 actor=cao825 cause=own-red:fix-lane:required-checks-red-ci-log-fix-strike-me — a hand action answered a fleet state no lane resolved
+    - surface=pr action=update-branch target=pr#10350@bd09f2518 actor=cao825 cause=own-red:fix-lane:required-checks-red-ci-log-fix-strike-me — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#f77a3c8b50ac33bd7ecf0b80eeb40fdb912b72eb4ff58dc4ac5d780abd544dc7
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

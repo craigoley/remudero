@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 10.00
   risk: high  # Rule 19: one concern — the sweep resolves a conflict whose unmerged paths are all registry artifacts itself; high because it pushes a merge to a fleet run branch
@@ -102,3 +102,11 @@
     worker", and pushes nothing, so the first title test fails. Drop the subset check on `git ls-files -u` and the
     hand-written fixture is pushed with conflict markers or one side discarded, so the second test fails. Resolve a
     both-sides registry edit by taking either side's bytes and the third test's generator-output comparison fails.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-24T16:30:38.137Z"
+    pin: "9f698b4ea5269c026030080d4059f72a0f99101872b771e03139355a71ba08e5"

@@ -1,0 +1,31 @@
+id: incident-666ef903459e6bed
+ts: 2026-10-24T16:56:56.450Z
+raw: >-
+  Incident 666ef903459e: intervention
+  own-red:fix-lane:coverage-ratchet-failed-on-coverage-ratc
+
+  First seen: 2026-10-24T16:52:39.577Z
+
+  Last seen: 2026-10-24T16:56:53.128Z
+
+  Count: 92, burn: 92.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10350@299f22565 actor=cao825 cause=own-red:fix-lane:coverage-ratchet-failed-on-coverage-ratc — a hand action answered a fleet state no lane resolved
+    - surface=pr action=update-branch target=pr#10350@ee3b46cdc actor=cao825 cause=own-red:fix-lane:coverage-ratchet-failed-on-coverage-ratc — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10350@1dc786730 actor=cao825 cause=own-red:fix-lane:coverage-ratchet-failed-on-coverage-ratc — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#666ef903459e6bed72b3262103b8788e7009f6e63628e73feffaa8eb5b93c50b
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
