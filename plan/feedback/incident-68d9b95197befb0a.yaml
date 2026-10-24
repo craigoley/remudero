@@ -1,0 +1,29 @@
+id: incident-68d9b95197befb0a
+ts: 2026-10-24T17:56:28.189Z
+raw: >-
+  Incident 68d9b95197be: intervention
+  review-failed:fix-lane:unmet-criterion-fix-round-awaiting-a-fre
+
+  First seen: 2026-10-24T17:53:23.307Z
+
+  Last seen: 2026-10-24T17:56:25.713Z
+
+  Count: 4, burn: 4.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#11255@31137dedf actor=cao825 cause=review-failed:fix-lane:unmet-criterion-fix-round-awaiting-a-fre — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#68d9b95197befb0a7ae6090300f51793cbe7bd5ec564785e8426f4a523ab11ad
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
