@@ -1,15 +1,12 @@
 - id: W1-T10563
   title: "Locate the current cash-actuals documentation and verify what PR 5907 merged, so the task that links to it names a real path"
   repo: remudero
-  depends_on:
-    - W1-T9341
+  depends_on: []
   type: recon
   verify: auto
   risk: low
   priority: 4
-  status: blocked
-  retirement: retired
-  # plan gardener: retire W1-T10563 — It depends on W1-T9341, which will never be built.
+  status: queued
   # backlog gardener: band=4 evidence=46195aee2ed22e1a
   # backlog gardener: placed=2026-10-24T17:39:57.656Z
   attempts: 0
