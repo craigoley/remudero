@@ -1,3 +1,4 @@
+import {createHash} from "node:crypto";
 import {classifyCodeScanningMergePolicy, CODE_SCANNING_MAX_CHANGED_FILES} from './code-scanning-merge-policy.mjs';
 import {changesSemgrepRuntime, semgrepRuntimeMetadataRequests} from './semgrep-runtime-merge-policy.mjs';
 
@@ -5,6 +6,21 @@ export const SECURITY_MERGE_CONTEXT = 'security-merge-policy';
 export const SECURITY_METADATA_MAX_PAGES = 30; // BACKSTOP: complete evidence or UNKNOWN, never partial success.
 const unknown = reason => ({state:'unknown',mergeAllowed:false,reason});
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
+
+/** Diagnostic receipt only; the classifier remains the sole permission decision. */
+function codeqlObservation(headSha, checks, checksComplete) {
+  const trusted = checks.filter(check => check?.name === 'CodeQL' && check.head_sha === headSha &&
+    check.app?.slug === 'github-advanced-security' && check.app?.id === 57789 && check.app?.owner?.login === 'github');
+  const identitiesKnown = trusted.every(check => Number.isSafeInteger(check.id) && check.id > 0) &&
+    new Set(trusted.map(check => check.id)).size === trusted.length;
+  const latest = identitiesKnown ? trusted.reduce((a, b) => !a || a.id < b.id ? b : a, undefined) : undefined;
+  return {checksComplete, checkCount: checks.length, trustedCodeqlCount: trusted.length,
+    ...(latest ? {latest: {id: latest.id, status: latest.status ?? null, conclusion: latest.conclusion ?? null,
+      title: latest.output?.title ?? null,
+      summarySha256: typeof latest.output?.summary === 'string'
+        ? createHash('sha256').update(latest.output.summary).digest('hex') : null,
+      startedAt: latest.started_at ?? null, completedAt: latest.completed_at ?? null}} : {})};
+}
 
 /** Shared runtime trusted API metadata ONLY. Caller supplies an authenticated, bounded HTTP reader;
  * no PR checkout, uploaded artifact, evaluator, install, merge or dispatch is executed.
@@ -56,7 +72,7 @@ export function* securityMergeMetadataRequests(target) {
     if (last?.head?.sha !== headSha || last.state !== 'open' || last.base?.sha !== first.base.sha || last.changed_files !== first.changed_files ||
         last.base?.repo?.full_name !== first.base.repo.full_name || last.base.ref !== first.base.ref)
       return {headSha,baseSha,decision:unknown('head-or-base-changed-during-observation')};
-    return {headSha,baseSha,decision};
+    return {headSha,baseSha,decision,observation:codeqlObservation(headSha,checks,checksComplete)};
   } catch {
     return {headSha,baseSha,decision:unknown('security-api-unavailable')};
   }

@@ -7925,6 +7925,11 @@ async function runReview(args: {
           head_sha: headSha,
           node_modules: snapshot.nodeModules,
         });
+        const evidencePath = join(snapshot.cwd, ".git", "rmd-review-input.json");
+        writeFileSync(evidencePath, JSON.stringify({
+          headSha, diff, report, reportIsSubstitute: args.reportIsSubstitute === true,
+          ...(args.implementationReport === undefined ? {} : { implementationReport: args.implementationReport }),
+        }), { mode: 0o600 });
         const prompt =
           buildReviewPrompt({
             task: { id: task.id, acceptance: criteria, ...narrative },
@@ -7932,6 +7937,7 @@ async function runReview(args: {
             owner,
             repo,
             headSha,
+            evidencePath,
             ...scopeContext,
           }) +
           "\n" +
@@ -28926,7 +28932,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // operator release is due at once.
     case "machine-judge": {
       const ports = productionMachineFilingJudgePorts({ repoRoot, stateDir, worktreesRoot: worktreesDir(config), owner, repo, log });
-      const inputs = () => machineJudgeInputsAsync(repoRoot, stateDir);
+      const inputs = () => machineJudgeInputsAsync(repoRoot, stateDir, "origin/main");
       return withDue(async () => {
         const seen = await inputs();
         let found = false;
@@ -37975,7 +37981,16 @@ export function productionMachineFilingJudgePorts(opts: {
       repairs: () => [...mainRepairRecordsFromLedger(readLedgerLines(join(opts.stateDir, LEDGER_FILENAME))).values()],
     }),
     stateDir: opts.stateDir,
-    plan: () => loadPlan(resolveRepoLayout(opts.repoRoot).planMonolith),
+    plan: async () => {
+      const mainSha = await mainTipViaGit(opts.repoRoot);
+      const committed = await loadPlanAtRefAsync(opts.repoRoot, relative(opts.repoRoot, resolveRepoLayout(opts.repoRoot).planMonolith), mainSha);
+      // The judge uses sourcePath to address the corresponding record in its fresh landing
+      // checkout. Keep those paths anchored here while every record's bytes come from mainSha.
+      const tasks = committed.tasks.map(task => ({
+        ...task, sourcePath: join(opts.repoRoot, task.sourcePath!.slice(mainSha.length + 1)),
+      }));
+      return { tasks, byId: new Map(tasks.map(task => [task.id, task])) };
+    },
     riskJudge: (input) => {
       if (!mount) {
         const mounts = loadMounts(mountsPath(opts.repoRoot));
