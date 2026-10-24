@@ -86,7 +86,9 @@ test("daily progress served scope preserves partial evidence and rejects foreign
       assert.equal(request("repository=acme%2Fa&date=today&url=https://evil.example").status, 400);
       assert.equal(request("repository=acme%2Fa&repository=evil%2Fhidden&date=today").status, 400);
       requestNow = Date.parse("2026-11-02T05:00:00Z");
+      assert.equal(request("repository=acme%2Fa&date=yesterday").status, 200, "at midnight the retained Today report becomes Yesterday independently of closing collection");
       assert.equal(request("repository=acme%2Fa&date=today").status, 503, "midnight resolves the new date before an old cached body can answer");
+      assert.equal(request("repository=acme%2Fa&date=today", conditional).status, 503, "an old-day ETag cannot answer for the new Today");
       assert.ok(reads.some(read => read.includes("2026-11-02")), "the new civil date is actually queried");
     } finally { db.close(); }
   });
