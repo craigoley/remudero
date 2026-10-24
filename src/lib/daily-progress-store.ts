@@ -116,7 +116,7 @@ export function prepareDailyProgressPublication(stateDir: string, records: reado
     const day = manifest.days[key], old = day ? readDailyProgressRevision(stateDir, day) : undefined;
     const events = new Map(old?.events.map(e => [e.id, e]) ?? []);
     const incoming = new Map<string, DailyProgressEvent>();
-    for (const event of input.events.slice(0, 200)) {
+    for (const event of input.events) {
       if (incoming.has(event.id) && eventContent(incoming.get(event.id)!) !== eventContent(event)) throw new Error("conflicting daily event identity");
       incoming.set(event.id, event);
       const previous = events.get(event.id);
