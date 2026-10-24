@@ -9419,7 +9419,9 @@ export function openEscalationStandDownReason(
   current?: { conflictEvidenceCaptured: boolean; baseSha?: string },
 ): { reason: string } | undefined {
   if (!candidate) return undefined; // nothing open on this key — the ordinary path
-  if (/(?:^|\n\n)PR stage stalled:/.test(candidate.body ?? "")) return undefined;
+  // The sweep writes the question immediately after its clarification context paragraph.
+  const question = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]*\n\n([^\n]*)/.exec(candidate.body ?? "")?.[1];
+  if (question?.startsWith("PR stage stalled:")) return undefined;
   const candidateHead = escalationHeadSha(candidate.body);
   // STRICTER THAN THE MATCHER (both arms): a candidate naming NO head, or naming a DIFFERENT one,
   // never refuses a worker. The first arm is the legacy-issue case, the second is a genuinely new
