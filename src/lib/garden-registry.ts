@@ -93,7 +93,7 @@ export const GARDEN_DUE_FAILED_STEP = "garden.due_failed";
 export const GARDEN_HOURLY_FLAG = "--hourly";
 
 /** A resource hold did not start a process; it is neither a signal exit nor a successful pass. */
-export type GardenPassOutcome = number | null | { kind: "deferred"; reason: "memory-budget-shortfall" };
+export type GardenPassOutcome = number | null | { kind: "deferred"; reason: "memory-budget-shortfall" | "admission-rank" };
 /** W1-T9761, W1-T9975: the garden's own pass cadence, its DUE INTERVAL (from a completed pass to the first ask of its
  *  next one; admission and pass-pool wait are not in it), and whether this is its first ask in this process, when a
  *  restart's wait is seeded. "measured" is this process's own median of two or more intervals (joined to the carried
@@ -575,7 +575,7 @@ export function childGardenPassSpawn(
     const admission = await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: gardenRunId(name), reserve,
       onShortfall: "defer", ...(d ? { deferral: { cadenceMs: d.cadenceMs, cadenceBasis: d.cadenceBasis, samples: d.samples,
         ...(last === undefined ? {} : { dueSinceMs: last + d.cadenceMs }) } } : {}) }, opts.admission);
-    if (admission.kind === "deferred") return { kind: "deferred", reason: "memory-budget-shortfall" };
+    if (admission.kind === "deferred") return { kind: "deferred", reason: admission.basis === "rank" ? "admission-rank" : "memory-budget-shortfall" };
     const reservation = "reservation" in admission ? admission.reservation :
       admission.kind === "error" && admission.reservationAttempted ? undefined : reserve();
     // The same counterfactual row a worker start writes, so a garden start's fit is measured before any ruling.

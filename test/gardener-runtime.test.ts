@@ -173,3 +173,24 @@ test("gardener process status refuses mixed duplicate and future opportunity row
     assert.equal(body.gardens.length, 2);
   }
 });
+
+test("a rank-deferred garden persists its actual refusal without claiming a memory failure or completion", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "rmd-gardener-rank-"));
+  t.after(() => rm(stateDir, {recursive:true, force:true}));
+  const writer = createGardenerRuntimeWriter({stateDir, repository:"acme/app", daemonRunId:"boot-rank", clock,
+    gardens:inventory, log:() => {}});
+  writer.record(event("queued"));
+  writer.record({...event("idle"), reason:"admission-rank"});
+  await writer.flush();
+  const persisted = (await readGardenerRuntime(stateDir)).gardens[0]!;
+  assert.equal(persisted.reason, "admission-rank");
+  assert.equal(persisted.phase, "idle");
+  assert.equal(persisted.attempts, 1);
+  assert.equal(persisted.completions, 0);
+  assert.equal(persisted.lastSuccessAt, null);
+  assert.equal(persisted.lastCompletedAt, null);
+  const response = await invoke(buildGardenersRoute({stateDir, repository:"acme/app", clock}));
+  assert.equal(response.status, 200);
+  assert.equal(response.body.gardens[0].reason, "admission-rank");
+  assert.equal(response.body.gardens[0].completions, 0);
+});

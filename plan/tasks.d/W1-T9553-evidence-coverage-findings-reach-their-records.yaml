@@ -6,11 +6,11 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 10.00
-  risk: high  # Rule 19: the approved landing-reader companion spans a second concern; production scope and budget stay fixed, and the gardener still never gates
+  risk: high  # Rule 19: shared lifecycle opt-in plus exact-main/API preparation and landing revalidation; the gardener still never gates
   band_meaning: blast-radius
   origin: "operator 2026-10-14: GRILL backlog pass (~/Remudero-notes/grill-recommendations-2026-10-14.md, separate items 1 and 2)"
   plan_refs: [W1-T4622, W1-T4640, W1-T5460]
-  files: [src/lib/evidence-coverage-gardener.ts, test/evidence-coverage-findings-reach-their-records.test.ts, test/an-evidence-gap-becomes-work.test.ts]
+  files: [src/lib/evidence-coverage-gardener.ts, test/evidence-coverage-findings-reach-their-records.test.ts, test/an-evidence-gap-becomes-work.test.ts, src/lib/feedback-evidence-revision.ts, src/lib/evidence-coverage-record-context.ts, src/lib/feedback-record-merge.ts, src/lib/feedback-landing.ts, src/run-task.ts, src/cli/commands/daemon.ts, test/feedback-record-monotonic.test.ts, test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts]
   status: queued
   priority: 1  # operator-2026-10-14: triage and the grill judge these records on numbers two weeks stale, and one live gap (containment/cost, 51%) is closed as already decided
   attempts: 0
@@ -49,6 +49,28 @@
        reopened only when the measured value moves.
     4. A `grilling` record keeps `grilling`; only its measured value is updated (the grill reads the live number).
     5. It still never gates: no merge, review or dispatch path reads any of this.
+    6. Bounded shared-policy amendment: only canonical evidence-coverage lane/field records carrying a
+       validated evidence_coverage_revision may update measured raw evidence at the same status or reopen
+       under point 3. Preserve every other record field and all non-measurement human raw history. Generic
+       lifecycle rules, including all original status-pair assertions, remain unchanged. No generic backward
+       transition, deleted-record resurrection, baseline/denominator/floor increase, or merge arm is granted.
+    7. Prepare records and the complete plan (tasks.yaml AND tasks.d) from one immutable fetched main SHA;
+       never use served-checkout status or a local digest as completion truth. Accepted/answered eligibility
+       requires complete API search evidence plus actual exact-repository PR state joined by exact task trailer
+       OR run-task branch. Missing, incomplete, malformed or unreadable evidence remains UNKNOWN. An open
+       matching PR dominates a merged duplicate. No referenced tasks is eligible only in the complete plan.
+    8. Pin the whole expected record and both plan sources in each revision. Both landing writers and pending
+       branch carry revalidate those expectations; concurrent human changes, plan changes and record deletion
+       refuse explicitly. No merge-time atomicity across Git and GitHub is claimed: task facts are observed at
+       preparation; the immutable plan/record expectation is checked when staging. Normal PR review/CI remain.
+    9. The daemon's existing injected repoRoot must reach its gardener context. Qualify the old self-hosting
+       gardener fixture with its own complete local Git source corpus; preserve every original assertion.
+       The programmatic gardenCommand entry receives the same optional source-root seam so its existing
+       CLI framing test also uses a complete local Git corpus. Original assertions stay byte-identical;
+       no CLI flag or production default changes. No refusal-stub exemption.
+    10. Retain the last reopened coverage value through closing and raw updates; equal coverage stays closed
+       even if its denominator grows. New value may reopen only under point 3. Keep existing cadence, filing
+       count, window, floors, denominator, drop tolerance, budget and all original acceptance/falsifier text.
   acceptance:
     - claim: "a landing that neither lands nor queues is retried on the next pass, not remembered as filed"
       proof: 'grep: test("W1-T9553: a refused landing is retried on the next pass" in test/evidence-coverage-findings-reach-their-records.test.ts'
@@ -56,16 +78,27 @@
       proof: 'grep: test("W1-T9553: an open record shows the measured value of the latest pass" in test/evidence-coverage-findings-reach-their-records.test.ts'
     - claim: "a closed record whose gap is still measurably open is reopened with the evidence"
       proof: 'grep: test("W1-T9553: a closed record whose gap is still open is reopened with evidence" in test/evidence-coverage-findings-reach-their-records.test.ts'
+    - claim: "the registered pass reaches exact-main measured reopening through the real ledger and pending queue"
+      proof: 'grep: test("private coverage production: the registered pass joins the real ledger to exact-main reopening and queues its evidence" in test/feedback-record-monotonic.test.ts'
+    - claim: "both actual landing writers refuse either plan-source drift, concurrent human record edits and record deletion"
+      proof: 'grep: test("private coverage landing: either plan source moving or concurrent record edits refuses both actual writers" in test/feedback-record-monotonic.test.ts'
+    - claim: "the existing producer invokes the exact revision builder and registered production context"
+      proof: 'grep: buildEvidenceRevision( in src/lib/evidence-coverage-gardener.ts'
   falsifier: |
     Seed a record reading 80.3% and a landing that returns `{ landed: false, error }`. At origin/main the pass
     reports it updated, stamps the digest, and a second pass writes nothing: the record stays at 80.3%. With
     the change the second pass lands 51%. Seed the record `status: rejected` with a 51% gap: at origin/main it
     stays rejected; with the change it reads `new` with the evidence line.
+    Additional shared-policy controls: remove the exact revision branch from mergeFeedbackRecord and the
+    real direct/disk and shared-predicate cases fail; remove the registered production context wiring and
+    the actual ledger-to-queue reopening fails. Both plan inputs moving, missing API evidence, deleted
+    records, concurrent human history, equal-value reclosure and stale queued revisions must stay refused
+    or closed as specified, while every original generic lifecycle assertion remains unchanged.
   risk_ruling:
     verdict: "operator"
     action: proceed
     confidence: 1
     reasons:
       - "released by the operator with rmd approve"
-    judged_at: "2026-10-24T06:48:32.860Z"
-    pin: "939b097a95df5737700f200d7c3e4eff0b000c68a25d2c1630ba11ec17afb409"
+    judged_at: "2026-10-24T14:53:48.547Z"
+    pin: "778a0971418459c08ed7ade13dd8f921939975cb38972bb289a476e3bd30a728"

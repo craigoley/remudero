@@ -320,7 +320,7 @@ boot_fetch() {
       fi
       return 0
     fi
-    if ! printf '%s' "$fetch_out" | grep -qiE 'cannot lock ref|unable to update local ref'; then
+    if ! printf '%s' "$fetch_out" | grep -iE 'cannot lock ref|unable to update local ref' > /dev/null; then
       printf '%s\n' "$fetch_out" | sed 's/^/  /' >&2
       return 1
     fi
