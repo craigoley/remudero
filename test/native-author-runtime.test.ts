@@ -39,6 +39,76 @@ test('native timing sample spans the ledger rather than choosing only its cheape
   assert.throws(() => runtime.runtimeSamples(files, ledger, 0), /positive/);
 });
 
+test('native timing calibration binds inherited heap-only NODE_OPTIONS without changing author admission', async (t) => {
+  const { makeRuntimeFixture } = await import('#test/helpers/native-runtime-fixture.js');
+  const { calibrateAuthorRuntime } = await import('#scripts/calibrate-author-runtime.mjs');
+  const { main } = await import('#scripts/preflight-author.mjs');
+  const f = makeRuntimeFixture(); t.after(() => f.cleanup());
+  const prior = process.env.NODE_OPTIONS;
+  try {
+    // Keep the scoped harness's old-space ceiling; reproduce the deployed semi-space setting.
+    process.env.NODE_OPTIONS = '--max-old-space-size=512 --max-semi-space-size=16';
+    let observed: { path: string; head: string } | undefined;
+    assert.doesNotThrow(() => { observed = calibrateAuthorRuntime({ root: f.dir }); },
+      'the real calibration must represent heap-only options rather than classify them as instrumentation');
+    assert.ok(observed);
+    const parsed = JSON.parse(readFileSync(observed.path, 'utf8'));
+    assert.equal(parsed.format, 'rmd-native-author-runtime-v2');
+    assert.deepEqual(parsed.bindings.memoryOptions, { maxOldSpaceSizeMiB: 512, maxSemiSpaceSizeMiB: 16 });
+    assert.equal(parsed.bindings.instrumentation, 'none');
+    const bindings = runtime.runtimeBindings(f.dir, observed.head);
+    assert.equal(runtime.readRuntimeProfile(f.dir, observed.path, bindings).assurance, 'runtime-sample-only');
+    const select = () => ({ fullRun: false, suites: ['test/a.test.ts', 'test/b.test.ts'], reasons: ['physical fixture'] });
+    assert.equal(main(['--runtime-profile', observed.path, '--deadline', new Date(Date.now() + 60_000).toISOString()],
+      { root: f.dir, select }), 1);
+    const refused = JSON.parse(readFileSync(join(f.dir, 'coverage/preflight-author.json'), 'utf8'));
+    assert.equal(refused.runtimeAdmission.fits, false);
+    assert.equal(refused.runtimeAdmission.stage, 'before-static');
+    assert.equal(readFileSync(observed.path, 'utf8'), JSON.stringify(parsed, null, 2) + '\n',
+      'using a timing profile must not rewrite its observations');
+  } finally {
+    if (prior === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = prior;
+  }
+});
+
+test('native timing profiles refuse changed memory settings and unmodelled NODE_OPTIONS', async (t) => {
+  const { makeRuntimeFixture } = await import('#test/helpers/native-runtime-fixture.js');
+  const { calibrateAuthorRuntime } = await import('#scripts/calibrate-author-runtime.mjs');
+  const f = makeRuntimeFixture(); t.after(() => f.cleanup());
+  const prior = process.env.NODE_OPTIONS;
+  try {
+    process.env.NODE_OPTIONS = '--max-old-space-size=512 --max-semi-space-size=16';
+    let observed: { path: string; head: string } | undefined;
+    assert.doesNotThrow(() => { observed = calibrateAuthorRuntime({ root: f.dir }); });
+    assert.ok(observed);
+    const options = (NODE_OPTIONS: string) => runtime.runtimeBindings(f.dir, observed!.head,
+      { ...process.env, NODE_OPTIONS });
+    const initial = options(process.env.NODE_OPTIONS);
+    assert.deepEqual(options('  --max-semi-space-size=16   --max-old-space-size=512  '), initial,
+      'an equivalent ordering is the same memory context');
+    for (const value of ['--max-old-space-size=511 --max-semi-space-size=16',
+      '--max-old-space-size=512 --max-semi-space-size=8', '', '--max-semi-space-size=16']) {
+      assert.throws(() => runtime.readRuntimeProfile(f.dir, observed!.path, options(value)), /binding mismatch/);
+    }
+    for (const value of ['--experimental-test-coverage', '--require=./anything.cjs', '--inspect',
+      '--max-old-space-size=512 --trace-gc', '--max-semi-space-size=16 --max-semi-space-size=16',
+      '--max-semi-space-size=0', '--max-old-space-size=-1', '--max-old-space-size=1.5',
+      '--max-old-space-size=9007199254740992', '--max-semi-space-size="16"', '--max-semi-space-size 16']) {
+      assert.throws(() => options(value), /not modelled|invalid|unsupported|duplicate/,
+        'unknown, ambiguous, malformed and instrumented options must retain their refusal: ' + value);
+    }
+    const original = readFileSync(observed.path, 'utf8'), parsed = JSON.parse(original);
+    writeFileSync(observed.path, JSON.stringify({ ...parsed, format: 'rmd-native-author-runtime-v1' }));
+    assert.throws(() => runtime.readRuntimeProfile(f.dir, observed!.path, initial), /binding mismatch/);
+    writeFileSync(observed.path, original);
+    assert.equal(runtime.readRuntimeProfile(f.dir, observed.path, initial).author, 'not-proven');
+  } finally {
+    if (prior === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = prior;
+  }
+});
+
 test('native runtime profile rereads real closed evidence and rejects stale, corrupt and foreign bindings', async (t) => {
   const { makeRuntimeFixture } = await import('./helpers/native-runtime-fixture.js');
   const f = makeRuntimeFixture(); t.after(() => f.cleanup());
