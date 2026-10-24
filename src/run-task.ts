@@ -1537,6 +1537,7 @@ import {
   extractTaskTrailerId,
   type AcceptanceAuthorTimeResult,
   parseAcceptanceBlock,
+  parseReviewerVerdictClauses,
   parseReviewerVerdicts,
   postReviewCommentGuarded,
   postReviewPending,
@@ -8041,6 +8042,7 @@ async function runReview(args: {
   // Advisory semantic layer — a FRESH read-only reviewer (no session inheritance),
   // in a throwaway cwd so it cannot touch the worktree/diff under review.
   let semantic: (boolean | undefined)[] | undefined;
+  let semanticClauses: (string | undefined)[] | undefined;
   // W1-T2472: a PLAN-ONLY changeset has no code for this advisory lane to judge, so the spawn is
   // skipped rather than dispatched to discover there is nothing to execute. This does not weaken
   // the gate: `judgeReview` decides a plan-only diff's state on `floorUnmet` (review.ts), and
@@ -8166,6 +8168,7 @@ async function runReview(args: {
         const candidateSemantic = reviewerSemanticVerdicts(reviewer, criteria.length);
         semantic = candidateSemantic;
         reviewerFindingText = workerTranscript(reviewer);
+        semanticClauses = parseReviewerVerdictClauses(reviewerFindingText, criteria.length);
         reviewerSubtype = reviewer.subtype;
         reviewerExit = reviewer.exit;
         const reviewerFields = workerLedgerFields(reviewer);
@@ -8291,6 +8294,7 @@ async function runReview(args: {
     reportIsSubstitute: args.reportIsSubstitute,
     reportSubstituteCause: args.reportSubstituteCause,
     semantic,
+    semanticClauses,
     headCheckoutDir: args.headCheckoutDir,
     baseCheckoutDir: args.baseCheckoutDir,
     baseUnreadablePaths: args.baseUnreadablePaths,
@@ -8333,14 +8337,10 @@ async function runReview(args: {
     log("review.rubric.error", { error: String((e as Error)?.message ?? e) });
   }
 
-  // W1-T178 (verdict stability): a re-review of an UNCHANGED head sha whose
-  // deterministic floor still passes may not render a verdict WORSE than its
-  // predecessor — see applyVerdictStability's doc comment (lib/review.ts) for
-  // the #388 fixture this fixes and why it is asymmetric (downgrades only).
-  const prior = args.ledgerPath
-    ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath), task.id, args.prUrl)
-    : undefined;
-  let { verdict, suppressed } = applyVerdictStability(computed, headSha, prior);
+  // W1-T178: suppress semantic noise only for the same known head, body and contract.
+  // A changed engine or task narrative is new information, not an unchanged review.
+  // Missing recorded identity cannot certify that the prior verdict judged these inputs.
+  // The stability rule remains asymmetric; an improved verdict always proceeds.
   const contractDigest = reviewContractDigest({
     taskId: task.id,
     acceptance: task.acceptance ?? [],
@@ -8349,6 +8349,11 @@ async function runReview(args: {
     budgetUsd: task.budget_usd ?? args.budgetUsd,
     ...narrative,
   });
+  const prior = args.ledgerPath && inputDigest !== undefined
+    ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath).filter((line) => line.review_input_digest === inputDigest), task.id, args.prUrl)
+    : undefined;
+  let { verdict, suppressed } = applyVerdictStability(computed, headSha,
+    prior?.reviewContractDigest === contractDigest ? prior : undefined);
   verdict = { ...verdict, reviewContractDigest: contractDigest };
 
   // W1-T3704 (completed here) — RECORD WHAT THIS VERDICT ACTUALLY JUDGED, so a LATER push can be compared against

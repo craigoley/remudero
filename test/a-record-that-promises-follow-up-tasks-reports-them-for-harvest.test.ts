@@ -99,7 +99,7 @@ test("a later filing rearms the same-head decision but unrelated main churn does
   assert.equal(prior, reviewDecisionDigest({ ...input, promisedFollowUpObservation: { ...observation(), baseSha: "c".repeat(40) } }));
   assert.notEqual(prior, reviewDecisionDigest({ ...input, promisedFollowUpObservation: observation(promises, [{ id: "W1-T9999", title: promises[0]!.text, plan_refs: ["W1-T7729"] }]) }));
   assert.notEqual(reviewInputDigest(input.headSha, input.report), reviewInputDigest(input.headSha, input.report, "reviewer-scope-context-v2"));
-  assert.equal(REVIEW_ENGINE_REVISION, "promised-followups-snapshot-v3");
+  assert.equal(REVIEW_ENGINE_REVISION, "explained-semantic-failures-v1");
 });
 
 test("missing exact-head promise evidence is pending, never a successful empty list", () => {

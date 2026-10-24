@@ -184,7 +184,7 @@ test("W1-T2872: the current engine owns a new decision instead of replaying PR #
 
 test("the semantic scope-context bump rearms both identities while operational churn changes neither", () => {
   const previousRevision = "w1-t2946-codex-disposable-review-v1";
-  assert.equal(REVIEW_ENGINE_REVISION, "promised-followups-snapshot-v3");
+  assert.equal(REVIEW_ENGINE_REVISION, "explained-semantic-failures-v1");
   const currentInput = reviewInputDigest(HEAD_4042, PR_BODY_4042, REVIEW_ENGINE_REVISION);
   assert.notEqual(currentInput, reviewInputDigest(HEAD_4042, PR_BODY_4042, previousRevision));
   assert.notEqual(currentInput, reviewInputDigest(`${HEAD_4042}a`, PR_BODY_4042, REVIEW_ENGINE_REVISION));
