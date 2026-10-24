@@ -6,7 +6,7 @@
   verify: human
   principles: {tdd: strict}
   budget_usd: 10.00
-  risk: medium  # Rule 19: one concern — what the evidence-coverage gardener writes to its own feedback records; it still never gates
+  risk: high  # Rule 19: the approved landing-reader companion spans a second concern; production scope and budget stay fixed, and the gardener still never gates
   band_meaning: blast-radius
   origin: "operator 2026-10-14: GRILL backlog pass (~/Remudero-notes/grill-recommendations-2026-10-14.md, separate items 1 and 2)"
   plan_refs: [W1-T4622, W1-T4640, W1-T5460]
