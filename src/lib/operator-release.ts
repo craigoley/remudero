@@ -1,4 +1,10 @@
 import { createHash } from "node:crypto";
+import { readFileIfExists } from "./fs-race-safe.js";
+
+/** Missing history is empty; unreadable history must reach the release authority as an error. */
+export function readReleaseLedgerLines(path: string): readonly string[] {
+  return (readFileIfExists(path) ?? "").split("\n").filter(Boolean);
+}
 
 type ReleaseContract = { id: string; sourcePath?: unknown; attempts?: unknown;
   risk_ruling?: { operator_release_pin?: string }; verify?: unknown };

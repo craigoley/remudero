@@ -8,7 +8,7 @@ import { resolveReleases, runnableCandidates } from "#src/lib/drain.js";
 import { renderMachineShard } from "#src/lib/machine-filing.js";
 import * as machineJudge from "#src/lib/machine-filing-judge.js";
 import { assertRunnable, loadPlan, type Task } from "#src/lib/plan.js";
-import { approveParkedTask, releaseReadersFor } from "#src/run-task.js";
+import { approveParkedTask, productionMachineFilingJudgePorts, releaseReadersFor } from "#src/run-task.js";
 
 const ID = "W1-T9901";
 const CLOCK = fixedClock(Date.parse("2026-10-24T10:00:00Z"));
@@ -178,7 +178,7 @@ test("a landed operator ruling cannot authorize a later narrative change", async
   assert.equal(f.task().risk_ruling?.operator_release_pin, operatorReleasePin(f.task()));
 });
 
-test("unread operator history cannot be overruled by a machine receipt", t => {
+test("unread operator history cannot be overruled by a machine receipt", async t => {
   const f = fixture(t);
   const row = { step: "ratify.approved", task_id: ID, author_class: "machine", release_pin: operatorReleasePin(f.task()) };
   writeFileSync(f.ledger, JSON.stringify(row) + "\n");
@@ -190,6 +190,42 @@ test("unread operator history cannot be overruled by a machine receipt", t => {
   writeFileSync(f.ledger, JSON.stringify({ ...row, author_class: "operator" }) + "\n");
   assert.equal(resolveReleases(releaseReadersFor(f.ledger), f.plan()).ids.has(ID), true,
     "a matching explicit operator receipt remains positive authority independently of the failed reader");
+
+  writeFileSync(join(f.stateDir, "operator-releases.json"), JSON.stringify({ releases: {} }));
+  writeFileSync(f.ledger, JSON.stringify(row) + "\n");
+  writeFileSync(join(f.root, "plan/policy.yaml"), "{}\n");
+  let modelCalls = 0;
+  let writes = 0;
+  const ports = {
+    ...productionMachineFilingJudgePorts({ repoRoot: f.root, stateDir: f.stateDir,
+      worktreesRoot: join(f.root, "worktrees"), owner: "fixture", repo: "fixture", log: () => {}, clock: CLOCK }),
+    plan: f.plan, writeRoot: f.root, isMerged: () => false, stageProposal: () => {},
+    riskJudge: async () => { modelCalls++; return { verdict: "low" as const, confidence: 1, reasons: ["low"] }; },
+  };
+  assert.deepEqual(ports.releaseLedgerLines!(), [JSON.stringify(row)], "the production reader sees the receipt while readable");
+  assert.equal(resolveReleases(releaseReadersFor(f.ledger), f.plan()).ids.has(ID), true);
+  const before = readFileSync(f.path, "utf8");
+  rmSync(f.ledger);
+  mkdirSync(f.ledger); // EISDIR is a real read failure even when tests run as root.
+  const unread = resolveReleases(releaseReadersFor(f.ledger), f.plan());
+  assert.match(unread.ledgerUnreadable!, /EISDIR/);
+  assert.equal(unread.ids.has(ID), false);
+  assert.throws(() => approveParkedTask(ID, { plan: f.plan(), ledgerPath: f.ledger, runId: "machine-unread",
+    provenance: { author_class: "machine" }, append: () => { writes++; } }), /EISDIR/);
+  await assert.rejects(runMachineFilingJudge(ports), /EISDIR/);
+  assert.equal(modelCalls, 0, "the production judge cannot ask a model past unread operator history");
+  assert.equal(writes, 0, "the approval writer cannot mint another machine receipt");
+  assert.equal(readFileSync(f.path, "utf8"), before, "an unread ledger cannot rewrite the parked contract");
+
+  recordOperatorRelease(f.stateDir, f.task(), CLOCK.iso());
+  const approved = resolveReleases(releaseReadersFor(f.ledger), f.plan());
+  assert.equal(approved.ids.has(ID), true, "a pinned durable operator receipt is independent positive authority");
+  assert.match(approved.ledgerUnreadable!, /EISDIR/);
+  rmSync(f.ledger, { recursive: true });
+  assert.deepEqual(ports.releaseLedgerLines!(), [], "a fresh checkout without a ledger still has empty history");
+  assert.equal(resolveReleases(releaseReadersFor(f.ledger), f.plan()).ledgerUnreadable, undefined);
+  assert.deepEqual((await runMachineFilingJudge(ports)).proceeded, [ID], "the judge resumes when history is readable");
+  assert.equal(modelCalls, 0, "the restored judge honors the explicit approval without a model call");
 });
 
 
