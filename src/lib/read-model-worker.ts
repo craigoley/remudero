@@ -78,6 +78,7 @@ import {
 } from "./read-model-db.js";
 import { threadSlowLane, type SlowLane, type SlowLaneBodies, type SlowLaneConfig } from "./read-model-slow-lane.js";
 import { commitDailyProgressPublication, type DailyProgressPublication } from "./daily-progress-store.js";
+import { createDailyProgressView, DAILY_PROGRESS_VIEW_NAME } from "./daily-progress-view.js";
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
@@ -387,7 +388,7 @@ export const readModelStatusView: ReadModelView = {
 };
 
 /** Every view the worker materializes; later Phase 1 views register here. */
-export const READ_MODEL_VIEWS: readonly ReadModelView[] = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), createAnalyticsView(), readModelStatusView];
+export const READ_MODEL_VIEWS: readonly ReadModelView[] = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), createAnalyticsView(), createDailyProgressView(), readModelStatusView];
 
 export interface ReadModelViewReader {
   consumer: string;
@@ -1846,6 +1847,7 @@ export interface ReadModelViewsData {
   host?: HostViewConfig;
   restoreCosts?: boolean;
   modelApprovalConfig?: HostModelApprovalConfig;
+  dailyProgressTimeZone?: string;
 }
 
 /** What the projector thread tells its view thread. */
@@ -1932,7 +1934,7 @@ export function runReadModelViewWorker(
 }
 
 export function readModelLaneViews(
-  data: Pick<ReadModelViewsData, "instances" | "registry" | "inboxRoot" | "host" | "modelApprovalConfig" | "selectedRegistryIntent">,
+  data: Pick<ReadModelViewsData, "instances" | "registry" | "inboxRoot" | "host" | "modelApprovalConfig" | "selectedRegistryIntent"> & Partial<Pick<ReadModelViewsData, "stateDir" | "dailyProgressTimeZone">>,
   clock: Clock,
   log: (step: string, extra: Record<string, unknown>) => void,
   demand: DemandBook,
@@ -1943,6 +1945,10 @@ export function readModelLaneViews(
     { name: NAV_BADGE_VIEW_NAME, create: () => createNavBadgeReadModelView(ledgerSource) },
     { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource, selectedRegistryObserver) },
     { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView({ modelApprovalConfig: data.modelApprovalConfig }) },
+    { name: DAILY_PROGRESS_VIEW_NAME, demand: true, create: () => createDailyProgressView({
+      ...(data.stateDir ? { stateDir: data.stateDir } : {}), ...(data.dailyProgressTimeZone ? { timeZone: data.dailyProgressTimeZone } : {}),
+      keys: () => demand.keys(DAILY_PROGRESS_VIEW_NAME),
+    }) },
     readModelStatusView,
     { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
     { name: INSTANCES_VIEW_NAME, qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION, create: () => createInstancesView({ instances, ...data.registry, ledgerSource }) },
@@ -2150,7 +2156,8 @@ export function runReadModelWorker(
   setLedgerMemoRetentionContext({ thread: "projector", log, instances: data.instances });
   const holder = randomUUID();
   const views = threadViews({
-    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}), ...(data.selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent: data.selectedRegistryIntent }) },
+    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}), ...(data.selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent: data.selectedRegistryIntent }),
+      ...(data.slowLane?.dailyProgress?.timeZone ? { dailyProgressTimeZone: data.slowLane.dailyProgress.timeZone } : {}) },
     relay: (m) => port.postMessage(m), log, clock,
   });
   const post = (m: ReadModelWorkerMessage): void => {

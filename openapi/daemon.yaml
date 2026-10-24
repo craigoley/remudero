@@ -85,6 +85,128 @@ components:
         every other route.
 
   schemas:
+    DailyProgressCount:
+      type: object
+      additionalProperties: false
+      required: [value, precision]
+      properties:
+        value: {type: [integer, "null"], minimum: 0}
+        precision: {type: string, enum: [exact, at_least, unavailable]}
+      oneOf:
+        - properties: {precision: {enum: [unavailable]}, value: {type: "null"}}
+        - properties: {precision: {enum: [exact, at_least]}, value: {type: integer, minimum: 0}}
+    DailyProgressSource:
+      type: object
+      additionalProperties: false
+      required: [id, repository, kind, required, state, lastAttemptAt, lastSuccessAt, coverageStart, coverageThrough, nextDueAt, reason]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 256}
+        repository: {type: string, minLength: 3, maxLength: 140}
+        kind: {type: string, enum: [pull_requests, ledger_activity, deployments]}
+        required: {type: boolean}
+        state: {type: string, enum: [complete, partial, stale, not_collected, unavailable, unauthorized]}
+        lastAttemptAt: {type: [string, "null"], format: date-time}
+        lastSuccessAt: {type: [string, "null"], format: date-time}
+        coverageStart: {type: [string, "null"], format: date-time}
+        coverageThrough: {type: [string, "null"], format: date-time}
+        nextDueAt: {type: [string, "null"], format: date-time}
+        reason: {type: [string, "null"], maxLength: 2048}
+    DailyProgressEvent:
+      type: object
+      additionalProperties: false
+      required: [id, repository, kind, sourceId, occurredAt, observedAt, fleetAttribution, taskIds, title, url]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 256}
+        repository: {type: string, minLength: 3, maxLength: 140}
+        kind: {type: string, enum: [merged, activity, deployment]}
+        sourceId: {type: string, minLength: 1, maxLength: 256}
+        occurredAt: {type: string, format: date-time}
+        observedAt: {type: string, format: date-time}
+        fleetAttribution: {type: string, enum: [confirmed, unknown, non_fleet]}
+        taskIds: {type: array, maxItems: 256, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
+        title: {type: string, minLength: 1, maxLength: 2048}
+        url: {type: [string, "null"], format: uri, maxLength: 2048}
+    DailyProgressReport:
+      type: object
+      additionalProperties: false
+      description: >
+        daily-progress-v1. Counts use the retained population, independently of this bounded evidence
+        page. Missing evidence is unavailable, not a measured zero. Merges, observed activity,
+        independent deployment evidence and present open work retain separate meanings and clocks.
+      required: [version, scope, reportDate, timeZone, windowStart, windowEnd, revision, correctionReason, generatedAt, phase, coverage, totals, events, page, currentWork]
+      properties:
+        version: {type: string, enum: [daily-progress-v1]}
+        scope:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [kind]
+              properties: {kind: {type: string, enum: [all]}}
+            - type: object
+              additionalProperties: false
+              required: [kind, repository]
+              properties: {kind: {type: string, enum: [repository]}, repository: {type: string, maxLength: 140}}
+        reportDate: {type: string, format: date}
+        timeZone: {type: string, minLength: 1, maxLength: 128}
+        windowStart: {type: string, format: date-time}
+        windowEnd: {type: string, format: date-time}
+        revision: {type: integer, minimum: 1}
+        correctionReason: {type: [string, "null"], maxLength: 2048}
+        generatedAt: {type: string, format: date-time}
+        phase: {type: string, enum: [provisional, finalizing, complete, corrected]}
+        coverage:
+          type: object
+          additionalProperties: false
+          required: [state, expectedRepositories, includedRepositories, sources]
+          properties:
+            state: {type: string, enum: [complete, partial, stale, not_collected, unavailable, unauthorized]}
+            expectedRepositories: {type: array, maxItems: 256, uniqueItems: true, items: {type: string, maxLength: 140}}
+            includedRepositories: {type: array, maxItems: 256, uniqueItems: true, items: {type: string, maxLength: 140}}
+            sources: {type: array, maxItems: 1024, items: {$ref: "#/components/schemas/DailyProgressSource"}}
+        totals:
+          type: object
+          additionalProperties: false
+          required: [mergedChanges, completedTasks]
+          properties:
+            mergedChanges: {$ref: "#/components/schemas/DailyProgressCount"}
+            completedTasks: {$ref: "#/components/schemas/DailyProgressCount"}
+        events: {type: array, maxItems: 200, items: {$ref: "#/components/schemas/DailyProgressEvent"}}
+        page:
+          type: object
+          additionalProperties: false
+          required: [totalEvents, nextCursor]
+          properties:
+            totalEvents: {type: integer, minimum: 0}
+            nextCursor: {type: [string, "null"], maxLength: 1024}
+        currentWork:
+          type: [object, "null"]
+          additionalProperties: false
+          required: [asOf, items]
+          properties:
+            asOf: {type: string, format: date-time}
+            items:
+              type: array
+              maxItems: 200
+              items:
+                type: object
+                additionalProperties: false
+                required: [repository, id, title, url]
+                properties:
+                  repository: {type: string, maxLength: 140}
+                  id: {type: string, minLength: 1, maxLength: 256}
+                  title: {type: string, minLength: 1, maxLength: 2048}
+                  url: {type: [string, "null"], format: uri, maxLength: 2048}
+    DailyProgressView:
+      type: object
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view: {type: string, enum: [daily-progress]}
+        version: {type: integer, enum: [1]}
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"], format: date-time}
+        stale: {type: boolean}
+        sources: {type: array, items: {$ref: "#/components/schemas/ViewSource"}}
+        data: {$ref: "#/components/schemas/DailyProgressReport"}
     OperatorAgentAnswer:
       type: object
       description: Bounded read-only answer-v1; missing evidence is explicit and citations are dated.
@@ -17004,6 +17126,52 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /v1/views/daily-progress:
+    get:
+      summary: Work observed for one reporting day, for a repository or the authorized fleet.
+      description: >
+        Cached daily-progress-v1. Collection runs hourly and at civil midnight without browser
+        demand or Analytics activation. Today and Yesterday resolve in the reporting IANA zone
+        before a held body or ETag can answer. Response evidence is capped at 200 events and
+        1 MiB; totals cover retained populations. A page cursor pins scope, date, zone and revision.
+        The native read-model off/shadow/activation policy still applies. No request fetches GitHub
+        or scans the ledger. Source merge does not establish served adoption or deployment.
+      security:
+        - bearerRead: []
+      parameters:
+        - in: query
+          name: repository
+          schema: {type: string, default: all, maxLength: 140}
+          description: A server-known owner/repository, or all for the authorized fleet.
+        - in: query
+          name: date
+          schema: {type: string, default: today, maxLength: 10}
+          description: today, yesterday, or an ISO civil date in the reporting zone.
+        - in: query
+          name: timeZone
+          schema: {type: string, maxLength: 128}
+          description: IANA zone; defaults to the server reporting zone, initially America/New_York.
+        - in: query
+          name: revision
+          schema: {type: integer, minimum: 1, maximum: 999999999999999}
+          description: An immutable repository revision or consolidated publication generation.
+        - in: query
+          name: page
+          schema: {type: string, maxLength: 512}
+          description: The preceding page's opaque nextCursor. Unknown or repeated parameters are refused.
+      responses:
+        "200":
+          description: Report with independent source clocks and coverage.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DailyProgressView"}
+        "304": {description: The request's If-None-Match matches the held report.}
+        "400": {description: Invalid scope, reporting day, zone, revision or page.}
+        "404": {description: The view is off, in shadow, or the requested retained revision is not ready.}
+        "503": {description: Current reporting-day or repository-scope evidence is not ready.}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   /v1/views/analytics:
     get:

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { createBoardSnapshotReader, readBoardClosedCollectionReceipt, readOpenBoardSnapshot } from "./board-snapshot-cache.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { dailyDateAt, dailyWindow, DEFAULT_DAILY_PROGRESS_ZONE, nextDailyDue, shiftDailyDate } from "./daily-progress-calendar.js";
@@ -7,6 +8,7 @@ import { dailyProgressDayKey, prepareDailyProgressPublication, readDailyProgress
 import { openLedgerUnion } from "./ledger-union.js";
 import type { BoardPrRest } from "./open-prs-rest.js";
 import { taskIdFromRunBranch } from "./status.js";
+import { repositoriesSourcesPath } from "./repositories-view.js";
 
 export interface DailyProgressInstance { name: string; repository: string; root: string; stateDir: string }
 export interface DailyProgressCollectionConfig {
@@ -19,6 +21,24 @@ const CATCH_UP_DAYS = 14, CORRECTION_DAYS = 7, MAX_DATES = 32;
 const TASK = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const stamp = (value: unknown): string | null => typeof value === "string" && Number.isFinite(Date.parse(value)) ? fixedClock(Date.parse(value)).iso() : null;
 const jobId = (repository: string, zone: string): string => createHash("sha256").update(JSON.stringify([repository, zone])).digest("hex");
+
+/** Expected scope comes from the server publisher, never from the observed event population. */
+export function readDailyProgressRepositories(stateDir: string): string[] {
+  let fd: number | undefined;
+  try {
+    fd = openSync(repositoriesSourcesPath(stateDir), constants.O_RDONLY | constants.O_NOFOLLOW);
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > 1024 * 1024) throw new Error("repository inventory exceeds its read bound");
+    const raw = JSON.parse(readFileSync(fd, "utf8")) as { improvementEvidence?: { version?: string; repositories?: Array<{ repository: string }>; unresolvedInstances?: unknown[] } };
+    const inventory = raw.improvementEvidence;
+    if (!inventory || inventory.version !== "repository-evidence-inventory-v1" || !Array.isArray(inventory.repositories) ||
+        !Array.isArray(inventory.unresolvedInstances) || inventory.unresolvedInstances.length ||
+        !inventory.repositories.length || inventory.repositories.length > 256 || inventory.repositories.some(r => !r || typeof r.repository !== "string" || !REPOSITORY.test(r.repository))) throw new Error("expected repository scope is unresolved");
+    return [...new Set(inventory.repositories.map(r => r.repository.toLowerCase()))].sort();
+  } catch (error) {
+    throw new Error("Daily progress repository inventory is unavailable; complete fleet scope is not established.", { cause: error });
+  } finally { if (fd !== undefined) closeSync(fd); }
+}
 
 function taskIds(pr: BoardPrRest): string[] {
   const branch = taskIdFromRunBranch(pr.headRefName);
@@ -62,7 +82,7 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
   Promise<ReturnType<typeof prepareDailyProgressPublication> | undefined> {
   const now = clock.now(), at = fixedClock(now).iso(), timeZone = config.timeZone ?? DEFAULT_DAILY_PROGRESS_ZONE;
   const today = dailyDateAt(now, timeZone), yesterday = shiftDailyDate(today, -1);
-  const expected = [...new Set([...(config.expectedRepositories ?? []), ...config.instances.map(s => s.repository)].map(r => r.toLowerCase()))].sort();
+  const expected = [...new Set((config.expectedRepositories ?? readDailyProgressRepositories(config.stateDir)).map(r => r.toLowerCase()))].sort();
   if (!expected.length || expected.length > 256 || expected.some(r => !REPOSITORY.test(r))) throw new Error("invalid server-owned daily repository inventory");
   if ((config.correctionDates?.length ?? 0) > MAX_DATES) throw new Error("too many targeted daily corrections");
   const manifest = readDailyProgressManifest(config.stateDir), board = createBoardSnapshotReader();
