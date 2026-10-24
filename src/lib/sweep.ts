@@ -3366,16 +3366,36 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const live = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as {
           head: { ref: string; sha: string }; user: { login: string }; title: string; body: string;
         };
-        if (live.head.sha !== pr.headSha || !isMachineLanePlanHead(live.head.ref) || !isFleetAppAuthor(live.user.login)) {
+        if (live.head.sha !== pr.headSha || !isFleetAppAuthor(live.user.login)) {
           return { outcome: "refused", reason: "the filing head or author changed" };
         }
         const paths = await fetchPrDiffFilesViaGh(pr.prUrl);
-        const resolved = fixRungTaskForForBuild(plan, { prNumber: pr.prNumber }, live.body, live.head.ref, paths);
-        const task = { ...resolved.task, id: escalationTaskIdFor(pr), files: resolved.task.files.filter(isInPlanScope) };
+        const filed = pr.taskId === undefined ? undefined : plan.tasks.find(task => task.id === pr.taskId);
+        const filedCandidate = filedPlanTaskReady(filed) && live.head.ref === pr.headRefName &&
+          filedTaskPlanRepairCandidate({ ...pr, headRefName: live.head.ref,
+          changedFiles: paths, taskExistsOnMain: filed !== undefined, taskDeclaredFiles: filed?.files });
+        if (!isMachineLanePlanHead(live.head.ref) && !filedCandidate) {
+          return { outcome: "refused", reason: "the filing head or author changed" };
+        }
+        const resolved = fixRungTaskForForBuild(plan, { prNumber: pr.prNumber,
+          ...(filedCandidate ? { taskId: pr.taskId } : {}) }, live.body, live.head.ref, paths);
+        let task = { ...resolved.task, id: escalationTaskIdFor(pr), files: resolved.task.files.filter(isInPlanScope) };
         claim = acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, live.head.ref), { run_id: runId });
         const materialized = materializePlanRoundWorktree(config, repoDir, pr.prNumber, pr.headSha);
         if (!materialized.worktreePath) return { outcome: "refused", reason: materialized.failure?.message ?? "the plan head could not be materialized" };
         worktreePath = materialized.worktreePath;
+        if (filedCandidate) {
+          if (!resolveTaskContractAtHeadImpl) return { outcome: "refused", reason: "filed plan repair has no head-contract resolver" };
+          const head = await resolveTaskContractAtHeadImpl(pr.prUrl, pr.taskId!, worktreePath);
+          const atHead = fixRungTaskAtHead(resolved, pr.taskId!, head);
+          if ("standDown" in atHead) return { outcome: "refused", reason: atHead.standDown };
+          if (head?.taskDeclaredFiles === undefined || taskContractRevision(atHead.task) !== taskContractRevision(task) ||
+              taskSemanticRevision(atHead.task) !== taskSemanticRevision(filed!) ||
+              atHead.task.risk !== task.risk || atHead.task.budget_usd !== task.budget_usd) {
+            return { outcome: "refused", reason: "filed plan repair contract differs between head and main" };
+          }
+          task = { ...atHead.task, files: [...atHead.task.files] };
+        }
         const mount = resolveMount(loadMounts(mountsPath(repoRoot)), "fix", task.risk);
         const settingsFile = renderWorkerSettings({ templatePath: join(repoRoot, "settings", "worker.json"),
           hooksDir: join(repoRoot, "hooks"), outPath: join(config.root, "tmp", `plan-round-${pr.prNumber}.json`) });
@@ -4859,6 +4879,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         user?: { login?: string }; title?: string; head?: { sha?: string; ref?: string };
       };
       const facts: PlanRepairFacts = { authorLogin: row?.user?.login, title: row?.title };
+      if (filedTaskPlanRepairCandidate(pr) && row?.head?.sha === pr.headSha && row.head.ref === pr.headRefName) {
+        facts.filedTaskRepairReady = filedPlanTaskReady(plan.tasks.find(task => task.id === pr.taskId));
+      }
       if (!gardenRecordRefusalCandidate(pr) || row?.head?.sha !== pr.headSha || row.head.ref !== pr.headRefName) return facts;
       const files = ghJsonForBuild(["api", `${pulls}/files?per_page=2`]) as { filename: string; status: string }[];
       if (!Array.isArray(files) || files.length !== 1 || files[0]?.status !== "added" ||
@@ -9440,6 +9463,19 @@ export function isMachineLanePlanHead(head: string | undefined): boolean {
   return head !== undefined && MACHINE_LANE_HEAD_RE.test(head);
 }
 
+function filedPlanTaskReady(task: Task | undefined): boolean {
+  return task?.verify === "auto" && task.status === "queued" && task.dispatch_hold !== true && task.retirement === undefined;
+}
+
+/** A filed plan-only task keeps its existing exact grant when using the plan repair effect. */
+export function filedTaskPlanRepairCandidate(pr: OpenPrView): boolean {
+  const files = pr.taskDeclaredFiles;
+  return pr.isPlanFiling === true && pr.mergeState === "clean" && pr.taskExistsOnMain === true &&
+    pr.taskId !== undefined && TASK_ID_TRAILER_RE.test(pr.taskId) && taskIdFromRunBranch(pr.headRefName) === pr.taskId &&
+    files !== undefined && files.length > 0 && files.every(path => isInPlanScope(path) && !path.split("/").includes("..")) &&
+    pr.changedFiles !== undefined && pr.changedFiles.length > 0 && pr.changedFiles.every(path => files.includes(path));
+}
+
 /** W1-T9289 — a DIRTY plan filing on a machine-lane head whose captured conflict evidence names only
  *  plan-scope paths. The author is a separate, async read (`readPlanRepairFacts`) the caller adds. */
 export function planConflictRoundCandidate(pr: OpenPrView): boolean {
@@ -9454,6 +9490,7 @@ export function isFleetAppAuthor(login: string | undefined): boolean {
 }
 
 export interface PlanRepairFacts {
+  filedTaskRepairReady?: boolean;
   authorLogin?: string;
   title?: string;
   gardenRecordRefusal?: string;
@@ -17416,7 +17453,7 @@ export async function runSweep(
     if (!deps.readPlanRepairFacts || !deps.repairPlanPr) return notRepaired;
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
     let facts: PlanRepairFacts = {};
-    if (isMachineLanePlanHead(pr.headRefName)) {
+    if (isMachineLanePlanHead(pr.headRefName) || filedTaskPlanRepairCandidate(pr)) {
       try {
         facts = planRoundFacts.get(pr.prNumber) ?? await deps.readPlanRepairFacts(pr);
         planRoundFacts.set(pr.prNumber, facts);
@@ -18799,7 +18836,7 @@ export async function runSweep(
       const facts = planRoundFacts.get(pr.prNumber);
       let planRoundExhausted = false;
       if (!repair.repaired && deps.dispatchPlanGateRound && isFleetAppAuthor(facts?.authorLogin) &&
-          isMachineLanePlanHead(pr.headRefName)) {
+          (isMachineLanePlanHead(pr.headRefName) || facts?.filedTaskRepairReady === true && filedTaskPlanRepairCandidate(pr))) {
         const row = { pr_number: pr.prNumber, head_sha: pr.headSha, lane_head: pr.headRefName,
           checks: (pr.ciFailures ?? []).map((f) => f.name), run_id: deps.runId, task_id: pr.taskId ?? "SWEEP" };
         repair.repaired = true;
