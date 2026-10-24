@@ -6,17 +6,34 @@ import { availableParallelism, cpus, hostname, release } from 'node:os';
 import { listTestFiles, medianMeasuredDurationMs, predictMakespanMs, weightedDurationMs } from '../test-tier-manifest.mjs';
 import { accountAuthorPhases } from './author-phase-accounting.mjs';
 
-export const RUNTIME_PROFILE_FORMAT = 'rmd-native-author-runtime-v1';
+export const RUNTIME_PROFILE_FORMAT = 'rmd-native-author-runtime-v2';
 export const AUTHOR_STATIC_RESERVE_MS = 15 * 60_000;
 export const AUTHOR_SHUTDOWN_RESERVE_MS = 30_000;
 export const AUTHOR_RUNTIME_SAFETY_FACTOR = 1.25;
 export const RUNTIME_PROFILE_MAX_AGE_MS = 24 * 60 * 60_000;
 export const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
+function runtimeMemoryOptions(env) {
+  const options = { maxOldSpaceSizeMiB: null, maxSemiSpaceSizeMiB: null };
+  for (const token of (env.NODE_OPTIONS?.trim() ?? '').split(/\s+/).filter(Boolean)) {
+    // Model only the numeric heap settings inherited from admission/resource policy.
+    // Never strip NODE_OPTIONS or label unknown flags/instrumentation as uninstrumented.
+    const match = /^--(max-old-space-size|max-semi-space-size)=([1-9][0-9]*)$/.exec(token);
+    if (!match) throw new Error('runtime profile: NODE_OPTIONS instrumentation or unsupported flags are not modelled');
+    const key = match[1] === 'max-old-space-size' ? 'maxOldSpaceSizeMiB' : 'maxSemiSpaceSizeMiB';
+    const value = Number(match[2]);
+    if (!Number.isSafeInteger(value) || options[key] !== null) {
+      throw new Error('runtime profile: invalid or duplicate NODE_OPTIONS memory setting');
+    }
+    options[key] = value;
+  }
+  return options;
+}
+
 /** Native timing evidence has no authority to certify tests or change the admitted pool. */
 export function runtimeBindings(root, head, env = process.env) {
   if (!/^[a-f0-9]{40}$/.test(head)) throw new Error('runtime profile: unresolved source head');
-  if (env.NODE_OPTIONS?.trim()) throw new Error('runtime profile: NODE_OPTIONS instrumentation is not modelled');
+  const memoryOptions = runtimeMemoryOptions(env);
   if (sourceHead(root) !== head || execFileSync('git', ['status', '--porcelain'],
     { cwd: root, encoding: 'utf8', timeout: 10_000 }).trim()) {
     throw new Error('runtime profile: source/runtime/corpus binding mismatch; committed inputs changed');
@@ -33,7 +50,7 @@ export function runtimeBindings(root, head, env = process.env) {
     .map((key) => [key, env[key] ?? null]))));
   return { head, inputTree, platform: process.platform, arch: process.arch, node: process.version,
     host: hostname(), kernel: release(), cores: availableParallelism(), cpuModel: cpus()[0]?.model ?? 'unavailable',
-    v8: process.versions.v8, loader: `tsx@${tsx}`, instrumentation: 'none',
+    v8: process.versions.v8, loader: `tsx@${tsx}`, instrumentation: 'none', memoryOptions,
     testIsolation: 'process', setup: './test/setup/tmp-hygiene.ts', environmentSha256,
     corpusSha256, corpusFiles: files.length, hashes };
 }
