@@ -51,6 +51,7 @@ fi
 
 # A wake/boot/empty-entry sequence earns its measured boot time as the next delay.
 # Read the rotation union in timestamp order: a boot and its entry can straddle files.
+# Rotation can also leave the same row in live and archived files; count it once.
 engine_history() {
   local file rc
   for file in "$state"/ledger.ndjson "$state"/ledger.*.ndjson "$state"/ledger.*.ndjson.gz; do
@@ -65,7 +66,10 @@ engine_schedule="$(engine_history | run_bounded jq -sr --arg since "$since" --ar
   def epoch:
     (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)
     + ((capture("\\.(?<fraction>[0-9]+)Z$").fraction? // "0") | ("0." + .) | tonumber);
-  map(. + {at: (.ts | epoch)}) | sort_by(.at) |
+  reduce .[] as $row ({seen: {}, rows: []};
+    ($row | tojson) as $key |
+    if .seen[$key] then . else .seen[$key] = true | .rows += [$row] end
+  ) | .rows | map(. + {at: (.ts | epoch)}) | sort_by(.at) |
   reduce .[] as $row (
     {deferral_s: 0, empty_wake_run: 0, armed: false, boot: null, pending: null};
     if $row.step == "daemon.idle_starved.engine_wake" then

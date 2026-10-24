@@ -85,6 +85,22 @@ test("W1-T9031: consecutive empty engine wakes defer the next engine wake", (t) 
   }
 });
 
+test("W1-T9031: live and archive overlap preserves consecutive empty engine wakes", (t) => {
+  const first = emptyWake(START - 2000);
+  const second = emptyWake(START - 1000);
+  const f = fixture(t, [first[1]!, ...second]);
+  f.rotate(first, true);
+
+  const deferred = f.run();
+  assert.equal(deferred.status, 0, deferred.stderr);
+  assert.equal(f.rows().at(-1)!.empty_wake_run, 2);
+  assert.equal(f.rows().at(-1)!.deferral_s, 140);
+  assert.equal(f.run({ elapsed: 139, mode: "pr-board" }).status, 0);
+  const wake = f.run({ elapsed: 140, mode: "pr-board" });
+  assert.equal(wake.status, 10, wake.stderr);
+  assert.equal(f.rows().at(-1)!.deferral_s, 140);
+});
+
 test("W1-T9031: a target change wakes at once during an engine deferral", (t) => {
   for (const kind of ["board", "main", "approval", "kick", "inbox", "uncertain"]) {
     const f = fixture(t, [...emptyWake(START - 2000), ...emptyWake(START - 1000)]);
