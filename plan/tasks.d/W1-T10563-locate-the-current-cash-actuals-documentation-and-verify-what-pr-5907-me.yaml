@@ -6,7 +6,9 @@
   type: recon
   verify: auto
   risk: low
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T10563 — It depends on W1-T9341, which will never be built.
   attempts: 0
   files:
     - plan/tasks.d/W1-T9341-update-pr-description-to-link-to-cash-actuals-documentation.yaml
