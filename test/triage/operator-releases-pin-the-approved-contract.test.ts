@@ -191,3 +191,53 @@ test("unread operator history cannot be overruled by a machine receipt", t => {
   assert.equal(resolveReleases(releaseReadersFor(f.ledger), f.plan()).ids.has(ID), true,
     "a matching explicit operator receipt remains positive authority independently of the failed reader");
 });
+
+
+async function parkedReapprovalControl(t: TestContext, store: "ledger" | "durable") {
+  const f = fixture(t);
+  let now = CLOCK.now();
+  let modelCalls = 0;
+  let answer: "high" | "low" = "high";
+  const run = () => runMachineFilingJudge({ stateDir: f.stateDir, plan: f.plan, writeRoot: f.root,
+    operatorReleases: () => readOperatorReleaseRecords(f.stateDir),
+    releaseLedgerLines: () => readFileSync(f.ledger, "utf8").split("\n"),
+    riskJudge: async () => { modelCalls++; return { verdict: answer, confidence: 1, reasons: [answer] }; },
+    isMerged: () => false, stageProposal: () => {}, clock: fixedClock(now), log: () => {},
+  });
+  assert.deepEqual((await run()).escalated, [ID]);
+  assert.equal(modelCalls, 1);
+  assert.equal(f.task().risk_ruling?.action, "escalate");
+  const before = readFileSync(f.path, "utf8");
+  if (store === "ledger") writeFileSync(f.ledger, JSON.stringify({ step: "ratify.approved", task_id: ID }) + "\n");
+  else writeFileSync(join(f.stateDir, "operator-releases.json"), JSON.stringify({ releases: { [ID]: CLOCK.iso() } }));
+  answer = "low";
+  now += 20 * machineJudge.MACHINE_JUDGE_REASK_SCALE_MS;
+  const held = await run();
+  assert.equal(modelCalls, 1, "a due escalation cannot ask the model past an explicit reapproval hold");
+  assert.deepEqual(held.proceeded, []);
+  assert.deepEqual(held.reasked ?? [], []);
+  assert.equal(readFileSync(f.path, "utf8"), before);
+  assert.equal(resolveReleases(releaseReadersFor(f.ledger), f.plan()).setAside.has(ID), true);
+  writeFileSync(f.ledger, "");
+  writeFileSync(join(f.stateDir, "operator-releases.json"), JSON.stringify({ releases: {} }));
+  now += 4 * machineJudge.MACHINE_JUDGE_REASK_SCALE_MS;
+  const rotated = await run();
+  assert.equal(modelCalls, 1, "the remembered hold survives losing the original receipt");
+  assert.deepEqual(rotated.proceeded, []);
+  assert.deepEqual(rotated.reasked ?? [], []);
+  assert.equal(readFileSync(f.path, "utf8"), before);
+  const approval = approveParkedTask(ID, { plan: f.plan(), ledgerPath: f.ledger, runId: "operator-current-escalation",
+    recordDurableRelease: task => recordOperatorRelease(f.stateDir, task, fixedClock(now).iso()) });
+  assert.equal(approval.released, true);
+  assert.deepEqual((await run()).proceeded, [ID]);
+  assert.equal(modelCalls, 1, "explicit approval uses its own authority without another model call");
+  assert.equal(f.task().verify, "auto");
+}
+
+test("an unpinned operator release cannot dispatch or be reapproved by a model during parked escalation re-asks", async t => {
+  await parkedReapprovalControl(t, "ledger");
+});
+
+test("an observed legacy reapproval hold survives rotation until an explicit new approval during parked escalation re-asks", async t => {
+  await parkedReapprovalControl(t, "durable");
+});

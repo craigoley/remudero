@@ -870,6 +870,7 @@ async function reaskParkedEscalations(c: {
   report: MachineJudgeReport;
   records: Map<string, FamilyTrackRecord>;
   released: ReadonlySet<string>;
+  reapproval: ReadonlySet<string>;
   excluded: ReadonlySet<string>;
   isMerged: (id: string) => boolean;
   policy: RiskPolicy;
@@ -889,7 +890,7 @@ async function reaskParkedEscalations(c: {
   let room = c.room;
   for (const task of plan.tasks) {
     if (room <= 0) break;
-    if (!parkedEscalation(task, c.released) || c.withdrawing.has(task.id)) continue;
+    if (!parkedEscalation(task, c.released) || c.reapproval.has(task.id) || c.withdrawing.has(task.id)) continue;
     const family = judgementFamily(task);
     const pin = task.risk_ruling!.pin; // parkedEscalation proved it is the record's own pin
     if (c.excluded.has(family) || state.declined?.[task.id] === pin) continue;
@@ -1240,7 +1241,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   }
   const withdraw = unansweredEscalations({ ports, plan, state, released, excluded });
   const reasks = await reaskParkedEscalations({
-    ports, plan, state, report, records, released, excluded, isMerged, policy,
+    ports, plan, state, report, records, released, reapproval: releaseEvidence.reapproval, excluded, isMerged, policy,
     room: ports.limit === undefined ? Infinity : ports.limit - due.length, withdrawing: new Set(withdraw.map((w) => w.task.id)),
   });
   ruled.push(...[...reasks.values()].map((r) => r.judged));
