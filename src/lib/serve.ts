@@ -3582,12 +3582,12 @@ export function serveGeneration(server: Server): ServeGenerationHooks | undefine
 }
 
 export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "instances" | "assistantRepository"> & { panelGraph?: Pick<ServeDeps["panelGraph"], "planPath"> }): ReadModelInstance[] {
-  const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), feedbackRoot: deps.questionsRoot,
+  const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), boardRoot: deps.questionsRoot, feedbackRoot: deps.questionsRoot,
     ...(deps.assistantRepository ? { repo: deps.assistantRepository } : {}), ...(deps.panelGraph?.planPath ? { planPath: deps.panelGraph.planPath } : {}) };
   const others = livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances });
   return [core, ...others.map((instance) => {
     const root = instanceStateRoot({ name: instance.name, repo: instance.repo, project: "", live: true }, dirname(dirname(instance.stateDir)));
-    return { name: instance.name, ledgerDir: instance.stateDir, repo: instance.repo,
+    return { name: instance.name, ledgerDir: instance.stateDir, boardRoot: root.root, repo: instance.repo,
       inbox: { instance: instance.name, repository: instance.repo, root: join(root.root, "repos", instance.repo.split("/")[1]),
         planPath: root.planPath, ledgerPath: root.ledgerPath, inboxRoot: root.root } };
   })];

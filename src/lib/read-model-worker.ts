@@ -160,6 +160,8 @@ const VIEW_BODY_DDL = `CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, 
 
 export interface ReadModelInstance {
   name: string;
+  /** Server-resolved board snapshot root; independent of the ledger and source checkout paths. */
+  boardRoot?: string;
   /** The instance's state dir: the one holding its live ledger and rotation archives. */
   ledgerDir: string;
   /** Inputs for the per-instance now view. */
@@ -2172,7 +2174,7 @@ export function runReadModelWorker(
     }
     port.postMessage(m);
   };
-  const dailyInstances = data.instances.flatMap(i => i.repo ? [{ name: i.name, repository: i.repo, root: dirname(i.ledgerDir), stateDir: i.ledgerDir }] : []);
+  const dailyInstances = data.instances.flatMap(i => i.repo && i.boardRoot ? [{ name: i.name, repository: i.repo, root: i.boardRoot, stateDir: i.ledgerDir }] : []);
   const dailyProgress = data.slowLane?.dailyProgress ?? (dailyInstances.length ? { stateDir: data.stateDir, instances: dailyInstances } : undefined);
   const slowLaneConfig: SlowLaneConfig | undefined = data.slowLane || dailyProgress ? { ...data.slowLane,
     ...(data.slowLane ? { instanceInboxes: data.instances.flatMap(i => i.inbox ? [i.inbox] : []),

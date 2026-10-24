@@ -12,6 +12,16 @@ import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "#src/lib/ledger-projector.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { createReadModelTicker } from "#src/lib/read-model-worker.js";
 import { runSlowLaneWorker, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
+import { readModelInstances } from "#src/lib/serve.js";
+
+test("daily progress uses server board roots instead of guessing from ledger locations", async () => {
+  await withTempDir("daily-roots", async root => {
+    const core = readModelInstances({ ledgerPath: join(root, "independent-ledger", "ledger.ndjson"), questionsRoot: join(root, "operator-root"), assistantRepository: "acme/app" })[0]!;
+    assert.equal(core.boardRoot, join(root, "operator-root"));
+    assert.notEqual(core.boardRoot, root, "a separately configured ledger parent is not the board snapshot root");
+    assert.equal(core.ledgerDir, join(root, "independent-ledger"));
+  });
+});
 
 test("daily progress collector reuses complete snapshots with truthful attribution and source clocks", async () => {
   await withTempDir("daily-collector", async root => {
