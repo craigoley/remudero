@@ -13,6 +13,7 @@ import { withTempDir } from "#src/lib/tmp.js";
 import { createReadModelTicker } from "#src/lib/read-model-worker.js";
 import { runSlowLaneWorker, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
 import { readModelInstances } from "#src/lib/serve.js";
+import { mapBoardPr, type BoardPrRest } from "#src/lib/open-prs-rest.js";
 
 test("daily progress uses server board roots instead of guessing from ledger locations", async () => {
   await withTempDir("daily-roots", async root => {
@@ -29,12 +30,16 @@ test("daily progress collector reuses complete snapshots with truthful attributi
     let now = Date.parse("2026-11-02T06:00:00Z");
     const clock = { now: () => now, iso: () => fixedClock(now).iso(), date: () => fixedClock(now).date() };
     const cache = createBoardSnapshotCache(root, "acme", "app", { clock });
-    const rows = Array.from({ length: 207 }, (_, index) => ({ number: index + 1, url: `https://github.com/acme/app/pull/${index + 1}`,
+    const rows: BoardPrRest[] = Array.from({ length: 207 }, (_, index) => ({ number: index + 1, url: `https://github.com/acme/app/pull/${index + 1}`,
       state: index === 206 ? "CLOSED" : "MERGED", headRefName: index < 205 ? `run-W1-T${index + 1}-1234567890123` : "manual-change", headRefOid: "a".repeat(40),
       body: index < 205 ? `Remudero-Task: W1-T${index + 1}` : "", autoMergeRequest: null, title: `Repair ${index + 1}`,
       updatedAt: "2026-11-02T05:30:00.000Z", mergedAt: index === 206 ? undefined : "2026-11-01T15:00:00.000Z" }));
     rows.push({ ...rows[0]!, number: 209, url: "https://github.com/acme/app/pull/209", headRefName: "run-unfiled-1234567890123", body: "Remudero-Task: not-a-plan-task" });
+    rows.push(mapBoardPr({ number: 210, html_url: "https://github.com/acme/app/pull/210", state: "closed", title: "Dependency update", body: "",
+      head: { ref: "dependabot/npm/example-2", sha: "b".repeat(40) }, user: { login: "dependabot[bot]", type: "Bot" },
+      updated_at: "2026-11-02T05:30:00Z", merged_at: "2026-11-01T15:00:00Z" }));
     cache.recordClosedAttempt!({ ok: true, persisted: cache.commitClosed(rows) }); cache.commitOpen!([], now);
+    assert.equal(Reflect.get(cache.closedSeed()!.get(210)!, "authorLogin"), "dependabot[bot]", "the existing REST adapter and durable snapshot retain verified author evidence");
     const line = (step: string, run: string) => JSON.stringify({ ts: "2026-11-01T16:00:00.000Z", task_id: "W1-T7", run_id: run, step, private: "/secret/path" }) + "\n";
     writeFileSync(join(stateDir, "ledger.2026-11-01.ndjson.gz"), gzipSync(line("worker.spawn", "one")));
     writeFileSync(join(stateDir, "ledger.2026-11-02.ndjson"), line("worker.finished", "two"));
@@ -52,6 +57,7 @@ test("daily progress collector reuses complete snapshots with truthful attributi
       assert.equal(yesterday.report.totals.completedTasks.value, 205);
       assert.deepEqual(yesterday.events.find(e => e.id === "merged:acme/app:209")!.taskIds, [], "an unfiled change is not a completed plan task");
       assert.equal(yesterday.events.filter(e => e.fleetAttribution === "unknown" && e.kind === "merged").length, 1);
+      assert.ok(!yesterday.events.some(e => e.id === "merged:acme/app:210"), "known dependency-service work is outside fleet activity; a manual merge remains unknown");
       assert.equal(yesterday.events.filter(e => e.kind === "activity").length, 3, "gzip, plain rotation and live ledger positive controls");
       assert.equal(yesterday.report.coverage.state, "partial");
       assert.equal(yesterday.report.coverage.sources.find(s => s.kind === "deployments")!.state, "not_collected");
