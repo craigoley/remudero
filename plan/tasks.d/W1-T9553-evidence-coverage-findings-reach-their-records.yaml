@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 10.00
   risk: high  # Rule 19: the approved landing-reader companion spans a second concern; production scope and budget stay fixed, and the gardener still never gates
@@ -61,3 +61,11 @@
     reports it updated, stamps the digest, and a second pass writes nothing: the record stays at 80.3%. With
     the change the second pass lands 51%. Seed the record `status: rejected` with a 51% gap: at origin/main it
     stays rejected; with the change it reads `new` with the evidence line.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-24T06:48:32.860Z"
+    pin: "939b097a95df5737700f200d7c3e4eff0b000c68a25d2c1630ba11ec17afb409"
