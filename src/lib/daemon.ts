@@ -52,6 +52,7 @@ import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-
 import {
   nextRunnable,
   runnableCandidates,
+  passedOverStateKey,
   laneDispatchBudget,
   wipDeferredAdmissionFields,
   type QueueAdmissionReading,
@@ -3962,6 +3963,18 @@ export async function runDaemon(
   const logPriorityRelease = (r: PriorityReservationRelease): void => {
     log("dispatch.priority_reservation_released", { task: r.task.id, waiting_task: r.waiting.id, reason: r.reason });
   };
+  const passedOverStates = new Map<string, string>();
+  const observePassedOver = (site: "tick" | "lane-refill"): NonNullable<NextRunnableOpts["onPassedOver"]> => (task, detail) => {
+    const key = passedOverStateKey(detail);
+    if (passedOverStates.get(task.id) === key) return;
+    log("dispatch.passed_over", { task: task.id, priority: task.priority ?? null, site,
+      passed_for: detail.passedFor, holders: detail.holders });
+    passedOverStates.set(task.id, key);
+  };
+  const forgetPassedOver = (current: Plan, collected: readonly Task[] = []): void => {
+    for (const task of collected) passedOverStates.delete(task.id);
+    for (const id of passedOverStates.keys()) if (!current.byId.has(id)) passedOverStates.delete(id);
+  };
   // W1-T8235: the gap since the previous process's last idle record is charged to `restart` (this process's first
   // sample ends it), at the idle slots that record left.
   idleLaneAccount = chargeRestartGap(idleLaneAccount, lastIdleLaneRecord(bootLedgerLines));
@@ -4928,6 +4941,7 @@ export async function runDaemon(
       const fresh = await deps.reloadPlan();
       if (fresh) {
         plan = fresh;
+        forgetPassedOver(fresh);
         deps.onPlanReload?.(fresh);
         log("daemon.plan_reloaded", { tasks: fresh.tasks.length });
       }
@@ -6546,6 +6560,7 @@ export async function runDaemon(
         lazyClosedUnmerged(deps.readClosedRunBranchPrs),
       );
       const dispatchOpts: NextRunnableOpts = {
+      onPassedOver: observePassedOver("tick"),
       priorityBackfill,
       onDeferredForPriority: logPriorityDeferral,
       onPriorityReservationReleased: logPriorityRelease,
@@ -6710,6 +6725,7 @@ export async function runDaemon(
         ...dispatchOpts, excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...childTaskIds()]), inFlight: occupiedTasks,
       });
       const candidates = runnableCandidates(planForBatch, isMerged, budget, selection.opts);
+      forgetPassedOver(planForBatch, candidates);
       tickEligible = selection.eligible;
       tickContext = selection.context;
       // Passed explicitly rather than relying on the partition's own default parameter — see
@@ -7189,9 +7205,11 @@ export async function runDaemon(
               ...[...refillProposals].map((proposal) => proposal.id)]),
             // W1-T8502: pack the pool disjoint from the occupied lanes too, so a head they block cannot crowd out the rest.
             inFlight: [...inFlightTasks, ...refillProposals],
+            onPassedOver: observePassedOver("lane-refill"),
             onDeferredForPriority: (d) => { refillDeferrals.push(d); logPriorityDeferral(d); },
           });
           const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, selection.opts);
+          forgetPassedOver(snapshot.plan, pool);
           refillEligible = selection.eligible;
           refillContext = selection.context;
           const fits = partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);

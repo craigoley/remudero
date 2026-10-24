@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { fixedClock, type Clock } from "../src/lib/clock.js";
@@ -30,7 +30,7 @@ import {
   type ConsistencyCheckOptions,
   type OracleWindow,
 } from "../src/lib/read-model-consistency.js";
-import { acquireLease, type ReadModelDb, type ReadModelLease } from "../src/lib/read-model-db.js";
+import { acquireLease, flushReadModelTransactions, type ReadModelDb, type ReadModelLease } from "#src/lib/read-model-db.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
@@ -38,13 +38,79 @@ const LIVE = "ledger.ndjson";
 /** The oracle's clock: an hour after the rows, so every fixture row sits inside the closed window. */
 const CHECK_AT = T0 + 3_600_000;
 
-type TestCtx = { after: (fn: () => void) => void };
+type TestCtx = { after: (fn: () => void | Promise<void>) => void };
 
 function scratch(t: TestCtx, kind: string): string {
   const dir = makeTempDir(kind);
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
+
+function fixtureDb(t: TestCtx, kind: string, clock: Clock, flush = flushReadModelTransactions): ReadModelDb {
+  const dir = makeTempDir(kind);
+  let db: ReadModelDb | undefined;
+  t.after(async () => {
+    db?.close();
+    await flush();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  db = openProjectorReadModel(dir, "core", clock);
+  return db;
+}
+
+test("oracle fixture closes its database before removing its directory", async () => {
+  const cleanup: Array<() => void | Promise<void>> = [];
+  const db = fixtureDb({ after: (fn) => { cleanup.push(fn); } }, "oracle-close-control", fixedClock(CHECK_AT));
+  const dir = dirname(dirname(db.path));
+  const close = db.close.bind(db);
+  let closed = false;
+  db.close = () => {
+    assert.equal(existsSync(dir), true, "database close must see its existing directory");
+    close();
+    closed = true;
+  };
+  try {
+    for (const fn of cleanup) await fn();
+    assert.equal(closed, true);
+    assert.equal(existsSync(dir), false);
+  } finally {
+    if (!closed) close();
+    await flushReadModelTransactions();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("oracle fixture preserves its directory when database close fails", async () => {
+  const cleanup: Array<() => void | Promise<void>> = [];
+  const db = fixtureDb({ after: (fn) => { cleanup.push(fn); } }, "oracle-close-failure", fixedClock(CHECK_AT));
+  const dir = dirname(dirname(db.path));
+  const close = db.close.bind(db);
+  db.close = () => { throw new Error("injected database close failure"); };
+  try {
+    await assert.rejects(async () => { for (const fn of cleanup) await fn(); }, /injected database close failure/);
+    assert.equal(existsSync(dir), true, "failed close must preserve its database directory");
+  } finally {
+    close();
+    await flushReadModelTransactions();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("oracle fixture preserves its directory when diagnostic publication cannot settle", async () => {
+  const cleanup: Array<() => void | Promise<void>> = [];
+  const db = fixtureDb({ after: (fn) => { cleanup.push(fn); } }, "oracle-barrier-failure", fixedClock(CHECK_AT), async () => {
+    await flushReadModelTransactions();
+    throw new Error("injected diagnostic barrier failure");
+  });
+  const dir = dirname(dirname(db.path));
+  try {
+    await assert.rejects(async () => { for (const fn of cleanup) await fn(); }, /injected diagnostic barrier failure/);
+    assert.equal(existsSync(dir), true, "unverified publication must preserve its database directory");
+  } finally {
+    await flushReadModelTransactions();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function row(ms: number, step: string, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({ ts: new Date(ms).toISOString(), host: "h1", step, ...extra });
@@ -75,8 +141,7 @@ function projected(t: TestCtx): Fixture {
   writeFileSync(join(rowsDir, archiveName(T0 + 8_500)), text(lines.slice(3, 9)));
   writeFileSync(join(rowsDir, LIVE), text(lines.slice(7)));
   const clock = fixedClock(T0 + 60_000);
-  const db = openProjectorReadModel(scratch(t, "oracle-state"), "core", clock);
-  t.after(() => db.close());
+  const db = fixtureDb(t, "oracle-state", clock);
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   createLedgerProjector({ ledgerDir: rowsDir, db, lease: got.lease, clock }).tick();
@@ -105,8 +170,7 @@ function fakeIssues(): IssueGateway & { titles: string[] } {
 
 function digestOfCleanRebuild(t: TestCtx, rowsDir: string): string {
   const clock = fixedClock(T0 + 60_000);
-  const db = openProjectorReadModel(scratch(t, "oracle-clean"), "core", clock);
-  t.after(() => db.close());
+  const db = fixtureDb(t, "oracle-clean", clock);
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   createLedgerProjector({ ledgerDir: rowsDir, db, lease: got.lease, clock }).tick();
@@ -298,8 +362,7 @@ test("a row quarantined at ingest is not a missing fact once its window closes",
   const early = row(T0 + 600_000, "run.start", { task_id: "W1-T1" });
   writeFileSync(join(rowsDir, LIVE), text([row(T0, "run.start", { task_id: "W1-T0" }), early]));
   const clock = fixedClock(T0);
-  const db = openProjectorReadModel(scratch(t, "oracle-state"), "core", clock);
-  t.after(() => db.close());
+  const db = fixtureDb(t, "oracle-state", clock);
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   assert.equal(createLedgerProjector({ ledgerDir: rowsDir, db, lease: got.lease, clock }).tick().quarantined, 1);
@@ -389,8 +452,7 @@ test("the rolling slice cursor starts a new cycle when it is finished or unreada
 });
 
 test("oracle slices are sized by row count so a busy day splits and quiet days merge and one cycle covers every row once", (t) => {
-  const db = openProjectorReadModel(scratch(t, "oracle-slices"), "core", fixedClock(CHECK_AT));
-  t.after(() => db.close());
+  const db = fixtureDb(t, "oracle-slices", fixedClock(CHECK_AT));
   const got = acquireLease(db, { clock: fixedClock(CHECK_AT) });
   assert.ok(got.ok);
   const DAY = 86_400_000;
@@ -527,8 +589,7 @@ test("the oracle agrees with an activity ring that dropped its oldest rows and h
   const rowsDir = scratch(t, "oracle-rows");
   writeFileSync(join(rowsDir, LIVE), text(Array.from({ length: ACTIVITY_RING_ROWS + 20 }, (_, i) => row(T0 + i * 1_000, "worker.activity", { n: i }))));
   const clock = fixedClock(CHECK_AT);
-  const db = openProjectorReadModel(scratch(t, "oracle-state"), "core", clock);
-  t.after(() => db.close());
+  const db = fixtureDb(t, "oracle-state", clock);
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   createLedgerProjector({ ledgerDir: rowsDir, db, lease: got.lease, clock }).tick();
@@ -553,8 +614,7 @@ test("a same-millisecond tie at the activity ring's edge agrees and is not re-he
   const lines = Array.from({ length: ACTIVITY_RING_ROWS + edge }, (_, i) => row(T0 + Math.max(i, edge) * 1_000, "board_gateway.issue_fetch_bytes", { n: i }));
   writeFileSync(join(rowsDir, LIVE), text(lines));
   const clock = fixedClock(CHECK_AT);
-  const db = openProjectorReadModel(scratch(t, "oracle-state"), "core", clock);
-  t.after(() => db.close());
+  const db = fixtureDb(t, "oracle-state", clock);
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   createLedgerProjector({ ledgerDir: rowsDir, db, lease: got.lease, clock }).tick();

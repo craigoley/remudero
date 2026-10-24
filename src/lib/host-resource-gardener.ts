@@ -1246,8 +1246,16 @@ export function startHostResourceGardener(ports: HostResourcePorts, intervalMs: 
 export function gitHeartbeatSource(repoRoot: string): () => Promise<HeartbeatRead[]> {
   const git = (args: string[]) => execFileLoopBounded("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 60_000 });
   return async () => {
+    const fetchHeartbeats = () => git(["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/heartbeat-*:refs/remotes/origin/heartbeat-*"]);
     try {
-      await git(["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/heartbeat-*:refs/remotes/origin/heartbeat-*"]);
+      try { await fetchHeartbeats(); }
+      catch (error) {
+        const stderr = (error as { stderr?: string }).stderr ?? "";
+        // Another fetch advanced this exact heartbeat ref during Git's compare-and-swap.
+        // Confirm freshness with one new fetch; a repeated race or any other error still refuses.
+        if (!/cannot lock ref 'refs\/remotes\/origin\/heartbeat-[^']+': is at [0-9a-f]{40,64} but expected [0-9a-f]{40,64}/i.test(stderr)) throw error;
+        await fetchHeartbeats();
+      }
     } catch (error) {
       const stderr = (error as { stderr?: string }).stderr;
       throw new Error(`fetching heartbeat branches failed: ${(stderr || String(error)).trim().slice(0, 200)}`, { cause: error });

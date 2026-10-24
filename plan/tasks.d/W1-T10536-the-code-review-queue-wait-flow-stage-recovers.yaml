@@ -1,0 +1,24 @@
+- id: W1-T10536
+  title: "THE CODE PR review_queue_wait STAGE SLOWED ON THE FULL SURFACE — p50 10.3 min against a 4.2 min baseline over the last 24 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-regression:code:review_queue_wait:full"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/the-code-review-queue-wait-flow-stage-recovers.test.ts
+  acceptance:
+    - claim: "the code review_queue_wait stage on the full surface returns under 2x its baseline p50"
+      proof: "grep: test(\"the code review_queue_wait stage recovers\" in test/sweep/the-code-review-queue-wait-flow-stage-recovers.test.ts"
+  note: "Filed by the flow gardener (W1-T5904). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not re-file this stage while this task is open."
+  rationale: |
+    code PRs, stage review_queue_wait on the full surface: p50 10.3 min against a 4.2 min baseline (rolling).
+    Last 24 h: n 3, p50 10.3, p90 21.4 min.
+    Slowest PRs: #13651 (21.4 min), #13736 (10.3 min), #13821 (4.6 min).
+    Find what these PRs share at this stage before changing a bound.
