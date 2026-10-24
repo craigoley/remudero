@@ -34,6 +34,7 @@ import * as memoryAdmission from "../src/lib/host-memory-admission.js";
 import * as memoryLearning from "../src/lib/host-memory-learning.js";
 import * as memoryShadow from "../src/lib/host-memory-shadow.js";
 import { childGardenPassSpawn } from "../src/lib/garden-registry.js";
+import { boundedGardenPassSpawn } from "#src/lib/garden-registry.js";
 import { defaultShadowMemoryPorts, gatherShadowInputs, installShadowMemorySink, markPsiStartAdmitted, recordShadowMemoryVerdict, resetShadowMemoryStateForTests,
   type HostMemoryBudgetPolicy, type StrictPsiTarget } from "../src/lib/host-memory-shadow.js";
 import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
@@ -2203,4 +2204,63 @@ test("W1-T10208: strict original refusals survive late settled telemetry abort a
       }
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("an outranked garden defers without consuming the two-slot pass pool or claiming a memory measurement", async () => {
+  resetShadowMemoryStateForTests(); resetMemoryAdmissionStateForTests();
+  const w = world(); w.state.availableMib = 2500; w.running.entries = [{id:"actual-build"}];
+  const stop = new AbortController();
+  const head = awaitMemoryAdmission({...request, workerClass:"review", runId:"higher-ranked", signal:stop.signal},
+    ports(w, {sleep: () => new Promise<void>(() => undefined)}));
+  const asked: string[] = [];
+  const noWait = ports(w, {sleep: async () => {throw new Error("defer-mode garden waited inside its pass pool");}});
+  const spawn = boundedGardenPassSpawn(childGardenPassSpawn({root:request.root, admission:noWait,
+    execPath:join(REPO_ROOT, "test/fixtures/garden-child-must-not-start"),
+    reserve: () => {throw new Error("an outranked garden must not reserve or spawn");}}), 2);
+  try {
+    const outcomes = await Promise.all((["plan", "gate", "test"] as const).map(name => {
+      asked.push(name); return spawn(name, [], {stopped:false});
+    }));
+    assert.equal(asked.length, 3);
+    assert.deepEqual(outcomes, Array.from({length:3}, () => ({kind:"deferred", reason:"admission-rank"})));
+    assert.equal(w.running.entries.length, 1, "rank refusal starts no child and publishes no memory reservation");
+    const refusals = w.rows.filter(r => r.step === memoryAdmission.ENFORCE_DEFER_STEP);
+    assert.equal(refusals.length, 3, "the third garden reaches admission after a pool slot settles");
+    for (const row of refusals) {
+      assert.equal(row.basis, "rank"); assert.equal(row.ahead_worker_class, "review");
+      assert.equal(row.numbers, undefined, "rank is not a fabricated physical-memory measurement");
+    }
+    assert.deepEqual(waitingStarts().map(x => x.workerClass), ["review"], "only the actual head remains queued");
+  } finally {stop.abort(); await head;}
+});
+
+test("a rank-deferred garden preserves its observed due streak but still refuses measured pressure", async () => {
+  resetShadowMemoryStateForTests(); resetMemoryAdmissionStateForTests();
+  const w = world(); w.state.availableMib = 2500; w.running.entries = [{id:"actual-build"}];
+  const stop = new AbortController();
+  const head = awaitMemoryAdmission({...request, workerClass:"review", runId:"higher-ranked", signal:stop.signal},
+    ports(w, {sleep: () => new Promise<void>(() => undefined)}));
+  const due = NOW - 60_000;
+  const ask = {...request, workerClass:"garden" as const, runId:"garden-plan", onShortfall:"defer" as const,
+    deferral:{cadenceMs:60_000, cadenceBasis:"carried" as const, dueSinceMs:due}};
+  const selected = ports(w, {sleep: async () => {throw new Error("an outranked garden waited");}});
+  try {
+    assert.deepEqual(await awaitMemoryAdmission(ask, selected), {kind:"deferred", reasons:[], basis:"rank"});
+    w.now.ms += 30_000;
+    assert.deepEqual(await awaitMemoryAdmission({...ask, deferral:{...ask.deferral, dueSinceMs:w.now.ms}}, selected),
+      {kind:"deferred", reasons:[], basis:"rank"});
+    const refusals = w.rows.filter(r => r.step === memoryAdmission.ENFORCE_DEFER_STEP);
+    assert.equal(refusals[0]!.deferred_since, new Date(due).toISOString());
+    assert.equal(refusals[1]!.deferred_since, refusals[0]!.deferred_since, "a retry does not reset the held due period");
+    assert.equal(refusals[1]!.deferrals, 2);
+    stop.abort(); await head;
+    const read = host(w.state);
+    const pressure = await awaitMemoryAdmission(ask, {...selected, readFile: path => path === "/proc/pressure/memory"
+      ? "some avg10=20.00 avg60=20.00 avg300=20.00 total=1\nfull avg10=3.00 avg60=3.00 total=1\n" : read(path)});
+    assert.equal(pressure.kind, "deferred", "old due age does not waive real PSI pressure");
+    assert.equal(w.rows.at(-1)?.basis, undefined, "the physical refusal remains a physical refusal");
+    assert.ok((w.rows.at(-1)?.reasons as string[]).includes("psi"));
+    assert.equal(w.running.entries.length, 1);
+  } finally {stop.abort(); await head;}
 });
