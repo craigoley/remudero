@@ -2503,6 +2503,7 @@ export function buildSweepEffects(
   | "postReview"
   | "repushAbsent"
   | "updateBranch"
+  | "readBranchProtectionStrict"
   | "readyDraft"
   | "draftRefusalAmendments"
   | "captureRepairFeedback"
@@ -39495,7 +39496,7 @@ interface LightPassReadPorts {
   openPrViews?: () => Promise<OpenPrView[]>;
   effects?: (deps: Parameters<typeof buildSweepEffects>[0]) => SweepDeps;
   readCompare?: (args: string[]) => Promise<unknown>;
-  now?: () => number;
+  clock?: Pick<Clock, "now">;
 }
 
 function createLightPassCompareReader(owner: string, repo: string, read: (args: string[]) => Promise<unknown>) {
@@ -39510,7 +39511,7 @@ function createLightPassCompareReader(owner: string, repo: string, read: (args: 
       const behindMainByPr = new Map<number, number>();
       const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
       await timing.measure("compare", () => Promise.all(distanceRefreshProbeTargets(prs).map(async (pr) => {
-        const start = timing.now();
+        const start = timing.clock.now();
         let entry = memo.get(pr.prNumber);
         const cacheHit = main !== undefined && entry?.head === pr.headSha && entry.main === main;
         if (!cacheHit) {
@@ -39539,7 +39540,7 @@ function createLightPassCompareReader(owner: string, repo: string, read: (args: 
           Object.assign(row, { outcome: "error", error: String(error) });
           if (memo.get(pr.prNumber) === entry) memo.delete(pr.prNumber);
         } finally {
-          row.elapsed_ms = timing.now() - start;
+          row.elapsed_ms = timing.clock.now() - start;
           timing.compareReads.push(row);
         }
       })));
@@ -39580,7 +39581,7 @@ export function buildSweepLightHook(
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
     // so `post-review` is the only lane left.
     const reviewOnly = scope?.reviewOnly === true;
-    const timing = new LightPassPreReviewTiming(io.now);
+    const timing = new LightPassPreReviewTiming(io.clock);
     let timingWritten = false;
     const finishTiming = () => {
       if (timingWritten) return;

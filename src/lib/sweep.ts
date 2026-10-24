@@ -4380,9 +4380,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T7735 — read once per pass by the refresh value test. A shape without a boolean `strict` is
     // unread (`undefined`), which keeps the pre-W1-T7735 refresh.
     readBranchProtectionStrict: () => {
-      const protection = ghJsonForBuild(["api", `repos/${owner}/${repo}/branches/main/protection/required_status_checks`]) as
-        { strict?: unknown } | null | undefined;
-      return typeof protection?.strict === "boolean" ? protection.strict : undefined;
+      const args = ["api", `repos/${owner}/${repo}/branches/main/protection/required_status_checks`];
+      const strict = (value: unknown): boolean | undefined => {
+        const protection = value as { strict?: unknown } | null | undefined;
+        return typeof protection?.strict === "boolean" ? protection.strict : undefined;
+      };
+      // Explicit synchronous fixtures keep their seam; production never blocks the loop here.
+      return deps.ghJsonImpl ? strict(ghJsonForBuild(args)) : readJsonImpl(args).then(strict);
     },
     // W1-T7735 — the LLM overlap judge spends only for a production entrypoint, the same flag the
     // progress judge reads; a fixture gets none, and ambiguous overlap reads `judge-unavailable`.
@@ -21806,7 +21810,7 @@ export class LightPassPreReviewTiming {
     after: () => { if (this.scope.getStore()) this.leave(); },
   });
 
-  constructor(readonly now: () => number = () => performance.now()) { this.hook.enable(); }
+  constructor(readonly clock: Pick<Clock, "now"> = clockFromMillisFn(() => performance.now())) { this.hook.enable(); }
 
   private enter(): void { if (this.depth++ === 0) this.started = performance.now(); }
   private leave(): void { if (--this.depth === 0) this.syncMs += performance.now() - this.started; }
@@ -21818,15 +21822,15 @@ export class LightPassPreReviewTiming {
   }
 
   sync<T>(phase: string, action: () => T): T {
-    const start = this.now();
+    const start = this.clock.now();
     try { return action(); }
-    finally { this.phaseMs[phase] = (this.phaseMs[phase] ?? 0) + this.now() - start; }
+    finally { this.phaseMs[phase] = (this.phaseMs[phase] ?? 0) + this.clock.now() - start; }
   }
 
   async measure<T>(phase: string, action: () => T | Promise<T>): Promise<T> {
-    const start = this.now();
+    const start = this.clock.now();
     try { return await action(); }
-    finally { this.phaseMs[phase] = (this.phaseMs[phase] ?? 0) + this.now() - start; }
+    finally { this.phaseMs[phase] = (this.phaseMs[phase] ?? 0) + this.clock.now() - start; }
   }
 
   finish(): Record<string, unknown> {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as turn } from "node:timers/promises";
 import { test } from "node:test";
-import { buildSweepLightHook } from "#src/run-task.js";
+import { buildSweepEffects, buildSweepLightHook } from "#src/run-task.js";
 import { LightPassPreReviewTiming, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 
@@ -62,7 +62,7 @@ function fixture(prs: OpenPrView[]) {
       compares.push(args);
       return { ahead_by: 2, files: [{ filename: "src/subject.ts" }] };
     },
-    now: () => clock,
+    clock: { now: () => clock },
   };
   const hook = () => buildSweepLightHook("o", "r", { root } as never, effects.ledgerPath, "T9918",
     { tasks: [], byId: new Map() } as never, (step, extra) => { logs.push({ step, ...extra }); },
@@ -194,6 +194,28 @@ test("W1-T9918: the default compare transport leaves the loop available while it
     assert.deepEqual(f.arms, []);
     await running;
     assert.deepEqual(f.arms, [991831]);
+    assert.deepEqual(f.logs.filter((r) => r.step === "sweep_light.error"), []);
+  } finally { await running; f.cleanup(); }
+});
+
+test("W1-T9918: the default ready value-gate read leaves the loop available", async (t) => {
+  const f = fixture([pr(991832, true), pr(991833)]);
+  f.io.effects = (deps) => ({ ...f.effects,
+    readBranchProtectionStrict: buildSweepEffects(deps).readBranchProtectionStrict });
+  const endpoint = "branches/main/protection/required_status_checks";
+  f.shim.addRoute({ when: endpoint, delaySeconds: 0.2, stdout: JSON.stringify({ strict: false }) });
+  let settled = false;
+  const running = f.hook()().finally(() => { settled = true; });
+  try {
+    await t.waitFor(() => f.shim.events().some((e) => e.phase === "start" && e.args.some((a) => a.includes(endpoint))),
+      { interval: 1, timeout: 2000 });
+    await turn();
+    assert.equal(settled, false);
+    assert.equal(f.shim.events().filter((e) => e.phase === "end" && e.args.some((a) => a.includes(endpoint))).length, 0);
+    assert.ok(f.rows.some((r) => r.step === "sweep.review_eligible" && r.pr_number === 991833));
+    assert.deepEqual(f.arms, [], "the ready PR still waits for its value gate");
+    await running;
+    assert.deepEqual(f.updates, [991832]);
     assert.deepEqual(f.logs.filter((r) => r.step === "sweep_light.error"), []);
   } finally { await running; f.cleanup(); }
 });
