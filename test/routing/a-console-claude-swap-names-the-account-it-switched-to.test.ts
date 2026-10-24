@@ -78,6 +78,17 @@ async function login(f: ReturnType<typeof fixture>, stagedConfig: string | undef
 
 test("W1-T10512: a console Claude swap carries the new account into the fleet store and keeps the rest of its config", async (t) => {
   const f = fixture(t);
+  const beforeIdentity = String.raw`{
+  "projects": {"/fixture/project": {"history": ["one", "two"], "trusted": true}},
+  "cachedUsageUtilization": {"accountUuid": "old-uuid", "fetchedAtMs": 123},
+  "hasCompletedOnboarding": true, "settings": {"theme": "dark", "count": 2},
+  "escaped": "\u0061 \"oauthAccount\": { } [ ] , : \\ \"quoted\"",
+  "large": 9007199254740993, "exponent": 1.2300e+42, "negativeZero": -0,
+  "nested": [{"oauthAccount": {"keep": true}}, ["}", "[", "\\"]],
+  "oauth\u0041ccount" : `;
+  const afterIdentity = '\r\n, "tail": "\\u007a"\r\n}\n';
+  f.originalConfig = beforeIdentity + JSON.stringify(oldAccount, null, 4) + afterIdentity;
+  writeFileSync(f.config, f.originalConfig);
   const locks = [join(f.store, CLAUDE_REFRESH_LOCK_NAME), `${f.store}.lock`];
   const rename = fs.renameSync;
   let identityWrites = 0;
@@ -100,8 +111,10 @@ test("W1-T10512: a console Claude swap carries the new account into the fleet st
       return true;
     },
   });
+  assert.equal(readFileSync(f.config, "utf8"), beforeIdentity + JSON.stringify(newAccount) + afterIdentity,
+    "only the top-level identity value may change; retain number literals, escapes and whitespace");
   const carried = JSON.parse(readFileSync(f.config, "utf8"));
-  assert.deepEqual(carried, { ...retainedConfig, oauthAccount: newAccount });
+  assert.deepEqual(carried, { ...JSON.parse(f.originalConfig), oauthAccount: newAccount });
   assert.equal(readAccountUsageFile(f.config).uuid, newAccount.accountUuid);
   assert.ok(result.kind === "replaced");
   assert.equal(result.identity, "carried");
@@ -118,6 +131,34 @@ test("W1-T10512: a console Claude swap carries the new account into the fleet st
   assert.equal(created.identity, "carried");
   assert.deepEqual(JSON.parse(readFileSync(f.config, "utf8")), { oauthAccount: newAccount });
   assert.equal(identityWrites, 2);
+});
+
+test("W1-T10512: identity splicing preserves surrounding bytes for every old value shape", async (t) => {
+  const replacement = JSON.stringify(newAccount);
+  const cases = [
+    ...['{"old": {"nested": [1, {"key": "value"}]}}', '["}", {"oauthAccount": "nested"}]',
+      '"old \\"quoted\\" value"', "false", "null", "9007199254740993"]
+      .map((value) => ({
+        before: ` \r\n{ "oauthAccount" : ${value} , "keep": "\\u0061 🐈", "large": 9007199254740993 }\n`,
+        after: ` \r\n{ "oauthAccount" : ${replacement} , "keep": "\\u0061 🐈", "large": 9007199254740993 }\n`,
+      })),
+    { before: '{ "oauthAccount": null, "oauth\\u0041ccount": [] }\n',
+      after: `{ "oauthAccount": ${replacement}, "oauth\\u0041ccount": ${replacement} }\n` },
+    { before: " \r\n{ \t }\n", after: ` \r\n{ \t "oauthAccount":${replacement}}\n` },
+    { before: '{ "nested": {"oauthAccount": 1}, "large": 9007199254740993 \n}\n',
+      after: `{ "nested": {"oauthAccount": 1}, "large": 9007199254740993 \n,"oauthAccount":${replacement}}\n` },
+  ];
+  for (const [index, c] of cases.entries()) {
+    await t.test(`W1-T10512: raw config variant ${index}`, async (t) => {
+      const f = fixture(t);
+      writeFileSync(f.config, c.before);
+      const result = await replaceClaudeFleetCredential(f);
+      assert.equal(result.kind, "replaced");
+      assert.equal(Reflect.get(result, "identity"), "carried");
+      assert.deepEqual(readFileSync(f.config), Buffer.from(c.after));
+      assert.deepEqual(JSON.parse(readFileSync(f.config, "utf8")).oauthAccount, newAccount);
+    });
+  }
 });
 
 test("W1-T10512: a swap that cannot carry the identity leaves the store config byte-identical and says so", async (t) => {

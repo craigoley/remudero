@@ -206,6 +206,39 @@ function isClaudeConfigObject(value: unknown): value is Record<string, unknown> 
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Input is a validated JSON object; splice only top-level identity values, including duplicate keys. */
+function replaceClaudeConfigIdentity(raw: string, identity: Record<string, unknown>): string {
+  const replacement = JSON.stringify(identity);
+  let depth = 0;
+  let nextIdentity = false;
+  let start = -1;
+  let copiedThrough = 0;
+  let output = "";
+  // Strings are indivisible tokens, so braces, colons and escaped quotes inside them cannot frame a value.
+  const tokens = /("(?:\\.|[^"\\])*")\s*:|"(?:\\.|[^"\\])*"|[{}[\]]|[^\s{}[\],:]+/g;
+  for (const token of raw.matchAll(tokens)) {
+    if (token[1] !== undefined) {
+      if (depth === 1) nextIdentity = JSON.parse(token[1]) === "oauthAccount";
+      continue;
+    }
+    if (nextIdentity) {
+      start = token.index;
+      nextIdentity = false;
+    }
+    if (token[0] === "{" || token[0] === "[") depth++;
+    else if (token[0] === "}" || token[0] === "]") depth--;
+    if (start !== -1 && depth === 1) {
+      output += raw.slice(copiedThrough, start) + replacement;
+      copiedThrough = token.index + token[0].length;
+      start = -1;
+    }
+  }
+  if (copiedThrough !== 0) return output + raw.slice(copiedThrough);
+  const closingBrace = raw.lastIndexOf("}");
+  const comma = raw.slice(raw.indexOf("{") + 1, closingBrace).trim() ? "," : "";
+  return raw.slice(0, closingBrace) + comma + '"oauthAccount":' + replacement + raw.slice(closingBrace);
+}
+
 /** W1-T10512: carry only the staged identity; the store owns every other config key. Locks are held. */
 function carryClaudeFleetIdentity(stagingDir: string, store: string): Extract<ClaudeFleetCredentialReplacement, { kind: "replaced" }>["identity"] {
   let staged: unknown;
@@ -217,9 +250,11 @@ function carryClaudeFleetIdentity(stagingDir: string, store: string): Extract<Cl
   }
   if (!isClaudeConfigObject(staged) || !isClaudeConfigObject(staged.oauthAccount)) return "staged-identity-missing";
   const configFile = join(store, ".claude.json");
+  let rawConfig = "{}";
   let config: unknown;
   try {
-    config = JSON.parse(readFileSync(configFile, "utf8"));
+    rawConfig = readFileSync(configFile, "utf8");
+    config = JSON.parse(rawConfig);
   } catch (error) {
     // Only absence starts a new config; other read or parse failures must preserve the store's bytes.
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") return "store-config-unreadable";
@@ -228,7 +263,7 @@ function carryClaudeFleetIdentity(stagingDir: string, store: string): Extract<Cl
   if (!isClaudeConfigObject(config)) return "store-config-unreadable";
   const temp = join(store, `.claude.json.login-${randomUUID()}`);
   try {
-    writeFileSync(temp, JSON.stringify({ ...config, oauthAccount: staged.oauthAccount }), { mode: 0o600, flag: "wx" });
+    writeFileSync(temp, replaceClaudeConfigIdentity(rawConfig, staged.oauthAccount), { mode: 0o600, flag: "wx" });
     chmodSync(temp, 0o600);
     renameSync(temp, configFile);
   } catch {
