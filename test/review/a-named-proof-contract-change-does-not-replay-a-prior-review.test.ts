@@ -10,7 +10,8 @@ import { claimReviewDecision, reviewContractDigest, reviewDecisionDigest, review
 // Either independently changed parent engine is still too old for the combined contract.
 // An unrelated engine bump must not make this proof pass on the unchanged base.
 const priorEngines = ['promised-followups-snapshot-v3', 'promised-followups-named-execution-v4',
-  'explained-semantic-failures-v1'] as const;
+  'explained-semantic-failures-v1', 'trusted-proof-receipts-v1',
+  'promised-followups-and-explained-semantic-failures-v5'] as const;
 const taskId = 'PR-7';
 const prUrl = 'https://github.com/example/fixture/pull/7';
 const head = 'a'.repeat(40);
