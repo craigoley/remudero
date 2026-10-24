@@ -1469,6 +1469,9 @@
 # shipped records W1-T110, W1-T111, W1-T192). Ratification note: plan/notes/ratification-W1-T9158.md.
 # This block carries no claim, proof, or task; it maps to a real W1-T id only on operator ratification.
 
+# W1-T9159 validation record — its shard declares `files:` and an executable `acceptance` proof.
+# The matching validation note is plan/notes/ratification-W1-T9159.md.
+
 - id: W1-T110
   title: "rmd inbox — the ratification inbox's deterministic core: Architect-drafted candidates + a rule-2 readiness predicate; deferred-with-trigger is never recommended (ratifies P25 i)"
   repo: remudero

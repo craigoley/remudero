@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 14.00
   risk: high  # operator-reviewed cross-system deletion/audit recovery; no automated --apply
@@ -11,7 +11,7 @@
   origin: "operator 2026-10-14 (\"go with your recommendations\"): the refs/rmd-id census and reaper proposal of the rmd-id leak session (PR #11707)"
   plan_refs: [W1-T3300, W1-T9488, W1-T5279, W1-T1055]
   files: [src/run-task.ts, test/the-reservation-audit-reaps-only-its-orphaned-candidates.test.ts, docs/cli-reference.md]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
@@ -113,3 +113,11 @@
     candidate's exact anchor remains in a verified pending intent. In a fresh invocation after ledger
     rotation, reconcile absent, unchanged and moved refs without deleting any ref or attributing an
     unproven actor; unread or torn history must refuse the reconciliation and any new deletion batch.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-24T06:48:32.860Z"
+    pin: "8184565a5a5d870a8dc3a37ba0bcd2c69a0dfe0d1e9a62ac34e784e35729ee38"

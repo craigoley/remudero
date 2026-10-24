@@ -11,7 +11,10 @@
  * injected, so "later" is provable without a real 30-minute wait.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
+import { createHash } from "node:crypto";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,7 +23,7 @@ import test from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { fixedClock } from "../src/lib/clock.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import { newestActivityMs, reapStaleWorktrees, reapStaleWorktreesAsync, runWorktreeReapRung, worktreesDir } from "../src/lib/worker.js";
+import { reviewWorktreeHoldState, newestActivityMs, reapStaleWorktrees, reapStaleWorktreesAsync, runWorktreeReapRung, worktreesDir } from "../src/lib/worker.js";
 import { daemonCommand, materializeReviewWorktree, withMaterializedWorktree } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import {
@@ -488,3 +491,105 @@ for (const mode of ["sync", "async", "rung"] as const) {
     }
   });
 }
+
+
+test("a separate review worker protects its real checkout from both reapers until its existing claim releases", async () => {
+  const u = reviewFixture();
+  const pr = 13947;
+  const runId = `review-PR${pr}-1234`;
+  const claimsDir = join(u.universe, "state", "inflight", "review-workers");
+  const lockId = `review-worker-${createHash("sha256").update(runId).digest("hex")}`;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import {acquireInflightLock} from "#src/lib/inflight-lock.js";
+    const held = acquireInflightLock(${JSON.stringify(claimsDir)}, ${JSON.stringify(lockId)}, {run_id:${JSON.stringify(runId)}, reclaim:false});
+    process.stdin.resume();
+    process.stdout.write("OWNED\\n");
+    try { await new Promise(resolve => process.stdin.once("end", resolve)); }
+    finally { held.release(); }
+  `], {cwd: REPO_ROOT, stdio: ["pipe", "pipe", "pipe"]});
+  const exit = once(child, "exit");
+  let stderr = "";
+  child.stderr.on("data", chunk => { stderr += chunk; });
+  try {
+    const ready = await Promise.race([once(child.stdout, "data"), exit.then(() => { throw new Error(`owner exited: ${stderr}`); })]);
+    assert.match(String(ready[0]), /OWNED/);
+    assert.notEqual(child.pid, process.pid, "ownership is in another real process, not the local hold set");
+    const late = fixedClock(Date.now() + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 60_000);
+    const trees = [1, 2, 3].map(n => cutLinkedTree(u, pr, n, headSha(u.repoDir)));
+    const held = sweepStrandedReviewWorktrees(u.config, collector().log, {clock: late});
+    assert.deepEqual(held.reclaimed, []);
+    assert.equal(held.kept.filter(x => x.reason === "live-review").length, 3);
+    const sync = reapStaleWorktrees(u.worktreesRoot, {now: () => late.now()});
+    const asyncResult = await reapStaleWorktreesAsync(u.worktreesRoot, {now: () => late.now()});
+    assert.deepEqual(sync.reaped, []);
+    assert.deepEqual(asyncResult.reaped, []);
+    for (const tree of trees) assert.equal(headSha(tree.path), headSha(u.repoDir), "real proof checkout survives");
+    assert.ok(existsSync(join(claimsDir, `${lockId}.lock`)), "neither reaper changes the owner's claim");
+    child.stdin.end();
+    const [code] = await exit;
+    assert.equal(code, 0, stderr);
+    assert.equal(existsSync(join(claimsDir, `${lockId}.lock`)), false, "normal owner release remains authoritative");
+    const released = sweepStrandedReviewWorktrees(u.config, collector().log, {clock: late});
+    assert.deepEqual(released.reclaimed.sort(), trees.map(x => x.name).sort());
+    for (const tree of trees) assert.equal(existsSync(tree.path), false);
+  } finally {
+    child.stdin.end();
+    await exit;
+    u.cleanup();
+  }
+});
+
+test("unreadable or malformed shared review ownership keeps the checkout as UNKNOWN without changing claims", () => {
+  const u = reviewFixture();
+  try {
+    const tree = cutLinkedTree(u, 13947, 1, headSha(u.repoDir));
+    const late = fixedClock(Date.now() + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 60_000);
+    const parent = join(u.universe, "state", "inflight");
+    mkdirSync(parent, {recursive:true});
+    const claimsDir = join(parent, "review-workers");
+    // ENOTDIR is a real failed enumeration, independent of privilege-dependent mode bits.
+    writeFileSync(claimsDir, "unreadable-directory-control");
+    const unreadable = sweepStrandedReviewWorktrees(u.config, collector().log, {clock: late});
+    assert.deepEqual(unreadable.reclaimed, []);
+    assert.equal(unreadable.kept[0]?.reason, "review-ownership-unknown");
+    assert.deepEqual(reapStaleWorktrees(u.worktreesRoot, {now: () => late.now()}).reaped, []);
+    rmSync(claimsDir);
+    mkdirSync(claimsDir);
+    const malformed = join(claimsDir, "review-worker-torn.lock");
+    writeFileSync(malformed, '{"run_id":');
+    const held = sweepStrandedReviewWorktrees(u.config, collector().log, {clock: late});
+    assert.equal(held.kept[0]?.reason, "review-ownership-unknown");
+    assert.ok(existsSync(malformed), "read-only ownership check preserves the original damaged evidence");
+    assert.equal(headSha(tree.path), headSha(u.repoDir));
+    rmSync(malformed);
+    const released = sweepStrandedReviewWorktrees(u.config, collector().log, {clock: late});
+    assert.deepEqual(released.reclaimed, [tree.name]);
+  } finally { u.cleanup(); }
+});
+
+
+test("shared review claims protect only their PR and unverifiable identity never becomes absence", () => {
+  const u = reviewFixture();
+  try {
+    const candidate = join(u.worktreesRoot, "review-PR13947-1");
+    const claimsDir = join(u.universe, "state", "inflight", "review-workers");
+    mkdirSync(claimsDir, {recursive:true});
+    const runId = "review-PR139470-2";
+    const lock = join(claimsDir, `review-worker-${createHash("sha256").update(runId).digest("hex")}.lock`);
+    writeFileSync(lock, JSON.stringify({run_id:runId, pid:process.pid}));
+    assert.equal(reviewWorktreeHoldState(candidate), "unheld", "PR prefixes do not alias");
+    assert.equal(reviewWorktreeHoldState(join(u.worktreesRoot, "run-other-1")), "unheld");
+    rmSync(lock);
+    const matching = "review-PR13947-3";
+    const exact = join(claimsDir, `review-worker-${createHash("sha256").update(matching).digest("hex")}.lock`);
+    for (const record of [null, {run_id:matching, pid:0}, {run_id:"unknown", pid:process.pid}]) {
+      writeFileSync(exact, JSON.stringify(record));
+      assert.equal(reviewWorktreeHoldState(candidate), "unknown");
+    }
+    writeFileSync(exact, JSON.stringify({run_id:matching, pid:2147483647, host:"foreign", startedAt:"unknown"}));
+    assert.equal(reviewWorktreeHoldState(candidate), "held", "PID absence or an unverifiable host never grants destruction");
+    rmSync(exact);
+    writeFileSync(join(claimsDir, "unrecognized.lock"), JSON.stringify({run_id:matching, pid:process.pid}));
+    assert.equal(reviewWorktreeHoldState(candidate), "unknown", "a mismatched filename is not a trustworthy owner identity");
+  } finally {u.cleanup();}
+});

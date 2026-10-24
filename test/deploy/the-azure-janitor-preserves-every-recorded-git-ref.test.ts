@@ -28,9 +28,10 @@ function privateCommit(repo: string, ref: string) {
   git(repo, "reset", "--hard", published);
   return oid;
 }
-function restore(fx: PhaseFixture, saved: string) {
+function restore(fx: PhaseFixture, saved: string, published = true) {
   const repo = join(fx.root, "independent-restore");
-  git(fx.root, "clone", "--quiet", fx.origin, repo);
+  if (published) git(fx.root, "clone", "--quiet", fx.origin, repo);
+  else git(fx.root, "init", "--quiet", repo);
   git(repo, "bundle", "verify", join(saved, "unpublished.bundle"));
   git(repo, "bundle", "unbundle", join(saved, "unpublished.bundle"));
   for (const line of readFileSync(join(saved, "refs.txt"), "utf8").trim().split("\n")) {
@@ -88,5 +89,24 @@ test("the Azure janitor keeps an idle checkout if a private ref moves after pres
     assert.equal(existsSync(repo), true, result.stdout);
     assert.match(result.stdout, /Git refs moved or became unreadable before retire/);
     assert.ok(existsSync(join(copy(fx, repo), "unpublished.bundle")));
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+
+test("the Azure janitor preserves private history when the publication probe fails", () => {
+  const { fx, roots, repo } = setup();
+  try {
+    const privateHead = commitFile(repo, "operator.txt", "not on the remote\n", "private operator work");
+    git(repo, "update-ref", "refs/remotes/origin/main", privateHead);
+    rmSync(join(fx.origin, "HEAD"));
+    age(repo, 13);
+    const result = pass(fx, roots);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(existsSync(repo), false, result.stdout);
+    const saved = copy(fx, repo);
+    assert.ok(existsSync(join(saved, "unpublished.bundle")), "unverified tracking refs must not exclude private history");
+    const restored = restore(fx, saved, false);
+    assert.equal(git(restored, "show", privateHead + ":operator.txt"), "not on the remote\n");
+    assert.equal(git(restored, "rev-parse", "refs/remotes/origin/main").trim(), privateHead);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });

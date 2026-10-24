@@ -1770,6 +1770,8 @@ export interface DaemonDeps {
    *  `eligible <= 0` is no demand: the idle branch sleeps as it always has. A `cadenceMs` that is
    *  `undefined` (nothing observed yet) leaves the idle sleep a single poll interval. */
   readIdleReviewDemand?: () => { eligible: number; cadenceMs?: number; medianReviewMs?: number; pushesPerPrHour?: number } | undefined;
+  /** Existing bounded completed-review memo, independent of current eligible demand. */
+  readReviewMedianMs?: () => number | undefined;
   /** Called exactly once, when a block classifies as a genuine blocker — one or more tasks
    *  transitively depend on the blocked task. The real command escalates naming the dependents.
    *  Optional: omitted, a genuine blocker still halts the loop, it just opens no issue (W1-T46). */
@@ -4509,14 +4511,17 @@ export async function runDaemon(
       detached_sweep_actions: detached, in_flight_reviews: reviews.size, waited_on: observation.snapshot() });
   };
   // W1-T8172 design 2: the drain's clock admits a pass only while the time left exceeds the measured review length.
-  const measuredReviewLength = (): { ms?: number; fixMs?: number; source: "measured" | "no_history" | "unreadable" } => {
+  const measuredReviewLength = (): { ms?: number; fixMs?: number; source: "measured" | "measured_memo" | "no_history" | "unreadable" } => {
     try {
       const lines = deps.readLedgerLines?.() ?? [];
       const ms = medianReviewRunMs(lines);
       const fixMs = medianFixRoundMs(lines);
-      return ms === undefined ? { fixMs, source: "no_history" } : { ms, fixMs, source: "measured" };
+      if (ms !== undefined) return { ms, fixMs, source: "measured" };
+      const memoMs = deps.readReviewMedianMs?.();
+      return typeof memoMs === "number" && Number.isFinite(memoMs) && memoMs > 0
+        ? { ms: memoMs, fixMs, source: "measured_memo" } : { fixMs, source: "no_history" };
     } catch (error) {
-      // An unreadable ledger is no history: the clock admits as before W1-T8172, and the completion row says why.
+      // An unreadable timing input is no history: the clock admits as before W1-T8172, and the completion row says why.
       return { source: "unreadable" };
     }
   };

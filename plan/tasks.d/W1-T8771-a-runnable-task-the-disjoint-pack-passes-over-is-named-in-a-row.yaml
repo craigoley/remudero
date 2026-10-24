@@ -14,7 +14,7 @@
     - src/lib/drain.ts
     - src/lib/daemon.ts
     - test/a-runnable-task-the-disjoint-pack-passes-over-is-named-in-a-row.test.ts
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |
