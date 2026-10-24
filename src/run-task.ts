@@ -878,6 +878,8 @@ import {
   reservationFloorFrom,
   reservationPolicyCurrency,
   reservationTakeoverFields,
+  reservationHolderBranch,
+  RESERVATION_PUSH_GRACE_MS,
   reserveTaskIdBlock,
   reserveTaskIdBlockRemote,
   reserveTaskIdRemote,
@@ -3101,6 +3103,7 @@ import {
 import { shouldRecordDecision, reversibilityFactor, type DiffFileChange } from "./lib/risk-score.js";
 import {
   assertLiveWriteAllowed,
+  assertClaimRefPushAllowed,
   isTestRunner,
   liveWritesExempt,
   LIVE_WRITE_OVERRIDE_ENV,
@@ -22605,6 +22608,8 @@ export interface NextTaskIdReserveDeps {
   openPrTexts?: () => string[];
   auditNowMs?: () => number;
   auditHistoryIds?: () => number[];
+  auditPullRequests?: () => ReservationAuditPull[];
+  auditPrFetch?: GhApiFetcher;
   /** W1-T4388: the `--prefix` mint's target checkout (defaults to {@link cloneTargetPlan}) and its filing branch. */
   openTargetRepo?: (repo: string) => ReturnType<typeof cloneTargetPlan>;
   filingBranch?: string;
@@ -22711,6 +22716,21 @@ export interface ReservationAuditReport {
   thresholdDays: number;
   rows: ReservationAuditRow[];
   degraded: string[];
+  reap?: { boundMs: number | null; basis: ReservationReapBasis; reservations: ReservationAuditRef[]; run: ReturnType<typeof gitRunAdapter> };
+}
+
+interface ReservationAuditPull {
+  body: string | null;
+  head: { ref: string };
+  created_at: string;
+  state: string;
+}
+
+interface ReservationReapBasis {
+  n: number;
+  max_ms: number | null;
+  p50_ms: number | null;
+  population: string[];
 }
 
 type ReservationAuditRefsRead =
@@ -22718,7 +22738,7 @@ type ReservationAuditRefsRead =
   | { status: "unknown"; reason: string };
 
 type ReservationAuditBranchesRead =
-  | { status: "ok"; branches: Map<string, string[]> }
+  | { status: "ok"; branches: Map<string, string[]>; live: Set<string> }
   | { status: "unknown"; reason: string };
 
 function reservationAuditAgeDays(rest: string[]): number | null {
@@ -22728,10 +22748,14 @@ function reservationAuditAgeDays(rest: string[]): number | null {
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
+function reservationAnchorTimestamp(anchor: string): number {
+  const holder = parseReservationHolderLine(anchor);
+  return Date.parse(RESERVATION_AUDIT_ISO_RE.exec(anchor)?.[0]
+    ?? (holder.status === "known" ? holder.holder.startedAt : undefined) ?? "");
+}
+
 function reservationAnchorAgeMs(anchor: string, nowMs: number): number | null {
-  const m = RESERVATION_AUDIT_ISO_RE.exec(anchor);
-  if (!m) return null;
-  const t = Date.parse(m[0]);
+  const t = reservationAnchorTimestamp(anchor);
   if (!Number.isFinite(t)) return null;
   return Math.max(0, nowMs - t);
 }
@@ -22787,20 +22811,22 @@ function readReservationAuditAnchor(
 function openRunBranchesByTaskId(run: (args: string[]) => { status: number; stdout: string; stderr: string }): ReservationAuditBranchesRead {
   let res: { status: number; stdout: string; stderr: string };
   try {
-    res = run(["ls-remote", "--heads", "origin", "run-*"]);
+    res = run(["ls-remote", "--heads", "origin"]);
   } catch (err) {
     return { status: "unknown", reason: `open run branch read threw: ${String(err)}` };
   }
   if (res.status !== 0) return { status: "unknown", reason: `open run branch read exited ${res.status}: ${res.stderr}` };
   const byId = new Map<string, string[]>();
+  const live = new Set<string>();
   for (const raw of (res.stdout ?? "").split("\n")) {
     const ref = raw.trimEnd().split(/[ \t]+/)[1] ?? "";
+    if (ref.startsWith("refs/heads/")) live.add(ref.slice("refs/heads/".length));
     const m = RUN_BRANCH_TASK_REF_RE.exec(ref);
     if (!m) continue;
     const branch = ref.slice("refs/heads/".length);
     byId.set(m[1], [...(byId.get(m[1]) ?? []), branch]);
   }
-  return { status: "ok", branches: byId };
+  return { status: "ok", branches: byId, live };
 }
 
 export function classifyReservationAuditRows(opts: {
@@ -22809,6 +22835,8 @@ export function classifyReservationAuditRows(opts: {
   historicalIds: ReadonlySet<string>;
   openRunBranchesById: ReadonlyMap<string, readonly string[]> | "unknown";
   openPrTrailerIds: ReadonlySet<string> | "unknown";
+  liveHolderBranches?: ReadonlySet<string>;
+  strictAge?: boolean;
   thresholdDays: number;
   nowMs: number;
 }): ReservationAuditRow[] {
@@ -22821,6 +22849,8 @@ export function classifyReservationAuditRows(opts: {
       for (const branch of opts.openRunBranchesById.get(r.taskId) ?? []) reasons.push(`open run branch ${branch}`);
     }
     if (opts.openPrTrailerIds !== "unknown" && opts.openPrTrailerIds.has(r.taskId)) reasons.push("open PR trailer");
+    const holder = reservationHolderBranch(r.anchor);
+    if (holder && opts.liveHolderBranches?.has(holder)) reasons.push(`live holder branch ${holder}`);
     const ageMs = reservationAnchorAgeMs(r.anchor, opts.nowMs);
     const ageDays = ageMs === null ? null : ageMs / RESERVATION_AUDIT_MS_PER_DAY;
     if (reasons.length > 0) return { taskId: r.taskId, status: "HELD", reasons, anchor: r.anchor, ageDays };
@@ -22830,8 +22860,11 @@ export function classifyReservationAuditRows(opts: {
     if (opts.openPrTrailerIds === "unknown") {
       return { taskId: r.taskId, status: "UNKNOWN", reasons: ["open PR read failed"], anchor: r.anchor, ageDays };
     }
+    if (opts.liveHolderBranches && parseReservationHolderLine(r.anchor).status === "unreadable") {
+      return { taskId: r.taskId, status: "UNKNOWN", reasons: ["anchor holder unreadable"], anchor: r.anchor, ageDays };
+    }
     if (ageMs === null) return { taskId: r.taskId, status: "UNKNOWN", reasons: ["anchor age unreadable"], anchor: r.anchor, ageDays };
-    if (ageMs < thresholdMs) return { taskId: r.taskId, status: "HELD", reasons: ["younger than threshold"], anchor: r.anchor, ageDays };
+    if (ageMs < thresholdMs || (opts.strictAge && ageMs === thresholdMs)) return { taskId: r.taskId, status: "HELD", reasons: ["younger than threshold"], anchor: r.anchor, ageDays };
     return { taskId: r.taskId, status: "CANDIDATE", reasons: ["no holding evidence older than threshold"], anchor: r.anchor, ageDays };
   });
 }
@@ -22855,6 +22888,10 @@ export function renderReservationAuditReport(report: ReservationAuditReport): st
     `reservation audit: ${report.rows.length} reservation(s); HELD ${held}; CANDIDATE ${candidate}; UNKNOWN ${unknown}`,
     `age threshold: ${report.thresholdDays} day(s)`,
   ];
+  if (report.reap) {
+    const { boundMs, basis } = report.reap;
+    lines.push(`reap bar: ${boundMs ?? "unknown"} ms; n=${basis.n}; max_ms=${basis.max_ms}; p50_ms=${basis.p50_ms}; population=HELD anchors matched to first PR by holder/run branch or trailer [${basis.population.join(", ")}]`);
+  }
   for (const d of report.degraded) lines.push(`DEGRADED: ${d}`);
   for (const row of report.rows) {
     const age = row.ageDays === null ? "unknown" : `${row.ageDays.toFixed(1)}d`;
@@ -22869,8 +22906,13 @@ function buildReservationAuditReport(opts: {
   thresholdDays: number;
   self: { owner: string; repo: string };
   deps: NextTaskIdReserveDeps;
+  reap?: boolean;
 }): ReservationAuditReport | "unreadable-reservations" {
-  const run = gitRunAdapter(opts.deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" })));
+  const run = gitRunAdapter(opts.deps.runGit ?? ((args: string[]) => {
+    const r = spawnSync("git", args, { cwd: opts.deps.repoRoot ?? repoRoot, encoding: "utf8", maxBuffer: 1 << 26 });
+    return { ...r, stderr: r.stderr || r.error?.message };
+  }));
+  if (opts.reap) return buildReservationReapReport(opts, run);
   const refs = readReservationAuditRefs(run);
   if (refs.status === "unknown") return "unreadable-reservations";
   const reservations = refs.refs.map((r) => ({ ...r, anchor: readReservationAuditAnchor(r.ref, run) }));
@@ -22897,11 +22939,190 @@ function buildReservationAuditReport(opts: {
       declaredIds,
       historicalIds,
       openRunBranchesById: branches.status === "ok" ? branches.branches : "unknown",
+      liveHolderBranches: branches.status === "ok" ? branches.live : undefined,
       openPrTrailerIds,
       thresholdDays: opts.thresholdDays,
       nowMs: opts.deps.auditNowMs?.() ?? Date.now(),
     }),
   };
+}
+
+function buildReservationReapReport(
+  opts: { planPath: string; self: { owner: string; repo: string }; deps: NextTaskIdReserveDeps },
+  run: ReturnType<typeof gitRunAdapter>,
+): ReservationAuditReport {
+  const degraded: string[] = [];
+  const read = <T>(surface: string, fn: () => T, fallback: T): T => {
+    try { return fn(); }
+    catch (error) {
+      const reason = `${surface}: ${String(error)}`;
+      degraded.push(reason);
+      return fallback;
+    }
+  };
+  const checked = (args: string[]): string => {
+    const answer = run(args);
+    if (answer.status !== 0) throw new Error(answer.stderr || `git ${args[0]} exited ${answer.status}`);
+    return answer.stdout;
+  };
+  const reservations = read("reservation ref read", () => {
+    const listed = checked(["ls-remote", "origin", "refs/rmd-id/*"]);
+    if (listed.split("\n").filter(Boolean).some(line => !/^[0-9a-f]{40}(?:[0-9a-f]{24})?[ \t]+refs\/rmd-id\/[^\s]+$/.test(line.trim()))) throw new Error("invalid reservation listing");
+    const refs = parseReservationAuditRefs(listed);
+    if (refs.some(r => r.ref !== taskIdReservationRef(r.taskId))) throw new Error("noncanonical reservation ref");
+    return refs;
+  }, [] as ReservationAuditRef[]);
+  const heads = read("branch heads read", () => {
+    const out = checked(["ls-remote", "--heads", "origin"]);
+    const branches = new Map<string, string[]>();
+    const live = new Set<string>();
+    for (const line of out.split("\n").filter(Boolean)) {
+      const parts = line.trim().split(/\s+/);
+      const ref = parts[1];
+      if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(parts[0]) || ref === undefined || !ref.startsWith("refs/heads/")) throw new Error("invalid head listing");
+      const branch = ref.slice("refs/heads/".length);
+      live.add(branch);
+      const match = RUN_BRANCH_TASK_REF_RE.exec(parts[1]);
+      if (match) branches.set(match[1], [...(branches.get(match[1]) ?? []), branch]);
+    }
+    return { branches, live };
+  }, { branches: new Map<string, string[]>(), live: new Set<string>() });
+  const pulls = read("open-PR and filing-delay read", () => {
+    const rows: ReservationAuditPull[] = opts.deps.auditPullRequests ? opts.deps.auditPullRequests() : [];
+    if (!opts.deps.auditPullRequests) {
+      for (let page = 1; ; page++) {
+        const batch = (opts.deps.auditPrFetch ?? ghJson)(["api", `repos/${opts.self.owner}/${opts.self.repo}/pulls?state=all&per_page=100&page=${page}`]);
+        if (!Array.isArray(batch) || batch.length > 100) throw new Error("invalid PR page");
+        rows.push(...batch);
+        if (batch.length < 100) break;
+      }
+    }
+    if (!Array.isArray(rows) || rows.some(p => !p || typeof p.head?.ref !== "string"
+      || (p.body !== null && typeof p.body !== "string") || !["open", "closed"].includes(p.state)
+      || !Number.isFinite(Date.parse(p.created_at)))) throw new Error("invalid PR population");
+    return rows;
+  }, [] as ReservationAuditPull[]);
+  const declaredIds = read("plan read", () => reservationAuditPlanIds(opts.planPath), new Set<string>());
+  const namespace = `refs/rmd-reap/${randomUUID()}/`;
+  let historicalIds = new Set<string>();
+  try {
+    read("anchor fetch", () => checked(["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin",
+      `+refs/rmd-id/*:${namespace}ids/*`, `+refs/heads/main:${namespace}main`]), "");
+    for (const reservation of reservations) {
+      reservation.anchor = read(`anchor ${reservation.taskId} read`, () => {
+        const body = checked(["log", "-1", "--format=%B", reservation.sha]).trim();
+        if (!body) throw new Error("empty anchor message");
+        return body;
+      }, "<unreadable>");
+    }
+    historicalIds = read("plan-history read", () => {
+      if (checked(["rev-parse", "--is-shallow-repository"]).trim() !== "false") throw new Error("shallow plan history");
+      const root = opts.deps.repoRoot ?? repoRoot;
+      const path = relative(root, dirname(opts.planPath));
+      if (isAbsolute(path) || path.startsWith("..")) throw new Error("plan outside repository");
+      const patch = checked(["log", `${namespace}main`, "-p", "--", path || "."]);
+      return new Set(extractAddedTaskIds(patch).filter(isAllocatableTaskId).map(n => `W1-T${n}`));
+    }, new Set<string>());
+  } finally {
+    read("private anchor ref cleanup", () => {
+      const refs = checked(["for-each-ref", "--format=%(refname)", namespace]).trim().split("\n").filter(Boolean);
+      for (const ref of refs) {
+        if (!ref.startsWith(namespace)) throw new Error("unexpected private ref");
+        checked(["update-ref", "-d", ref]);
+      }
+    }, undefined);
+  }
+  const openPrTrailerIds = idsFromOpenPrTrailers(pulls.filter(p => p.state === "open").map(p => p.body ?? ""));
+  for (const pull of pulls.filter(p => p.state === "open")) {
+    const match = RUN_BRANCH_TASK_REF_RE.exec(`refs/heads/${pull.head.ref}`);
+    if (match) openPrTrailerIds.add(match[1]);
+  }
+  const classify = (thresholdDays: number) => classifyReservationAuditRows({
+    reservations, declaredIds, historicalIds, openRunBranchesById: heads.branches,
+    openPrTrailerIds, liveHolderBranches: heads.live, strictAge: true, thresholdDays, nowMs: opts.deps.auditNowMs?.() ?? Date.now(),
+  });
+  const held = new Set(classify(0).filter(r => r.status === "HELD").map(r => r.taskId));
+  const firstByBranch = new Map<string, number>();
+  const firstByTask = new Map<string, number>();
+  for (const p of pulls) {
+    const opened = Date.parse(p.created_at);
+    firstByBranch.set(p.head.ref, Math.min(firstByBranch.get(p.head.ref) ?? Infinity, opened));
+    const ids = idsFromOpenPrTrailers([p.body ?? ""]);
+    const runTask = RUN_BRANCH_TASK_REF_RE.exec(`refs/heads/${p.head.ref}`)?.[1];
+    if (runTask) ids.add(runTask);
+    for (const id of ids) firstByTask.set(id, Math.min(firstByTask.get(id) ?? Infinity, opened));
+  }
+  const delays: { taskId: string; ms: number }[] = [];
+  for (const r of reservations) {
+    if (!held.has(r.taskId)) continue;
+    const anchorTime = reservationAnchorTimestamp(r.anchor);
+    const holder = reservationHolderBranch(r.anchor);
+    if (!Number.isFinite(anchorTime)) continue;
+    const firstOpen = Math.min(firstByTask.get(r.taskId) ?? Infinity,
+      holder ? firstByBranch.get(holder) ?? Infinity : Infinity,
+      ...(heads.branches.get(r.taskId) ?? []).map(b => firstByBranch.get(b) ?? Infinity));
+    if (firstOpen >= anchorTime && firstOpen <= (opts.deps.auditNowMs?.() ?? Date.now())) delays.push({ taskId: r.taskId, ms: firstOpen - anchorTime });
+  }
+  const values = delays.map(d => d.ms).sort((a, b) => a - b);
+  const n = values.length;
+  const basis: ReservationReapBasis = { n, max_ms: n ? values[n - 1] : null,
+    p50_ms: n ? (values[Math.floor((n - 1) / 2)] + values[Math.floor(n / 2)]) / 2 : null,
+    population: delays.map(d => d.taskId) };
+  const boundMs = basis.max_ms === null ? null : Math.max(RESERVATION_PUSH_GRACE_MS, basis.max_ms);
+  if (boundMs === null) degraded.push("filing-delay read: no measured population");
+  const thresholdDays = (boundMs ?? RESERVATION_PUSH_GRACE_MS) / RESERVATION_AUDIT_MS_PER_DAY;
+  return { thresholdDays, rows: classify(thresholdDays), degraded, reap: { boundMs, basis, reservations, run } };
+}
+
+function applyReservationReap(report: ReservationAuditReport, apply: boolean, deps: NextTaskIdReserveDeps): number {
+  const reap = report.reap!;
+  const candidates = report.rows.filter(r => r.status === "CANDIDATE" && r.ageDays !== null
+    && reap.boundMs !== null && r.ageDays * RESERVATION_AUDIT_MS_PER_DAY > reap.boundMs);
+  console.log(`reservation reap: ${apply ? "apply" : "dry-run"}; ${candidates.length} reservation(s) to reap`);
+  const byId = new Map(reap.reservations.map(r => [r.taskId, r]));
+  const entries = candidates.map(row => {
+    const r = byId.get(row.taskId)!;
+    return { reserved_id: r.taskId, ref: r.ref, sha: r.sha, anchor: r.anchor,
+      holder: r.anchor.split(/\r?\n/).find(line => line.startsWith("rmd-id holder ")) ?? null,
+      lane: "reap", reason: `reaped: no shard/branch/PR; age ${row.ageDays! * RESERVATION_AUDIT_MS_PER_DAY} > bound ${reap.boundMs}` };
+  });
+  const log = deps.log ?? ((step: string, fields: Record<string, unknown>) => {
+    appendLedger(ledgerPathFor(loadConfig()), { run_id: `REAP-${process.pid}`, task_id: "REAP", step, ...fields });
+  });
+  // Persist recovery evidence BEFORE any deletion; a failed ledger write must leave every ref intact.
+  log("task_id.reservation_reap_planned", { lane: "reap", apply, candidates: entries.length,
+    counts: { total: report.rows.length, held: report.rows.filter(r => r.status === "HELD").length,
+      candidate: report.rows.filter(r => r.status === "CANDIDATE").length, unknown: report.rows.filter(r => r.status === "UNKNOWN").length },
+    bound_ms: reap.boundMs, basis: reap.basis, degraded: report.degraded, ...(apply ? { recovery: entries } : {}) });
+  if (report.degraded.length || reap.boundMs === null) return 2;
+  if (!apply || entries.length === 0) return 0;
+  const run = reap.run;
+  let failed = false;
+  const push = (batch: typeof entries): void => {
+    let result: ReturnType<typeof run>;
+    try {
+      assertClaimRefPushAllowed(run, batch[0].ref);
+      result = run(["push", "--porcelain", "origin", ...batch.map(r => `--force-with-lease=${r.ref}:${r.sha}`), ...batch.map(r => `:${r.ref}`)]);
+    } catch (error) {
+      result = { status: 1, stdout: "", stderr: String(error) };
+    }
+    if (/E2BIG|argument list too long/i.test(result.stderr) && batch.length > 1) {
+      const mid = Math.floor(batch.length / 2);
+      push(batch.slice(0, mid));
+      push(batch.slice(mid));
+      return;
+    }
+    for (const r of batch) {
+      const line = result.stdout.split("\n").find(line => line.split("\t")[1]?.split(":").at(-1) === r.ref);
+      const released = line?.startsWith("-\t") === true;
+      const outcome = released ? "released" : /stale info/.test(line ?? "") ? "foreign" : "failed";
+      failed ||= !released;
+      log(released ? "task_id.reservation_released" : "task_id.reservation_release_skipped",
+        { ...r, outcome, ...(released ? {} : { detail: line ?? result.stderr }) });
+    }
+  };
+  push(entries);
+  return failed ? 1 : 0;
 }
 
 function mintForReservationAttempt(mint: MintedTaskIdWithHistory, heldId: number, heldTaskId: string): MintedTaskIdWithHistory {
@@ -22945,9 +23166,15 @@ export async function nextTaskIdCommand(
   overlapDeps: OverlapWarningDeps = {},
   deps: NextTaskIdReserveDeps = {},
 ): Promise<number> {
-  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo", "--branch", "--count"], ["--offline", "--reserve", "--no-reserve", "--audit"]);
+  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo", "--branch", "--count"], ["--offline", "--reserve", "--no-reserve", "--audit", "--reap", "--apply"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const reap = rest.includes("--reap");
+  if ((reap && (!rest.includes("--audit") || rest.some(a => ["--offline", "--audit-age-days", "--prefix", "--repo"].includes(a))))
+    || (rest.includes("--apply") && !reap)) {
+    console.error("### rmd next-task-id: --reap requires --audit online with a derived age bar; --apply requires --reap");
     return 2;
   }
   const countArg = parseTaskIdCount(rest);
@@ -22975,12 +23202,19 @@ export async function nextTaskIdCommand(
   const offline = rest.includes("--offline");
   const self = resolveOwnerRepo();
   if (rest.includes("--audit")) {
-    const report = buildReservationAuditReport({ planPath, offline, thresholdDays: auditAgeDays, self, deps });
+    const report = buildReservationAuditReport({ planPath, offline, thresholdDays: auditAgeDays, self, deps, reap });
     if (report === "unreadable-reservations") {
       console.error("### rmd next-task-id --audit: cannot read origin refs/rmd-id/*");
       return 2;
     }
     console.log(renderReservationAuditReport(report));
+    if (reap) {
+      try { return applyReservationReap(report, rest.includes("--apply"), deps); }
+      catch (error) {
+        console.error(`reservation reap ledger failed: ${String(error)}`);
+        return 2;
+      }
+    }
     return 0;
   }
   let mint: MintedTaskIdWithHistory;
@@ -47317,8 +47551,8 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "next-task-id",
-    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>]",
-    summary: "Atomically CLAIM the next free W1-T<n> task id. `--no-reserve` prints one without claiming it.",
+    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit [--reap [--apply]]] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>]",
+    summary: "Claim the next task id, or preview orphan cleanup with --audit --reap; --apply deletes under leases.",
     detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and the audit never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder. W1-T9683 --count <n> reserves n ids from ONE open-PR read and one history scan, each walk starting above the last id held (contention advances and is reported exactly as for one id), all under the same holder; it prints a RESERVED line per id it holds and a final `HELD k of n:` line, and a partial result (k < n) prints only the ids it holds and exits 2. --count is refused beside --offline, --no-reserve, --audit and --prefix.",
   },
   {
