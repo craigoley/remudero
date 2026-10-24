@@ -2175,7 +2175,7 @@ export function runReadModelWorker(
     port.postMessage(m);
   };
   const dailyInstances = data.instances.flatMap(i => i.repo && i.boardRoot ? [{ name: i.name, repository: i.repo, root: i.boardRoot, stateDir: i.ledgerDir }] : []);
-  const dailyProgress = data.slowLane?.dailyProgress ?? (dailyInstances.length ? { stateDir: data.stateDir, instances: dailyInstances } : undefined);
+  const dailyProgress = data.slowLane?.dailyProgress;
   const slowLaneConfig: SlowLaneConfig | undefined = data.slowLane || dailyProgress ? { ...data.slowLane,
     ...(data.slowLane ? { instanceInboxes: data.instances.flatMap(i => i.inbox ? [i.inbox] : []),
       analytics: data.slowLane.analytics ?? { instances: data.instances.map(i => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) } } : {}),
