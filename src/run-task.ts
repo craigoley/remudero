@@ -161,7 +161,7 @@ import {
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
 import { boundChildByLoopTime, execFileLoopBounded, type LoopBound } from "./lib/loop-bounded-child.js";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
@@ -905,6 +905,8 @@ import {
   reservationFloorFrom,
   reservationPolicyCurrency,
   reservationTakeoverFields,
+  reservationHolderBranch,
+  RESERVATION_PUSH_GRACE_MS,
   reserveTaskIdBlock,
   reserveTaskIdBlockRemote,
   reserveTaskIdRemote,
@@ -1101,7 +1103,7 @@ import {
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
-import type { ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
+import { childEntryArgv, childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, type ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
 import {
   bodyWithFailingProofAtOpen,
   checkProofLaunchArgv,
@@ -1250,7 +1252,7 @@ import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, with
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -1691,7 +1693,7 @@ import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
+import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
   terminalUnionScans } from "./lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
@@ -2483,6 +2485,17 @@ export async function mainTipViaGit(repoDir: string): Promise<string> {
   return (await hostWorktreeGitAsync(repoDir, ["rev-parse", "origin/main"])).trim();
 }
 
+export function buildRequiredFixReviewRunner(
+  next: typeof runReview,
+  readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
+): typeof runReview {
+  return async (args) => {
+    const startFreshness = await ownStartFreshness(readFreshness);
+    return next({ ...args, requireSemanticReview: true,
+      reviewerCodeFreshness: reviewerFreshnessForPublication(startFreshness, readFreshness) });
+  };
+}
+
 export function buildSweepEffects(
   deps: BuildSweepEffectsDeps & {
     /** W1-T3618 test seam: override the reviewer-code freshness read the review gate below uses.
@@ -2596,8 +2609,9 @@ export function buildSweepEffects(
     worktreeRoot: join(repoRoot, "..", "worktrees"),
     spawnReview: spawnRmdReviewForFreshTree,
   };
+  const readReviewerCodeFreshness = reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshnessAsync(repoRoot, process.env));
   const reviewerCodeGate = buildReviewerCodeFreshnessGate(
-    reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshnessAsync(repoRoot, process.env)),
+    readReviewerCodeFreshness,
     deps.log,
     reviewCommand,
     buildFreshTreeReviewRunner(repoRoot, freshTreeSeams),
@@ -2852,7 +2866,7 @@ export function buildSweepEffects(
     waitForCiGreenImpl: waitForCiGreen,
     restRollupForImpl: restRollupFor,
     fetchCiFailuresImpl: fetchCiFailuresAsync,
-    runReviewImpl: runReview,
+    runReviewImpl: buildRequiredFixReviewRunner(runReview, readReviewerCodeFreshness),
     fetchPrBodyImpl: fetchPrBodyViaGh,
     // W1-T3869: the missing-trailer repair's writer. Unwired, `requiredSweepRuntime` throws
     // `buildSweepEffects requires updatePrBodyImpl from its entrypoint adapter` the moment
@@ -3130,6 +3144,7 @@ import {
 import { shouldRecordDecision, reversibilityFactor, type DiffFileChange } from "./lib/risk-score.js";
 import {
   assertLiveWriteAllowed,
+  assertClaimRefPushAllowed,
   isTestRunner,
   liveWritesExempt,
   LIVE_WRITE_OVERRIDE_ENV,
@@ -7651,6 +7666,8 @@ async function runReview(args: {
    *  resolved the run policy pass it through; the fallback keeps direct review invocations on
    *  the same policy row without inventing a second timeout. */
   reviewerClockBoundMs?: number;
+  /** Cancellation of this review also stops its plan-lint process group. */
+  signal?: AbortSignal;
   /**
    * PR-HEAD checkout dir the deterministic FLOOR executes whitelisted proofs in
    * (W1-T65, ratifies P15 — HEAD DISCIPLINE: never the operator's working
@@ -7730,6 +7747,8 @@ async function runReview(args: {
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
 }): Promise<ReviewRunResult> {
   const { owner, repo, prUrl, task, report, log, say } = args;
+  const laneSignal = currentReviewSignal();
+  const signal = args.signal && laneSignal ? AbortSignal.any([args.signal, laneSignal]) : args.signal ?? laneSignal;
   const headSha = readHeadShaRest(prUrl);
   let replayInput: ReviewReplayInput = args.reviewReplaySetupInput ?? {
     stage: "setup", plan_only: false, required_semantic: args.requireSemanticReview === true,
@@ -8119,7 +8138,8 @@ async function runReview(args: {
   // gate observes repo state whether or not the advisory reviewer above ever
   // completed.
   // W1-T4423: a plan-only PASS names lint-plan, so the review runs it on the target repo's plan at this head.
-  const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir) : undefined;
+  const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir,
+    undefined, undefined, { signal, log }) : undefined;
   const computed = await preparedDecision.judge({
     diff,
     report,
@@ -18250,6 +18270,10 @@ export interface NextTaskIdReserveDeps {
   openPrTexts?: () => string[];
   auditNowMs?: () => number;
   auditHistoryIds?: () => number[];
+  auditPullRequests?: () => ReservationAuditPull[];
+  auditPrFetch?: GhApiFetcher;
+  /** Test-only journal location; production uses the configured state root. */
+  reapLedgerPath?: string;
   /** W1-T4388: the `--prefix` mint's target checkout (defaults to {@link cloneTargetPlan}) and its filing branch. */
   openTargetRepo?: (repo: string) => ReturnType<typeof cloneTargetPlan>;
   filingBranch?: string;
@@ -18356,6 +18380,21 @@ export interface ReservationAuditReport {
   thresholdDays: number;
   rows: ReservationAuditRow[];
   degraded: string[];
+  reap?: { boundMs: number | null; basis: ReservationReapBasis; reservations: ReservationAuditRef[]; run: ReturnType<typeof gitRunAdapter> };
+}
+
+interface ReservationAuditPull {
+  body: string | null;
+  head: { ref: string };
+  created_at: string;
+  state: string;
+}
+
+interface ReservationReapBasis {
+  n: number;
+  max_ms: number | null;
+  p50_ms: number | null;
+  population: string[];
 }
 
 type ReservationAuditRefsRead =
@@ -18363,7 +18402,7 @@ type ReservationAuditRefsRead =
   | { status: "unknown"; reason: string };
 
 type ReservationAuditBranchesRead =
-  | { status: "ok"; branches: Map<string, string[]> }
+  | { status: "ok"; branches: Map<string, string[]>; live: Set<string> }
   | { status: "unknown"; reason: string };
 
 function reservationAuditAgeDays(rest: string[]): number | null {
@@ -18373,10 +18412,14 @@ function reservationAuditAgeDays(rest: string[]): number | null {
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
+function reservationAnchorTimestamp(anchor: string): number {
+  const holder = parseReservationHolderLine(anchor);
+  return Date.parse(RESERVATION_AUDIT_ISO_RE.exec(anchor)?.[0]
+    ?? (holder.status === "known" ? holder.holder.startedAt : undefined) ?? "");
+}
+
 function reservationAnchorAgeMs(anchor: string, nowMs: number): number | null {
-  const m = RESERVATION_AUDIT_ISO_RE.exec(anchor);
-  if (!m) return null;
-  const t = Date.parse(m[0]);
+  const t = reservationAnchorTimestamp(anchor);
   if (!Number.isFinite(t)) return null;
   return Math.max(0, nowMs - t);
 }
@@ -18432,20 +18475,22 @@ function readReservationAuditAnchor(
 function openRunBranchesByTaskId(run: (args: string[]) => { status: number; stdout: string; stderr: string }): ReservationAuditBranchesRead {
   let res: { status: number; stdout: string; stderr: string };
   try {
-    res = run(["ls-remote", "--heads", "origin", "run-*"]);
+    res = run(["ls-remote", "--heads", "origin"]);
   } catch (err) {
     return { status: "unknown", reason: `open run branch read threw: ${String(err)}` };
   }
   if (res.status !== 0) return { status: "unknown", reason: `open run branch read exited ${res.status}: ${res.stderr}` };
   const byId = new Map<string, string[]>();
+  const live = new Set<string>();
   for (const raw of (res.stdout ?? "").split("\n")) {
     const ref = raw.trimEnd().split(/[ \t]+/)[1] ?? "";
+    if (ref.startsWith("refs/heads/")) live.add(ref.slice("refs/heads/".length));
     const m = RUN_BRANCH_TASK_REF_RE.exec(ref);
     if (!m) continue;
     const branch = ref.slice("refs/heads/".length);
     byId.set(m[1], [...(byId.get(m[1]) ?? []), branch]);
   }
-  return { status: "ok", branches: byId };
+  return { status: "ok", branches: byId, live };
 }
 
 export function classifyReservationAuditRows(opts: {
@@ -18454,6 +18499,8 @@ export function classifyReservationAuditRows(opts: {
   historicalIds: ReadonlySet<string>;
   openRunBranchesById: ReadonlyMap<string, readonly string[]> | "unknown";
   openPrTrailerIds: ReadonlySet<string> | "unknown";
+  liveHolderBranches?: ReadonlySet<string>;
+  strictAge?: boolean;
   thresholdDays: number;
   nowMs: number;
 }): ReservationAuditRow[] {
@@ -18466,6 +18513,8 @@ export function classifyReservationAuditRows(opts: {
       for (const branch of opts.openRunBranchesById.get(r.taskId) ?? []) reasons.push(`open run branch ${branch}`);
     }
     if (opts.openPrTrailerIds !== "unknown" && opts.openPrTrailerIds.has(r.taskId)) reasons.push("open PR trailer");
+    const holder = reservationHolderBranch(r.anchor);
+    if (holder && opts.liveHolderBranches?.has(holder)) reasons.push(`live holder branch ${holder}`);
     const ageMs = reservationAnchorAgeMs(r.anchor, opts.nowMs);
     const ageDays = ageMs === null ? null : ageMs / RESERVATION_AUDIT_MS_PER_DAY;
     if (reasons.length > 0) return { taskId: r.taskId, status: "HELD", reasons, anchor: r.anchor, ageDays };
@@ -18475,8 +18524,11 @@ export function classifyReservationAuditRows(opts: {
     if (opts.openPrTrailerIds === "unknown") {
       return { taskId: r.taskId, status: "UNKNOWN", reasons: ["open PR read failed"], anchor: r.anchor, ageDays };
     }
+    if (opts.liveHolderBranches && parseReservationHolderLine(r.anchor).status === "unreadable") {
+      return { taskId: r.taskId, status: "UNKNOWN", reasons: ["anchor holder unreadable"], anchor: r.anchor, ageDays };
+    }
     if (ageMs === null) return { taskId: r.taskId, status: "UNKNOWN", reasons: ["anchor age unreadable"], anchor: r.anchor, ageDays };
-    if (ageMs < thresholdMs) return { taskId: r.taskId, status: "HELD", reasons: ["younger than threshold"], anchor: r.anchor, ageDays };
+    if (ageMs < thresholdMs || (opts.strictAge && ageMs === thresholdMs)) return { taskId: r.taskId, status: "HELD", reasons: ["younger than threshold"], anchor: r.anchor, ageDays };
     return { taskId: r.taskId, status: "CANDIDATE", reasons: ["no holding evidence older than threshold"], anchor: r.anchor, ageDays };
   });
 }
@@ -18500,6 +18552,10 @@ export function renderReservationAuditReport(report: ReservationAuditReport): st
     `reservation audit: ${report.rows.length} reservation(s); HELD ${held}; CANDIDATE ${candidate}; UNKNOWN ${unknown}`,
     `age threshold: ${report.thresholdDays} day(s)`,
   ];
+  if (report.reap) {
+    const { boundMs, basis } = report.reap;
+    lines.push(`reap bar: ${boundMs ?? "unknown"} ms; n=${basis.n}; max_ms=${basis.max_ms}; p50_ms=${basis.p50_ms}; population=HELD anchors matched to first PR by holder/run branch or trailer [${basis.population.join(", ")}]`);
+  }
   for (const d of report.degraded) lines.push(`DEGRADED: ${d}`);
   for (const row of report.rows) {
     const age = row.ageDays === null ? "unknown" : `${row.ageDays.toFixed(1)}d`;
@@ -18514,8 +18570,13 @@ function buildReservationAuditReport(opts: {
   thresholdDays: number;
   self: { owner: string; repo: string };
   deps: NextTaskIdReserveDeps;
+  reap?: boolean;
 }): ReservationAuditReport | "unreadable-reservations" {
-  const run = gitRunAdapter(opts.deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" })));
+  const run = gitRunAdapter(opts.deps.runGit ?? ((args: string[]) => {
+    const r = spawnSync("git", args, { cwd: opts.deps.repoRoot ?? repoRoot, encoding: "utf8", maxBuffer: 1 << 26 });
+    return { ...r, stderr: r.stderr || r.error?.message };
+  }));
+  if (opts.reap) return buildReservationReapReport(opts, run);
   const refs = readReservationAuditRefs(run);
   if (refs.status === "unknown") return "unreadable-reservations";
   const reservations = refs.refs.map((r) => ({ ...r, anchor: readReservationAuditAnchor(r.ref, run) }));
@@ -18542,11 +18603,376 @@ function buildReservationAuditReport(opts: {
       declaredIds,
       historicalIds,
       openRunBranchesById: branches.status === "ok" ? branches.branches : "unknown",
+      liveHolderBranches: branches.status === "ok" ? branches.live : undefined,
       openPrTrailerIds,
       thresholdDays: opts.thresholdDays,
       nowMs: opts.deps.auditNowMs?.() ?? Date.now(),
     }),
   };
+}
+
+function buildReservationReapReport(
+  opts: { planPath: string; self: { owner: string; repo: string }; deps: NextTaskIdReserveDeps },
+  run: ReturnType<typeof gitRunAdapter>,
+): ReservationAuditReport {
+  const clock = clockFromMillisFn(opts.deps.auditNowMs);
+  const degraded: string[] = [];
+  const read = <T>(surface: string, fn: () => T, fallback: T): T => {
+    try { return fn(); }
+    catch (error) {
+      const reason = `${surface}: ${String(error)}`;
+      degraded.push(reason);
+      return fallback;
+    }
+  };
+  const checked = (args: string[]): string => {
+    const answer = run(args);
+    if (answer.status !== 0) throw new Error(answer.stderr || `git ${args[0]} exited ${answer.status}`);
+    return answer.stdout;
+  };
+  const reservations = read("reservation ref read", () => {
+    const listed = checked(["ls-remote", "origin", "refs/rmd-id/*"]);
+    if (listed.split("\n").filter(Boolean).some(line => !/^[0-9a-f]{40}(?:[0-9a-f]{24})?[ \t]+refs\/rmd-id\/[^\s]+$/.test(line.trim()))) throw new Error("invalid reservation listing");
+    const refs = parseReservationAuditRefs(listed);
+    if (refs.some(r => r.ref !== taskIdReservationRef(r.taskId))) throw new Error("noncanonical reservation ref");
+    return refs;
+  }, [] as ReservationAuditRef[]);
+  const heads = read("branch heads read", () => {
+    const out = checked(["ls-remote", "--heads", "origin"]);
+    const branches = new Map<string, string[]>();
+    const live = new Set<string>();
+    for (const line of out.split("\n").filter(Boolean)) {
+      const parts = line.trim().split(/\s+/);
+      const ref = parts[1];
+      if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(parts[0]) || ref === undefined || !ref.startsWith("refs/heads/")) throw new Error("invalid head listing");
+      const branch = ref.slice("refs/heads/".length);
+      live.add(branch);
+      const match = RUN_BRANCH_TASK_REF_RE.exec(parts[1]);
+      if (match) branches.set(match[1], [...(branches.get(match[1]) ?? []), branch]);
+    }
+    return { branches, live };
+  }, { branches: new Map<string, string[]>(), live: new Set<string>() });
+  const pulls = read("open-PR and filing-delay read", () => {
+    const rows: ReservationAuditPull[] = opts.deps.auditPullRequests ? opts.deps.auditPullRequests() : [];
+    if (!opts.deps.auditPullRequests) {
+      for (let page = 1; ; page++) {
+        const batch = (opts.deps.auditPrFetch ?? ghJson)(["api", `repos/${opts.self.owner}/${opts.self.repo}/pulls?state=all&per_page=100&page=${page}`]);
+        if (!Array.isArray(batch) || batch.length > 100) throw new Error("invalid PR page");
+        rows.push(...batch);
+        if (batch.length < 100) break;
+      }
+    }
+    if (!Array.isArray(rows) || rows.some(p => !p || typeof p.head?.ref !== "string"
+      || (p.body !== null && typeof p.body !== "string") || !["open", "closed"].includes(p.state)
+      || !Number.isFinite(Date.parse(p.created_at)))) throw new Error("invalid PR population");
+    return rows;
+  }, [] as ReservationAuditPull[]);
+  const declaredIds = read("plan read", () => reservationAuditPlanIds(opts.planPath), new Set<string>());
+  const namespace = `refs/rmd-reap/${randomUUID()}/`;
+  let historicalIds = new Set<string>();
+  try {
+    read("anchor fetch", () => checked(["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin",
+      `+refs/rmd-id/*:${namespace}ids/*`, `+refs/heads/main:${namespace}main`]), "");
+    for (const reservation of reservations) {
+      reservation.anchor = read(`anchor ${reservation.taskId} read`, () => {
+        const body = checked(["log", "-1", "--format=%B", reservation.sha]).trim();
+        if (!body) throw new Error("empty anchor message");
+        return body;
+      }, "<unreadable>");
+    }
+    historicalIds = read("plan-history read", () => {
+      if (checked(["rev-parse", "--is-shallow-repository"]).trim() !== "false") throw new Error("shallow plan history");
+      const root = opts.deps.repoRoot ?? repoRoot;
+      const path = relative(root, dirname(opts.planPath));
+      if (isAbsolute(path) || path.startsWith("..")) throw new Error("plan outside repository");
+      const patch = checked(["log", `${namespace}main`, "-p", "--", path || "."]);
+      return new Set(extractAddedTaskIds(patch).filter(isAllocatableTaskId).map(n => `W1-T${n}`));
+    }, new Set<string>());
+  } finally {
+    read("private anchor ref cleanup", () => {
+      const refs = checked(["for-each-ref", "--format=%(refname)", namespace]).trim().split("\n").filter(Boolean);
+      for (const ref of refs) {
+        if (!ref.startsWith(namespace)) throw new Error("unexpected private ref");
+        checked(["update-ref", "-d", ref]);
+      }
+    }, undefined);
+  }
+  const openPrTrailerIds = idsFromOpenPrTrailers(pulls.filter(p => p.state === "open").map(p => p.body ?? ""));
+  for (const pull of pulls.filter(p => p.state === "open")) {
+    const match = RUN_BRANCH_TASK_REF_RE.exec(`refs/heads/${pull.head.ref}`);
+    if (match) openPrTrailerIds.add(match[1]);
+  }
+  const classify = (thresholdDays: number) => classifyReservationAuditRows({
+    reservations, declaredIds, historicalIds, openRunBranchesById: heads.branches,
+    openPrTrailerIds, liveHolderBranches: heads.live, strictAge: true, thresholdDays, nowMs: clock.now(),
+  });
+  const held = new Set(classify(0).filter(r => r.status === "HELD").map(r => r.taskId));
+  const anchorTimes = new Map<string, number>();
+  const holderTasks = new Map<string, Set<string>>();
+  for (const reservation of reservations) {
+    if (!held.has(reservation.taskId)) continue;
+    const anchorTime = reservationAnchorTimestamp(reservation.anchor);
+    if (!Number.isFinite(anchorTime)) continue;
+    anchorTimes.set(reservation.taskId, anchorTime);
+    const holder = reservationHolderBranch(reservation.anchor);
+    for (const branch of [...(holder ? [holder] : []), ...(heads.branches.get(reservation.taskId) ?? [])]) {
+      const ids = holderTasks.get(branch) ?? new Set<string>();
+      ids.add(reservation.taskId);
+      holderTasks.set(branch, ids);
+    }
+  }
+  const firstByTask = new Map<string, number>();
+  const observedNow = clock.now();
+  for (const pull of pulls) {
+    const opened = Date.parse(pull.created_at);
+    const ids = idsFromOpenPrTrailers([pull.body ?? ""]);
+    const runTask = RUN_BRANCH_TASK_REF_RE.exec(`refs/heads/${pull.head.ref}`)?.[1];
+    if (runTask) ids.add(runTask);
+    for (const id of holderTasks.get(pull.head.ref) ?? []) ids.add(id);
+    for (const id of ids) {
+      const anchorTime = anchorTimes.get(id);
+      if (anchorTime !== undefined && opened >= anchorTime && opened <= observedNow) {
+        firstByTask.set(id, Math.min(firstByTask.get(id) ?? Infinity, opened));
+      }
+    }
+  }
+  const delays: { taskId: string; ms: number }[] = [];
+  for (const [taskId, anchorTime] of anchorTimes) {
+    const firstOpen = firstByTask.get(taskId);
+    if (firstOpen !== undefined) delays.push({ taskId, ms: firstOpen - anchorTime });
+  }
+  const values = delays.map(d => d.ms).sort((a, b) => a - b);
+  const n = values.length;
+  const basis: ReservationReapBasis = { n, max_ms: n ? values[n - 1] : null,
+    p50_ms: n ? (values[Math.floor((n - 1) / 2)] + values[Math.floor(n / 2)]) / 2 : null,
+    population: delays.map(d => d.taskId) };
+  const boundMs = basis.max_ms === null ? null : Math.max(RESERVATION_PUSH_GRACE_MS, basis.max_ms);
+  if (boundMs === null) degraded.push("filing-delay read: no measured population");
+  const thresholdDays = (boundMs ?? RESERVATION_PUSH_GRACE_MS) / RESERVATION_AUDIT_MS_PER_DAY;
+  return { thresholdDays, rows: classify(thresholdDays), degraded, reap: { boundMs, basis, reservations, run } };
+}
+
+const RESERVATION_REAP_PENDING = "task_id.reservation_reap_pending";
+const RESERVATION_REAP_RECONCILED = "task_id.reservation_reap_reconciled";
+
+type ReservationReapEntry = {
+  reserved_id: string; ref: string; sha: string; anchor: string; holder: string | null;
+  lane: string; reason: string; eligibility: { status: "CANDIDATE"; age_ms: number; reasons: string[] };
+};
+
+type ReservationReapIntent = ReservationReapEntry & {
+  batch_id: string; repository: string; intent_status: "PENDING";
+  bound_ms: number; basis: ReservationReapBasis;
+};
+
+function reservationReapJournal(deps: NextTaskIdReserveDeps) {
+  const path = deps.reapLedgerPath ?? ledgerPathFor(loadConfig());
+  mkdirSync(dirname(path), { recursive: true });
+  const log = deps.log ?? ((step: string, fields: Record<string, unknown>) => {
+    appendLedger(path, { run_id: `REAP-${process.pid}`, task_id: "REAP", step, ...fields });
+  });
+  const read = (): Record<string, unknown>[] => {
+    const unreadDirectories: string[] = [];
+    const history = readLedgerUnionRecordsSync(dirname(path), { refuseIncomplete: true,
+      step: [RESERVATION_REAP_PENDING, RESERVATION_REAP_RECONCILED,
+        "task_id.reservation_released", "task_id.reservation_release_skipped"] }, {
+      ...realLedgerFs,
+      readdirSync: directory => {
+        try { return realLedgerFs.readdirSync(directory); }
+        catch (error) {
+          unreadDirectories.push(`${directory}: ${String(error)}`);
+          throw error;
+        }
+      },
+    });
+    if (unreadDirectories.length || !history.ok || history.torn || history.unclassified.length) {
+      throw new Error(`reap ledger history UNKNOWN: directories=${unreadDirectories.join(",")}; unread=${history.unread.join(",")}; torn=${history.torn}; unclassified=${history.unclassified.join(",")}`);
+    }
+    return history.rows;
+  };
+  const verify = (rows: Record<string, unknown>[], step: string, fields: Record<string, unknown>): void => {
+    if (!rows.some(row => row.step === step && Object.entries(fields).every(([key, value]) => isDeepStrictEqual(row[key], value)))) {
+      throw new Error(`reap ledger readback UNKNOWN: ${step} ${fields.reserved_id}`);
+    }
+  };
+  return { path, read, log, verify };
+}
+
+function pendingReservationReaps(rows: Record<string, unknown>[], repository: string): ReservationReapIntent[] {
+  const intents = new Map<string, ReservationReapIntent>();
+  for (const row of rows.filter(row => row.step === RESERVATION_REAP_PENDING)) {
+    if (typeof row.batch_id !== "string" || typeof row.repository !== "string"
+      || typeof row.reserved_id !== "string" || row.ref !== taskIdReservationRef(row.reserved_id)
+      || typeof row.sha !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(row.sha)
+      || typeof row.anchor !== "string" || row.intent_status !== "PENDING"
+      || !row.eligibility || typeof row.bound_ms !== "number" || !row.basis) {
+      throw new Error("reap ledger history UNKNOWN: incomplete pending intent");
+    }
+    if (row.repository !== repository) continue;
+    const key = `${row.batch_id}:${row.ref}`;
+    const { batch_id, repository: origin, reserved_id, ref, sha, anchor, holder, lane, reason, eligibility, bound_ms, basis } = row;
+    const intent = { batch_id, repository: origin, reserved_id, ref, sha, anchor, holder, lane, reason,
+      eligibility, bound_ms, basis, intent_status: "PENDING" } as ReservationReapIntent;
+    if (intents.has(key) && !isDeepStrictEqual(intents.get(key), intent)) {
+      throw new Error("reap ledger history UNKNOWN: conflicting pending intents");
+    }
+    intents.set(key, intent);
+  }
+  return [...intents.values()].filter(intent => !rows.some(row =>
+    ["task_id.reservation_released", "task_id.reservation_release_skipped", RESERVATION_REAP_RECONCILED].includes(String(row.step))
+    && row.intent_status === "RESOLVED" && row.batch_id === intent.batch_id && row.repository === repository
+    && row.reserved_id === intent.reserved_id && row.ref === intent.ref && row.sha === intent.sha));
+}
+
+function reservationReapRepository(run: ReturnType<typeof gitRunAdapter>): string {
+  const result = run(["remote", "get-url", "origin"]);
+  if (result.status !== 0 || !result.stdout.trim()) throw new Error(`reap repository UNKNOWN: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
+function reconcileReservationReaps(deps: NextTaskIdReserveDeps): number {
+  const journal = reservationReapJournal(deps);
+  const lock = acquireDrainLock(join(dirname(journal.path), "reservation-reap.lock"));
+  try {
+    const run = gitRunAdapter(deps.runGit ?? (args => hostWorktreeGitResult(deps.repoRoot ?? repoRoot, args)));
+    const repository = reservationReapRepository(run);
+    const pending = pendingReservationReaps(journal.read(), repository);
+    let unknown = false;
+    const resolutions: Record<string, unknown>[] = [];
+    for (const intent of pending) {
+      try {
+        const result = run(["ls-remote", "origin", intent.ref]);
+        if (result.status !== 0) throw new Error(result.stderr || "ref read failed");
+        const lines = result.stdout.trim().split("\n").filter(Boolean);
+        const [sha, ref] = lines[0]?.split(/\s+/) ?? [];
+        if (lines.length > 1 || (lines.length === 1 && (ref !== intent.ref || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)))) {
+          throw new Error("invalid exact-ref reading");
+        }
+        const outcome = !lines.length ? "observed_absent" : sha !== intent.sha ? "foreign" : "unchanged";
+        const resolution = { ...intent, intent_status: "RESOLVED", outcome,
+          deletion_actor: "UNKNOWN", observed_sha: sha ?? null, reason: `reconciliation observed ${outcome}; no deletion attempted` };
+        journal.log(RESERVATION_REAP_RECONCILED, resolution);
+        resolutions.push(resolution);
+      } catch (error) {
+        unknown = true;
+        console.error(`${intent.reserved_id} reconciliation UNKNOWN: ${String(error)}`);
+      }
+    }
+    const written = journal.read();
+    for (const resolution of resolutions) {
+      try {
+        journal.verify(written, RESERVATION_REAP_RECONCILED, resolution);
+        console.log(`${resolution.reserved_id} ${resolution.outcome}; actor UNKNOWN; no deletion attempted`);
+      } catch (error) {
+        unknown = true;
+        console.error(`${resolution.reserved_id} reconciliation UNKNOWN: ${String(error)}`);
+      }
+    }
+    console.log(`reservation reap reconciliation: ${pending.length} pending intent(s); no deletion attempted`);
+    return unknown ? 2 : 0;
+  } finally { lock.release(); }
+}
+
+function applyReservationReap(report: ReservationAuditReport, apply: boolean, deps: NextTaskIdReserveDeps): number {
+  const reap = report.reap!;
+  const candidates = report.rows.filter(r => r.status === "CANDIDATE" && r.ageDays !== null
+    && reap.boundMs !== null && r.ageDays * RESERVATION_AUDIT_MS_PER_DAY > reap.boundMs);
+  console.log(`reservation reap: ${apply ? "apply" : "dry-run"}; ${candidates.length} reservation(s) to reap`);
+  const byId = new Map(reap.reservations.map(r => [r.taskId, r]));
+  const entries: ReservationReapEntry[] = candidates.map(row => {
+    const r = byId.get(row.taskId)!;
+    return { reserved_id: r.taskId, ref: r.ref, sha: r.sha, anchor: r.anchor,
+      holder: r.anchor.split(/\r?\n/).find(line => line.startsWith("rmd-id holder ")) ?? null,
+      eligibility: { status: "CANDIDATE", age_ms: row.ageDays! * RESERVATION_AUDIT_MS_PER_DAY, reasons: row.reasons },
+      lane: "reap", reason: `eligible: no shard/branch/PR; age ${row.ageDays! * RESERVATION_AUDIT_MS_PER_DAY} > bound ${reap.boundMs}` };
+  });
+  const journal = reservationReapJournal(deps);
+  const summary = { lane: "reap", apply, candidates: entries.length,
+    counts: { total: report.rows.length, held: report.rows.filter(r => r.status === "HELD").length,
+      candidate: report.rows.filter(r => r.status === "CANDIDATE").length, unknown: report.rows.filter(r => r.status === "UNKNOWN").length },
+    bound_ms: reap.boundMs, basis: reap.basis, degraded: report.degraded };
+  journal.log("task_id.reservation_reap_planned", summary);
+  if (report.degraded.length || reap.boundMs === null) return 2;
+  if (!apply) return 0;
+  const lock = acquireDrainLock(join(dirname(journal.path), "reservation-reap.lock"));
+  try {
+    const run = reap.run;
+    const repository = reservationReapRepository(run);
+    if (pendingReservationReaps(journal.read(), repository).length) {
+      console.error("reservation reap UNKNOWN: unresolved batch; run --audit --reap --reconcile before a fresh --apply");
+      return 2;
+    }
+    if (entries.length === 0) return 0;
+    const batch_id = randomUUID();
+    const intents = entries.map(entry => ({ ...entry, batch_id, repository, intent_status: "PENDING" as const,
+      bound_ms: reap.boundMs!, basis: reap.basis }));
+    // Verify the entire write-ahead set, including earlier rows, before the first push.
+    for (const intent of intents) journal.log(RESERVATION_REAP_PENDING, intent);
+    const written = journal.read();
+    for (const intent of intents) {
+      journal.verify(written, RESERVATION_REAP_PENDING, intent);
+    }
+    let failed = false;
+    let unknown = false;
+    const push = (batch: typeof intents): void => {
+      let result: ReturnType<typeof run>;
+      let guarded = true;
+      try {
+        assertClaimRefPushAllowed(run, batch[0].ref);
+        guarded = false;
+        result = run(["push", "--porcelain", "origin", ...batch.map(r => `--force-with-lease=${r.ref}:${r.sha}`), ...batch.map(r => `:${r.ref}`)]);
+      } catch (error) {
+        result = { status: 1, stdout: "", stderr: String(error) };
+      }
+      if (/E2BIG|argument list too long/i.test(result.stderr) && batch.length > 1) {
+        const mid = Math.floor(batch.length / 2);
+        push(batch.slice(0, mid));
+        if (!unknown) push(batch.slice(mid));
+        return;
+      }
+      const confirmations: { step: string; fields: Record<string, unknown> }[] = [];
+      for (const r of batch) {
+        const lines = result.stdout.split("\n").filter(line => line.split("\t")[1]?.split(":").at(-1) === r.ref);
+        const line = lines.length === 1 ? lines[0] : undefined;
+        const released = line?.startsWith("-\t") === true;
+        const rejected = line?.startsWith("!\t") === true;
+        const outcome = released ? "released" : rejected && /stale info/.test(line ?? "") ? "foreign"
+          : guarded || rejected ? "failed" : "unknown";
+        failed ||= !released;
+        unknown ||= outcome === "unknown";
+        try {
+          const step = released ? "task_id.reservation_released" : "task_id.reservation_release_skipped";
+          const reason = released ? r.reason.replace(/^eligible:/, "reaped:")
+            : `${outcome === "unknown" ? "reap outcome unknown" : `reap skipped (${outcome})`}: ${r.reason}`;
+          const fields = { ...r, reason, outcome, intent_status: outcome === "unknown" ? "PENDING" : "RESOLVED",
+            ...(released ? { deletion_actor: batch_id } : { detail: line ?? result.stderr }) };
+          journal.log(step, fields);
+          confirmations.push({ step, fields });
+        } catch (error) {
+          unknown = true;
+          console.error(`${r.reserved_id} outcome UNKNOWN; pending intent ${batch_id} retained: ${String(error)}`);
+        }
+      }
+      let outcomes: Record<string, unknown>[];
+      try { outcomes = journal.read(); }
+      catch (error) {
+        unknown = true;
+        for (const { fields } of confirmations) console.error(`${fields.reserved_id} outcome UNKNOWN; pending intent ${batch_id} retained: ${String(error)}`);
+        return;
+      }
+      for (const { step, fields } of confirmations) {
+        try {
+          journal.verify(outcomes, step, fields);
+          console.log(`${fields.reserved_id} ${fields.outcome === "unknown" ? "UNKNOWN" : fields.outcome}`);
+        } catch (error) {
+          unknown = true;
+          console.error(`${fields.reserved_id} outcome UNKNOWN; pending intent ${batch_id} retained: ${String(error)}`);
+        }
+      }
+    };
+    push(intents);
+    return unknown ? 2 : failed ? 1 : 0;
+  } finally { lock.release(); }
 }
 
 function mintForReservationAttempt(mint: MintedTaskIdWithHistory, heldId: number, heldTaskId: string): MintedTaskIdWithHistory {
@@ -18590,9 +19016,16 @@ export async function nextTaskIdCommand(
   overlapDeps: OverlapWarningDeps = {},
   deps: NextTaskIdReserveDeps = {},
 ): Promise<number> {
-  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo", "--branch", "--count"], ["--offline", "--reserve", "--no-reserve", "--audit"]);
+  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo", "--branch", "--count"], ["--offline", "--reserve", "--no-reserve", "--audit", "--reap", "--apply", "--reconcile"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const reap = rest.includes("--reap");
+  if ((reap && (!rest.includes("--audit") || rest.some(a => ["--offline", "--audit-age-days", "--prefix", "--repo"].includes(a))))
+    || (rest.includes("--apply") && !reap)
+    || (rest.includes("--reconcile") && (!reap || rest.includes("--apply")))) {
+    console.error("### rmd next-task-id: --reap requires --audit online with a derived age bar; --apply requires --reap");
     return 2;
   }
   const countArg = parseTaskIdCount(rest);
@@ -18619,13 +19052,27 @@ export async function nextTaskIdCommand(
   const planPath = flagValue(rest, "--plan") ?? join(mintRepoRoot, "plan", "tasks.yaml");
   const offline = rest.includes("--offline");
   const self = resolveOwnerRepo();
+  if (rest.includes("--reconcile")) {
+    try { return reconcileReservationReaps(deps); }
+    catch (error) {
+      console.error(`reservation reap reconciliation UNKNOWN: ${String(error)}`);
+      return 2;
+    }
+  }
   if (rest.includes("--audit")) {
-    const report = buildReservationAuditReport({ planPath, offline, thresholdDays: auditAgeDays, self, deps });
+    const report = buildReservationAuditReport({ planPath, offline, thresholdDays: auditAgeDays, self, deps, reap });
     if (report === "unreadable-reservations") {
       console.error("### rmd next-task-id --audit: cannot read origin refs/rmd-id/*");
       return 2;
     }
     console.log(renderReservationAuditReport(report));
+    if (reap) {
+      try { return applyReservationReap(report, rest.includes("--apply"), deps); }
+      catch (error) {
+        console.error(`reservation reap ledger UNKNOWN: ${String(error)}`);
+        return 2;
+      }
+    }
     return 0;
   }
   let mint: MintedTaskIdWithHistory;
@@ -19776,47 +20223,64 @@ export function lintScopeMergeBase(
  * W1-T4423 — THE LINT A PLAN-ONLY PASS NAMES, RUN BY THE REVIEW ITSELF. A consumer repo's CI has no lint-plan job,
  * so remudero-site #133 merged PORTAL-T27 with two violations under a status claiming lint-plan had gated it. This
  * runs `lint-plan:fast`'s selection, {@link lintPlanCommand} offline over the tasks the PR changed against its merge
- * base, on the TARGET repo's plan at the PR head. In-process: the body has no `await`, so every line it prints is
- * written before the console is restored, and a missing summary line reads as "could not run", never as clean.
+ * base, on the TARGET repo's plan at the PR head. Git preparation and the lint child are awaited so the
+ * daemon loop stays available. A missing summary reads as "could not run", never as clean.
  */
 export async function lintPlanForReview(
   headCheckoutDir: string | undefined,
-  git: (cwd: string, args: string[]) => string = (cwd, args) => hostWorktreeGit(cwd, args, { timeout: 120_000 }),
-  lint: typeof lintPlanCommand = lintPlanCommand,
+  git: (cwd: string, args: string[]) => string | Promise<string> = (cwd, args) => hostWorktreeGitAsync(cwd, args, { timeout: 120_000 }),
+  run: (argv: string[], options: { cwd: string; signal?: AbortSignal }) => Promise<CensusChildResult> = spawnReviewPlanLint,
+  options: { signal?: AbortSignal; log?: (step: string, extra?: Record<string, unknown>) => void } = {},
 ): Promise<PlanLintOutcome> {
   if (!headCheckoutDir) return { ran: false, reason: "no PR-head checkout" };
   try {
     // A stale origin/main moves the merge base back and widens the changed-task scope onto other filings.
-    git(headCheckoutDir, ["fetch", "--quiet", "--no-tags", "origin", "main"]);
+    await git(headCheckoutDir, ["fetch", "--quiet", "--no-tags", "origin", "main"]);
   } catch (e) {
     console.error(`### lint-plan for review: origin/main not refreshed (${String((e as Error).message).split("\n")[0]})`);
   }
   let mergeBase: string;
   try {
-    mergeBase = git(headCheckoutDir, ["merge-base", "origin/main", "HEAD"]).trim();
+    mergeBase = (await git(headCheckoutDir, ["merge-base", "origin/main", "HEAD"])).trim();
   } catch (e) {
     return { ran: false, reason: `no merge base: ${String((e as Error).message).split("\n")[0]}` };
   }
-  const lines: string[] = [];
-  const saved = { log: console.log, error: console.error, warn: console.warn };
-  const capture = (...parts: unknown[]): void => void lines.push(parts.map(String).join(" "));
-  let pending: Promise<number>;
-  console.log = console.error = console.warn = capture;
   try {
-    pending = lint(["--plan", join(headCheckoutDir, "plan", "tasks.yaml"), "--base", mergeBase], {
-      offline: true,
-      repoRoot: headCheckoutDir,
-    });
-  } finally {
-    Object.assign(console, saved);
-  }
-  let code: number;
-  try {
-    code = await pending;
+    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted" };
+    const launch = childEntryArgv(repoRoot, "run-task", "src/run-task.ts", ["lint-plan", "--plan",
+      join(headCheckoutDir, "plan", "tasks.yaml"), "--base", mergeBase, "--offline", "--repo-root", headCheckoutDir],
+      undefined, { log: options.log });
+    options.log?.(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow("run-task", "lint-plan", launch));
+    const result = await run(launch.argv, { cwd: repoRoot, signal: options.signal });
+    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted" };
+    if (result.error) return { ran: false, reason: `lint-plan could not start: ${result.error.message}` };
+    if (result.signal) return { ran: false, reason: `lint-plan killed by ${result.signal}` };
+    if (result.status === null) return { ran: false, reason: "lint-plan exited without a status" };
+    const lines = `${result.stdout}\n${result.stderr}`.split(/\r?\n/);
+    return planLintOutcomeFromOutput(result.status, lines, mergeBase, existsSync(join(headCheckoutDir, "plan", "tasks.d")));
   } catch (e) {
     return { ran: false, reason: `lint-plan threw: ${String((e as Error).message).split("\n")[0]}` };
   }
-  return planLintOutcomeFromOutput(code, lines, mergeBase, existsSync(join(headCheckoutDir, "plan", "tasks.d")));
+}
+
+/** The lint leads its own process group, so cancellation reaches its Git descendants too. No new timeout. */
+function spawnReviewPlanLint(argv: string[], options: { cwd: string; signal?: AbortSignal }): Promise<CensusChildResult> {
+  return new Promise((resolveChild) => {
+    const child = spawn(process.execPath, argv, { cwd: options.cwd, detached: true, stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, RMD_SELF_SYNC_DONE: "1" } });
+    let stdout = "", stderr = "";
+    let error: Error | undefined;
+    child.stdout.setEncoding("utf8").on("data", (text: string) => { stdout += text; });
+    child.stderr.setEncoding("utf8").on("data", (text: string) => { stderr += text; });
+    child.once("error", (cause: Error) => { error = cause; });
+    child.once("close", (status, signal) => {
+      options.signal?.removeEventListener("abort", abort);
+      resolveChild({ status, signal, stdout, stderr, ...(error ? { error } : {}) });
+    });
+    const abort = (): void => { if (child.pid !== undefined) killProcessGroup(child.pid); };
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
+  });
 }
 
 /** W1-T4423: read {@link lintPlanCommand}'s printed report back into violations. `monolith-filing` is dropped for a
@@ -19849,7 +20313,7 @@ export function planLintOutcomeFromOutput(code: number, lines: string[], mergeBa
 }
 
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
-  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], ["--all", "--merge-base"]);
+  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base", "--repo-root"], ["--all", "--merge-base", "--offline"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -19857,8 +20321,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // W1-T324: a standalone token, never a substring match on a proof body quoting "--all".
   // Ignored in --base mode, whose own scope already defines what is in-bounds.
   const allFlag = rest.includes("--all");
-  const offline = deps.offline === true;
-  const checkoutRoot = deps.repoRoot ?? repoRoot;
+  const offline = deps.offline === true || rest.includes("--offline");
+  const checkoutRoot = deps.repoRoot ?? resolve(flagValue(rest, "--repo-root") ?? repoRoot);
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show
@@ -42513,9 +42977,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "next-task-id",
-    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>]",
-    summary: "Atomically CLAIM the next free W1-T<n> task id. `--no-reserve` prints one without claiming it.",
-    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and the audit never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder. W1-T9683 --count <n> reserves n ids from ONE open-PR read and one history scan, each walk starting above the last id held (contention advances and is reported exactly as for one id), all under the same holder; it prints a RESERVED line per id it holds and a final `HELD k of n:` line, and a partial result (k < n) prints only the ids it holds and exits 2. --count is refused beside --offline, --no-reserve, --audit and --prefix.",
+    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit [--reap [--apply | --reconcile]]] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>]",
+    summary: "Claim the next task id, or preview orphan cleanup with --audit --reap; --apply deletes under leases.",
+    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. --audit --reap previews only CANDIDATE rows past a freshly measured bar: the largest HELD-anchor-to-first-PR delay, floored at RESERVATION_PUSH_GRACE_MS, with n/max/p50 and population reported. It reads anchors with one private-namespace fetch; any unread surface or empty measured population refuses deletion. --reap alone writes one planned summary; --apply verifies a PENDING intent per id before one batched, guarded, leased push, then verifies confirmed released/skipped outcomes. Missing push results or outcome writes report UNKNOWN and return nonzero with recoverable intents. Unresolved batches block further deletion at that repository/state root. --audit --reap --reconcile reads the complete compressed, rotated-plain and live ledger union and freshly reads each pending exact ref; it records observed_absent with actor UNKNOWN, foreign or unchanged without deleting. Unread or torn history refuses action; reconciliation never retries a deletion. A later deletion requires another complete audit and explicit --reap --apply. Neither apply nor reconciliation runs automatically. --offline refuses --reap; --audit-age-days applies only to audit alone. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and --audit alone never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder. W1-T9683 --count <n> reserves n ids from ONE open-PR read and one history scan, each walk starting above the last id held (contention advances and is reported exactly as for one id), all under the same holder; it prints a RESERVED line per id it holds and a final `HELD k of n:` line, and a partial result (k < n) prints only the ids it holds and exits 2. --count is refused beside --offline, --no-reserve, --audit and --prefix.",
   },
   {
     name: "emissions",

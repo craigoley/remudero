@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
@@ -236,9 +237,11 @@ export function hotFileOrigin(file: string): string {
 const HOT_FILE_SLUG_MAX = 72;
 
 /** The shard's stem and its regression test's name, one slug: lint-plan's sizing reads a test named
- *  after its own shard as that task's falsifier, not a second concern. */
+ *  after its own shard as that task's falsifier, not a second concern. Target identity stays in the
+ *  digest; title, origin, files and proof retain the full path. This names a Git merge regression. */
 export function hotFileShardStem(file: string): string {
-  return kebabSlug(`two-prs-never-conflict-on-${file}`, HOT_FILE_SLUG_MAX).replace(/-+$/, "");
+  const target = createHash("sha256").update(file).digest("hex");
+  return kebabSlug(`two-prs-never-conflict-on-file-${target}`, HOT_FILE_SLUG_MAX).replace(/-+$/, "");
 }
 
 /** The NEW regression test a restructuring adds: two pull requests editing the file merge cleanly. */

@@ -12,7 +12,7 @@
   origin: feedback#fb-1791908319669-d9d257
   plan_refs: ["§7B", W1-T5859, W1-T8264, W1-T3600, W1-T7762, W1-T8921]
   files: [plan/fleet-ownership-write-boundary.md]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The standing doctrine leave-red-prs-to-the-fix-lane permits hand takeover only after
