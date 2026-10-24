@@ -8340,7 +8340,15 @@ async function runReview(args: {
   // W1-T4423: a plan-only PASS names lint-plan, so the review runs it on the target repo's plan at this head.
   const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir,
     undefined, undefined, { signal, log }) : undefined;
-  const computed = await preparedDecision.judge({ ...proofEvidence, planLint, semantic, semanticClauses });
+  const computed = await preparedDecision.judge({
+    ...proofEvidence, planLint, semantic, semanticClauses,
+    diff, report,
+    target: { owner, repo },
+    headCheckoutDir: args.headCheckoutDir,
+    baseCheckoutDir: args.baseCheckoutDir,
+    taskDeclaredFiles: task.files,
+    openTaskIds: args.openTaskIds,
+  });
 
   // W1-T359: ADVISORY rubric layer — invoked AFTER `computed` above, over the
   // SAME `diff`/`report` the binding verdict just judged, and consulted by
