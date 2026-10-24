@@ -7,7 +7,9 @@
   verify: auto
   risk: low
   priority: 4
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T10563 — It depends on W1-T9341, which will never be built.
   # backlog gardener: band=4 evidence=46195aee2ed22e1a
   # backlog gardener: placed=2026-10-24T17:39:57.656Z
   attempts: 0
