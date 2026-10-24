@@ -167,13 +167,55 @@ BANNER_WAIT_S="${RMD_SERVE_BANNER_WAIT_S:-60}"
 BANNER_POLL_S="${RMD_SERVE_BANNER_POLL_S:-3}"
 DOCKERENV_PATH="${RMD_SERVE_DOCKERENV_PATH:-/.dockerenv}"
 
+daemon_host_path_for() {
+  local CONTAINER_PATH="$1"
+  local BEST_SOURCE="" BEST_DEST="" SOURCE="" DEST=""
+  while IFS=$'\t' read -r SOURCE DEST; do
+    [ -n "${SOURCE}" ] && [ -n "${DEST}" ] || continue
+    case "${CONTAINER_PATH}" in
+      "${DEST}"|"${DEST}"/*)
+        if [ "${#DEST}" -gt "${#BEST_DEST}" ]; then BEST_SOURCE="${SOURCE}"; BEST_DEST="${DEST}"; fi
+        ;;
+    esac
+  done < <(docker inspect "${DAEMON_CONTAINER}" --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' 2>/dev/null || true)
+  [ -n "${BEST_DEST}" ] || return 1
+  printf '%s%s\n' "${BEST_SOURCE}" "${CONTAINER_PATH:${#BEST_DEST}}"
+}
+
+claude_fleet_auth_plan() {
+  CLAUDE_FLEET_AUTH_HOST="${RMD_CLAUDE_FLEET_AUTH_HOST_DIR:-}"
+  CLAUDE_FLEET_AUTH_DEST="/home/node/.claude/fleet-auth"
+  CLAUDE_FLEET_AUTH_ARGS=()
+  local configured="${RMD_CLAUDE_DIR:-${HOME:-/root}/.claude}/fleet-auth" hint=""
+  if [ -z "${CLAUDE_FLEET_AUTH_HOST}" ]; then
+    hint="$(daemon_host_path_for "${CLAUDE_FLEET_AUTH_DEST}" || true)"
+    if [ -d "${configured}" ]; then
+      CLAUDE_FLEET_AUTH_HOST="${configured}"
+      if [ -d "${hint}" ] && [ "$(cd -P "${configured}" && pwd)" != "$(cd -P "${hint}" && pwd)" ]; then
+        echo "serve-container: NOTE — configured fleet-auth ${configured} and daemon mount ${hint} disagree; Claude login unavailable." >&2
+        return 0
+      fi
+    else
+      CLAUDE_FLEET_AUTH_HOST="${hint}"
+    fi
+  fi
+  if [ -n "${CLAUDE_FLEET_AUTH_HOST}" ] && [ -d "${CLAUDE_FLEET_AUTH_HOST}" ]; then
+    CLAUDE_FLEET_AUTH_HOST="$(cd -P "${CLAUDE_FLEET_AUTH_HOST}" && pwd)"
+    CLAUDE_FLEET_AUTH_ARGS=(-v "${CLAUDE_FLEET_AUTH_HOST}:${CLAUDE_FLEET_AUTH_DEST}")
+  else
+    echo "serve-container: NOTE — fleet-auth directory is absent; Claude login unavailable." >&2
+  fi
+}
+
 REPLACE=0
 DRY_RUN=0
+FLEET_AUTH_PLAN_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --instance) INSTANCE_NAME="${2:?--instance needs a name}"; shift 2 ;;
     --replace)   REPLACE=1; shift ;;
     --dry-run)   DRY_RUN=1; shift ;;
+    --fleet-auth-plan) FLEET_AUTH_PLAN_ONLY=1; shift ;;
     --tag)       TAG="${2:?--tag needs a value}"; REF="${REGISTRY}.azurecr.io/${IMAGE}:${TAG}"; shift 2 ;;
     -h|--help)   sed -n '1,80p' "$0"; exit 0 ;;
     *)           echo "serve-container: unknown argument $1" >&2; exit 2 ;;
@@ -238,6 +280,14 @@ fi
 
 DAEMON_REPO_DIR="${STATE_MOUNT_DEST}/${DAEMON_REPO}"
 if [ -n "${INSTANCE_NAME}" ]; then SERVE_SUPERVISOR=off; fi
+
+if [ "${FLEET_AUTH_PLAN_ONLY}" -eq 1 ]; then
+  claude_fleet_auth_plan
+  if [ "${#CLAUDE_FLEET_AUTH_ARGS[@]}" -gt 0 ]; then
+    printf 'bind\t%s\t%s\n' "${CLAUDE_FLEET_AUTH_HOST}" "${CLAUDE_FLEET_AUTH_DEST}"
+  fi
+  exit 0
+fi
 
 # ── 1. REFUSE TO RUN INSIDE A CONTAINER ─────────────────────────────────────────────────────────
 # Same refusal, same reason, as recycle-container.sh section 1: this file is COPYed into the image
@@ -379,29 +429,6 @@ unset CURRENT VAR_NAME
 # assuming where the operator keeps credentials on the host. Longest destination wins so a nested
 # mount is never shadowed by a broader parent. Paths are metadata, not secret material; key CONTENT
 # is never read here.
-daemon_host_path_for() {
-  local CONTAINER_PATH="$1"
-  local BEST_SOURCE=""
-  local BEST_DEST=""
-  local SOURCE=""
-  local DEST=""
-  while IFS=$'\t' read -r SOURCE DEST; do
-    [ -n "${SOURCE}" ] && [ -n "${DEST}" ] || continue
-    case "${CONTAINER_PATH}" in
-      "${DEST}"|"${DEST}"/*)
-        if [ "${#DEST}" -gt "${#BEST_DEST}" ]; then
-          BEST_SOURCE="${SOURCE}"
-          BEST_DEST="${DEST}"
-        fi
-        ;;
-    esac
-  done < <(docker inspect "${DAEMON_CONTAINER}" --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' 2>/dev/null || true)
-  if [ -z "${BEST_DEST}" ]; then
-    return 1
-  fi
-  printf '%s%s\n' "${BEST_SOURCE}" "${CONTAINER_PATH:${#BEST_DEST}}"
-}
-
 # ── W1-T2834: THE KEY'S HOST PATH IS CONFIGURATION, NOT AN INFERENCE ABOUT A SIBLING ────────────
 #
 # `daemon_host_path_for` inspects `remudero-daemon` ONCE, at docker-run time, and is never
@@ -514,6 +541,7 @@ unset APP_KEY_DECLARED APP_KEY_HOST APP_KEY_HOST_DECLARED APP_KEY_SOURCE APP_KEY
 # See the header note for the defect this closes. `-f` (a regular file, not a directory) is the
 # right test: `~/.claude.json` is a FILE beside `~/.claude/`, never the directory itself, and a
 # host where the two got swapped should read as "absent" rather than mount the wrong thing.
+claude_fleet_auth_plan
 ACCOUNT_FILE_ARGS=()
 if [ -f "${CLAUDE_JSON_PATH}" ]; then
   ACCOUNT_FILE_ARGS=(-v "${CLAUDE_JSON_PATH}:${CLAUDE_JSON_MOUNT_DEST}:ro" -e "RMD_ACCOUNT_FILE_PATH=${CLAUDE_JSON_MOUNT_DEST}")
@@ -746,6 +774,7 @@ RUN_ARGS=(
   # one host state it was written to tolerate. The production host is bash 5.2.21 (measured) where
   # either form works; this one works on both.
   "${ACCOUNT_FILE_ARGS[@]+"${ACCOUNT_FILE_ARGS[@]}"}"
+  "${CLAUDE_FLEET_AUTH_ARGS[@]+"${CLAUDE_FLEET_AUTH_ARGS[@]}"}"
   # W1-T2568: same bash-3.2-safe empty-array form as ACCOUNT_FILE_ARGS immediately above — see
   # that splice's own comment for why the bare `"${ARR[@]}"` form is unsafe under `set -u`.
   "${GITHUB_WEBHOOK_SECRET_ARGS[@]+"${GITHUB_WEBHOOK_SECRET_ARGS[@]}"}"
