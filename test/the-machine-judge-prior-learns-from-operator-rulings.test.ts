@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +19,7 @@ import { loadPlan, loadPlanFromYaml, type Task } from "#src/lib/plan.js";
 import type { RiskJudgeInput } from "#src/lib/risk-judge.js";
 import { taskRulingPin } from "#src/lib/task-linter.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const CLOCK = fixedClock(Date.parse("2026-10-24T12:00:00Z"));
@@ -32,8 +32,8 @@ function shard(id: string, family = "flow-blocker"): string {
   return result.text;
 }
 
-function fixture(t: { after(fn: () => void): void }, shards: Record<string, string>) {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}judge-prior-`));
+function fixture(t: { after(fn: () => void): void }, shards: Record<string, string>,
+  root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}judge-prior-`))) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
@@ -85,23 +85,19 @@ test("W1-T9045: every ladder gardener's origin family reads its own gardener rec
 });
 
 test("W1-T9045: a default pass credits squash trailers and ignores a shard's merged status", async t => {
+  const repo = gitRepo({ seedCommit: false, kind: "judge-prior" });
   const f = fixture(t, {
     "W1-T9901": shard("W1-T9901").replace("status: queued", "status: blocked"),
     "W1-T9902": shard("W1-T9902"),
     "W1-T9903": shard("W1-T9903").replace("status: queued", "status: merged"),
     "W1-T9904": shard("W1-T9904").replace("status: queued", "status: done"),
-  });
-  const git = (args: string[]) => execFileSync("git", ["-C", f.root, ...args], { encoding: "utf8", stdio: "pipe",
-    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" } });
-  git(["init", "-q"]);
-  git(["config", "user.name", "Fixture"]);
-  git(["config", "user.email", "fixture@example.invalid"]);
-  git(["add", "plan"]);
+  }, repo.dir);
+  repo.git("add", "plan");
   const message = join(f.root, "commit-message.txt");
   writeFileSync(message, "fixture\n\n" + "unrelated narrative\n".repeat(60_000) +
     "Remudero-Task: W1-T9901\nRemudero-Task: W1-T9901\nprose Remudero-Task: W1-T9903\n");
-  git(["commit", "-q", "-F", message]);
-  git(["update-ref", "refs/remotes/origin/main", "HEAD"]);
+  repo.git("commit", "-q", "-F", message);
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   assert.equal(f.ports.isMerged, undefined, "exercise the production default");
   const report = await runMachineFilingJudge(f.ports);
   assert.deepEqual(report.proceeded, ["W1-T9902"]);
