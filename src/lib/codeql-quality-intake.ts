@@ -4,6 +4,38 @@ import type { RawAlert } from "./ops.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { CodeHealthProjectionInput } from "./code-health-projection.js";
+
+export interface CodeHealthRelatedWork {
+  repository: string;
+  proposalId: string;
+  taskId?: string;
+  prUrl?: string;
+  threadId?: string;
+}
+
+export interface CodeHealthImprovementOpportunity {
+  id: string;
+  snapshotId: string;
+  repository: string;
+  proposalId: string;
+  ruleId: string;
+  title: string;
+  consequence: string;
+  expectedResult: string;
+  acceptanceIdeas: string[];
+  uncertainty: string[];
+  mayPlan: boolean;
+  evidence: Array<{ fingerprint: string; sourceId: string; scanId: string; analyzedSha: string; observedAt: string; severity: string; title: string; path: string }>;
+  effortMinutes: number | null;
+  estimateKind: "modeled" | null;
+  relatedWork: CodeHealthRelatedWork[];
+}
+
+/** A read-only briefing over existing evidence and opportunity identities; never files or ranks. */
+export function buildCodeHealthOpportunities(_input: CodeHealthProjectionInput, _relatedWork: readonly CodeHealthRelatedWork[] = []): CodeHealthImprovementOpportunity[] {
+  throw new Error("Code health opportunity briefing is not implemented");
+}
 
 export const CODEQL_QUALITY_PROPOSAL_PREFIX = "codeql-quality:";
 
