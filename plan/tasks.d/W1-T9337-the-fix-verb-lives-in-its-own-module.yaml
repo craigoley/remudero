@@ -3,14 +3,26 @@
   repo: remudero
   depends_on: [W1-T9331]  # the cli-no-run-task rule must hold before a handler moves; the five extractions all declare src/run-task.ts, so dispatch serializes them
   type: implement
-  verify: auto
+  verify: human
   principles: {tdd: strict}
   budget_usd: 15.00
   risk: high  # Rule 19: one concern — a verbatim move of one verb's handlers behind a host seam; behaviour, rows and exit codes are unchanged
   band_meaning: span
   origin: "operator approval 2026-10-13: the run-task.ts serialization finding; one step of the split, in measured-churn order W1-T9332 (run-task), W1-T9333 (daemon), W1-T9337 (fix), W1-T9338 (sweep) and W1-T9339 (review)"
   plan_refs: [W1-T9331, W1-T2893, W1-T2883, W1-T2892, W1-T2894, W1-T2325, W1-T3138, W1-T8502]
-  files: [src/run-task.ts, src/cli/commands/fix.ts, test/the-fix-verb-lives-in-its-own-module.test.ts]
+  files:
+    - src/run-task.ts
+    - src/cli/commands/fix.ts
+    - test/the-fix-verb-lives-in-its-own-module.test.ts
+    - scripts/source-text-assertion-baseline.json
+    - test/a-capped-proof-repair-amends-the-plan-not-the-pr-body.test.ts
+    - test/a-generic-route-has-an-explicit-tool-bound.test.ts
+    - test/a-stale-gate-cannot-publish-a-verdict.test.ts
+    - test/instrument-isolation.test.ts
+    - test/resolver-divergence-detector.test.ts
+    - test/review-provider-provenance.test.ts
+    - test/run-review-evidence-target.test.ts
+    - test/the-regime-helper-has-one-derivation.test.ts
   # refusal-amendment (W1-T9337, run DAEMON-1792797246750@7ecddddd77f973a141331e2d6bba6dc421d8994e, 2026-10-24T00:28:15.288Z): the worker refused criterion 4 [contradicts-another-criterion] — proposed re-scope-criteria: reconcile the contradicting criteria — re-scope one so both can hold at once
   #   worker evidence: Existing source-text tests require moved fix-rung statements in `src/run-task.ts`, while criteria 1 and 3 require those statements in `fix.ts` behind thin delegates.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
@@ -47,8 +59,11 @@
        function builds the host from run-task.ts's own symbols and delegates to the module. HANDLERS, every in-file
        caller, and every test that imports a root from src/run-task.ts stay unchanged.
     4. Unchanged: COMMANDS (scripts/rmd-help.mjs source-scans that array), and the verb's behaviour, ledger rows,
-       stdout and exit codes. No test file other than the new one is edited. If an existing test must change, the
-       move was not verbatim; fix the move, not the test.
+       stdout and exit codes. The eight explicitly declared existing source readers may also follow both
+       physical source owners and the mechanical host qualification, preserving all 326 original assertion
+       calls byte-for-byte. No other existing test changes are allowed. The source-text assertion baseline
+       permits only instrument-isolation and review-provider-provenance to rise from two physical reads to
+       three each; every other entry, exclusion, population, threshold and falsifier stays unchanged.
     5. The PR body reports the moved symbol count and line count, and the host's member count. A large host is
        acceptable. Never shrink it by importing run-task.ts.
     Tests go in the new file test/the-fix-verb-lives-in-its-own-module.test.ts, with `test(` titles exactly as in the proofs below. They read the two source

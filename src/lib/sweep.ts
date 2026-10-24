@@ -16690,7 +16690,7 @@ export async function runSweep(
     if (row.step === "pr.stuck.resolved") resolvedStages.add(stageKey(row));
   }
   const reportStuckStage = async (pr: OpenPrView, fields: ReturnType<typeof blockerFields>, repairStarted: boolean,
-    standDownReason: string | undefined): Promise<void> => {
+    standDownReason: string | undefined, escalationHandled: boolean): Promise<void> => {
     if (deps.dryRun) return;
     const key = stageKey({ pr_number: pr.prNumber, ...fields });
     const record = (step: string, extra: Record<string, unknown>) => appendLine(deps.ledgerPath, {
@@ -16703,20 +16703,27 @@ export async function runSweep(
         resolved_blocker: fields.blocker, resolved_blocker_since: fields.blocker_since });
       resolvedStages.add(oldKey);
     }
+    const ownerless = fields.blocker_owner === "NONE";
     const bound = policy.stageBackstops[fields.blocker];
-    if (!bound || fields.blocker_age_ms <= bound.minutes * 60_000 || stuckStages.has(key) ||
+    if ((!ownerless && (!bound || fields.blocker_age_ms <= bound.minutes * 60_000)) || stuckStages.has(key) ||
         /(?:MERGED|CLOSED)/.test(standDownReason ?? "")) return;
     const belongs = (row: Record<string, unknown>) => row.pr_number === pr.prNumber || row.pr_url === pr.prUrl ||
       (row.pr_number === undefined && row.pr_url === undefined && pr.taskId !== undefined && row.task_id === pr.taskId);
     const since = Date.parse(fields.blocker_since);
-    const currentRows = readLedger(deps.ledgerPath);
+    let currentRows = ledgerLines;
+    let stageHistoryError: string | undefined;
+    try { currentRows = readLedger(deps.ledgerPath); }
+    catch (error) {
+      stageHistoryError = String(error);
+      log("sweep.stuck_history_unavailable", { pr_number: pr.prNumber, reason: stageHistoryError });
+    }
     const reportedStage = currentRows.find(row => row.step === "pr.stuck" && stageKey(row) === key);
     if (reportedStage) { stuckStages.set(key, reportedStage); return; }
     const stageRows = currentRows.filter(row => belongs(row) && Date.parse(String(row.ts)) >= since);
     // W1-T9433: the backstop counts only the time the stage's owner could act, so a stand-down the fleet placed
     // on itself (a PAUSE hold, capacity, a light pass) is read back from the stage's own rows and excluded.
     const heldMs = fleetWithheldStageMs(stageRows, now);
-    if (fields.blocker_age_ms - heldMs <= bound.minutes * 60_000) return;
+    if (!ownerless && bound && fields.blocker_age_ms - heldMs <= bound.minutes * 60_000) return;
     // W1-T9971: the fix rung writes `fix.dispatch` when a round ENDS, so a round an EARLIER pass handed to it
     // (still queued in memory admission, or running) has no qualifying row yet. Read it as the dedup does: this
     // head is in the dispatched set and its seed's rung has not ended. Only a seed since the stage began counts.
@@ -16734,7 +16741,35 @@ export async function runSweep(
           (row.step === "fix.done" && typeof row.pushed_head_sha === "string")) ||
           (priorBlockerByPr.get(pr.prNumber)?.blocker === fields.blocker &&
             ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber)?.head_sha !== pr.headSha))) return;
+    const signatureOf = (reason: string): string => reason
+      .replace(/\b[0-9a-f]{7,40}\b/gi, "<sha>")
+      .replace(/#\d+\b/g, "#<pr>")
+      .replace(/\b\d+(?:\.\d+)?\s*(?:milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)\b/gi, "<duration>")
+      .replace(/\b\d+(?:\.\d+)?\b/g, "<n>")
+      .replace(/\s+/g, " ").trim();
+    const repeats = new Map<string, number>();
+    for (const row of stageRows) {
+      if (row.step !== "sweep.disposed" || typeof row.reason !== "string") continue;
+      const signature = signatureOf(row.reason);
+      if (signature) repeats.set(signature, (repeats.get(signature) ?? 0) + 1);
+    }
+    const repeated = [...repeats].filter(([, count]) => count > 1).sort((a, b) => b[1] - a[1])[0];
+    const repeatDiagnosis = repeated ? `repeat: ${JSON.stringify(repeated[0])} x${repeated[1]}` : undefined;
+    const boundFields = { ...(ownerless ? { owner: "none" } : { bound_minutes: bound?.minutes, bound_kind: bound?.kind }),
+      ...(stageHistoryError ? { stage_history_error: stageHistoryError } : {}) };
+    const recordStuck = (row: Record<string, unknown> & { diagnosis: string }): void => {
+      record("pr.stuck", row);
+      stuckStages.set(key, row);
+      const name = `pr-stage-stall:${fields.blocker}:${repeated?.[0] ?? signatureOf(row.diagnosis)}`;
+      record("incident.event", {
+        task_id: "INCIDENT", source: "daemon", kind: "flow", name,
+        fingerprint: createHash("sha256").update(`flow\u0000${name}`, "utf8").digest("hex"),
+        subject: `pr=${pr.prNumber}`, message: `pr=${pr.prNumber} ${fields.blocker}: ${row.diagnosis}`,
+      });
+    };
     const diagnoses: string[] = fields.blocker_cause ? [fields.blocker_cause] : [];
+    if (stageHistoryError) diagnoses.push(`stage history unreadable (${stageHistoryError})`);
+    if (repeatDiagnosis) diagnoses.push(repeatDiagnosis);
     // W1-T8167: a review admitted for this head and not yet posted/failed/refused is a live owner, not a stall.
     // It is overdue only past the longest review this process has observed (the 30-minute bound stands in).
     // A review whose setup refused at this head, with no review started since, is no live owner: each pass
@@ -16755,7 +16790,7 @@ export async function runSweep(
           !stageRows.some(row => LIVE_REVIEW_CLOSING_STEPS.has(String(row.step)) &&
             Date.parse(String(row.ts)) >= admittedAtMs)) {
         const observedBoundMs = observedReviewOverrunBoundMs(idleMemo.reviewMs);
-        const overdueAfterMs = observedBoundMs ?? bound.minutes * 60_000;
+        const overdueAfterMs = observedBoundMs ?? (bound?.minutes ?? 0) * 60_000;
         if (now - admittedAtMs <= overdueAfterMs) {
           const deferredKey = `${deps.ledgerPath}\u0000${key}`;
           if (!deferredStageKeys.has(deferredKey)) {
@@ -16794,10 +16829,10 @@ export async function runSweep(
         row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
       let outcome = typeof prior?.outcome === "string" ? prior.outcome : undefined;
       const refreshed = (refreshOutcome: string) => {
-        const row = { pr_number: pr.prNumber, ...fields, diagnosis: "fixed-on-main", bound_minutes: bound.minutes,
-          bound_kind: bound.kind, main_sha: mainTipSha, test_files: fixedFiles, refresh_outcome: refreshOutcome };
-        record("pr.stuck", row);
-        stuckStages.set(key, row);
+        const row = { pr_number: pr.prNumber, ...fields,
+          diagnosis: repeatDiagnosis ? `fixed-on-main; ${repeatDiagnosis}` : "fixed-on-main", ...boundFields,
+          main_sha: mainTipSha, test_files: fixedFiles, refresh_outcome: refreshOutcome };
+        recordStuck(row);
       };
       if (prior === undefined && !baseRedHistory.refreshed.has(refreshKey) && deps.updateBranch) {
         // W1-T8396: a fixed-on-main read is evidence only when merging main can clear the red.
@@ -16834,12 +16869,12 @@ export async function runSweep(
     const diagnosis = diagnoses.length ? diagnoses.join("; ") : "unknown signature";
     const reason = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — ${fields.blocker} for ` +
       `${Math.floor(fields.blocker_age_ms / 60_000)} minutes ` +
-      `(BACKSTOP ${bound.minutes}); since ${fields.blocker_since}; DIAGNOSIS: ${diagnosis}` +
+      `${ownerless ? "(owner: none)" : `(BACKSTOP ${bound?.minutes})`}; since ${fields.blocker_since}; DIAGNOSIS: ${diagnosis}` +
       (heldMs > 0 ? `; the fleet itself withheld the repair for ${Math.floor(heldMs / 60_000)} of those minutes` : "");
-    const row = { pr_number: pr.prNumber, ...fields, diagnosis, bound_minutes: bound.minutes, bound_kind: bound.kind,
+    const row = { pr_number: pr.prNumber, ...fields, diagnosis, ...boundFields,
       held_ms: heldMs };
-    record("pr.stuck", row);
-    stuckStages.set(key, row);
+    recordStuck(row);
+    if (escalationHandled) return;
     try {
       await deps.escalate(pr, reason, {
         taskId: escalationTaskIdFor(pr), prNumber: pr.prNumber, prUrl: pr.prUrl, question: reason,
@@ -18154,7 +18189,13 @@ export async function runSweep(
     };
     if (armOutcome !== "armed" && armOutcome !== "direct-merged" && !gardenRecordRefusals.has(pr.prNumber)) {
       const repairStarted = acted && spent !== false && (disposition === "conflicted" || disposition === "blocked-fixable");
-      await reportStuckStage(pr, blockerRow, repairStarted, standDownReason);
+      const escalationHandled = (disposition === "blocked-ambiguous" || disposition === "refused-escalate") &&
+        (acted || deduped || actionError !== undefined || (pr.isPlanFiling === true && !pr.taskId)) ||
+        // Ownerless stages still report immediately; the disposition owns repairs, waits and prior escalations.
+        (blockerRow.blocker_owner === "NONE" && (acted || deduped || actionError !== undefined || disposition === "wait" ||
+          (standDownReason !== undefined && (deps.actionable?.(disposition) ?? true))));
+      const stageStandDown = disposition === "stale" && acted ? "CLOSED" : standDownReason;
+      await reportStuckStage(pr, blockerRow, repairStarted, stageStandDown, escalationHandled);
     }
     // A real pass's `sweep.disposed` row below carries every field of these two rows, and on the
     // fleet each was an exact duplicate of it (1,454 of 14,089 core rows, 2026-09-24): write them only

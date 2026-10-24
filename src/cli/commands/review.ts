@@ -5,7 +5,7 @@ import { buildBaseProofDir, hostWorktreeGitAtTopLevel } from "../../lib/check-pr
 import { execFileSync, spawn } from "node:child_process";
 import { withheldReviewRefusalRow } from "../../lib/sweep.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
-import { existsSync, lstatSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { loadConfig, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
@@ -735,6 +735,11 @@ export async function runReview(host: ReviewCommandHost, args: {
           head_sha: headSha,
           node_modules: snapshot.nodeModules,
         });
+        const evidencePath = join(snapshot.cwd, ".git", "rmd-review-input.json");
+        writeFileSync(evidencePath, JSON.stringify({
+          headSha, diff, report, reportIsSubstitute: args.reportIsSubstitute === true,
+          ...(args.implementationReport === undefined ? {} : { implementationReport: args.implementationReport }),
+        }), { mode: 0o600 });
         const prompt =
           buildReviewPrompt({
             task: { id: task.id, acceptance: criteria, ...narrative },
@@ -742,6 +747,7 @@ export async function runReview(host: ReviewCommandHost, args: {
             owner,
             repo,
             headSha,
+            evidencePath,
             ...scopeContext,
           }) +
           "\n" +
