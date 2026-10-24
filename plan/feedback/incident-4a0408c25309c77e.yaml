@@ -19,6 +19,9 @@ raw: >-
     (none found)
 attachments: []
 origin: incident#4a0408c25309c77e5399d135b399c67a8ac1234834a978dad2a13b07839b24f6
+# Triage: already covered by W1-T8240 (stranded-task detection) and W1-T8927 (restart yield costs).
+# This sample reports harness-only yields with a clear breaker, as W1-T8240 specifies;
+# it supplies no new root-cause evidence warranting another task.
 status: rejected
 reply_to: null
 proposal_pr: null
