@@ -709,7 +709,7 @@ import {
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
-import { mergedHeadTypechecks, probeMerge, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
+import { applyMergeProbeEvidence, mergedHeadTypechecks, probeMerge, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
@@ -7922,6 +7922,27 @@ async function runReview(args: {
     sessionId: null,
   };
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
+  const proofEvidence: Parameters<typeof preparedDecision.judge>[0] = {
+    diff,
+    report,
+    headRefName: args.headRefName,
+    reservationOwnership: ownership,
+    baseTaskIdDeclarations: taskIdEvidence.baseDeclarations,
+    implementationReport: args.implementationReport,
+    target: { owner, repo },
+    // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
+    reportIsSubstitute: args.reportIsSubstitute,
+    reportSubstituteCause: args.reportSubstituteCause,
+    headCheckoutDir: args.headCheckoutDir,
+    baseCheckoutDir: args.baseCheckoutDir,
+    baseUnreadablePaths: args.baseUnreadablePaths,
+    baseIsCheckout: args.baseIsCheckout,
+    addedTestFiles: args.addedTestFiles,
+    // W1-T322: advisory-only inputs — see ReviewEvidence's own doc for both fields.
+    taskDeclaredFiles: task.files,
+    openTaskIds: args.openTaskIds,
+  };
+  const preliminaryProofs = attemptReviewer ? await preparedDecision.judge(proofEvidence) : undefined;
   let reviewerSubtype: string | undefined;
   let reviewerExit: WorkerResult["exit"];
   let reviewerSpawnFailed = false;
@@ -7949,6 +7970,16 @@ async function runReview(args: {
           headSha, diff, report, reportIsSubstitute: args.reportIsSubstitute === true,
           ...(args.implementationReport === undefined ? {} : { implementationReport: args.implementationReport }),
         }), { mode: 0o600 });
+        const proofEvidencePath = join(snapshot.cwd, ".git", "rmd-review-proofs.json");
+        writeFileSync(proofEvidencePath, JSON.stringify({
+          headSha, phase: "pre-semantic", mergeVerdict: false,
+          baseProvided: args.baseCheckoutDir !== undefined, baseIsCheckout: args.baseIsCheckout === true,
+          executions: preparedDecision.proofExecutions().map(({ cwd, ...execution }) => ({ ...execution,
+            side: cwd === args.headCheckoutDir ? "head" : cwd === args.baseCheckoutDir ? "base" : "other" })),
+          capped: preliminaryProofs!.capped, floorDegraded: preliminaryProofs!.floorDegraded,
+          criteria: preliminaryProofs!.criteria.map((criterion, index) => ({ index: index + 1,
+            proof: criterion.proof, proof_exec: criterion.proof_exec, floorMet: criterion.floorMet, reason: criterion.reason })),
+        }), { mode: 0o600 });
         const prompt =
           buildReviewPrompt({
             task: { id: task.id, acceptance: criteria, ...narrative },
@@ -7957,6 +7988,7 @@ async function runReview(args: {
             repo,
             headSha,
             evidencePath,
+            proofEvidencePath,
             ...scopeContext,
           }) +
           "\n" +
@@ -8141,25 +8173,11 @@ async function runReview(args: {
   const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir,
     undefined, undefined, { signal, log }) : undefined;
   const computed = await preparedDecision.judge({
-    diff,
-    report,
-    planLint,
-    headRefName: args.headRefName,
-    reservationOwnership: ownership,
-    baseTaskIdDeclarations: taskIdEvidence.baseDeclarations,
-    implementationReport: args.implementationReport,
+    ...proofEvidence, planLint, semantic, semanticClauses,
+    diff, report,
     target: { owner, repo },
-    // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
-    reportIsSubstitute: args.reportIsSubstitute,
-    reportSubstituteCause: args.reportSubstituteCause,
-    semantic,
-    semanticClauses,
     headCheckoutDir: args.headCheckoutDir,
     baseCheckoutDir: args.baseCheckoutDir,
-    baseUnreadablePaths: args.baseUnreadablePaths,
-    baseIsCheckout: args.baseIsCheckout,
-    addedTestFiles: args.addedTestFiles,
-    // W1-T322: advisory-only inputs — see ReviewEvidence's own doc for both fields.
     taskDeclaredFiles: task.files,
     openTaskIds: args.openTaskIds,
   });
@@ -33257,7 +33275,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
   const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
   const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, baseChangedFilesByPr);
-  await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { dryRun, behindMainByPr });
+  applyMergeProbeEvidence(prsForFixRung, await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { dryRun, behindMainByPr }));
   // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
   // composition change, not a new read: the credit rung already built exactly this set, just
   // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
@@ -34649,8 +34667,8 @@ export function buildSweepHook(
       const behindMainByPr = await prelude.time("behind_main", () => tickRead?.behindMainByPr
         ?? buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles));
       const baseChangedFilesByPr = tickRead?.baseChangedFilesByPr ?? freshBaseChangedFiles;
-      await prelude.time("merge_probes", () =>
-        probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr }));
+      applyMergeProbeEvidence(prsForFixRung, await prelude.time("merge_probes", () =>
+        probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr })));
       // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
       // composition change, not a new read: the credit rung already built exactly this set, just
       // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open

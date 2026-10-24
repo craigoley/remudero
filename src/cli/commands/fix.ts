@@ -860,6 +860,9 @@ function openEscalationStandDownReason(
   current?: { conflictEvidenceCaptured: boolean; baseSha?: string },
 ): { reason: string } | undefined {
   if (!candidate) return undefined; // nothing open on this key — the ordinary path
+  // The sweep writes the question immediately after its clarification context paragraph.
+  const question = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]*\n\n([^\n]*)/.exec(candidate.body ?? "")?.[1];
+  if (question?.startsWith("PR stage stalled:")) return undefined;
   const candidateHead = escalationHeadSha(candidate.body);
   // STRICTER THAN THE MATCHER (both arms): a candidate naming NO head, or naming a DIFFERENT one,
   // never refuses a worker. The first arm is the legacy-issue case, the second is a genuinely new
@@ -5401,6 +5404,7 @@ export async function fixCommand(
       : codeqlHeadAlerts ? [{ name: CODEQL_CHECK_NAME, logTail: "The CodeQL results check failed at this head." }] : undefined,
     codeqlHeadAlerts,
     redRequiredChecks,
+    mergeConflictSource: undefined,
   };
 
   const planPath =
