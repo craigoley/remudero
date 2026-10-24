@@ -353,7 +353,7 @@ test("the follow-up id is a stable, path-safe dedup key", () => {
 
 // ── the production seams ────────────────────────────────────────────────────────────────────
 
-test("the feedback filer captures a new follow-up once and lands an update without resetting its status", () => {
+test("the feedback filer captures a follow-up once and reports an update that neither lands nor queues", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-evidence-coverage-root-"));
   const gitCalls: string[][] = [];
   const git = (args: string[]): string => {
@@ -372,7 +372,11 @@ test("the feedback filer captures a new follow-up once and lands an update witho
   assert.equal(entry.status, "new");
 
   gitCalls.length = 0;
-  file({ id: "evidence-coverage-fix-cost", action: "update", lane: "fix", field: "cost", raw: "second body" });
+  assert.throws(
+    () => file({ id: "evidence-coverage-fix-cost", action: "update", lane: "fix", field: "cost", raw: "second body" }),
+    /offline in this fixture/,
+    "an update that neither lands nor queues must reach the gardener's retry path",
+  );
   assert.ok(gitCalls.length > 0, "an update goes through the landing path, never a local rewrite of a tracked entry");
   assert.equal(parseYaml(readFileSync(path, "utf8")).raw, "first body");
 });
