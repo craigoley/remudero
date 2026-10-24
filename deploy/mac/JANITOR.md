@@ -399,6 +399,15 @@ to 111 MiB, and agents had left 16 GB of JSON and log dumps beside their checkou
   many days and not open are deleted. Archiving a thread in Codex keeps its log on disk, and its
   history database (`thread_history_*.sqlite`) is Codex's own and never touched.
 
+Keep declarations hold every action of this phase. A path is held when any of these is on it,
+on any folder above it, or anywhere inside it: `.rmd-janitor-keep`, `.rmd-scratch-keep`,
+`.rmd-dependency-seed-root.json` (in any form, including a dangling symlink), or a seed
+generation's `ready.json` beside `consumers/`. A path whose markers cannot be inspected is held
+too. A held path is never retired, repacked, worktree-pruned, compressed, expired or removed.
+A worktree is also held when its store is held. Seed stores are collected only by the
+reference-aware sweeper below. On 2026-10-24 the loose-folder rule had removed two recovered
+seed generations' `node_modules` under `~/.local/share/remudero/source-recovery`.
+
 The janitor also runs `~/.local/bin/remudero-dependencies sweep --apply` on every apply
 pass when that tool is installed (see `deploy/DEPENDENCY-SEEDS.md`).
 

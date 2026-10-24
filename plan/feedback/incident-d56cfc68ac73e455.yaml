@@ -1,0 +1,31 @@
+id: incident-d56cfc68ac73e455
+ts: 2026-10-24T17:14:18.907Z
+raw: >-
+  Incident d56cfc68ac73: intervention
+  security-alert-hold:fix-lane:security-hold-the-code-scanning-merge-po
+
+  First seen: 2026-10-24T17:09:08.632Z
+
+  Last seen: 2026-10-24T17:14:18.022Z
+
+  Count: 18, burn: 18.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#12570@5a413892f actor=cao825 cause=security-alert-hold:fix-lane:security-hold-the-code-scanning-merge-po — a hand action answered a fleet state no lane resolved
+    - surface=pr action=update-branch target=pr#12570@92029e512 actor=cao825 cause=security-alert-hold:fix-lane:security-hold-the-code-scanning-merge-po — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#12570@912b7b102 actor=cao825 cause=security-alert-hold:fix-lane:security-hold-the-code-scanning-merge-po — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#d56cfc68ac73e45599225edfb1170297172f2ecfdfe94db2882af67cc623d21c
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

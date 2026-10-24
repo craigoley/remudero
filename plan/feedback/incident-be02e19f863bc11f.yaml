@@ -1,0 +1,31 @@
+id: incident-be02e19f863bc11f
+ts: 2026-10-24T17:03:57.510Z
+raw: >-
+  Incident be02e19f863b: intervention
+  own-red:fix-lane:coverage-shard-failed-on-coverage-shard
+
+  First seen: 2026-10-24T16:59:54.504Z
+
+  Last seen: 2026-10-24T17:03:56.614Z
+
+  Count: 50, burn: 50.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10350@37ec64266 actor=cao825 cause=own-red:fix-lane:coverage-shard-failed-on-coverage-shard — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10350@c0ad82ef3 actor=cao825 cause=own-red:fix-lane:coverage-shard-failed-on-coverage-shard — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10523@e89d4d0ce actor=cao825 cause=own-red:fix-lane:coverage-shard-failed-on-coverage-shard — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#be02e19f863bc11f8a2e5b11738a03ef0d29edbd266a4d07596334d7c07fcef6
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -1,0 +1,29 @@
+id: incident-21424e9c79247536
+ts: 2026-10-24T18:02:15.635Z
+raw: >-
+  Incident 21424e9c7924: intervention
+  awaiting-arm:arm:review-success-required-checks-green-arm
+
+  First seen: 2026-10-24T17:53:23.307Z
+
+  Last seen: 2026-10-24T18:02:11.878Z
+
+  Count: 9, burn: 9.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#12570@6fbe37eba actor=cao825 cause=awaiting-arm:arm:review-success-required-checks-green-arm — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#21424e9c792475363a1ab15bbebb8e4b0ab581cce6a75cebd6a9bf7ceb32212f
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

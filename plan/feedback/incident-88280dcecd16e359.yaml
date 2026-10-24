@@ -1,0 +1,30 @@
+id: incident-88280dcecd16e359
+ts: 2026-10-24T16:54:04.022Z
+raw: >-
+  Incident 88280dcecd16: intervention undisposed:none
+
+  First seen: 2026-10-24T16:52:39.577Z
+
+  Last seen: 2026-10-24T16:52:39.577Z
+
+  Count: 64, burn: 64.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10434@dd52ef6c1 actor=cao825 cause=undisposed:none — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10445@754f103b0 actor=cao825 cause=undisposed:none — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10446@66acbee1f actor=cao825 cause=undisposed:none — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#88280dcecd16e359986ab3877575db8cae03dd301cfae37ab907e0293411b8f4
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

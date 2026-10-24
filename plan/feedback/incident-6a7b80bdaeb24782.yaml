@@ -1,0 +1,31 @@
+id: incident-6a7b80bdaeb24782
+ts: 2026-10-24T17:11:18.891Z
+raw: >-
+  Incident 6a7b80bdaeb2: intervention
+  own-red:fix-lane:comment-load-ratchet-failed-on-every-red
+
+  First seen: 2026-10-24T17:09:08.632Z
+
+  Last seen: 2026-10-24T17:11:16.561Z
+
+  Count: 10, burn: 10.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10785@f201ed573 actor=cao825 cause=own-red:fix-lane:comment-load-ratchet-failed-on-every-red — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10785@0c407701c actor=cao825 cause=own-red:fix-lane:comment-load-ratchet-failed-on-every-red — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10523@65cf3b7fe actor=cao825 cause=own-red:fix-lane:comment-load-ratchet-failed-on-every-red — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#6a7b80bdaeb2478289f5670a77750dcd70454d9459ecc042f29b3b4f3ecb9a87
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

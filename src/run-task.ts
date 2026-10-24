@@ -6455,7 +6455,8 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
       const message = parseReport(report)?.commitMessage;
       if (!message || checkCommitMessage(message).length) return refuse("the plan round needs a valid COMMIT_MESSAGE");
       git(["add", "-A", "--", ...changed]);
-      git(["commit", "-m", message]);
+      const filedTask = taskIdFromRunBranch(pr.headRefName) === input.task.id && namesATask(input.task.id);
+      git(["commit", "-m", message, ...(filedTask ? ["-m", `Remudero-Task: ${input.task.id}`] : [])]);
       sha = git(["rev-parse", "HEAD"]).trim();
     } else if (metadata.title === input.title && metadata.body === input.body) return refuse("the worker changed nothing");
     const verdict = await preflight(worktreePath, sha, metadata);
@@ -12184,8 +12185,17 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         const prerequisiteWorkerId = fixWorkerRunId(opts.runId, "prerequisite", systemClock.now());
         const prerequisiteReceipt = fixWorkerReceipt(deps.spawn, deps.log, prerequisiteWorkerId, fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
           { prUrl: opts.prUrl, roundId: prerequisiteWorkerId });
-        const spawnOutcome = await spawnFixWorkerBounded({ ...deps, spawn: prerequisiteReceipt.spawn }, dispatchArgs, { runId: opts.runId, taskId: opts.taskId });
+        const spawnOutcome = await withPredecessorTranscriptCopies(dispatchArgs, {
+          root: opts.config.root, taskId: opts.taskId, excludeRunId: prerequisiteWorkerId,
+        }, (args) => spawnFixWorkerBounded({ ...deps, spawn: prerequisiteReceipt.spawn }, args, {
+          runId: opts.runId, taskId: opts.taskId,
+        }), deps.log);
         const prerequisiteWorker = spawnOutcome.kind === "spawned" ? deps.account(spawnOutcome.result) : undefined;
+        if (prerequisiteWorker) archiveWorkerTranscript({
+          root: opts.config.root, taskId: opts.taskId, runId: prerequisiteWorkerId,
+          rung: "fix-prerequisite", text: workerTranscript(prerequisiteWorker),
+          model: opts.mount.model, verdict: prerequisiteWorker.subtype, worker: prerequisiteWorker,
+        }, deps.log);
         const prerequisiteUrl = prerequisiteWorker ? parseReport(workerTranscript(prerequisiteWorker))?.prUrl : undefined;
         const target = prerequisiteUrl ? mergeTargetFromPrUrl(prerequisiteUrl) : undefined;
         if (!target) {
@@ -46139,6 +46149,16 @@ export function mainRepairLaneFor(
   // W1-T8572: the failing test files each fix request carried, so the revert of the same merge proves itself with them.
   const testFilesBySha = new Map<string, readonly string[]>();
   return {
+    reproduceAt: async (sha, files) => {
+      const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
+      const log = (step: string, extra: Record<string, unknown> = {}) =>
+        appendLedger(ledgerPath, { run_id: runId, task_id: mainRepairTaskId(sha), step, ...extra });
+      const outcomes = await buildBaseReproductionProbe(config, repoDir, ledgerPath, log)({ prNumber: 0, headSha: sha } as OpenPrView, files, sha);
+      log("sweep.base_reproduction", { main_sha: sha, files: [...outcomes], verdict: decideBaseReproduction(files, outcomes),
+        ...(outcomes.setup_error === undefined ? {} : { setup_error: outcomes.setup_error }),
+        ...(outcomes.reason === undefined ? {} : { reason: outcomes.reason }) });
+      return outcomes;
+    },
     openFixPr: (request) => {
       testFilesBySha.set(request.offendingSha, request.testFiles);
       return dispatchFix(owner, repo, config, request, ledgerPath, runId);

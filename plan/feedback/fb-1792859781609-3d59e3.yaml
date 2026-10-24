@@ -1,0 +1,34 @@
+id: fb-1792859781609-3d59e3
+ts: 2026-10-24T16:36:21.609Z
+raw: >-
+  [answer to feedback#fb-1791856366580-a47db8] prerequisites-first
+
+
+  Proceed through the existing governed triage and task-producing filing path
+  for the two existing submissions:
+
+  - nanoclaw-2026-10-13/prompt-surface-covers-injected-skills
+
+  - nanoclaw-2026-10-13/skill-conformance-discovery
+
+
+  Establish executable acceptance and concrete task IDs for both before filing
+  the consumer-repository skill-layering task. Keep layering dependent on both
+  safeguards merging. Preserve the existing selection budget, source-repository
+  attribution, target-repository collision rule and unchanged core behavior.
+
+
+  This resolves the ordering question under the already approved follow-through.
+  It does not claim either prerequisite is filed or implemented, duplicate an
+  existing task, release a dependency/security hold, change prompt-injection
+  policy, or authorize deployment. Record the resulting task and filing-PR
+  receipts here; do not close the issue solely because this reply exists.
+attachments: []
+origin: issue
+status: new
+reply_to: fb-1791856366580-a47db8
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: issue#12567:comment:6386448490
+thread_id: null
