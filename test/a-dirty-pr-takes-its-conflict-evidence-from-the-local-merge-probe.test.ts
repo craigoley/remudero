@@ -44,8 +44,13 @@ function fixture(t: TestContext) {
 
 test("W1-T9454: a dirty PR with unknown mergeability is dispositioned from the merge probe", async (t) => {
   const f = fixture(t);
+  const clean = { ...f.pr, mergeState: "clean" as const, mergeableState: "clean" };
+  const first = await probes.probeOpenPrMerges([clean], f.ledgerPath, f.log, f.repo.dir);
+  assert.equal(first.probed, 1);
+  assert.equal(readLedgerLines(f.ledgerPath).find(r => r.step === probes.MERGE_PROBE_STEP)?.verdict, "conflict");
   assert.equal(deriveDisposition(f.pr, DEFAULT_SWEEP_POLICY, f.now).disposition, "wait");
   const summary = await probes.probeOpenPrMerges([f.pr], f.ledgerPath, f.log, f.repo.dir);
+  assert.equal(summary.probed, 0, "the unchanged pair reuses the conflict captured while GitHub reported clean");
   const prs = [f.pr];
   probes.applyMergeProbeEvidence(prs, summary);
   assert.equal(deriveDisposition(prs[0]!, DEFAULT_SWEEP_POLICY, f.now).disposition, "conflicted");
@@ -84,6 +89,8 @@ test("W1-T9454: a dirty PR with unknown mergeability is dispositioned from the m
 
 test("W1-T9454: the merge probe returns per-path conflict evidence", async (t) => {
   const f = fixture(t);
+  f.pr.mergeState = "clean";
+  f.pr.mergeableState = "clean";
   const summary = await probes.probeOpenPrMerges([f.pr], f.ledgerPath, f.log, f.repo.dir);
   assert.equal(summary.probed, 1);
   assert.equal(summary.mainSha, f.mainSha);
@@ -96,6 +103,32 @@ test("W1-T9454: the merge probe returns per-path conflict evidence", async (t) =
   const row = readLedgerLines(f.ledgerPath).find(r => r.step === probes.MERGE_PROBE_STEP);
   assert.deepEqual(row?.conflict_paths, ["conflict.txt"]);
   assert.equal(row?.verdict, "conflict");
+  assert.deepEqual(row?.conflict_evidence, captured.evidence);
+});
+
+test("W1-T9454: a cached conflict without usable evidence is re-probed for the unchanged pair", async (t) => {
+  for (const evidence of [undefined, { files: [] }, { files: [], oursLog: "", theirsLog: "" }]) {
+    await t.test(JSON.stringify(evidence) ?? "missing", async (t) => {
+      const f = fixture(t);
+      f.log(probes.MERGE_PROBE_STEP, {
+        pr_number: f.pr.prNumber, head_sha: f.pr.headSha, main_sha: f.mainSha,
+        verdict: "conflict", conflict_paths: ["conflict.txt"], github_mergeable_state: "clean",
+        ...(evidence ? { conflict_evidence: evidence } : {}),
+      });
+      const summary = await probes.probeOpenPrMerges([f.pr], f.ledgerPath, f.log, f.repo.dir);
+      assert.equal(summary.probed, 1);
+      const captured = summary.conflictsByPr.get(f.pr.prNumber);
+      assert.ok(captured);
+      assert.deepEqual(captured.evidence.files, [{ path: "conflict.txt", oursDeleted: 1, theirsDeleted: 1 }]);
+      probes.applyMergeProbeEvidence([f.pr], summary);
+      assert.equal(deriveDisposition(f.pr, DEFAULT_SWEEP_POLICY, f.now).disposition, "conflicted");
+      assert.equal(f.pr.mergeConflictSource, "merge-probe");
+      const cached = await probes.probeOpenPrMerges([f.pr], f.ledgerPath, f.log, f.repo.dir);
+      assert.equal(cached.probed, 0);
+      assert.deepEqual(cached.conflictsByPr, summary.conflictsByPr);
+      assert.equal(readLedgerLines(f.ledgerPath).filter(r => r.step === probes.MERGE_PROBE_STEP).length, 2);
+    });
+  }
 });
 
 test("W1-T9454: a PR waiting on unknown mergeability takes a probe slot first", async (t) => {

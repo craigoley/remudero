@@ -130,7 +130,7 @@ async function probeConflictEvidence(
   return evidence;
 }
 
-/** Probe each open, non-draft PR head against main once per (head, main) pair.
+/** Reuse each open, non-draft PR's (head, main) probe unless conflict evidence is missing.
  * Read-only git supplies fallback evidence; a failed read never supplies a repair input. */
 export async function probeOpenPrMerges(
   prs: readonly OpenPrView[],
@@ -161,14 +161,17 @@ export async function probeOpenPrMerges(
     const seen = new Set(
       lines.filter((line) => line.step === MERGE_PROBE_STEP).map((line) => `${line.head_sha}:${line.main_sha}`),
     );
-    for (const pr of eligible.filter(needsConflictEvidence)) {
+    for (const pr of eligible) {
       const row = lines.findLast(line => line.step === MERGE_PROBE_STEP && line.pr_number === pr.prNumber &&
         line.head_sha === pr.headSha && line.main_sha === mainSha);
+      if (row?.verdict !== "conflict") continue;
       const evidence = row?.conflict_evidence as MergeConflictEvidence | undefined;
-      if (row?.verdict === "conflict" && evidence && Array.isArray(evidence.files) &&
+      if (evidence && Array.isArray(evidence.files) &&
           typeof evidence.oursLog === "string" && typeof evidence.theirsLog === "string" &&
           hasCapturedMergeConflictEvidence(evidence)) {
         conflictsByPr.set(pr.prNumber, { headSha: pr.headSha, evidence });
+      } else {
+        seen.delete(`${pr.headSha}:${mainSha}`);
       }
     }
     const targets = eligible
@@ -181,7 +184,7 @@ export async function probeOpenPrMerges(
       const result = await probeMerge({ headSha: pr.headSha, mainSha, git });
       let evidence: MergeConflictEvidence | undefined;
       let evidenceFailure: { error: string } | undefined;
-      if (result.verdict === "conflict" && needsConflictEvidence(pr)) {
+      if (result.verdict === "conflict") {
         try {
           if (result.truncated) throw new Error("conflict paths exceeded the probe cap");
           evidence = await probeConflictEvidence(result.paths, pr.headSha, mainSha, git);
