@@ -612,3 +612,39 @@ test("reconciliation's default git reader observes the fixture without deleting"
   assert.deepEqual(f.remoteIds(), before);
   assert.equal(f.readRows().at(-1).outcome, "unchanged");
 });
+
+
+test("the reap bar keeps later qualifying filing delays when a holder branch has an older unrelated PR", async (t) => {
+  const f = fixture(t);
+  f.sample(110, 3 * DAY);
+  f.sample(111, 7 * DAY);
+  f.pulls.unshift({ body: "Remudero-Task: W1-T9999", head: { ref: "filing-111" },
+    created_at: new Date(NOW - 30 * DAY).toISOString(), state: "closed" });
+  f.anchor(112, 5);
+  const before = f.remoteIds();
+  const result = await f.invoke(["--audit", "--reap", "--apply"]);
+  assert.equal(result.code, 0, result.text);
+  const summary = f.logs.find((row) => row.step === "task_id.reservation_reap_planned")!.fields;
+  assert.equal(summary.bound_ms, 7 * DAY, JSON.stringify({ actualBound: summary.bound_ms, before, after: f.remoteIds() }));
+  assert.deepEqual(f.remoteIds(), before, "a five-day reservation is younger than the actual seven-day filing delay");
+  assert.equal(f.calls.filter((args) => args[0] === "push").length, 0);
+});
+
+
+test("the reap compares each reused holder reservation with its own anchor", async (t) => {
+  const f = fixture(t);
+  f.sample(110, 3 * DAY);
+  f.pulls[0]!.state = "closed";
+  f.anchor(111, 10, "filing-110");
+  f.pulls.push({ body: "Remudero-Task: W1-T111", head: { ref: "filing-110" },
+    created_at: new Date(NOW - 3 * DAY).toISOString(), state: "open" });
+  f.anchor(112, 5);
+  const before = f.remoteIds();
+  const result = await f.invoke(["--audit", "--reap", "--apply"]);
+  assert.equal(result.code, 0, result.text);
+  const summary = f.logs.find((row) => row.step === "task_id.reservation_reap_planned")!.fields;
+  assert.equal(summary.bound_ms, 7 * DAY);
+  assert.deepEqual(summary.basis, { n: 2, max_ms: 7 * DAY, p50_ms: 5 * DAY, population: ["W1-T110", "W1-T111"] });
+  assert.deepEqual(f.remoteIds(), before);
+  assert.equal(f.calls.filter((args) => args[0] === "push").length, 0);
+});
