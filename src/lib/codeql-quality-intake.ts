@@ -4,6 +4,86 @@ import type { RawAlert } from "./ops.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { codeHealthFindingFingerprint, projectCodeHealth, type CodeHealthProjectionInput } from "./code-health-projection.js";
+
+export interface CodeHealthRelatedWork {
+  repository: string;
+  proposalId: string;
+  taskId?: string;
+  prUrl?: string;
+  threadId?: string;
+}
+
+export interface CodeHealthImprovementOpportunity {
+  id: string;
+  snapshotId: string;
+  repository: string;
+  proposalId: string;
+  ruleId: string;
+  title: string;
+  consequence: string;
+  expectedResult: string;
+  acceptanceIdeas: string[];
+  uncertainty: string[];
+  mayPlan: boolean;
+  evidence: Array<{ fingerprint: string; sourceId: string; scanId: string; analyzedSha: string | null; observedAt: string | null; severity: string; title: string; path: string }>;
+  effortMinutes: number | null;
+  estimateKind: "modeled" | null;
+  relatedWork: CodeHealthRelatedWork[];
+}
+
+/** A read-only briefing over existing evidence and opportunity identities; never files or ranks. */
+export function buildCodeHealthOpportunities(input: CodeHealthProjectionInput, relatedWork: readonly CodeHealthRelatedWork[] = []): CodeHealthImprovementOpportunity[] {
+  const assessment = projectCodeHealth(input), scan = input.scans.find(value => value.kind === "quality");
+  if (!scan) return [];
+  const source = assessment.sources.find(value => value.kind === "quality")!;
+  const retained = new Map(assessment.findings.map(finding => [finding.fingerprint, finding]));
+  const groups = new Map<string, Set<string>>();
+  for (const finding of scan.findings) {
+    const fingerprint = codeHealthFindingFingerprint(assessment.repository, scan.kind, finding);
+    if (finding.status !== "open" || !retained.has(fingerprint)) continue;
+    const group = groups.get(finding.ruleId) ?? new Set<string>(); group.add(fingerprint); groups.set(finding.ruleId, group);
+  }
+  // The source scan IDs and normalized content, not the time a page read them, pin this briefing.
+  const normalizedScans = [...input.scans].sort((a, b) => a.kind.localeCompare(b.kind)).map(value => {
+    const findings = new Map(value.findings.map(finding => [codeHealthFindingFingerprint(assessment.repository, value.kind, finding),
+      [finding.id, finding.ruleId, finding.status, finding.severity, finding.category, finding.path, finding.title, finding.effortMinutes]]));
+    return [value.kind, value.scanId, [...findings].sort(([a], [b]) => a.localeCompare(b))];
+  });
+  const snapshotId = createHash("sha256").update(JSON.stringify([assessment.repository, assessment.currentSha, assessment.baselineSha,
+    assessment.policyVersion, assessment.sources, assessment.checks, assessment.findings, normalizedScans])).digest("hex");
+  const scopedRelated = (proposalId: string): CodeHealthRelatedWork[] => {
+    const rows = relatedWork.filter(work => work.repository.toLowerCase() === assessment.repository && work.proposalId === proposalId).map(work => {
+      const value: CodeHealthRelatedWork = { repository: assessment.repository, proposalId };
+      if (typeof work.taskId === "string" && /^[A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?$/.test(work.taskId)) value.taskId = work.taskId;
+      if (typeof work.threadId === "string" && /^thread:[A-Za-z0-9:._/-]{1,500}$/.test(work.threadId)) value.threadId = work.threadId;
+      if (typeof work.prUrl === "string" && URL.canParse(work.prUrl)) {
+        const url = new URL(work.prUrl);
+        if (url.protocol === "https:" && url.hostname === "github.com" && !url.username && !url.password && !url.search && !url.hash &&
+            url.pathname.toLowerCase().startsWith(`/${assessment.repository}/pull/`) && /^\/[a-z0-9_.-]+\/[a-z0-9_.-]+\/pull\/[1-9][0-9]*$/i.test(url.pathname)) value.prUrl = url.href;
+      }
+      return value;
+    });
+    return [...new Map(rows.map(value => [JSON.stringify(value), value])).values()];
+  };
+  return [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([ruleId, fingerprints]) => {
+    const findings = [...fingerprints].sort().map(id => retained.get(id)!);
+    const totalEffort = findings.every(finding => finding.effortMinutes !== null) ? findings.reduce((total, finding) => total + finding.effortMinutes!, 0) : null;
+    const effortMinutes = totalEffort !== null && Number.isFinite(totalEffort) ? totalEffort : null;
+    const mayPlan = source.state === "complete" && source.analyzedSha === assessment.currentSha && source.observedAt !== null;
+    const proposalId = codeqlQualityProposalId(ruleId);
+    return { id: `${assessment.repository}/${proposalId}`, snapshotId, repository: assessment.repository, proposalId, ruleId,
+      title: findings.length === 1 ? findings[0]!.title : `Review ${findings.length} related maintainability findings`,
+      consequence: `The scan reports: ${findings[0]!.title} Its effect on delivery has not been measured.`,
+      expectedResult: "The same scan confirms these findings are fixed without narrowing the measured scope.",
+      acceptanceIdeas: ["Repeat the analysis with the same tool, rules and measured scope.", "Verify each linked finding is fixed; disappearance or dismissal alone is insufficient.", "Keep the repository's required checks passing."],
+      uncertainty: [...(assessment.state !== "measured" ? ["Some required checks have incomplete or incomparable evidence."] : []),
+        ...(!mayPlan ? ["Refresh this finding's source before starting an actionable plan."] : [])], mayPlan,
+      evidence: findings.map(finding => ({ fingerprint: finding.fingerprint, sourceId: source.id, scanId: scan.scanId, analyzedSha: source.analyzedSha,
+        observedAt: source.observedAt, severity: finding.severity, title: finding.title, path: finding.path })),
+      effortMinutes, estimateKind: effortMinutes === null ? null : "modeled" as const, relatedWork: scopedRelated(proposalId) };
+  });
+}
 
 export const CODEQL_QUALITY_PROPOSAL_PREFIX = "codeql-quality:";
 
