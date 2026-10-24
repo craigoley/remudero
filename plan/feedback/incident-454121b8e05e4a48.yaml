@@ -1,0 +1,31 @@
+id: incident-454121b8e05e4a48
+ts: 2026-10-24T16:58:54.774Z
+raw: >-
+  Incident 454121b8e05e: intervention
+  own-red:fix-lane:rule-checks-failed-on-ci-log-fix-strike
+
+  First seen: 2026-10-24T16:52:39.577Z
+
+  Last seen: 2026-10-24T16:58:53.708Z
+
+  Count: 84, burn: 84.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#10350@bc36ba622 actor=cao825 cause=own-red:fix-lane:rule-checks-failed-on-ci-log-fix-strike — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10350@83e96d0b2 actor=cao825 cause=own-red:fix-lane:rule-checks-failed-on-ci-log-fix-strike — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10350@a5bbf7a1d actor=cao825 cause=own-red:fix-lane:rule-checks-failed-on-ci-log-fix-strike — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#454121b8e05e4a4864c072bb2e1beaf01192c2ce907612e5c756e5a1eb2e2f26
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

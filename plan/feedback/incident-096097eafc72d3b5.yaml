@@ -1,0 +1,31 @@
+id: incident-096097eafc72d3b5
+ts: 2026-10-24T17:13:18.726Z
+raw: >-
+  Incident 096097eafc72: intervention
+  own-red:fix-lane:coverage-session-blanking-failed-on-ci-l
+
+  First seen: 2026-10-24T17:09:08.632Z
+
+  Last seen: 2026-10-24T17:13:17.516Z
+
+  Count: 15, burn: 15.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#11049@2c19d9e21 actor=cao825 cause=own-red:fix-lane:coverage-session-blanking-failed-on-ci-l — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#11049@e2058e950 actor=cao825 cause=own-red:fix-lane:coverage-session-blanking-failed-on-ci-l — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#11049@b73349546 actor=cao825 cause=own-red:fix-lane:coverage-session-blanking-failed-on-ci-l — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#096097eafc72d3b5aa4b6234203f15ed6967dc3b4d020fd59813d4350190305f
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
