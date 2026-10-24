@@ -1,0 +1,74 @@
+- id: W1-T10550
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:ci-shard cost 94.9 PR minute(s) across 56 round(s) on 45 pull request(s), and rung 1's remedy did not move it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.07
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:ci-shard#r2"
+  files:
+    - src/lib/prompt-render.ts
+    - test/worker/check-ci-log-ci-shard.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:ci-shard"
+      proof: "grep: test(\"W1-T10550: check:ci-log:ci-shard is prevented, not retried\" in test/worker/check-ci-log-ci-shard.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 2. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:ci-shard's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 3."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:ci-shard cost 94.9 PR minute(s) (seven-day half-life) across 56 fix round(s) on 45 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/prompt-render.ts: test/the-prerequisite-split-contract-has-no-optional-seam.test.ts imports it
+    - test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: named by the failing check
+    - the rounds name a failing test: test/the-prerequisite-split-contract-has-no-optional-seam.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13789 (https://github.com/craigoley/remudero/pull/13789) at 2026-10-23T19:15:29.001Z: ci-log round — ci-shard (1/8)
+        log excerpt:
+          | ##[error]test/the-retro-trigger-is-gated-on-its-own-read-cost.test.ts(10,35): error TS2305: Module '"#src/run-task.js"' has no exported member 'projectRetroReadCost'.
+          | ##[error]test/the-retro-trigger-is-gated-on-its-own-read-cost.test.ts(10,57): error TS2305: Module '"#src/run-task.js"' has no exported member 'readRetroCadenceHistory'.
+          | ##[error]test/the-retro-trigger-is-gated-on-its-own-read-cost.test.ts(10,109): error TS2305: Module '"#src/run-task.js"' has no exported member 'rotationDigestFile'.
+          | ##[error]test/the-retro-trigger-is-gated-on-its-own-read-cost.test.ts(189,54): error TS7006: Para
+    - PR #13774 (https://github.com/craigoley/remudero/pull/13774) at 2026-10-23T16:54:55.265Z: ci-log round — ci-shard (1/8)
+        log excerpt:
+          | ##[error]test/review/replay-refresh-proofs-bind-the-capture.test.ts(9,60): error TS7016: Could not find a declaration file for module '#scripts/proof-discrimination-gate.mjs'. '/home/runner/work/remudero/remudero/scripts/proof-discrimination-gate.mjs' implicitly has an 'any' type.
+          |   Try `npm i --save-dev @types/remudero` if it exists or add a new declaration (.d.ts) file containing `declare module '#scripts/proof-discrimination-gate.mjs';`
+          | ##[error]Process completed with exit code 1.
+    - PR #13645 (https://github.com/craigoley/remudero/pull/13645) at 2026-10-22T21:00:07.223Z: ci-log round — ci-shard (1/8)
+        log excerpt:
+          | ##[error]test/a-review-only-light-pass-names-its-scope.test.ts(99,44): error TS2352: Conversion of type '{ sleepUntilSweepWake: () => Promise<void | "timeout" | "wake">; sweepLight: (s: LightPassScope | undefined) => Promise<void>; }' to type 'DaemonDeps' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+          |   Type '{ sleepUntilSweepWake: () => Promise<void | "timeout" | "wake">; sweepLight: (s: LightPassScope | undefined) => Promise<void>; }' is missing the following properties from type 'DaemonDeps': re
+    - PR #13505 (https://github.com/craigoley/remudero/pull/13505) at 2026-10-22T07:45:28.537Z: ci-log round — ci-shard (1/8); coverage-shard (2/8): gpt-N.N-sol
+        failing tests: gpt-6.1-sol; cash native request deadline includes body consumption and a shared429 cooldown window; gpt-6.1-sol, cash native request deadline includes body consumption and a shared429 cooldown window; cash worker passes caller cancellation into the actual adapter before the next paid attempt
+        log excerpt:
+          | ##[error]test/github/codex-reads-as-the-same-github-user-around-the-broker.test.ts(465,11): error TS2339: Property 'catch' does not exist on type 'number | Promise<number>'.
+          |   Property 'catch' does not exist on type 'number'.
+          | ##[error]test/github/codex-reads-as-the-same-github-user-around-the-broker.test.ts(472,35): error TS2339: Property 'catch' does not exist on type 'number | Promise<number>'.
+          |   Property 'catch' does not exist on type 'number'.
+          | ##[error]Process completed with exit code 1.
+    - PR #13416 (https://github.com/craigoley/remudero/pull/13416) at 2026-10-21T21:45:42.370Z: ci-log round — comment-load-ratchet: test/console-parity-ratchet.test.ts; claims: test/console-parity-ratchet.test.ts; rule-checks: test/console-parity-ratchet.test.ts; ci-shard (1/8); acceptance-auth
+        failing tests: W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/console-parity-ratchet.test.ts:1:3877
+          | ✖ W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped (96.465604ms)
+          |   AssertionError [ERR_ASSERTION]: every real COMMANDS verb needs a route or a CLI_ONLY reason — unmapped: review-replay
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'review-replay'
+          |   + ]
+          |   - []
+          | 
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/console-parity-ratchet.test.ts:129:10)
+
+    WHAT THE LAST RUNG TRIED: W1-T9839 (files src/lib/prompt-render.ts, test/check-ci-log-ci-shard.test.ts) — did not fall: share of fix rounds 0.8% (3/355) before, 3.7% (14/375) after, over 5.1 day(s) each side.
+    Do something structurally different from it.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

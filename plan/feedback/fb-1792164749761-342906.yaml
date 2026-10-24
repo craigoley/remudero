@@ -18,10 +18,11 @@ raw: |-
   EXECUTION: Use the existing governed fleet intake/Architect filing, task-id reservation, plan PR review, selector, claim, builder and repair lanes. Do not create a duplicate task if fresher work now covers this request. Keep all source and branch writes in the fleet. Honor normal preflight, required CI and review. This instruction does not authorize a manual merge/approval/auto-merge override, restart/deploy, worker termination, claim/governor/limit/gate change, or another live CPU profile. Once merged, loaded adoption and a new separately authorized bounded health observation remain separate from local tests/CI and from proof of whole-stall causality.
 attachments: []
 origin: ui
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: operator-registry-ledger-index-20261016T151530Z
 thread_id: null
+answered_by: null

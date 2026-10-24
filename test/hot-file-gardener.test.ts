@@ -1,3 +1,6 @@
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { lintTask, newShardRuleSuiteViolations } from "#src/lib/task-linter.js";
+import { hotFileShardStem, hotFileTestPath } from "#src/lib/hot-file-gardener.js";
 /**
  * W1-T4803: the fleet finds the files its pull requests collide on. Every merge-conflict fix round
  * records its conflicted paths; files are ranked by the recency-weighted PR MINUTES their conflicts
@@ -258,4 +261,34 @@ test("W1-T4803: a filed file that stops conflicting credits its remedy", () => {
   assert.deepEqual(after, { trials: 14, successes: 13 });
   assert.ok(after.successes / after.trials > before.successes / before.trials, "ten clean merges since raise the class's rate");
   assert.deepEqual(hotFileMetric(build(4), "append-only"), { trials: 0, successes: 0 }, "another remedy's record is untouched");
+});
+
+
+test("hot-file merge regressions pass the actual new-shard gate for baseline targets without a rule exemption", () => {
+  const files = ["scripts/comment-load-baseline.json", "scripts/source-size-baseline.json", "scripts/test-tier-manifest.json"];
+  const paths: string[] = [];
+  for (const file of files) {
+    const price = { file, minutes: 40, rounds: 3, prs: 5, inferredMinutes: 0, recordedMinutes: 40 };
+    const yaml = hotFileShardYaml(price, "W1-T9999");
+    const task = loadPlanFromYaml(yaml, `plan/tasks.d/W1-T9999-${hotFileShardStem(file)}.yaml`).tasks[0]!;
+    const opts = { riskTransition: { baseTask: undefined } };
+    assert.deepEqual(newShardRuleSuiteViolations(task, opts), []);
+    const actual = lintTask(task, opts);
+    assert.equal(actual.ok, true, JSON.stringify(actual.violations));
+    assert.equal(task.files?.[0], file);
+    const path = hotFileTestPath(file);
+    assert.ok(task.files?.includes(path));
+    assert.ok(task.acceptance![0]!.proof.includes(path));
+    assert.ok(task.acceptance![0]!.proof.includes(`two pull requests editing ${file} merge without a conflict`));
+    assert.equal(task.origin, `hot-file:${file}`);
+    assert.doesNotMatch(yaml, /@not-a-rule-suite|PRECHECK_PARITY|census-precheck/);
+    assert.equal(hotFileTestPath(file), path, "the path remains deterministic");
+    assert.equal(hotFileShardStem(file).length <= 72, true);
+    paths.push(path);
+    const census = { ...task, files: [...task.files!, "test/rules/merge-regression.test.ts"] };
+    assert.equal(newShardRuleSuiteViolations(census, opts).length, 1, "actual rule-directory suites still require parity");
+    const namedCensus = { ...task, files: [...task.files!, "test/a-real-population-census.test.ts"] };
+    assert.equal(newShardRuleSuiteViolations(namedCensus, opts).length, 1, "census-named suites still require parity");
+  }
+  assert.equal(new Set(paths).size, files.length, "different target identities remain distinct");
 });

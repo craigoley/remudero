@@ -1221,7 +1221,7 @@ preserve_oversized() {
   done <<< "$files"
 }
 preserve_exclusions() {
-  local repo="$1" unit="$2" url ref sha
+  local repo="$1" unit="$2" url
   url="$(rgit "$repo" remote get-url origin 2>/dev/null)" || return 0
   remote_published "$url" || return 0
   rmd_remote_outside_retirement "$repo" "$unit" || return 0
@@ -1231,9 +1231,6 @@ preserve_exclusions() {
       awk '$2 == "commit" { print "^" $1 }' | sort -u
     return 0
   fi
-  for ref in refs/remotes/origin/main refs/remotes/origin/master; do
-    sha="$(rgit "$repo" rev-parse --verify -q "$ref^{commit}" 2>/dev/null)" && printf '^%s\n' "$sha"
-  done
   return 0
 }
 preserve_write() {
