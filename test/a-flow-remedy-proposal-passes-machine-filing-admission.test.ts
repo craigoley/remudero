@@ -9,6 +9,8 @@ import type { GardenerDeps } from "../src/lib/gardener.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations } from "../src/lib/plan.js";
 import type { LedgerRecord } from "../src/lib/retro.js";
 import { runnableCandidates } from "../src/lib/drain.js";
+import { assertRunnable, type Plan } from "#src/lib/plan.js";
+import { machineAuthorVerifyViolation, taskRulingPin } from "#src/lib/task-linter.js";
 
 const TASK_ID = "W1-T5995-fixture";
 const TEST_PATH = "test/flow-own-red-required-checks-red.test.ts";
@@ -138,4 +140,80 @@ test("a flow remedy the machine-filing judge released to verify:auto keeps its n
   assert.doesNotMatch(admit(auto + ruling("proceed")), /exist in neither the checkout nor the base tree/, "a judge-released remedy (#9657's W1-T6044 shape) is admitted");
   assert.match(admit(auto + ruling("escalate")), new RegExp(TEST_PATH.replaceAll("/", "\\/")), "an escalated ruling releases nothing");
   assert.match(admit(auto), new RegExp(TEST_PATH.replaceAll("/", "\\/")), "an unjudged verify:auto remedy is still refused, as #9571 pins");
+});
+
+function heldFeedbackPlan(): Plan {
+  return loadPlanFromYaml(YAML
+    .replace("  attempts: 0", "  attempts: 0\n  dispatch_hold: true")
+    .replace('origin: "flow-blocker:own-red:required checks red"', 'origin: "feedback:source-qualified-proposal"')
+    .replace(TEST_PATH, "test/machine-filed-task-admission.test.ts"), "held-feedback-proposal");
+}
+
+test("an explicitly held feedback proposal files without gaining dispatch authority", () => {
+  const plan = heldFeedbackPlan(), task = plan.tasks[0]!;
+  assert.equal(task.dispatch_hold, true, "the maintained parser retains the explicit hold");
+  assert.deepEqual(machineFilingAdmissionViolations(task, {
+    plan, releasedIds: new Set(), pathExists: () => true,
+  }), []);
+  for (const releasedIds of [new Set<string>(), new Set([task.id])]) {
+    assert.deepEqual(runnableCandidates(plan, () => false, 10, { releasedIds }), []);
+    assert.throws(() => assertRunnable(plan, task, () => false, releasedIds), /task-scoped dispatch hold/);
+  }
+  assert.equal(task.verify, "human");
+  assert.equal(task.risk_ruling, undefined, "filing creates no ruling");
+  task.dispatch_hold = false;
+  assert.match(machineFilingAdmissionViolations(task, {
+    plan, releasedIds: new Set(), pathExists: () => true,
+  }).join("; "), /not selectable by runnableCandidates/, "unheld custom proposals remain refused");
+});
+
+test("held proposals retain judge refusals and cannot dispatch even with a current proceed ruling", () => {
+  for (const state of ["unjudged", "unavailable", "escalate", "proceed"] as const) {
+    const plan = heldFeedbackPlan(), task = plan.tasks[0]!;
+    if (state === "escalate" || state === "proceed") task.risk_ruling = {
+      verdict: state === "escalate" ? "high" : "low", action: state,
+      confidence: 1, reasons: ["fixture ruling"], judged_at: "2026-10-24T18:00:00.000Z", pin: taskRulingPin(task),
+    };
+    const before = JSON.stringify(task);
+    assert.deepEqual(machineFilingAdmissionViolations(task, {
+      plan, releasedIds: new Set(), pathExists: () => true,
+    }), [], state);
+    assert.equal(JSON.stringify(task), before, "filing admission cannot rewrite a ruling or hold");
+    task.verify = "auto";
+    if (state !== "proceed") assert.ok(machineAuthorVerifyViolation(task), state);
+    else assert.equal(machineAuthorVerifyViolation(task), undefined, "the positive judge control is current");
+    assert.deepEqual(runnableCandidates(plan, () => false, 10, { releasedIds: new Set([task.id]) }), [], state);
+    assert.throws(() => assertRunnable(plan, task, () => false, new Set([task.id])), /task-scoped dispatch hold/);
+  }
+  const control = heldFeedbackPlan(), task = control.tasks[0]!;
+  task.dispatch_hold = false;
+  task.verify = "auto";
+  delete task.author_class;
+  assert.deepEqual(runnableCandidates(control, () => false, 10).map(t => t.id), [task.id], "the selector saw a runnable control");
+  assert.doesNotThrow(() => assertRunnable(control, task, () => false));
+});
+
+test("held feedback filing still refuses blocked tasks missing paths and unknown dependency credit", () => {
+  const plan = heldFeedbackPlan(), task = plan.tasks[0]!;
+  const facts = { plan, releasedIds: new Set<string>(), pathExists: () => true };
+  task.status = "blocked";
+  assert.match(machineFilingAdmissionViolations(task, facts).join("; "), /is blocked/);
+  task.status = "queued";
+  assert.match(machineFilingAdmissionViolations(task, {
+    ...facts, pathExists: () => false, pathExistsAtBase: () => false,
+  }).join("; "), /exist in neither the checkout nor the base tree/);
+  task.depends_on = ["W1-T-held-dependency"];
+  assert.match(machineFilingAdmissionViolations(task, {
+    ...facts, dependencyEvidence: () => ({ state: "unknown", reason: "fixture unavailable" }),
+  }).join("; "), /dependency credit unavailable \(UNKNOWN\)/);
+  const dependency = { ...task, id: task.depends_on[0]!, depends_on: [] };
+  plan.byId.set(dependency.id, dependency);
+  plan.tasks.push(dependency);
+  assert.match(machineFilingAdmissionViolations(task, { ...facts, isMerged: () => false }).join("; "), /unmerged dependencies/);
+  assert.deepEqual(machineFilingAdmissionViolations(task, { ...facts, isMerged: () => true }), []);
+  task.files = ["learnings/ci.d/new-unheld-shape.yaml"];
+  task.origin = "ci-learning:held-custom-shape";
+  assert.match(machineFilingAdmissionViolations(task, {
+    ...facts, isMerged: () => true, pathExists: () => false, pathExistsAtBase: () => false,
+  }).join("; "), /exist in neither the checkout nor the base tree/, "the hold grants no missing-path exemption");
 });
