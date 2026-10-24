@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import * as sweep from "#src/lib/sweep.js";
 import { probeMerge } from "#src/lib/merge-probe.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { setProofSandboxForTests } from "#src/lib/review.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-async function fixture(t: TestContext, kind: "deletion" | "generated" | "mixed" = "deletion", brokenGenerator = false) {
+async function fixture(t: TestContext, kind: "deletion" | "generated" | "mixed" = "deletion", brokenGenerator = false, guardedGenerator = false) {
   const origin = gitRepo({ bare: true });
   const repo = gitRepo();
   t.after(() => { repo.cleanup(); origin.cleanup(); });
@@ -30,6 +31,16 @@ async function fixture(t: TestContext, kind: "deletion" | "generated" | "mixed" 
     cpSync(join(REPO_ROOT, "scripts", script), dest);
   }
   if (brokenGenerator) write("scripts/generate-learnings-index.mjs", 'throw new Error("generator unavailable");');
+  if (guardedGenerator) {
+    const script = join(repo.dir, "scripts/generate-learnings-index.mjs");
+    const original = readFileSync(script, "utf8");
+    writeFileSync(script, original.replace(/^#![^\n]*\n/, shebang => `${shebang}import { readFileSync as escape } from "node:fs";
+if (process.env.RMD_CONFLICT_GENERATOR_SECRET) throw new Error("inherited daemon environment");
+let escaped = false;
+try { escape(${JSON.stringify(join(repo.dir, "outside.txt"))}); escaped = true; } catch {}
+if (escaped) throw new Error("generator escaped the worktree sandbox");
+`));
+  }
   repo.git("add", ".");
   repo.git("commit", "-qm", `chore(test): seed artifacts ${repo.dir}`);
   const branch = "run-W1-T9578-1792839891250";
@@ -53,6 +64,7 @@ async function fixture(t: TestContext, kind: "deletion" | "generated" | "mixed" 
   repo.git("add", ".");
   repo.git("commit", "-qm", "chore(test): edit main");
   repo.git("push", "-q", "origin", "main");
+  if (guardedGenerator) write("outside.txt", "outside the detached tree");
   const mainSha = repo.git("rev-parse", "HEAD");
   const probe = await probeMerge({ headSha, mainSha, git: (args) => {
     try { return { status: 0, stdout: repo.git(...args) }; }
@@ -128,7 +140,13 @@ test("W1-T9578: an unmerged path outside the registry falls through to the confl
 });
 
 test("W1-T9578: a registry path both sides edited resolves to the generator output on the merged tree", async (t) => {
-  const f = await fixture(t, "generated");
+  const f = await fixture(t, "generated", false, true);
+  const previous = process.env.RMD_CONFLICT_GENERATOR_SECRET;
+  process.env.RMD_CONFLICT_GENERATOR_SECRET = "must-not-reach-generator";
+  t.after(() => {
+    if (previous === undefined) delete process.env.RMD_CONFLICT_GENERATOR_SECRET;
+    else process.env.RMD_CONFLICT_GENERATOR_SECRET = previous;
+  });
   assert.equal(existsSync(join(f.repo.dir, "node_modules")), false, "exercise the fleet's install-root fallback");
   await f.run();
   assert.equal(f.receipts()[0]!.outcome, "pushed", String(f.receipts()[0]!.reason));
@@ -142,6 +160,19 @@ test("W1-T9578: a registry path both sides edited resolves to the generator outp
   });
   assert.deepEqual(f.receipts()[0]!.paths, [{ path: f.path, action: "learnings-index" }]);
   assert.deepEqual(f.counts(), { workers: 0, admissions: 0, attempts: 1 });
+  assert.equal(readFileSync(join(f.repo.dir, "outside.txt"), "utf8"), "outside the detached tree");
+});
+
+test("W1-T9578: an unavailable generator sandbox refuses to push", async (t) => {
+  const f = await fixture(t, "generated");
+  setProofSandboxForTests({ mode: "unsandboxed", reason: "fixture unavailable" });
+  t.after(() => setProofSandboxForTests());
+  await f.run();
+  assert.equal(f.remoteHead(), f.headSha);
+  assert.equal(f.receipts()[0]!.outcome, "error");
+  assert.match(String(f.receipts()[0]!.reason), /conflict generator sandbox unavailable: fixture unavailable/);
+  assert.deepEqual(f.counts(), { workers: 1, admissions: 1, attempts: 1 });
+  assert.equal(existsSync(join(f.repo.dir, "resolution")), false);
 });
 
 test("W1-T9578: missing, wrong-pair and non-registry probes preserve the worker route", async (t) => {

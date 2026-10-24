@@ -189,6 +189,9 @@ import {
   judgeReviewAsync,
   parseAcceptanceBlock,
   parseWhitelistedProof,
+  proofChildEnv,
+  proofSandboxArgv,
+  proofSandboxStatus,
   postedArmFactsFromLedger,
   REVIEW_CONTEXT,
   reviewLedgerKeyFor,
@@ -196,6 +199,7 @@ import {
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
 } from "./review.js";
+import { withTempDir } from "./tmp.js";
 import type {
   ArmDecision,
   AutomergeHold,
@@ -1976,7 +1980,14 @@ export async function regenerateConflictViaGit(
       }
       for (const { path, action } of paths) {
         if (action === "deleted-on-main") continue;
-        await execFileLoopBounded("npm", ["run", "--silent", action], { cwd: worktreePath, encoding: "utf8" });
+        await withTempDir("conflict-generator-home", async (home) => {
+          const status = proofSandboxStatus();
+          if (status.mode !== "bwrap") throw new Error(`conflict generator sandbox unavailable: ${status.reason}`);
+          const sandbox = proofSandboxArgv({ cwd: worktreePath, home });
+          await execFileLoopBounded(status.binary, [...sandbox, "npm", "run", "--silent", action], {
+            cwd: worktreePath, env: { ...proofChildEnv(home), TMPDIR: "/tmp" }, encoding: "utf8",
+          });
+        });
         await run(worktreePath, ["add", "--", path]);
       }
       const unexpected = (await run(worktreePath, ["diff", "--name-only", "-z"])).split("\0").filter(Boolean);
