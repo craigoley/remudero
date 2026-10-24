@@ -245,6 +245,8 @@ export interface ReadModelViewRoutesOptions {
   readModel?: ViewBodySource;
   /** Query parameters a read-model view's key cannot omit, by view: a request without one answers 400. */
   requiredParams?: Record<string, readonly string[]>;
+  /** Read-model-only validators run before held bodies and ETags, without inventing a legacy computation. */
+  validateRequests?: Record<string, NonNullable<ViewDefinition["validateRequest"]>>;
   /** Views whose keys are built on demand (view-demand.ts); defaults to {@link DEMAND_VIEWS}. */
   demandViews?: readonly string[];
   clock?: Clock;
@@ -306,7 +308,8 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
       const shadow = opts.shadow;
       if (shadowSampled(opts.readModel?.switches().views[name]) && shadow) res.once("finish", () => shadow(name, viewKey(params), params));
       const fallback = legacy.get(name);
-      const refused = fallback?.validateRequest?.(params, mode === "serve" ? opts.readModel : undefined);
+      const refused = fallback?.validateRequest?.(params, mode === "serve" ? opts.readModel : undefined)
+        ?? opts.validateRequests?.[name]?.(params, mode === "serve" ? opts.readModel : undefined);
       if (refused) {
         const { status = 400, ...body } = refused;
         res.writeHead(status, { "content-type": "application/json; charset=utf-8" });

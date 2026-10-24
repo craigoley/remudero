@@ -848,12 +848,25 @@ export function acquireLease(
     if (row && row.holder !== lease.holder && Number(row.expires_ms) > now) {
       return { ok: false, heldBy: String(row.holder), pid: Number(row.pid), host: String(row.host), expiresMs: Number(row.expires_ms) };
     }
+    const epochKey = `lease-ownership-epoch:${lease.name}`;
+    // A renewed holder keeps its epoch; a new acquisition gets an opaque token even if the clock repeats.
+    if (!row || row.holder !== lease.holder || db.meta(epochKey) === undefined) {
+      db.prepare("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v").run(epochKey, randomUUID());
+    }
     db.prepare(`INSERT INTO lease(name, holder, pid, host, acquired_ms, expires_ms) VALUES(?, ?, ?, ?, ?, ?)
       ON CONFLICT(name) DO UPDATE SET holder = excluded.holder, pid = excluded.pid, host = excluded.host,
         acquired_ms = CASE WHEN lease.holder = excluded.holder THEN lease.acquired_ms ELSE excluded.acquired_ms END,
         expires_ms = excluded.expires_ms`).run(lease.name, lease.holder, process.pid, hostname(), now, now + lease.ttlMs);
     return { ok: true, lease };
   });
+}
+
+/** Current ownership identity, read under the caller's transaction when used as a publication fence. */
+export function readModelLeaseEpoch(db: ReadModelDb, lease: ReadModelLease): string | undefined {
+  const row = db.prepare("SELECT holder FROM lease WHERE name = ?").get(lease.name);
+  if (!row || row.holder !== lease.holder) return undefined;
+  const epoch = db.meta(`lease-ownership-epoch:${lease.name}`);
+  return epoch !== undefined && /^[a-f0-9-]{36}$/.test(epoch) ? epoch : undefined;
 }
 
 /** Reads the named lease of any read-model file without joining its schema checks: the reaper asks
