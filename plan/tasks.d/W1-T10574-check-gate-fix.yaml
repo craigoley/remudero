@@ -37,3 +37,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filing supplies recurrence counts and references to “gate-fix,” but no per-PR diagnosis establishing a shared preventable cause; the proposed structural remedy is therefore not verifiable from the supplied evidence.; on the change's description/files alone, no diff was read — Acceptance checks for test-title text through grep, which cannot establish the promised behavior that check:gate-fix is prevented rather than retried."
+    judged_at: "2026-10-24T19:58:14.350Z"
+    pin: "633c1c14c1586f72616fbab502197b491a39cb79b7c26c87635827b9b14eb8e0"
