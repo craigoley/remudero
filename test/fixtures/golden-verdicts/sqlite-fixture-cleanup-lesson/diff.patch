@@ -1,0 +1,22 @@
+diff --git a/learnings/testing.yaml b/learnings/testing.yaml
+--- a/learnings/testing.yaml
++++ b/learnings/testing.yaml
+@@ -0,0 +1,18 @@
++- id: sqlite-fixture-cleanup-waits-for-diagnostic-publication
++  subsystem: testing
++  lifecycle: active
++  files: [test/read-model-consistency.test.ts, test/board-projection.test.ts, src/lib/read-model-db.ts]
++  fact: >-
++    SQLite fixtures close the database, await flushReadModelTransactions(), then remove their
++    owned directory in one after-hook. Node runs after-hooks in registration order. Close can
++    enqueue asynchronous diagnostic writes; deleting first, or closing without the barrier,
++    can recreate the directory and fail ENOTEMPTY. Preserve the directory if close or flush fails.
++  evidence: >-
++    PR#13850 repaired board-projection's remove-before-close hooks and qualified the diagnostic
++    barrier with failure controls. PR#13848 coverage job 120713354605 then exposed the same hook
++    order in read-model-consistency. Its six database fixture sites now share one cleanup owner;
++    the private old-order control fails five tests, including two original cases, and restoration
++    passes all 31. Removing only the barrier fails its diagnostic-publication control.
++  src: "PR#13850; PR#13848 job 120713354605"
++  cited: "2026-10-24"
++  assertion: 'grep -q "export.*flushReadModelTransactions" src/lib/read-model-db.ts'

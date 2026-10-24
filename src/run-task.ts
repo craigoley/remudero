@@ -77,6 +77,7 @@ export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTes
 import { daemonCommand as daemonCommandFromModule, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
 import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
+import { createIndexedLifetimeAccounting, type LifetimeIndexFailure } from "./lib/lifetime-identity-index.js";
 import { defaultCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
   type CreditOverrideRow, type CreditReadState, type CreditStore } from "./lib/status.js";
 import type { DependencyMergeEvidence } from "./lib/plan.js";
@@ -1539,6 +1540,7 @@ import {
   extractTaskTrailerId,
   type AcceptanceAuthorTimeResult,
   parseAcceptanceBlock,
+  parseReviewerVerdictClauses,
   parseReviewerVerdicts,
   postReviewCommentGuarded,
   postReviewPending,
@@ -8044,6 +8046,7 @@ async function runReview(args: {
   // Advisory semantic layer — a FRESH read-only reviewer (no session inheritance),
   // in a throwaway cwd so it cannot touch the worktree/diff under review.
   let semantic: (boolean | undefined)[] | undefined;
+  let semanticClauses: (string | undefined)[] | undefined;
   // W1-T2472: a PLAN-ONLY changeset has no code for this advisory lane to judge, so the spawn is
   // skipped rather than dispatched to discover there is nothing to execute. This does not weaken
   // the gate: `judgeReview` decides a plan-only diff's state on `floorUnmet` (review.ts), and
@@ -8093,6 +8096,11 @@ async function runReview(args: {
           head_sha: headSha,
           node_modules: snapshot.nodeModules,
         });
+        const evidencePath = join(snapshot.cwd, ".git", "rmd-review-input.json");
+        writeFileSync(evidencePath, JSON.stringify({
+          headSha, diff, report, reportIsSubstitute: args.reportIsSubstitute === true,
+          ...(args.implementationReport === undefined ? {} : { implementationReport: args.implementationReport }),
+        }), { mode: 0o600 });
         const prompt =
           buildReviewPrompt({
             task: { id: task.id, acceptance: criteria, ...narrative },
@@ -8100,6 +8108,7 @@ async function runReview(args: {
             owner,
             repo,
             headSha,
+            evidencePath,
             ...scopeContext,
           }) +
           "\n" +
@@ -8169,6 +8178,7 @@ async function runReview(args: {
         const candidateSemantic = reviewerSemanticVerdicts(reviewer, criteria.length);
         semantic = candidateSemantic;
         reviewerFindingText = workerTranscript(reviewer);
+        semanticClauses = parseReviewerVerdictClauses(reviewerFindingText, criteria.length);
         reviewerSubtype = reviewer.subtype;
         reviewerExit = reviewer.exit;
         const reviewerFields = workerLedgerFields(reviewer);
@@ -8294,6 +8304,7 @@ async function runReview(args: {
     reportIsSubstitute: args.reportIsSubstitute,
     reportSubstituteCause: args.reportSubstituteCause,
     semantic,
+    semanticClauses,
     headCheckoutDir: args.headCheckoutDir,
     baseCheckoutDir: args.baseCheckoutDir,
     baseUnreadablePaths: args.baseUnreadablePaths,
@@ -8336,14 +8347,10 @@ async function runReview(args: {
     log("review.rubric.error", { error: String((e as Error)?.message ?? e) });
   }
 
-  // W1-T178 (verdict stability): a re-review of an UNCHANGED head sha whose
-  // deterministic floor still passes may not render a verdict WORSE than its
-  // predecessor — see applyVerdictStability's doc comment (lib/review.ts) for
-  // the #388 fixture this fixes and why it is asymmetric (downgrades only).
-  const prior = args.ledgerPath
-    ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath), task.id, args.prUrl)
-    : undefined;
-  let { verdict, suppressed } = applyVerdictStability(computed, headSha, prior);
+  // W1-T178: suppress semantic noise only for the same known head, body and contract.
+  // A changed engine or task narrative is new information, not an unchanged review.
+  // Missing recorded identity cannot certify that the prior verdict judged these inputs.
+  // The stability rule remains asymmetric; an improved verdict always proceeds.
   const contractDigest = reviewContractDigest({
     taskId: task.id,
     acceptance: task.acceptance ?? [],
@@ -8352,6 +8359,11 @@ async function runReview(args: {
     budgetUsd: task.budget_usd ?? args.budgetUsd,
     ...narrative,
   });
+  const prior = args.ledgerPath && inputDigest !== undefined
+    ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath).filter((line) => line.review_input_digest === inputDigest), task.id, args.prUrl)
+    : undefined;
+  let { verdict, suppressed } = applyVerdictStability(computed, headSha,
+    prior?.reviewContractDigest === contractDigest ? prior : undefined);
   verdict = { ...verdict, reviewContractDigest: contractDigest };
 
   // W1-T3704 (completed here) — RECORD WHAT THIS VERDICT ACTUALLY JUDGED, so a LATER push can be compared against
@@ -30192,12 +30204,13 @@ interface LifetimeReplayWindow {
   seen: Set<string>;
 }
 
-export const MAX_LIFETIME_ARCHIVE_START_IDENTITIES = 4_096; // BACKSTOP: a capped identity set keeps the live-only decision.
+export const MAX_LIFETIME_ARCHIVE_START_IDENTITIES = 4_096; // BACKSTOP: resident joins and per-task identities retain the live-only refusal.
 
 type LifetimeArchiveHistoryUnavailableReason =
   | "archive_unreadable"
   | "start_identity_missing"
-  | "start_identity_ceiling";
+  | "start_identity_ceiling"
+  | "identity_index_unavailable";
 
 function lifetimeStartIdentity(row: Record<string, unknown>): string | undefined {
   return typeof row.task_id === "string" && typeof row.run_id === "string"
@@ -30225,71 +30238,19 @@ function replayedLifetimeLedgerLine(
   return false;
 }
 
-function lifetimeAccounting() {
-  const tallies = new Map<string, LifetimeDispatchTally>();
-  const starts = new Set<string>();
-  const pending = new Map<string, { taskId: string; charged: boolean }>();
-  const earlyVerdicts = new Map<string, boolean>();
-  let unavailableReason: LifetimeArchiveHistoryUnavailableReason | undefined;
-  const tallyFor = (taskId: string) => {
-    const tally = tallies.get(taskId) ?? { starts: 0, capacityBlocked: 0 };
-    tallies.set(taskId, tally);
-    return tally;
-  };
-  const record = (row: Record<string, unknown>) => {
-    if (row.step === "daemon.spawn_infra_blocked") {
-      if (typeof row.task === "string") tallyFor(row.task).capacityBlocked += 1;
-      return;
-    }
-    const identity = lifetimeStartIdentity(row);
-    if (identity === undefined) {
-      if (row.step === "run.start") unavailableReason ??= "start_identity_missing";
-      return;
-    }
-    if (row.step === "verdict") {
-      const excluded = streakRefusal(row) !== undefined;
-      const run = pending.get(identity);
-      if (run) {
-        tallyFor(run.taskId).starts += Number(!excluded) - Number(run.charged);
-        pending.delete(identity);
-      } else if (!starts.has(identity)) {
-        // Retention can put a terminal row before its start. This join is bounded too.
-        if (!earlyVerdicts.has(identity) && starts.size + earlyVerdicts.size >= MAX_LIFETIME_ARCHIVE_START_IDENTITIES) {
-          unavailableReason ??= "start_identity_ceiling";
-          return;
-        }
-        earlyVerdicts.set(identity, excluded);
-      }
-      return;
-    }
-    if (row.step !== "run.start" || starts.has(identity)) return;
-    const terminal = earlyVerdicts.get(identity);
-    earlyVerdicts.delete(identity);
-    if (starts.size + earlyVerdicts.size >= MAX_LIFETIME_ARCHIVE_START_IDENTITIES) {
-      unavailableReason ??= "start_identity_ceiling";
-      return;
-    }
-    starts.add(identity);
-    const taskId = row.task_id as string;
-    tallyFor(taskId).starts += Number(terminal !== true);
-    if (terminal === undefined) pending.set(identity, { taskId, charged: true });
-  };
+function lifetimeAccounting(onUnavailable?: (failure: LifetimeIndexFailure) => void) {
+  const indexed = createIndexedLifetimeAccounting(MAX_LIFETIME_ARCHIVE_START_IDENTITIES, { onUnavailable });
   return {
-    record,
-    unavailableReason: () => unavailableReason,
+    record: (row: Record<string, unknown>) => indexed.record(row, lifetimeStartIdentity(row),
+      row.step === "verdict" && streakRefusal(row) !== undefined),
+    unavailableReason: indexed.unavailableReason,
+    error: indexed.error,
+    close: indexed.close,
     tallyFor(taskId: string, rows: ReadonlyArray<Record<string, unknown>>): LifetimeDispatchTally | undefined {
-      if (unavailableReason !== undefined) return undefined;
+      if (indexed.unavailableReason() !== undefined) return undefined;
       const orphans = orphanedRunIds(rows, taskId);
       const visible = new Set(rows.filter((row) => row.task_id === taskId).map((row) => row.run_id));
-      for (const [identity, run] of pending) {
-        if (run.taskId !== taskId) continue;
-        const runId = identity.slice(identity.indexOf("\u0000") + 1);
-        if (!visible.has(runId)) continue; // a start rotated out after boot keeps its last attribution
-        const charged = !orphans.has(runId);
-        tallyFor(taskId).starts += Number(charged) - Number(run.charged);
-        run.charged = charged;
-      }
-      return { ...tallyFor(taskId) };
+      return indexed.tallyFor(taskId, visible, orphans);
     },
   };
 }
@@ -30299,6 +30260,7 @@ function lifetimeAccounting() {
  * join the tally. This is what prevents the archive snapshot and the live retention core from
  * double-charging the same dispatch. */
 export interface LifetimeHistory {
+  close?: () => boolean;
   /** W1-T6358: `live` is a pass-shared read; absent, the overlay reads the file itself. */
   tallyFor: (taskId: string, live?: Pick<LedgerSnapshot, "identity" | "content" | "lines">) => LifetimeDispatchTally | undefined;
 }
@@ -30351,8 +30313,10 @@ function lifetimeHistory(
     return { ok: true, rows: snapshot.lines };
   };
   return {
+    close: accounting.close,
     tallyFor(taskId, supplied) {
       const refreshed = refresh(supplied);
+      if (!refreshed.ok) return undefined;
       return accounting.tallyFor(taskId, refreshed.rows ?? []);
     },
   };
@@ -30365,15 +30329,19 @@ function lifetimeHistory(
 export async function auditedLifetimeTalliesFromArchives(
   stateDir: string,
   ledgerPath: string = join(stateDir, LEDGER_FILENAME),
+  onIndexUnavailable?: (failure: LifetimeIndexFailure) => void,
 ): Promise<{
   history: LifetimeHistory | undefined;
+  indexError?: string;
   unavailableReason: LifetimeArchiveHistoryUnavailableReason | undefined;
   archiveCount: number;
   unread: readonly string[];
   records: number;
 }> {
-  const accounting = lifetimeAccounting();
+  let handedOff = false;
+  const accounting = lifetimeAccounting((failure) => { if (handedOff) onIndexUnavailable?.(failure); });
   const recentByStep = new Map<string, LifetimeReplayWindow>();
+  try {
   const scan = await auditLedgerUnion(stateDir, {
     step: ["run.start", "daemon.spawn_infra_blocked", "verdict"],
     dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
@@ -30384,13 +30352,20 @@ export async function auditedLifetimeTalliesFromArchives(
     },
   });
   const unavailableReason = !scan.ok ? "archive_unreadable" : accounting.unavailableReason();
+  if (unavailableReason !== undefined) accounting.close();
+  const history = unavailableReason === undefined ? lifetimeHistory(ledgerPath, accounting, recentByStep) : undefined;
+  handedOff = history !== undefined;
   return {
-    history: unavailableReason === undefined ? lifetimeHistory(ledgerPath, accounting, recentByStep) : undefined,
+    history,
+    ...(accounting.error() === undefined ? {} : { indexError: accounting.error() }),
     unavailableReason,
     archiveCount: scan.archiveCount,
     unread: scan.unread,
     records: scan.records,
   };
+  } finally {
+    if (!handedOff) accounting.close();
+  }
 }
 
 export function breakerGateFor(
@@ -31593,12 +31568,15 @@ async function drainCommand(
   };
   // W1-T3758: one bounded archive scan before dispatch begins. The live ledger remains freshly
   // overlaid inside breakerGateFor; a partial archive is named and deliberately changes nothing.
-  const archivedLifetime = await auditedLifetimeTalliesFromArchives(dirname(ledgerPath));
+  const archivedLifetime = await auditedLifetimeTalliesFromArchives(dirname(ledgerPath), undefined,
+    (failure) => log("dispatch.lifetime_history_unavailable", { ...failure, phase: "index" }));
+  try {
   if (archivedLifetime.history === undefined) {
     log("dispatch.lifetime_history_unavailable", {
       archive_count: archivedLifetime.archiveCount,
       unread_archives: archivedLifetime.unread,
       reason: archivedLifetime.unavailableReason,
+      ...(archivedLifetime.indexError === undefined ? {} : { detail: archivedLifetime.indexError }),
     });
   } else {
     log("dispatch.lifetime_history_loaded", {
@@ -31639,6 +31617,7 @@ async function drainCommand(
   // permanent stale lock or a STOP latch. (SIGKILL is uncatchable — the same limitation the
   // lock itself has; the next drain reclaims a dead-pid lock, and `rmd stop` no-ops when idle.)
   const onSignal = (sig: NodeJS.Signals) => {
+    archivedLifetime.history?.close?.();
     consumeStop(config.root);
     drainLock.release();
     process.kill(process.pid, sig); // re-raise with the default handler now cleared
@@ -31791,6 +31770,9 @@ async function drainCommand(
     if (!deps.runDrain) disposeSharedPauseRefresh(realDeps().sharedPauseGit);
     consumeStop(config.root);
     drainLock.release();
+  }
+  } finally {
+    archivedLifetime.history?.close?.();
   }
 }
 
@@ -33554,7 +33536,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // operator release is due at once.
     case "machine-judge": {
       const ports = productionMachineFilingJudgePorts({ repoRoot, stateDir, worktreesRoot: worktreesDir(config), owner, repo, log });
-      const inputs = () => machineJudgeInputsAsync(repoRoot, stateDir);
+      const inputs = () => machineJudgeInputsAsync(repoRoot, stateDir, "origin/main");
       return withDue(async () => {
         const seen = await inputs();
         let found = false;
@@ -43029,7 +43011,16 @@ export function productionMachineFilingJudgePorts(opts: {
       repairs: () => [...mainRepairRecordsFromLedger(readLedgerLines(join(opts.stateDir, LEDGER_FILENAME))).values()],
     }),
     stateDir: opts.stateDir,
-    plan: () => loadPlan(resolveRepoLayout(opts.repoRoot).planMonolith),
+    plan: async () => {
+      const mainSha = await mainTipViaGit(opts.repoRoot);
+      const committed = await loadPlanAtRefAsync(opts.repoRoot, relative(opts.repoRoot, resolveRepoLayout(opts.repoRoot).planMonolith), mainSha);
+      // The judge uses sourcePath to address the corresponding record in its fresh landing
+      // checkout. Keep those paths anchored here while every record's bytes come from mainSha.
+      const tasks = committed.tasks.map(task => ({
+        ...task, sourcePath: join(opts.repoRoot, task.sourcePath!.slice(mainSha.length + 1)),
+      }));
+      return { tasks, byId: new Map(tasks.map(task => [task.id, task])) };
+    },
     riskJudge: (input) => {
       if (!mount) {
         const mounts = loadMounts(mountsPath(opts.repoRoot));
