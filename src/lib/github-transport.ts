@@ -421,20 +421,21 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
  * and never attempts JSON parsing. */
 export async function ghTextAsync(
   args: string[],
-  opts: { maxBuffer?: number; timeout?: number } = {},
+  opts: { maxBuffer?: number; timeout?: number; cwd?: string } = {},
   execAsync: GhAsyncExecutor = execFileAsync,
 ): Promise<string> {
   const maxBuffer = opts.maxBuffer ?? DEFAULT_GH_MAX_BUFFER;
   const timeout = opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS;
   const read = async (): Promise<string> => {
-    const { stdout } = await withGhKillEscalation(execAsync("gh", args, { encoding: "utf8", maxBuffer, timeout }), args, timeout);
+    const { stdout } = await withGhKillEscalation(execAsync("gh", args, { encoding: "utf8", maxBuffer, timeout,
+      ...(opts.cwd === undefined ? {} : { cwd: opts.cwd }) }), args, timeout);
     return stdout;
   };
 
   // An injected executor is an offline seam; only the real `gh` process spends cadence and joins
   // same-request reads. Prefix the key so a concurrent JSON reader can never receive raw text.
   if (execAsync !== execFileAsync) return read();
-  const key = ghArgsAreCoalescibleRead(args) ? `text:${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
+  const key = ghArgsAreCoalescibleRead(args) ? `text:${JSON.stringify(args)}:${maxBuffer}:${timeout}:${opts.cwd ?? process.cwd()}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {

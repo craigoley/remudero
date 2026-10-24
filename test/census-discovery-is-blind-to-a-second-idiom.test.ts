@@ -257,3 +257,19 @@ test("W1-T2809: ls-files takes precedence for a file carrying both tokens, so th
   const found = discoverCensusCandidates("/fake/repo", listSpawn(["test/both.test.ts"]), () => 'ls-files src/ and readdirSync("src/lib")');
   assert.deepEqual(found, [{ testFile: "test/both.test.ts", idiom: "ls-files", walks: ["src/lib"] }]);
 });
+
+
+test("W1-T9049: repair diff strings and gate regexes are evidence rather than a census enumeration", () => {
+  const evidence = `import { classify } from "#src/lib/gate-gardener.js";
+const repair = '-const token = "ls-files";\\n+const token = ["ls", "files"].join("-");';
+const gateRegex = /ls-files/;`;
+  const file = "test/repair-evidence.test.ts";
+  assert.deepEqual(discoverCensusCandidates("/fixture", listSpawn([file]), () => evidence), []);
+  for (const enumeration of [
+    'execFileSync("git", ["ls-files", "src/lib"]);',
+    'execFileSync("git", ["ls-files", "src/lib"]); readdirSync("src/lib");',
+  ]) {
+    assert.deepEqual(discoverCensusCandidates("/fixture", listSpawn([file]), () => `${evidence}\n${enumeration}`),
+      [{ testFile: file, idiom: "ls-files", walks: ["src/lib"] }]);
+  }
+});

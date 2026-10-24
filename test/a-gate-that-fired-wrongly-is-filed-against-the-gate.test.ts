@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyGateRepair, gateRepairCandidates, renderFalsePositiveShard } from "#src/lib/gate-gardener.js";
+import { classifyGateRepair, gateRepairCandidates, renderFalsePositiveShard, loadGateRepairObservations } from "#src/lib/gate-gardener.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations } from "#src/lib/plan.js";
-import { PRECHECK_TRIGGERED_SUITES, PRECHECK_PATH_TRIGGERED_SUITES } from "#scripts/census-precheck.mjs";
+import { ghTextAsync } from "#src/lib/github-transport.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { rmSync } from "node:fs";
+
+const precheckModule: string = "#scripts/census-precheck.mjs";
+const { PRECHECK_TRIGGERED_SUITES, PRECHECK_PATH_TRIGGERED_SUITES } = await import(precheckModule) as {
+  PRECHECK_TRIGGERED_SUITES: Array<{ testFile: string; ownFiles: string[]; recognizer: string }>;
+  PRECHECK_PATH_TRIGGERED_SUITES: Array<{ testFile: string; ownFiles: string[]; recognizer: string; symbol: string }>;
+};
 
 const baseline = "scripts/census-precheck-parity-baseline.json";
 const pair = { pr: 10787, gate: "census", redSha: "red", greenSha: "green", state: "repaired" as const,
@@ -99,4 +108,88 @@ test("W1-T9049: precheck gate ownership is explicit and names the census recogni
   assert.ok(census.ownFiles.includes(baseline));
   assert.equal(census.recognizer, "src/lib/ci-parity.ts");
   assert.equal(census.symbol, "censusCandidateWalks");
+});
+
+const readerDeps = { repoRoot: REPO_ROOT, stateDir: "/unused", log: () => {},
+  openWorkspace: () => { throw new Error("reader must not open a workspace"); } };
+
+function repairReader(overrides: Record<string, unknown> = {}, gate = "census") {
+  const responses: Record<string, unknown> = {
+    "repo view --json nameWithOwner": { nameWithOwner: "o/r" },
+    "api repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=100": [{ number: 7, base: { sha: "base" } }],
+    "api repos/o/r/pulls/7/commits?per_page=100": [{ sha: "red" }, { sha: "green" }],
+    "api repos/o/r/commits/red/check-runs?per_page=100": { check_runs: [
+      { id: 99, name: gate, conclusion: "failure", details_url: "https://github.com/o/r/actions/runs/2/job/42" },
+      { id: 1, name: gate, conclusion: "failure", details_url: "https://github.com/o/r/actions/runs/1/job/10" },
+    ] },
+    "api repos/o/r/commits/green/check-runs?per_page=100": { check_runs: [{ id: 100, name: gate, conclusion: "success" }] },
+    "api repos/o/r/commits/red/status": { statuses: [] },
+    "api repos/o/r/commits/green/status": { statuses: [] },
+    "api repos/o/r/compare/red...green": { files: [{ filename: "test/example.test.ts", patch: dodge }] },
+    "api repos/o/r/compare/base...red": { merge_base_commit: { sha: "merge" },
+      files: [{ filename: "new.ts", status: "added" }, { filename: "gone.ts", status: "removed" },
+        { filename: "renamed.ts", previous_filename: "old.ts", status: "renamed" }] },
+    ...Object.fromEntries(["new.ts?ref=red", "gone.ts?ref=merge", "renamed.ts?ref=red", "old.ts?ref=merge"]
+      .map((path) => [`api repos/o/r/contents/${path}`, { encoding: "base64", content: Buffer.from(path).toString("base64") }])),
+    ...overrides,
+  };
+  const calls: string[] = [];
+  const readRepair = async (args: string[]) => {
+    const key = args.join(" ");
+    calls.push(key);
+    if (key === "run view --job 42 --log-failed") return "census failed";
+    assert.ok(Object.hasOwn(responses, key), `unexpected read: ${key}`);
+    return JSON.stringify(responses[key]);
+  };
+  return { readRepair, calls };
+}
+
+test("W1-T9049: asynchronous repair reads retain the latest Actions job and added, removed and renamed trigger files", async () => {
+  const reader = repairReader({}, "rule-checks");
+  const observations = await loadGateRepairObservations(readerDeps, [{ ...rule, trigger: ({ readHead, readBase }) => {
+    assert.equal(readHead("gone.ts"), null);
+    assert.equal(readBase("new.ts"), null);
+    assert.equal(readHead("new.ts"), "new.ts?ref=red");
+    assert.equal(readBase("renamed.ts"), "old.ts?ref=merge");
+    return false;
+  } }], reader);
+  assert.equal(observations.length, 1);
+  assert.equal(classifyGateRepair(observations[0].pair, observations[0].repairDiff, [], rule.gateRegex), "off-subject");
+  assert.ok(reader.calls.includes("run view --job 42 --log-failed"));
+  assert.ok(!reader.calls.includes("run view --job 99 --log-failed"));
+});
+
+test("W1-T9049: unreadable repair patches, rollups and trigger contents never become an empty success", async () => {
+  for (const [key, value, message] of [
+    ["api repos/o/r/compare/red...green", { files: [] }, /diff unreadable/],
+    ["api repos/o/r/compare/red...green", { files: [{ filename: "binary" }] }, /diff unreadable/],
+    ["api repos/o/r/commits/red/status", null, /checks unreadable/],
+    ["api repos/o/r/contents/new.ts?ref=red", {}, /content unreadable/],
+  ] as const) {
+    await assert.rejects(loadGateRepairObservations(readerDeps, [{ ...rule, trigger: () => true }],
+      repairReader({ [key]: value })), message);
+  }
+});
+
+test("W1-T9049: the default repair reader uses the asynchronous transport with its own CLI stub", async () => {
+  const shim = ghShim([{ when: "repo view", stdout: '{"nameWithOwner":"o/r"}' },
+    { when: "pulls?state=all", stdout: "[]" }]);
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+  try {
+    assert.deepEqual(await loadGateRepairObservations(readerDeps, [rule], {}), []);
+    assert.equal(shim.calls().length, 2);
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    rmSync(shim.dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T9049: plain-text transport preserves the repair reader's checkout", async () => {
+  const output = await ghTextAsync(["repo", "view"], { cwd: REPO_ROOT }, async (_file, _args, options) => {
+    assert.equal(options.cwd, REPO_ROOT);
+    return { stdout: "fixture", stderr: "" };
+  });
+  assert.equal(output, "fixture");
 });

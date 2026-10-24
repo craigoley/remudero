@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { availableParallelism, hostname, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 
 import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
@@ -2566,7 +2567,39 @@ function censusWalksFromText(text: string): string[] {
   return walks;
 }
 
+/** Discard embedded code/regex evidence while retaining literal command arguments and comments. */
+function censusEnumerationText(source: string): string {
+  const scanner = createScanner(true, undefined, source);
+  const templates: number[] = [];
+  let depth = 0, previous = "=", cursor = 0, text = "", hasRepairDiff = false;
+  for (let kind = scanner.scan(); kind !== SyntaxKind.EndOfFile; kind = scanner.scan()) {
+    if (kind === SyntaxKind.SlashToken && /^(?:=|\(|\[|\{|,|:|\?|return|case|=>|!|&&|\|\||\?\?)$/.test(previous)) kind = scanner.reScanSlashToken();
+    if (scanner.isUnterminated() || kind === SyntaxKind.Unknown) return source;
+    if (scanner.getTokenEnd() === scanner.getTokenStart()) return source;
+    let start = scanner.getTokenStart();
+    if (kind === SyntaxKind.CloseBraceToken && templates.at(-1) === depth - 1) {
+      depth--;
+      kind = scanner.reScanTemplateToken(false);
+      start++;
+      if (kind === SyntaxKind.TemplateTail) templates.pop();
+    } else if (kind === SyntaxKind.CloseBraceToken) depth--;
+    if (kind === SyntaxKind.TemplateHead) templates.push(depth);
+    if (kind === SyntaxKind.TemplateHead || kind === SyntaxKind.TemplateMiddle) depth++;
+    if (kind === SyntaxKind.OpenBraceToken) depth++;
+    const token = scanner.getTokenText();
+    const literal = [SyntaxKind.StringLiteral, SyntaxKind.NoSubstitutionTemplateLiteral,
+      SyntaxKind.TemplateHead, SyntaxKind.TemplateMiddle, SyntaxKind.TemplateTail].includes(kind);
+    const embedded = literal && /^["'`](?:[-+]|diff --git )/.test(token) && /ls-files/.test(token);
+    hasRepairDiff ||= embedded;
+    text += source.slice(cursor, start) + (embedded || kind === SyntaxKind.RegularExpressionLiteral ? token.replace(/[^\n]/g, " ") : source.slice(start, scanner.getTokenEnd()));
+    cursor = scanner.getTokenEnd();
+    previous = kind === SyntaxKind.TemplateHead || kind === SyntaxKind.TemplateMiddle ? "{" : token;
+  }
+  return hasRepairDiff ? text + source.slice(cursor) : source;
+}
+
 export function censusCandidateWalks(text: string): string[] {
+  text = censusEnumerationText(text);
   const walks = new Set<string>();
   const idiom = /ls-files|readdirSync|globSync/g;
   for (let match = idiom.exec(text); match; match = idiom.exec(text)) {
@@ -2647,6 +2680,7 @@ export function discoverCensusCandidates(
       out.push({ testFile, idiom: "ls-files", walks: ["src/"] });
       continue;
     }
+    text = censusEnumerationText(text);
     const idiom: CensusEnumerationIdiom | undefined = /ls-files/.test(text)
       ? "ls-files"
       : /readdirSync|globSync/.test(text)
