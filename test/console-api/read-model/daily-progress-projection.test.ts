@@ -88,6 +88,13 @@ test("daily progress retains complete history and immutable late corrections", a
       assert.equal(manifest.days[key]!.revisions[0], originalHash);
       prepareDailyProgressPublication(root, [late], []).commit(db, got.lease);
       assert.equal(readDailyProgressManifest(root).days[key]!.revisions.length, 2, "an identical retry creates no new evidence revision");
+      const rechecked = structuredClone(late); rechecked.generatedAt = "2026-11-02T08:00:00.000Z";
+      for (const source of rechecked.coverage.sources) if (source.required) {
+        source.lastAttemptAt = source.lastSuccessAt = rechecked.generatedAt; source.nextDueAt = "2026-11-02T09:00:00.000Z";
+      }
+      for (const event of rechecked.events) event.observedAt = rechecked.generatedAt;
+      prepareDailyProgressPublication(root, [rechecked], []).commit(db, got.lease);
+      assert.equal(readDailyProgressManifest(root).days[key]!.revisions.length, 2, "rechecking an already closed day without new evidence is not a correction");
       const superseded = prepareDailyProgressPublication(root, [], []);
       prepareDailyProgressPublication(root, [], []).commit(db, got.lease);
       assert.throws(() => superseded.commit(db, got.lease), /superseded/);
@@ -96,6 +103,25 @@ test("daily progress retains complete history and immutable late corrections", a
       assert.throws(() => stale.commit(db, got.lease), /lease_lost/);
       if (second.ok) assert.throws(() => prepareDailyProgressPublication(root, [], []).commit(db, second.lease, () => false), /ownership epoch/);
       assert.equal(readDailyProgressRevision(root, readDailyProgressManifest(root).days[key]!).events.length, 206);
+    } finally { db.close(); }
+  });
+});
+
+test("daily progress treats the first closing pass as completion rather than a late correction", async () => {
+  await withTempDir("daily-first-closing", async root => {
+    const db = openReadModel({ stateDir: root, instance: "proof", schemaVersion: 1 });
+    try {
+      const got = acquireLease(db); assert.ok(got.ok); if (!got.ok) return;
+      const provisional = record(1); provisional.generatedAt = "2026-11-02T04:59:00.000Z"; provisional.phase = "provisional";
+      provisional.events[0]!.observedAt = provisional.generatedAt;
+      for (const source of provisional.coverage.sources) if (source.required) {
+        source.lastAttemptAt = source.lastSuccessAt = source.coverageThrough = provisional.generatedAt;
+      }
+      prepareDailyProgressPublication(root, [provisional], []).commit(db, got.lease);
+      const closed = record(1); prepareDailyProgressPublication(root, [closed], []).commit(db, got.lease);
+      const key = dailyProgressDayKey("acme/app", closed.timeZone, closed.reportDate);
+      const report = readDailyProgressRevision(root, readDailyProgressManifest(root).days[key]!).report;
+      assert.equal(report.phase, "complete"); assert.equal(report.correctionReason, null);
     } finally { db.close(); }
   });
 });
