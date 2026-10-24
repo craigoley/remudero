@@ -20,7 +20,7 @@ const HEAD = "936a81f13aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PR: OpenPrView = {
   prNumber: 11821, prUrl: "https://github.com/craigoley/remudero/pull/11821", taskId: TASK.id,
   headSha: HEAD, headRefName: "run-W1-T7739-1792014654970", checksState: "red", reviewState: "none",
-  unmetCriteria: [], priorStrikes: 0, lastActivityAt: "2026-10-14T22:43:46.000Z", autoMergeArmed: false,
+  unmetCriteria: [], priorStrikes: 0, lastActivityAt: new Date().toISOString(), autoMergeArmed: false,
 };
 const STALLED = `PR stage stalled: #11821 ${PR.prUrl} — own-red for 53 minutes (BACKSTOP 45); ` +
   "since 2026-10-14T22:43:46.000Z; DIAGNOSIS: unknown signature";
