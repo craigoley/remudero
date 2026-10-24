@@ -14,6 +14,7 @@ import { SPEC, violations } from "./helpers/openapi-strict.js";
 import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
 import { fixedClock } from "../src/lib/clock.js";
+import { captureGardenerSpendSource, foldGardenerSpend } from "#src/lib/gardener-spend.js";
 
 const repository = "fixture/repo";
 const at = new Date().toISOString();
@@ -47,6 +48,55 @@ async function captured(t: { after(fn: () => void): void }, rows: unknown[], sco
   writeFileSync(join(dir, "ledger.ndjson"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
   return { dir, spend: foldGardenerSpend(await captureGardenerSpendSource(dir), repository, at) };
 }
+
+test("W1-T10461: incomplete or changed-generation gardener evidence cannot refresh as verified", async t => {
+  const observed = Date.parse(at) + 1000;
+  const known = await captured(t, [parent, child]);
+  const opts = { repository };
+  assert.equal(foldGardenerSpend(await captureGardenerSpendSource(known.dir, fixedClock(observed), opts), repository, at).totalUsd, 2);
+  for (const kind of ["missing-live", "malformed-live", "unreadable-archive", "foreign", "future", "missing-registry", "invalid-registry"]) {
+    await t.test(kind, async t => {
+      const { dir } = await captured(t, [parent, child]);
+      if (kind === "missing-live") rmSync(join(dir, "ledger.ndjson"));
+      if (kind === "malformed-live") writeFileSync(join(dir, "ledger.ndjson"), JSON.stringify(parent) + "\n{bad\n");
+      if (kind === "unreadable-archive") writeFileSync(join(dir, archive() + ".gz"), "not-gzip");
+      if (kind === "foreign") writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify({ ...runtime(), repository: "foreign/repo" }));
+      if (kind === "future") writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify({ ...runtime(), configuredAt: new Date(observed + 1).toISOString() }));
+      if (kind === "missing-registry") rmSync(join(dir, "gardener-runtime.json"));
+      if (kind === "invalid-registry") writeFileSync(join(dir, "gardener-runtime.json"), "{");
+      const source = await captureGardenerSpendSource(dir, fixedClock(observed), opts);
+      assert.notEqual(source.corpusComplete, true);
+      const spend = foldGardenerSpend(source, repository, at);
+      assert.notEqual(spend.state, "complete"); assert.equal(spend.totalUsd, null);
+    });
+  }
+  for (const changed of ["generation", "repository", "revoked", "deleted", "malformed"]) {
+    await t.test(`registry changed during capture: ${changed}`, async t => {
+      const { dir } = await captured(t, [parent, child]);
+      const clock = { ...fixedClock(observed), iso: () => {
+        const next = runtime();
+        if (changed === "generation") next.daemonRunId = "new-generation";
+        if (changed === "repository") next.repository = "other/repo";
+        if (changed === "revoked") next.gardens[0]!.enabled = false;
+        if (changed === "deleted") rmSync(join(dir, "gardener-runtime.json"));
+        else writeFileSync(join(dir, "gardener-runtime.json"), changed === "malformed" ? "{" : JSON.stringify(next));
+        return new Date(observed).toISOString();
+      } };
+      const source = await captureGardenerSpendSource(dir, clock, opts);
+      assert.equal(source.reason, "invalid_registry");
+      assert.equal(foldGardenerSpend(source, repository, at).counts.priced, null);
+    });
+  }
+  for (const before of [true, false]) {
+    await t.test(`abort ${before ? "before" : "during"} real collection`, async t => {
+      const { dir } = await captured(t, [parent, child]);
+      const controller = new AbortController();
+      if (before) controller.abort(Error("fixture cancellation"));
+      const clock = { ...fixedClock(observed), iso: () => { controller.abort(Error("fixture cancellation")); return new Date(observed).toISOString(); } };
+      await assert.rejects(captureGardenerSpendSource(dir, clock, { ...opts, signal: controller.signal }), /fixture cancellation/);
+    });
+  }
+});
 
 test("W1-T10160: owned machine-judge receipts preserve partial money and reported zero", async t => {
   const producer = { ...child, step: "machine_judge.attempt_spend", total_cost_usd: 0.25, billing_mode: "api" };
@@ -354,7 +404,8 @@ test("W1-T8667: real worker materializes many gardener receipts before cached re
         signal: new SharedArrayBuffer(8), slowLane: { intervalMs: 60000 } });
     const ready = () => {
       const message = body();
-      return message?.type === "body" && (message.entry.body.data as AnalyticsViewData).instances[0]?.gardenerSpend?.pricedSubtotalUsd === expected;
+      return message?.type === "body" && (message.entry.body.data as AnalyticsViewData).coverage.counted === 1 &&
+        (message.entry.body.data as AnalyticsViewData).instances[0]?.gardenerSpend?.pricedSubtotalUsd === expected;
     };
     const deadline = Date.now() + 20000;
     while (!ready() && Date.now() < deadline) await sleep(20);
@@ -795,7 +846,8 @@ test("W1-T9658: cached gardener usage survives the real materialization boundary
           const spend = (m.entry.body.data as AnalyticsViewData).instances[0]?.gardenerSpend;
           // Warm snapshots already contain the same money. Wait for the requested usage
           // transition, not the earlier cached balance, through the real refresh boundary.
-          return spend?.pricedSubtotalUsd === 2 && spend.workerCalls?.counts.matched === expectedMatched;
+          return (m.entry.body.data as AnalyticsViewData).coverage.counted === 1 &&
+            spend?.pricedSubtotalUsd === 2 && spend.workerCalls?.counts.matched === expectedMatched;
         });
         const deadline = Date.now() + 20000;
         while (!latest() && Date.now() < deadline) await sleep(20);
