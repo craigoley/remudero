@@ -137,6 +137,43 @@ function harness(work: (bodyFile: string, args: SpawnWorkerArgs) => string) {
   };
 }
 
+test("reported main-repair paths without a failing test witness use the checked proof path", async () => {
+  for (const failingTestTitles of [[], [" ", ""]]) {
+    const req = { ...request([SPENT_CHECK_TEST, "test/a-reported-clock-fixture.test.ts"]), failingTestTitles,
+      logExcerpt: "expiring-fixture-census: BLOCKED — control_failed" };
+    const h = harness((bodyFile, args) => {
+      const body = readFileSync(bodyFile, "utf8");
+      assert.ok(body.includes(MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER), "reported paths do not become implicit file proofs");
+      assert.deepEqual(parseAcceptanceBlock(body), [], "no unproven whole-file failure claim is prewritten");
+      assert.ok(args.prompt.includes(PR_BODY_ACCEPTANCE_GRAMMAR[0]!));
+      assert.ok(args.prompt.includes("Reported test path(s), not established whole-file failures"));
+      assert.ok(args.prompt.includes(SPENT_CHECK_TEST), "paths remain available for diagnosis");
+      assert.ok(args.prompt.includes("do NOT open a PR"), "the dispatcher keeps the checked publication path");
+      writeFileSync(bodyFile, body.replace(MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER,
+        '- the pushed repair adds the missing refresh record | grep: "refresh\\.clearance", in src/lib/ledger.ts'));
+      return "REPORT\nPUSHED: fixture\n";
+    });
+    try {
+      assert.equal(await h.run(req), FIX_PR);
+      assert.equal(h.opened.length, 1);
+      assert.deepEqual(parseAcceptanceBlock(h.opened[0]!.body!).map((c) => c.proof),
+        ['grep: "refresh\\.clearance", in src/lib/ledger.ts']);
+      assert.equal(rowsOf(h.ledgerPath, MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP).length, 0);
+    } finally { h.cleanup(); }
+  }
+});
+
+test("reported main-repair paths without a failing witness retain the worker-opened defect", async () => {
+  const h = harness(() => `REPORT\nPR_URL: ${FIX_PR}\n`);
+  try {
+    assert.equal(await h.run({ ...request([SPENT_CHECK_TEST]), failingTestTitles: [] }), FIX_PR);
+    assert.deepEqual(h.opened, [], "an existing worker-opened PR is not opened a second time");
+    const row = rowsOf(h.ledgerPath, MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP).at(-1);
+    assert.equal(row?.defect, "worker-opened");
+    assert.equal(row?.resolution, "opened-unchecked", "a breach remains explicit rather than becoming checked assurance");
+  } finally { h.cleanup(); }
+});
+
 test("W1-T8572: a main-repair body passes check-acceptance and every proof has a dialect", () => {
   const body = mainRepairFixBody(request([SPENT_CHECK_TEST]));
   assert.ok(acceptanceAuthorTimeCheck(body).ok, "the body as opened passes the author-time check");

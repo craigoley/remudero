@@ -19,6 +19,9 @@ import { ciRemedyExecutionObserver } from "../src/lib/ci-remedy-execution-observ
 import { codingLedgerObserver } from "../src/lib/model-canary-ledger.ts";
 
 const DAY = 86_400_000;
+// Serialized payload bytes bound retained evidence, not the process's RSS.
+const RAW_WINDOW_BYTE_LIMIT = 32 * 1024 ** 2;
+const rawWindowBound = reason => reason === "ledger-retention-row-bound" || reason === "ledger-retention-byte-bound";
 const since = ROUTING_EXPERIMENTS.map((item) => item.startedOn).sort()[0];
 
 async function readSource(source, asOf, resolutions, dedupeMaxBytes) {
@@ -42,7 +45,7 @@ async function readSource(source, asOf, resolutions, dedupeMaxBytes) {
   let findingsOmitted = 0;
   const finding = (value) => { if (findings.length < 200) findings.push(value); else findingsOmitted++; };
   const windowStart = Date.parse(asOf) - DAY;
-  let retainedRowsOmitted = 0;
+  let retainedRowsOmitted = 0, retainedRowLimitOmitted = 0, retainedByteRowsOmitted = 0, retainedRawBytes = 0;
   let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, invalidTimestampRows = 0, newestTs = null;
   let index, dedupeEvidence, dedupeFailure;
   try {
@@ -76,7 +79,12 @@ async function readSource(source, asOf, resolutions, dedupeMaxBytes) {
         || row.step === "ci_learning_cadence.run_failed" || row.step === "sweep.update_branch.pending_guard"
         || String(row.step).endsWith(".gardener_judged")
         || String(row.step).endsWith(".gardener_failed") || String(row.step).startsWith("goal."))) {
-      if (rows.length < 100_000) rows.push(row); else retainedRowsOmitted++;
+      if (rows.length >= 100_000) { retainedRowsOmitted++; retainedRowLimitOmitted++; }
+      else {
+        const bytes = Buffer.byteLength(JSON.stringify(row), "utf8");
+        if (bytes > RAW_WINDOW_BYTE_LIMIT - retainedRawBytes) { retainedRowsOmitted++; retainedByteRowsOmitted++; }
+        else { rows.push(row); retainedRawBytes += bytes; }
+      }
     }
   }
     dedupeEvidence = index.evidence();
@@ -87,7 +95,8 @@ async function readSource(source, asOf, resolutions, dedupeMaxBytes) {
   } finally { index?.close(); }
   const reasons = [];
   if (dedupeFailure) reasons.push(dedupeFailure);
-  if (retainedRowsOmitted) reasons.push("ledger-retention-row-bound");
+  if (retainedRowLimitOmitted) reasons.push("ledger-retention-row-bound");
+  if (retainedByteRowsOmitted) reasons.push("ledger-retention-byte-bound");
   if (unreadSources) reasons.push("ledger-source-unreadable");
   if (malformedRows) reasons.push("ledger-source-malformed");
   if (invalidTimestampRows) reasons.push("ledger-source-invalid-timestamp");
@@ -96,8 +105,11 @@ async function readSource(source, asOf, resolutions, dedupeMaxBytes) {
   return { ...source, state: reasons.length ? "observed-partial" : "observed", reasons, forms,
     rowsRead, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows, routingReports,
     componentExecution: component.report(!dedupeFailure && unreadSources === 0 && malformedRows === 0 && invalidTimestampRows === 0 && futureRows === 0),
-    codingTrials: coding.report(reasons.length === 0 || reasons.every(reason => reason === "ledger-retention-row-bound")),
+    codingTrials: coding.report(reasons.length === 0 || reasons.every(rawWindowBound)),
     retention: { rawWindowRows: rows.length, rawWindowOmitted: retainedRowsOmitted, rawWindowLimit: 100_000,
+      rawWindowBytes: retainedRawBytes, rawWindowByteLimit: RAW_WINDOW_BYTE_LIMIT,
+      rawWindowByteRowsOmitted: retainedByteRowsOmitted, rawWindowRowLimitOmitted: retainedRowLimitOmitted,
+      rawWindowByteBasis: "retained-json-utf8-payload; not process RSS",
       routing: routingReports.map(report => ({ id: report.id, ...report.evidence })),
       unionDedupe: "exact-utf16-sqlite-bounded-pages", dedupeEvidence: dedupeEvidence ?? null, distinctScanComplete: !dedupeFailure, scanWallMs: performance.now() - scanStarted } };
 }
@@ -131,7 +143,7 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
   const results = [];
   for (const source of sources) {
     const { rows, routingReports, componentExecution, ...quality } = await readSource(source, asOf, resolutions, dedupeMaxBytes);
-    const trialReasons = quality.reasons.filter(reason => reason !== "ledger-retention-row-bound" && (reason !== "ledger-source-future-dated"
+    const trialReasons = quality.reasons.filter(reason => !rawWindowBound(reason) && (reason !== "ledger-source-future-dated"
       || quality.futureRows !== quality.routingResolvedFutureRows));
     const trialSourceQuality = { scope: "routing-trials", rawSourceState: quality.state,
       state: quality.state === "unavailable" ? "unavailable" : trialReasons.length ? "observed-partial" : "observed",

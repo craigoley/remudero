@@ -76,6 +76,7 @@ import {
 export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
 import { daemonCommand as daemonCommandFromModule, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
+import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import { defaultCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
   type CreditOverrideRow, type CreditReadState, type CreditStore } from "./lib/status.js";
@@ -143,6 +144,7 @@ import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/ada
 import { RUN_AGENT_WAIT_HEAP_STEP, type AgentWaitHeap } from "./lib/agent-wait-heap.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
+import { admittedFixTestPaths } from "./lib/fix-test-scope.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger, withheldReviewRefusalRow,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
@@ -730,6 +732,7 @@ import {
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
 import { checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { observeSynchronousPreflightPhase, reportPreflightPhase } from "./lib/preflight-phase-progress.js";
 import {
   buildPreflightSummary,
   callerReachableSuites,
@@ -907,14 +910,12 @@ import {
   approvePrTitle,
   approveProposal,
   classifyProposal,
-  draftAttemptKey,
   draftsDueOnDaemon,
   resolvedInboxDraftLane,
   decideDraftDeferral,
   type ProposalVerdictKind,
   deferralFromOutcomes,
   parseDraftDeferralCache,
-  mergeDraftCaches,
   DAEMON_DRAFT_BATCH_CAP,
   evictRefusalPoisonedKeys,
   markReopened,
@@ -953,6 +954,8 @@ import {
   renderRatifyTelemetry,
   INBOX_DRAFT_DISALLOWED_TOOLS,
   runDraftRung,
+  captureInboxDraftSnapshot,
+  commitInboxDraftOutcomes,
   parseDraftedCandidate,
   lintDraftedFragment,
   stageBundleProposals,
@@ -1192,7 +1195,7 @@ import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-c
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
 import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
@@ -1660,7 +1663,7 @@ import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "./lib/sweep.js";
+import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
   terminalUnionScans } from "./lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
@@ -1936,11 +1939,13 @@ export function fleetRatifyGateway(
   repoDir: string,
   logDir: string,
   ledgerPath: string,
-  overrides: Partial<FreshTreeTools> & Pick<RatifyCliTree, "spawn"> & { mainTip?: (repoDir: string) => Promise<string> } = {},
+  overrides: Partial<FreshTreeTools> & Pick<RatifyCliTree, "spawn"> & { mainTip?: (repoDir: string) => Promise<string>; stateRoot?: string } = {},
 ): RatifyCliHandle {
-  const { spawn: spawnChild, ...tree } = overrides;
+  const { spawn: spawnChild, stateRoot, ...tree } = overrides;
+  const causalScope = stateRoot ? reframeCausalScope({ root: stateRoot }, true) : undefined;
   return ratifyCliGateway(repoDir, logDir, {
     ledgerPath,
+    ...(causalScope ? { causalScope } : {}),
     freshTree: freshOriginMainTreeRunner(repoDir, {
       // inspectFreshReviewerWorktree passes `-C <dir>` first; the leaf takes the dir apart.
       git: (args) => hostWorktreeGit(args[1] ?? repoDir, args.slice(2)),
@@ -3103,6 +3108,8 @@ import {
 } from "./lib/live-write-guard.js";
 import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
+import { parseInstanceRegistry } from "./lib/instance-registry.js";
+import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type InboxCausalScope, type InboxInputReference } from "./lib/inbox-thread.js";
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
@@ -11862,7 +11869,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           ? fixRungScopeStandDownReason(
               currentDiffFiles,
               baselineDiffFiles,
-              admitFixTests && opts.task.files ? [...opts.task.files, "test/"] : opts.task.files,
+              admitFixTests && opts.task.files
+                ? [...opts.task.files, "test/", ...admittedFixTestPaths(currentDiffFiles, opts.task.files.length > 0)]
+                : opts.task.files,
               reachableRemedyFiles,
               currentCiFailures ?? [],
               readRegistrationChanges(opts.worktreePath, currentDiffFiles, "origin/main", undefined, currentPinnedSha),
@@ -25367,14 +25376,16 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     ? (file, args, opts) => metrics.observe(() => (deps.spawn ?? defaultPreflightSpawn)(file, args, opts))
     : deps.spawn;
   const boundary = <T>(run: () => T): T => metrics ? metrics.observe(run) : run();
+  const onPhase = deps.onPhase ?? reportPreflightPhase;
+  const phase = <T>(name: string, run: () => T): T => observeSynchronousPreflightPhase(name, () => boundary(run), onPhase);
 
-  const result = boundary(() => runPreflight(repoRoot, { ...deps, range, spawn }));
+  const result = phase("default", () => runPreflight(repoRoot, { ...deps, range, spawn, onPhase }));
   // W1-T3737 — THE FAST TIER IS THE DEFAULT. MEASURED on origin/main: it runs twenty checks in
   // 29s with no false reds, and the three-step default passed a diff CI then refused (the #5928
   // comment-load shape, 12s green). `--fast` stays accepted and is now a no-op, so every existing
   // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
   // no escape is a wall and an operator on a slow host must still be able to push.
-  const fast = rest.includes("--no-fast") ? undefined : boundary(() => runPreflightFast(repoRoot, { spawn }));
+  const fast = rest.includes("--no-fast") ? undefined : phase("fast", () => runPreflightFast(repoRoot, { spawn }));
   // W1-T4108 — RIDE THE SAME `--no-fast` ESCAPE AS `fast` ABOVE. Both are further, GitHub-free
   // additions to the same default tier that #6677/#6687/#6690/#6693 (2026-09-23) show CI, not
   // preflight, was catching: console-parity/the two census suites cost seconds like every other
@@ -25382,17 +25393,17 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // needing a second flag to stay fast — see runPreflightScopedDiffCoverage's own doc.
   const ciChecks = rest.includes("--no-fast")
     ? undefined
-    : boundary(() => preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn })));
+    : phase("ci-checks", () => preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn })));
   const scopedCoverage = rest.includes("--no-fast")
     ? undefined
-    : boundary(() => preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn })));
+    : phase("fast-coverage", () => preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn })));
   // Full-suite routes key containment/deadlines on the ORIGINAL spawn identity. Observe their
   // tier boundaries, never wrap their executor into the injected-spawn synchronous route.
-  const ciParity = rest.includes("--ci-parity") ? boundary(() => runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
-  const coverage = rest.includes("--coverage") ? boundary(() => runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
+  const ciParity = rest.includes("--ci-parity") ? phase("ci-parity", () => runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
+  const coverage = rest.includes("--coverage") ? phase("coverage", () => runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
   // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
   // 29-second default tier cannot absorb that. Named in the coverage line below either way.
-  const proofs = rest.includes("--proofs") ? boundary(() => runPreflightProofs(repoRoot, { spawn: deps.spawn })) : undefined;
+  const proofs = rest.includes("--proofs") ? phase("proofs", () => runPreflightProofs(repoRoot, { spawn: deps.spawn })) : undefined;
 
   for (const step of result.steps) {
     console.log(step.detail);
@@ -33046,7 +33057,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // canary it judges and rolls back. The headroom sweep is an ES module, so it starts once loaded.
     case "config": {
       const d = deps("config");
-      return import(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href).then(
+      return tsImport(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href, import.meta.url).then(
         (): RegisteredGardenPass => {
           const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
           // Leave the build seam absent: production must use the heap-bounded measurement worker.
@@ -36219,7 +36230,7 @@ export function commitWorkerEdits(
     runGit(["ls-tree", "--name-only", "HEAD", "--", path]).trim() === "" &&
     declaresProofTitle(readFileSync(join(repoDir, path), "utf8"), titles),
   );
-  const admittedTests = options.admitTests ? changed.filter((path) => path.startsWith("test/") && !path.split("/").includes("..")) : [];
+  const admittedTests = admittedFixTestPaths(changed, options.admitTests);
   const registrationChanges = declaredPaths.every(isInPlanScope) ? [] :
     readRegistrationChanges(repoDir, changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths)), undefined, runGit, options.priorHeadSha);
   const admittedRegistrations = registrationChanges.filter(isAdditiveRegistrationChange).map((change) => change.path);
@@ -38841,6 +38852,13 @@ export function inFlightTaskIdsFrom(inflightDir: string): string[] {
     .map((entry) => entry.slice(0, -".lock".length));
 }
 
+/** W1-T9569 — what a review-only light pass writes on its rows: its scope, in the stand-down text and in
+ * `light_pass_scope`, never the ordinary "deferred to full sweep (light pass)". An ordinary pass gets nothing. */
+export function reviewOnlyLightPassDeps(scope?: LightPassScope): Pick<SweepDeps, "lightPassScope" | "standDownReasonFor"> {
+  const name = scope?.reviewOnly === true ? scope.scope : undefined;
+  return name ? { lightPassScope: name, standDownReasonFor: () => reviewOnlyStandDownReason(name) } : {};
+}
+
 export function buildSweepLightHook(
   owner: string,
   repo: string,
@@ -38947,6 +38965,7 @@ export function buildSweepLightHook(
             // W1-T8086: own-red and conflict repairs use per-claim capacity on ordinary passes;
             // review-only still stands them down.
             actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly, fixAdmitted),
+            ...reviewOnlyLightPassDeps(scope),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
             readLiveStateAtAct: effects.readLiveState,
             // W1-T7734: the light pass re-derives a moved head in-pass too, as the full pass does.
@@ -41419,6 +41438,8 @@ export async function draftProposalBatch(
   rawSpawn: typeof spawnWorker = spawnWorker,
 ): Promise<DraftRungOutcome[]> {
   if (toDraft.length === 0) return [];
+  const causalScope = { repository: `${owner}/${repo}` };
+  toDraft = toDraft.map(proposal => captureInboxDraftSnapshot(proposal, causalScope).proposal);
   const registryIntent = selectedRegistryIntentForConfig(config);
 
   // W1-T2559: the inbox-draft rung ships no code and supervises no worker, so G-17's Tier
@@ -41451,6 +41472,7 @@ export async function draftProposalBatch(
       planText,
       {
         repoFacts: checkoutRepoFacts(worktreePath),
+        causalScope,
         spawn: (proposal, prompt, ctx) =>
           benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({ ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
@@ -41637,6 +41659,8 @@ export function buildInboxDraftHook(
   return async () => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
+      const causalScope = { repository: `${owner}/${repo}` };
+      commitInboxDraftOutcomes({ stateDir: join(config.root, "state"), scope: causalScope, snapshots: [], outcomes: [], log });
       const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
       if (proposals.length === 0) return; // no active proposals — no spend
       const ledgerPath = ledgerPathFor(config);
@@ -41793,6 +41817,7 @@ export function buildInboxDraftHook(
       writeFileSync(inflightPath, JSON.stringify(Object.fromEntries(due.map((p) => [p.id, spawnedAt])), null, 2), "utf8");
 
       let outcomes: DraftRungOutcome[];
+      const snapshots = due.map(proposal => captureInboxDraftSnapshot(proposal, causalScope));
       try {
         outcomes = await draftBatch(due, config, owner, repo, runId, log);
       } finally {
@@ -41808,8 +41833,6 @@ export function buildInboxDraftHook(
         writeFileSync(inflightPath, JSON.stringify({}, null, 2), "utf8");
       }
 
-      const nextDrafts: DraftCache = { ...drafts };
-      const nextAttempts: DraftAttemptCache = { ...attempts };
       // W1-T2564: ids left unkeyed because the account refused them — ledgered below so a refusal
       // storm is visible as itself rather than as a run of malformed-output errors.
       const refusedThisBatch: string[] = [];
@@ -41825,12 +41848,9 @@ export function buildInboxDraftHook(
         // ran, permanently, because a routed follow-up's key is the literal `::0` and can never
         // change. This is the ONLY arm that skips the write; an ordinary failure still keys, so
         // W1-T192's throttle is untouched (its own test pins that).
-        if (outcome.ok || !outcome.refused) {
-          nextAttempts[outcome.proposalId] = draftAttemptKey(proposal, draftLane);
-        } else {
+        if (!outcome.ok && outcome.refused) {
           refusedThisBatch.push(outcome.proposalId);
         }
-        if (outcome.ok) nextDrafts[outcome.proposalId] = outcome.candidate;
       }
       // ATOMIC PAIR (W1-T241): see lib/inbox.ts's `writeDraftAttemptPair` doc for the
       // torn-file/wedged-idempotence hazard this closes and why drafts commits before
@@ -41851,19 +41871,10 @@ export function buildInboxDraftHook(
           matched: nextDeferral.matched,
         });
       }
-      // W1-T2569: RE-READ AND MERGE IMMEDIATELY BEFORE WRITING. The guard above makes overlap
-      // unlikely; this makes a lost update impossible if one happens anyway (a reclaimed-but-live
-      // lock, a second host). `nextDrafts`/`nextAttempts` were built from a snapshot taken up to
-      // ~950s ago — an eternity on this rung — so anything another writer committed in between
-      // would be silently reverted by a plain spread. See `mergeDraftCaches`' own doc.
-      const merged = mergeDraftCaches(
-        {
-          drafts: parseDraftCache(readFileIfExists(draftsPath)),
-          attempts: parseDraftAttemptCache(readFileIfExists(attemptsPath)),
-        },
-        { drafts: nextDrafts, attempts: nextAttempts },
-      );
-      writeDraftAttemptPair(draftsPath, attemptsPath, merged.drafts, merged.attempts);
+      // Re-read under the shared registry lock, adopt only this batch's unchanged generations,
+      // and persist completion before publication. Never spread an old whole-cache snapshot
+      // over unrelated writes or mark newer direction attempted when an older worker finishes.
+      commitInboxDraftOutcomes({ stateDir: join(config.root, "state"), scope: causalScope, snapshots, outcomes, lane: draftLane, log });
       } finally {
         draftLock.release();
       }
@@ -41989,12 +42000,14 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   const runId = `INBOX-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "inbox", step, lane: "inbox", ...extra });
 
+  if (!dryRun) commitInboxDraftOutcomes({ stateDir: join(config.root, "state"), scope: { repository: `${owner}/${repo}` }, snapshots: [], outcomes: [], log });
+
   if (needsDraft.length > 0 && !dryRun) {
+    const causalScope = { repository: `${owner}/${repo}` };
+    const snapshots = needsDraft.map(proposal => captureInboxDraftSnapshot(proposal, causalScope));
     const outcomes = await draftProposalBatch(needsDraft, config, owner, repo, runId, log);
-    for (const outcome of outcomes) {
-      if (outcome.ok) drafts[outcome.proposalId] = outcome.candidate;
-    }
-    writeFileSync(draftsPath, JSON.stringify(drafts, null, 2), "utf8");
+    commitInboxDraftOutcomes({ stateDir: join(config.root, "state"), scope: causalScope, snapshots, outcomes, log });
+    Object.assign(drafts, parseDraftCache(readFileIfExists(draftsPath)));
   }
 
   const deriveDeps: DeriveDeps = { ledgerPath, github: deps.github ?? buildBatchedGithub(owner, repo) };
@@ -42609,7 +42622,7 @@ export function productionMachineFilingJudgePorts(opts: {
   /** Test files main's CI failed at a sha (W1-T9694). Absent: read from GitHub, as the flake-incident gardener does. */
   mainFailures?: SelectorShadowMainFailures;
 }): MachineJudgePorts {
-  let judge: ((input: RiskJudgeInput) => Promise<RiskJudgeVerdict>) | undefined;
+  let mount: Mount | undefined;
   const fetcher = opts.fetcher ?? ghJson;
   return {
     flakeEvidence: flakeJudgeEvidencePort({
@@ -42621,11 +42634,61 @@ export function productionMachineFilingJudgePorts(opts: {
     stateDir: opts.stateDir,
     plan: () => loadPlan(resolveRepoLayout(opts.repoRoot).planMonolith),
     riskJudge: (input) => {
-      if (!judge) {
+      if (!mount) {
         const mounts = loadMounts(mountsPath(opts.repoRoot));
-        judge = realRiskJudge({ mount: mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts), cwd: opts.repoRoot, settingsFile: join(opts.repoRoot, "settings", "worker.json"), spawn: opts.spawn ?? ledgeredNonDispatchSpawn("risk-judge") });
+        mount = mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts);
       }
-      return judge(input);
+      // Per-judgment receipts precede parse retries; symbol-only identity preserves router inputs.
+      const identity = { runId: `machine-judge-${nextLaneEpochMs()}`, taskId: input.planContext.taskId ?? "RISK-JUDGE" };
+      const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("risk-judge");
+      const record = (result: WorkerResult | undefined, assignmentId: string | undefined): void => {
+        try {
+          let resources: ReturnType<typeof benchmarkWorkerAttemptResources> | undefined;
+          try { if (result) resources = benchmarkWorkerAttemptResources(result); }
+          catch { /* unavailable accounting is unknown, never a replacement judgment */ }
+          const { billing_mode = "unknown" } = resources ?? {};
+          const price = resources?.total_cost_usd, notional = resources?.notional_cost_usd;
+          const priced = typeof price === "number" && Number.isFinite(price) && price >= 0;
+          opts.log("machine_judge.attempt_spend", {
+            run_id: identity.runId, task_id: identity.taskId,
+            ...attemptAssignmentJoin(assignmentId, result === undefined),
+            attempt_state: result ? "result" : assignmentId ? "failed" : "not-started",
+            accounting_source: "worker-result-estimate-not-invoice",
+            provider: result?.provider === "claude" || result?.provider === "codex" || result?.provider === "cash" ? result.provider : "unknown",
+            billing_mode,
+            price_state: priced ? "reported" : "unknown",
+            ...(priced ? { total_cost_usd: price } : {}),
+            ...(typeof notional === "number" && Number.isFinite(notional) && notional >= 0 ? { notional_cost_usd: notional } : {}),
+          });
+        } catch { /* a telemetry failure must not change the ruling, retries or provider result */ }
+      };
+      return realRiskJudge({ mount, cwd: opts.repoRoot, settingsFile: join(opts.repoRoot, "settings", "worker.json"),
+        spawn: async (args) => {
+          let assignmentId: string | undefined;
+          const recorded = new Set<string>();
+          const recordedResults = new WeakSet<WorkerResult>();
+          const recordAttempt = (result: WorkerResult | undefined, id: string | undefined): void => {
+            // A fallback observer and final return can carry the same result object without IDs.
+            if (result !== undefined && recordedResults.has(result) || id !== undefined && recorded.has(id)) return;
+            record(result, id);
+            if (result !== undefined) recordedResults.add(result);
+            if (id !== undefined) recorded.add(id);
+          };
+          try {
+            const result = await spawn(withReceiptIdentity({ ...args,
+              onSelectionAssignment: (assignment) => { assignmentId = assignment.id; args.onSelectionAssignment?.(assignment); },
+              onModelFallbackAttempt: (attempt) => {
+                recordAttempt(attempt.result, attempt.selectionAssignmentId);
+                args.onModelFallbackAttempt?.(attempt);
+              },
+            }, identity));
+            recordAttempt(result, result.selectionAssignmentId ?? assignmentId);
+            return result;
+          } catch (error) {
+            recordAttempt(undefined, assignmentId);
+            throw error;
+          }
+        } })(input);
     },
     riskPolicy: () => readRiskPolicy(policyPath(opts.repoRoot)),
     gardenRecord: (family) => gardenFamilyRecord(opts.stateDir, family),
@@ -43211,11 +43274,12 @@ export function readLedgerRawLines(path: string): readonly string[] {
 
 export async function inboxActionCliCommand(name: InboxVerbName, rest: string[], config: Config = loadConfig(), deps?: PanelGraphDeps): Promise<number> {
   const { owner, repo } = deps ? { owner: "", repo: "" } : resolveOwnerRepo();
+  const causalScope = deps?.inboxSourceIdentity ?? deps?.inboxAuditScope ?? reframeCausalScope(config, true);
   const actions = buildInboxVerbActions(deps ?? {
     root: repoRoot, inboxRoot: config.root, planPath: join(repoRoot, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
     github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
     ratify: ratifyCliGateway(repoRoot, join(config.root, "logs")),
-  });
+  }, causalScope);
   return inboxVerbCommand(name, rest, actions);
 }
 
@@ -44324,9 +44388,40 @@ export async function noteCommand(
   return 0;
 }
 
+/** A forwarded input requires the configured instance's existing root binding. A direct local
+ * command may instead use its explicit checkout context; no account-selected repository is read. */
+function explicitReframeTarget(instance: string) {
+  const registryPath = process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(repoRoot);
+  let registryText: string | undefined;
+  try { registryText = readFileSync(registryPath, "utf8"); }
+  catch { return { ok: false as const, refusal: "instance registry is unreadable; forwarded input scope is unverified" }; }
+  return resolvePauseTarget({ configRoot: "", instance, registryText, registryPath });
+}
+
+function reframeCausalScope(config: Pick<Config, "root">, forwarded: boolean): InboxCausalScope | undefined {
+  const registryPath = process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(repoRoot);
+  let registryText: string | undefined;
+  try { registryText = readFileSync(registryPath, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error("rmd reframe: instance registry is unreadable; repository scope is unverified");
+      return undefined;
+    }
+    registryText = undefined;
+  }
+  const bound = resolvePauseTarget({ configRoot: config.root, registryText, registryPath });
+  if (bound.ok && registryText) {
+    const instance = parseInstanceRegistry(registryText).instances.find(instance => instance.name === bound.target.instance && instance.live);
+    return instance ? { repository: instance.repo, instance: instance.name } : undefined;
+  }
+  if (forwarded) return undefined;
+  const { owner, repo } = resolveOwnerRepo();
+  return { repository: `${owner}/${repo}` };
+}
+
 export async function reframeCommand(rest: string[], deps: { config?: Config } = {}): Promise<number> {
   const proposalId = rest[0];
-  const badArg = unknownArgError("reframe", rest.slice(1), ["--feedback", "--supersedes"], []);
+  const badArg = unknownArgError("reframe", rest.slice(1), ["--feedback", "--supersedes", "--input-id", "--instance"], []);
   if (!proposalId || badArg) {
     console.error((badArg ?? `rmd reframe: <P##> is required — usage: ${commandSyntax("reframe")}`) + "\n" + USAGE);
     return 2;
@@ -44337,13 +44432,42 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
     return 2;
   }
 
-  const config = deps.config ?? loadConfig();
-  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const inputId = flagValue(rest, "--input-id");
+  const instance = flagValue(rest, "--instance");
+  if ((inputId === undefined) !== (instance === undefined)) {
+    console.error("rmd reframe: a forwarded input requires both --instance and --input-id — nothing was changed");
+    return 2;
+  }
+  let explicitRoot: string | undefined;
+  if (instance !== undefined) {
+    const selected = explicitReframeTarget(instance);
+    if (!selected.ok) { console.error(`rmd reframe: ${selected.refusal}`); return 2; }
+    explicitRoot = selected.target.root;
+  }
+  // Forwarded, state-only work uses the declared source. It neither opens the account config
+  // nor loads provider credentials, and cannot select an arbitrary path or repository label.
+  const config: Pick<Config, "root"> = explicitRoot !== undefined ? { root: explicitRoot } : deps.config ?? loadConfig();
+  const causalScope = reframeCausalScope(config, inputId !== undefined);
+  if (!causalScope || inputId !== undefined && !/^[A-Za-z0-9._:-]{1,256}$/.test(inputId)) {
+    console.error("rmd reframe: repository/input scope is unverified — nothing was changed");
+    return 2;
+  }
+  let input: InboxInputReference | undefined;
+  if (inputId !== undefined) {
+    const captured = readThread(inboxThreadId(proposalId), { threadStorePath: inboxThreadStorePath(config.root) });
+    const matches = captured.status === "ok" ? captured.messages.filter(message => message.role === "reply" && !hasThreadEvent(message.extra) && message.extra?.input?.id === inputId) : [];
+    const capturedInput = matches[0]?.extra?.input;
+    if (matches.length !== 1 || matches[0]!.body !== feedback || capturedInput === undefined || verifiedInboxInput(capturedInput, causalScope, proposalId, feedback) === false) {
+      console.error("rmd reframe: input is missing, ambiguous, foreign or changed — nothing was changed");
+      return 2;
+    }
+    input = capturedInput;
+  }
   const ledgerPath = ledgerPathFor(config);
-  const { owner, repo } = resolveOwnerRepo();
 
   const registryPath = join(config.root, "state", "inbox-proposals.json");
-  const { proposal, drafts, draftsPath } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
+  const proposal = parseProposalRegistry(readFileIfExists(registryPath)).find(proposal => proposal.id === proposalId);
+  const draftsPath = join(config.root, "state", "inbox-drafts.json");
   if (!proposal) {
     console.error(`rmd reframe: unknown proposal '${proposalId}' — not in the ACTIVE registry (${registryPath})`);
     return 2;
@@ -44375,14 +44499,15 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
   updateProposalRegistry(registryPath, (current) => {
     const freshProposal = current.find((p) => p.id === proposalId);
     if (!freshProposal) return null; // vanished concurrently — nothing left to reframe
-    reframed = reframeProposal(freshProposal, feedback, drafts, { ledgerPath, runId, threadStorePath: inboxThreadStorePath(config.root) }, supersedes);
+    const freshDrafts = parseDraftCache(readFileIfExists(draftsPath));
+    reframed = reframeProposal(freshProposal, feedback, freshDrafts, { ledgerPath, runId, threadStorePath: inboxThreadStorePath(config.root), causalScope, ...(input ? { input } : {}) }, supersedes);
+    writeAtomic(draftsPath, JSON.stringify(reframed.drafts, null, 2));
     return current.map((p) => (p.id === proposalId ? reframed!.proposal : p));
   });
   if (!reframed) {
     console.error(`rmd reframe: ${proposalId} was removed from the registry by a concurrent update — nothing to reframe`);
     return 2;
   }
-  writeFileSync(draftsPath, JSON.stringify(reframed.drafts, null, 2), "utf8");
 
   console.log(
     supersedes && supersedes.length > 0
@@ -44722,10 +44847,10 @@ export function mainRepairTaskId(offendingSha: string): string {
 export const mainRepairRevertTaskId = (offendingSha: string): string => `main-repair-revert-${offendingSha.slice(0, 12)}`;
 
 /**
- * W1-T8572 — THE DISPATCHER WRITES A MAIN-REPAIR PR'S ACCEPTANCE BLOCK. Each `request.testFiles` entry fails on main
- * by definition (`baseReproductionFiles`), so `unit test: <path>` fails at base and passes at a repaired head: the
- * discrimination proof-discrimination wants, written by the harness so a model's spelling never sits between a red
- * main and its repair (#11096's prose proofs). Rendered through {@link renderAcceptanceBlock}, so it round-trips
+ * W1-T8572 — THE DISPATCHER WRITES A MAIN-REPAIR PR'S ACCEPTANCE BLOCK. Paths with a named failing-test witness
+ * qualify for whole-file proofs through {@link mainRepairUsesFileProofs}; reported paths alone remain context.
+ * The harness spells the file proof so a model's spelling never sits between a red main and its repair
+ * (#11096's prose proofs). Rendered through {@link renderAcceptanceBlock}, so it round-trips
  * through `parseAcceptanceBlock` or throws; it throws on an empty list too, which the no-test-file path never reaches.
  */
 export function mainRepairAcceptanceCriteria(request: Pick<MainRepairFixRequest, "testFiles">): string {
@@ -44737,11 +44862,16 @@ export const MAIN_REPAIR_PROSE_PLACEHOLDER = "WORKER-PROSE: replace this one lin
 /** W1-T8572 — the no-test-file body's one line under `Acceptance:` that the worker replaces with its bullets. */
 export const MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER = "WORKER-ACCEPTANCE: replace this one line with your `- <claim> | <proof>` bullets.";
 
+// Gate reports can name suites that pass normally; paths alone are not a failing-test witness.
+function mainRepairUsesFileProofs(request: Pick<MainRepairFixRequest, "testFiles" | "failingTestTitles">): boolean {
+  return request.testFiles.length > 0 && request.failingTestTitles.some((title) => title.trim().length > 0);
+}
+
 /** W1-T8572 — the body the dispatcher writes BEFORE the fix worker spawns: the prose placeholder, the Acceptance
  *  block (rendered here when test files are known, a placeholder line for the worker's bullets when not), the
  *  `origin:` line and the `Remudero-Task:` trailer last. */
 export function mainRepairFixBody(request: MainRepairFixRequest): string {
-  const block = request.testFiles.length > 0 ? mainRepairAcceptanceCriteria(request) : `Acceptance:\n${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}`;
+  const block = mainRepairUsesFileProofs(request) ? mainRepairAcceptanceCriteria(request) : `Acceptance:\n${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}`;
   return [
     MAIN_REPAIR_PROSE_PLACEHOLDER,
     "",
@@ -44760,7 +44890,7 @@ export function mainRepairFixBody(request: MainRepairFixRequest): string {
  *  the open to the dispatcher, which checks those proofs first. */
 export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: string, harnessOwnsGit = false): string {
   const pr = request.offendingPr !== undefined ? `PR #${request.offendingPr}` : "an unnamed PR";
-  const known = request.testFiles.length > 0;
+  const known = mainRepairUsesFileProofs(request);
   const merges = mainRepairMergesBrief(request);
   return [
     "You are a REMUDERO red-main fix worker dispatched by the main-health rung (W1-T6403).",
@@ -44772,7 +44902,7 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: str
     "",
     `Failing check(s): ${request.failingChecks.join(", ") || "(none named)"}`,
     `Failing test title(s): ${request.failingTestTitles.join("; ") || "(none parsed from the log)"}`,
-    `Failing test file(s): ${request.testFiles.join(", ") || "(none parsed from the log)"}`,
+    `${known ? "Failing test file(s)" : "Reported test path(s), not established whole-file failures"}: ${request.testFiles.join(", ") || "(none parsed from the log)"}`,
     `Why main reads red: ${request.reason}`,
     "Log excerpt of the failing check(s):",
     "```",
@@ -44781,7 +44911,8 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: str
     "",
     merges.fixLine,
     "Do NOT revert that merge — a revert PR is this lane's separate, later step. Do not scope-creep.",
-    "Reproduce the failing test file(s) above first, then make the minimal correct change.",
+    known ? "Reproduce the failing test file(s) above first, then make the minimal correct change."
+      : "Reproduce the red check's actual failing experiment first: reported paths may pass at the ordinary clock. Then make the minimal correct change.",
     "",
     `THE PR BODY IS ALREADY WRITTEN, by the dispatcher, at: ${bodyFile}`,
     "It lives outside your checkout: never copy it in and never commit it. Its `origin:` line and its",
@@ -44790,7 +44921,7 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: str
     ...(known
       ? ["Its Acceptance block is the dispatcher's too: never edit, add or remove a bullet in it."]
       : [
-          `No failing test file was parsed, so replace the line \`${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}\``,
+          `${request.testFiles.length > 0 ? "No named failing test witness was supplied" : "No failing test file was parsed"}, so replace the line \`${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}\``,
           "with ONE executable bullet per check you repair, in this grammar:",
           ...PR_BODY_ACCEPTANCE_GRAMMAR,
           "The dispatcher reads those bullets before it opens the PR. An undialected proof is a defect it never",
@@ -44930,7 +45061,7 @@ export async function dispatchMainRepairFixRun(
       const landed = await landHarnessCommit("main-repair", worker, branch, worktreePath, log, deps);
       if (landed === undefined) return undefined;
       prUrl = await openCheckedMainRepairPr(owner, repo, request, branch, worktreePath, bodyFile, log, deps, landed);
-    } else if (request.testFiles.length === 0) {
+    } else if (!mainRepairUsesFileProofs(request)) {
       // A no-test-file worker that opened its own PR broke the contract: its body reached GitHub unchecked, so the
       // breach is ledgered with whatever the body file holds. The PR exists, so it is still returned for review.
       if (prUrl) log(MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP, mainRepairWorkerOpenedDefect(prUrl, existsSync(bodyFile) ? readFileSync(bodyFile, "utf8") : undefined));
@@ -47601,9 +47732,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "reframe",
-    syntax: "rmd reframe <P##> --feedback \"<text>\" [--supersedes <rounds>]",
+    syntax: "rmd reframe <P##> --feedback \"<text>\" [--supersedes <rounds>] [--instance <name> --input-id <id>]",
     summary: "The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.",
-    detail: "the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range (\"2-3\"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range",
+    detail: "the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range (\"2-3\"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range. --input-id resumes one unique already-captured conversational input in this config root's verified instance binding; foreign, changed, ambiguous or absent input refuses before writing. It supplies no repository authority or approval.",
   },
 
   {
@@ -47924,7 +48055,13 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
   try {
     // Do not create either HOME config or an override's state/ directory before deploy-run validates
     // the path. The supervisor's explicit-root path is intentionally not logged at this seam.
-    if (stateRootOverride !== undefined) return;
+    if (stateRootOverride !== undefined) {
+      if (cmd === "reframe" && stateRootOverride && existsSync(join(stateRootOverride, "state"))) {
+        appendLedger(ledgerPathFor({ root: stateRootOverride }), { run_id: `CLI-${systemClock.now()}`, task_id: "CLI", step: "cli.invoked", verb: cmd,
+          argv_shape: argv.map(argument => argument.startsWith("-") ? argument : "<arg>") });
+      }
+      return;
+    }
     const config = loadConfig();
     // A missing pause/resume root must reach target validation still missing. Invocation
     // telemetry must not recreate it and turn an unavailable state mount into a local target.
@@ -48538,7 +48675,12 @@ export async function main(
   // if-ladder this replaced is gone and this was its only remaining reader in main() itself.
   // W1-T477 signal (i): see logCliInvocation's own doc — first, unconditional, one row per
   // process regardless of which dispatch arm below (if any) ends up matching `cmd`.
-  const invocationStateRoot = cmd === "deploy-run" && rest.includes("--state-root") ? flagValue(rest, "--state-root") ?? "" : undefined;
+  let invocationStateRoot = cmd === "deploy-run" && rest.includes("--state-root") ? flagValue(rest, "--state-root") ?? "" : undefined;
+  if (cmd === "reframe" && (rest.includes("--input-id") || rest.includes("--instance"))) {
+    const instance = flagValue(rest, "--instance");
+    const selected = instance && flagValue(rest, "--input-id") ? explicitReframeTarget(instance) : undefined;
+    invocationStateRoot = selected?.ok ? selected.target.root : "";
+  }
   const registryObserver = logCliInvocation(cmd, rest, invocationStateRoot);
   if (cmd === "--help" || cmd === "-h" || cmd === "help") {
     console.log(USAGE);

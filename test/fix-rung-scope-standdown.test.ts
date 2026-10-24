@@ -39,6 +39,7 @@
  * as a thrown "not a function" rather than a silent pass.
  */
 import assert from "node:assert/strict";
+import { admittedFixTestPaths } from "../src/lib/fix-test-scope.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -451,4 +452,60 @@ test("runFixRung (criterion 5): the scope stand-down never calls updatePrBody â€
 
   assert.equal(outcome.outcome, "stood_down");
   assert.equal(updatePrBodyCalls, 0, "the stand-down never rewrites the PR body");
+});
+
+/** Replays a repair's next-strike boundary; the worker and review are deterministic seams. */
+async function observedTestAdmission(path: string, declared: string[], baseline = declared) {
+  let spawned = 0, reviewed = 0;
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const failing = fakeReview('failure', [criterion({claim:'repair completes',met:false,reason:'fixture'})]);
+  const task = {id:'W1-T10432X',title:'repair the fixture',files:[...declared]};
+  const issues = fakeIssueStore();
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(task),strikeCap:2,initialReview:failing,
+    deps:{spawn:async()=>result({sessionId:`scope-${++spawned}`}),waitForCiGreen:async()=> 'green',
+      runReview:async()=> ++reviewed===1 ? {...failing,headSha:'sha-1'} :
+        {...failing,state:'success',headSha:'sha-2',criteria:[criterion({claim:'repair completes',met:true})]},
+      push:()=>{},issues,ledgerPath:tmpLedgerPath(),log:(step,extra)=>logs.push({step,extra}),say:()=>{},account:r=>r,
+      fetchPrBody,fetchPrDiffFiles:diffFileSequence([baseline,baseline,[...baseline,path]])},
+  });
+  return {spawned,outcome,logs,task,issues};
+}
+
+test('an admitted fix test survives the next strike without widening source scope',async()=>{
+  const declared=['src/lib/proof-amendment.ts','src/run-task.ts','test/a-build-that-needs-scope-before-its-pr-gets-it.test.ts'];
+  const child='test/a-build-that-imports-a-left-out-file-asks-for-scope.test.ts';
+  const got=await observedTestAdmission(child,declared);
+  assert.equal(got.spawned,2,'the actual incident child reaches the next worker');
+  assert.equal(got.outcome.outcome,'fixed');
+  assert.equal(got.logs.some(r=>r.step==='fix.stood_down'&&r.extra?.site==='rung.scope'),false);
+  assert.deepEqual(got.task.files,declared,'the permission does not amend the task record');
+  const outside=await observedTestAdmission('src/lib/undeclared-source.ts',declared);
+  assert.equal(outside.spawned,1);assert.equal(outside.outcome.outcome,'stood_down');
+  assert.ok(outside.logs.some(r=>r.step==='fix.stood_down'&&r.extra?.site==='rung.scope'));
+});
+
+test('fix test admission preserves plan and ungranted scope refusals',async()=>{
+  const child='test/a-build-that-imports-a-left-out-file-asks-for-scope.test.ts';
+  const plan=['plan/tasks.d/example.yaml'];
+  const onPlan=await observedTestAdmission(child,plan);
+  assert.equal(onPlan.spawned,1);assert.equal(onPlan.outcome.outcome,'stood_down');
+  const filing=await observedTestAdmission(child,['src/future.ts'],plan);
+  assert.equal(filing.spawned,1);assert.equal(filing.outcome.outcome,'stood_down');
+  const sibling=await observedTestAdmission('test-other/escape.ts',['src/foo.ts']);
+  assert.equal(sibling.spawned,1);assert.equal(sibling.outcome.outcome,'stood_down');
+  const traversal=await observedTestAdmission('test/../src/escape.ts',['src/foo.ts']);
+  assert.equal(traversal.spawned,1);assert.equal(traversal.outcome.outcome,'stood_down');
+  assert.deepEqual(scopeGuardOutOfScopeFiles([child],undefined),[child]);
+  assert.deepEqual(scopeGuardOutOfScopeFiles([child],[]),[child]);
+  assert.deepEqual(scopeGuardOutOfScopeFiles([child],['test/']),[child],'general directory policy remains exact');
+});
+
+test("fix test admission materializes only safe observed test paths", () => {
+  const paths = ["test/new.test.ts", "test/nested/helper.ts", "test-other/escape.ts", "test/../src/escape.ts", "src/foo.ts"];
+  assert.deepEqual(admittedFixTestPaths(paths, true), ["test/new.test.ts", "test/nested/helper.ts"]);
+  assert.deepEqual(admittedFixTestPaths(paths, false), []);
+  assert.deepEqual(admittedFixTestPaths(paths, undefined), []);
+  assert.deepEqual(admittedFixTestPaths([], true), []);
+  assert.deepEqual(paths, ["test/new.test.ts", "test/nested/helper.ts", "test-other/escape.ts", "test/../src/escape.ts", "src/foo.ts"]);
 });

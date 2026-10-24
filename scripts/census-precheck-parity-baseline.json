@@ -41,7 +41,6 @@
     "test/dependency-declarations-match-use.test.ts",
     "test/deploy-scripts-use-mktemp.test.ts",
     "test/enforcement-data-carveout.test.ts",
-    "test/every-ci-census-is-asked-before-the-push.test.ts",
     "test/every-shard-on-main-is-lintable.test.ts",
     "test/expiring-fixture-census.test.ts",
     "test/fast-gate-admits-the-census-class.test.ts",

@@ -202,6 +202,12 @@ test("GOLDEN — HEALTHY CONTROL: a correct PR with no planted violation arms �
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — COVERAGE REPORTER AND STACKED PR LESSONS: both CI learning proofs execute and arm", () => {
+  const { verdict, golden } = judgeCase("ci-coverage-reporter-stacked-pr-lessons");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
 test("GOLDEN — KNOWLEDGE REPAIR: retargeting an existing operator-impact learning arms, and the coverage items do not mistake an edit for an addition", () => {
   const { verdict, golden } = judgeCase("knowledge-repair");
   assert.equal(golden.violation, "none");
@@ -357,6 +363,18 @@ test("GOLDEN — CI SHARD SEVEN-EIGHT LESSON: the cited proof executes and task 
     const selected = selectLearnings(entries, [taskFile]).selected;
     assert.ok(selected.some((entry) => entry.id === "ci-shard-seven-eight-refusals-reach-task-authoring-lane"), taskFile);
   }
+});
+
+test("GOLDEN — COVERAGE SHARD ONE-FOUR LESSON: the cited proof executes and task authors receive guidance", () => {
+  const { verdict, golden } = judgeCase("ci-coverage-shard-one-four-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const taskFile = "plan/tasks.d/W1-T3829.yaml";
+  const learningsDir = join(HERE, "..", "learnings");
+  const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+  const selected = selectLearnings(entries, [taskFile]).selected;
+  assert.ok(selected.some((entry) => entry.id === "coverage-shard-one-four-refusal-repair-lane"), taskFile);
 });
 
 test("GOLDEN — SCAN LESSON: the cited incident executes and the matched lane arms (W1-T7651)", () => {

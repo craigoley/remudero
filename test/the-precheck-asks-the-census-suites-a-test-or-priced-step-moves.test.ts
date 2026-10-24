@@ -66,7 +66,8 @@ test("the priced prefilter reads literal logs, constant logs and step objects, i
   for (const text of ['log(PRICED_STEP, { total_cost_usd: 3 });', 'log(PRICED_STEP, {});', 'const row = { cost_usd: 2 };', 'step: PRICED_STEP; cost_usd']) {
     assert.ok(!evaluate(SOURCE, text).started.includes(PRICED), text);
   }
-  assert.deepEqual(evaluate("src/lib/config-gardener.ts", "", "").runs, [[PRICED]]);
+  assert.deepEqual(evaluate("src/lib/config-gardener.ts", "", "").runs,
+    [[PRICED, "test/rules/scout-config-gardener-failed.test.ts"]]);
 });
 
 test("the host prefilter asks on each added token line and on duplicate sites, excluding unchanged and removed lines", () => {

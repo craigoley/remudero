@@ -540,7 +540,9 @@ async function deliver(
   const capture = captureResponse();
   let captured: Captured;
   try {
-    await source.handler(req, capture.res, ctx);
+    await source.handler(req, capture.res, { ...ctx, params: { ...ctx.params,
+      inboxThreadRepository: binding.repository, inboxThreadInstance: binding.instance,
+    } });
     captured = capture.done();
   } catch (error) {
     const unknown: IntentReceipt = { ...pending, status: "unknown" };

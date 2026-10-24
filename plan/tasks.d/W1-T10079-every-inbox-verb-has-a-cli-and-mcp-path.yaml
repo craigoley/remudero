@@ -20,7 +20,7 @@
     - scripts/console-parity-ratchet.mjs
     - test/help-renders-a-summary-not-a-paragraph.test.ts
     - test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator 2026-10-17: an agent recording the operator's decisions has no sanctioned way to act
   attempts: 0
   rationale: |

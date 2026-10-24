@@ -41,13 +41,13 @@ export function main(argv = process.argv.slice(2)) {
     catch (error) { if (error.code === 'EEXIST') throw new Error('existing seed configuration must be reviewed before replacing it'); throw error; }
     console.log(JSON.stringify({ config: file, root }));
   } else if (command === 'prime' && checkout) {
-    console.log(JSON.stringify(materializeDependencySeed(checkout, { root, sourceDir: flag('--source'), sourceSeed: flag('--reuse-seed'), proof: args.includes('--proof') })));
+    console.log(JSON.stringify(materializeDependencySeed(checkout, { root, sourceDir: flag('--source'), sourceSeed: flag('--reuse-seed'), readOnlyLinks: args.includes('--read-only-links'), proof: args.includes('--proof') })));
   } else if (command === 'report') {
     if (args.includes('--apply')) throw new Error('report is read-only; --apply is not accepted');
     console.log(JSON.stringify(observeDependencySeedReuse(root), null, 2));
   } else if (command === 'sweep') {
     console.log(JSON.stringify(sweepDependencySeeds(root, { apply: args.includes('--apply'), isOpen: seedIsOpen }), null, 2));
-  } else throw new Error('usage: dependency-seeds.mjs enable [--root PATH] | prime CHECKOUT [--source DONOR | --reuse-seed GENERATION] [--proof] [--root PATH] | report [--root PATH] | sweep [--root PATH] [--apply]');
+  } else throw new Error('usage: dependency-seeds.mjs enable [--root PATH] | prime CHECKOUT [--source DONOR | --reuse-seed GENERATION] [--read-only-links] [--proof] [--root PATH] | report [--root PATH] | sweep [--root PATH] [--apply]');
     return 0;
   } catch (error) { console.error(`dependency-seeds: ${error.message}`); return 1; }
 }

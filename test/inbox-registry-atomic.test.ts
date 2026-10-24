@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 // The DEFAULT export -- a plain, mutable object -- so `t.mock.method` can actually
 // intercept the calls `updateProposalRegistry` makes: named bindings off `node:fs` are
@@ -14,6 +15,8 @@ import { test } from "node:test";
 import { parseProposalRegistry, updateProposalRegistry, type Proposal, type RatifyGateway } from "../src/lib/inbox.js";
 import type { Config } from "../src/lib/config.js";
 import { approveCommand, inboxCommand, reframeCommand } from "../src/run-task.js";
+import { inboxThreadId, readThread, type InboxInputReference } from "#src/lib/inbox-thread.js";
+import { inboxThreadStorePath } from "#src/lib/panel-graph.js";
 
 // ── W1-T240 ──────────────────────────────────────────────────────────────────────────────
 //
@@ -446,6 +449,19 @@ function seedRegistry(config: Config, proposals: Proposal[]): string {
   return registryPath;
 }
 
+function assertCapturedReframeInput(config: Config, proposalId: string, feedback: string, input: InboxInputReference | undefined): InboxInputReference {
+  assert.ok(input, "the real CLI must persist a newly captured input identity");
+  assert.match(input.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.deepEqual(input, { id: input.id, repository: "craigoley/remudero", proposalId,
+    threadId: inboxThreadId(proposalId), contentSha256: createHash("sha256").update(feedback).digest("hex") });
+  const rows = readFileSync(join(config.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.deepEqual(rows.filter(row => row.step === "ratify.reframed").map(row => ({ feedback: row.feedback, input: row.input })), [{ feedback, input }]);
+  const thread = readThread(input.threadId, { threadStorePath: inboxThreadStorePath(config.root) });
+  assert.equal(thread.status, "ok");
+  assert.deepEqual(thread.messages.map(message => ({ body: message.body, input: message.extra?.input })), [{ body: feedback, input }]);
+  return input;
+}
+
 function seedRatifiedLedgerLine(config: Config, proposalId: string): void {
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   mkdirSync(join(config.root, "state"), { recursive: true });
@@ -551,7 +567,8 @@ test("W1-T240 claim 4: `rmd reframe`'s real dispatch (reframeCommand) actually r
     assert.equal(code, 0);
     const onDisk = parseProposalRegistry(readFileSync(registryPath, "utf8"));
     assert.equal(onDisk.length, 1);
-    assert.deepEqual(onDisk[0].reframeHistory, [{ feedback: "needs another pass" }], "the feedback must land on the ON-DISK registry entry, off a FRESH read under lock");
+    const input = assertCapturedReframeInput(config, "P-REFRAME", "needs another pass", onDisk[0].reframeHistory?.[0]?.input);
+    assert.deepEqual(onDisk[0].reframeHistory, [{ feedback: "needs another pass", input }], "the feedback must land on the ON-DISK registry entry, off a FRESH read under lock");
 
     const drafts = JSON.parse(readFileSync(draftsPath, "utf8"));
     assert.equal(drafts["P-REFRAME"], undefined, "the cached draft must be invalidated by the same real dispatch");
@@ -600,9 +617,10 @@ test("W1-T194: `rmd reframe --supersedes` accepts a valid round expression, retr
 
     assert.equal(code, 0);
     const onDisk = parseProposalRegistry(readFileSync(registryPath, "utf8"));
+    const input = assertCapturedReframeInput(config, "P-SUPERSEDE", "round two: supersedes round one", onDisk[0].reframeHistory?.[1]?.input);
     assert.deepEqual(onDisk[0].reframeHistory, [
       { feedback: "round one: dollar-ceiling framing", retracted: true },
-      { feedback: "round two: supersedes round one" },
+      { feedback: "round two: supersedes round one", input, supersedes: [1] },
     ]);
   } finally {
     rmSync(config.root, { recursive: true, force: true });
@@ -644,7 +662,8 @@ test("W1-T240: `rmd reframe` with `deps` omitted entirely falls through to the R
 
     assert.equal(code, 0);
     const onDisk = parseProposalRegistry(readFileSync(join(root, "state", "inbox-proposals.json"), "utf8"));
-    assert.deepEqual(onDisk[0].reframeHistory, [{ feedback: "exercised via the real loadConfig()" }]);
+    const input = assertCapturedReframeInput(config, "P-REALCFG", "exercised via the real loadConfig()", onDisk[0].reframeHistory?.[0]?.input);
+    assert.deepEqual(onDisk[0].reframeHistory, [{ feedback: "exercised via the real loadConfig()", input }]);
   });
 });
 

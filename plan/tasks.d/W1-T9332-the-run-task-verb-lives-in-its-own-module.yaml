@@ -74,7 +74,7 @@
     - test/worker-clock-bound.test.ts
     - test/worker-preflight-visibility.test.ts
     - test/worktree-reap-boot-rung.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   amendment: |

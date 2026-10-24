@@ -185,3 +185,54 @@ test("compact observer rejects invalid bounds and reports oversized evidence wit
     experiment: { assignedArm: "unknown", crossover: false } } } });
   assert.equal(observer.report().evidence!.omitted.oversized, 5); assert.equal(observer.report().assignments, 0);
 });
+
+
+function usefulWindowAfterHistoryCapacity(t: TestContext) {
+  // Many small valid identities trigger real native page exhaustion. No row is
+  // individually larger than the complete index and every clock is fixture data.
+  const noise = Array.from({ length: 64 }, (_, id) => ({
+    ts: "2026-10-10T10:00:00.000Z", step: "worker.assignment", task_id: `W1-T${980000 + id}`,
+    worker_assignment: { id: `old-capacity-${id}`, routing: { decision: { ab: "unrelated-fixture" } } },
+    fixture_payload: "x".repeat(600),
+  }));
+  const learning = { ts: "2026-10-12T11:50:00.000Z", step: "ci_learning_cadence.ran", filed: 1, refused: 0 };
+  const review = { ts: "2026-10-12T11:40:00.000Z", step: "review.posted", task_id: "W1-T7099" };
+  return fixture(t, [...noise, assignment(7099)], [learning], [receipt(7099), review]);
+}
+
+test("recent-window positive control reaches three physical forms after real history index exhaustion", async t => {
+  const f = usefulWindowAfterHistoryCapacity(t);
+  const { snapshot } = await dailyRoutingReview({ ...f, dedupeMaxBytes: 16_384 });
+  const source = snapshot.sources[0];
+  assert.equal(source.state, "observed-partial");
+  assert.ok(source.reasons.includes("ledger-dedupe-storage-bound"));
+  assert.ok(source.rowsRead > 0 && source.rowsRead < 64, "real small identities exhausted the historical index before its recent tail");
+  assert.equal(source.retention.distinctScanComplete, false);
+  assert.equal(source.retention.dedupeEvidence.complete, false);
+  // The completed first call closed its index. Independently verify the existing
+  // reader can reach all recent positive witnesses under the identical page cap.
+  const { createLedgerExactDedupe } = await import("#src/lib/ledger-exact-dedupe.js");
+  const { openLedgerUnion } = await import("#src/lib/ledger-union.js");
+  const index = createLedgerExactDedupe(16_384), recent: Record<string, unknown>[] = [];
+  try {
+    for await (const row of openLedgerUnion(f.stateDir, { exactDedupe: index, since: "2026-10-11T12:00:00.000Z" })) recent.push(row);
+    assert.equal(recent.length, 4, "one gzip assignment, one plain learning and two live witnesses reached the actual reader");
+    assert.deepEqual(new Set(recent.map(row => row.step)), new Set(["worker.assignment", "ci_learning_cadence.ran", "worker.attempt", "review.posted"]));
+    assert.equal(index.evidence().complete, true);
+    assert.equal(index.evidence().accepted, 4);
+  } finally { index.close(); }
+});
+
+test("a historical exact-index refusal preserves incomplete trials while recent daily learning remains reachable", async t => {
+  const f = usefulWindowAfterHistoryCapacity(t);
+  const { snapshot } = await dailyRoutingReview({ ...f, dedupeMaxBytes: 16_384 });
+  const source = snapshot.sources[0];
+  assert.equal(source.state, "observed-partial", "the global history refusal must remain visible");
+  assert.ok(source.reasons.includes("ledger-dedupe-storage-bound"));
+  assert.equal(source.retention.distinctScanComplete, false);
+  assert.ok(source.reports.every((report: { reviewState: string }) => report.reviewState === "source-incomplete"));
+  assert.equal(source.selfImprovement.ciLearning?.filed, 1,
+    "bounded old history cannot prevent the existing daily consumer from reaching its recent positive learning witness");
+  assert.equal(source.selfImprovement.efficacyClaim, "none");
+  assert.equal(snapshot.comparativeClaims, "none");
+});

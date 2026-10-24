@@ -162,7 +162,7 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   const inputs = { ...persistedContent(classified, stores), dismissalAudit: dismissalAudit(classified, deps, now),
     retirementSource: lifecycleRead.state === "observed" && !gardenerScope ? "unavailable" as const : lifecycleRead.state,
     ...(gardenerScope ? { gardenerSource: inboxGardenerSource(proposals, classified.plan.byId, { ...gardenerScope, root: deps.inboxRoot }, operatorIntents) } : {}),
-    snapshotScope: deps.inboxSourceIdentity ?? deps.inboxAuditScope ?? { root: deps.inboxRoot },
+    snapshotScope: { ...(deps.inboxSourceIdentity ?? deps.inboxAuditScope), root: deps.inboxRoot },
     ...(deps.inboxSourceIdentity ? { sourceIdentity: deps.inboxSourceIdentity } : {}) };
   const attentionCensus = materializeInboxAttentionCensus(deps, classified, stores, inputs, sourceThreads);
   const scope = deps.inboxSourceIdentity ?? deps.inboxAuditScope;

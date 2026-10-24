@@ -22,6 +22,8 @@ interface Run {
  */
 function beatOnce(opts: { prevAgoS?: number; prevCoreId?: string; publish?: boolean; consoleHighMib?: number; registry?: "repo" | "env" } = {}): Run {
   const dir = makeTempDir("heartbeat-mem");
+  const fixtureNow = 1_800_000_000;
+  const fixtureIso = new Date(fixtureNow * 1000).toISOString().replace(".000Z", "Z");
   try {
     for (const path of ["bin", "scripts", "home", "state-root/state", "tmp", "scratch"]) mkdirSync(join(dir, path), { recursive: true });
     const script = join(dir, "scripts", "fleet-heartbeat.sh");
@@ -71,7 +73,7 @@ function beatOnce(opts: { prevAgoS?: number; prevCoreId?: string; publish?: bool
     const prevAgoS = opts.prevAgoS ?? 300;
     if (prevAgoS > 0) {
       writeFileSync(join(state, "heartbeat-mem.txt"), [
-        `epoch ${Math.floor(Date.now() / 1000) - prevAgoS}`,
+        `epoch ${fixtureNow - prevAgoS}`,
         `cg remudero-daemon ${opts.prevCoreId ?? CORE_ID} 403000 12384706`,
         `cg remudero-console-daemon ${CONSOLE_ID} 0 14289`,
       ].join("\n") + "\n");
@@ -81,6 +83,12 @@ function beatOnce(opts: { prevAgoS?: number; prevCoreId?: string; publish?: bool
     const stub = (name: string, body: string) => writeFileSync(join(dir, "bin", name), `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
     stub("git", 'printf "fixture-sha\\n"');
     stub("uname", 'printf "Linux\\n"');
+    // The previous sample and the copied shell share a clock; explicit-date parsing stays real.
+    stub("date", `case "$*" in
+  "+%s"|"-u +%s") printf '%s\\n' "${fixtureNow}" ;;
+  "-u +%Y-%m-%dT%H:%M:%SZ") printf '%s\\n' "${fixtureIso}" ;;
+  *) exec /bin/date "$@" ;;
+esac`);
     stub("docker", `
 case "$1" in
   ps) printf '%s %s\\n' "${CORE_ID}" remudero-daemon "${CONSOLE_ID}" remudero-console-daemon "${SITE_ID}" remudero-site-daemon 31335f60 cloudflared ;;

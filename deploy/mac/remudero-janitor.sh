@@ -452,8 +452,19 @@ refresh_process_snapshot() {
   [ "$rc" -le 1 ]
 }
 
+artifact_index_risk() {
+  local repo="$1" artifact="$2" relative tracked
+  relative="${artifact#"$repo"/}"
+  [ "$relative" != "$artifact" ] || { printf 'artifact path is outside its checkout'; return 0; }
+  tracked=$(GIT_LITERAL_PATHSPECS=1 rmd_retirement_git "$repo" ls-files -- "$relative" 2>/dev/null) || {
+    printf 'artifact Git index is unreadable'; return 0;
+  }
+  [ -z "$tracked" ] || { printf 'artifact contains tracked source'; return 0; }
+  return 1
+}
+
 clean_artifact() {
-  local artifact="$1" min_age="${2:-$AGE_HOURS}" policy="${3:-}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope activity_root="$1"
+  local artifact="$1" min_age="${2:-$AGE_HOURS}" policy="${3:-}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope activity_root="$1" artifact_repo="" index_risk
   # Dynamically scoped to log(): only reuse this candidate's existing size probe.
   local RMD_DECISION_KNOWN_BYTES=unknown
   [ -d "$artifact" ] && [ ! -L "$artifact" ] || return 0
@@ -473,6 +484,10 @@ clean_artifact() {
     [ "$policy" != residual ] || [ "$parent" != "${USER_HOME%/*}" ] || break
     if [ -e "$parent/.git" ]; then
       activity_root="$parent"
+      artifact_repo="$parent"
+      if index_risk=$(artifact_index_risk "$artifact_repo" "$artifact"); then
+        log "SKIP protected $artifact ($index_risk)"; return
+      fi
       status=$(rmd_retirement_git "$parent" status --porcelain --untracked-files=all 2>/dev/null) || {
         log "SKIP git-unverified $artifact"; return;
       }
@@ -533,6 +548,10 @@ clean_artifact() {
     stamp=$(artifact_mtime "$artifact") || stamp=0
     if [ "$stamp" -eq 0 ] || [ "$(( $(date +%s) - stamp ))" -lt "$((min_age * 3600))" ]; then
       log "SKIP recent-or-unverified-before-remove $artifact"; return
+    fi
+    # A concurrent author can add a cache-named source file after the first read.
+    if [ -n "$artifact_repo" ] && index_risk=$(artifact_index_risk "$artifact_repo" "$artifact"); then
+      log "SKIP changed protected $artifact ($index_risk)"; return
     fi
     # Immutable dependency snapshots may have read-only directories. Give
     # the owning account delete permission only on directories inside this

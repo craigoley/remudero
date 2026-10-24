@@ -13,7 +13,7 @@
     - src/lib/daemon.ts
     - src/lib/account-usage.ts
     - test/routing/a-fleet-store-on-an-exhausted-account-is-named-and-escalated.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator ruling 2026-10-22: P0
   attempts: 0
   rationale: |
