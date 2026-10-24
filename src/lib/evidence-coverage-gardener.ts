@@ -14,6 +14,8 @@ import { feedbackEntryPath, feedbackEntryRepoPath, readFeedbackEntry, stageFeedb
 import { landFeedbackStatusContent, readQueuedFeedbackRecords, type LandFeedbackOpts } from "./feedback-landing.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { loadPlan } from "./plan.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 
 /**
  * lib/evidence-coverage-gardener.ts (W1-T4622) — an evidence gap becomes work.
@@ -341,6 +343,7 @@ export interface EvidenceCoverageFollowup {
   lane: string;
   field: EvidenceCoverageField | "source";
   raw: string;
+  measuredAt?: string;
 }
 
 export type EvidenceCoverageFiler = ((followup: EvidenceCoverageFollowup) => void) & {
@@ -516,7 +519,7 @@ export function runEvidenceCoverageGardener(deps: EvidenceCoverageInput): Eviden
         // Filers without a record reader retain whole-percent dedup; the production filer checks
         // the record's measured coverage even when this digest has not moved.
         const digest = `${open.kind}|${open.firstSeenAt}|${Math.round((count.observed / count.denominator) * 100)}`;
-        fileOnce(open, digest, { id: evidenceCoverageFollowupId(lane, field), lane, field, raw: gapFollowupRaw(gap) });
+        fileOnce(open, digest, { id: evidenceCoverageFollowupId(lane, field), lane, field, raw: gapFollowupRaw(gap), measuredAt: nowIso });
       }
     }
   }
@@ -543,10 +546,33 @@ export function feedbackEvidenceCoverageFiler(root: string, land: LandFeedbackOp
     return (queued as unknown as FeedbackEntry | undefined) ?? (existsSync(feedbackEntryPath(root, id)) ? readFeedbackEntry(root, id) : undefined);
   };
   const coverageLine = (raw: string): string => raw.split("\n").find((line) => line.startsWith("Coverage:")) ?? raw;
+  const measurement = (raw: string): string => coverageLine(raw).split(" in the trailing ")[0]!;
+  const history = (raw: string): string[] => raw.split("\n").filter((line) => line.startsWith("Reopened "));
+  const shouldReopen = (entry: FeedbackEntry, followup: Omit<EvidenceCoverageFollowup, "action">): boolean => {
+    if (followup.field === "source") return false;
+    if (entry.status !== "rejected" && entry.status !== "accepted" && entry.status !== "answered") return false;
+    if (history(entry.raw).at(-1)?.endsWith(`; ${measurement(followup.raw)}`)) return false;
+    if (entry.status === "rejected") return true;
+    const planPath = resolveRepoLayout(root).planMonolith;
+    const tasks = existsSync(planPath) ? loadPlan(planPath).tasks : [];
+    return !tasks.some((task) => task.origin === `feedback#${entry.id}` &&
+      !task.retirement && task.status !== "merged" && task.status !== "done");
+  };
   const file: EvidenceCoverageFiler = (followup) => {
     const entry = current(followup.id);
     if (entry) {
-      const result = landFeedbackStatusContent(root, feedbackEntryRepoPath(followup.id), stringifyYaml({ ...entry, raw: followup.raw }), land);
+      const reopen = shouldReopen(entry, followup);
+      const evidence = history(entry.raw);
+      if (reopen) {
+        const at = followup.measuredAt ?? systemClock.iso();
+        const since = fixedClock(Date.parse(at) - EVIDENCE_COVERAGE_WINDOW_MS).iso();
+        evidence.push(`Reopened ${at}: overrides ${entry.status}${entry.proposal_pr ? ` (${entry.proposal_pr})` : ""}; window ${since} to ${at}; ${measurement(followup.raw)}`);
+      }
+      const base = existsSync(feedbackEntryPath(root, followup.id)) ? readFeedbackEntry(root, followup.id) : entry;
+      const raw = [followup.raw, ...evidence].join("\n");
+      const content = stringifyYaml({ ...entry, status: reopen ? "new" : entry.status, raw,
+        evidence_coverage_update: { status: base.status, raw: base.raw } });
+      const result = landFeedbackStatusContent(root, feedbackEntryRepoPath(followup.id), content, land);
       const queued = result.queued !== undefined && result.queued.includes(feedbackEntryRepoPath(followup.id));
       if (!result.landed && !queued) {
         throw new Error(result.error ?? `feedback landing did not land or queue ${followup.id}`);
@@ -558,7 +584,7 @@ export function feedbackEvidenceCoverageFiler(root: string, land: LandFeedbackOp
   };
   file.needsUpdate = (followup) => {
     const entry = current(followup.id);
-    return entry === undefined || coverageLine(entry.raw) !== coverageLine(followup.raw);
+    return entry === undefined || coverageLine(entry.raw) !== coverageLine(followup.raw) || shouldReopen(entry, followup);
   };
   return file;
 }

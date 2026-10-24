@@ -104,14 +104,61 @@ test("W1-T9553: a failed initial capture is queued on retry even if its local co
   assert.match(f.record().raw, /\(51.0%\)/);
 });
 
-test("W1-T9553: the shared landing policy blocks measured edits and reopening", (t) => {
+test("W1-T9553: a closed record whose gap is still open is reopened with evidence", (t) => {
   const f = fixture(t);
-  const before = stringify(f.entry);
-  assert.deepEqual(mergeFeedbackRecord(before, stringify({ ...f.entry, raw: "Coverage: 51/100 (51.0%)" })),
-    { kind: "keep-upstream" });
   const closed = stringify({ ...f.entry, status: "rejected", proposal_pr: "https://github.com/o/r/pull/10976" });
-  const reopen = stringify({ ...parse(closed), status: "new", raw: "Coverage: 51/100 (51.0%)" });
-  const decision = mergeFeedbackRecord(closed, reopen);
-  assert.equal(decision.kind, "refuse");
-  if (decision.kind === "refuse") assert.match(decision.reason, /refusing to move the record backward/);
+  writeFileSync(f.path, closed);
+  assert.deepEqual(f.pass().filed, [f.id]);
+  assert.equal(f.record().status, "new");
+  assert.match(f.record().raw, /Reopened 2026-10-14T18:46:00.000Z: overrides rejected \(https:\/\/github.com\/o\/r\/pull\/10976\)/);
+  assert.match(f.record().raw, /window 2026-10-07T18:46:00.000Z to 2026-10-14T18:46:00.000Z; Coverage: 51\/100 joined worker calls \(51.0%\)/);
+  assert.equal(mergeFeedbackRecord(closed, readFileSync(f.queued, "utf8")).kind, "take-local",
+    "the queued reopening must survive the real publication policy");
+  assert.deepEqual(f.pass().updated, []);
+  writeFileSync(f.path, stringify({ ...f.record(), status: "rejected" }));
+  rmSync(f.queued);
+  assert.deepEqual(f.pass().updated, [], "closing unchanged evidence again is respected");
+  f.setObserved(55);
+  assert.deepEqual(f.pass().updated, [f.id]);
+  assert.equal(f.record().status, "new");
+  assert.equal(f.record().raw.split("\n").filter((line) => line.startsWith("Reopened ")).length, 2);
+  assert.match(f.record().raw, /2026-10-15T12:46:00.000Z.*\(55.0%\)/);
+  assert.equal(mergeFeedbackRecord(readFileSync(f.path, "utf8"), readFileSync(f.queued, "utf8")).kind, "take-local");
+});
+
+test("W1-T9553: accepted and answered records reopen only without open work", (t) => {
+  for (const status of ["accepted", "answered"] as const) {
+    const f = fixture(t);
+    writeFileSync(f.path, stringify({ ...f.entry, status }));
+    const planPath = join(f.root, "plan", "tasks.yaml");
+    writeFileSync(planPath, stringify([{ id: "W1-T1", title: "restore coverage", status: "running",
+      origin: `feedback#${f.id}`, depends_on: [], prompt: "restore coverage" }]));
+    assert.deepEqual(f.pass().filed, [f.id]);
+    assert.equal(f.record().status, status);
+    assert.doesNotMatch(f.record().raw, /Reopened /);
+    writeFileSync(planPath, "[]\n");
+    assert.deepEqual(f.pass().updated, [f.id], "unchanged measurement reopens when its task closes");
+    assert.equal(f.record().status, "new");
+    assert.match(f.record().raw, new RegExp(`overrides ${status}`));
+  }
+});
+
+test("W1-T9553: healthy and insufficient readings keep a closed record closed", (t) => {
+  const f = fixture(t);
+  writeFileSync(f.path, stringify({ ...f.entry, status: "rejected" }));
+  f.setObserved(100);
+  assert.deepEqual(f.pass().filed, []);
+  assert.equal(parse(readFileSync(f.path, "utf8")).status, "rejected");
+});
+
+test("W1-T9553: measured updates publish without overwriting a newer decision", (t) => {
+  const f = fixture(t);
+  const before = readFileSync(f.path, "utf8");
+  f.pass();
+  const after = readFileSync(f.queued, "utf8");
+  assert.equal(mergeFeedbackRecord(before, after).kind, "take-local");
+  const changed = stringify({ ...f.entry, status: "rejected" });
+  assert.equal(mergeFeedbackRecord(changed, after).kind, "refuse");
+  const metadata = stringify({ ...f.entry, summary: { headline: "a concurrent decision" } });
+  assert.equal(mergeFeedbackRecord(metadata, after).kind, "refuse");
 });

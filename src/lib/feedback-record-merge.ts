@@ -131,6 +131,21 @@ export function mergeFeedbackRecord(upstreamBytes: string | undefined, localByte
     };
   }
 
+  // A gardener update names the exact record it measured against. A concurrent decision or
+  // metadata change invalidates that base, preserving the ordinary lifecycle protection.
+  const { raw: upstreamRaw, status: upstreamStatus, evidence_coverage_update: _upstreamUpdate, ...upstreamFields } = upstream;
+  const { raw: localRaw, status: localStatus, evidence_coverage_update: update, ...localFields } = local;
+  const base = update !== null && typeof update === "object" ? update as RecordShape : undefined;
+  const coverageUpdate = typeof local.id === "string" && local.id.startsWith("evidence-coverage-") &&
+    typeof localRaw === "string" && localRaw.startsWith("Evidence coverage gap (evidence-coverage-v1,") &&
+    base?.raw === upstreamRaw && base?.status === upstreamStatus &&
+    isDeepStrictEqual(upstreamFields, localFields);
+  const reopening = localStatus === "new" &&
+    (upstreamStatus === "rejected" || upstreamStatus === "accepted" || upstreamStatus === "answered") &&
+    typeof localRaw === "string" && localRaw.split("\n").some((line) =>
+      line.startsWith("Reopened ") && line.includes(`: overrides ${String(upstreamStatus)}`));
+  if (coverageUpdate && (localStatus === upstreamStatus || reopening)) return takeLocal();
+
   if (localRank < upstreamRank) {
     return {
       kind: "refuse",
