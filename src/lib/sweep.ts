@@ -21797,7 +21797,7 @@ let lightPassReadyRefreshInFlight = false;
 /** Wall phases and synchronous execution attributed to this pass's async context, excluding sibling work. */
 export class LightPassPreReviewTiming {
   readonly phaseMs: Record<string, number> = Object.fromEntries([
-    "open_pr_views", "main_tip", "compare", "ready_ledger", "ready_actions", "ready_value_gate",
+    "open_pr_views", "review_eligibility", "main_tip", "compare", "ready_ledger", "ready_actions", "ready_value_gate",
     "ready_update", "refresh_admission", "armed_ratchet_rejudge",
   ].map((phase) => [phase, 0]));
   readonly compareReads: Array<Record<string, unknown>> = [];
@@ -22117,6 +22117,35 @@ function lightPassMemoryWaitSummary(pr: OpenPrView, deps: SweepDeps, sinceMs?: n
 export function reviewAdmissionBound(width: number): { bound: number; inFlight: number } {
   const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight;
   return { bound: Math.max(0, width - inFlight), inFlight };
+}
+
+/** Publish eligibility from the same selection inputs the light batch uses, before ready-only reads. */
+export function observeLightPassReviewEligibility(
+  openPrs: OpenPrView[], deps: SweepDeps, policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): ReadonlyArray<Record<string, unknown>> {
+  if (openPrs.length === 0 || deps.dryRun) return [];
+  const now = deps.now ? deps.now() : systemClock.now();
+  const lines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+  const retryViews = openPrs.map(pr => promiseHarvestRetryView(pr, lines));
+  const prior = priorActionsFromLedger(lines, retryViews);
+  const views = retryViews.map(pr => completedRefusalRetryView(pr, prior));
+  const freshnessBackoffs = new Set<string>();
+  for (const pr of views) {
+    const key = reviewOutcomeKeyForPr(pr);
+    const refusal = prior.reviewFreshnessRefusals.get(key);
+    const probe = refusal?.probe?.loadedCodeSha === deps.reviewerCodeRecovery?.loadedCodeSha
+      ? refusal?.probe : undefined;
+    const probeDue = refusal?.freshness === "unreadable" && deps.reviewerCodeRecovery?.loadedCodeSha &&
+      refusal.attemptedAt !== undefined && now - (probe?.attemptedAt ?? refusal.attemptedAt) >=
+        Math.min(probe?.backoffMinutes ?? UNREADABLE_REVIEWER_BACKOFF_MINUTES, policy.pendingCeilingMinutes) * 60_000;
+    if (!probeDue && reviewerCodeFreshnessBackoffReason(prior.reviewFreshnessRefusals,
+      key, policy, now, deps.reviewerCodeRecovery) !== undefined) freshnessBackoffs.add(key);
+  }
+  observeReviewEligibility(views, deps, policy, now, lines, {
+    delivered: prior.reviewDelivered, refused: prior.reviewRefused,
+    retryableThrows: prior.reviewRetryableThrows, freshnessBackoffs,
+  }, "light");
+  return lines;
 }
 
 export async function runSweepLightPass(

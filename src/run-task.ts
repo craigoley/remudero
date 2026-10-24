@@ -116,7 +116,7 @@ import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-upda
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
 import { revisionedRead, type ReadGeneration } from "./lib/read-plane.js";
-import { LightPassPreReviewTiming } from "./lib/sweep.js";
+import { LightPassPreReviewTiming, observeLightPassReviewEligibility } from "./lib/sweep.js";
 import { distanceRefreshProbeTargets } from "./lib/tick-read-worker.js";
 import { GITHUB_COMPARE_FILES_LISTED } from "./lib/base-reproduction.js";
 import { readPlaneWorkerInput } from "./lib/read-plane.worker.js";
@@ -39589,6 +39589,7 @@ export function buildSweepLightHook(
       log("sweep_light.pre_review_timing", { run_id: runId, ...timing.finish() });
     };
     try {
+      await timing.run(async () => {
       const readViews = () => io.openPrViews?.() ?? buildOpenPrViewsAsync(owner, repo, ledgerPath, {
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
@@ -39655,8 +39656,22 @@ export function buildSweepLightHook(
       };
       const readyNumbers = new Set(readyPrs.map((pr) => pr.prNumber));
       const ordinaryPrs = openPrs.filter((pr) => !readyNumbers.has(pr.prNumber));
-      // Start review eligibility before any ready-only read. Both paths remain owned by this hook.
-      const ordinary = ordinaryPrs.length > 0 || readyPrs.length === 0 ? runBatches(ordinaryPrs) : Promise.resolve();
+      // Publish ordinary eligibility now. The action batch follows the whole-snapshot refresh
+      // decisions, so its ledger rows cannot change which held or armed head gets refreshed.
+      const observationLines = timing.run(() => timing.sync("review_eligibility", () => observeLightPassReviewEligibility(
+        ordinaryPrs, { ...effects, ledgerPath, runId }, DEFAULT_SWEEP_POLICY)));
+      // Review-lane heads cannot be selected by ready-overlap refresh. A head named in a
+      // previous refresh admission, or already armed, stays in the later action batch.
+      const lastAdmission = observationLines.findLast((row) => row.step === "sweep.base_red.refresh_admission");
+      const admissionWaiters = new Set((Array.isArray(lastAdmission?.waiting) ? lastAdmission.waiting : [])
+        .flatMap((entry) => typeof entry?.pr_number === "number" && typeof entry.head_sha === "string"
+          ? [`${entry.pr_number}@${entry.head_sha}`] : []));
+      const earlyReviewPrs = ordinaryPrs.filter((pr) => !pr.autoMergeArmed &&
+        !admissionWaiters.has(`${pr.prNumber}@${pr.headSha}`) && isReviewLaneDisposition(deriveDisposition(pr).disposition));
+      const earlyNumbers = new Set(earlyReviewPrs.map((pr) => pr.prNumber));
+      const laterOrdinaryPrs = ordinaryPrs.filter((pr) => !earlyNumbers.has(pr.prNumber));
+      const earlyReviews = earlyReviewPrs.length > 0
+        ? timing.run(() => runBatches(earlyReviewPrs)) : Promise.resolve();
       const refresh = timing.run(async () => {
         let readyRefreshed: number | undefined;
         let measuredReadyPrs = readyPrs;
@@ -39681,16 +39696,19 @@ export function buildSweepLightHook(
           !admitted.includes(pr.prNumber) && !ratchetRefreshed.includes(pr.prNumber)),
           measured: new Set(measuredReadyPrs.map((pr) => pr.prNumber)) };
       });
-      const ready = refresh.finally(finishTiming).then(({ prs, measured }) => {
+      const ready = refresh.then(({ prs, measured }) => {
         const known = prs.filter((pr) => measured.has(pr.prNumber));
         const unknown = prs.filter((pr) => !measured.has(pr.prNumber));
         return Promise.all([
-          known.length > 0 ? runBatches(known) : undefined,
-          unknown.length > 0 ? runBatches(unknown, false) : undefined,
+          known.length > 0 ? timing.run(() => runBatches(known)) : undefined,
+          unknown.length > 0 ? timing.run(() => runBatches(unknown, false)) : undefined,
         ]);
       });
-      const results = await Promise.allSettled([ordinary, ready]);
+      const ordinary = refresh.then(() => laterOrdinaryPrs.length > 0 || readyPrs.length === 0
+        ? timing.run(() => runBatches(laterOrdinaryPrs)) : undefined);
+      const results = await Promise.allSettled([earlyReviews, ordinary, ready]);
       for (const result of results) if (result.status === "rejected") throw result.reason;
+      });
     } catch (e) {
       log("sweep_light.error", { error: String((e as Error)?.message ?? e) });
     } finally {

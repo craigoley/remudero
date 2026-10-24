@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { setImmediate as turn } from "node:timers/promises";
 import { test } from "node:test";
 import { buildSweepEffects, buildSweepLightHook } from "#src/run-task.js";
@@ -62,7 +63,7 @@ function fixture(prs: OpenPrView[]) {
       compares.push(args);
       return { ahead_by: 2, files: [{ filename: "src/subject.ts" }] };
     },
-    clock: { now: () => clock },
+    clock: { now: () => clock + performance.now() },
   };
   const hook = () => buildSweepLightHook("o", "r", { root } as never, effects.ledgerPath, "T9918",
     { tasks: [], byId: new Map() } as never, (step, extra) => { logs.push({ step, ...extra }); },
@@ -80,23 +81,39 @@ function fixture(prs: OpenPrView[]) {
 
 test("W1-T9918: a light pass ledgers each pre-review phase duration", async (t) => {
   const f = fixture([pr(991801, true), pr(991802)]);
+  const baseRead = f.effects.readLedger!;
+  let blockedMs = 0;
+  let reads = 0;
+  f.effects.readLedger = (path) => {
+    reads++;
+    if (reads === 1) {
+      const start = performance.now();
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 80);
+      blockedMs = performance.now() - start;
+    }
+    return baseRead(path);
+  };
   try {
     await f.hook()();
     assert.deepEqual(f.logs.filter((r) => r.step === "sweep_light.error"), []);
     const timing = f.logs.filter((r) => r.step === "sweep_light.pre_review_timing");
     assert.equal(timing.length, 1);
     const phases = timing[0]!.phase_ms as Record<string, number>;
-    for (const phase of ["open_pr_views", "main_tip", "compare", "ready_ledger", "ready_actions",
+    for (const phase of ["open_pr_views", "review_eligibility", "main_tip", "compare", "ready_ledger", "ready_actions",
       "ready_value_gate", "ready_update", "refresh_admission", "armed_ratchet_rejudge"]) {
       assert.equal(typeof phases[phase], "number", phase);
       assert.ok(phases[phase]! >= 0, phase);
     }
-    assert.equal(phases.open_pr_views, 3);
-    assert.equal(phases.compare, 7);
-    assert.equal(phases.ready_actions, 11);
-    assert.equal(phases.ready_value_gate, 13);
-    assert.equal(phases.ready_update, 17);
-    assert.ok(Number.isFinite(timing[0]!.sync_on_loop_ms));
+    assert.ok(phases.open_pr_views >= 3);
+    assert.ok(phases.review_eligibility >= blockedMs * 0.9,
+      "the phase includes the synchronous eligibility ledger read");
+    assert.ok(phases.compare >= 7);
+    assert.ok(phases.ready_actions >= 11);
+    assert.ok(phases.ready_value_gate >= 13);
+    assert.ok(phases.ready_update >= 17);
+    assert.ok(blockedMs >= 75);
+    assert.ok(Number(timing[0]!.sync_on_loop_ms) >= blockedMs * 0.9,
+      "the row includes the synchronous eligibility ledger read before either batch starts");
     t.diagnostic(JSON.stringify(timing[0]));
     assert.deepEqual(f.updates, [991801]);
     assert.deepEqual(f.arms, [], "the refreshed snapshot cannot arm");
@@ -106,7 +123,8 @@ test("W1-T9918: a light pass ledgers each pre-review phase duration", async (t) 
 
 test("W1-T9918: a non-ready PR is review-eligible before the ready refresh settles", async (t) => {
   for (const held of ["main_tip", "compare", "actions", "value_gate", "admission"] as const) {
-    const f = fixture([pr(991811, true), pr(991812)]);
+    const armed = { ...pr(991813), autoMergeArmed: true, checksState: "pending" as const };
+    const f = fixture([pr(991811, true), pr(991812), armed]);
     const gate = deferred<void>();
     const entered = deferred<void>();
     if (held === "main_tip") {
@@ -138,7 +156,11 @@ test("W1-T9918: a non-ready PR is review-eligible before the ready refresh settl
       await turn();
       assert.equal(gate.settled, false);
       assert.ok(f.rows.some((r) => r.step === "sweep.review_eligible" && r.pr_number === 991812), held);
+      assert.ok(f.logs.some((r) => r.step === "sweep.fix_capacity"),
+        "the ordinary review batch enters while the ready read is pending");
       assert.deepEqual(f.arms, [], "a ready head cannot arm while its distance/refresh is pending");
+      assert.equal(f.rows.some((r) => r.step === "sweep.disposed" && r.pr_number === 991813), false,
+        "the armed ordinary head must not write a disposition before whole-snapshot refresh selection");
     } finally {
       gate.resolve(); await running; f.cleanup();
     }
