@@ -561,7 +561,7 @@ sweep_worktree() {
   esac
   if is_open "$wt"; then log "KEEP $wt: held open by a process"; return; fi
   if [ "$DOCKER_OK" != 1 ]; then log "KEEP $wt: Docker mount snapshot failed (unknown)"; return; fi
-  if is_docker_mount "$wt"; then log "KEEP $wt: Docker mount"; return; fi
+  if is_docker_mount "$wt"; then log "KEEP $wt: Docker mount ($DOCKER_PATH_REASON)"; return; fi
   if [ "$orphaned" = 1 ]; then
     log "KEEP $wt: Git metadata is unreadable or missing; cannot prove published work"
     return
@@ -654,8 +654,12 @@ fs_id() {
 
 DOCKER_OK=1
 DOCKER_MOUNTS=""
+container_path_identity() {
+  stat -Lc '%d:%i' -- "$1" 2>/dev/null || stat -Lf '%d:%i' -- "$1" 2>/dev/null
+}
 snapshot_docker() {
-  local ids id mounts
+  local ids id mounts mount identity
+  DOCKER_IDENTITIES="|"; DOCKER_PATH_REASON="Docker mount snapshot failed"
   if ! ids="$($DOCKER_CMD ps -q 2>/dev/null)"; then DOCKER_OK=0; return; fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
@@ -663,21 +667,45 @@ snapshot_docker() {
       DOCKER_OK=0; return
     fi
     DOCKER_MOUNTS="$(printf '%s\n%s' "$DOCKER_MOUNTS" "$mounts")"
+    while IFS= read -r mount; do
+      [ -n "$mount" ] || continue
+      if ! identity="$(container_path_identity "$mount")"; then
+        DOCKER_OK=0; DOCKER_PATH_REASON="Docker mount identity unreadable"; return
+      fi
+      case "$DOCKER_IDENTITIES" in *"|$identity|"*) ;; *) DOCKER_IDENTITIES="$DOCKER_IDENTITIES$identity|" ;; esac
+    done <<< "$mounts"
   done <<< "$ids"
 }
 keep_container_path() {
   local p="$1"
-  if [ "$DOCKER_OK" != 1 ]; then log "KEEP $p: Docker mount snapshot failed (fail closed)"; return 0; fi
-  if is_docker_mount "$p"; then log "KEEP $p: running container mount"; return 0; fi
+  if [ "$DOCKER_OK" != 1 ]; then log "KEEP $p: $DOCKER_PATH_REASON (fail closed)"; return 0; fi
+  if is_docker_mount "$p"; then log "KEEP $p: $DOCKER_PATH_REASON"; return 0; fi
   return 1
 }
 is_docker_mount() {
-  local p="$1" mount
+  local p="$1" mount cursor identity
+  [ "$DOCKER_OK" = 1 ] || return 0
+  DOCKER_PATH_REASON="running container mount"
   while IFS= read -r mount; do
     [ -n "$mount" ] || continue
     case "$mount" in "$p"|"$p"/*) return 0 ;; esac
     case "$p" in "$mount"|"${mount%/}"/*) return 0 ;; esac
   done <<< "$DOCKER_MOUNTS"
+  [ "${DOCKER_IDENTITIES:-|}" != "|" ] || return 1
+  case "$p" in /*) ;; *) DOCKER_PATH_REASON="Docker mount path is not absolute (fail closed)"; return 0 ;; esac
+  cursor="$p"
+  while :; do
+    if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+      if ! identity="$(container_path_identity "$cursor")"; then
+        DOCKER_PATH_REASON="Docker mount identity unreadable (fail closed)"; return 0
+      fi
+      case "$DOCKER_IDENTITIES" in
+        *"|$identity|"*) DOCKER_PATH_REASON="running container mount through filesystem identity"; return 0 ;;
+      esac
+    fi
+    [ "$cursor" = / ] && break
+    cursor="${cursor%/*}"; [ -n "$cursor" ] || cursor=/
+  done
   return 1
 }
 # A parent directly under a scratch root is met twice (as a unit, then as a parent): log it once.
@@ -981,7 +1009,7 @@ sweep_scratch_unit() {
   if seed_reason=$(rmd_dependency_seed_risk "$p"); then log "KEEP $p: $seed_reason"; return; fi
   if is_open "$p"; then log "KEEP $p: held open by a process"; return; fi
   if [ "$DOCKER_OK" != 1 ]; then log "KEEP $p: docker probe failed (unknown)"; return; fi
-  if is_docker_mount "$p"; then log "KEEP $p: running container mount"; return; fi
+  if is_docker_mount "$p"; then log "KEEP $p: $DOCKER_PATH_REASON"; return; fi
   if [ -d "$p" ]; then
     bare_repository_scan "$p"; status=$?
     case "$status" in
@@ -1417,7 +1445,7 @@ preserve_unit() {
   [ -n "$descend" ] || ! is_open "$p" || descend="held open by a process"
   if [ "$DOCKER_OK" != 1 ]; then preserve_hold "$p" "Docker mount snapshot failed (unknown)"; return; fi
   if docker_mount_inside "$p"; then descend="${descend:-holds the mount of a running container}"
-  elif is_docker_mount "$p"; then log "KEEP $p: Docker mount"; return; fi
+  elif is_docker_mount "$p"; then log "KEEP $p: Docker mount ($DOCKER_PATH_REASON)"; return; fi
   if [ -z "$descend" ]; then
     bare_repository_scan "$p"; status=$?
     case "$status" in
@@ -1564,7 +1592,7 @@ ruling_remove_plain() {
     *) preserve_hold "$c" "activity probe failed (unknown)"; return ;;
   esac
   if is_open "$c"; then log "KEEP $c: held open by a process"; return; fi
-  if [ "$DOCKER_OK" != 1 ] || is_docker_mount "$c"; then preserve_hold "$c" "Docker mount or snapshot failed"; return; fi
+  if [ "$DOCKER_OK" != 1 ] || is_docker_mount "$c"; then preserve_hold "$c" "Docker mount or snapshot failed ($DOCKER_PATH_REASON)"; return; fi
   bytes="$(du_bytes "$c")"
   log "REMOVE $c: idle scratch retired under the operator ruling of 2026-10-23"
   act rm -rf -- "$c" && tally "ruling $n" "$bytes"

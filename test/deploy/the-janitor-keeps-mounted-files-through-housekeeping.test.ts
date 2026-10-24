@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { test } from "node:test";
 import { age, fixture, run, type Fixture } from "#test/helpers/host-cleanup-fixture.js";
@@ -105,4 +105,26 @@ test("an unavailable Docker snapshot keeps temp units, tsx files and nested cove
   assert.equal(r.status, 0, r.stdout + r.stderr);
   for (const unit of ["rmd-idle", "tsx-1000", "rmd-c-123456789abc"]) assert.equal(readFileSync(join(fx.scratch, unit, "payload"), "utf8"), "fixture\n");
   assert.match(r.stdout, /Docker mount snapshot failed \(fail closed\)/);
+});
+
+test("filesystem aliases of container mounts remain protected while unmounted peers are reclaimed", () => {
+  const fx = fixture();
+  const physical = join(fx.root, "physical-mounted"), logical = join(fx.root, "logical-mounted"), peer = join(fx.root, "alias-peer"), locks = join(fx.root, "alias-locks");
+  mkdirSync(physical); mkdirSync(locks); symlinkSync(physical, logical, "dir");
+  const body = JSON.stringify({ fixture: "x".repeat(6 * 1024 * 1024) }) + "\n";
+  for (const root of [physical, peer]) {
+    for (const unit of ["rmd-idle", "tsx-1000", "rmd-c-abcdef012345"]) { file(join(root, unit, "payload")); age(join(root, unit)); }
+    file(join(root, "dumps", "idle.json"), body);
+  }
+  mount(fx, logical);
+  const r = run(fx, { ...scope(fx), RMD_CLEANUP_TMP_ROOTS: `${physical}:${peer}`, RMD_CLEANUP_TMP_GLOBS: "rmd-idle", RMD_CLEANUP_NESTED_COVERAGE_ROOTS: `${physical}:${peer}`, RMD_CLEANUP_COVERAGE_LOCK_DIR: locks, RMD_CLEANUP_DUMP_ROOTS: `${physical}:${peer}` });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  for (const unit of ["rmd-idle", "tsx-1000", "rmd-c-abcdef012345"]) {
+    assert.equal(readFileSync(join(physical, unit, "payload"), "utf8"), "fixture\n");
+    assert.equal(existsSync(join(peer, unit, "payload")), false, `unmounted ${unit} control`);
+  }
+  assert.equal(readFileSync(join(physical, "dumps", "idle.json"), "utf8"), body);
+  assert.equal(existsSync(join(physical, "dumps", "idle.json.gz")), false);
+  assert.equal(existsSync(join(peer, "dumps", "idle.json.gz")), true, "unmounted compression control");
+  assert.match(r.stdout, /running container mount through filesystem identity/);
 });
