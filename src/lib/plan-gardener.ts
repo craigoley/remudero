@@ -174,7 +174,8 @@ export function retirementCandidates(inv: PlanInventory, repoRoot: string): Plan
   for (const t of inv.open) {
     if (t.status !== "queued" || t.retirement) continue;
     const gone = t.depends_on.filter((d) => abandoned.has(d));
-    if (gone.length > 0) {
+    // An abandoned subject may still need a research finding; dependency state alone cannot retire recon.
+    if (gone.length > 0 && t.type !== "recon") {
       out.push({ class: "retire", target: t.id, retirement: "retired", reason: `It depends on ${gone.join(", ")}, which will never be built.` });
       continue;
     }
