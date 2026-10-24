@@ -10,6 +10,7 @@ import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
 import { CENSUS_POPULATION, isRuleSuitePath, type CensusPopulationMember } from "./rule-suites.js";
 import { resolveTestPath } from "./test-path-resolver.js";
+import { maskLiterals, stripComments } from "./test-impact-map.js";
 import { ciControlPlaneParity } from "./ci-control-plane.js";
 import { clockFromMillisFn, systemClock } from "./clock.js";
 import { resolveHostPole, type HostPole } from "./host-parity.js";
@@ -2524,8 +2525,8 @@ const CENSUS_FAST_GATE_STEPS: { job: string; script: string; reason: string; bou
  *  at 28 and 84 suites sharing one member, hazard (j)'s instance being in the second set only. */
 export type CensusEnumerationIdiom = "ls-files" | "dir-walk";
 
-/** One census-shaped candidate and its idiom. `ls-files` takes PRECEDENCE where both tokens appear,
- *  so {@link censusPopulationDrift}'s gated population is byte-for-byte what it was before. */
+/** One census-shaped candidate and its idiom. An executable `ls-files` walk takes precedence
+ *  when a suite also executes a directory walk. Mentions in literals and comments carry no idiom. */
 export interface CensusCandidate {
   readonly testFile: string;
   readonly idiom: CensusEnumerationIdiom;
@@ -2566,18 +2567,120 @@ function censusWalksFromText(text: string): string[] {
   return walks;
 }
 
-export function censusCandidateWalks(text: string): string[] {
-  const walks = new Set<string>();
-  const idiom = /ls-files|readdirSync|globSync/g;
-  for (let match = idiom.exec(text); match; match = idiom.exec(text)) {
-    const lineStart = text.lastIndexOf("\n", match.index) + 1;
-    const lineEnd = text.indexOf("\n", match.index);
-    const windowEnd = lineEnd === -1 ? text.length : Math.min(text.length, lineEnd + 1);
-    const window = text.slice(lineStart, windowEnd);
-    for (const walk of censusWalksFromText(window)) walks.add(walk);
+/** Split a call using masked code: parentheses or commas in fixture strings cannot end it. */
+function censusCallArgs(text: string, code: string, start: number, close = ")"): string[] {
+  const args: string[] = [];
+  let depth = 0;
+  let from = start;
+  for (let i = start; i < code.length; i += 1) {
+    const c = code[i];
+    if (c === close && depth === 0) {
+      args.push(text.slice(from, i).trim());
+      break;
+    }
+    if (c === "," && depth === 0) {
+      args.push(text.slice(from, i).trim());
+      from = i + 1;
+    } else if (c === "(" || c === "[" || c === "{") depth += 1;
+    else if (c === ")" || c === "]" || c === "}") depth -= 1;
   }
-  if (/(?:src\/|["'`]src["'`])/.test(text) && ![...walks].some((walk) => walk.startsWith("src/"))) walks.add("src/");
-  return [...walks].sort();
+  return args;
+}
+
+/** Resolve local path/argv constants without allowing a literal's contents to become code. */
+function censusExpression(expr: string, text: string, code: string, position: number, seen = new Set<string>()): string {
+  const scopeAt = (end: number): number[] => {
+    const stack: number[] = [];
+    for (let i = 0; i < end; i += 1) {
+      if (code[i] === "{") stack.push(i);
+      else if (code[i] === "}") stack.pop();
+    }
+    return stack;
+  };
+  const scope = scopeAt(position);
+  const masked = maskLiterals(expr);
+  return expr.replace(/\b[A-Za-z_$][\w$]*\b/g, (name, offset: number) => {
+    if (masked.slice(offset, offset + name.length) !== name || seen.has(name)) return name;
+    const declaration = [...code.matchAll(new RegExp(`\\b(?:const|let|var)\\s+${name}\\s*(?::[^=;]+)?=\\s*`, "g"))]
+      .findLast((match) => scopeAt(match.index).every((open, index) => scope[index] === open));
+    if (!declaration) return name;
+    const start = declaration.index + declaration[0].length;
+    let end = start;
+    let depth = 0;
+    for (; end < code.length; end += 1) {
+      const c = code[end];
+      if (depth === 0 && (c === ";" || c === "\n")) break;
+      if (c === "(" || c === "[" || c === "{") depth += 1;
+      else if (c === ")" || c === "]" || c === "}") depth -= 1;
+    }
+    seen.add(name);
+    return censusExpression(text.slice(start, end), text, code, declaration.index, seen);
+  });
+}
+
+function censusExecutableWalks(source: string): { idiom: CensusEnumerationIdiom; walks: string[] }[] {
+  const text = stripComments(source);
+  const code = maskLiterals(text);
+  const out: { idiom: CensusEnumerationIdiom; walks: string[] }[] = [];
+  const calls = /\b(readdirSync|globSync|execFileSync|execFile|spawnSync|spawn|execSync|exec|git)\s*\(/g;
+  for (const match of code.matchAll(calls)) {
+    const args = censusCallArgs(text, code, match.index + match[0].length)
+      .map((arg) => censusExpression(arg, text, code, match.index));
+    const dirWalk = match[1] === "readdirSync" || match[1] === "globSync";
+    const shell = match[1] === "execSync" || match[1] === "exec";
+    const argv = (match[1] === "git" ? args[0] : args[1]) ?? "";
+    const elements = censusCallArgs(argv, maskLiterals(argv), 1, "]");
+    const value = (element: string) => /^(['"`])([^'"`]*)\1$/.exec(element)?.[2];
+    let command = 0;
+    let gitCwd: string | undefined;
+    while (command < elements.length && value(elements[command])?.startsWith("-")) {
+      const flag = value(elements[command++]);
+      if (flag === "-C" || flag === "-c" || flag === "--git-dir" || flag === "--work-tree") {
+        if (flag === "-C" || flag === "--work-tree") gitCwd = elements[command];
+        command += 1;
+      }
+    }
+    if (!dirWalk && !(shell ? /^(['"`])git\s+ls-files\b/.test(args[0] ?? "")
+      : (match[1] === "git" || /^(['"`])git\1$/.test(args[0] ?? "")) && value(elements[command] ?? "") === "ls-files")) continue;
+    const options = args[dirWalk || shell || match[1] === "git" ? 1 : 2] ?? "";
+    const cwd = /\bcwd\s*:\s*([^,}]+)/.exec(options)?.[1];
+    const root = dirWalk ? `${args[0]} ${cwd ?? ""}` : cwd ?? gitCwd ?? "";
+    // A known temporary root is evidence against repository scope, even if its child is "src".
+    if (/\b(?:mkdtempSync|mkdtemp|tmpdir)\s*\(|\b(?:fixture|scratch|sandbox|ownTmp)\w*/i.test(maskLiterals(root)) ||
+        /['"`]\/(?:tmp|var\/tmp)\//.test(root)) continue;
+    const pathspecs = elements.slice(command + 1).filter((element) => {
+      const literal = value(element);
+      return literal === undefined || !literal.startsWith("-");
+    });
+    const target = shell
+      ? (args[0] ?? "").slice(1, -1).split(/\s+/).map((word) => JSON.stringify(word)).join(",")
+      : dirWalk ? args[0] ?? "" : pathspecs.join(",");
+    const walks = censusWalksFromText(target);
+    if (dirWalk && walks.length === 0 && /^[A-Za-z_$][\w$]*$/.test(args[0] ?? "")) {
+      const helper = new RegExp(`\\bfunction\\s+(\\w+)\\s*\\(\\s*${args[0]}\\b`).exec(code);
+      if (helper) {
+        for (const call of code.matchAll(new RegExp(`\\b${helper[1]}\\s*\\(`, "g"))) {
+          if (call.index === helper.index + helper[0].indexOf(helper[1])) continue;
+          const arg = censusCallArgs(text, code, call.index + call[0].length)[0] ?? "";
+          const resolved = censusExpression(arg, text, code, call.index);
+          if (!/\b(?:mkdtempSync|mkdtemp|tmpdir)\s*\(/.test(maskLiterals(resolved))) {
+            walks.push(...censusWalksFromText(resolved));
+          }
+        }
+      }
+    }
+    if (walks.length === 0 && (dirWalk ? /\bREPO_ROOT\b|\brepoRoot\b|\bprocess\.cwd\s*\(/.test(root)
+      : shell ? /^(['"`])git\s+ls-files\1$/.test(args[0] ?? "") : pathspecs.length === 0)) {
+      // An unfiltered tracked-file listing walks all corpora; an unrelated import adds none.
+      walks.push("src/", "test/", "scripts/", "plan/tasks.d/");
+    }
+    if (walks.length > 0) out.push({ idiom: dirWalk ? "dir-walk" : "ls-files", walks });
+  }
+  return out;
+}
+
+export function censusCandidateWalks(text: string): string[] {
+  return [...new Set(censusExecutableWalks(text).flatMap((call) => call.walks))].sort();
 }
 
 /**
@@ -2598,9 +2701,8 @@ export const CENSUS_DIR_WALK_STOPGAP =
 /** The enumeration idiom a census-shaped suite carries: the probe below greps it, {@link censusWalksOf} re-tests it. */
 const CENSUS_ENUMERATION_IDIOM = "ls-files|readdirSync|globSync";
 
-/** THE ONE PROBE, exported so a test asserts the real argv rather than restating it. An
- *  ALTERNATION kept to a SINGLE `git grep` spawn: the idiom is decided from each hit's own text,
- *  which the `src/` filter had to read anyway — one recognizer with two idioms. */
+/** One coarse probe, exported so a test asserts the real argv. Each hit is then checked for
+ *  executable enumeration and its scope; the probe's raw token match never admits a candidate. */
 export const CENSUS_DISCOVERY_PROBE_ARGV: readonly string[] = [
   "grep",
   // W1-T3021 — `--untracked`, or this probe is blind LOCALLY to the one file a PR is adding.
@@ -2628,7 +2730,7 @@ export const CENSUS_DISCOVERY_PROBE_ARGV: readonly string[] = [
 
 /** THE RECOGNIZER (W1-T2523's own, extracted so the drift guard reuses it rather than growing a
  *  second copy — ONE CENSUS PREDICATE, NEVER TWO; widened by W1-T2809). Every `test/*.test.ts`
- *  mentioning `ls-files`, `readdirSync` or `globSync` that also names a walked corpus is a candidate;
+ *  executing a tracked-file listing or directory/glob walk over a repository corpus is a candidate;
  *  an unreadable hit is KEPT. */
 export function discoverCensusCandidates(
   repoRoot: string,
@@ -2647,13 +2749,9 @@ export function discoverCensusCandidates(
       out.push({ testFile, idiom: "ls-files", walks: ["src/"] });
       continue;
     }
-    const idiom: CensusEnumerationIdiom | undefined = /ls-files/.test(text)
-      ? "ls-files"
-      : /readdirSync|globSync/.test(text)
-        ? "dir-walk"
-        : undefined;
-    if (!idiom) continue;
-    const walks = censusCandidateWalks(text);
+    const calls = censusExecutableWalks(text);
+    const idiom: CensusEnumerationIdiom = calls.some((call) => call.idiom === "ls-files") ? "ls-files" : "dir-walk";
+    const walks = [...new Set(calls.flatMap((call) => call.walks))].sort();
     if (walks.length === 0) continue;
     out.push({ testFile, idiom, walks });
   }
