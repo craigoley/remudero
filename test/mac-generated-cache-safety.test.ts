@@ -279,7 +279,21 @@ test("artifact cache cleanup restores staging when activity appears and reports 
   const fx = fixture();
   try {
     const p = fx.workspace("candidate"), cache = fx.cache(p);
-    const held = fx.run(String.raw`original=ns['main'].__globals__['inactive'];calls=0
+    const liveness = String.raw`g=ns['main'].__globals__;real_command=g['command']
+package=pathlib.Path(os.environ['CACHE_HOME'])/'.codex/work-artifacts/session/candidate/package.json'
+def private_process_inventory(argv):
+ if argv==['ps','-axww','-o','pid=,command=']:
+  return ns['subprocess'].CompletedProcess(argv,0,str(os.getpid())+' private-cache-fixture\n','')
+ if argv==['lsof','-nP','-a','-d','cwd','-Fn']:
+  return ns['subprocess'].CompletedProcess(argv,0,'p'+str(os.getpid())+'\nn'+str(pathlib.Path.cwd())+'\n','')
+ if argv==['lsof','-nP','-p',str(os.getpid()),'-Fn']:
+  return ns['subprocess'].CompletedProcess(argv,0,'p'+str(os.getpid())+'\nn'+str(package)+'\n','')
+ if argv==['lsof','-nP','+D',str(package.parent)]:
+  return ns['subprocess'].CompletedProcess(argv,1,'','')
+ return real_command(argv)
+g['command']=private_process_inventory
+`;
+    const held = fx.run(liveness + String.raw`original=ns['main'].__globals__['inactive'];calls=0
 def activity(workspace):
  global calls
  calls+=1
@@ -287,7 +301,7 @@ def activity(workspace):
  original(workspace)
 ns['main'].__globals__['inactive']=activity`);
     assert.equal(held.status, 0, held.stderr + held.stdout); assert.ok(existsSync(cache)); assert.match(held.stdout, /active-after-staging/);
-    const changed = fx.run(String.raw`original=ns['shutil'].rmtree
+    const changed = fx.run(liveness + String.raw`original=ns['shutil'].rmtree
 def deletion(path):
  original(path)
  p=pathlib.Path(path).parents[2]/'after-removal.txt'
