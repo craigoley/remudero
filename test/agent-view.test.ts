@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
-import { retainFixture } from "#test/setup/retained-fixtures.js";
+import { fixtureRetentionReason, retainFixture } from "#test/setup/retained-fixtures.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // W1-T5051 (arch Phase 4 P4-T12): the `agent` view family. Each part must equal its GET /v1/operator-agent/*
 // route over the same ledger (archive included), `proposals` must equal the nav badge's engine over the same
@@ -9,7 +9,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // committed position after a restart.
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { AGENT_CLOCK_MS, AGENT_VIEW_PARTS, agentPartBodies, agentViewKey, createAgentView, type AgentProposalsBody, type AgentViewData, type AgentViewPart } from "../src/lib/agent-view.js";
@@ -777,16 +777,45 @@ test("agent fixture release and barrier failures preserve real evidence after th
 
 
 test("agent corpus enrolls its owned root before asynchronous resources acquire it", async (t) => {
-  const fixture = ownedDirectoryFixture(t);
+  const cleanup: Array<() => void> = [];
+  const acquisitionFailure = new Error("corpus acquisition failed after opening SQLite");
+  const barrierFailure = new Error("corpus diagnostic barrier failed");
+  const fixture = ownedDirectoryFixture({ after: (fn) => void cleanup.push(fn) }, async () => {
+    await flushReadModelTransactions();
+    throw barrierFailure;
+  });
   let captured: string | undefined, enrolledBeforeFirstHook: boolean | undefined;
-  const result = await corpus({
+  let db: ReadModelDb | undefined, closed = false;
+  t.after(async () => {
+    if (db && !closed) db.close();
+    await flushReadModelTransactions();
+    if (captured) rmSync(captured, { recursive: true, force: true });
+  });
+  await assert.rejects(corpus({
     ownRoot: (root) => { captured = root; fixture.ownRoot(root); },
     after: (finish) => {
       enrolledBeforeFirstHook ??= captured !== undefined;
       fixture.after(finish);
     },
-  });
+  }, async (hooks) => {
+    assert.ok(captured, "the actual corpus enrolls its root before starting acquisition");
+    const stateDir = join(captured, "state");
+    assert.equal(existsSync(stateDir), true, "acquisition uses the corpus-created state directory");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    db = openProjectorReadModel(stateDir, "core", fixedClock(NOW));
+    writeFileSync(join(captured, "evidence"), "partially acquired corpus");
+    hooks.after(() => { db!.close(); closed = true; });
+    throw acquisitionFailure;
+  }), (error) => error === acquisitionFailure);
   assert.equal(enrolledBeforeFirstHook, true);
-  assert.equal(captured, dirname(result.stateDir));
-  assert.equal(existsSync(result.ledgerPath), true, "the enrolled root is the real populated corpus");
+  assert.ok(captured);
+  assert.ok(db);
+  assert.equal(closed, false, "the asynchronous acquisition actually opened a resource");
+  assert.equal(cleanup.length, 1);
+  await assert.rejects(async () => cleanup[0]!(), (error) => error === barrierFailure);
+  assert.equal(closed, true, "partial acquisition releases its real resource before the barrier");
+  assert.throws(() => db!.prepare("SELECT 1"));
+  assert.equal(fixtureRetentionReason(captured), "agent fixture retirement failed");
+  assert.equal(readFileSync(join(captured, "evidence"), "utf8"), "partially acquired corpus");
+  assert.equal(readFileSync(db.path).subarray(0, 16).toString(), "SQLite format 3\0");
 });
