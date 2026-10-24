@@ -374,7 +374,7 @@ test("the sweep adapter feeds CI tails and writes validated metadata through RES
 test("a fleet filed plan task reaches only its exact plan repair grant", async () => {
   const filed = { ...pr, taskId: "W1-T9772", headRefName: "run-W1-T9772-1792847208006", mergeState: "clean",
     taskExistsOnMain: true, taskDeclaredFiles: [PATH], changedFiles: [PATH] } as OpenPrView;
-  for (const scenario of ["valid", "foreign-author", "unknown-task", "unknown-scope", "outside-grant", "product-grant", "wrong-branch", "unknown-merge", "dry-run", "admission"] as const) {
+  for (const scenario of ["valid", "foreign-author", "unknown-task", "unknown-scope", "outside-grant", "product-grant", "wrong-branch", "unknown-merge", "human-hold", "dry-run", "admission"] as const) {
     const ledger: Record<string, unknown>[] = [];
     let rounds = 0;
     const candidate = { ...filed,
@@ -388,7 +388,8 @@ test("a fleet filed plan task reaches only its exact plan repair grant", async (
     const deps = { runId: "filed-plan-route", ledgerPath: "/dev/null/ledger", readLedger: () => ledger,
       appendLine: (_: string, row: Record<string, unknown>) => ledger.push(row),
       arm() {}, close() {}, escalate() {}, dispatchFix() { assert.fail("never enter the code lane"); },
-      readPlanRepairFacts: () => ({ authorLogin: scenario === "foreign-author" ? "cao825" : "remudero-fleet[bot]" }),
+      readPlanRepairFacts: () => ({ authorLogin: scenario === "foreign-author" ? "cao825" : "remudero-fleet[bot]",
+        filedTaskRepairReady: scenario !== "human-hold" }),
       repairPlanPr() {}, dryRun: scenario === "dry-run",
       claimFixAdmission: () => scenario === "admission" ? { admitted: false, reason: "capacity held" } : { admitted: true },
       dispatchPlanGateRound: async () => { rounds++; return { outcome: "pushed", headSha: NEXT }; },
@@ -401,7 +402,7 @@ test("a fleet filed plan task reaches only its exact plan repair grant", async (
 test("the real plan repair effect rechecks filed scope and head contract before a worker", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-filed-plan-effect-"));
   const task = { id: "W1-T9772", title: "retire the obsolete target", files: [PATH], risk: "medium" as const,
-    acceptance: [], design: "preserve the reason", budget_usd: 10 };
+    acceptance: [], design: "preserve the reason", budget_usd: 10, verify: "auto", status: "queued" };
   const filed = { ...pr, taskId: task.id, headRefName: "run-W1-T9772-1792847208006", mergeState: "clean",
     taskExistsOnMain: true, taskDeclaredFiles: [PATH], changedFiles: [PATH] } as OpenPrView;
   let calls = 0;
@@ -439,6 +440,9 @@ test("the real plan repair effect rechecks filed scope and head contract before 
     assert.match((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).reason!, /no head-contract resolver/);
     deps.resolveTaskContractAtHeadImpl = async () => ({ ...contract, taskDeclaredFiles: ["plan/tasks.d/other.yaml"] });
     assert.match((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).reason!, /contract differs/);
+    task.verify = "human";
+    deps.resolveTaskContractAtHeadImpl = async () => contract;
+    assert.equal((await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(filed))).outcome, "refused");
     assert.equal(calls, 1, "refusals never reach a worker");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -3371,7 +3371,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         const paths = await fetchPrDiffFilesViaGh(pr.prUrl);
         const filed = pr.taskId === undefined ? undefined : plan.tasks.find(task => task.id === pr.taskId);
-        const filedCandidate = filedTaskPlanRepairCandidate({ ...pr, headRefName: live.head.ref,
+        const filedCandidate = filedPlanTaskReady(filed) && live.head.ref === pr.headRefName &&
+          filedTaskPlanRepairCandidate({ ...pr, headRefName: live.head.ref,
           changedFiles: paths, taskExistsOnMain: filed !== undefined, taskDeclaredFiles: filed?.files });
         if (!isMachineLanePlanHead(live.head.ref) && !filedCandidate) {
           return { outcome: "refused", reason: "the filing head or author changed" };
@@ -4878,6 +4879,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         user?: { login?: string }; title?: string; head?: { sha?: string; ref?: string };
       };
       const facts: PlanRepairFacts = { authorLogin: row?.user?.login, title: row?.title };
+      if (filedTaskPlanRepairCandidate(pr) && row?.head?.sha === pr.headSha && row.head.ref === pr.headRefName) {
+        facts.filedTaskRepairReady = filedPlanTaskReady(plan.tasks.find(task => task.id === pr.taskId));
+      }
       if (!gardenRecordRefusalCandidate(pr) || row?.head?.sha !== pr.headSha || row.head.ref !== pr.headRefName) return facts;
       const files = ghJsonForBuild(["api", `${pulls}/files?per_page=2`]) as { filename: string; status: string }[];
       if (!Array.isArray(files) || files.length !== 1 || files[0]?.status !== "added" ||
@@ -9457,6 +9461,10 @@ export function isMachineLanePlanHead(head: string | undefined): boolean {
   return head !== undefined && MACHINE_LANE_HEAD_RE.test(head);
 }
 
+function filedPlanTaskReady(task: Task | undefined): boolean {
+  return task?.verify === "auto" && task.status === "queued" && task.dispatch_hold !== true && task.retirement === undefined;
+}
+
 /** A filed plan-only task keeps its existing exact grant when using the plan repair effect. */
 export function filedTaskPlanRepairCandidate(pr: OpenPrView): boolean {
   const files = pr.taskDeclaredFiles;
@@ -9480,6 +9488,7 @@ export function isFleetAppAuthor(login: string | undefined): boolean {
 }
 
 export interface PlanRepairFacts {
+  filedTaskRepairReady?: boolean;
   authorLogin?: string;
   title?: string;
   gardenRecordRefusal?: string;
@@ -18825,7 +18834,7 @@ export async function runSweep(
       const facts = planRoundFacts.get(pr.prNumber);
       let planRoundExhausted = false;
       if (!repair.repaired && deps.dispatchPlanGateRound && isFleetAppAuthor(facts?.authorLogin) &&
-          (isMachineLanePlanHead(pr.headRefName) || filedTaskPlanRepairCandidate(pr))) {
+          (isMachineLanePlanHead(pr.headRefName) || facts?.filedTaskRepairReady === true && filedTaskPlanRepairCandidate(pr))) {
         const row = { pr_number: pr.prNumber, head_sha: pr.headSha, lane_head: pr.headRefName,
           checks: (pr.ciFailures ?? []).map((f) => f.name), run_id: deps.runId, task_id: pr.taskId ?? "SWEEP" };
         repair.repaired = true;
