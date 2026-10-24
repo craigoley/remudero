@@ -71,7 +71,7 @@ import { refreshReviewPublisherToken as refreshInstallationToken } from "../../l
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
 import { dispatchClaimRef, findClaimMintRow, releaseReplacedContainerClaims, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
 import { buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
-import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence } from "../../lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
 import { terminalUnionScans } from "../../lib/sweep.js";
@@ -1798,6 +1798,7 @@ export async function daemonCommand(
         // W1-T7734: the idle sleep runs the light pass while review demand waits, at a cadence the sweep
         // derives from observed review duration and head churn. Reads the sweep's in-process memo only.
         readIdleReviewDemand: () => readIdleLightCadence(systemClock.now()),
+        readReviewMedianMs: readObservedReviewMedianMs,
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
         // ended BETWEEN polls (not only at the last boot) is still found within one cycle.

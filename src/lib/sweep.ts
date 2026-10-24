@@ -15631,6 +15631,13 @@ export function detachedSweepActionCount(): number {
  *  review started by a light pass the exit never awaits was killed mid-judgement (PR 6993, 2026-09-24). */
 interface ReviewRegistration { taskId?: string; prNumber?: number; admittedAtMs: number; kind?: string }
 const inFlightReviewRuns = new Map<Promise<void>, ReviewRegistration>();
+const reviewCancellation = new AsyncLocalStorage<AbortSignal>();
+const inFlightReviewStops = new Map<Promise<void>, AbortController>();
+
+/** The cancellation owned by the admitting review lane, carried through reviewCommand's awaits. */
+export function currentReviewSignal(): AbortSignal | undefined {
+  return reviewCancellation.getStore();
+}
 
 /** W1-T10057: a read-only view of the existing wait registries, not another owner of work.
  * `settled` is an internal identity/settlement handle; ledger writers must omit it. */
@@ -15660,13 +15667,19 @@ export function restartDrainInventory(): RestartDrainInventoryEntry[] {
 }
 
 /** Hand one review attempt to {@link inFlightReviewRuns}; returns `work` unchanged for the caller to await. */
-export function trackInFlightReview(work: Promise<void>, review?: Omit<ReviewRegistration, "admittedAtMs"> & { admittedAtMs?: number }): Promise<void> {
+export function trackInFlightReview(start: Promise<void> | (() => Promise<void>), review?: Omit<ReviewRegistration, "admittedAtMs"> & { admittedAtMs?: number }): Promise<void> {
+  const stop = new AbortController();
+  const work = typeof start === "function" ? reviewCancellation.run(stop.signal, async () => start()) : start;
   const held: Promise<void> = work.then(
     () => undefined,
     () => undefined,
   );
   inFlightReviewRuns.set(held, { ...review, admittedAtMs: review?.admittedAtMs ?? systemClock.now() });
-  void held.finally(() => inFlightReviewRuns.delete(held));
+  inFlightReviewStops.set(held, stop);
+  void held.finally(() => {
+    inFlightReviewRuns.delete(held);
+    inFlightReviewStops.delete(held);
+  });
   return work;
 }
 
@@ -15695,7 +15708,9 @@ export async function drainInFlightReviews(opts: { boundMs: number; onWait?: (it
   } finally {
     clearTimeout(timer);
   }
-  return running.filter((review) => !settled.has(review)).length;
+  const abandoned = running.filter((review) => !settled.has(review));
+  for (const review of abandoned) inFlightReviewStops.get(review)?.abort();
+  return abandoned.length;
 }
 
 /** W1-T2981 — is an action of this kind already detached? A second concurrent retro would race the
@@ -16332,6 +16347,12 @@ export function noteReviewDuration(ms: number): void {
   if (!Number.isFinite(ms) || ms < 0) return;
   idleMemo.reviewMs.push(ms);
   if (idleMemo.reviewMs.length > IDLE_MEMO_WINDOW) idleMemo.reviewMs.shift();
+}
+
+/** Completed review timing remains available when ledger rotation or zero current demand hides it. */
+export function readObservedReviewMedianMs(): number | undefined {
+  return deriveIdleLightCadenceMs({ reviewDurationsMs: idleMemo.reviewMs.filter(ms => ms > 0),
+    headPushes: 0, openPrs: 0, windowMs: 0 }).medianReviewMs;
 }
 
 /** W1-T8167: the steps that end a `sweep.review_admitted` review's life. */
@@ -21481,7 +21502,7 @@ export async function runSweep(
           passReviewsInFlight++;
           fullReviews.started++;
         }
-        const tracked = trackInFlightReview(runReview(job), {
+        const tracked = trackInFlightReview(() => runReview(job), {
           taskId: job.pr.taskId, prNumber: job.pr.prNumber, kind: job.mode.kind,
           admittedAtMs: deps.now?.() ?? systemClock.now(),
         });
