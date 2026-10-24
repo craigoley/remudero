@@ -1694,8 +1694,14 @@ export function resolveReleases(deps: ReleaseReaders, plan?: Plan): ReleaseResol
   let durable: ReleaseEvidence = new Map();
   let ledgerUnreadable: string | undefined;
   let durableUnreadable: string | undefined;
-  try { lines = deps.readLedgerLines?.() ?? []; } catch (e) { ledgerUnreadable = String((e as Error)?.message ?? e); }
-  try { durable = deps.readDurableReleases?.() ?? new Map(); } catch (e) { durableUnreadable = String((e as Error)?.message ?? e); }
+  try { lines = deps.readLedgerLines?.() ?? []; } catch (e) {
+    // Carry ledgerUnreadable to the caller; an unreadable store is distinct from an empty history.
+    ledgerUnreadable = String((e as Error)?.message ?? e);
+  }
+  try { durable = deps.readDurableReleases?.() ?? new Map(); } catch (e) {
+    // Carry durableUnreadable to the caller and refuse machine receipts that cannot exclude a human hold.
+    durableUnreadable = String((e as Error)?.message ?? e);
+  }
   const { authors, reapproval } = qualifyReleaseEvidence(lines, durable, releaseContractPins(plan?.tasks ?? []));
   const ids = new Set<string>();
   const setAside = new Set<string>(reapproval);

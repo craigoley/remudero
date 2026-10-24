@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
-import type { Task } from "./plan.js";
+
+type ReleaseContract = { id: string; sourcePath?: unknown; attempts?: unknown;
+  risk_ruling?: { operator_release_pin?: string }; verify?: unknown };
 
 export type ReleaseEvidence = ReadonlyMap<string, unknown> | ReadonlySet<string>;
 export type ReleaseAuthor = "operator" | "machine";
 
 /** Pins the loaded contract, excluding only runtime bookkeeping and the ruling it authorizes.
  *  The human-to-auto verification transition must not invalidate its own approval. */
-export function operatorReleasePin(task: Task): string {
+export function operatorReleasePin(task: ReleaseContract): string {
   const { sourcePath: _source, attempts: _attempts, risk_ruling: _ruling, ...contract } = task;
   const stable = (value: unknown): string => {
     if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
@@ -20,7 +22,7 @@ export function operatorReleasePin(task: Task): string {
   return createHash("sha256").update(stable({ ...contract, verify: "auto" })).digest("hex");
 }
 
-export function releaseContractPins(tasks: readonly Task[]): (id: string) => string | undefined {
+export function releaseContractPins(tasks: readonly ReleaseContract[]): (id: string) => string | undefined {
   const byId = new Map(tasks.map(task => [task.id, task]));
   const pins = new Map<string, string>();
   return id => {
@@ -47,7 +49,10 @@ export function qualifyReleaseEvidence(
   for (const line of lines) {
     if (!line.includes("ratify.approved")) continue;
     let row: Record<string, unknown>;
-    try { row = JSON.parse(line); } catch { continue; }
+    try { row = JSON.parse(line); } catch {
+      // An unparseable row identifies and releases no task; other receipts still require their exact contract pin.
+      continue;
+    }
     if (row === null || typeof row !== "object" || row.step !== "ratify.approved" || typeof row.task_id !== "string" || !row.task_id) continue;
     observe(row.task_id, row.release_pin, row.author_class === "machine" ? "machine" : "operator");
   }
@@ -65,7 +70,7 @@ export function qualifyReleaseEvidence(
 }
 
 /** A newly pinned operator ruling must keep the same approval contract after landing. */
-export function operatorReleaseContractChanged(task: Task): boolean {
+export function operatorReleaseContractChanged(task: ReleaseContract): boolean {
   const pin = task.risk_ruling?.operator_release_pin;
   return pin !== undefined && pin !== operatorReleasePin(task);
 }
