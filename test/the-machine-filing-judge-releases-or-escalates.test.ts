@@ -515,12 +515,14 @@ test("earned autonomy lowers the bar for a family that helps and raises it for o
   });
   try {
     const plan = readPlan(root);
-    const merged = (id: string) => plan.byId.get(id)?.status === "merged";
+    const mergedIds = new Set(["W1-T9014", "W1-T9015"]);
+    const merged = (id: string) => mergedIds.has(id);
     assert.equal(machineFamily(plan.byId.get("W1-T9010")!), "helps");
     assert.ok(familyTrackRecord(plan, "helps", merged).mean > 0.5);
     assert.ok(familyTrackRecord(plan, "fails", merged).mean < 0.5);
     const seen: RiskJudgeInput[] = [];
-    const report = await runMachineFilingJudge(ports(root, async (input) => (seen.push(input), verdict("low", 0.75))).p);
+    const report = await runMachineFilingJudge(ports(root,
+      async (input) => (seen.push(input), verdict("low", 0.75)), { isMerged: merged }).p);
     assert.deepEqual(report.proceeded, ["W1-T9010"], "the same verdict clears the family that has helped");
     assert.deepEqual(report.escalated, ["W1-T9011"], "and escalates the family that has failed");
     assert.match(String(seen[0]!.planContext.family_track_record), /2 merged/);

@@ -1,0 +1,29 @@
+id: incident-abfe0cab3b51ea6f
+ts: 2026-10-24T17:59:59.111Z
+raw: >-
+  Incident abfe0cab3b51: intervention
+  base-red:main-health:required-checks-red-coverage-ratchet-ref
+
+  First seen: 2026-10-24T17:53:23.307Z
+
+  Last seen: 2026-10-24T17:59:56.152Z
+
+  Count: 7, burn: 7.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#11939@06875b3fe actor=cao825 cause=base-red:main-health:required-checks-red-coverage-ratchet-ref — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#abfe0cab3b51ea6f1602be01d0f038eb627f2e4aa1e49e74abad632d5ed88873
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -1,0 +1,71 @@
+- repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: span
+  origin: "operator request 2026-10-24: fleet cockpit code health and daily progress; approved researched
+    eight-slice delivery"
+  status: queued
+  attempts: 0
+  id: W1-T10561
+  title: Create saved improvement conversations and reviewed task drafts from verified findings
+  depends_on:
+    - W1-T10558
+    - W1-T10560
+  priority: 2
+  budget_usd: 55
+  files:
+    - src/lib/improvement-thread.ts
+    - src/lib/inbox-thread.ts
+    - src/lib/inbox.ts
+    - src/lib/feedback.ts
+    - src/lib/opportunity-intake.ts
+    - src/lib/panel-graph.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - test/**/improvement-thread.test.ts
+    - test/**/improvement-thread-route.test.ts
+  rationale: Native Ask turns are temporary and read-only, existing Inbox routes only read/reply to existing
+    conversations, and the intent-plan gateway is explicitly unserved. The approved Plan this improvement
+    action needs durable core creation and subsequent reviewed task drafting, not a capture-only success
+    claim.
+  design: >-
+    Add an authenticated core finding-to-conversation contract, proposed POST /v1/improvements/threads. Accept
+    an opaque repository-qualified finding/opportunity reference and snapshot version, bounded operator
+    goal/constraints, and idempotency key. Resolve immutable evidence server-side, validate scope/source
+    freshness and existing related work, and create/reopen one durable native Inbox thread. Store the
+    briefing: source commit/scan/clock, observed finding, practical consequence, uncertainty, expected
+    outcome, related work and acceptance/falsifier draft. Return saved thread and request identities;
+    retry/reload recovers the same conversation and handles uncertain commit outcomes honestly. Refuse
+    foreign/missing/stale findings safely.
+
+
+    Reuse existing Inbox messages, interpretation and proposal review for questions, amended goals, Draft plan
+    tasks and Review and file tasks. Task filing uses existing governed reservation/operator mechanisms,
+    open-head subject checks, exact merge credit and admission; return separate durable draft/decision/filing
+    receipts. Opening or replying to a thread does not approve/file/dispatch/merge/deploy. No new blanket
+    approval, desktop Codex bridge, tool permission, hidden execution, gate weakening or arbitrary
+    browser-provided commands. Pin the real read/write contract for the dependent console consumer; an
+    unserved stub or feedback capture alone does not satisfy the task.
+  falsifier: Remove idempotency, source/scope validation and action boundary separately; repeated creation,
+    cross-repository substitution and no-dispatch assertions must fail. Exercise actual persistence
+    interruption and restart. A local React conversation or feedback-only ID cannot pass the saved-thread
+    proof.
+  acceptance:
+    - claim: duplicate creation and reload preserve one durable source-bound planning conversation
+      proof: "unit test: improvement planning reuses one durable conversation across retries and reloads"
+    - claim: foreign stale or missing findings cannot create an actionable thread
+      proof: "unit test: improvement planning refuses stale foreign and missing findings"
+    - claim: thread creation does not file tasks and later reviewed filing returns its own receipts
+      proof: "unit test: improvement planning separates conversation drafting filing and execution"
+    - claim: the evidence mechanism is reached by its production caller
+      proof: "grep: buildImprovementThreadRoutes( in src/lib/serve.ts"
+  note: Reviewed core c18e7e4c48cee7cb19d2fc96fa93273ef63d85a5 and console
+    c57646ea3636341cc1fad8847df8b144e169d3f1. Before filing, all 10 open core PR heads and main were compared
+    by subject; each head had the same subject counts as main, with more than 4,370 plan shards as corpus
+    controls. No new daily report or code-health producer exists. Refresh main, all open heads, exact
+    merged-task credit and dispatch/run claims before implementation. Reservations belong to
+    codex/file-console-improvement-20261024; preserve contested claims. Reserved W1-T10561 through rmd
+    next-task-id; this filing does not claim implementation or deployment.

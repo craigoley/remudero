@@ -1,0 +1,26 @@
+- id: W1-T10563
+  title: "Locate the current cash-actuals documentation and verify what PR 5907 merged, so the task that links to it names a real path"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=46195aee2ed22e1a
+  # backlog gardener: placed=2026-10-24T17:39:57.656Z
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T9341-update-pr-description-to-link-to-cash-actuals-documentation.yaml
+  acceptance:
+    - claim: "The W1-T9341 shard records a RECON FINDING that names the real path of the cash-actuals documentation, or states that none exists on origin/main"
+      proof: "grep: RECON FINDING in plan/tasks.d/W1-T9341-update-pr-description-to-link-to-cash-actuals-documentation.yaml"
+    - claim: "The finding states what PR 5907 merged (merged or closed, and whether its body held the duplicated cash summary) from a read of the PR itself, not from the follow-up text"
+      proof: "grep: PR 5907 verified in plan/tasks.d/W1-T9341-update-pr-description-to-link-to-cash-actuals-documentation.yaml"
+  origin: "architect"
+  rationale: >-
+    From the 2026-10-15 follow-up on W1-T9341-1792030115080, ratified via rmd approve:
+  
+    follow-up harvest [research]: Locate the current cash-actuals documentation and inspect PR
+    #5907, because the task references a missing path and an unverified PR body. — from W1-T9341
+    (run W1-T9341-1792030115080)
