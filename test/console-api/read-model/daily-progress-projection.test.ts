@@ -8,6 +8,7 @@ import { dailyProgressDayKey, dailyProgressStorePath, prepareDailyProgressPublic
 import { acquireLease, openReadModel } from "#src/lib/read-model-db.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { boardClosedRowsDigest, createBoardSnapshotCache, readBoardClosedCollectionReceipt } from "#src/lib/board-snapshot-cache.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
 
 function record(size = 205): DailyProgressRecord {
   const window = dailyWindow("2026-11-01");
@@ -131,5 +132,28 @@ test("daily PR source records complete truncated and failed attempts separately 
     read = readBoardClosedCollectionReceipt(root, "acme", "app", rows); assert.ok(read.ok); if (!read.ok) return;
     assert.equal(read.receipt.state, "unavailable"); assert.equal(read.receipt.lastSuccessAt, success);
     assert.equal(readBoardClosedCollectionReceipt(root, "acme", "app", []).ok, false, "a receipt cannot certify another corpus");
+  });
+});
+
+test("daily collection receipts are reached by the normal synchronous PR gateway", async () => {
+  await withTempDir("daily-gateway-receipts", async root => {
+    let now = Date.parse("2026-11-02T06:00:00Z"), failed = false;
+    const clock = { now: () => now, iso: () => fixedClock(now).iso(), date: () => fixedClock(now).date() };
+    const cache = createBoardSnapshotCache(root, "acme", "app", { clock });
+    const gateway = buildBatchedGithub("acme", "app", { snapshotCache: cache, now: clock.now, ttlMs: 0, mergedTtlMs: 0,
+      commitTrailerIndex: () => new Map(), exec(args) {
+        if (failed) throw Object.assign(new Error("offline fixture"), { code: "ENETUNREACH" });
+        if (args.some(arg => arg.includes("state=open"))) return "[]";
+        return JSON.stringify([{ number: 7, html_url: "https://github.com/acme/app/pull/7", state: "closed", title: "Repair", body: "Remudero-Task: W1-T7",
+          head: { ref: "run-W1-T7-1234567890123", sha: "a".repeat(40) }, updated_at: "2026-11-02T05:00:00Z", merged_at: "2026-11-01T15:00:00Z", auto_merge: null }]);
+      } });
+    assert.equal(gateway.listMergedHeadBranches!()!.length, 1, "positive control sees the authoritative merge");
+    const rows = cache.closedSeed(); assert.ok(rows);
+    let read = readBoardClosedCollectionReceipt(root, "acme", "app", rows.values()); assert.ok(read.ok);
+    if (read.ok) assert.equal(read.receipt.state, "complete");
+    now += 60_000; failed = true;
+    assert.equal(gateway.listMergedHeadBranches!(), null);
+    read = readBoardClosedCollectionReceipt(root, "acme", "app", rows.values()); assert.ok(read.ok);
+    if (read.ok) { assert.equal(read.receipt.state, "unavailable"); assert.equal(read.receipt.lastAttemptAt, clock.iso()); assert.notEqual(read.receipt.lastSuccessAt, clock.iso()); }
   });
 });
