@@ -79,6 +79,11 @@
   plan_refs: ["§5C"]
   files: [plan/tasks.yaml]
   priority: 4
+  # refusal-amendment (W1-T4290, run W1-T4290-1792834922445, 2026-10-24T10:32:01.835Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: W1-T3570 is in `plan/tasks.d/W1-T3570-measure-the-bounded-openweight-inbox-draft-trial-before-widening.yaml` at both `HEAD` and `origin/main`; it is absent from `plan/tasks.yaml`, the only file W1-T4290 declares.
+  # refusal-amendment (W1-T4290, run W1-T4290-1792834922445, 2026-10-24T10:32:01.835Z): the worker refused criterion 2 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: W1-T4290’s design requires editing W1-T3570 in `plan/tasks.yaml`, but its scope fence also forbids touching the shard where that task actually lives.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   # backlog gardener: band=4 evidence=96846d7c305a5453
   attempts: 0
