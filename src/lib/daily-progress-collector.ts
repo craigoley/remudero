@@ -8,6 +8,7 @@ import { dailyProgressDayKey, prepareDailyProgressPublication, readDailyProgress
 import { openLedgerUnion } from "./ledger-union.js";
 import type { BoardPrRest } from "./open-prs-rest.js";
 import { taskIdFromRunBranch } from "./status.js";
+import { HAND_WORKTREE_TASK_ID_RE } from "./hand-worktree.js";
 import { repositoriesSourcesPath } from "./repositories-view.js";
 
 export interface DailyProgressInstance { name: string; repository: string; root: string; stateDir: string }
@@ -43,7 +44,7 @@ export function readDailyProgressRepositories(stateDir: string): string[] {
 function taskIds(pr: BoardPrRest): string[] {
   const branch = taskIdFromRunBranch(pr.headRefName);
   const trailers = [...pr.body.matchAll(/^Remudero-Task:[ \t]*([A-Za-z0-9._-]+)[ \t]*$/gm)].map(m => m[1]!);
-  return [...new Set([...(branch ? [branch] : []), ...trailers].filter(id => TASK.test(id)))].sort();
+  return [...new Set([...(branch ? [branch] : []), ...trailers].filter(id => HAND_WORKTREE_TASK_ID_RE.test(id)))].sort();
 }
 
 function prIdentity(pr: BoardPrRest, repository: string, states: readonly string[] = ["MERGED", "CLOSED"]): boolean {
@@ -138,7 +139,7 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
           if (Date.parse(occurredAt) < start || Date.parse(occurredAt) >= end) continue;
           const ids = taskIds(pr), eventId = `merged:${repository}:${pr.number}`;
           events.set(eventId, { id: eventId, repository, kind: "merged", sourceId: coverage.id, occurredAt, observedAt: at,
-            fleetAttribution: ids.length ? "confirmed" : "unknown", taskIds: ids, title: pr.title.trim().slice(0, 2048) || "Merged change", url: pr.url });
+            fleetAttribution: ids.length || taskIdFromRunBranch(pr.headRefName) ? "confirmed" : "unknown", taskIds: ids, title: pr.title.trim().slice(0, 2048) || "Merged change", url: pr.url });
         }
       }
       if (!chosen) { chosen = { id: `${repository}:prs:missing`, repository, kind: "pull_requests", required: true, state: "not_collected", lastAttemptAt: null, lastSuccessAt: null,
