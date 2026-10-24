@@ -1095,51 +1095,65 @@ function childCoverageFindings(text) {
 
 /** W1-T5692: these slower censuses join the same child when changed source adds a literal. */
 export const PRECHECK_TRIGGERED_SUITES = [
-  { testFile: "test/ledger-rotation.test.ts", script: "census:ledger-rotation", trigger: stepTrigger,
+  { testFile: "test/ledger-rotation.test.ts",
+    recognizer: "src/lib/ledger.ts", ownFiles: ["src/lib/ledger.ts"], script: "census:ledger-rotation", trigger: stepTrigger,
     remedy: "register DECISION_RELEVANT_LEDGER_STEPS in src/lib/ledger.ts" },
-  { testFile: "test/a-union-read-of-an-unretained-step-is-refused.test.ts", script: "census:unretained-step", trigger: stepTrigger,
+  { testFile: "test/a-union-read-of-an-unretained-step-is-refused.test.ts",
+    recognizer: "src/lib/ledger.ts", ownFiles: ["src/lib/ledger.ts"], script: "census:unretained-step", trigger: stepTrigger,
     remedy: "register DECISION_RELEVANT_LEDGER_STEPS in src/lib/ledger.ts" },
-  { testFile: "test/spend-is-counted-once-at-its-producer.test.ts", script: "census:spend", trigger: stepTrigger,
+  { testFile: "test/spend-is-counted-once-at-its-producer.test.ts",
+    recognizer: "src/lib/spend-rows.ts", ownFiles: ["src/lib/spend-rows.ts"], script: "census:spend", trigger: stepTrigger,
     remedy: "declare SPEND_STEP_ROLES in src/lib/spend-rows.ts" },
-  { testFile: "test/env-var-registry.test.ts", script: "census:env-var-registry",
+  { testFile: "test/env-var-registry.test.ts",
+    recognizer: "src/lib/config-schema.ts", ownFiles: ["src/lib/config-schema.ts"], script: "census:env-var-registry",
     trigger: (input) => input.changed.includes("src/lib/config-schema.ts") || addsLiteral(input, ENV_NAME_RE, 0),
     remedy: "register ENV_REGISTRY in src/lib/config-schema.ts" },
-  { testFile: "test/error-subclass-census.test.ts", script: "census:error-subclass",
+  { testFile: "test/error-subclass-census.test.ts",
+    recognizer: "test/error-subclass-census.test.ts", ownFiles: ["scripts/error-subclass-baseline.json"], script: "census:error-subclass",
     trigger: (input) => input.changed.includes("scripts/error-subclass-baseline.json") || addsLiteral(input, ERROR_CLASS_RE, 1),
     remedy: "adopt RmdError in src/lib/errors.ts or record the reviewed ceiling in scripts/error-subclass-baseline.json" },
   // W1-T5693: whole-tree structural censuses, 4-13 s each alone; `structural` runs each in its OWN child.
-  { testFile: "test/cycle-ratchet.test.ts", gitFree: true, script: "census:cycle-ratchet", structural: true,
+  { testFile: "test/cycle-ratchet.test.ts",
+    recognizer: "scripts/cycle-ratchet.mjs", ownFiles: ["scripts/cycle-baseline.json", ".dependency-cruiser.cjs"], gitFree: true, script: "census:cycle-ratchet", structural: true,
     trigger: (input) => input.changed.some((p) => [".dependency-cruiser.cjs", "scripts/cycle-baseline.json", "scripts/cycle-ratchet.mjs"].includes(p)) ||
       addsImport(input, IMPORT_SCOPE_RE),
     remedy: "break the import ring or record the reviewed ceiling in scripts/cycle-baseline.json" },
-  { testFile: "test/source-size-baseline-is-enforced.test.ts", script: "census:source-size", structural: true,
+  { testFile: "test/source-size-baseline-is-enforced.test.ts",
+    recognizer: ".dependency-cruiser.cjs", ownFiles: [".dependency-cruiser.cjs"], script: "census:source-size", structural: true,
     trigger: (input) => input.changed.some((p) => ["scripts/source-size-ratchet.mjs", "src/lib/ci-parity.ts", ".dependency-cruiser.cjs"].includes(p)) ||
       addsImport(input, LIB_SCOPE_RE, importsLayerAboveLib),
     remedy: "src/lib must not import src/cli, src/spike.ts or src/run-task.ts (.dependency-cruiser.cjs)" },
-  { testFile: "test/citation-anchor-census.test.ts", gitFree: true, script: "census:citation-anchor", structural: true,
+  { testFile: "test/citation-anchor-census.test.ts",
+    recognizer: "scripts/citation-anchor-census.mjs", ownFiles: ["scripts/citation-anchor-census.mjs"], gitFree: true, script: "census:citation-anchor", structural: true,
     trigger: ({ changed }) => changed.some((p) => p.startsWith("plan/tasks.d/") || p === "MASTER-PLAN.md" || p === "scripts/citation-anchor-census.mjs"),
     remedy: "anchor each #NNNN citation the shard or MASTER-PLAN.md adds (scripts/citation-anchor-census.mjs)" },
   // W1-T5702: a new test importing src/run-task.ts is the reach ratchet's own refusal.
-  { testFile: "test/the-affected-suite-reach-ratchet.test.ts", script: "census:affected-reach", structural: true,
+  { testFile: "test/the-affected-suite-reach-ratchet.test.ts",
+    recognizer: "src/lib/affected-suites.ts", ownFiles: ["scripts/affected-reach-baseline.json"], script: "census:affected-reach", structural: true,
     trigger: (input) =>
       input.changed.some((p) => ["src/lib/affected-suites.ts", "scripts/affected-reach-baseline.json"].includes(p)) ||
       addsImport(input, TEST_TS_SCOPE_RE, (spec) => /(?:^|\/)run-task\.[jt]s$/.test(spec)),
     remedy: "import the module the suite tests rather than src/run-task.ts, or record the tighter ceiling in scripts/affected-reach-baseline.json" },
-  { testFile: "test/node-24-runtime-compatibility.test.ts", script: "census:node24-runtime", trigger: node24RuntimeTrigger,
+  { testFile: "test/node-24-runtime-compatibility.test.ts",
+    recognizer: "scripts/census-precheck.mjs", ownFiles: ["test/node-24-runtime-compatibility.test.ts"], script: "census:node24-runtime", trigger: node24RuntimeTrigger,
     remedy: "name --test-reporter=tap on the spawn (or mark it `node-test-reporter: exempt`) and let the Worker inherit execArgv" },
-  { testFile: "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts", gitFree: true, script: "census:every-priced-ledger-step",
+  { testFile: "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts",
+    recognizer: "src/lib/config-gardener.ts", ownFiles: ["src/lib/config-gardener.ts"], gitFree: true, script: "census:every-priced-ledger-step",
     trigger: (input) => input.changed.includes("src/lib/config-gardener.ts") || addsMatch(input, CLOCK_SCOPE_RE, pricedWrites),
     remedy: "register CONFIG_GARDEN_LEDGER_STEPS in src/lib/config-gardener.ts or a reasoned exemption in test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts" },
-  { testFile: "test/host-capability-fixtures.test.ts", script: "census:host-capability-fixtures",
+  { testFile: "test/host-capability-fixtures.test.ts",
+    recognizer: "test/host-capability-fixtures.test.ts", ownFiles: ["test/host-capability-fixtures.test.ts"], script: "census:host-capability-fixtures",
     trigger: (input) => addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => HOST_CAPABILITY_RE.test(line))),
     remedy: "own the fixture's host condition or declare its reason in test/host-capability-fixtures.test.ts" },
-  { testFile: "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts", script: "census:no-nested-preflight",
+  { testFile: "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts",
+    recognizer: "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts", ownFiles: ["test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts"], script: "census:no-nested-preflight",
     trigger: (input) =>
       input.changed.includes("test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts") ||
       addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => /\bpreflightCommand\(|["']preflight["']/.test(line))),
     remedy: "inject `spawn` into preflightCommand / `dispatch` into main, or prove the invariant through preflightSummaryTarget" },
   // W1-T7812: changes to the measured fixture-crossing runner or its proof rerun that proof before push.
-  { testFile: "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts", gitFree: true, script: "census:near-fixture-crossing",
+  { testFile: "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",
+    recognizer: "scripts/expiring-fixture-census.mjs", ownFiles: ["scripts/expiring-fixture-census.mjs"], gitFree: true, script: "census:near-fixture-crossing",
     trigger: ({ changed }) => changed.some((p) => [
       "scripts/expiring-fixture-census.mjs", "src/lib/gate-gardener.ts", "scripts/clock-shift.mjs",
       "src/lib/ci-parity.ts", "scripts/census-precheck.mjs",
@@ -1147,10 +1161,12 @@ export const PRECHECK_TRIGGERED_SUITES = [
     ].includes(p)),
     remedy: "preserve the 24 h control/shifted verdict and the private TMPDIR proof" },
   // W1-T6106: a host git spawn into a worker worktree must go through src/lib/worktree-git.ts.
-  { testFile: "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts", gitFree: true, script: "census:host-worktree-git",
+  { testFile: "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts",
+    recognizer: "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts", ownFiles: ["test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts"], gitFree: true, script: "census:host-worktree-git",
     trigger: (input) => gitSpawnTrigger(input),
     remedy: "route the spawn through hostWorktreeGit (src/lib/worktree-git.ts), or name it in that suite's RAW_SITE_EXCEPTIONS with its reason" },
-  { testFile: "test/worktree-creation-census.test.ts", gitFree: true, script: "census:worktree-creation", trigger: worktreeCreationTrigger,
+  { testFile: "test/worktree-creation-census.test.ts",
+    recognizer: "src/lib/worktree-sites.ts", ownFiles: ["src/lib/worktree-sites.ts"], gitFree: true, script: "census:worktree-creation", trigger: worktreeCreationTrigger,
     remedy: "route the site through worktreeAdd (src/lib/worker.ts), or add a NAMED exempt row with its reason to WORKTREE_SITE_REGISTRY (src/lib/worktree-sites.ts)" },
 ];
 
@@ -1166,6 +1182,8 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
       "test/rules/the-root-scratch-ignore-stays-root-only.test.ts"].includes(p)),
     remedy: "preserve the operator-approved root-only scratch ignore and existing or tracked contents" },
   { testFile: "test/every-ci-census-is-asked-before-the-push.test.ts",
+    recognizer: "src/lib/ci-parity.ts", symbol: "censusCandidateWalks", gateRegex: /ls-files|readdirSync|globSync/,
+    ownFiles: ["scripts/census-precheck-parity-baseline.json", "src/lib/rule-suites.ts", "scripts/census-precheck.mjs"],
     trigger: ({ changed, readHead, readBase }) => changed.some((p) => [
       "scripts/census-precheck.mjs", "scripts/census-precheck-parity-baseline.json",
       "scripts/list-rule-suites.mjs", "src/lib/ci-parity.ts", "src/lib/rule-suites.ts",
@@ -1245,6 +1263,13 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
     ].includes(p)),
     remedy: "preserve isolating sandbox subjects when learning bindings change" },
 ];
+
+export const GATE_REPAIR_RULES = [...PRECHECK_TRIGGERED_SUITES, ...PRECHECK_PATH_TRIGGERED_SUITES]
+  .filter((entry) => entry.recognizer && entry.ownFiles)
+  .map((entry) => ({ gate: entry.testFile, recognizer: entry.recognizer,
+    symbol: entry.symbol ?? entry.script ?? entry.testFile, ownFiles: entry.ownFiles,
+    gateRegex: entry.gateRegex ?? /(?!)/, trigger: entry.trigger }));
+
 
 /**
  * Admitted suites join by `walks` prefixes; triggered suites join by new literals or registry changes.

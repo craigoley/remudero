@@ -17,6 +17,7 @@ import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations, retiremen
 import { hostWorktreeGit } from "./worktree-git.js";
 import { loadPolicy } from "./policy.js";
 import { sameTestFile } from "./test-path-resolver.js";
+import { collectCiFailureCorpus, rollupAtSha, type CiFailurePair } from "./ci-failure-corpus.js";
 
 /**
  * lib/gate-gardener.ts (W1-T4116) — the gates tend themselves.
@@ -36,9 +37,162 @@ import { sameTestFile } from "./test-path-resolver.js";
  * by its PR's decision (W1-T5825).
  */
 
-export type GateGardenClass = "tighten" | "refresh" | "demote" | "defuse";
-export const GATE_GARDEN_CLASSES: readonly GateGardenClass[] = ["tighten", "refresh", "demote", "defuse"];
+export type GateGardenClass = "tighten" | "refresh" | "demote" | "defuse" | "false-positive";
+export const GATE_GARDEN_CLASSES: readonly GateGardenClass[] = ["tighten", "refresh", "demote", "defuse", "false-positive"];
 export const DEFUSE_LEAD_DAYS = 21;
+
+export type GateRepairClass = "baseline-only" | "token-dodge" | "rename-dodge" | "off-subject" | "genuine";
+export type GateRepairPair = CiFailurePair & { triggered?: boolean };
+export interface GateRepairRule {
+  gate: string;
+  recognizer: string;
+  symbol: string;
+  ownFiles: readonly string[];
+  gateRegex: RegExp;
+  trigger?: (input: { changed: string[]; readHead: (path: string) => string | null; readBase: (path: string) => string | null }) => boolean;
+}
+export interface GateRepairObservation { pair: GateRepairPair; repairDiff: string }
+
+const STRING_LITERAL = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g;
+const matchesGate = (regex: RegExp, text: string): boolean => new RegExp(regex.source, regex.flags.replace(/[gy]/g, "")).test(text);
+const stringValue = (literal: string): string => literal.slice(1, -1).replace(/\\([\\"'])/g, "$1");
+
+function rebuiltTokens(line: string): Array<{ expression: string; value: string }> {
+  const literal = STRING_LITERAL.source;
+  const expressions = new RegExp(`\\[(?:\\s*(?:${literal})\\s*,?)+\\]\\.join\\(\\s*(?:${literal})\\s*\\)|(?:${literal})(?:\\s*\\+\\s*(?:${literal}))+`, "g");
+  return [...line.matchAll(expressions)].map(([expression]) => {
+    const strings = [...expression.matchAll(STRING_LITERAL)].map(([s]) => stringValue(s));
+    const value = expression.startsWith("[") ? strings.slice(0, -1).join(strings.at(-1)) : strings.join("");
+    return { expression, value };
+  });
+}
+
+export function classifyGateRepair(pair: GateRepairPair, repairDiff: string, ownFiles: readonly string[], gateRegex: RegExp): GateRepairClass {
+  if (pair.state !== "repaired" || !pair.greenSha || !pair.repairFiles?.length) return "genuine";
+  if (pair.repairFiles.every((file) => ownFiles.includes(file))) return "baseline-only";
+  if (pair.triggered === false) return "off-subject";
+  const chunks = repairDiff.split(/^(?:diff --git .*|@@.*)$/m);
+  for (const chunk of chunks) {
+    const removed = chunk.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---")).map((line) => line.slice(1));
+    const added = chunk.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).map((line) => line.slice(1));
+    if (!removed.length || removed.length !== added.length) continue;
+    const before = removed.join("\n"), after = added.join("\n");
+    if (!matchesGate(gateRegex, before) || matchesGate(gateRegex, after)) continue;
+    for (const rebuilt of rebuiltTokens(after)) {
+      if (!matchesGate(gateRegex, rebuilt.value)) continue;
+      for (const [literal] of before.matchAll(STRING_LITERAL)) {
+        if (stringValue(literal) === rebuilt.value && before.replace(literal, "<token>") === after.replace(rebuilt.expression, "<token>")) return "token-dodge";
+      }
+    }
+    const tokens = (text: string) => text.match(new RegExp(`${STRING_LITERAL.source}|//[^\\n]*|/\\*[\\s\\S]*?\\*/|[A-Za-z_$][\\w$]*|\\s+|[^\\w\\s]`, "g")) ?? [];
+    const oldTokens = tokens(before), newTokens = tokens(after);
+    if (oldTokens.length !== newTokens.length) continue;
+    const changed = oldTokens.flatMap((old, i) => old === newTokens[i] ? [] : [{ old, next: newTokens[i]! }]);
+    const first = changed[0];
+    if (first && changed.every(({ old, next }) => old === first.old && next === first.next && /^[A-Za-z_$][\w$]*$/.test(old) && /^[A-Za-z_$][\w$]*$/.test(next)) &&
+        matchesGate(gateRegex, first.old) && !matchesGate(gateRegex, first.next)) return "rename-dodge";
+  }
+  return "genuine";
+}
+
+export function gateRepairCandidates(observations: readonly GateRepairObservation[], rules: readonly GateRepairRule[], coveredOrigins: readonly string[], log: GardenerDeps["log"]): GateGardenAction[] {
+  const covered = new Set(coveredOrigins), actions: GateGardenAction[] = [];
+  for (const observation of observations) {
+    const rule = rules.find((r) => r.gate === observation.pair.gate);
+    if (!rule) continue;
+    const classification = classifyGateRepair(observation.pair, observation.repairDiff, rule.ownFiles, rule.gateRegex);
+    if (classification === "genuine") continue;
+    log("gate.false_positive_suspected", { ...observation.pair, classification, recognizer: rule.recognizer, symbol: rule.symbol });
+    const target = `gate-false-positive:${rule.gate}`;
+    if (covered.has(target)) continue;
+    covered.add(target);
+    actions.push({ class: "false-positive", target, file: rule.recognizer,
+      edit: { kind: "false-positive", rule, observation, classification },
+      reason: `PR #${observation.pair.pr} cleared ${rule.gate} with ${classification}; repair ${rule.symbol}.` });
+  }
+  return actions;
+}
+
+export function renderFalsePositiveShard(action: GateGardenAction, taskId: string) {
+  if (action.edit.kind !== "false-positive") throw new Error("gate gardener: mixed false-positive plan");
+  const { rule, observation: { pair, repairDiff }, classification } = action.edit;
+  return renderMachineShard({ taskId, title: `Repair ${rule.symbol}'s ${classification} false positive`, origin: action.target,
+    files: [rule.recognizer], cost: 1,
+    acceptance: [{ claim: `${rule.symbol} accepts the healthy case from PR #${pair.pr} while still refusing its unhealthy control.`,
+      proof: `unit test: ${taskId}: ${rule.symbol} distinguishes the false positive from its unhealthy control` }],
+    rationale: [`Gate ${rule.gate}, PR #${pair.pr}: ${pair.redSha} -> ${pair.greenSha}; classification ${classification}.`,
+      `Repair the recognizer ${rule.symbol} in ${rule.recognizer}. Gate-owned files: ${rule.ownFiles.join(", ")}.`,
+      "Measure the gate's suspect repair rate after the remedy merges; lowering that rate is the effect.",
+      "Preserve the unhealthy control. Do not rename the PR's symbols, rebuild tokens, or raise a baseline to hide the refusal.",
+      ...repairDiff.split("\n").map((line) => `Repair evidence: ${line}`)],
+  });
+}
+
+export function loadGateRepairObservations(deps: GardenerDeps, rules: readonly GateRepairRule[], sources: GateDefuseSources): GateRepairObservation[] {
+  const run = (args: string[]): string => sources.execFile
+    ? sources.execFile("gh", args, { cwd: deps.repoRoot, encoding: "utf8" })
+    : execFileSync("gh", args, { cwd: deps.repoRoot, encoding: "utf8" });
+  const read = (args: string[]): unknown => JSON.parse(run(args));
+  const repo = read(["repo", "view", "--json", "nameWithOwner"]) as { nameWithOwner: string };
+  const api = `repos/${repo.nameWithOwner}`;
+  const prs = read(["api", `${api}/pulls?state=all&sort=updated&direction=desc&per_page=100`]) as Array<{ number: number; base: { sha: string } }>;
+  const observations: GateRepairObservation[] = [];
+  for (const pr of prs) {
+    const commits = read(["api", `${api}/pulls/${pr.number}/commits?per_page=100`]) as Array<{ sha: string }>;
+    const runs = new Map<string, { check_runs: Array<{ id: number; name: string; conclusion: string }> }>();
+    const corpus = collectCiFailureCorpus({ prs: [{ number: pr.number, commits: commits.map(({ sha }) => ({ sha,
+      rollup: rollupAtSha(...repo.nameWithOwner.split("/") as [string, string], sha, (args) => {
+        const value = read(args);
+        if (args[1]?.includes("/check-runs")) runs.set(sha, value as ReturnType<typeof runs.get> & {});
+        return value;
+      }) })) }] });
+    for (const pair of corpus.pairs.filter((pair) => pair.state === "repaired")) {
+      const diff = read(["api", `${api}/compare/${pair.redSha}...${pair.greenSha}`]) as { files: Array<{ filename: string; patch?: string }> };
+      if (!diff.files?.length || diff.files.some((file) => file.patch === undefined)) throw new Error(`gate repair diff unreadable for PR #${pr.number}`);
+      const repairDiff = diff.files.map((file) => `diff --git a/${file.filename} b/${file.filename}\n${file.patch}`).join("\n");
+      const direct = rules.filter((rule) => rule.gate === pair.gate);
+      const failed = runs.get(pair.redSha)?.check_runs.find((check) => check.name === pair.gate && check.conclusion === "failure");
+      const log = direct.length || !failed ? "" : run(["run", "view", "--job", String(failed.id), "--log-failed"]);
+      const implicated = direct.length ? direct : rules.filter((rule) => log.includes(rule.gate));
+      for (const rule of implicated) {
+        const before = read(["api", `${api}/compare/${pr.base.sha}...${pair.redSha}`]) as { merge_base_commit: { sha: string }; files: Array<{ filename: string }> };
+        const readAt = (sha: string, path: string): string | null => {
+          const value = read(["api", `${api}/contents/${path}?ref=${sha}`]) as { content?: string; encoding?: string };
+          if (value.encoding !== "base64" || typeof value.content !== "string") throw new Error(`gate trigger content unreadable: ${path}@${sha}`);
+          return Buffer.from(value.content, "base64").toString("utf8");
+        };
+        const triggered = rule.trigger?.({ changed: before.files.map((file) => file.filename),
+          readHead: (path) => readAt(pair.redSha, path), readBase: (path) => readAt(before.merge_base_commit.sha, path) });
+        observations.push({ pair: { ...pair, gate: rule.gate, repairFiles: diff.files.map((file) => file.filename), triggered }, repairDiff });
+      }
+    }
+  }
+  return observations;
+}
+
+function falsePositiveInventory(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources): { actions: GateGardenAction[]; tally: Outcome } {
+  const reportPath = gateFireRatesPath(deps.stateDir);
+  if (!sources.repairObservations && (!existsSync(reportPath) || !(readJson(reportPath).gates as GateFireRate[] | undefined)?.some((gate) => gate.repaired > 0))) {
+    return { actions: [], tally: { trials: 0, successes: 0 } };
+  }
+  const rules = sources.repairRules ?? probes.fp?.GATE_REPAIR_RULES;
+  if (!rules) throw new Error("gate gardener: false-positive rule metadata is missing");
+  const observations = sources.repairObservations?.() ?? loadGateRepairObservations(deps, rules, sources);
+  const tally: Outcome = { trials: observations.length, successes: 0 };
+  for (const observation of observations) {
+    const rule = rules.find((rule) => rule.gate === observation.pair.gate);
+    if (rule && classifyGateRepair(observation.pair, observation.repairDiff, rule.ownFiles, rule.gateRegex) === "genuine") tally.successes++;
+  }
+  if (!observations.length) return { actions: [], tally };
+  const layout = resolveRepoLayout(deps.repoRoot);
+  const queued = existsSync(layout.planMonolith) ? loadPlan(layout.planMonolith).tasks.filter((task) =>
+    task.status === "queued" && !task.retirement).flatMap((task) => task.origin ? [task.origin] : []) : [];
+  const open = sources.openOrigins?.() ?? (JSON.parse(sources.execFile
+    ? sources.execFile("gh", ["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"], { cwd: deps.repoRoot, encoding: "utf8" })
+    : execFileSync("gh", ["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"], { cwd: deps.repoRoot, encoding: "utf8" })) as Array<{ body: string }> )
+    .flatMap((pr) => [...pr.body.matchAll(/gate-false-positive:[^\s"'`]+/g)].map(([origin]) => origin));
+  return { actions: gateRepairCandidates(observations, rules, [...queued, ...open], deps.log), tally };
+}
 
 interface ExpiringFixture {
   file: string; line: number; stamp: string; field: string; threshold: string;
@@ -46,6 +200,8 @@ interface ExpiringFixture {
 }
 
 export interface GateDefuseSources {
+  repairObservations?: () => readonly GateRepairObservation[];
+  repairRules?: readonly GateRepairRule[];
   thresholdDays?: number;
   leadDays?: number;
   openOrigins?: () => string[];
@@ -160,7 +316,8 @@ export function runSuiteShiftedMeasured(repoRoot: string, file: string, shiftDay
 export type GateEdit =
   | { kind: "row"; key: string; to: number | null }
   | { kind: "demote"; gate: string; rationale: string }
-  | { kind: "defuse"; finding: ExpiringFixture; leadDays: number; urgent: boolean };
+  | { kind: "defuse"; finding: ExpiringFixture; leadDays: number; urgent: boolean }
+  | { kind: "false-positive"; rule: GateRepairRule; observation: GateRepairObservation; classification: GateRepairClass };
 
 export interface GateGardenAction extends GardenAction<GateGardenClass> {
   /** Repo-relative file the edit lands in. */
@@ -172,6 +329,7 @@ export interface GateInventory {
   candidates: GateGardenAction[];
   /** Repaired and overridden refusals, summed over every fire-rate measurement seen so far. */
   tally: Outcome;
+  repairTally?: Outcome;
 }
 
 export const CI_GATE_YML = ".github/workflows/ci-gate.yml";
@@ -188,6 +346,7 @@ interface LedgerVerdict {
 /** The ratchets' own measurement and evaluation functions. They are ES modules under scripts/, so
  *  they load once, asynchronously, before the (synchronous) gardener runs. */
 export interface GateProbes {
+  fp?: { GATE_REPAIR_RULES: readonly GateRepairRule[] };
   ss: { listSourceFiles: (r: string) => string[]; countLines: (t: string) => number; evaluateSourceSizeRatchet: (c: Json, b: Json) => LedgerVerdict };
   cl: { listMeasuredFiles: (r: string) => string[]; countCommentLines: (t: string, p: string) => { comments: number }; evaluateCommentLoadRatchet: (c: Json, b: Json) => LedgerVerdict };
   lb: { loadCorpus: (d: string) => unknown[]; computeActiveChars: (e: unknown[]) => { chars: number; activeCount: number } };
@@ -203,6 +362,7 @@ export async function loadGateProbes(root: string): Promise<GateProbes> {
     lb: await load("scripts/learnings-budget-ratchet.mjs"),
     gm: await load("scripts/gate-monotonic-check.mjs"),
     ef: await load("scripts/expiring-fixture-census.mjs"),
+    fp: await load("scripts/census-precheck.mjs"),
   };
 }
 
@@ -320,7 +480,7 @@ function prepareDefuseTaskIds(ws: GardenCheckout, count: number, deps: GardenerD
 }
 
 function assertDefuseAdmission(action: GateGardenAction, deps: GardenerDeps, sources: GateDefuseSources): void {
-  const draft = renderDefuseShard(action, "NEW-1");
+  const draft = action.edit.kind === "false-positive" ? renderFalsePositiveShard(action, "NEW-1") : renderDefuseShard(action, "NEW-1");
   if (draft.refused) throw new Error(`gate gardener: defuse shard refused (${draft.refused})`);
   const plan = loadPlanFromYaml(draft.text, "defuse-admission");
   const reasons = (sources.admissionViolations ?? machineFilingAdmissionViolations)(plan.tasks[0]!, {
@@ -336,10 +496,10 @@ function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], dep
     assertDefuseAdmission(action, deps, sources);
     const taskId = heldIds ? heldIds[index] : (prepareDefuseTaskIds(ws, 1, deps, sources) as string[])[0];
     if (!taskId) throw new Error("gate gardener: task-id reservation returned no held id");
-    const rendered = renderDefuseShard(action, taskId);
+    const rendered = action.edit.kind === "false-positive" ? renderFalsePositiveShard(action, taskId) : renderDefuseShard(action, taskId);
     if (rendered.refused) throw new Error(`gate gardener: defuse shard refused (${rendered.refused})`);
     const stem = action.file.replace(/^test\//, "").replace(/\.test\.ts$/, "").replace(/[^a-zA-Z0-9-]/g, "-");
-    const path = join(resolveRepoLayout(ws.root).planDir, "tasks.d", `${taskId}-defuse-${stem}.yaml`);
+    const path = join(resolveRepoLayout(ws.root).planDir, "tasks.d", `${taskId}-${action.class}-${stem}.yaml`);
     mkdirSync(join(path, ".."), { recursive: true });
     writeFileSync(path, rendered.text);
     paths.push(relative(ws.root, path));
@@ -349,11 +509,12 @@ function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], dep
     const url = land(opts);
     if (url) for (const a of actions) {
       if (a.edit.kind === "defuse") deps.log("gate_garden.defuse_filed", defuseEvidence(a.edit.finding, a.edit.leadDays));
+      if (a.edit.kind === "false-positive") deps.log("gate.false_positive_filed", { gate: a.edit.rule.gate, recognizer: a.file, classification: a.edit.classification });
     }
     return url;
   };
-  return { paths, title: `chore(plan): file ${actions.length} expiring fixture remedy task(s)`, body: [
-    "The gate gardener files expiring fixture remedies before the CI margin.", "", "## Acceptance",
+  return { paths, title: `chore(plan): file ${actions.length} ${actions[0]?.class === "false-positive" ? "gate recognizer" : "expiring fixture"} remedy task(s)`, body: [
+    "The gate gardener files remedies against the surface responsible for the refusal.", "", "## Acceptance",
     ...actions.flatMap((a, i) => [`- claim: ${a.target} has a machine-filed remedy`, `  proof: grep: ${a.target} in ${paths[i]}`]),
   ].join("\n") };
 }
@@ -464,7 +625,7 @@ export function applyGateActions(root: string, actions: GateGardenAction[], head
   for (const [file, list] of byFile) {
     let text = readFileSync(join(root, file), "utf8");
     for (const a of list) {
-      if (a.edit.kind === "defuse") throw new Error("defuse actions require machine filing");
+      if (a.edit.kind === "defuse" || a.edit.kind === "false-positive") throw new Error("defuse and false-positive actions require machine filing");
       text = a.edit.kind === "row" ? editBaselineRow(text, a.edit.key, a.edit.to) : demoteInCiGate(text, a.edit.gate, a.edit.rationale);
     }
     if (file === CI_GATE_YML) {
@@ -481,7 +642,7 @@ export function applyGateActions(root: string, actions: GateGardenAction[], head
 }
 
 function prBody(actions: GateGardenAction[], heading: string): string {
-  const proofs = actions.flatMap((a) => a.edit.kind === "defuse" ? [] :
+  const proofs = actions.flatMap((a) => a.edit.kind === "defuse" || a.edit.kind === "false-positive" ? [] :
     a.edit.kind === "demote"
       ? [`- claim: ${a.edit.gate} is moved to ADVISORY with a reviewed rationale`, `  proof: grep: GATE_RATIONALE: "W1-T4116 gate gardener: ${a.edit.gate} refused 0 in ${CI_GATE_YML}`]
       : a.edit.to === null
@@ -517,19 +678,24 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
     inventory: () => {
       const inv = gateInventory(deps.repoRoot, deps.stateDir, probes);
       if (!existsSync(join(deps.stateDir, "GATE_OFF-defuse"))) inv.candidates.push(...defuseCandidates(deps, probes, sources));
+      if (!existsSync(join(deps.stateDir, "GATE_OFF-false-positive"))) {
+        const repairs = falsePositiveInventory(deps, probes, sources);
+        inv.candidates.push(...repairs.actions);
+        inv.repairTally = repairs.tally;
+      }
       return inv;
     },
     fingerprint: (inv) => inv.candidates.map((a) => a.target).join(","),
-    metric: (inv) => inv.tally,
+    metric: (inv, actionClass) => actionClass === "false-positive" ? inv.repairTally ?? { trials: 0, successes: 0 } : inv.tally,
     candidates: (inv) => inv.candidates,
     scorecard: (inv, plan) => ({ candidates: inv.candidates.length, tally: inv.tally, proposed: plan.actions.length }),
     prepare: (ws, plan, async) => {
-      const actions = plan.acting[0] === "defuse" ? plan.actions : [];
+      const actions = plan.acting[0] === "defuse" || plan.acting[0] === "false-positive" ? plan.actions : [];
       for (const action of actions) assertDefuseAdmission(action, deps, sources);
       return prepareDefuseTaskIds(ws, actions.length, deps, sources, async);
     },
     apply: (ws, plan, _scorecard, heldIds) => {
-      if (plan.acting[0] === "defuse") return applyDefuseActions(ws, plan.actions, deps, sources, heldIds);
+      if (plan.acting[0] === "defuse" || plan.acting[0] === "false-positive") return applyDefuseActions(ws, plan.actions, deps, sources, heldIds);
       const heading = `## Pass ${clock.iso()}`;
       const paths = applyGateActions(ws.root, plan.actions, heading, probes);
       return { paths, title: `chore(gates): the gate gardener proposes to ${plan.acting[0]} ${plan.actions.length} gate row(s)`, body: prBody(plan.actions, heading) };
