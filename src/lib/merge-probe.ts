@@ -12,7 +12,8 @@ import {
 } from "./typecheck-buildinfo.js";
 import { acquireTestSlotAsync, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotOptions } from "./test-slot.js";
 import { pinWorktreeGit } from "./worktree-git.js";
-import type { OpenPrView } from "./sweep.js";
+import { hasCapturedMergeConflictEvidence, type OpenPrView } from "./sweep.js";
+import type { MergeConflictEvidence } from "./merge-state.js";
 
 export const MERGE_PROBE_STEP = "sweep.merge_probe";
 /** PRIMARY CONTROL on the git work one pass may spend; unprobed pairs carry over to the next pass. */
@@ -29,7 +30,7 @@ export type MergeProbeGit = (args: readonly string[]) => MergeProbeGitResult | P
 
 export type MergeProbeResult =
   | { verdict: "clean"; tree: string }
-  | { verdict: "conflict"; paths: string[] }
+  | { verdict: "conflict"; paths: string[]; truncated?: true }
   | { verdict: "unreadable"; reason: string };
 
 export function defaultMergeProbeGit(cwd: string): MergeProbeGit {
@@ -58,14 +59,17 @@ export async function probeMerge(input: { headSha: string; mainSha: string; git:
       return { verdict: "unreadable", reason: `git merge-tree exited ${res.status} without a tree` };
     }
     if (res.status === 0) return { verdict: "clean", tree };
-    return { verdict: "conflict", paths: [...new Set(lines.slice(1))].slice(0, MERGE_PROBE_MAX_PATHS) };
+    const paths = [...new Set(lines.slice(1))];
+    return { verdict: "conflict", paths: paths.slice(0, MERGE_PROBE_MAX_PATHS),
+      ...(paths.length > MERGE_PROBE_MAX_PATHS ? { truncated: true as const } : {}) };
   } catch (e) {
     return { verdict: "unreadable", reason: String((e as Error)?.message ?? e) };
   }
 }
 
-/** PR numbers a `Stacked on #N` line names, as data only. */
-const dirtyFirst = (pr: OpenPrView): number => (pr.mergeableState === "dirty" ? 0 : 1);
+const needsConflictEvidence = (pr: OpenPrView): boolean =>
+  pr.mergeState === "dirty" || pr.mergeableState === "dirty" || pr.mergeableState === "unknown";
+const dirtyFirst = (pr: OpenPrView): number => (needsConflictEvidence(pr) ? 0 : 1);
 
 export function stackedOnNumbers(body: string | undefined): number[] {
   const line = (body ?? "").split(/\r?\n/).find((candidate) => /^\s*(?:[-*]\s+)?(?:\*\*)?Stacked on\b/i.test(candidate));
@@ -75,10 +79,59 @@ export function stackedOnNumbers(body: string | undefined): number[] {
 export interface MergeProbeSummary {
   probed: number;
   mainSha?: string;
+  conflictsByPr: Map<number, { headSha: string; evidence: MergeConflictEvidence }>;
 }
 
-/** Probe each open, non-draft PR head against main once per (head, main) pair. Observation only:
- *  read-only verbs, nothing written to a PR. A throw is logged and never fails the pass. */
+/** Compare evidence wins; a matching probe supplies only missing evidence for a waiting head. */
+export function applyMergeProbeEvidence(prs: OpenPrView[], summary: MergeProbeSummary): void {
+  for (const pr of prs) {
+    const conflict = summary.conflictsByPr.get(pr.prNumber);
+    if (pr.mergeConflict !== undefined || !needsConflictEvidence(pr) || conflict?.headSha !== pr.headSha) continue;
+    pr.mergeConflict = conflict.evidence;
+    pr.mergeConflictSource = "merge-probe";
+    pr.mergeState = "dirty";
+  }
+}
+
+async function probeConflictEvidence(
+  paths: readonly string[], headSha: string, mainSha: string, git: MergeProbeGit,
+): Promise<MergeConflictEvidence> {
+  const read = async (args: string[]): Promise<string> => {
+    const result = await git(args);
+    if (result.status !== 0) throw new Error(`conflict evidence ${args[0]} exited ${result.status}`);
+    return result.stdout;
+  };
+  const base = (await read(["merge-base", headSha, mainSha])).trim();
+  if (!/^[0-9a-f]{40,64}$/.test(base)) throw new Error("conflict evidence has no merge base");
+  const deletions = async (tip: string): Promise<Map<string, number>> => {
+    const stats = await read(["diff", "--numstat", "-z", "--no-renames", base, tip, "--"]);
+    const out = new Map<string, number>();
+    for (const entry of stats.split("\0").filter(Boolean)) {
+      const match = /^([^\t]+)\t([^\t]+)\t([\s\S]+)$/.exec(entry);
+      if (!match) throw new Error("conflict evidence has malformed numstat");
+      const removed = /^\d+$/.test(match[2]!) ? Number(match[2]) : NaN;
+      out.set(match[3]!, removed);
+    }
+    return out;
+  };
+  const ours = await deletions(headSha);
+  const theirs = await deletions(mainSha);
+  if (paths.some(path => !ours.has(path) && !theirs.has(path))) {
+    throw new Error("conflict evidence numstat did not include a conflicting path");
+  }
+  const evidence = {
+    files: paths.map(path => ({ path, oursDeleted: ours.get(path) ?? 0, theirsDeleted: theirs.get(path) ?? 0 })),
+    oursLog: (await read(["log", "--reverse", "--format=%h %s", `${base}..${headSha}`, "--"])).trim(),
+    theirsLog: (await read(["log", "--reverse", "--format=%h %s", `${base}..${mainSha}`, "--"])).trim(),
+  };
+  if (paths.some(path => path.startsWith('"')) || !hasCapturedMergeConflictEvidence(evidence)) {
+    throw new Error("conflict evidence has unreadable paths or deletion counts");
+  }
+  return evidence;
+}
+
+/** Probe each open, non-draft PR head against main once per (head, main) pair.
+ * Read-only git supplies fallback evidence; a failed read never supplies a repair input. */
 export async function probeOpenPrMerges(
   prs: readonly OpenPrView[],
   ledgerPath: string,
@@ -91,8 +144,9 @@ export async function probeOpenPrMerges(
     limit?: number;
   } = {},
 ): Promise<MergeProbeSummary> {
+  const conflictsByPr: MergeProbeSummary["conflictsByPr"] = new Map();
   const eligible = prs.filter((pr) => pr.isDraft !== true);
-  if (eligible.length === 0 || opts.dryRun === true) return { probed: 0 };
+  if (eligible.length === 0 || opts.dryRun === true) return { probed: 0, conflictsByPr };
   try {
     const git = opts.git ?? defaultMergeProbeGit(cwd);
     const fetched = await git(["fetch", "--no-tags", "--quiet", "origin", "main"]);
@@ -100,22 +154,42 @@ export async function probeOpenPrMerges(
     const mainSha = main.status === 0 ? main.stdout.trim() : "";
     if (mainSha === "") {
       log(`${MERGE_PROBE_STEP}.main_unreadable`, { git_status: main.status });
-      return { probed: 0 };
+      return { probed: 0, conflictsByPr };
     }
     // ledger-read-intent: live
     const lines = readLedgerLines(ledgerPath);
     const seen = new Set(
       lines.filter((line) => line.step === MERGE_PROBE_STEP).map((line) => `${line.head_sha}:${line.main_sha}`),
     );
+    for (const pr of eligible.filter(needsConflictEvidence)) {
+      const row = lines.findLast(line => line.step === MERGE_PROBE_STEP && line.pr_number === pr.prNumber &&
+        line.head_sha === pr.headSha && line.main_sha === mainSha);
+      const evidence = row?.conflict_evidence as MergeConflictEvidence | undefined;
+      if (row?.verdict === "conflict" && evidence && Array.isArray(evidence.files) &&
+          typeof evidence.oursLog === "string" && typeof evidence.theirsLog === "string" &&
+          hasCapturedMergeConflictEvidence(evidence)) {
+        conflictsByPr.set(pr.prNumber, { headSha: pr.headSha, evidence });
+      }
+    }
     const targets = eligible
       .filter((pr) => !seen.has(`${pr.headSha}:${mainSha}`))
-      // A PR GitHub already reads as dirty is the one whose conflict evidence the sweep is waiting on,
-      // so it takes a slot before clean-looking PRs that merely changed since the last main.
+      // Dirty and unknown heads take slots before PRs that merely changed since the last main.
       .sort((a, b) => dirtyFirst(a) - dirtyFirst(b) || a.lastActivityAt.localeCompare(b.lastActivityAt) || a.prNumber - b.prNumber)
       .slice(0, opts.limit ?? MERGE_PROBE_LIMIT);
     for (const pr of targets) {
       await git(["fetch", "--no-tags", "--quiet", "origin", `refs/pull/${pr.prNumber}/head`]);
       const result = await probeMerge({ headSha: pr.headSha, mainSha, git });
+      let evidence: MergeConflictEvidence | undefined;
+      let evidenceFailure: { error: string } | undefined;
+      if (result.verdict === "conflict" && needsConflictEvidence(pr)) {
+        try {
+          if (result.truncated) throw new Error("conflict paths exceeded the probe cap");
+          evidence = await probeConflictEvidence(result.paths, pr.headSha, mainSha, git);
+          conflictsByPr.set(pr.prNumber, { headSha: pr.headSha, evidence });
+        } catch (error) {
+          evidenceFailure = { error: String((error as Error)?.message ?? error) };
+        }
+      }
       const behind = opts.behindMainByPr?.get(pr.prNumber);
       log(MERGE_PROBE_STEP, {
         pr_number: pr.prNumber,
@@ -123,16 +197,18 @@ export async function probeOpenPrMerges(
         main_sha: mainSha,
         verdict: result.verdict,
         conflict_paths: result.verdict === "conflict" ? result.paths : [],
+        ...(evidence ? { conflict_evidence: evidence } : {}),
+        ...(evidenceFailure ? { conflict_evidence_error: evidenceFailure.error } : {}),
         github_mergeable_state: pr.mergeableState ?? "absent",
         stacked_on: stackedOnNumbers(pr.body),
         ...(result.verdict === "unreadable" ? { reason: result.reason } : {}),
         ...(behind === undefined ? {} : { behind_by: behind }),
       });
     }
-    return { probed: targets.length, mainSha };
+    return { probed: targets.length, mainSha, conflictsByPr };
   } catch (e) {
     log(`${MERGE_PROBE_STEP}.error`, { error: String((e as Error)?.message ?? e) });
-    return { probed: 0 };
+    return { probed: 0, conflictsByPr };
   }
 }
 
