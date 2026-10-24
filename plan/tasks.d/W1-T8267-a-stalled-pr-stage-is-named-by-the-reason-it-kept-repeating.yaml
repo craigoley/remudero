@@ -11,7 +11,7 @@
   origin: "operator rulings 2026-10-09 (never leave stuck PRs) + 2026-10-11 detection research: review-owner loops, light-pass deferral loops and ownerless plan PRs were found by a person"
   plan_refs: [W1-T5900, W1-T6405, W1-T8167, W1-T8088, W1-T8086, W1-T7959, W1-T4385]
   files: [src/lib/sweep.ts, test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

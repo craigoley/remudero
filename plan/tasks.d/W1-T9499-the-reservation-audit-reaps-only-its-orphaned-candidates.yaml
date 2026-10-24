@@ -11,7 +11,7 @@
   origin: "operator 2026-10-14 (\"go with your recommendations\"): the refs/rmd-id census and reaper proposal of the rmd-id leak session (PR #11707)"
   plan_refs: [W1-T3300, W1-T9488, W1-T5279, W1-T1055]
   files: [src/run-task.ts, test/the-reservation-audit-reaps-only-its-orphaned-candidates.test.ts, docs/cli-reference.md]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
