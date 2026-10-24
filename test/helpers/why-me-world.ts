@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, w
 import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
+import { duplexPair, type Duplex } from "node:stream";
 import { fixedClock } from "../../src/lib/clock.js";
 import { readPersistedInbox } from "../../src/lib/fleet-lane.js";
 import { refreshInboxClassification } from "../../src/lib/inbox-view.js";
@@ -21,10 +22,11 @@ const operator: IdentityProvider = { name: "test-operator", grant: () => undefin
   if (req.headers.authorization === "Bearer bob") return { scopes: new Set(["read", "write"]), tier: "low", actor: "operator:bob" };
   return undefined;
 } };
-export async function world(scope: T, options: { root?: string; instance?: string; repository?: string; native?: boolean; planSource?: PanelGraphDeps["readPlanSource"]; retirementBarrier?: () => Promise<void>; httpTransport?: "unix" } = {}) {
+export async function world(scope: T, options: { root?: string; instance?: string; repository?: string; native?: boolean; planSource?: PanelGraphDeps["readPlanSource"]; retirementBarrier?: () => Promise<void>; httpTransport?: "duplex" } = {}) {
   const instance = options.instance ?? INSTANCE, repository = options.repository ?? REPOSITORY;
   const root = options.root ?? makeTempDir("why-me");
   const closures: Array<() => void | Promise<void>> = [];
+  const httpOwners: Array<{ server: ReturnType<typeof createService>; connections: Duplex[]; connect: () => Duplex }> = [];
   const t: T = { after: (close) => { closures.push(close); } };
   scope.after(async () => {
     const failures: unknown[] = [];
@@ -63,18 +65,38 @@ export async function world(scope: T, options: { root?: string; instance?: strin
       routes: options.native ? defaultInstanceInboxSources({ instance, root, planPath, ledgerPath }, repository, fakeGitHub()) : [buildInboxAttentionCensusRoute({ ...deps, inboxFromSlowLane: true,
         readPlanSnapshot: () => { throw new Error("GET must read the maintained snapshot"); } })], ...binding });
     const server = createService({ tokens: { read: "read", write: "shared" }, providers: [operator], routes, enforceWriteTiers: true });
-    const socketPath = options.httpTransport === "unix" ? join(root, `http-${closures.length}.sock`) : undefined;
-    await new Promise<void>(resolve => socketPath
-      ? server.listen(socketPath, resolve)
-      : server.listen(0, "127.0.0.1", resolve));
-    t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
-    const base = socketPath ? undefined : `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const connections: Duplex[] = [];
+    const connect = () => {
+      const [client, accepted] = duplexPair();
+      connections.push(client, accepted);
+      server.emit("connection", accepted);
+      return client;
+    };
+    httpOwners.push({ server, connections, connect });
+    if (options.httpTransport !== "duplex") await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => { server.off("error", reject); resolve(); });
+    });
+    t.after(async () => {
+      server.closeAllConnections();
+      await Promise.all(connections.filter(socket => !socket.closed).map(socket => new Promise<void>(resolve => {
+        socket.once("close", resolve);
+        socket.destroy();
+      })));
+      await new Promise<void>((resolve, reject) => server.close(error => {
+        // Stream connections exercise Node's HTTP parser without owning a listening socket.
+        if (error && !(options.httpTransport === "duplex" &&
+          (error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING")) reject(error);
+        else resolve();
+      }));
+    });
+    const base = options.httpTransport === "duplex" ? undefined : `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     return async (body?: unknown, token = "alice", query = "") => {
       const path = `/v1/i/${instance}/inbox/${body === undefined ? "attention-census" : "why-me-correction"}${query}`;
       const method = body === undefined ? "GET" : "POST";
       const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
-      if (socketPath) return new Promise<{ status: number; body: Record<string, any> }>((resolve, reject) => {
-        const req = httpRequest({ socketPath, path, method, headers, agent: false }, res => {
+      if (options.httpTransport === "duplex") return new Promise<{ status: number; body: Record<string, any> }>((resolve, reject) => {
+        const req = httpRequest({ createConnection: connect, path, method, headers }, res => {
           const chunks: Buffer[] = [];
           res.on("data", chunk => chunks.push(Buffer.from(chunk)));
           res.on("end", () => resolve({ status: res.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString()) }));
@@ -90,6 +112,6 @@ export async function world(scope: T, options: { root?: string; instance?: strin
   };
   const request = (intentId: string, correction = "fleet_can_handle") => ({ repository, instance,
     proposalId: PROPOSAL, threadId: inboxThreadId(PROPOSAL), snapshotKey: key(), intentId, correction });
-  return { after: t.after, root, state, instance, repository, planPath, ledgerPath, registry, plan, deps, refresh, key, served, request, call: await served() };
+  return { after: t.after, root, state, instance, repository, planPath, ledgerPath, registry, plan, deps, refresh, key, served, request, httpOwners, call: await served() };
 }
 

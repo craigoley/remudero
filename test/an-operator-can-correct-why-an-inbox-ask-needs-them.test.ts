@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { request as httpRequest } from "node:http";
 import fs from "node:fs";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, appendFileSync, copyFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import type { AddressInfo } from "node:net";
+import { Server as NetServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { writeAtomic } from "../src/lib/fs-race-safe.js";
@@ -671,43 +673,60 @@ test("why-me receipt FIFOs are refused without waiting for a writer", t => {
 
 
 test("why-me fixture resources close and diagnostics settle before its owned root retires", async (t) => {
+  t.mock.method(NetServer.prototype, "listen", () => { throw new Error("this proof must not bind a socket"); });
   const { openProjectorReadModel } = await import("#src/lib/ledger-projector.js");
   const { flushReadModelTransactions } = await import("#src/lib/read-model-db.js");
   let retirement!: () => void | Promise<void>, release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void;
+  const atBarrier = new Promise<void>(resolve => { entered = resolve; });
   let closed = false, observedBarrier = false, retired = false;
+  let disconnected!: Promise<void>;
   const w = await world({ after: (finish) => {
     retirement = finish;
     t.after(async () => { if (!retired) { retired = true; await finish(); } });
   } }, {
-    httpTransport: "unix",
+    httpTransport: "duplex",
     retirementBarrier: async () => {
       assert.equal(closed, true, "the actual SQLite owner closes before the diagnostic barrier");
-      await assert.rejects(() => w.call(), error =>
-        error instanceof Error && "code" in error && ["ENOENT", "ECONNREFUSED"].includes(String(error.code)),
-      "the real HTTP owner is closed before the barrier");
-      await flushReadModelTransactions(); observedBarrier = true; await gate;
+      assert.throws(() => db.prepare("SELECT 1"), "SQLite is unusable at the diagnostic barrier");
+      assert.ok(w.httpOwners[0]!.connections.length >= 4, "completed and active HTTP connections were opened");
+      assert.ok(w.httpOwners[0]!.connections.every(socket => socket.closed),
+        "all real HTTP client and server streams close before the barrier");
+      await disconnected;
+      await flushReadModelTransactions(); observedBarrier = true; entered(); await gate;
     },
   });
   assert.equal((await w.call()).status, 200, "the real HTTP owner serves a request before retirement");
   const db = openProjectorReadModel(w.state, "core", fixedClock(Date.now()));
   w.after(() => { db.close(); closed = true; });
+  const owner = w.httpOwners[0]!, received = once(owner.server, "request");
+  const pending = httpRequest({ createConnection: owner.connect, method: "POST",
+    path: `/v1/i/${w.instance}/inbox/why-me-correction`,
+    headers: { authorization: "Bearer alice", "content-type": "application/json", "content-length": "1" } });
+  disconnected = assert.rejects(new Promise<void>((resolve, reject) => {
+    pending.once("error", reject);
+    pending.once("response", () => resolve());
+  }), { code: "ECONNRESET" }, "retirement severs an active real HTTP request before diagnostics");
+  pending.flushHeaders(); await received;
+  assert.ok(owner.connections.slice(-2).every(socket => !socket.destroyed), "retirement starts with an active HTTP connection");
   retired = true;
-  const finishing = Promise.resolve(retirement());
+  const finishing = Promise.resolve(retirement()).then(() => undefined, error => error);
   try {
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await Promise.race([atBarrier, finishing.then(error => { throw error ?? new Error("retirement finished before the barrier"); })]);
     assert.ok(existsSync(w.root), "retirement keeps the real root while diagnostics are held");
-    release(); await finishing;
+    release(); assert.equal(await finishing, undefined);
     assert.equal(observedBarrier, true);
     assert.throws(() => db.prepare("SELECT 1"));
     assert.equal(existsSync(w.root), false);
   } finally {
-    release(); await finishing.catch(() => {});
+    release(); await finishing;
     rmSync(w.root, { recursive: true, force: true });
   }
 });
 
 test("why-me fixture release and barrier failures retain real SQLite evidence after the standard exit sweep", async (t) => {
+  t.mock.method(NetServer.prototype, "listen", () => { throw new Error("this proof must not bind a socket"); });
   const { REPO_ROOT } = await import("#test/helpers/repo-root.js");
   const { openProjectorReadModel } = await import("#src/lib/ledger-projector.js");
   const { flushReadModelTransactions } = await import("#src/lib/read-model-db.js");
@@ -720,10 +739,13 @@ test("why-me fixture release and barrier failures retain real SQLite evidence af
       retirement = finish;
       t.after(async () => { if (!retired) { retired = true; await finish(); } });
     } }, {
-      httpTransport: "unix",
+      httpTransport: "duplex",
       retirementBarrier: async () => { await flushReadModelTransactions(); if (mode === "barrier") throw failure; },
     });
+    assert.equal((await w.call()).status, 200, "HTTP setup reaches the real service before the injected failure");
     const db = openProjectorReadModel(w.state, "core", fixedClock(Date.now())), dbPath = db.path;
+    db.exec("CREATE TABLE retirement_evidence (mode TEXT NOT NULL)");
+    db.prepare("INSERT INTO retirement_evidence VALUES (?)").run(mode);
     w.after(() => { db.close(); if (mode === "release") throw failure; });
     retired = true;
     await assert.rejects(async () => retirement(), error => error === failure);
@@ -746,6 +768,10 @@ test("why-me fixture release and barrier failures retain real SQLite evidence af
     const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
     assert.equal(existsSync(receipt.root), true, `${failureMode}: the actual exit sweep preserves retained ownership evidence`);
     assert.deepEqual(readFileSync(receipt.dbPath).subarray(0, 16), Buffer.from([...Buffer.from("SQLite format 3"), 0]));
+    const { DatabaseSync } = await import("node:sqlite");
+    const evidence = new DatabaseSync(receipt.dbPath, { readOnly: true });
+    try { assert.equal(evidence.prepare("SELECT mode FROM retirement_evidence").get()!.mode, failureMode); }
+    finally { evidence.close(); }
     assert.equal(existsSync(receipt.unretained), false, "the same standard exit sweep removes its unretained control");
   }
 });
