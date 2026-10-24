@@ -1,9 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { isDeepStrictEqual } from "node:util";
 import { validateDailyProgressReport, type DailyProgressEvent, type DailyProgressReport } from "./daily-progress-contract.js";
 import { withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
+
+const require = createRequire(import.meta.url);
 
 export type DailyProgressRecord = Omit<DailyProgressReport, "revision" | "correctionReason" | "events" | "page"> & { events: DailyProgressEvent[] };
 export interface DailyProgressRevision { generation: number; report: Omit<DailyProgressReport, "events" | "page">; events: DailyProgressEvent[] }
@@ -169,12 +172,27 @@ export function prepareDailyProgressPublication(stateDir: string, records: reado
   return { manifest, publication, commit: (db, lease, stillCurrent) => commitDailyProgressPublication(stateDir, publication, db, lease, stillCurrent) };
 }
 
+/** PRIMARY CONTROL: a non-waiting SQLite writer lock serializes publications across scratch generations.
+ * The OS releases a crashed holder's lock; the manifest remains the durable evidence authority. */
+function withPublicationLock(root: string, action: () => void): void {
+  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+  const lock = new DatabaseSync(join(root, "publication-lock.sqlite"), { timeout: 0 });
+  try {
+    lock.exec("BEGIN IMMEDIATE");
+    action();
+    lock.exec("COMMIT");
+  } finally {
+    // Closing also rolls back an interrupted lock transaction, without discarding saved evidence.
+    lock.close();
+  }
+}
+
 /** Called by the owning projector with its already-open DB, never by the HTTP reader. */
 export function commitDailyProgressPublication(stateDir: string, publication: DailyProgressPublication, db: ReadModelDb, lease: ReadModelLease, stillCurrent: () => boolean = () => true): void {
   if (!Number.isSafeInteger(publication.baseGeneration) || publication.baseGeneration < 0 ||
       parseManifest(publication.manifestBody).generation !== publication.baseGeneration + 1) throw new Error("invalid staged daily publication generation");
   const root = dailyProgressStorePath(stateDir);
-  withWriteTransaction(db, lease, () => {
+  withPublicationLock(root, () => withWriteTransaction(db, lease, () => {
     if (!stillCurrent()) throw new Error("daily publication lost its source ownership epoch");
     const manifestPath = join(root, "manifest.json");
     const currentGeneration = readDailyProgressManifest(stateDir).generation;
@@ -187,5 +205,5 @@ export function commitDailyProgressPublication(stateDir: string, publication: Da
     }
     durableWrite(manifestPath, publication.manifestBody);
     syncDirectory(root);
-  });
+  }));
 }
