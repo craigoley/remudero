@@ -29,3 +29,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The filed remedy permits preventing dispatch or self-healing a scope refusal, but does not specify the mechanism or require preserving scope enforcement; the supplied record cannot establish whether this changes review policy.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for test declaration text with grep, rather than executing a behavioral check that the refusal is prevented while scope enforcement remains intact."
+    judged_at: "2026-10-24T22:14:29.211Z"
+    pin: "21db24c700b63cbdffa1184168908a31de9d86c25f226492933e22cab7303ce8"
