@@ -2,7 +2,7 @@
   title: Observe when a pending CI refresh only brings main changes its actual checkout already tested
   repo: remudero
   type: recon
-  verify: human
+  verify: auto
   depends_on: []
   plan_refs: [W1-T7735, W1-T5696, W1-T6022, W1-T10338, W1-T10065]
   priority: 1
@@ -89,3 +89,13 @@
     differs, or the actual recorded trigger is a distinct mandatory repair, the initial
     unnecessary-refresh hypothesis fails. A genuinely untested reaching change must remain
     separate. A report claiming a fleet-wide zero from this one selected case is not acceptable.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed task scopes a recon report to docs/ci-friction-remedies.md and explicitly reserves refresh-policy changes for a separate decision."
+      - "The supplied rationale identifies exact CI run, checkout, parent commits, refresh timestamps and tree comparisons, providing concrete provenance for the bounded PR-13834 observation."
+      - "Acceptance requires preserving UNKNOWN and counterexamples; the rationale explicitly rejects generalizing this case to other refreshes and distinguishes related plan tasks."
+    judged_at: "2026-10-24T00:14:35.499Z"
+    pin: "543e6bf3ccbd66bef26821cd16a5553e1640a3ffabe9723dece8972d1fddebd9"
