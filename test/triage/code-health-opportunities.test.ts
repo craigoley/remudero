@@ -39,6 +39,9 @@ test("code health deduplicates opportunities and preserves urgent findings", () 
   const retry = buildCodeHealthOpportunities(reordered, related)[0]!;
   assert.equal(retry.id, opportunity.id);
   assert.equal(retry.snapshotId, opportunity.snapshotId, "source order does not mint a different immutable snapshot");
+  const otherBaseline = structuredClone(value); otherBaseline.baseline!.scans[0]!.scanId = "quality:another-baseline";
+  assert.notEqual(buildCodeHealthOpportunities(otherBaseline, related)[0]!.snapshotId, opportunity.snapshotId,
+    "another baseline scan is different immutable evidence even when its code and finding states match");
   const renamed = structuredClone(value); renamed.scans[0]!.findings.forEach(finding => { finding.title = "Updated source explanation."; finding.path = "src/moved.ts"; });
   const update = buildCodeHealthOpportunities(renamed, related)[0]!;
   assert.equal(update.id, opportunity.id, "a moved finding reuses its work package");
