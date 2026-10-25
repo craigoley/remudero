@@ -13,6 +13,7 @@ import { daemonCommand } from "#src/cli/commands/daemon.js";
 import { runTask as directRunTask } from "#src/cli/commands/run-task-verb.js";
 import { main } from "#src/run-task.js";
 import { spawnCodexWorker } from "#src/lib/worker-provider.js";
+import { realDeployDeps } from "#src/lib/deployer.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { workerHomeDir } from "#src/lib/config.js";
 import { perRunWorkerHomeDir } from "#src/lib/worker-home.js";
@@ -204,6 +205,50 @@ test("selected runtime trusted launcher packet uses the real bounded child and i
     const changed = invoke(packet[2]);
     assert.equal(changed.status, 0);
     assert.notEqual(changed.stdout.split("\n")[3], packet[3], "equal bytes never conceal a replacement physical identity");
+  } finally { fixture.cleanup(); }
+});
+
+test("selected supervisor hands immutable private identity only to its trusted recycler and redacts failures", async () => {
+  const fixture = runtimeRegistryFixture(), calls: string[][] = [];
+  const stateRoot = join(fixture.root, "selected-state");
+  writeFileSync(fixture.selected, registry("shadow") + `    state_dir: ${stateRoot}\n    container_name: selected-container\n`);
+  try {
+    await runtimeRegistryRunner()(() => {
+      const options = { installPath: fixture.root, stateRoot, daemonLabel: "fixture", serveLabel: "fixture-serve",
+        servePort: 1, uid: 1, ledgerPath: join(stateRoot, "unused"), log: () => {},
+        execFile: (cmd: string, args: string[]) => { calls.push([cmd, ...args]); return ""; } };
+      const deps = realDeployDeps(options), recycler = deps.restartBackends!().find(b => b.name === "recycle-container")!;
+      options.instance = "retargeted";
+      recycler.restart();
+      const command = calls.at(-1)!;
+      assert.ok(command.includes("worker"), "selected bytes, not the healthy public row, name the target");
+      assert.ok(command.includes(fixture.selected), "only this trusted host launcher receives the private selection");
+      assert.ok(command.some(arg => /^[a-f0-9]{64}$/.test(arg)), "the original digest/physical binding survives the handoff");
+      calls.length = 0;
+      assert.throws(() => deps.kickstart(), /selected instance registry unavailable/);
+      assert.deepEqual(calls, [], "an unsupported launchctl route must refuse before a restart");
+      const refused = realDeployDeps({ ...options, instance: "worker", execFile: () => { throw new Error(fixture.selected); } });
+      assert.throws(() => refused.restartBackends!().find(b => b.name === "recycle-container")!.restart(), error => {
+        assert.ok(error instanceof runtimeRegistry.InstanceRegistryRuntimeError);
+        assert.equal(error.message.includes(fixture.root), false, "exec failures must not quote private argv");
+        return true;
+      });
+    }, { envPath: fixture.selected, instanceName: "worker" });
+  } finally { fixture.cleanup(); }
+});
+
+test("selected trusted launcher target cannot contradict its original invocation", async () => {
+  const fixture = runtimeRegistryFixture();
+  try {
+    await runtimeRegistryRunner()(() => {
+      const packet = runtimeRegistry.trustedInstanceRegistryLaunchPacket as (target?: string) => string;
+      assert.throws(() => packet("different"), /selected instance registry unavailable/);
+      assert.equal(packet("worker").split("\n")[0], "rmd-private-registry-v1");
+    }, { envPath: fixture.selected, instanceName: "worker" });
+    await runtimeRegistryRunner()(() => {
+      const packet = runtimeRegistry.trustedInstanceRegistryLaunchPacket as (target?: string) => string;
+      assert.equal(packet("worker").split("\n")[0], "rmd-private-registry-v1", "an explicit trusted target can bind an unnamed host invocation");
+    }, { envPath: fixture.selected });
   } finally { fixture.cleanup(); }
 });
 
