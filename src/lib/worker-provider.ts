@@ -5,7 +5,7 @@ import { CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
-import { constants as fsConstants, accessSync, appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { constants as fsConstants, accessSync, appendFileSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -42,6 +42,7 @@ import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { makeTempDir, withTempDir } from "./tmp.js";
+import { assertInstanceRegistryRuntimeCurrent, runtimeInstanceRegistryPrivateFile, InstanceRegistryRuntimeError } from "./instance-registry-selection.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
@@ -2710,7 +2711,7 @@ export function codexTestSlotArgs(env: NodeJS.ProcessEnv = process.env): string[
   return args;
 }
 
-function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
+function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">, privateProfile?: string): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
   if (!model) throw new Error("refusing a Codex spawn with no model: the account default would run unreviewed");
@@ -2727,7 +2728,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     [":tmpdir", "write"],
     ...disposableReadRoots.map((root) => [root, "read"]),
   ].map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(",");
-  const disposableReviewProfile = disposableReview
+  const disposableReviewProfile = disposableReview && privateProfile === undefined
     ? [
         "--enable", "network_proxy",
         "-c", 'default_permissions="rmd_review"',
@@ -2741,6 +2742,8 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     "--ignore-user-config",
     ...codexPreToolUseProfile(args.settingsFile),
     ...disposableReviewProfile,
+    ...(privateProfile === undefined ? [] : ["--profile", privateProfile, "--strict-config",
+      ...(disposableReview ? ["--enable", "network_proxy"] : [])]),
     // W1-T2754: Codex refuses to start when its `-C` cwd is neither a git repository nor a
     // configured trusted directory — "Not inside a trusted directory and --skip-git-repo-check
     // was not specified." — and it does so by EXITING 0 WITH NO OUTPUT, so the caller sees an
@@ -2783,8 +2786,8 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   return [
     "exec",
     ...shared,
-    ...(disposableReview ? [] : ["--sandbox", readOnly ? "read-only" : "workspace-write"]),
-    ...(readOnly || disposableReview ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
+    ...(disposableReview || privateProfile !== undefined ? [] : ["--sandbox", readOnly ? "read-only" : "workspace-write"]),
+    ...(readOnly || disposableReview || privateProfile !== undefined ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
     // Writers only: a reader or review runs no typecheck that needs the host slot.
     ...(readOnly || disposableReview ? [] : codexTestSlotArgs()),
     "-C", args.cwd,
@@ -2792,14 +2795,52 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   ];
 }
 
+async function withPrivateRegistryCodexProfile<T>(
+  args: CodexSpawnArgs, config: Config, selected: string, operation: (profile: string) => Promise<T>,
+): Promise<T> {
+  await assertInstanceRegistryRuntimeCurrent();
+  // A saved session may carry older permissions. Never silently resume it with unqualified private access.
+  if (args.resumeSessionId) throw new InstanceRegistryRuntimeError("worker_resume_not_qualified");
+  const name = `rmd_registry_${randomUUID().replaceAll("-", "")}`;
+  let path: string, text: string, identity: { dev: number; ino: number };
+  try {
+    // An exclusive invocation file only: do not create a home, copy credentials or edit base configuration.
+    path = join(realpathSync(codexHome(config)), `${name}.config.toml`);
+    const review = args.sandboxIntent === "disposable-review", readOnly = codexReadOnly(args);
+    const filesystem = new Map<string, string>(review ? [[":slash_tmp", "deny"], [":tmpdir", "write"],
+      ...[...new Set((args.sandboxReadRoots ?? []).filter(isAbsolute).map(physicalPath))].map(root => [root, "read"] as [string, string])] : []);
+    // Set denies last, so an overlapping reviewer read grant cannot replace either narrow denial.
+    filesystem.set(selected, "deny"); filesystem.set(path, "deny");
+    text = `default_permissions="rmd_registry"\n[permissions.rmd_registry]\nextends="${readOnly ? ":read-only" : ":workspace"}"\n`
+      + `[permissions.rmd_registry.network]\nenabled=${review || !readOnly}\n[permissions.rmd_registry.filesystem]\n`
+      + [...filesystem].map(([target, access]) => `${JSON.stringify(target)}=${JSON.stringify(access)}`).join("\n") + "\n";
+    writeFileSync(path, text, { flag: "wx", mode: 0o600 });
+    identity = lstatSync(path);
+  } catch {
+    // Unavailable private profile is unknown containment, never a fallback to broad workspace reads.
+    throw new InstanceRegistryRuntimeError("worker_profile_unavailable");
+  }
+  try { return await operation(name); }
+  finally {
+    const current = lstatSync(path);
+    if (!current.isFile() || current.dev !== identity.dev || current.ino !== identity.ino || readFileSync(path, "utf8") !== text) {
+      throw new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
+    }
+    rmSync(path);
+  }
+}
+
 export async function spawnCodexWorker(
   args: CodexSpawnArgs,
   config: Config,
   selection?: Pick<ProviderCapacity, "model" | "effort">,
 ): Promise<CodexWorkerResult> {
-  return withTempDir("codex-worker", (privateTmpDir) =>
-    spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection),
-  );
+  return withTempDir("codex-worker", (privateTmpDir) => {
+    const selected = runtimeInstanceRegistryPrivateFile();
+    if (selected === undefined) return spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection);
+    return withPrivateRegistryCodexProfile(args, config, selected, profile =>
+      spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, profile));
+  });
 }
 
 /** Azure deployment authentication is process-local to the daemon. It is deliberately not a
@@ -5355,6 +5396,7 @@ async function spawnCodexWorkerInPrivateTemp(
   config: Config,
   privateTmpDir: string,
   selection?: Pick<ProviderCapacity, "model" | "effort">,
+  privateProfile?: string,
 ): Promise<CodexWorkerResult> {
   const bin = resolveCodexBin(config);
   const startedAt = Date.now();
@@ -5388,7 +5430,7 @@ async function spawnCodexWorkerInPrivateTemp(
   };
   const childEnv = { ...codexSpawnEnv(config, args), TMPDIR: privateTmpDir };
   const contained = spawn(
-    { command: bin, args: codexExecArgs(args, config, selection), cwd: args.cwd, env: childEnv },
+    { command: bin, args: codexExecArgs(args, config, selection, privateProfile), cwd: args.cwd, env: childEnv },
     (chunk) => {
       if (outputLimit || timedOut) return;
       // W1-T8203: stderr past its bound is truncated (head + tail), never a teardown and never a verdict.
