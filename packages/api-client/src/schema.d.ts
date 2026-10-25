@@ -124,7 +124,7 @@ export interface components {
       goalDigest: string;
       draftDigest: unknown;
       requestedAt: string;
-      state: "requested" | "waiting" | "completed" | "refused" | "uncertain";
+      state: "prepared" | "requested" | "waiting" | "completed" | "refused" | "uncertain";
       reason: unknown;
       receipt: unknown;
     };

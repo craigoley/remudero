@@ -554,6 +554,7 @@ components:
         state:
           type: string
           enum:
+            - prepared
             - requested
             - waiting
             - completed

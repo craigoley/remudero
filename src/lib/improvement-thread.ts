@@ -356,7 +356,7 @@ export function readImprovementThread(requestId: string, deps: ImprovementThread
         if (!action || action.proposalId !== proposal.id || action.kind !== "draft") {
           if (drafting.state !== "ready") drafting = { state: "unavailable", digest: null, fragmentYaml: null, reason: "A draft decision was started, but its saved receipt cannot currently be verified." };
         } else if (action.goalDigest === proposal.improvement.goalDigest) {
-          if (drafting.state === "not_requested") drafting = { state: action.state === "refused" ? "refused" : action.state === "completed" || action.state === "uncertain" ? "unavailable" : "requested", digest: null, fragmentYaml: null,
+          if (drafting.state === "not_requested") drafting = { state: action.state === "refused" ? "refused" : action.state === "prepared" || action.state === "completed" || action.state === "uncertain" ? "unavailable" : "requested", digest: null, fragmentYaml: null,
             reason: action.reason ?? (action.state === "completed" ? "The completed draft's cached content cannot currently be verified." : null) };
           drafting = { ...drafting, operationId: action.operationId, sourceRequestId: action.requestId };
         }
@@ -364,7 +364,7 @@ export function readImprovementThread(requestId: string, deps: ImprovementThread
       if (index.file) {
         const action = readAction(deps.stateDir, index.file);
         if (!action || action.proposalId !== proposal.id || action.kind !== "file") throw new Error("The filing receipt cannot be verified.");
-        filing = { state: action.state === "completed" && action.receipt ? "plan_pr_opened" : action.state === "refused" ? "refused" : action.state === "uncertain" || action.state === "completed" ? "uncertain" : "requested",
+        filing = { state: action.state === "completed" && action.receipt ? "plan_pr_opened" : action.state === "refused" ? "refused" : action.state === "prepared" || action.state === "uncertain" || action.state === "completed" ? "uncertain" : "requested",
           operationId: action.operationId, sourceRequestId: action.requestId, ...(action.receipt ? { receipt: action.receipt } : {}), reason: action.reason };
       }
     } catch {
@@ -439,12 +439,14 @@ export interface ImprovementPlanReceipt {
 export interface ImprovementAction {
   version: "improvement-action-v1"; operationId: string; kind: "draft" | "file"; requestId: string; proposalId: string;
   actorId: string; payloadHash: string; goalDigest: string; draftDigest: string | null; requestedAt: string;
-  state: "requested" | "waiting" | "completed" | "refused" | "uncertain"; reason: string | null;
+  state: "prepared" | "requested" | "waiting" | "completed" | "refused" | "uncertain"; reason: string | null;
   receipt: ImprovementPlanReceipt | null;
 }
 export interface ImprovementActionDeps extends ImprovementThreadDeps {
   /** Starts only the owned fresh-source CLI handoff. A request receipt is not a completed action. */
   launchAction?: (target: { operationId: string; stateDir: string; repoRoot: string }) => void;
+  /** Decision-write interruption seam; never accepted in an API request. */
+  afterActionPersist?: (stage: "prepared" | "indexed" | "requested") => void;
 }
 export type ImprovementActionResult = Failure | { state: "requested"; operation: ImprovementAction; execution: { state: "not_requested" } };
 function actionInput(value: unknown, kind: ImprovementAction["kind"]): ImprovementActionRequest | undefined {
@@ -478,7 +480,7 @@ function readAction(stateDir: string, operationId: string): ImprovementAction | 
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   const { contentHash, ...action } = raw as ImprovementAction & { contentHash: string };
   if (contentHash !== hash(action) || action.version !== "improvement-action-v1" || action.operationId !== operationId ||
-      !["draft", "file"].includes(action.kind) || !["requested", "waiting", "completed", "refused", "uncertain"].includes(action.state) ||
+      !["draft", "file"].includes(action.kind) || !["prepared", "requested", "waiting", "completed", "refused", "uncertain"].includes(action.state) ||
       ![action.requestId, action.goalDigest, action.payloadHash].every(value => /^[a-f0-9]{64}$/.test(value))) throw new Error("Invalid saved improvement action.");
   return action;
 }
@@ -519,21 +521,36 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
       if (previous.state === "uncertain" && previous.kind === "file" && deps.launchAction) deps.launchAction({ ...actionTarget(intent), operationId, stateDir: deps.stateDir });
       return { state: "requested", operation: previous, execution: { state: "not_requested" } };
     }
+    if (kind === "file" && (!previous || previous.state === "prepared")) {
+      const index = readActionIndex(deps.stateDir, intent.proposalId);
+      if (!index) return fail("uncertain", "This chat's earlier filing decisions cannot currently be checked.");
+      if (index.file && index.file !== operationId) {
+        const earlier = readAction(deps.stateDir, index.file);
+        if (!earlier || earlier.kind !== "file" || earlier.proposalId !== intent.proposalId) return fail("uncertain", "An earlier filing decision cannot currently be verified. Check its saved result before continuing.");
+        if (earlier.state !== "refused") return fail("conflict", earlier.state === "completed"
+          ? "This improvement already has a plan pull request. Review that plan before starting follow-up work."
+          : "An earlier filing decision is still pending or unconfirmed. Check its saved result; another request identity cannot repeat filing.");
+      }
+    }
+    const refusePrepared = (reason: string) => {
+      if (previous?.state === "prepared") { previous.state = "refused"; previous.reason = reason; writeAction(deps.stateDir, previous, owns!); }
+    };
     const view = readImprovementThread(input.requestId, deps);
-    if (view.state !== "saved") return view;
-    if (view.currentRequestId !== input.requestId || view.goalDigest !== input.goalDigest) return fail("conflict", "The goal changed. Review the latest conversation before continuing.");
-    const source = sourceFor(intent.request, intent.scope, deps); if ("state" in source) return source;
+    if (view.state !== "saved") { refusePrepared(view.reason); return view; }
+    if (view.currentRequestId !== input.requestId || view.goalDigest !== input.goalDigest) { refusePrepared("The goal changed before this decision was saved."); return fail("conflict", "The goal changed. Review the latest conversation before continuing."); }
+    const source = sourceFor(intent.request, intent.scope, deps); if ("state" in source) { refusePrepared(source.reason); return source; }
     if (kind === "file" && (view.correspondence.state !== "linked" || view.correspondence.pendingInputs !== 0 || view.correspondence.pendingWork !== 0)) return fail("conflict", "A newer chat message has not been resolved. Review its answer and the current draft before filing.");
     if (kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== input.draftDigest)) return fail("conflict", "Review the current completed draft before requesting filing.");
     if (deps.launchAction === undefined) return fail("source_unavailable", "This repository cannot start plan drafting or filing right now. No action was requested.");
     const action: ImprovementAction = previous ?? { version: "improvement-action-v1", operationId, kind, requestId: input.requestId, proposalId: intent.proposalId,
-      actorId: deps.actorId, payloadHash, goalDigest: input.goalDigest, draftDigest: input.draftDigest ?? null, requestedAt: (deps.clock ?? systemClock).iso(), state: "requested", reason: null, receipt: null };
-    if (!previous) {
+      actorId: deps.actorId, payloadHash, goalDigest: input.goalDigest, draftDigest: input.draftDigest ?? null, requestedAt: (deps.clock ?? systemClock).iso(), state: "prepared", reason: null, receipt: null };
+    if (!previous || action.state === "prepared") {
+      // Seal the full decision before publishing its pointer. A partial save can be retried only with identical bytes.
+      if (!previous) { writeAction(deps.stateDir, action, owns); wrote = true; deps.afterActionPersist?.("prepared"); }
       const index = readActionIndex(deps.stateDir, intent.proposalId);
       if (!index) throw new Error("The saved action index is unavailable.");
-      // Publish the pointer first: interruption exposes an unverified decision, never a false 'not requested'.
-      writeActionIndex(deps.stateDir, { ...index, [kind]: operationId }, owns); wrote = true;
-      writeAction(deps.stateDir, action, owns);
+      writeActionIndex(deps.stateDir, { ...index, [kind]: operationId }, owns); wrote = true; deps.afterActionPersist?.("indexed");
+      action.state = "requested"; writeAction(deps.stateDir, action, owns); deps.afterActionPersist?.("requested");
     }
     if (kind === "draft" && ["requested", "waiting"].includes(action.state)) {
       const registryPath = join(intent.scope.inboxStateDir, "inbox-proposals.json");
@@ -574,6 +591,7 @@ export async function runImprovementAction(operationId: string, deps: Improvemen
     action = readAction(deps.stateDir, operationId);
     if (!action) return fail("source_unavailable", "This saved action request is unavailable.");
     if (["completed", "refused"].includes(action.state)) return action;
+    if (action.state === "prepared") return fail("uncertain", "This decision was not fully saved. Retry the same request before it can run.");
     const intent = readIntent(join(deps.stateDir, "improvement-threads", `${action.requestId}.json`));
     if (!intent || intent.stage !== "saved" || intent.proposalId !== action.proposalId) return fail("source_unavailable", "This action's saved conversation cannot be verified.");
     const scope = scopeFor(intent.request, deps.stateDir);
@@ -584,6 +602,7 @@ export async function runImprovementAction(operationId: string, deps: Improvemen
     action = readAction(deps.stateDir, operationId);
     if (!action || action.proposalId !== intent.proposalId || action.requestId !== intent.requestId) return fail("uncertain", "The action changed during admission.");
     if (["completed", "refused"].includes(action.state)) return action;
+    if (action.state === "prepared") return fail("uncertain", "This decision was not fully saved. Retry the same request before it can run.");
     // The native ratification receipt is the recovery authority, including after source or goal changes.
     if (action.kind === "file") {
       const recovered = deps.recoverFiling({ proposalId: intent.proposalId, ledgerPath: scope.ledgerPath });
