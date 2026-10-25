@@ -33925,7 +33925,7 @@ export function gardenReplayCommand(rest: string[], opts: GardenReplayOptions = 
 }
 
 /** `rmd garden run <name> [--hourly]` — one pass of one registered garden, the daemon's off-loop child (W1-T5114). */
-export async function gardenCommand(rest: string[]): Promise<number> {
+export async function gardenCommand(rest: string[], source: { repoRoot?: string } = {}): Promise<number> {
   const [sub, name] = rest;
   if (sub === "replay") return gardenReplayCommand(rest.slice(1));
   const badArg = unknownArgError("garden", rest.slice(2), [], [GARDEN_HOURLY_FLAG]);
@@ -33941,7 +33941,7 @@ export async function gardenCommand(rest: string[]): Promise<number> {
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
   const raiseDuplicate = (e: Escalation): string =>
     escalate({ ...e, runId }, { issues: ghIssueGateway(self.owner, self.repo), ledgerPath, runId });
-  return await runRegisteredGardenPass(name, rest.slice(2), { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate });
+  return await runRegisteredGardenPass(name, rest.slice(2), { config, repoRoot: source.repoRoot ?? repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate });
 }
 
 export function sweepPrTerminalRung(github: Pick<GitHub, "prByRef">, ledgerPath: string, runId: string, // W1-T5318
