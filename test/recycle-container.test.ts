@@ -387,7 +387,9 @@ test("selected private recycler refuses unknown input before any transport or pu
     const control = runRecycle("good", opts);
     assert.equal(control.status, 0, control.stderr);
     assert.ok(control.calls.some(isRun), "healthy unselected public input must reach the contained Docker transport");
-    for (const selected of ["", "relative.yaml", join(root, "missing.yaml")]) {
+    const fragment = join(root, "fragment.yaml");
+    writeFileSync(fragment, "  fixture:\n    repo: remudero\n");
+    for (const selected of ["", "relative.yaml", join(root, "missing.yaml"), fragment]) {
       const result = runRecycle("good", { ...opts, extraEnv: { RMD_INSTANCE_REGISTRY: selected } });
       assert.equal(result.status, 2, result.stderr);
       assert.match(result.stderr, /selected registry unavailable/);
@@ -1241,8 +1243,10 @@ function runInstance(extra: string[], mode = "good", opts: RunOpts = {}): Run {
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
   const registry = join(root, "daemon-instances.yaml");
   const record = [
+    "instances:",
     "  fixture:",
     "    repo: remudero",
+    "    github_repo: owner/remudero",
     `    state_dir: ${dirs.state}`,
     "    container_name: remudero-fixture",
     "    image: test-registry.azurecr.io/remudero:latest",
