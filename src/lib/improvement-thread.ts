@@ -15,6 +15,9 @@ import type { Route } from "./service.js";
 import { causalThreadInputs, appendThreadMessageOnce, inboxThreadId, inboxThreadIdentity, readThread, type ThreadMessageExtra } from "./inbox-thread.js";
 
 export const IMPROVEMENT_THREAD_VERSION = "improvement-thread-v1" as const;
+// Valid Unicode goals, constraints and the bounded briefing must fit the same writer and recovery reader.
+const IMPROVEMENT_INTENT_MAX_BYTES = 512 * 1024;
+const IMPROVEMENT_ACTION_MAX_BYTES = 32 * 1024;
 export interface ImprovementThreadRequest {
   repository: string; opportunityId: string; snapshotId: string; goal: string; constraints?: string[];
   idempotencyKey: string; instance?: string;
@@ -114,15 +117,18 @@ function sourceFor(request: ImprovementThreadRequest, scope: Scope, deps: Improv
   // Scanner text is quoted evidence. It never becomes a command or a human approval.
   const excerpt = opportunity.evidence.slice(0, 20).map(row => ({ path: row.path, finding: row.title, severity: row.severity, scan: row.scanId, observedAt: row.observedAt }));
   const context = [
-    `Improvement in ${request.repository} (${scope.instance})`, `Source commit: ${scan.analyzedSha}`, `Source checked: ${scan.observedAt}`,
-    `Saved snapshot: ${request.snapshotId}`, `Opportunity: ${opportunity.id}`, `Existing policy: ${CODE_HEALTH_POLICY_VERSION}`,
+    `Improvement in ${request.repository} (${scope.instance})`,
     `Observed finding (quoted): ${JSON.stringify(opportunity.title)}`, `What this may affect: ${opportunity.consequence}`,
-    `Expected result: ${opportunity.expectedResult}`, `Evidence: ${excerpt.length} shown of ${opportunity.evidenceCount} findings.`, JSON.stringify(excerpt),
+    `Expected result: ${opportunity.expectedResult}`,
     `What we do not know: ${opportunity.uncertainty.join(" ") || "The effect on delivery has not been measured."}`,
     `Effort: ${opportunity.effortMinutes === null ? "Not estimated." : `${opportunity.effortMinutes} minutes, modeled estimate; not a measured duration.`}`,
-    `Related work (${related.state}): ${JSON.stringify(opportunity.relatedWork)}`, related.reason ?? "Review existing work before filing.",
-    `Ideas for checking the result: ${opportunity.acceptanceIdeas.join(" ")}`, "How to check if the change did not help: repeat the same analysis. A linked finding that is still open means the expected improvement was not confirmed.",
+    `Ideas for checking the result: ${opportunity.acceptanceIdeas.join(" ")}`,
+    "How to check if the change did not help: repeat the same analysis. A linked finding that is still open means the expected improvement was not confirmed.",
     "This is a saved planning conversation. Choose Draft plan tasks when ready. Creating or replying does not file tasks or start execution.",
+    "Evidence details", `Source checked: ${scan.observedAt}`, `Source commit: ${scan.analyzedSha}`,
+    `Saved snapshot: ${request.snapshotId}`, `Opportunity: ${opportunity.id}`, `Existing policy: ${CODE_HEALTH_POLICY_VERSION}`,
+    `Evidence: ${excerpt.length} shown of ${opportunity.evidenceCount} findings.`, JSON.stringify(excerpt),
+    `Related work (${related.state}): ${JSON.stringify(opportunity.relatedWork)}`, related.reason ?? "Review existing work before filing.",
   ].join("\n");
   if (Buffer.byteLength(context) > 64 * 1024) return fail("source_unavailable", "This finding's briefing exceeds the saved conversation limit.");
   return { binding, context, sourceProposalId: opportunity.proposalId };
@@ -152,7 +158,7 @@ function lockOwnership(lock: InflightLockHandle): () => boolean {
 }
 function readIntent(path: string): Intent | undefined {
   let raw: unknown;
-  try { raw = readCodeHealthArtifactJson(path, 128 * 1024); }
+  try { raw = readCodeHealthArtifactJson(path, IMPROVEMENT_INTENT_MAX_BYTES); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   const { contentHash, ...intent } = raw as Intent & { contentHash: string };
   if (intent.version !== IMPROVEMENT_THREAD_VERSION || contentHash !== hash(intent) || !/^[a-f0-9]{64}$/.test(intent.requestId) ||
@@ -231,8 +237,11 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
       contextId: `context:${hash([source.binding, source.context])}`, goalId: `goal:${hash([proposalId, source.binding, deps.actorId, goalBody])}`, stage: "intent" };
     const persist = (stage: Intent["stage"]) => {
       if (!owns!()) throw new Error("Improvement request ownership changed.");
-      intent.stage = stage; mayHaveWritten = true; mkdirSync(root, { recursive: true });
-      if (!writeAtomic(path, JSON.stringify({ ...intent, contentHash: hash(intent) }), { mode: 0o600, beforeRename: owns })) throw new Error("Improvement request ownership changed.");
+      intent.stage = stage;
+      const serialized = JSON.stringify({ ...intent, contentHash: hash(intent) });
+      if (Buffer.byteLength(serialized) > IMPROVEMENT_INTENT_MAX_BYTES) throw new Error("The conversation cannot fit its recovery record.");
+      mayHaveWritten = true; mkdirSync(root, { recursive: true });
+      if (!writeAtomic(path, serialized, { mode: 0o600, beforeRename: owns })) throw new Error("Improvement request ownership changed.");
       syncPath(root, true); syncPath(deps.stateDir, true); deps.afterPersist?.(stage === "saved" ? "receipt" : stage);
     };
     if (!previous) persist("intent");
@@ -318,7 +327,9 @@ export function readImprovementThread(requestId: string, deps: ImprovementThread
       return fail("uncertain", "The conversation's latest goal cannot be verified.", requestId);
     const source = sourceFor(current.request, scope, deps);
     const sourceState: Extract<ImprovementThreadView, { state: "saved" }>["source"] = "state" in source
-      ? { state: source.state === "source_stale" ? "stale" : "unavailable", reason: source.reason } : { state: "current", reason: null };
+      ? { state: source.state === "source_stale" ? "stale" : "unavailable", reason: source.reason }
+      : source.context !== current.context ? { state: "stale", reason: "The saved planning context has changed. Reopen this improvement and review the latest evidence and related work." }
+      : { state: "current", reason: null };
     let drafting: Extract<ImprovementThreadView, { state: "saved" }>["drafting"] = { state: proposal.trigger?.fired ? "requested" : "not_requested", digest: null, fragmentYaml: null, reason: null };
     try {
       const cache = readInboxJson(join(scope.inboxStateDir, "inbox-drafts.json")) as DraftCache;
@@ -477,7 +488,7 @@ function actionPath(stateDir: string, operationId: string): string { return join
 function readAction(stateDir: string, operationId: string): ImprovementAction | undefined {
   if (!/^[a-f0-9]{64}$/.test(operationId)) throw new Error("Invalid improvement action identity.");
   let raw: unknown;
-  try { raw = readCodeHealthArtifactJson(actionPath(stateDir, operationId), 32 * 1024); }
+  try { raw = readCodeHealthArtifactJson(actionPath(stateDir, operationId), IMPROVEMENT_ACTION_MAX_BYTES); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   const { contentHash, ...action } = raw as ImprovementAction & { contentHash: string };
   if (contentHash !== hash(action) || action.version !== "improvement-action-v1" || action.operationId !== operationId ||
@@ -487,7 +498,9 @@ function readAction(stateDir: string, operationId: string): ImprovementAction | 
 }
 function writeAction(stateDir: string, action: ImprovementAction, owns: () => boolean): void {
   const path = actionPath(stateDir, action.operationId);
-  if (!writeAtomic(path, JSON.stringify({ ...action, contentHash: hash(action) }), { mode: 0o600, beforeRename: owns })) throw new Error("Improvement action ownership changed.");
+  const serialized = JSON.stringify({ ...action, contentHash: hash(action) });
+  if (Buffer.byteLength(serialized) > IMPROVEMENT_ACTION_MAX_BYTES) throw new Error("The decision cannot fit its recovery record.");
+  if (!writeAtomic(path, serialized, { mode: 0o600, beforeRename: owns })) throw new Error("Improvement action ownership changed.");
   syncPath(dirname(path), true); syncPath(dirname(dirname(path)), true);
 }
 function actionTarget(intent: Intent): { operationId: string; stateDir: string; repoRoot: string } {
@@ -534,12 +547,16 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
       }
     }
     const refusePrepared = (reason: string) => {
-      if (previous?.state === "prepared") { previous.state = "refused"; previous.reason = reason; writeAction(deps.stateDir, previous, owns!); }
+      if (previous && ["prepared", "requested", "waiting"].includes(previous.state)) { previous.state = "refused"; previous.reason = reason; writeAction(deps.stateDir, previous, owns!); }
     };
     const view = readImprovementThread(input.requestId, deps);
     if (view.state !== "saved") { refusePrepared(view.reason); return view; }
     if (view.currentRequestId !== input.requestId || view.goalDigest !== input.goalDigest) { refusePrepared("The goal changed before this decision was saved."); return fail("conflict", "The goal changed. Review the latest conversation before continuing."); }
     const source = sourceFor(intent.request, intent.scope, deps); if ("state" in source) { refusePrepared(source.reason); return source; }
+    if (source.context !== intent.context) {
+      const reason = "The saved planning context has changed. Reopen this improvement and review the latest evidence and related work.";
+      refusePrepared(reason); return fail("source_stale", reason);
+    }
     if (kind === "file" && (view.correspondence.state !== "linked" || view.correspondence.pendingInputs !== 0 || view.correspondence.pendingWork !== 0)) return fail("conflict", "A newer chat message has not been resolved. Review its answer and the current draft before filing.");
     if (kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== input.draftDigest)) return fail("conflict", "Review the current completed draft before requesting filing.");
     if (deps.launchAction === undefined) return fail("source_unavailable", "This repository cannot start plan drafting or filing right now. No action was requested.");
@@ -613,7 +630,7 @@ export async function runImprovementAction(operationId: string, deps: Improvemen
     }
     const view = readImprovementThread(action.requestId, deps);
     const source = sourceFor(intent.request, scope, deps);
-    if (view.state !== "saved" || view.currentRequestId !== action.requestId || view.goalDigest !== action.goalDigest || "state" in source ||
+    if (view.state !== "saved" || view.currentRequestId !== action.requestId || view.goalDigest !== action.goalDigest || "state" in source || source.context !== intent.context ||
         action.kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== action.draftDigest || view.correspondence.state !== "linked" || view.correspondence.pendingInputs !== 0 || view.correspondence.pendingWork !== 0)) {
       action.state = "refused"; action.reason = "The source, goal, or reviewed draft changed before this action could run."; writeAction(deps.stateDir, action, owns); return action;
     }
