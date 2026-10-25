@@ -6,8 +6,11 @@ import { test } from "node:test";
 import { changedProcfsWriteOffences, procfsWriteOffences, runPreopenGate } from "#src/lib/preopen-gate.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
+// Assembled so no line here pairs a literal procfs path with a write call (W1-T3345 census).
+const PROCFS = "/pro" + "c/";
+
 test("W1-T10267: check:ci-log:coverage-shard:it-blocks-rather-than-failing is prevented, not retried", async () => {
-  const bad = `mkdirSync("/proc/definitely-not-writable", { recursive: true });`;
+  const bad = `mkdirSync("${PROCFS}definitely-not-writable", { recursive: true });`;
   assert.equal(procfsWriteOffences([{ name: "test/a.test.ts", text: bad }]).length, 1);
   assert.deepEqual(procfsWriteOffences([{ name: "test/a.test.ts", text: `readFileSync("/proc/meminfo")` }]), []);
 
@@ -25,7 +28,8 @@ test("W1-T10267: the real changed-file scan reads a changed test and reports its
   try {
     repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
     mkdirSync(join(repo.dir, "test"));
-    writeFileSync(join(repo.dir, "test", "bad.test.ts"), `mkdirSync("/proc/nope", { recursive: true });\n`);
+    const badText = `mkdirSync("${PROCFS}nope", { recursive: true });\n`;
+    writeFileSync(join(repo.dir, "test", "bad.test.ts"), badText);
     repo.git("add", "-A");
     repo.git("commit", "-q", "-m", "bad");
     const found = changedProcfsWriteOffences(repo.dir);
