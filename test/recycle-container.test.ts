@@ -370,6 +370,18 @@ const isStop = (c: Call) => c.bin === "docker" && c.argv[0] === "stop";
 const isRm = (c: Call) => c.bin === "docker" && c.argv[0] === "rm";
 const isRun = (c: Call) => c.bin === "docker" && c.argv[0] === "run";
 
+test("selected registry shared launcher import defines guards without running a recycle", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}registry-library-`));
+  const scriptPath = join(root, "import.sh");
+  try {
+    writeFileSync(scriptPath, `source ${JSON.stringify(SCRIPT)}\ndeclare -F selected_registry_init\n`);
+    const result = runRecycle("good", { scriptPath });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.calls, [], "importing the shared guard must not inspect or mutate a live transport");
+    assert.match(result.stdout, /selected_registry_init/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("selected private recycler refuses unknown input before any transport or public fallback", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}private-recycle-binding-`));
   const scriptPath = join(root, "deploy", "recycle-container.sh"), prior = process.env.RMD_INSTANCE_REGISTRY;
