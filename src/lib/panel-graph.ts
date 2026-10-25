@@ -3774,8 +3774,14 @@ export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: ()
 }
 
 export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxCausalScope): InboxVerbActions {
+  const improvementReviewRequired = (proposalId: string, respond: InboxVerbRespond): boolean => {
+    if (!proposalId.startsWith("improvement:")) return false;
+    respond(409, { error: "improvement_review_required", detail: "Use this improvement's saved conversation to change its goal, request a draft, or review and file its exact draft." });
+    return true;
+  };
   return {
     approve: validatedInboxAction(validateApproveProposal, async (input, actor, respond) => {
+      if (improvementReviewRequired(input.proposalId, respond)) return;
       const taskId = /^verify-human:([A-Za-z0-9-]+)$/.exec(input.proposalId)?.[1];
       const retained = taskId ? await readRetainedHumanReleases(deps) : undefined;
       const receipt = taskId ? retained?.receipts.get(taskId) : undefined;
@@ -3807,6 +3813,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       respond(200, { ok: true, proposalId: input.proposalId, started: true });
     }),
     reframe: validatedInboxAction(validateReframeProposal, (input, actor, respond) => {
+      if (improvementReviewRequired(input.proposalId, respond)) return;
       const { proposals } = classifyAllProposals(deps);
       if (!proposals.some((p) => p.id === input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
@@ -3873,6 +3880,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
     restore: validatedInboxAction(validateDeclineProposal, (input, actor, respond) => proposalVerdictResponse("restore", deps, input, actor, respond)),
     reply: validatedInboxAction(validateThreadReply, async (input, caller, respond) => {
       const proposalId = proposalIdOfThread(input.threadId)!;
+      if (improvementReviewRequired(proposalId, respond)) return;
       // The detail route and daemon responder both require a current operator-owned item.
       // A syntactically valid but orphaned id must not receive a success receipt for a
       // message the responder will silently have no item to answer.
