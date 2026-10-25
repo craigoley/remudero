@@ -349,9 +349,12 @@ other `Developer` or `Downloads` content or protected roots), at most once every
 `["remudero-*", "rmd*"]`. macOS on this host has no periodic `/tmp` cleaner, so agent scratch
 there lasts until a reboot: on 2026-10-23 one `remudero-pr-queue-*` folder held 7.9 GiB, 5.6 GiB
 of it in 60 subfolders idle for over six hours. A match counts only when this account owns it
-and it is not a symlink. A worktree there is preserved and retired like any other; a clone or
-bare repository is held (`shared-temp-root`) unless other accounts cannot enter its root, since
-they could borrow its objects. Preserved copies are named `tmp__<path>@<UTC>`.
+and it is not a symlink. Worktrees, clones and bare repositories there are preserved and retired
+like any other. Until 2026-10-25 a clone or bare repository in a root other accounts could enter
+was held (`shared-temp-root`). Agents create those roots with mode 755, so every such clone was
+held forever: 907 held, about 6 GiB, on that day. A lender in `/private/tmp` cannot be relied on
+by any account, because macOS clears it at boot, and the borrower census still keeps a temp
+lender of this account's own kept clones. Preserved copies are named `tmp__<path>@<UTC>`.
 
 A checkout, standalone clone or bare repository is a candidate when nothing in it
 (dependencies included, its own Git metadata excluded) changed in `idle_hours` by
