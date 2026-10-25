@@ -19899,13 +19899,16 @@ export async function runSweep(
               break;
             }
             case "blocked-fixable": {
-              const escalationKey = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha,
-                pr.mergeConflict !== undefined, isBlockedCi(pr), deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
-              const candidate = matchDuplicateEscalation(escalationKey, await readOpenEscalations());
-              const openHold = openEscalationStandDownReason(pr.headSha, candidate, escalationKey.contractRevision,
-                { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
-                isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer);
-              if (openHold) { acted = false; spent = false; standDownReason = openHold.reason; break; }
+              const issues = await readOpenEscalations();
+              if (issues.length > 0) {
+                const escalationKey = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha,
+                  pr.mergeConflict !== undefined, isBlockedCi(pr), deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
+                const candidate = matchDuplicateEscalation(escalationKey, issues);
+                const openHold = openEscalationStandDownReason(pr.headSha, candidate, escalationKey.contractRevision,
+                  { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
+                  isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer);
+                if (openHold) { acted = false; spent = false; standDownReason = openHold.reason; break; }
+              }
               if (terminalDesignHold?.amended) {
                 const amended = await refreshAmendedContract([{ progress_contract_revision: terminalDesignHold.revision }], undefined, terminalDesignHold.observedRevision, terminalDesignHold.semantic);
                 if (amended === undefined) acted = false;

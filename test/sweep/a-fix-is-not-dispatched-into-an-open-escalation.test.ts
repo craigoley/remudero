@@ -136,10 +136,12 @@ test("W1-T10343: an operator answer releases an open escalation", async t => {
 });
 
 test("W1-T10343: unreadable and unwired issue lists fail open", async t => {
-  for (const wired of [true, false]) {
+  for (const list of ["unreadable", "unwired", "empty"] as const) {
     const f = fixture(t);
-    if (wired) f.deps.readOpenEscalations = () => { throw Error("issue list unavailable"); };
-    else f.deps.readOpenEscalations = undefined;
+    if (list === "unreadable") f.deps.readOpenEscalations = () => { throw Error("issue list unavailable"); };
+    if (list === "unwired") f.deps.readOpenEscalations = undefined;
+    if (list === "empty") f.setIssues([]);
+    f.deps.readTaskContractRevision = () => assert.fail("no open issue needs a contract comparison");
     await f.pass();
     assert.equal(f.dispatched.length, 1);
     assert.equal(f.admitted.length, 1);
