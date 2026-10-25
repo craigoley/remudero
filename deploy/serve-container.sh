@@ -124,7 +124,9 @@ if [ ! -r "${CLAUDE_DIRECTORY_FILE}" ]; then
 fi
 source "${CLAUDE_DIRECTORY_FILE}"
 INSTANCE_NAME="${RMD_SERVE_INSTANCE:-}"
-INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY:-${SCRIPT_ROOT}/.remudero/daemon-instances.yaml}"
+INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY-${SCRIPT_ROOT}/.remudero/daemon-instances.yaml}"
+SELECTED_REGISTRY_ACTIVE=0
+SELECTED_REGISTRY_LAUNCH_ARGS=()
 INSTANCE_STATE_DIR=""
 INSTANCE_IMAGE=""
 INSTANCE_PORT=""
@@ -228,8 +230,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ "${RMD_INSTANCE_REGISTRY+x}" = x ]; then
+  if [ ! -r "${SCRIPT_ROOT}/deploy/recycle-container.sh" ]; then
+    echo "serve-container: REFUSING -- selected registry unavailable (reader_unavailable)." >&2
+    exit 2
+  fi
+  source "${SCRIPT_ROOT}/deploy/recycle-container.sh"
+  selected_registry_init "${SCRIPT_ROOT}" "${INSTANCE_NAME}" serve-container
+fi
+
 registry_field() {
-  local field="$1"
+  local field="$1" input="${INSTANCE_REGISTRY}"
+  if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then input=/dev/stdin; fi
   awk -v wanted_instance="${INSTANCE_NAME}" -v wanted_field="${field}" '
     $0 == "  " wanted_instance ":" { inside = 1; next }
     inside && $0 ~ /^  [A-Za-z0-9_.-]+:$/ { inside = 0 }
@@ -238,7 +250,7 @@ registry_field() {
       print
       exit
     }
-  ' "${INSTANCE_REGISTRY}"
+  ' "$input" <<< "${SELECTED_REGISTRY_TEXT-}"
 }
 
 if [ -n "${INSTANCE_NAME}" ]; then
@@ -335,6 +347,10 @@ if docker inspect "${DAEMON_CONTAINER}" >/dev/null 2>&1; then
     --format "{{range .Mounts}}{{if eq .Destination \"${STATE_MOUNT_DEST}\"}}{{.Source}}{{end}}{{end}}" 2>/dev/null || true)"
 fi
 STATE_DIR="${RMD_STATE_DIR:-${DAEMON_STATE_DIR:-${INSTANCE_STATE_DIR:-${HOME:-/root}/rmd-state}}}"
+if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] && [ "${STATE_DIR}" != "${INSTANCE_STATE_DIR}" ]; then
+  selected_registry_refuse target_missing_or_mismatched
+  exit 2
+fi
 
 if [ -n "${DAEMON_STATE_DIR}" ] && [ "${STATE_DIR}" != "${DAEMON_STATE_DIR}" ]; then
   echo "serve-container: REFUSING — the state mount disagrees with the running daemon." >&2
@@ -766,6 +782,7 @@ RUN_ARGS=(
   -e GH_APP_INSTALLATION_ID
   -e GH_APP_PRIVATE_KEY_PATH
   -e "RMD_SERVE_NETWORK=${SERVE_NETWORK_ENV_VALUE}"
+  "${SELECTED_REGISTRY_LAUNCH_ARGS[@]+"${SELECTED_REGISTRY_LAUNCH_ARGS[@]}"}"
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
   -v "${SERVE_REPO_DIR}:${DAEMON_REPO_DIR}"
   "${INSTANCE_STATE_ARGS[@]+"${INSTANCE_STATE_ARGS[@]}"}"
@@ -788,9 +805,9 @@ RUN_ARGS=(
   "${INGEST_TOKEN_ARGS[@]+"${INGEST_TOKEN_ARGS[@]}"}"
   "${SERVE_GENS_ARGS[@]+"${SERVE_GENS_ARGS[@]}"}"
   "${SCRATCH_ARGS[@]+"${SCRATCH_ARGS[@]}"}"
-  "${REF}"
-  "${SERVE_CMD[@]}"
 )
+SERVE_IMAGE_ARG_INDEX="${#RUN_ARGS[@]}"
+RUN_ARGS+=("${REF}" "${SERVE_CMD[@]}")
 
 if [ "${DRY_RUN}" -eq 1 ]; then
   echo "serve-container: --dry-run, nothing changed. The launch would be:"
@@ -830,6 +847,15 @@ if ! docker pull "${REF}" >/dev/null 2>&1; then
   echo "serve-container: REFUSING — target image ${REF} could not be pulled; existing container was left untouched." >&2
   exit 1
 fi
+SERVE_SELECTED_IMAGE=""
+if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+  if ! SERVE_SELECTED_IMAGE="$(selected_registry_docker_read image inspect --format '{{.Id}}' "${REF}")" || [ -z "${SERVE_SELECTED_IMAGE}" ]; then
+    selected_registry_refuse image_reader_unknown
+    exit 2
+  fi
+  selected_registry_image "${SERVE_SELECTED_IMAGE}"
+  RUN_ARGS[SERVE_IMAGE_ARG_INDEX]="${SERVE_SELECTED_IMAGE}"
+fi
 
 if [ "${SERVE_SUPERVISOR}" = "on" ]; then
   mkdir -p "${SERVE_GENS_DIR}"
@@ -846,6 +872,7 @@ SERVE_CHECKOUT_COLD=false
 [ -e "${SERVE_REPO_DIR}/.git" ] || SERVE_CHECKOUT_COLD=true
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   serve_replace_admission "before docker stop"
+  if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then selected_registry_image "${SERVE_SELECTED_IMAGE}"; fi
   if command -v scratch_outgoing_reads >/dev/null 2>&1; then
     SERVE_OUTGOING_READS="$(scratch_outgoing_reads "${CONTAINER_NAME}" 2>/dev/null || true)"
   fi
@@ -857,7 +884,12 @@ fi
 
 if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then scratch_fresh_tmp; fi
 echo "serve-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
+if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then selected_registry_recheck; fi
 docker "${RUN_ARGS[@]}" >/dev/null
+if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+  "${SCRIPT_ROOT}/deploy/container-runtime-contract.sh" --container "${CONTAINER_NAME}" \
+    --expect "${SELECTED_REGISTRY_HOST_FILE}" "${SELECTED_REGISTRY_CONTAINER_FILE}" ro
+fi
 if [ "${#SCRATCH_ARGS[@]}" -gt 0 ] && command -v scratch_placement_row >/dev/null 2>&1; then
   scratch_placement_row "${STATE_DIR}/state/ledger.ndjson" "${CONTAINER_NAME}" "${SERVE_REPO_DIR}" "${SERVE_CHECKOUT_COLD}" "${SERVE_OUTGOING_READS}"
 fi
