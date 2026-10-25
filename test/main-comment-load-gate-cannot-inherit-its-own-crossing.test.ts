@@ -1,3 +1,4 @@
+// Historical explicit --baseline reproductions; ordinary comment commands are now nonblocking signals.
 /**
  * W1-T5623. The main push lane ran `comment-load-signal -- --base HEAD^`, and the ratchet calls a
  * count already present at the base INHERITED. A crossing commit whose own push run was superseded
@@ -53,7 +54,7 @@ function runInProcess(argv: string[]): { code: number; out: string; err: string 
   console.log = (...a: unknown[]) => void out.push(a.join(" "));
   console.error = (...a: unknown[]) => void err.push(a.join(" "));
   try {
-    return { code: main(argv), out: out.join("\n"), err: err.join("\n") };
+    return { code: main([...argv, "--baseline", join(argv[argv.indexOf("--root") + 1], "scripts/comment-load-baseline.json")]), out: out.join("\n"), err: err.join("\n") };
   } finally {
     console.log = realLog;
     console.error = realError;
