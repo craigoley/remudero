@@ -67,12 +67,12 @@ test("code health deduplicates opportunities and preserves urgent findings", () 
 });
 
 test("code health retains analysis identity through the real alert reader", () => {
-  const payload = [{ number: 41, state: "open", created_at: "2026-11-01T05:00:00Z",
+  const payload = [{ number: 41, state: "fixed", fixed_at: "2026-11-02T04:59:00Z", created_at: "2026-11-01T05:00:00Z",
     html_url: "https://github.com/acme/atlas/security/code-scanning/41",
     tool: { name: "CodeQL", version: "2.25.0" },
     rule: { id: "js/repeated-work", severity: "warning", tags: ["quality", "maintainability"] },
     most_recent_instance: { ref: "refs/heads/main", commit_sha: "a".repeat(40), analysis_key: ".github/workflows/codeql.yml:analyze",
-      category: "/language:javascript-typescript", environment: '{"language":"javascript-typescript","private":"do-not-copy"}', state: "open",
+      category: "/language:javascript-typescript", environment: '{"language":"javascript-typescript","private":"do-not-copy"}', state: "fixed",
       location: { path: "src/first.ts", start_line: 5 } } },
     { number: 42, state: "open", created_at: "2026-11-01T05:00:00Z", html_url: "https://github.com/acme/atlas/security/code-scanning/42",
       tool: { name: "CodeQL" }, rule: { id: "js/repeated-work", severity: "warning", tags: ["quality", "maintainability"] } }];
@@ -90,11 +90,13 @@ test("code health retains analysis identity through the real alert reader", () =
     assert.equal(source.ref, "refs/heads/main");
     assert.equal(source.category, "/language:javascript-typescript");
     assert.equal(source.analysisKey, ".github/workflows/codeql.yml:analyze");
-    assert.equal(source.instanceState, "open");
+    assert.equal(source.instanceState, "fixed");
+    assert.equal(source.fixedAt, "2026-11-02T04:59:00.000Z");
+    assert.equal(source.dismissedAt, null);
     assert.match(source.environmentHash!, /^[a-f0-9]{64}$/);
     assert(!JSON.stringify(source).includes("do-not-copy"), "retain a stable environment identity without copying its private values");
     assert.deepEqual(read.analysisInstances![1], { alertId: "42", analyzedSha: null, toolVersion: null, ref: null, analysisKey: null,
-      category: null, environmentHash: null, instanceState: null }, "missing source metadata stays unknown");
+      category: null, environmentHash: null, instanceState: null, fixedAt: null, dismissedAt: null }, "missing source metadata stays unknown");
     const ordinary = readCodeScanningAlerts("acme", "atlas");
     assert.equal(ordinary.ok, true);
     assert.equal(Object.hasOwn(ordinary, "analysisInstances"), false, "ordinary alert callers keep their existing bounded response");
@@ -264,6 +266,21 @@ test("code health requires every configured analysis before treating quality evi
   assert.equal(qualityScanFromCollectedEvidence(mismatch).state, "partial");
   const wrongAnalysis = structuredClone(value); wrongAnalysis.analyses[0]!.sarifId = "f2345678-1234-1234-1234-123456789012";
   assert.equal(qualityScanFromCollectedEvidence(wrongAnalysis).state, "partial");
+  const fixed = structuredClone(value); fixed.source.alerts[0]!.state = "fixed"; fixed.source.analysisInstances[0]!.instanceState = "fixed";
+  fixed.source.analysisInstances[0]!.analyzedSha = "f".repeat(40);
+  const fixedInstance = fixed.source.analysisInstances[0] as typeof fixed.source.analysisInstances[number] & { fixedAt?: string | null };
+  fixedInstance.fixedAt = "2026-11-02T04:59:00.000Z";
+  const confirmed = qualityScanFromCollectedEvidence(fixed);
+  assert.equal(confirmed.state, "complete", "a resolved older revision is not a missing current analysis");
+  assert.equal(confirmed.findings[0]!.status, "fixed");
+  assert.equal(confirmed.findings[0]!.fixedSha, "f".repeat(40));
+  assert.equal(confirmed.findings[0]!.fixedAt, fixedInstance.fixedAt);
+  fixedInstance.fixedAt = null;
+  const history = qualityScanFromCollectedEvidence(fixed);
+  assert.equal(history.state, "complete", "unconfirmed older closed history cannot permanently invalidate every new scan");
+  assert.equal(history.findings.length, 0, "no fix credit is minted from history without a recorded fix time");
+  fixedInstance.fixedAt = "2026-11-02T06:00:00.000Z";
+  assert.equal(qualityScanFromCollectedEvidence(fixed).state, "partial", "a later fix cannot be attributed to an earlier scan");
   const dismissed = structuredClone(value); dismissed.source.alerts[0]!.state = "dismissed";
   const retained = qualityScanFromCollectedEvidence(dismissed);
   assert.equal(retained.state, "complete", "GitHub can retain an open most-recent instance for a dismissed alert");
