@@ -7,6 +7,7 @@
   risk: low
   priority: 4
   status: queued
+  retirement: withdrawn
   # backlog gardener: band=4 evidence=5f8b98d122f788e4
   attempts: 0
   files:
@@ -33,3 +34,15 @@
   
     This is an automation candidate only. The existing inbox/draft flow owns the next step; the
     shard, plan records, release rows, and merge gates remain unchanged.
+  amendment: |
+    Disposition: withdraw this unsupported one-file learning contract; no remedy credit.
+    The parent records 40 repair observations over 37 distinct PRs, but no dominant
+    per-PR causal reason has been established in the available record. The one-file
+    contract also requires production prompt injection from LEARNINGS.md, whereas
+    the maintained loader injects learnings/*.yaml. LEARNINGS.md is a human
+    narrative read by retroCommand, not that loader. This is not learning credit.
+    Preserve the original criteria, rationale and PR #14133 evidence as history.
+    The separate empty-assignment workflow defect is already repaired by #14153
+    (41c9302577ae3d217bff6f4447304d0986146e02). That repair supplies no learning credit.
+    Future learning work must first bind a real failure population and the actual
+    structured injection path; an aggregate check name alone is not a causal finding.
