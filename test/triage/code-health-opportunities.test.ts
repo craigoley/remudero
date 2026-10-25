@@ -272,25 +272,29 @@ test("code health requires every configured analysis before treating quality evi
 });
 
 
+function publishFixture(opts: Parameters<typeof publishCodeHealthSnapshot>[0]) {
+  return publishCodeHealthSnapshot({ clock: fixedClock(Date.parse("2026-11-02T06:00:00.000Z")), ...opts });
+}
+
 test("code health publishes immutable evidence and refuses stale or occupied publication", async () => {
   await withTempDir("code-health-store", async stateDir => {
     assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas").state, "not_collected");
-    const first = publishCodeHealthSnapshot({ stateDir, input: input(), expectedSnapshotId: null });
+    const first = publishFixture({ stateDir, input: input(), expectedSnapshotId: null });
     assert.equal(first.state, "published"); assert("snapshotId" in first);
     const read = readCodeHealthSnapshot(stateDir, "acme/atlas");
     assert.equal(read.state, "observed"); assert("snapshot" in read);
     assert.equal(read.snapshot.snapshotId, first.snapshotId);
     assert.deepEqual(read.snapshot.input, input());
     const reread = input(); reread.observedAt = "2026-11-02T05:02:00.000Z";
-    const duplicate = publishCodeHealthSnapshot({ stateDir, input: reread, expectedSnapshotId: first.snapshotId });
+    const duplicate = publishFixture({ stateDir, input: reread, expectedSnapshotId: first.snapshotId });
     assert.equal(duplicate.state, "duplicate"); assert("snapshotId" in duplicate); assert.equal(duplicate.snapshotId, first.snapshotId);
     const next = input(); next.scans.forEach(scan => { scan.scanId += ":independent"; });
-    const published = publishCodeHealthSnapshot({ stateDir, input: next, expectedSnapshotId: first.snapshotId });
+    const published = publishFixture({ stateDir, input: next, expectedSnapshotId: first.snapshotId });
     assert.equal(published.state, "published"); assert("snapshotId" in published);
     assert.notEqual(published.snapshotId, first.snapshotId);
-    assert.equal(publishCodeHealthSnapshot({ stateDir, input: input(), expectedSnapshotId: first.snapshotId }).state, "superseded");
+    assert.equal(publishFixture({ stateDir, input: input(), expectedSnapshotId: first.snapshotId }).state, "superseded");
     const older = input(); older.scans.forEach(scan => { scan.observedAt = "2026-11-02T04:59:00.000Z"; scan.scanId += ":older"; });
-    assert.equal(publishCodeHealthSnapshot({ stateDir, input: older, expectedSnapshotId: published.snapshotId }).state, "superseded",
+    assert.equal(publishFixture({ stateDir, input: older, expectedSnapshotId: published.snapshotId }).state, "superseded",
       "even a successful CAS cannot replace a newer measured source with an older one");
     const current = readCodeHealthSnapshot(stateDir, "acme/atlas"); assert.equal(current.state, "observed"); assert("snapshot" in current);
     assert.equal(current.snapshot.snapshotId, published.snapshotId);
@@ -300,12 +304,12 @@ test("code health publishes immutable evidence and refuses stale or occupied pub
     assert.equal(readCodeHealthSnapshot(stateDir, "acme/foreign").state, "unavailable");
     const lock = acquireInflightLock(join(stateDir, "code-health", "locks"), "publication", { run_id: "test-owned-publication" });
     try {
-      assert.equal(publishCodeHealthSnapshot({ stateDir, input: next, expectedSnapshotId: published.snapshotId }).state, "busy");
+      assert.equal(publishFixture({ stateDir, input: next, expectedSnapshotId: published.snapshotId }).state, "busy");
       assert.equal(existsSync(lock.path), true, "preserve a live publisher and its lock");
     } finally { lock.release(); }
     writeFileSync(join(stateDir, "code-health", "latest.json"), "broken");
     assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas").state, "unavailable", "corruption cannot become an empty healthy cache");
-    assert.equal(publishCodeHealthSnapshot({ stateDir, input: next, expectedSnapshotId: published.snapshotId }).state, "unavailable");
+    assert.equal(publishFixture({ stateDir, input: next, expectedSnapshotId: published.snapshotId }).state, "unavailable");
     assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas", first.snapshotId).state, "observed", "retain immutable evidence after pointer failure");
   });
 });
@@ -320,10 +324,20 @@ test("code health recovers a proven dead publisher while preserving unknown lock
       const deadPid = Number(execFileSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }));
       const bytes = kind === "dead" ? JSON.stringify({ pid: deadPid, run_id: "completed-own-fixture", host: hostname(), startedAt }) : "unknown ownership";
       writeFileSync(lockPath, bytes);
-      const result = publishCodeHealthSnapshot({ stateDir, input: input(), expectedSnapshotId: null });
+      const result = publishFixture({ stateDir, input: input(), expectedSnapshotId: null });
       assert.equal(result.state, kind === "dead" ? "published" : "busy");
       if (kind === "unknown") assert.equal(readFileSync(lockPath, "utf8"), bytes);
       else assert.equal(existsSync(lockPath), false, "release only this fixture's own new publication lock");
     }
+  });
+});
+
+
+test("code health does not publish measurements from after the collection attempt", async () => {
+  await withTempDir("code-health-future", async stateDir => {
+    const result = publishCodeHealthSnapshot({ stateDir, input: input(), expectedSnapshotId: null,
+      clock: fixedClock(Date.parse("2026-11-02T05:00:00.000Z")) });
+    assert.equal(result.state, "unavailable");
+    assert.equal(existsSync(join(stateDir, "code-health", "latest.json")), false);
   });
 });
