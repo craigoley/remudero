@@ -7,10 +7,17 @@ import { buildProductRoutes } from "#src/lib/product-routes.js";
 import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
 import { createService, type IdentityProvider } from "#src/lib/service.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { declaredBody, violations } from "#test/helpers/openapi-strict.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const command = { version: "product-intent-v1", requestId: "route-create-00001", expectedRevision: 0,
-  brief: { name: "Wreckterra", idea: "private original mobile combat idea", portfolio: "OleyArcade" } };
+  brief: { name: "Wreckterra", idea: "private original mobile combat idea", portfolio: "OleyArcade",
+    objective: "Play a solo Central Park skirmish", constraints: ["mobile first"],
+    decisions: [{ key: "players", value: "solo first", provenance: { kind: "operator", reference: "approved brief" } }],
+    research: [{ label: "OpenStreetMap", url: "https://www.openstreetmap.org/copyright" }],
+    requestedRepository: { owner: "craigoley", name: "wreckterra" },
+    resourceEnvelope: { budgetUsd: 30, maxConcurrentBuilds: 1, existingSetupOnly: true },
+  } };
 const identity: IdentityProvider = {
   name: "fixture-verified-session", grant: () => undefined, readSensitivity: "sensitive",
   authorize(req) {
@@ -59,7 +66,11 @@ async function request(base: string, path: string, session?: "alice" | "bob", bo
     headers: { authorization: "Bearer fixture-write", ...(session ? { "x-test-session": session } : { "x-rmd-actor": "clerk:alice" }),
       ...(body === undefined ? {} : { "content-type": "application/json" }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  return { status: result.status, cache: result.headers.get("cache-control"), body: await result.json() as Reply };
+  const reply = await result.json() as Reply;
+  const method = body === undefined ? "GET" : "POST";
+  assert.deepEqual(violations(reply, declaredBody("/v1/products", method, result.status)), [],
+    "the real product HTTP response must match its declared contract");
+  return { status: result.status, cache: result.headers.get("cache-control"), body: reply };
 }
 
 test("W1-T10612: product routes require verified operator identity and are mounted by serve", async (t) => {
