@@ -50,7 +50,7 @@ async function captureDeps(planPath: string, buildAutoTriageHooks?: NonNullable<
 }
 
 test("the real daemon wires a cache-only PR repair snapshot into triage", async () => {
-  const { home, root, planPath } = fixtureHome();
+  const { home, planPath } = fixtureHome();
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   let supplied: (() => unknown) | undefined;
@@ -61,10 +61,6 @@ test("the real daemon wires a cache-only PR repair snapshot into triage", async 
     });
     assert.equal(typeof supplied, "function", "deleting the production supplier breaks this composition test");
     assert.equal(supplied!(), undefined, "without a published generation no read or priority evidence is manufactured");
-    const ledger = join(root, "state", "ledger.ndjson");
-    const events = (existsSync(ledger) ? readFileSync(ledger, "utf8") : "").split("\n").filter(Boolean).map(line => JSON.parse(line));
-    assert.deepEqual(events.filter(row => row.step === "auto_triage.repair_snapshot_unavailable").map(row => row.reasonCode),
-      ["unpublished-generation"], "the real producer says why no priority snapshot was supplied");
   } finally {
     if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });
@@ -279,6 +275,29 @@ test("BOUNDS SURVIVE THE WIRING: runAutoTriage records the fire BEFORE running t
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+
+test("the real daemon reports why its repair snapshot is unavailable", async () => {
+  const { home, root, planPath } = fixtureHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  let supplied: (() => unknown) | undefined;
+  try {
+    await captureDeps(planPath, (options: { repairSnapshot?: () => unknown }) => {
+      supplied = options.repairSnapshot;
+      return { checkAutoTriage: () => ({ fire: false, reason: "fixture" }), runAutoTriage: async () => {} };
+    });
+    assert.equal(typeof supplied, "function");
+    assert.equal(supplied!(), undefined, "unpublished evidence cannot acquire priority");
+    const ledger = join(root, "state", "ledger.ndjson");
+    const events = (existsSync(ledger) ? readFileSync(ledger, "utf8") : "").split("\n").filter(Boolean).map(line => JSON.parse(line));
+    assert.deepEqual(events.filter(row => row.step === "auto_triage.repair_snapshot_unavailable").map(row => row.reasonCode),
+      ["unpublished-generation"], "the real producer names its missing evidence");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });
   }
 });
