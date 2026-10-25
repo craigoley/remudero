@@ -369,3 +369,29 @@ test("code health does not publish measurements from after the collection attemp
     assert.equal(existsSync(join(stateDir, "code-health", "latest.json")), false);
   });
 });
+
+
+test("code health reads immutable source history without running today's assessment", async () => {
+  await withTempDir("code-health-history", async stateDir => {
+    const saved = publishFixture({ stateDir, input: input(), expectedSnapshotId: null }); assert("snapshotId" in saved);
+    const format = Date.prototype.toISOString;
+    try {
+      // Simulate an unavailable current assessment formatter. Historical evidence needs only its sealed source bytes.
+      Date.prototype.toISOString = () => { throw new Error("a source-history read must not run the current assessment"); };
+      assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas", saved.snapshotId).state, "observed");
+    } finally { Date.prototype.toISOString = format; }
+  });
+});
+
+test("code health detects corruption of an immutable snapshot's history link", async () => {
+  await withTempDir("code-health-history-integrity", async stateDir => {
+    const saved = publishFixture({ stateDir, input: input(), expectedSnapshotId: null }); assert("snapshotId" in saved);
+    const path = join(stateDir, "code-health", "snapshots", `${saved.snapshotId}.json`);
+    const original = readFileSync(path, "utf8"), changed = JSON.parse(original);
+    changed.previousSnapshotId = "e".repeat(64);
+    writeFileSync(path, JSON.stringify(changed));
+    assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas", saved.snapshotId).state, "unavailable");
+    writeFileSync(path, original);
+    assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas", saved.snapshotId).state, "observed");
+  });
+});
