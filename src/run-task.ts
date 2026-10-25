@@ -8963,8 +8963,9 @@ export function openEscalationStandDownReason(
   candidate: OpenIssue | undefined,
   currentContractRevision?: string,
   current?: { conflictEvidenceCaptured: boolean; baseSha?: string },
+  redCheckNames?: readonly string[],
 ): { reason: string } | undefined {
-  return fixCommandHelpers(fixCommandHost()).openEscalationStandDownReason(headSha, candidate, currentContractRevision, current);
+  return fixCommandHelpers(fixCommandHost()).openEscalationStandDownReason(headSha, candidate, currentContractRevision, current, redCheckNames);
 }
 
 export function resolveClearedEscalation(
