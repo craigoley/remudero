@@ -277,3 +277,19 @@ test("daily source receipts follow the real background PR collector on success a
     assert.deepEqual([...cache.closedSeed()!.keys()], [7], "a failed background refresh preserves the merged evidence");
   });
 });
+
+
+test("daily retained history refuses a named pipe without blocking its reader", async () => {
+  const { spawnSync } = await import("node:child_process"), { pathToFileURL } = await import("node:url");
+  const { repoRoot } = await import("#test/helpers/repo-root.js");
+  await withTempDir("daily-history-pipe", async root => {
+    const path = join(dailyProgressStorePath(root), "manifest.json"); mkdirSync(dailyProgressStorePath(root), { recursive: true });
+    const fifo = spawnSync("mkfifo", [path], { encoding: "utf8" }); assert.equal(fifo.status, 0, fifo.stderr);
+    const moduleUrl = pathToFileURL(join(repoRoot(), "src", "lib", "daily-progress-store.ts")).href;
+    const code = `import { readDailyProgressManifest } from ${JSON.stringify(moduleUrl)}; try { readDailyProgressManifest(process.argv[1]); process.exitCode = 2; } catch (error) { if (!String(error).includes("bounded regular file")) throw error; }`;
+    // BACKSTOP: a corrupt retained source must not stall the admitted test runner.
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code, root], { encoding: "utf8", timeout: 5000 });
+    assert.equal(child.error, undefined, "opening retained evidence must refuse before waiting for a pipe writer");
+    assert.equal(child.status, 0, child.stderr);
+  });
+});
