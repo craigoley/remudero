@@ -6,7 +6,7 @@ import { performance } from "node:perf_hooks";
 import { setImmediate as turn } from "node:timers/promises";
 import { test } from "node:test";
 import { buildSweepEffects, buildSweepLightHook } from "#src/run-task.js";
-import { LightPassPreReviewTiming, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import { LightPassPreReviewTiming, observeLightPassReviewEligibility, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 
 function deferred<T>() {
@@ -167,6 +167,33 @@ test("W1-T9918: a non-ready PR is review-eligible before the ready refresh settl
     if (held === "compare" || held === "main_tip") assert.deepEqual(f.arms, [991811], JSON.stringify({ rows: f.rows, logs: f.logs }));
     else assert.deepEqual(f.updates, [991811], "the same overlap winner is refreshed");
   }
+});
+
+test("W1-T9918: early eligibility releases a due unreadable reviewer-source probe", () => {
+  const subject = { ...pr(991871), reviewInputDigest: "review-input-991871" };
+  const f = fixture([subject]);
+  const refusalAt = Date.now();
+  let now = refusalAt + 4 * 60_000;
+  f.effects.now = () => now;
+  f.effects.reviewerCodeRecovery = {
+    loadedCodeSha: "loaded-reviewer-code",
+    isLoadedCodeAtOrAfter: () => false,
+  };
+  f.rows.push({
+    ts: new Date(refusalAt).toISOString(), step: "review.post_refused", task_id: subject.taskId,
+    pr_url: subject.prUrl, head_sha: subject.headSha, review_input_digest: subject.reviewInputDigest,
+    reviewer_code_freshness: "unreadable",
+  });
+  try {
+    observeLightPassReviewEligibility([subject], f.effects);
+    assert.equal(f.rows.some((row) => row.step === "sweep.review_eligible"), false,
+      "the unreadable-source backoff still holds a premature probe");
+    now = refusalAt + 5 * 60_000;
+    observeLightPassReviewEligibility([subject], f.effects);
+    assert.ok(f.rows.some((row) => row.step === "sweep.review_eligible" && row.pr_number === subject.prNumber &&
+      row.review_input_digest === subject.reviewInputDigest && row.surface === "light"),
+    "the due probe is eligible on the early light-pass surface");
+  } finally { f.cleanup(); }
 });
 
 test("W1-T9918: an unchanged head and main reuse their compare off the loop", async (t) => {
