@@ -2601,9 +2601,35 @@ function censusExpression(expr: string, text: string, code: string, position: nu
   const masked = maskLiterals(expr);
   return expr.replace(/\b[A-Za-z_$][\w$]*\b/g, (name, offset: number) => {
     if (masked.slice(offset, offset + name.length) !== name || seen.has(name)) return name;
+    if (/^\s*\(/.test(masked.slice(offset + name.length)) || /(?<!\.)\.\s*$/.test(masked.slice(0, offset))) return name;
     const declaration = [...code.matchAll(new RegExp(`\\b(?:const|let|var)\\s+${name}\\s*(?::[^=;]+)?=\\s*`, "g"))]
       .findLast((match) => scopeAt(match.index).every((open, index) => scope[index] === open));
-    if (!declaration) return name;
+    if (!declaration) {
+      const headers = /\b(?:function\s+(\w+)|(?:const|let)\s+(\w+)\s*=)\s*\(([^)]*)\)/g;
+      const helper = [...code.matchAll(headers)].findLast((header) => {
+        if (header.index >= position) return false;
+        const params = header[3].split(",").map((param) => param.trim().split(/[\s:]/)[0]);
+        if (!params.includes(name)) return false;
+        const body = code.indexOf("{", header.index + header[0].length);
+        const arrow = code.indexOf("=>", header.index + header[0].length);
+        return scope.includes(body) || (header[2] && arrow < position &&
+          !code.slice(arrow, position).includes(";"));
+      });
+      if (!helper) return name;
+      const helperName = helper[1] ?? helper[2];
+      const key = `${helperName}:${name}`;
+      if (seen.has(key)) return name;
+      const index = helper[3].split(",").findIndex((param) => param.trim().split(/[\s:]/)[0] === name);
+      const resolved: string[] = [];
+      for (const call of code.matchAll(new RegExp(`\\b${helperName}\\s*\\(`, "g"))) {
+        if (call.index === helper.index + helper[0].indexOf(helperName)) continue;
+        const arg = censusCallArgs(text, code, call.index + call[0].length)[index];
+        if (!arg) continue;
+        const value = censusExpression(arg, text, code, call.index, new Set([...seen, key]));
+        if (!/\b(?:mkdtempSync|mkdtemp|tmpdir)\s*\(/.test(maskLiterals(value))) resolved.push(value);
+      }
+      return resolved.find((value) => censusWalksFromText(value).length > 0) ?? resolved[0] ?? name;
+    }
     const start = declaration.index + declaration[0].length;
     let end = start;
     let depth = 0;
@@ -2629,7 +2655,10 @@ function censusExecutableWalks(source: string): { idiom: CensusEnumerationIdiom;
     const dirWalk = match[1] === "readdirSync" || match[1] === "globSync";
     const shell = match[1] === "execSync" || match[1] === "exec";
     const argv = (match[1] === "git" ? args[0] : args[1]) ?? "";
-    const elements = censusCallArgs(argv, maskLiterals(argv), 1, "]");
+    const elements = censusCallArgs(argv, maskLiterals(argv), 1, "]").flatMap((element) => {
+      const spread = /^\.\.\.\s*(\[.*\])$/s.exec(element)?.[1];
+      return spread ? censusCallArgs(spread, maskLiterals(spread), 1, "]") : [element];
+    });
     const value = (element: string) => /^(['"`])([^'"`]*)\1$/.exec(element)?.[2];
     let command = 0;
     let gitCwd: string | undefined;
@@ -2657,10 +2686,11 @@ function censusExecutableWalks(source: string): { idiom: CensusEnumerationIdiom;
       : dirWalk ? args[0] ?? "" : pathspecs.join(",");
     const walks = censusWalksFromText(target);
     if (dirWalk && walks.length === 0 && /^[A-Za-z_$][\w$]*$/.test(args[0] ?? "")) {
-      const helper = new RegExp(`\\bfunction\\s+(\\w+)\\s*\\(\\s*${args[0]}\\b`).exec(code);
+      const helper = new RegExp(`(?:\\bfunction\\s+(\\w+)\\s*\\(|\\b(?:const|let)\\s+(\\w+)\\s*=\\s*\\()\\s*${args[0]}\\b`).exec(code);
       if (helper) {
-        for (const call of code.matchAll(new RegExp(`\\b${helper[1]}\\s*\\(`, "g"))) {
-          if (call.index === helper.index + helper[0].indexOf(helper[1])) continue;
+        const name = helper[1] ?? helper[2];
+        for (const call of code.matchAll(new RegExp(`\\b${name}\\s*\\(`, "g"))) {
+          if (call.index === helper.index + helper[0].indexOf(name)) continue;
           const arg = censusCallArgs(text, code, call.index + call[0].length)[0] ?? "";
           const resolved = censusExpression(arg, text, code, call.index);
           if (!/\b(?:mkdtempSync|mkdtemp|tmpdir)\s*\(/.test(maskLiterals(resolved))) {
@@ -2669,7 +2699,10 @@ function censusExecutableWalks(source: string): { idiom: CensusEnumerationIdiom;
         }
       }
     }
-    if (walks.length === 0 && (dirWalk ? /\bREPO_ROOT\b|\brepoRoot\b|\bprocess\.cwd\s*\(/.test(root)
+    if (!dirWalk && walks.length === 0 && pathspecs.some((path) => /^\*[^/]*$/.test(value(path) ?? ""))) {
+      walks.push("src/", "test/", "scripts/");
+    }
+    if (walks.length === 0 && (dirWalk ? /^(?:REPO_ROOT|repoRoot\([^)]*\)|process\.cwd\(\))$/.test(args[0] ?? "")
       : shell ? /^(['"`])git\s+ls-files\1$/.test(args[0] ?? "") : pathspecs.length === 0)) {
       // An unfiltered tracked-file listing walks all corpora; an unrelated import adds none.
       walks.push("src/", "test/", "scripts/", "plan/tasks.d/");

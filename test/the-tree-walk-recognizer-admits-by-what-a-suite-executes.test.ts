@@ -75,4 +75,23 @@ test("W1-T9050: a helper directory walk retains its repository caller scope", ()
     ["src/"]);
   assert.deepEqual(censusCandidateWalks('function walk(dir) { return readdirSync(dir); } walk(join(REPO_ROOT, "src"));\n' +
     'test("fixture", () => { const dir = mkdtempSync(join(tmpdir(), "r-")); });'), ["src/"]);
+  assert.deepEqual(censusCandidateWalks('const files = (dir: string): string[] => readdirSync(dir); files(join(REPO_ROOT, "src"));'),
+    ["src/"]);
+  assert.deepEqual(censusCandidateWalks('function walk(dir) { readdirSync(dir); walk(join(dir, "child")); } walk(join(REPO_ROOT, "src"));'),
+    ["src/"]);
+});
+
+test("W1-T9050: repository-wide wildcard listings cover the source corpus", () => {
+  assert.deepEqual(censusCandidateWalks('execFileSync("git", ["ls-files", "--", "*.ts", "*.mjs", "*.sh"])'),
+    ["scripts/", "src/", "test/"]);
+});
+
+test("W1-T9050: git wrappers retain executable argv and repository scope", () => {
+  const text = 'const root = REPO_ROOT; const list = (args: string[]) => execFileSync("git", ["-C", root, ...args]);\n' +
+    'list(["ls-files", "src/*.ts", "src/lib/*.ts"]);';
+  assert.deepEqual(censusCandidateWalks(text), ["src/*.ts", "src/lib/*.ts"]);
+  const nested = 'const AREAS = ["src", "scripts"];\n' +
+    'function tracked(root, dirs) { return execFileSync("git", ["-C", root, "ls-files", "--", ...dirs]); }\n' +
+    'function scan(root, dirs) { return tracked(root, dirs); } scan(REPO_ROOT, AREAS);';
+  assert.deepEqual(censusCandidateWalks(nested), ["scripts/", "src/"]);
 });
