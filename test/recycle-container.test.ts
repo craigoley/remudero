@@ -524,6 +524,21 @@ test("selected private launcher diagnostics hide operational values including dr
   }
 });
 
+test("selected private file is refused when a broad runtime mount would expose a second path", () => {
+  for (const serve of [false, true]) {
+    const fixture = privateRecyclerFixture();
+    try {
+      const alias = join(fixture.root, "state", "other-private-path.yaml");
+      writeFileSync(alias, readFileSync(fixture.selected), { mode: 0o600 });
+      const result = fixture.run("private-good", serve, { RMD_INSTANCE_REGISTRY: alias });
+      assert.notEqual(result.status, 0);
+      assert.equal(result.calls.some(isStop), false, "the exact-file denial must not be bypassable through a preexisting broad state mount");
+      assert.equal(result.calls.some(c => isRun(c) && c.argv.includes("-d")), false);
+      assert.equal((result.stdout + result.stderr).includes(fixture.root), false);
+    } finally { fixture.cleanup(); }
+  }
+});
+
 test("W1-T1010: a recycle with no captured credential refuses before mutating", () => {
   const run = runRecycle("no-token");
   assert.notEqual(run.status, 0, "no GH_TOKEN anywhere must refuse");
