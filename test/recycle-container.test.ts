@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -292,6 +292,7 @@ interface RunOpts {
   instanceRoot?: string;
   shellPath?: string;
   unsetDockerHost?: boolean;
+  unselectedRegistry?: boolean;
 }
 
 function runRecycle(mode: string, opts: RunOpts = {}): Run {
@@ -357,6 +358,8 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
       RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "recycle-container-test-no-such-dockerenv-marker"),
       ...opts.extraEnv,
       ...(opts.unsetDockerHost ? { DOCKER_HOST: undefined } : {}),
+      ...(opts.unselectedRegistry ? { RMD_INSTANCE_REGISTRY: undefined, RMD_INSTANCE_REGISTRY_DIGEST: undefined,
+        RMD_INSTANCE_REGISTRY_LAUNCH_BINDING: undefined } : {}),
     },
   });
   let calls: Call[] = [];
@@ -424,14 +427,15 @@ test("selected private recycler refuses unknown input before any transport or pu
 
 // ── ACCEPTANCE 1: no captured credential refuses before mutating anything ───────────────────────
 
-function privateRecyclerFixture() {
+function privateRecyclerFixture(extra: string[] = []) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-launch-`));
   for (const dir of ["state", "claude", "codex", "config"]) mkdirSync(join(root, dir));
   writeFileSync(join(root, "config/config.json"), JSON.stringify({ workerProviders: { enabled: ["openweight"], cashFallbackWhenBlocked: true }, dailyCapUsd: 25 }));
   const selected = join(root, "private.yaml");
   writeFileSync(selected, ["instances:", "  fixture:", "    repo: remudero", "    github_repo: owner/remudero", "    mode: shadow",
     `    state_dir: ${join(root, "state")}`, "    container_name: remudero-private-fixture", "    image: test-registry.azurecr.io/remudero:latest",
-    `    claude_dir: ${join(root, "claude")}`, `    codex_dir: ${join(root, "codex")}`, `    container_config_dir: ${join(root, "config")}`, ""].join("\n"), { mode: 0o600 });
+    `    claude_dir: ${join(root, "claude")}`, `    codex_dir: ${join(root, "codex")}`, `    container_config_dir: ${join(root, "config")}`,
+    ...extra.map(field => `    ${field}`), ""].join("\n"), { mode: 0o600 });
   const runs: Run[] = [];
   return { root, selected, run(mode: string, serve = false, extraEnv: Record<string, string> = {}, dryRun = false) {
     const result = runRecycle(mode, { ...(serve ? { scriptPath: join(REPO_ROOT, "deploy/serve-container.sh") } : {}),
@@ -537,6 +541,20 @@ test("selected private file is refused when a broad runtime mount would expose a
       assert.equal((result.stdout + result.stderr).includes(fixture.root), false);
     } finally { fixture.cleanup(); }
   }
+});
+
+test("selected private recycler preserves configured app and heap fields after image qualification", () => {
+  const fixture = privateRecyclerFixture(["gh_app_id: 4648213", "gh_app_installation_id: 155256285",
+    "gh_app_private_key_path: /home/node/.claude/rmd-app.pem", "max_old_space_mb: 4096"]);
+  try {
+    const result = fixture.run("private-good");
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(runEnvValues(result, "GH_APP_ID"), ["4648213"]);
+    assert.deepEqual(runEnvValues(result, "GH_APP_INSTALLATION_ID"), ["155256285"]);
+    assert.deepEqual(runEnvValues(result, "GH_APP_PRIVATE_KEY_PATH"), ["/home/node/.claude/rmd-app.pem"]);
+    assert.deepEqual(runEnvValues(result, "NODE_OPTIONS"), ["--max-old-space-size=4096 --max-semi-space-size=16"]);
+    assert.deepEqual(runEnvValues(result, "RMD_SHADOW_MODE"), [], "reading existing mode does not authorize activation");
+  } finally { fixture.cleanup(); }
 });
 
 test("W1-T1010: a recycle with no captured credential refuses before mutating", () => {
@@ -1377,7 +1395,15 @@ function runInstance(extra: string[], mode = "good", opts: RunOpts = {}): Run {
   const root = opts.instanceRoot ?? mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-instance-`));
   const dirs = { state: join(root, "state"), claude: join(root, "claude"), codex: join(root, "codex"), config: join(root, "config") };
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
-  const registry = join(root, "daemon-instances.yaml");
+  // These pre-existing tests exercise the unselected public grammar and exact legacy lifecycle.
+  // Private selection now has independent image/identity checks, covered by the selected fixtures above.
+  const scriptPath = opts.scriptPath ?? join(root, "deploy", "recycle-container.sh");
+  const scriptRoot = join(dirname(scriptPath), "..");
+  assert.notEqual(resolve(scriptRoot), resolve(REPO_ROOT), "never write a fixture registry into the maintained checkout");
+  mkdirSync(dirname(scriptPath), { recursive: true });
+  if (!opts.scriptPath) writeFileSync(scriptPath, readFileSync(SCRIPT));
+  mkdirSync(join(scriptRoot, ".remudero"), { recursive: true });
+  const registry = join(scriptRoot, ".remudero", "daemon-instances.yaml");
   const record = [
     "instances:",
     "  fixture:",
@@ -1394,16 +1420,18 @@ function runInstance(extra: string[], mode = "good", opts: RunOpts = {}): Run {
   writeFileSync(registry, `${record.join("\n")}\n`);
   return runRecycle(mode, {
     ...opts,
+    scriptPath,
+    unselectedRegistry: true,
     args: ["--instance", "fixture"],
     stateDir: dirs.state,
-    extraEnv: { RMD_INSTANCE_REGISTRY: registry, RMD_CLAUDE_DIR: dirs.claude, RMD_CODEX_DIR: dirs.codex, RMD_CONTAINER_CONFIG_DIR: dirs.config,
+    extraEnv: { RMD_CLAUDE_DIR: dirs.claude, RMD_CODEX_DIR: dirs.codex, RMD_CONTAINER_CONFIG_DIR: dirs.config,
       RMD_RECYCLE_HOST_LOCK: join(root, "host-recycle.lock"), RMD_RECYCLE_LOCK_WAIT_S: "2", ...opts.extraEnv },
   });
 }
 
 /** The `-e NAME=VALUE` values the `docker run` was given for NAME, in order. */
 function runEnvValues(run: Run, name: string): string[] {
-  const argv = run.calls.find(isRun)?.argv ?? [];
+  const argv = run.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)?.argv ?? [];
   return argv.flatMap((a, i) => (argv[i - 1] === "-e" && a.startsWith(`${name}=`) ? [a.slice(name.length + 1)] : []));
 }
 
