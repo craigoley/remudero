@@ -70,7 +70,6 @@ test("code health retains analysis identity through the real alert reader", () =
   try {
     const read = readCodeScanningAlerts("acme", "atlas", { includeAnalysisInstances: true });
     assert.equal(read.ok, true, "the default reader executes the real fixture process and decodes its response");
-    if (!read.ok) throw new Error(read.error);
     assert.equal(read.alerts.length, 2);
     assert.equal(read.analysisInstances?.length, 2);
     const source = read.analysisInstances![0]!;
