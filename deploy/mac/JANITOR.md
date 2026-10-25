@@ -483,3 +483,14 @@ REFUSE, `INCOMPLETE` when the pass never reached its summary line (or was alread
 previous beat), and `FAILED` when the unit's last result was not success. Any of the three raises
 the `REAPER_ALARM` arm in `fleet-heartbeat-watch.yml`, which files that host's needs-human issue.
 `ok`, `running` and `unknown` (no reaper on the host) are silent.
+
+
+### Declarations that arrive during a pass
+
+Discovery-time absence of a keep declaration is not permission for a later action.
+Immediately before checkout removal, worktree pruning and repacking, preserve-retire
+rechecks the common store and its registered worktrees, including worktrees outside
+the discovery roots. An unreadable or malformed worktree listing holds the store.
+Previously observed holds remain held for the pass. Unmarked stores retain their
+ordinary eligibility, activity and preservation guards. This is a fresh pre-action
+check, not an atomic lock against another process creating a marker after that check.
