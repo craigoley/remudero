@@ -2587,26 +2587,70 @@ function censusCallArgs(text: string, code: string, start: number, close = ")"):
   return args;
 }
 
-/** Resolve local path/argv constants without allowing a literal's contents to become code. */
-function censusExpression(expr: string, text: string, code: string, position: number, seen = new Set<string>()): string {
-  const scopeAt = (end: number): number[] => {
-    const stack: number[] = [];
-    for (let i = 0; i < end; i += 1) {
-      if (code[i] === "{") stack.push(i);
-      else if (code[i] === "}") stack.pop();
+/** One suite's comment-free text and literal-masked code, with the whole-file scans
+ *  {@link censusExpression} repeats per identifier computed once: the brace-scope stack at every
+ *  offset, each name's declarations, the helper headers and each callee's call sites. */
+interface CensusSource {
+  readonly text: string;
+  readonly code: string;
+  scopeAt(end: number): readonly number[];
+  declarations(name: string): readonly RegExpExecArray[];
+  readonly headers: readonly RegExpExecArray[];
+  callsOf(name: string): readonly RegExpExecArray[];
+}
+
+function censusSource(text: string, code: string): CensusSource {
+  // The open-brace stack after each brace in `code`; scopeAt(end) reads the last one before `end`.
+  const braces: number[] = [];
+  const stacks: (readonly number[])[] = [];
+  let stack: readonly number[] = [];
+  for (let i = 0; i < code.length; i += 1) {
+    if (code[i] === "{") stack = [...stack, i];
+    else if (code[i] === "}") stack = stack.slice(0, -1);
+    else continue;
+    braces.push(i);
+    stacks.push(stack);
+  }
+  const scopeAt = (end: number): readonly number[] => {
+    let lo = 0;
+    let hi = braces.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (braces[mid]! < end) lo = mid + 1;
+      else hi = mid;
     }
-    return stack;
+    return lo === 0 ? [] : stacks[lo - 1]!;
   };
+  const memo = (build: (name: string) => RegExp) => {
+    const cache = new Map<string, readonly RegExpExecArray[]>();
+    return (name: string): readonly RegExpExecArray[] => {
+      let hits = cache.get(name);
+      if (!hits) cache.set(name, (hits = [...code.matchAll(build(name))]));
+      return hits;
+    };
+  };
+  return {
+    text,
+    code,
+    scopeAt,
+    declarations: memo((name) => new RegExp(`\\b(?:const|let|var)\\s+${name}\\s*(?::[^=;]+)?=\\s*`, "g")),
+    headers: [...code.matchAll(/\b(?:function\s+(\w+)|(?:const|let)\s+(\w+)\s*=)\s*\(([^)]*)\)/g)],
+    callsOf: memo((name) => new RegExp(`\\b${name}\\s*\\(`, "g")),
+  };
+}
+
+/** Resolve local path/argv constants without allowing a literal's contents to become code. */
+function censusExpression(expr: string, source: CensusSource, position: number, seen = new Set<string>()): string {
+  const { text, code, scopeAt } = source;
   const scope = scopeAt(position);
   const masked = maskLiterals(expr);
   return expr.replace(/\b[A-Za-z_$][\w$]*\b/g, (name, offset: number) => {
     if (masked.slice(offset, offset + name.length) !== name || seen.has(name)) return name;
     if (/^\s*\(/.test(masked.slice(offset + name.length)) || /(?<!\.)\.\s*$/.test(masked.slice(0, offset))) return name;
-    const declaration = [...code.matchAll(new RegExp(`\\b(?:const|let|var)\\s+${name}\\s*(?::[^=;]+)?=\\s*`, "g"))]
+    const declaration = source.declarations(name)
       .findLast((match) => scopeAt(match.index).every((open, index) => scope[index] === open));
     if (!declaration) {
-      const headers = /\b(?:function\s+(\w+)|(?:const|let)\s+(\w+)\s*=)\s*\(([^)]*)\)/g;
-      const helper = [...code.matchAll(headers)].findLast((header) => {
+      const helper = source.headers.findLast((header) => {
         if (header.index >= position) return false;
         const params = header[3].split(",").map((param) => param.trim().split(/[\s:]/)[0]);
         if (!params.includes(name)) return false;
@@ -2621,11 +2665,11 @@ function censusExpression(expr: string, text: string, code: string, position: nu
       if (seen.has(key)) return name;
       const index = helper[3].split(",").findIndex((param) => param.trim().split(/[\s:]/)[0] === name);
       const resolved: string[] = [];
-      for (const call of code.matchAll(new RegExp(`\\b${helperName}\\s*\\(`, "g"))) {
+      for (const call of source.callsOf(helperName)) {
         if (call.index === helper.index + helper[0].indexOf(helperName)) continue;
         const arg = censusCallArgs(text, code, call.index + call[0].length)[index];
         if (!arg) continue;
-        const value = censusExpression(arg, text, code, call.index, new Set([...seen, key]));
+        const value = censusExpression(arg, source, call.index, new Set([...seen, key]));
         if (!/\b(?:mkdtempSync|mkdtemp|tmpdir)\s*\(/.test(maskLiterals(value))) resolved.push(value);
       }
       return resolved.find((value) => censusWalksFromText(value).length > 0) ?? resolved[0] ?? name;
@@ -2640,18 +2684,19 @@ function censusExpression(expr: string, text: string, code: string, position: nu
       else if (c === ")" || c === "]" || c === "}") depth -= 1;
     }
     seen.add(name);
-    return censusExpression(text.slice(start, end), text, code, declaration.index, seen);
+    return censusExpression(text.slice(start, end), source, declaration.index, seen);
   });
 }
 
 function censusExecutableWalks(source: string): { idiom: CensusEnumerationIdiom; walks: string[] }[] {
   const text = stripComments(source);
   const code = maskLiterals(text);
+  const scan = censusSource(text, code);
   const out: { idiom: CensusEnumerationIdiom; walks: string[] }[] = [];
   const calls = /\b(readdirSync|globSync|execFileSync|execFile|spawnSync|spawn|execSync|exec|git)\s*\(/g;
   for (const match of code.matchAll(calls)) {
     const args = censusCallArgs(text, code, match.index + match[0].length)
-      .map((arg) => censusExpression(arg, text, code, match.index));
+      .map((arg) => censusExpression(arg, scan, match.index));
     const dirWalk = match[1] === "readdirSync" || match[1] === "globSync";
     const shell = match[1] === "execSync" || match[1] === "exec";
     const argv = (match[1] === "git" ? args[0] : args[1]) ?? "";
@@ -2689,10 +2734,10 @@ function censusExecutableWalks(source: string): { idiom: CensusEnumerationIdiom;
       const helper = new RegExp(`(?:\\bfunction\\s+(\\w+)\\s*\\(|\\b(?:const|let)\\s+(\\w+)\\s*=\\s*\\()\\s*${args[0]}\\b`).exec(code);
       if (helper) {
         const name = helper[1] ?? helper[2];
-        for (const call of code.matchAll(new RegExp(`\\b${name}\\s*\\(`, "g"))) {
+        for (const call of scan.callsOf(name)) {
           if (call.index === helper.index + helper[0].indexOf(name)) continue;
           const arg = censusCallArgs(text, code, call.index + call[0].length)[0] ?? "";
-          const resolved = censusExpression(arg, text, code, call.index);
+          const resolved = censusExpression(arg, scan, call.index);
           if (!/\b(?:mkdtempSync|mkdtemp|tmpdir)\s*\(/.test(maskLiterals(resolved))) {
             walks.push(...censusWalksFromText(resolved));
           }
