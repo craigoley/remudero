@@ -158,6 +158,7 @@ function writeStubs(dir: string): void {
     'rec() { printf "%s" "docker" >> "$STUB_REC/calls"; for a in "$@"; do printf "\\t%s" "$a" >> "$STUB_REC/calls"; done; printf "\\n" >> "$STUB_REC/calls"; }',
     'rec "$@"',
     'case "$1" in',
+    '  context) case "$STUB_MODE" in private-remote) echo "ssh://unqualified.example.invalid" ;; *) echo "unix:///fixture/docker.sock" ;; esac; exit 0 ;;',
     "  image)",
     '    if [ "$2" = "inspect" ]; then',
     "      shift 2",
@@ -219,6 +220,7 @@ function writeStubs(dir: string): void {
     "    esac",
     "    exit 0 ;;",
     "  pull)",
+    '    if [ "$STUB_MODE" = private-revised ]; then printf "\\n# changed after capture\\n" >> "$RMD_INSTANCE_REGISTRY"; fi',
     '    case "$STUB_MODE" in',
     '      pull-fail) echo "unauthorized: authentication required" >&2; exit 1 ;;',
     "    esac",
@@ -257,7 +259,8 @@ function writeStubs(dir: string): void {
     "    exit 0 ;;",
     // W1-T4197: this mode models an operator replacing the recycle's PAUSE with their own mid-run.
     '  stop) [ "$STUB_MODE" = pause-swapped ] && printf \'%s\' \'{"reason":"operator hold","requestedAt":"2026-10-01T00:00:00.000Z"}\' > "$RMD_STATE_DIR/state/PAUSE"; exit 0 ;;',
-    '  rm|run) [ "$1" = "rm" ] && [ "$STUB_MODE" = rm-hang ] && sleep 10; exit 0 ;;',
+    '  run) case "$*" in *selected-registry-capability-v1*) case "$STUB_MODE" in private-good|private-revised) echo selected-registry-capability-v1; exit 0 ;; *) exit 2 ;; esac ;; esac; exit 0 ;;',
+    '  rm) [ "$STUB_MODE" = rm-hang ] && sleep 10; exit 0 ;;',
     "esac",
     "exit 0",
     "",
@@ -414,6 +417,56 @@ test("selected private recycler refuses unknown input before any transport or pu
 });
 
 // ── ACCEPTANCE 1: no captured credential refuses before mutating anything ───────────────────────
+
+function privateRecyclerFixture() {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-launch-`));
+  for (const dir of ["state", "claude", "codex", "config"]) mkdirSync(join(root, dir));
+  writeFileSync(join(root, "config/config.json"), JSON.stringify({ workerProviders: { enabled: ["openweight"], cashFallbackWhenBlocked: true }, dailyCapUsd: 25 }));
+  const selected = join(root, "private.yaml");
+  writeFileSync(selected, ["instances:", "  fixture:", "    repo: remudero", "    github_repo: owner/remudero", "    mode: shadow",
+    `    state_dir: ${join(root, "state")}`, "    container_name: remudero-private-fixture", "    image: test-registry.azurecr.io/remudero:latest",
+    `    claude_dir: ${join(root, "claude")}`, `    codex_dir: ${join(root, "codex")}`, `    container_config_dir: ${join(root, "config")}`, ""].join("\n"), { mode: 0o600 });
+  const runs: Run[] = [];
+  return { root, selected, run(mode: string) {
+    const result = runRecycle(mode, { args: ["--instance", "fixture"], stateDir: join(root, "state"),
+      extraEnv: { RMD_INSTANCE_REGISTRY: selected, RMD_RECYCLE_HOST_LOCK: join(root, "own-recycle.lock") } });
+    runs.push(result); return result;
+  }, cleanup() {
+    for (const run of runs) for (const path of [run.fixtureRecordingDir, run.fixtureStubDir]) rmSync(path, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  } };
+}
+
+test("selected private recycler mounts exactly one readonly file and proves the image reader before stop", () => {
+  const fixture = privateRecyclerFixture();
+  try {
+    const result = fixture.run("private-good");
+    assert.equal(result.status, 0, result.stderr);
+    const probe = result.calls.findIndex(c => isRun(c) && c.argv.some(a => a.includes("selected-registry-capability-v1")));
+    const stop = result.calls.findIndex(isStop);
+    assert.ok(probe >= 0 && stop > probe, "a healthy contained image-reader control must precede any stop");
+    const launch = result.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
+    assert.ok(launch, "the positive control reaches the actual final launch argument assembly");
+    assert.ok(launch.argv.includes(`type=bind,src=${fixture.selected},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`));
+    assert.ok(launch.argv.includes("RMD_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"));
+    assert.ok(launch.argv.some(a => /^RMD_INSTANCE_REGISTRY_DIGEST=[a-f0-9]{64}$/.test(a)));
+    assert.equal(launch.argv.includes(`type=bind,src=${fixture.root},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`), false);
+  } finally { fixture.cleanup(); }
+});
+
+test("selected private recycler refuses unsupported image remote namespace and revised binding before stop", () => {
+  for (const mode of ["private-old-image", "private-remote", "private-revised"]) {
+    const fixture = privateRecyclerFixture();
+    try {
+      const result = fixture.run(mode);
+      assert.notEqual(result.status, 0, mode);
+      assert.equal(result.calls.some(isStop), false, `${mode} must leave the outgoing worker container untouched`);
+      assert.equal(result.calls.some(isRm), false);
+      assert.equal(result.calls.some(c => isRun(c) && c.argv.includes("-d")), false);
+      assert.equal(existsSync(join(fixture.root, "state/state/PAUSE")), false, "a preflight refusal leaves no automation pause");
+    } finally { fixture.cleanup(); }
+  }
+});
 
 test("W1-T1010: a recycle with no captured credential refuses before mutating", () => {
   const run = runRecycle("no-token");
