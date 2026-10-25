@@ -289,3 +289,47 @@ test("daily projector refuses a publication it cannot commit and keeps durable h
     }
   });
 });
+
+test("daily progress preserves contiguous closing progress across a long restart", async () => {
+  await withTempDir("daily-long-restart-audit", async root => {
+    const stateDir = join(root, "state"); mkdirSync(stateDir); writeFileSync(join(stateDir, "ledger.ndjson"), "");
+    let now = systemClock.now();
+    const clock = { now: () => now, iso: () => fixedClock(now).iso(), date: () => fixedClock(now).date() };
+    const startDate = dailyDateAt(now), repository = "acme/app", zone = "America/New_York";
+    const cache = createBoardSnapshotCache(root, "acme", "app", { clock });
+    const config = { stateDir, expectedRepositories: [repository], instances: [{ name: "core", root, stateDir, repository }], timeZone: zone };
+    const pass = async () => {
+      cache.recordClosedAttempt!({ ok: true, persisted: cache.commitClosed([]) }); cache.commitOpen!([], now);
+      const db = openReadModel({ stateDir, instance: "audit", schemaVersion: 1 });
+      try {
+        const lease = acquireLease(db, { clock }); assert(lease.ok);
+        const publication = await collectDailyProgress(config, clock);
+        if (publication) { publication.commit(db, lease.lease); await flushReadModelTransactions(); }
+        releaseLease(db, lease.lease);
+        return publication !== undefined;
+      } finally { await flushReadModelTransactions(); db.close(); }
+    };
+    assert.equal(await pass(), true);
+    let manifest = readDailyProgressManifest(stateDir);
+    const initial = manifest.days[dailyProgressDayKey(repository, zone, shiftDailyDate(startDate, -1))]; assert(initial);
+    assert.equal(readDailyProgressRevision(stateDir, initial).report.phase, "complete", "positive control: the real source receipt covers the closed day");
+    assert.equal(Object.values(manifest.jobs)[0]!.closedThrough, shiftDailyDate(startDate, -1));
+    now = Date.parse(dailyWindow(shiftDailyDate(startDate, 32), zone).windowStart) + 12 * 3_600_000;
+    const today = dailyDateAt(now, zone);
+    assert.equal(await pass(), true);
+    manifest = readDailyProgressManifest(stateDir);
+    const firstClosedThrough = Object.values(manifest.jobs)[0]!.closedThrough;
+    for (let batch = 0; batch < 4; batch++) await pass();
+    manifest = readDailyProgressManifest(stateDir);
+    const missing: string[] = [];
+    for (let date = startDate; date < today; date = shiftDailyDate(date, 1)) if (!manifest.days[dailyProgressDayKey(repository, zone, date)]) missing.push(date);
+    assert.deepEqual(missing, [], "every missed closing date must be published after bounded catch-up passes");
+    assert.equal(firstClosedThrough, shiftDailyDate(startDate, 13), "recent corrections cannot advance the first closing batch beyond its contiguous boundary");
+    for (let date = startDate; date < today; date = shiftDailyDate(date, 1)) {
+      const day = manifest.days[dailyProgressDayKey(repository, zone, date)];
+      assert(day, `missed closing date ${date} must survive the restart backlog`);
+      assert.equal(readDailyProgressRevision(stateDir, day).report.phase, "complete");
+    }
+    assert.equal(Object.values(manifest.jobs)[0]!.closedThrough, shiftDailyDate(today, -1));
+  });
+});
