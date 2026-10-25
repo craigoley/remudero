@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -328,6 +328,55 @@ test("selected runtime Codex spawn denies private bytes without adding them to c
     }
     assert.equal(spawns, 3);
   } finally { fixture.cleanup(); }
+});
+
+test("selected Codex writer retains public linked metadata and host-slot writes without private overlap", async () => {
+  const fixture = runtimeRegistryFixture(), repo = gitRepo();
+  const cwd = join(fixture.root, "checkout"), codexHome = join(fixture.root, "codex-home"), slots = join(fixture.root, "public-slots");
+  const linked = repo.addWorktree(cwd, "selected-policy-fixture");
+  const gitDir = realpathSync(linked.git("rev-parse", "--absolute-git-dir"));
+  const commonFile = join(gitDir, "commondir"), originalCommon = readFileSync(commonFile, "utf8");
+  writeFileSync(cwd + ".base", `gitdir: ${gitDir}\n`);
+  mkdirSync(codexHome); mkdirSync(slots); mkdirSync(join(cwd, "node_modules"));
+  const keys = ["NODE_TEST_CONTEXT", "RMD_TEST_SLOT_DIR", "RMD_TEST_SLOTS"] as const;
+  const previous = new Map(keys.map(key => [key, process.env[key]]));
+  let spawns = 0;
+  const config: Config = { root: fixture.root, claudeBin: "/unused", workerProviders: {
+    enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome,
+  } };
+  const enter = () => runtimeRegistryRunner()(() => spawnCodexWorker({
+    cwd, workerHome: fixture.root, prompt: "public writer fixture", settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: ["Read", "Edit", "Bash"],
+    containment: { spawn: options => {
+      spawns++;
+      assert.equal(options.args[options.args.indexOf("--add-dir") + 1], slots, "the genuine writer slot argument remains present");
+      const i = options.args.indexOf("--profile"), profile = readFileSync(join(codexHome, options.args[i + 1]! + ".config.toml"), "utf8");
+      for (const path of [gitDir, realpathSync(join(repo.dir, ".git")), realpathSync(join(cwd, "node_modules"))]) {
+        assert.ok(profile.includes(`${JSON.stringify(path)}="read"`), "existing public metadata/dependencies remain readable");
+      }
+      assert.ok(profile.includes('\":workspace_roots\"="write"'));
+      assert.equal(profile.includes(`${JSON.stringify(realpathSync(slots))}="read"`), false, "do not downgrade the writer's admitted slot directory");
+      const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough();
+      const child = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
+      stdin.on("finish", () => { stdout.end(JSON.stringify({ type: "turn.completed", usage: {} }) + "\n"); queueMicrotask(() => child.emit("exit", 0)); });
+      return { process: child as never, pid: 9876 };
+    }, teardown: () => {} },
+  }, config), { envPath: fixture.selected });
+  try {
+    delete process.env.NODE_TEST_CONTEXT; process.env.RMD_TEST_SLOT_DIR = slots; process.env.RMD_TEST_SLOTS = "2";
+    await enter(); assert.equal(spawns, 1);
+    process.env.RMD_TEST_SLOT_DIR = fixture.root;
+    await assert.rejects(enter(), /worker_scope_contains_private_file/); assert.equal(spawns, 1, "no contained child on overlapping slot scope");
+    process.env.RMD_TEST_SLOT_DIR = slots;
+    for (const invalid of ["", "x".repeat(4097), "absent-common-directory"]) {
+      writeFileSync(commonFile, invalid);
+      try { await assert.rejects(enter(), /worker_scope_unqualified|worker_profile_unavailable/); assert.equal(spawns, 1); }
+      finally { writeFileSync(commonFile, originalCommon); }
+    }
+  } finally {
+    writeFileSync(commonFile, originalCommon);
+    for (const key of keys) { const value = previous.get(key); if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    repo.cleanup(); fixture.cleanup();
+  }
 });
 
 test("selected Codex dispatch snapshots caller-owned arguments before its first asynchronous boundary", async () => {
