@@ -253,6 +253,46 @@ test("selected runtime Codex spawn denies private bytes without adding them to c
   } finally { fixture.cleanup(); }
 });
 
+test("selected runtime worker unknown and cleanup outcomes stay explicit", async () => {
+  for (const mode of ["resume", "home-missing", "spawn-error", "profile-replaced", "profile-unlinked"] as const) {
+    const fixture = runtimeRegistryFixture(), codexHome = join(fixture.root, "codex-home");
+    const original = new Error("contained spawn failure");
+    let spawns = 0, profileFile = "";
+    if (mode !== "home-missing") mkdirSync(codexHome);
+    try {
+      const result = runtimeRegistryRunner()(() => spawnCodexWorker({
+        cwd: fixture.root, workerHome: fixture.root, prompt: "no model call",
+        settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: ["Read", "Bash"],
+        ...(mode === "resume" ? { resumeSessionId: "old-permissions" } : {}),
+        containment: { spawn: options => {
+          spawns++;
+          const index = options.args.indexOf("--profile"); assert.ok(index >= 0);
+          profileFile = join(codexHome, options.args[index + 1]! + ".config.toml");
+          if (mode === "profile-replaced") { unlinkSync(profileFile); writeFileSync(profileFile, "replacement"); }
+          if (mode === "profile-unlinked") unlinkSync(profileFile);
+          throw original;
+        }, teardown: () => {} },
+      }, { root: fixture.root, claudeBin: "/unused", workerProviders: {
+        enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome,
+      } }), { envPath: fixture.selected });
+      await assert.rejects(result, error => {
+        if (mode === "spawn-error") return error === original;
+        assert.ok(error instanceof runtimeRegistry.InstanceRegistryRuntimeError);
+        assert.equal(error.message.includes(fixture.root), false, "OS/private paths must not leak through a cleanup error");
+        if (mode === "profile-replaced" || mode === "profile-unlinked") {
+          assert.match(error.message, /worker_profile_cleanup_unknown/);
+          assert.equal(error.cause, original, "cleanup uncertainty preserves the actual original failure");
+        } else assert.match(error.message, mode === "resume" ? /worker_resume_not_qualified/ : /worker_profile_unavailable/);
+        return true;
+      });
+      if (mode === "resume" || mode === "home-missing") assert.equal(spawns, 0);
+      if (mode === "spawn-error") assert.equal(existsSync(profileFile), false);
+      if (mode === "profile-replaced") assert.equal(readFileSync(profileFile, "utf8"), "replacement", "never delete a replacement as if it were our artifact");
+      if (mode === "profile-unlinked") assert.equal(existsSync(profileFile), false, "absence is not falsely certified retained evidence");
+    } finally { fixture.cleanup(); }
+  }
+});
+
 test("selected runtime invalid evidence refuses before the unchanged legacy effect", async () => {
   const fixture = runtimeRegistryFixture();
   try {
