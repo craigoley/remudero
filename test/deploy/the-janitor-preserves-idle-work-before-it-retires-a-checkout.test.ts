@@ -94,6 +94,22 @@ exec '${native}' "$@"
   return native;
 }
 
+function pythonAccountProbe(fx: Fx) {
+  const native = execFileSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).trim();
+  const bootstrap = join(fx.root, "fixture-preserve-retire.py");
+  writeFileSync(bootstrap, `import importlib.util, sys
+gs = sys.argv[1:]
+ args[0] == "-I":
+  args.pop(0)
+lper = args.pop(0)
+ec = importlib.util.spec_from_file_location("pr", helper); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+account_home = lambda: ${JSON.stringify(fx.home)}
+s.argv = [helper, *args, "--now", "${NOW}"]
+ise SystemExit(m.main())
+;
+  pythonProbe(fx, `exec '${native}' -I -B '${bootstrap}' "$@"`);
+}
+
 function preserved(fx: Fx, rel: string): string {
   const root = join(fx.home, "Remudero-preserved");
   const name = readdirSync(root).find(n => n.startsWith(rel.replaceAll("/", "__") + "@"));
@@ -320,6 +336,7 @@ test("retention expires only stamped copies older than retain_days", () => {
 test("the janitor runs the preserve-then-retire phase and rotates its human log", () => {
   const fx = setup();
   try {
+    pythonAccountProbe(fx);
     const log = join(fx.root, "janitor.log");
     writeFileSync(log, "x".repeat(16 * 1024 * 1024 + 1));
     const r = spawnSync("bash", [JANITOR, "--dry-run"], { encoding: "utf8", timeout: 120_000, env: {
@@ -341,19 +358,7 @@ test("the janitor summary counts an actual preserved retirement in its total", (
   try {
     const repo = clone(fx, "Remudero/unpublished");
     commit(repo, "work.ts", "export const work = true;\n", "unpublished work");
-    const native = execFileSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).trim();
-    const bootstrap = join(fx.root, "fixture-preserve-retire.py");
-    writeFileSync(bootstrap, `import importlib.util, sys
-args = sys.argv[1:]
-if args[0] == "-I":
-    args.pop(0)
-helper = args.pop(0)
-spec = importlib.util.spec_from_file_location("pr", helper); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-m.account_home = lambda: ${JSON.stringify(fx.home)}
-sys.argv = [helper, *args, "--now", "${NOW}"]
-raise SystemExit(m.main())
-`);
-    pythonProbe(fx, `exec '${native}' -I -B '${bootstrap}' "$@"`);
+    pythonAccountProbe(fx);
     const r = janitor(fx, true);
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.equal(existsSync(repo), false, r.stdout);
