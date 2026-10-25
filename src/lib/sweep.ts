@@ -19291,7 +19291,11 @@ export async function runSweep(
         !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
       let contractRevision: string | undefined;
       let readable = true;
-      try { contractRevision = pr.taskId === undefined ? undefined : deps.readTaskContractRevision?.(pr.taskId); }
+      // A run-unfiled PR's task is synthetic (`PR-<n>`): its body, not a plan record, is the contract it read.
+      try {
+        contractRevision = pr.taskId === undefined || /^PR-\d+$/.test(fixLedgerTaskIdFor(pr)) ? undefined
+          : deps.readTaskContractRevision?.(pr.taskId);
+      }
       catch (error) { readable = false; deps.log?.("sweep.stand_down_hold.unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) }); }
       const held = readable ? fixSeedRead(ledgerLines, pr, deps.runId,
         { headSha: pr.headSha, contractRevision, bodySha256: standDownBodySha }) : undefined;

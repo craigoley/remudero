@@ -11146,6 +11146,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     const proofDiscriminationNow =
       proofDiscriminationFromReview !== undefined && opts.proofDiscrimination?.source === "gate-log"
         ? { ...proofDiscriminationFromReview, source: "gate-log" as const }
+        : proofDiscriminationFromReview !== undefined && opts.proofDiscrimination?.bodyRepair === true
+        // W1-T10339: a taskless PR's body-repair marker is likewise a property of the dispatch.
+        ? { ...proofDiscriminationFromReview, bodyRepair: true as const }
         : proofDiscriminationFromReview;
     const proofRepairRound = proofDiscriminationNow?.source === "gate-log";
     // W1-T2236: this round's structured gate-failure remedy (the `gate-fix` mode's ONLY input —
