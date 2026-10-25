@@ -102,15 +102,16 @@ test("selected runtime CLI entry refuses invalid input without changing unselect
     if (typeof callback === "function") callback();
     return true;
   });
-  process.argv = [process.execPath, "rmd", "gh", "missing-separator"];
+  process.argv = [process.execPath, "rmd", "daemon"];
   try {
     process.env.RMD_INSTANCE_REGISTRY = "";
     await assert.rejects(main(), /selected instance registry unavailable/);
     assert.equal(code, undefined, "invalid selection stops before the actual dispatch exit");
-    for (const selected of [undefined, fixture.selected]) {
+    process.argv = [process.execPath, "rmd", "gh", "missing-separator"];
+    for (const selected of [undefined, fixture.selected, ""]) {
       if (selected === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = selected;
       await assert.rejects(main(), error => error === reachedExit);
-      assert.equal(code, 2, "the real local gh usage path keeps its existing exit result");
+      assert.equal(code, 2, "read-only recovery dispatch must not become a global selected-configuration hold");
     }
   } finally {
     process.argv = argv;
