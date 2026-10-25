@@ -2844,8 +2844,21 @@ export async function spawnCodexWorker(
   config: Config,
   selection?: Pick<ProviderCapacity, "model" | "effort">,
 ): Promise<CodexWorkerResult> {
+  const selected = runtimeInstanceRegistryPrivateFile();
+  if (selected !== undefined) {
+    // Snapshot before withTempDir or the fresh-source read yields. Signals and callbacks retain their
+    // identity; caller-owned data cannot change the permission intent, child environment or prompt later.
+    args = { ...args, tools: args.tools?.slice(), cashTools: args.cashTools?.slice(),
+      sandboxReadRoots: args.sandboxReadRoots?.slice(), env: args.env && { ...args.env },
+      containment: args.containment && { ...args.containment }, clockBound: args.clockBound && { ...args.clockBound } };
+    try { config = structuredClone(config); }
+    catch {
+      // An uncopyable selected invocation has unknown isolation, not permission to use mutable inputs.
+      throw new InstanceRegistryRuntimeError("worker_arguments_unqualified");
+    }
+    selection = selection && { ...selection };
+  }
   return withTempDir("codex-worker", (privateTmpDir) => {
-    const selected = runtimeInstanceRegistryPrivateFile();
     if (selected === undefined) return spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection);
     return withPrivateRegistryCodexProfile(args, config, selected, profile =>
       spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, profile));
