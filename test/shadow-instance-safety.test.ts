@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import * as runtimeRegistry from "#src/lib/instance-registry-selection.js";
+import { observeSelectedMode } from "#src/lib/instance-mode.js";
 
 import { parseInstanceRegistry } from "../src/lib/instance-registry.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -34,6 +36,94 @@ const registry = (mode?: string) => [
   ...(mode ? [`    mode: ${mode}`] : []),
   "",
 ].join("\n");
+
+type RuntimeRegistryRunner = <T>(operation: () => T | Promise<T>, input: { envPath?: string; instanceName?: string }) => Promise<T>;
+function runtimeRegistryRunner(): RuntimeRegistryRunner {
+  const run = Reflect.get(runtimeRegistry, "withInstanceRegistryRuntime");
+  assert.equal(typeof run, "function", "production invocation binding must exist, not a supplied current-subject fixture");
+  return run as RuntimeRegistryRunner;
+}
+function runtimeRegistryFixture(mode = "shadow") {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}runtime-registry-`));
+  const selected = join(root, "private.yaml");
+  const legacy = registry("live");
+  mkdirSync(join(root, ".remudero"));
+  writeFileSync(join(root, ".remudero", "daemon-instances.yaml"), legacy);
+  writeFileSync(selected, registry(mode));
+  return { root, selected, legacy, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+test("selected runtime binding reaches the existing default mode reader", async () => {
+  const fixture = runtimeRegistryFixture();
+  try {
+    const run = runtimeRegistryRunner();
+    assert.equal(readInstanceRegistryText(fixture.root), fixture.legacy, "healthy unselected legacy positive control");
+    await run(async () => {
+      assert.equal(readInstanceRegistryText(fixture.root), registry("shadow"));
+      assert.equal(instanceMode("owner/repo", readInstanceRegistryText(fixture.root)), "shadow");
+      assert.throws(() => instanceMode("other/repo", readInstanceRegistryText(fixture.root)), /selected instance registry unavailable/);
+      let effects = 0;
+      assert.equal(await observeSelectedMode(undefined, "arm", () => { effects++; return "independent-owner-hold"; }), "independent-owner-hold");
+      assert.equal(effects, 1, "runtime configuration binding is not an observation toggle or publication permission");
+    }, { envPath: fixture.selected, instanceName: "worker" });
+    assert.equal(readInstanceRegistryText(fixture.root), fixture.legacy, "completion does not change the ambient legacy reader");
+  } finally { fixture.cleanup(); }
+});
+
+test("selected runtime invalid evidence refuses before the unchanged legacy effect", async () => {
+  const fixture = runtimeRegistryFixture();
+  try {
+    const run = runtimeRegistryRunner();
+    let effects = 0;
+    for (const envPath of ["", "relative.yaml", join(fixture.root, "missing.yaml")]) {
+      await assert.rejects(run(() => { effects++; return readInstanceRegistryText(fixture.root); }, { envPath }), /selected instance registry unavailable/);
+    }
+    writeFileSync(fixture.selected, "not a valid registry\n");
+    await assert.rejects(run(() => { effects++; }, { envPath: fixture.selected }), /selected instance registry unavailable/);
+    assert.equal(effects, 0, "healthy public bytes never rescue an explicitly invalid selection");
+    assert.equal(await run(() => readInstanceRegistryText(fixture.root), {}), fixture.legacy);
+  } finally { fixture.cleanup(); }
+});
+
+test("selected runtime changed binding is rechecked at the real final arm observer seam", async () => {
+  const fixture = runtimeRegistryFixture();
+  try {
+    const run = runtimeRegistryRunner();
+    let effects = 0;
+    await run(async () => {
+      assert.equal(instanceMode("owner/repo", readInstanceRegistryText(fixture.root)), "shadow");
+      writeFileSync(fixture.selected, registry("live"));
+      await assert.rejects(observeSelectedMode(undefined, "arm", () => { effects++; return "armed"; }), /selected instance registry unavailable/);
+    }, { envPath: fixture.selected, instanceName: "worker" });
+    assert.equal(effects, 0, "revised bytes cannot silently retarget deferred work");
+    assert.equal(await observeSelectedMode(undefined, "arm", () => { effects++; return "legacy-result"; }), "legacy-result");
+    assert.equal(effects, 1, "absence preserves the legacy effect without a global hold");
+  } finally { fixture.cleanup(); }
+});
+
+test("selected runtime concurrent and escaped invocations cannot borrow another binding", { timeout: 10000 }, async () => {
+  const a = runtimeRegistryFixture("shadow"), b = runtimeRegistryFixture("live");
+  try {
+    const run = runtimeRegistryRunner();
+    let entered = 0, release!: () => void;
+    const both = new Promise<void>(resolve => { release = resolve; });
+    const modes = await Promise.all([a, b].map(fixture => run(async () => {
+      if (++entered === 2) release();
+      await both;
+      const expected = fixture === a ? "shadow" : "live";
+      assert.equal(instanceMode("owner/repo", readInstanceRegistryText(fixture.root)), expected);
+      await run(() => assert.equal(readInstanceRegistryText(fixture.root), fixture.legacy), {});
+      assert.equal(instanceMode("owner/repo", readInstanceRegistryText(fixture.root)), expected);
+      return expected;
+    }, { envPath: fixture.selected, instanceName: "worker" })));
+    assert.deepEqual(modes, ["shadow", "live"]);
+    let wake!: () => void, escaped!: Promise<string | undefined>;
+    const later = new Promise<void>(resolve => { wake = resolve; });
+    await run(() => { escaped = later.then(() => readInstanceRegistryText(a.root)); }, { envPath: a.selected });
+    wake();
+    await assert.rejects(escaped, /selected instance registry unavailable/, "escaped async work cannot use a completed invocation's trusted bytes");
+  } finally { a.cleanup(); b.cleanup(); }
+});
 
 test("a shadow instance opens pull requests ready for review under the no-draft rule", () => {
   assert.equal(parseInstanceRegistry(registry("shadow")).instances[0]?.mode, "shadow");
