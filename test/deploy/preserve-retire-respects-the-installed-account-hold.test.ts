@@ -2,10 +2,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const HELPER = join(REPO_ROOT, "deploy/mac/preserve-retire.py");
 const NOW = Math.floor(Date.now() / 1000) + 48 * 3600;
@@ -77,10 +78,12 @@ assert os.path.isfile(os.path.join(target, m.STAMP_REL))`);
 test("every maintained destructive helper consults the account hold at its own action boundary", () => {
   const fx = fixture();
   try {
+    mkdirSync(join(fx.home, "work"));
+    const seed = gitRepo({ kind: "janitor-account-hold" });
+    renameSync(seed.dir, join(fx.home, "work/repo"));
     const r = probe(fx.home, `
-root = os.path.join(home, "work"); os.mkdir(root)
+root = os.path.join(home, "work")
 repo = os.path.join(root, "repo")
-git("init", "--quiet", repo)
 with open(os.path.join(repo, "README"), "w") as f: f.write("fixture")
 git("-C", repo, "add", "README"); git("-C", repo, "commit", "--quiet", "-m", "fixture")
 git("-C", repo, "repack", "-a", "-d", "-q")
