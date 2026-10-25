@@ -5,7 +5,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { withTempDir } from "#src/lib/tmp.js";
-import { buildCodeHealthOpportunities, codeqlQualityProposalId } from "#src/lib/codeql-quality-intake.js";
+import { buildCodeHealthOpportunities, codeqlQualityProposalId, qualityScanFromCollectedEvidence } from "#src/lib/codeql-quality-intake.js";
 import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
 import { readCoverageNightlySummary } from "#src/lib/coverage-nightly-intake.js";
 import { fixedClock } from "#src/lib/clock.js";
@@ -230,4 +230,41 @@ test("code health retains coverage provenance at the existing ledger boundary", 
       reader: { ...opts.reader, summaryForRun: async () => foreign } });
     assert.equal(refused.status, "failed", "foreign source metadata is refused before publication");
   });
+});
+
+
+test("code health requires every configured analysis before treating quality evidence as complete", () => {
+  const sha = "a".repeat(40), requiredLanguages = ["javascript-typescript", "actions", "python"];
+  const artifacts = requiredLanguages.map((language, n) => ({ version: "code-health-source-v1", kind: "quality", repository: "acme/atlas", analyzedSha: sha,
+    ref: "refs/heads/main", runId: "123", runAttempt: "1", observedAt: "2026-11-02T05:00:00.000Z", language,
+    sarifId: `${n + 1}2345678-1234-1234-1234-123456789012`, scanId: `codeql:123:1:${language}:${n + 1}2345678-1234-1234-1234-123456789012`,
+    state: "complete", reasons: [], toolVersion: "2.23.0", rulesVersion: "b".repeat(64), configHash: "c".repeat(64), ruleCount: 12,
+    exclusions: ["test/**"], scope: { kind: "explicit-analysis-targets", fileCount: 2, hash: "d".repeat(64) },
+    completion: { kind: "workflow-analysis-step", state: "success", at: "2026-11-02T05:00:00.000Z" } }));
+  const analyses = artifacts.map(artifact => ({ sarifId: artifact.sarifId, analyzedSha: sha, category: `/language:${artifact.language}`,
+    toolVersion: "2.23.0", analysisKey: ".github/workflows/codeql.yml:analyze", environmentHash: "e".repeat(64), error: "", warning: "" }));
+  const value = { repository: "acme/atlas", analyzedSha: sha, runId: "123", requiredLanguages, artifacts, analyses,
+    source: { ok: true as const, alerts: [{ source: "code-scanning" as const, id: "42", severity: "high" as const, state: "open", createdAt: "2026-11-01T05:00:00.000Z",
+      summary: "Repeated work is hard to change.", url: "https://github.com/acme/atlas/security/code-scanning/42", toolName: "CodeQL", ruleId: "js/repeated-work",
+      ruleTags: ["quality", "maintainability"], location: { path: "src/example.ts" } }],
+      analysisInstances: [{ alertId: "42", analyzedSha: sha, toolVersion: "2.23.0", ref: "refs/heads/main", analysisKey: analyses[0]!.analysisKey,
+        category: analyses[0]!.category, environmentHash: analyses[0]!.environmentHash, instanceState: "open" }] } };
+  const positive = qualityScanFromCollectedEvidence(value);
+  assert.equal(positive.state, "complete"); assert.equal(positive.findings.length, 1); assert.equal(positive.checks[0]!.met, false);
+  assert.equal(positive.observedAt, artifacts[0]!.observedAt);
+  const zero = qualityScanFromCollectedEvidence({ ...value, source: { ok: true, alerts: [], analysisInstances: [] } });
+  assert.equal(zero.state, "complete", "a zero-alert result has all required source-population controls"); assert.equal(zero.checks[0]!.met, true);
+  const missing = qualityScanFromCollectedEvidence({ ...value, artifacts: artifacts.slice(0, 2) });
+  assert.equal(missing.state, "partial"); assert.equal(missing.findings.length, 1);
+  const foreign = structuredClone(value); foreign.artifacts[0]!.repository = "acme/foreign";
+  assert.throws(() => qualityScanFromCollectedEvidence(foreign), /provenance|repository/i);
+  const mismatch = structuredClone(value); mismatch.source.analysisInstances[0]!.analyzedSha = "f".repeat(40);
+  assert.equal(qualityScanFromCollectedEvidence(mismatch).state, "partial");
+  const wrongAnalysis = structuredClone(value); wrongAnalysis.analyses[0]!.sarifId = "f2345678-1234-1234-1234-123456789012";
+  assert.equal(qualityScanFromCollectedEvidence(wrongAnalysis).state, "partial");
+  const dismissed = structuredClone(value); dismissed.source.alerts[0]!.state = "dismissed";
+  const retained = qualityScanFromCollectedEvidence(dismissed);
+  assert.equal(retained.state, "complete", "GitHub can retain an open most-recent instance for a dismissed alert");
+  assert.equal(retained.findings[0]!.status, "dismissed"); assert.equal(retained.checks[0]!.met, false);
+  assert.equal(qualityScanFromCollectedEvidence({ ...value, source: { ok: false, error: "unavailable" } }).state, "unavailable");
 });

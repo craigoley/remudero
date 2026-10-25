@@ -4,7 +4,7 @@ import type { RawAlert } from "./ops.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { codeHealthFindingFingerprint, projectCodeHealth, type CodeHealthProjectionInput } from "./code-health-projection.js";
+import { codeHealthFindingFingerprint, projectCodeHealth, type CodeHealthProjectionInput, type CodeHealthScan } from "./code-health-projection.js";
 
 export interface CodeHealthRelatedWork {
   repository: string;
@@ -31,6 +31,12 @@ export interface CodeHealthImprovementOpportunity {
   estimateKind: "modeled" | null;
   relatedWork: CodeHealthRelatedWork[];
 }
+
+export function qualityScanFromCollectedEvidence(_input: {
+  repository: string; analyzedSha: string; runId: string; requiredLanguages: string[]; artifacts: unknown[];
+  analyses: Array<{ sarifId: string; analyzedSha: string; category: string; toolVersion: string; analysisKey: string; environmentHash: string; error: string; warning: string }>;
+  source: import("./ops.js").CodeScanningAlertsRead;
+}): CodeHealthScan { throw new Error("Code health source adaptation is not implemented."); }
 
 /** A read-only briefing over existing evidence and opportunity identities; never files or ranks. */
 export function buildCodeHealthOpportunities(input: CodeHealthProjectionInput, relatedWork: readonly CodeHealthRelatedWork[] = []): CodeHealthImprovementOpportunity[] {
