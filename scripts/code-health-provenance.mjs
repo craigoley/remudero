@@ -3,7 +3,7 @@
 import { parseLcovRecords } from "./lib/lcov.mjs";
 import { parseLcovTotals, classifyCoverageTier } from "./coverage-ratchet.mjs";
 import { createHash } from "node:crypto";
-import { closeSync, fstatSync, openSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -102,12 +102,20 @@ export function coverageProvenance(summary, lcov, baseline, workflow, repository
 
 function boundedRead(path, limit) {
   if (!path) throw new Error("Unbounded or unavailable analysis input.");
-  // Check and read through one open handle so the file cannot change between the two.
+  // Operate on one open handle only, and bound the bytes actually read rather than trusting a
+  // size observed earlier, so a file that grows after the type check is still refused.
   const fd = openSync(path, "r");
   try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > limit) throw new Error("Unbounded or unavailable analysis input.");
-    return readFileSync(fd, "utf8");
+    if (!fstatSync(fd).isFile()) throw new Error("Unbounded or unavailable analysis input.");
+    const buffer = Buffer.allocUnsafe(limit + 1);
+    let length = 0;
+    for (;;) {
+      const count = readSync(fd, buffer, length, buffer.length - length, null);
+      if (count === 0) break;
+      length += count;
+      if (length > limit) throw new Error("Unbounded or unavailable analysis input.");
+    }
+    return buffer.toString("utf8", 0, length);
   } finally {
     closeSync(fd);
   }
