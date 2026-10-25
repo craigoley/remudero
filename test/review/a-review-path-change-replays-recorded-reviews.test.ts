@@ -362,7 +362,7 @@ async function reviewWithReplayProvenance(legacy: string | null, identified: boo
         return identified ? { status: "stale", codeSha, originMainSha: nextSha, changedPaths: ["src/cli/commands/review.ts"] }
           : { status: "unreadable", reason: "fixture cannot establish reviewer provenance" };
       },
-      arm: () => { arms++; return { armed: false, reason: "fixture refuses arming" }; }, disarm: () => {},
+      arm: () => { arms++; throw new Error("replay attribution must not arm"); }, disarm: () => {},
     });
     return { rows, freshnessReads, arms, codeSha, head, publication: readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>) };
   } finally {
