@@ -191,6 +191,7 @@ export interface CollectCodeHealthOptions {
   coverageStateDir?: string;
   clock?: import("./clock.js").Clock;
   source?: import("./ops.js").CodeScanningAlertsRead;
+  mayPublish?: () => boolean;
   readQualityEvidence?: typeof readCodeHealthQualityEvidence;
 }
 

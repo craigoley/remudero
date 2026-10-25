@@ -617,11 +617,21 @@ test("code health collection publishes cached facts and keeps failed refreshes v
     const evidence = { currentSha: sha, quality: { analyzedSha: sha, runId: "123", requiredLanguages: ["actions"], artifacts: [artifact], analyses: [{ sarifId, analyzedSha: sha,
       category: "/language:actions", toolVersion: "2.23.0", analysisKey: ".github/workflows/codeql.yml:analyze", environmentHash: "e".repeat(64), createdAt: at, rulesCount: 12, error: "", warning: "" }] } };
     const opts = { stateDir, repository, clock, source: { ok: true as const, alerts: [], analysisInstances: [] }, readQualityEvidence: async () => evidence };
+    let deniedReads = 0;
+    const denied = await collectCodeHealth({ ...opts, mayPublish: () => false, readQualityEvidence: async () => { deniedReads++; return evidence; } });
+    assert.equal(denied.state, "superseded"); assert.equal(deniedReads, 0, "no source read starts after ownership is lost");
     const first = await collectCodeHealth(opts); assert.equal(first.state, "published"); assert("snapshotId" in first);
     const saved = readCodeHealthSnapshot(stateDir, repository); assert("snapshot" in saved);
     assert.equal(saved.snapshot.input.scans.length, 2); assert(saved.snapshot.input.scans.every(scan => scan.state === "complete" && scan.observedAt === at));
     assert.equal(projectCodeHealth(saved.snapshot.input).summary.healthy, null, "one measurement cannot invent a comparison baseline");
     now += 60_000;
+    let owned = true;
+    const beforeLeaseLoss = readCodeHealthSnapshot(stateDir, repository);
+    const lost = await collectCodeHealth({ ...opts, mayPublish: () => owned, readQualityEvidence: async () => { owned = false; return evidence; } });
+    assert.equal(lost.state, "superseded"); assert.deepEqual(readCodeHealthSnapshot(stateDir, repository), beforeLeaseLoss, "late results cannot refresh the pointer");
+    owned = true;
+    const lostFailure = await collectCodeHealth({ ...opts, mayPublish: () => owned, readQualityEvidence: async () => { owned = false; throw new Error("lease-lost-private"); } });
+    assert.equal(lostFailure.state, "superseded"); assert.equal(readCodeHealthCollectionFailure(stateDir, repository).state, "none", "late failures cannot publish either");
     const failed = await collectCodeHealth({ ...opts, readQualityEvidence: async () => { throw new Error("private-source-detail-do-not-publish"); } });
     assert.equal(failed.state, "unavailable");
     const afterFailure = readCodeHealthSnapshot(stateDir, repository); assert("snapshot" in afterFailure); assert.equal(afterFailure.snapshot.snapshotId, first.snapshotId);
@@ -638,6 +648,7 @@ test("code health collection publishes cached facts and keeps failed refreshes v
     await Promise.resolve(); now += 60_000;
     assert.equal((await collectCodeHealth(opts)).state, "duplicate");
     now += 60_000; release();
+    // This late failure is superseded by the newer successful pointer, independently of lease loss.
     const stale = await old; assert.equal(stale.state, "superseded", "a late failed collector cannot replace the status of a newer successful refresh");
     assert.equal(readCodeHealthCollectionFailure(stateDir, repository).state, "none");
     const empty = join(stateDir, "first-read-failed");
