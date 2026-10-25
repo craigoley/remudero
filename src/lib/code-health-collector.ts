@@ -1,3 +1,9 @@
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
+import { ghTextAsync } from "./github-transport.js";
+import { withTempDir } from "./tmp.js";
+import { readCodeHealthArtifactJson } from "./code-health-store.js";
 import { isDeepStrictEqual } from "node:util";
 import { fixedClock } from "./clock.js";
 import { CODE_HEALTH_SOURCE_KINDS } from "./code-health-contract.js";
@@ -71,6 +77,93 @@ export interface CodeHealthQualityEvidenceRead {
   quality: Omit<Parameters<typeof import("./codeql-quality-intake.js").qualityScanFromCollectedEvidence>[0], "repository" | "source" | "knownFindingIds">;
 }
 
-export async function readCodeHealthQualityEvidence(_repository: string): Promise<CodeHealthQualityEvidenceRead> {
-  throw new Error("Code health quality source has not been read.");
+type QualityTextRead = (args: string[], opts?: { maxBuffer?: number; timeout?: number }) => Promise<string>;
+const QUALITY_RESPONSE_BYTES = 512 * 1024;
+const qualityObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+const qualityString = (value: unknown, max = 4096): value is string => typeof value === "string" && value.length > 0 && value.length <= max && !value.includes("\0");
+
+function configuredQualityLanguages(value: unknown): string[] {
+  if (!qualityObject(value) || !qualityObject(value.jobs)) throw new Error("The configured CodeQL job inventory is unavailable.");
+  const languages: string[] = [];
+  for (const job of Object.values(value.jobs)) {
+    if (!qualityObject(job) || !Array.isArray(job.steps) || !job.steps.some(step => qualityObject(step) && typeof step.uses === "string" && /^github\/codeql-action\/analyze@/i.test(step.uses))) continue;
+    const strategy = qualityObject(job.strategy) ? job.strategy : {}, matrix = qualityObject(strategy.matrix) ? strategy.matrix : {};
+    let configured: unknown[] | undefined;
+    if (matrix.exclude !== undefined) throw new Error("The configured CodeQL language exclusions need explicit source support.");
+    if (Array.isArray(matrix.include)) configured = matrix.include.map(entry => qualityObject(entry) ? entry.language : undefined);
+    else if (Array.isArray(matrix.language)) configured = matrix.language;
+    else {
+      const init = job.steps.find(step => qualityObject(step) && typeof step.uses === "string" && /^github\/codeql-action\/init@/i.test(step.uses));
+      const field = qualityObject(init) && qualityObject(init.with) ? init.with.languages : undefined;
+      if (typeof field === "string" && !field.includes("${{")) configured = field.split(/[,\s]+/).filter(Boolean);
+    }
+    if (!configured?.length || configured.some(language => typeof language !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(language))) throw new Error("The configured CodeQL languages cannot be resolved safely.");
+    languages.push(...configured as string[]);
+  }
+  if (!languages.length || languages.length > 8 || new Set(languages).size !== languages.length) throw new Error("The configured CodeQL language inventory is missing, repeated or exceeds its bound.");
+  return languages.sort();
+}
+
+/** Existing GitHub transport, one completed main run, original metadata, and independently configured languages. Never reads alerts again. */
+export async function readCodeHealthQualityEvidence(repository: string, readText: QualityTextRead = ghTextAsync): Promise<CodeHealthQualityEvidenceRead> {
+  if (!/^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/i.test(repository) || /\/(?:\.|\.\.)$/.test(repository)) throw new Error("Invalid Code health repository identity.");
+  const prefix = `repos/${repository.toLowerCase()}`;
+  const json = async (path: string): Promise<unknown> => {
+    const text = await readText(["api", `${prefix}/${path}`, "-H", "X-GitHub-Api-Version: 2026-03-10"], { maxBuffer: QUALITY_RESPONSE_BYTES, timeout: 10_000 });
+    if (Buffer.byteLength(text) > QUALITY_RESPONSE_BYTES) throw new Error("Code health source response exceeds its bound.");
+    return JSON.parse(text);
+  };
+  const head = await json("commits/main");
+  if (!qualityObject(head) || typeof head.sha !== "string" || !/^[a-f0-9]{40}$/i.test(head.sha)) throw new Error("The current repository revision is unavailable.");
+  const runs = await json("actions/workflows/codeql.yml/runs?branch=main&status=completed&per_page=1");
+  if (!qualityObject(runs) || !Array.isArray(runs.workflow_runs) || runs.workflow_runs.length !== 1) throw new Error("No bounded completed main CodeQL run is available.");
+  const run = runs.workflow_runs[0];
+  if (!qualityObject(run) || !Number.isSafeInteger(run.id) || Number(run.id) <= 0 || run.head_branch !== "main" || run.status !== "completed" ||
+      typeof run.head_sha !== "string" || !/^[a-f0-9]{40}$/i.test(run.head_sha) || run.path !== ".github/workflows/codeql.yml") throw new Error("The selected CodeQL run has incomplete or foreign identity.");
+  const runId = String(run.id), analyzedSha = run.head_sha.toLowerCase();
+  const file = await json(`contents/.github/workflows/codeql.yml?ref=${analyzedSha}`);
+  if (!qualityObject(file) || file.type !== "file" || file.encoding !== "base64" || typeof file.content !== "string" || !Number.isSafeInteger(file.size) || Number(file.size) > 128 * 1024) throw new Error("The configured CodeQL workflow is unreadable or exceeds its bound.");
+  const workflow = Buffer.from(file.content, "base64");
+  if (workflow.length !== file.size || workflow.length > 128 * 1024) throw new Error("The configured CodeQL workflow size does not match.");
+  const requiredLanguages = configuredQualityLanguages(parseYaml(workflow.toString("utf8")));
+  const listed = await json(`actions/runs/${runId}/artifacts?per_page=100`);
+  if (!qualityObject(listed) || !Number.isSafeInteger(listed.total_count) || Number(listed.total_count) > 100 || !Array.isArray(listed.artifacts) || listed.artifacts.length !== listed.total_count) throw new Error("The CodeQL artifact inventory is incomplete or exceeds its bound.");
+  const selected = requiredLanguages.map(language => {
+    const name = `code-health-quality-${language}`, matches = listed.artifacts.filter(artifact => qualityObject(artifact) && artifact.name === name);
+    if (matches.length !== 1) throw new Error("A configured original-output artifact is missing or repeated.");
+    const artifact = matches[0] as Record<string, unknown>, source = artifact.workflow_run;
+    if (!Number.isSafeInteger(artifact.id) || Number(artifact.id) <= 0 || artifact.expired !== false || !Number.isSafeInteger(artifact.size_in_bytes) ||
+        Number(artifact.size_in_bytes) <= 0 || Number(artifact.size_in_bytes) > 256 * 1024 || !qualityObject(source) || source.id !== run.id ||
+        source.head_sha !== run.head_sha || source.head_branch !== "main" || !Number.isSafeInteger(source.repository_id) || source.repository_id !== source.head_repository_id)
+      throw new Error("A CodeQL artifact is expired, oversized, or belongs to another workflow run or repository.");
+    return { language, name };
+  });
+  const artifacts = await withTempDir("code-health-quality", async root => {
+    const values: unknown[] = [];
+    for (const artifact of selected) {
+      const dir = join(root, artifact.language);
+      await readText(["run", "download", runId, "--repo", repository.toLowerCase(), "--name", artifact.name, "--dir", dir], { maxBuffer: 16 * 1024, timeout: 10_000 });
+      values.push(readCodeHealthArtifactJson(join(dir, "code-health-quality.json")));
+    }
+    return values;
+  });
+  const raw = await json("code-scanning/analyses?ref=refs%2Fheads%2Fmain&tool_name=CodeQL&per_page=100");
+  if (!Array.isArray(raw) || !raw.length || raw.length > 100) throw new Error("The bounded CodeQL analysis inventory is unavailable.");
+  let lastAt = Number.POSITIVE_INFINITY;
+  const analyses: CodeHealthQualityEvidenceRead["quality"]["analyses"] = raw.map(value => {
+    if (!qualityObject(value) || value.ref !== "refs/heads/main" || !qualityObject(value.tool) || String(value.tool.name).toLowerCase() !== "codeql" ||
+        typeof value.created_at !== "string" || !Number.isFinite(Date.parse(value.created_at)) || Date.parse(value.created_at) > lastAt) throw new Error("The analysis inventory is invalid or not ordered newest first.");
+    lastAt = Date.parse(value.created_at);
+    const bounded = (value: unknown, max = 256): string => qualityString(value, max) ? value : "";
+    return { sarifId: bounded(value.sarif_id), analyzedSha: bounded(value.commit_sha).toLowerCase(), category: bounded(value.category),
+      toolVersion: bounded(value.tool.version), analysisKey: bounded(value.analysis_key),
+      environmentHash: qualityString(value.environment) ? createHash("sha256").update(value.environment).digest("hex") : "",
+      createdAt: fixedClock(Date.parse(value.created_at)).iso(), rulesCount: Number.isSafeInteger(value.rules_count) ? Number(value.rules_count) : -1,
+      error: value.error === "" ? "" : bounded(value.error, 2048) || "The analysis error state is unavailable.",
+      warning: value.warning === "" ? "" : bounded(value.warning, 2048) || "The analysis warning state is unavailable." };
+  });
+  // GitHub returns newest first. Finding every original SARIF ID proves this page covers all
+  // newer analyses relevant to the selected artifacts; it does not claim complete historical coverage.
+  if (artifacts.some(artifact => !qualityObject(artifact) || !analyses.some(analysis => analysis.sarifId === artifact.sarifId))) throw new Error("The bounded analysis page does not cover every configured artifact.");
+  return { currentSha: head.sha.toLowerCase(), quality: { analyzedSha, runId, requiredLanguages, artifacts, analyses } };
 }

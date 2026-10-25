@@ -216,3 +216,8 @@ export function saveCodeHealthCoverageSource(opts: { stateDir: string; repositor
   } catch { return { state: "unavailable", reason: "Coverage source evidence could not be saved safely; prior evidence was retained." }; }
   finally { if (lock && owns?.()) lock.release(); }
 }
+
+/** Original-output metadata uses the same bounded no-follow reader as sealed evidence. */
+export function readCodeHealthArtifactJson(path: string): unknown {
+  return boundedEvidenceJson(path, 128 * 1024);
+}
