@@ -5,7 +5,8 @@
   type: implement
   principles: {tdd: strict}
   budget_usd: 12.00
-  verify: human
+  verify: auto
+  priority: 2.5
   dispatch_hold: true
   risk: high
   band_meaning: span
@@ -36,3 +37,13 @@
     Complete captured475-head object scope covers265 task-shard trees and1426 distinct subject-matched blobs, plus26 inline-plan variants and all captured open PR file lists. Exact marker/original/reply searches identify no matching lifecycle filing in that population; this is snapshot-scoped evidence, not universal absence. The private worktree advanced to d1df6a5 during normal creation; all10 relevant admission/judge/policy/CLI/writer blobs remain identical to12d24585, and its three additional paths concern a first-repository plan and an unrelated sweep repair.
     Correctness requires exact repository-local identity, appropriate API-confirmed merged source evidence and review of the resulting lifecycle proposal. Preserve terminal operator decisions and unknown evidence; a mutable PR body marker is a candidate, never self-authorizing proof that the feedback was fixed.
     This one plan-only publication has Craig's explicit author NOT RUN/full-CI exception. Full normal CI, coverage, security and fleet review still gate merge; implementation tests are future requirements, not results of this filing. Serve stays running, W7740 stays USER_HELD90, and foundation/Janitor ownership, SHADOW and independent holds are untouched.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.74
+    reasons:
+      - "Description and acceptance criteria state that reconciliation reuses the existing slow-lane snapshot and writer, and that the result lands through the normal reviewed landing path. They rule out new fetchers, GET-side writes, and review bypass."
+      - "The declared files (panel-graph.ts, read-model-slow-lane.ts and two tests) are consistent with the described scope. No secrets, auth, deletion, or merge/deploy policy changes are indicated."
+      - "The operator's design decision is recorded as already made (issue #12899), and the criteria are unit-test verifiable. The family's empty track record is a neutral prior, and no actual change view was supplied."
+    judged_at: "2026-10-25T15:26:43.639Z"
+    pin: "540a251c69fcde85946e00709afb161d0b6de988e51b7ffe181ac7ee99f7ea4f"
