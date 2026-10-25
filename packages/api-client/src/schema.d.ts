@@ -12,10 +12,18 @@ export interface components {
       precision: "exact" | "at_least";
       value: number;
     });
+    ExpectedDailyProgressSource: {
+      id: string;
+      repository: string;
+      kind: "pull_requests" | "ledger_activity" | "deployments";
+      instanceId: string | null;
+      required: boolean;
+    };
     DailyProgressSource: {
       id: string;
       repository: string;
       kind: "pull_requests" | "ledger_activity" | "deployments";
+      instanceId: string | null;
       required: boolean;
       state: "complete" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized";
       lastAttemptAt: string | null;
@@ -58,6 +66,7 @@ export interface components {
         state: "complete" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized";
         expectedRepositories: (string)[];
         includedRepositories: (string)[];
+        expectedSources: (ExpectedDailyProgressSource)[];
         sources: (DailyProgressSource)[];
       };
       totals: {

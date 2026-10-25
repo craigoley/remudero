@@ -101,14 +101,25 @@ components:
           additionalProperties: false
           required: [value, precision]
           properties: {precision: {type: string, enum: [exact, at_least]}, value: {type: integer, minimum: 0}}
-    DailyProgressSource:
+    ExpectedDailyProgressSource:
       type: object
       additionalProperties: false
-      required: [id, repository, kind, required, state, lastAttemptAt, lastSuccessAt, coverageStart, coverageThrough, nextDueAt, reason]
+      required: [id, repository, kind, instanceId, required]
       properties:
         id: {type: string, minLength: 1, maxLength: 256}
         repository: {type: string, minLength: 3, maxLength: 140}
         kind: {type: string, enum: [pull_requests, ledger_activity, deployments]}
+        instanceId: {type: [string, "null"], minLength: 1, maxLength: 128}
+        required: {type: boolean}
+    DailyProgressSource:
+      type: object
+      additionalProperties: false
+      required: [id, repository, kind, instanceId, required, state, lastAttemptAt, lastSuccessAt, coverageStart, coverageThrough, nextDueAt, reason]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 256}
+        repository: {type: string, minLength: 3, maxLength: 140}
+        kind: {type: string, enum: [pull_requests, ledger_activity, deployments]}
+        instanceId: {type: [string, "null"], minLength: 1, maxLength: 128}
         required: {type: boolean}
         state: {type: string, enum: [complete, partial, stale, not_collected, unavailable, unauthorized]}
         lastAttemptAt: {type: [string, "null"], format: date-time}
@@ -163,11 +174,12 @@ components:
         coverage:
           type: object
           additionalProperties: false
-          required: [state, expectedRepositories, includedRepositories, sources]
+          required: [state, expectedRepositories, includedRepositories, expectedSources, sources]
           properties:
             state: {type: string, enum: [complete, partial, stale, not_collected, unavailable, unauthorized]}
             expectedRepositories: {type: array, maxItems: 256, uniqueItems: true, items: {type: string, maxLength: 140}}
             includedRepositories: {type: array, maxItems: 256, uniqueItems: true, items: {type: string, maxLength: 140}}
+            expectedSources: {type: array, maxItems: 1024, items: {$ref: "#/components/schemas/ExpectedDailyProgressSource"}}
             sources: {type: array, maxItems: 1024, items: {$ref: "#/components/schemas/DailyProgressSource"}}
         totals:
           type: object

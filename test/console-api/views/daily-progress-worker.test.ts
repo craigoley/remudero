@@ -204,3 +204,31 @@ test("daily repository inventory refuses a named pipe without blocking the admit
     assert.equal(child.status, 0, child.stderr);
   });
 });
+
+
+test("daily collector keeps every configured PR source visible before counting exact totals", async () => {
+  await withTempDir("daily-configured-coverage", async root => {
+    const now = fixedClock(Date.parse("2026-11-02T12:00:00.000Z")), repository = "acme/app";
+    const first = join(root, "first"), second = join(root, "second");
+    for (const dir of [first, second]) { mkdirSync(dir); mkdirSync(join(dir, "state")); writeFileSync(join(dir, "state", "ledger.ndjson"), ""); }
+    const complete = (boardRoot: string) => {
+      const cache = createBoardSnapshotCache(boardRoot, "acme", "app", { clock: now });
+      cache.recordClosedAttempt!({ ok: true, persisted: cache.commitClosed([]) }); cache.commitOpen!([], now.now());
+    };
+    complete(first);
+    for (const both of [false, true]) {
+      if (both) complete(second);
+      const stateDir = join(root, both ? "all-sources" : "missing-source");
+      const collected = await collectDailyProgress({ stateDir, expectedRepositories: [repository], instances: [first, second].map((path, index) => ({ name: `instance${index}`, root: path, stateDir: join(path, "state"), repository })) }, now); assert(collected);
+      const db = openReadModel({ stateDir, instance: "source-coverage", schemaVersion: 1 });
+      try {
+        const held = acquireLease(db, { holder: "source-coverage", clock: now }); assert(held.ok); collected.commit(db, held.lease);
+        const key = dailyProgressDayKey(repository, "America/New_York", dailyDateAt(now.now())), report = readDailyProgressRevision(stateDir, collected.manifest.days[key]!).report;
+        assert.equal(report.coverage.expectedSources.filter(source => source.kind === "pull_requests" && source.required).length, 2);
+        assert.equal(report.coverage.sources.filter(source => source.kind === "pull_requests" && source.required).length, 2);
+        assert.equal(report.totals.mergedChanges.precision, both ? "exact" : "unavailable", "one complete sibling cannot erase a missing required source");
+        if (both) assert.equal(report.totals.mergedChanges.value, 0, "complete persisted source receipts support the measured zero");
+      } finally { db.close(); }
+    }
+  });
+});
