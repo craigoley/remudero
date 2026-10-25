@@ -1,28 +1,10 @@
 #!/usr/bin/env node
 // scripts/comment-load-ratchet.mjs
 //
-// A CEILING ON COMMENT VOLUME. It refuses two things and judges nothing else: a measured file
-// whose comment-line count grew past scripts/comment-load-baseline.json, and a newly ADDED
-// comment block longer than MAX_ADDED_BLOCK_LINES in the diff against a base ref. The written
-// standard it enforces the volume half of is docs/comment-standard.md.
-//
-// TWO HALVES, DELIBERATELY COMPLEMENTARY. The baseline half cannot bind on a file it has never
-// seen (a new file is RECORDED, not refused — there is nothing to have grown past), so the added-
-// block half is what constrains new code. The added-block half cannot see growth spread over many
-// short blocks, so the baseline half is what constrains existing files.
-//
-// A RATCHET, NOT A CAP. A recorded count is a ceiling on ONE file: today's count is legal forever.
-// A shrunk file rewrites its own entry DOWN so the gain is held; a deleted file is dropped. Only
-// raising a ceiling is refused, and the only way to raise one is an edit to the baseline that a
-// reviewer reads — which is the deliberation this gate exists to force.
-//
-// EXIT CODES: 0 clean, 1 refused (growth, or an oversized added block), 2 could not measure (bad
-// arguments, unreadable baseline, unresolvable base ref). A run that cannot measure must never
-// report OK.
-//
-// Usage:
-//   node scripts/comment-load-ratchet.mjs [--base <ref>] [--root <dir>] [--baseline <path>]
-//   node scripts/comment-load-ratchet.mjs --json | --print | --check | --no-record | --strict
+// Default: measure comment-volume debt for high-priority follow-up; volume never refuses a PR.
+// Explicit --baseline reproduces the historical ratchet for archived evidence and its fixtures.
+// --print shows whole-corpus counts. Only an unreadable default measurement exits nonzero.
+// Operator policy 2026-10-24 is recorded in docs/comment-standard.md.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -458,6 +440,28 @@ function printLargest(comments, totals) {
   for (const [path, n] of top) console.log(`  ${String(n).padStart(6)}  ${path}`);
 }
 
+/** A maintenance nomination threshold, never a merge or publication ceiling. */
+export const COMMENT_FOLLOWUP_LINES = 250;
+
+export function measureCommentLoadSignal(root, baseRef = "origin/main") {
+  const read = args => git(root, args, `measure comment signal (${args[0]})`);
+  const head = read(["rev-parse", "HEAD"]).trim();
+  const base = read(["merge-base", baseRef, head]).trim();
+  const files = listMeasuredFiles(root);
+  const changed = new Set(read(["diff", "--name-only", "-z", `${base}...${head}`, "--", ...MEASURED_ROOTS]).split("\0").filter(Boolean));
+  const atBase = new Set(read(["ls-tree", "-r", "--name-only", "-z", base, "--", ...MEASURED_ROOTS]).split("\0").filter(Boolean));
+  const hotspots = files.filter(path => changed.has(path)).map(path => {
+    const after = countCommentLines(read(["show", `${head}:${path}`]), path);
+    const before = atBase.has(path) ? countCommentLines(read(["show", `${base}:${path}`]), path) : { comments: 0, code: 0 };
+    return { path, before: before.comments, comments: after.comments, code: after.code, delta: after.comments - before.comments,
+      followup: after.comments > COMMENT_FOLLOWUP_LINES };
+  });
+  const measured = new Set(files);
+  const blocks = findOversizedAddedBlocks(read(["diff", "--unified=0", `${base}...${head}`, "--", ...MEASURED_ROOTS]), path => measured.has(path));
+  return { schema_version: 2, policy: "nonblocking-followup", head, base, measured_files: files.length, hotspots, oversized_added_blocks: blocks };
+}
+
+
 /** The CLI body, exported so its branches are exercised IN PROCESS rather than only through a
  *  subprocess — a spawned run reports no coverage, which left every arm below untested. */
 export function main(argv) {
@@ -482,6 +486,17 @@ export function main(argv) {
   }
 
   const root = resolve(values.root);
+  if (!values.baseline && !values.print) {
+    try {
+      const report = measureCommentLoadSignal(root, values.base);
+      console.log(values.json ? JSON.stringify(report) :
+        `comment-load-signal: measured ${report.measured_files} files; comment volume does not block this change.\ncomment-load-signal-json: ${JSON.stringify(report)}`);
+      return 0;
+    } catch (error) {
+      console.error(`comment-load-signal: MEASUREMENT FAILED — ${error.message}`);
+      return 2;
+    }
+  }
   const baselinePath = values.baseline ? resolve(values.baseline) : join(root, DEFAULT_BASELINE_RELATIVE_PATH);
   const baselineRelPath = values.baseline ?? DEFAULT_BASELINE_RELATIVE_PATH;
 
