@@ -58,6 +58,7 @@ export interface SlowLaneConfig {
   accountUsage?: { ledgerPath: string; root: string; accountFilePath?: string };
   /** The analytics unit's instances, each by the state dir holding its ledger; it runs only while the analytics view is switched on. */
   analytics?: { instances: Array<{ name: string; stateDir: string; repository?: string }>; intervalMs?: number; timeoutMs?: number };
+  codeHealth?: { stateDir: string; instances: Array<{ name: string; stateDir: string; repository?: string }> };
   intervalMs?: number;
 }
 
@@ -534,3 +535,11 @@ export function threadSlowLane(opts: {
     },
   };
 }
+
+
+/** Daily cached assessments share the leased slow lane, independently of Analytics. */
+export function createCodeHealthCollectionUnit(_config: NonNullable<SlowLaneConfig["codeHealth"]>, _opts: {
+  clock: Clock; captureOwnership: () => () => boolean; ownsInstance: (name: string) => boolean;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  collect?: typeof import("./code-health-collector.js").collectCodeHealth;
+}): SlowLaneUnit { return { name: "code-health", run: async () => ({ views: [] }) }; }

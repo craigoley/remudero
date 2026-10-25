@@ -700,3 +700,31 @@ test("code health retains saved facts beside an unauthorized current refresh", a
     assert.equal(evidence.snapshot.input.scans[0]!.observedAt, value.scans[0]!.observedAt);
   });
 });
+
+
+test("code health background collection is leased, daily, restart-aware and independent of Analytics", async () => {
+  const { createCodeHealthCollectionUnit } = await import("#src/lib/read-model-slow-lane.js");
+  const { codeHealthRepositoryStateDir } = await import("#src/lib/code-health-store.js");
+  await withTempDir("code-health-background", async stateDir => {
+    let now = Date.parse("2026-11-02T06:00:00.000Z"), owned = true;
+    const clock = clockFromMillisFn(() => now), repository = "acme/atlas";
+    mkdirSync(join(stateDir, "read-model"));
+    writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ improvementEvidence: {
+      version: "repository-evidence-inventory-v1", measurementState: "not_collected", unresolvedInstances: [], repositories: [{ repository, instanceIds: ["atlas"], expectedQualitySources: ["quality", "coverage"] }] } }));
+    const config = { stateDir, instances: [{ name: "atlas", stateDir: join(stateDir, "legacy-atlas"), repository }] };
+    const calls: Parameters<typeof collectCodeHealth>[0][] = [];
+    const opts = { clock, captureOwnership: () => { const started = owned; return () => started && owned; }, ownsInstance: (name: string) => name === "atlas" && owned, log: () => {},
+      collect: async (options: Parameters<typeof collectCodeHealth>[0]) => {
+        calls.push(options); const value = input(); value.observedAt = clock.iso();
+        return publishCodeHealthSnapshot({ stateDir: options.stateDir, input: value, expectedSnapshotId: null, clock });
+      } };
+    let unit = createCodeHealthCollectionUnit(config, opts);
+    owned = false; await unit.run(); assert.equal(calls.length, 0);
+    owned = true; await unit.run(); assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.stateDir, codeHealthRepositoryStateDir(stateDir, repository));
+    assert.equal(calls[0]!.coverageStateDir, config.instances[0]!.stateDir);
+    assert.equal(calls[0]!.mayPublish?.(), true); owned = false; assert.equal(calls[0]!.mayPublish?.(), false);
+    owned = true; unit = createCodeHealthCollectionUnit(config, opts); await unit.run(); assert.equal(calls.length, 1, "restart respects the persisted successful attempt");
+    now += 86_400_000; await unit.run(); assert.equal(calls.length, 2, "next day is due without a page load or Analytics");
+  });
+});
