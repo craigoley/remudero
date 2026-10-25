@@ -3886,7 +3886,6 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
     restore: validatedInboxAction(validateDeclineProposal, (input, actor, respond) => proposalVerdictResponse("restore", deps, input, actor, respond)),
     reply: validatedInboxAction(validateThreadReply, async (input, caller, respond) => {
       const proposalId = proposalIdOfThread(input.threadId)!;
-      if (improvementReviewRequired(proposalId, respond)) return;
       // The detail route and daemon responder both require a current operator-owned item.
       // A syntactically valid but orphaned id must not receive a success receipt for a
       // message the responder will silently have no item to answer.

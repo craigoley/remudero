@@ -12,7 +12,7 @@ import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js"
 import { inboxDraftGeneration, invalidateDraft, parseProposalRegistryResult, updateProposalRegistry, type DraftCache, type DraftedCandidate, type Proposal } from "./inbox.js";
 import { bearerTokenId, jsonAction, sendJson } from "./panel-actions.js";
 import type { Route } from "./service.js";
-import { appendThreadMessageOnce, inboxThreadId, inboxThreadIdentity, readThread, type ThreadMessageExtra } from "./inbox-thread.js";
+import { causalThreadInputs, appendThreadMessageOnce, inboxThreadId, inboxThreadIdentity, readThread, type ThreadMessageExtra } from "./inbox-thread.js";
 
 export const IMPROVEMENT_THREAD_VERSION = "improvement-thread-v1" as const;
 export interface ImprovementThreadRequest {
@@ -160,6 +160,19 @@ function readIntent(path: string): Intent | undefined {
       intent.threadId !== inboxThreadId(intent.proposalId)) throw new Error("The saved improvement request is invalid.");
   return intent;
 }
+function publishThreadLink(stateDir: string, intent: Intent, owns: () => boolean): void {
+  const dir = join(stateDir, "improvement-threads", "thread-links"), link = { version: "improvement-thread-link-v1", threadId: intent.threadId, requestId: intent.requestId };
+  if (!writeAtomic(join(dir, `${hash(intent.threadId)}.json`), JSON.stringify({ ...link, contentHash: hash(link) }), { mode: 0o600, beforeRename: owns })) throw new Error("Conversation link ownership changed.");
+  syncPath(dir, true);
+}
+function requestOfThread(stateDir: string, threadId: string): string | undefined {
+  let raw: unknown;
+  try { raw = readCodeHealthArtifactJson(join(stateDir, "improvement-threads", "thread-links", `${hash(threadId)}.json`), 4096); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  const { contentHash, ...link } = raw as { contentHash: string; version: string; threadId: string; requestId: string };
+  if (link.version !== "improvement-thread-link-v1" || link.threadId !== threadId || !/^[a-f0-9]{64}$/.test(link.requestId) || contentHash !== hash(link)) throw new Error("Conversation link cannot be verified.");
+  return link.requestId;
+}
 function saved(intent: Intent, reused: boolean): ImprovementThreadResult {
   return { state: "saved", version: IMPROVEMENT_THREAD_VERSION, requestId: intent.requestId, threadId: intent.threadId, proposalId: intent.proposalId,
     repository: intent.request.repository, instance: intent.scope.instance, snapshotId: intent.request.snapshotId, opportunityId: intent.request.opportunityId, reused,
@@ -207,6 +220,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
         return current.map(row => row.id === previous.proposalId ? { ...row, improvement: { ...row.improvement!, conversationReady: true } } : row);
       }, { maxWaitMs: 0 });
       syncPath(registryPath); syncPath(scope.inboxStateDir, true);
+      if (!requestOfThread(deps.stateDir, previous.threadId)) publishThreadLink(deps.stateDir, previous, owns);
       return owns() ? saved(previous, true) : fail("uncertain", "The request writer changed before acknowledgement.", requestId);
     }
     const source = sourceFor(request, scope, deps); if ("state" in source) return { ...source, requestId };
@@ -266,6 +280,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
       return current.map(row => row.id === intent.proposalId ? { ...row, improvement: { ...row.improvement!, conversationReady: true } } : row);
     }, { maxWaitMs: 0 });
     syncPath(registryPath); syncPath(scope.inboxStateDir, true);
+    publishThreadLink(deps.stateDir, intent, owns);
     return owns() ? saved(intent, previous !== undefined) : fail("uncertain", "The writer changed before the saved conversation could be acknowledged.", requestId);
   } catch {
     // A write may have reached disk. Only the same-key retry and the native messages can establish its outcome.
@@ -281,6 +296,7 @@ export type ImprovementThreadView = Failure | {
   state: "saved"; version: typeof IMPROVEMENT_THREAD_VERSION; requestId: string; currentRequestId: string; proposalId: string; threadId: string;
   repository: string; instance: string; snapshotId: string; opportunityId: string; goal: string; constraints: string[]; goalDigest: string;
   source: { state: "current" | "stale" | "unavailable"; reason: string | null };
+  correspondence: { state: "linked" | "unknown"; pendingInputs: number | null; pendingWork: number | null };
   messages: import("./inbox-thread.js").ThreadMessage[]; messageCount: number; messagesPartial: boolean; nextBeforeSeq: number | null;
   drafting: { state: "not_requested" | "requested" | "ready" | "unavailable" | "refused"; digest: string | null; fragmentYaml: string | null; reason: string | null; operationId?: string; sourceRequestId?: string };
   filing: { state: "not_requested" | "requested" | "plan_pr_opened" | "refused" | "uncertain"; operationId?: string; sourceRequestId?: string; receipt?: ImprovementPlanReceipt; reason?: string | null }; execution: { state: "not_requested" };
@@ -319,6 +335,10 @@ export function readImprovementThread(requestId: string, deps: ImprovementThread
     }
     const read = readThread(current.threadId, { threadStorePath: join(scope.inboxStateDir, "inbox-threads.jsonl") });
     if (read.status !== "ok") return fail("uncertain", "The saved messages cannot currently be read.", requestId);
+    // Saved goals are source-bound context, not interpreter requests. Other replies keep the native causal contract.
+    const causalMessages = read.messages.filter(message => !(message.role === "reply" && message.extra?.messageId?.startsWith("goal:") &&
+      message.extra.improvement?.repository === current.request.repository && message.extra.improvement.instance === scope.instance && message.extra.input === undefined));
+    const correspondence = causalThreadInputs(causalMessages, { repository: current.request.repository, instance: scope.instance }, current.proposalId, proposal.reframeHistory);
     const candidates = read.messages.filter(message => beforeSeq === undefined || message.seq < beforeSeq), messages: typeof read.messages = [];
     let bytes = 0;
     for (const message of candidates.toReversed()) {
@@ -355,6 +375,7 @@ export function readImprovementThread(requestId: string, deps: ImprovementThread
     return { state: "saved", version: IMPROVEMENT_THREAD_VERSION, requestId, currentRequestId: current.requestId, proposalId: proposal.id, threadId: current.threadId,
       repository: current.request.repository, instance: scope.instance, snapshotId: current.request.snapshotId, opportunityId: current.request.opportunityId,
       goal: current.request.goal, constraints: current.request.constraints ?? [], goalDigest: proposal.improvement.goalDigest, source: sourceState,
+      correspondence: { state: correspondence.unknown ? "unknown" : "linked", pendingInputs: correspondence.unknown ? null : correspondence.pending.length, pendingWork: correspondence.unknown ? null : correspondence.pendingWork.length },
       messages, messageCount: read.messages.length, messagesPartial: messages.length < read.messages.length,
       nextBeforeSeq: candidates.length > messages.length ? messages[0]!.seq : null, drafting, filing, execution: { state: "not_requested" } };
   } catch {
@@ -397,9 +418,16 @@ export function buildImprovementThreadRoutes(options: { stateDir: string; clock?
     } },
     { method: "GET", path: "/v1/improvements/thread", scope: "read", handler: (req, res) => {
       const params = new URL(req.url ?? "/", "http://localhost").searchParams;
-      if ([...params.keys()].some(key => !["requestId", "beforeSeq"].includes(key)) || params.getAll("requestId").length !== 1 || params.getAll("beforeSeq").length > 1 || params.has("beforeSeq") && !/^[1-9][0-9]{0,15}$/.test(params.get("beforeSeq")!)) { sendJson(res, 400, { error: "invalid_request", detail: "Use one saved conversation request identity." }); return; }
-      const result = readImprovementThread(params.get("requestId")!, { ...options, actorId: bearerTokenId(req) }, params.has("beforeSeq") ? Number(params.get("beforeSeq")) : undefined);
-      sendJson(res, resultStatus(result), result);
+      if ([...params.keys()].some(key => !["requestId", "threadId", "beforeSeq"].includes(key)) || params.getAll("requestId").length + params.getAll("threadId").length !== 1 || params.has("threadId") && (params.get("threadId")!.length > 256 || !params.get("threadId")!.startsWith("thread:improvement:")) || params.getAll("beforeSeq").length > 1 || params.has("beforeSeq") && !/^[1-9][0-9]{0,15}$/.test(params.get("beforeSeq")!)) { sendJson(res, 400, { error: "invalid_request", detail: "Use one saved conversation request identity." }); return; }
+      try {
+        const requestId = params.get("requestId") ?? requestOfThread(options.stateDir, params.get("threadId")!);
+        const result = requestId ? readImprovementThread(requestId, { ...options, actorId: bearerTokenId(req) }, params.has("beforeSeq") ? Number(params.get("beforeSeq")) : undefined)
+          : fail("source_unavailable", "This saved conversation link is unavailable.");
+        sendJson(res, resultStatus(result), result);
+      } catch {
+        // An unreadable navigation link does not establish that the conversation was never saved.
+        sendJson(res, 503, fail("uncertain", "This saved chat link cannot currently be checked."));
+      }
     } },
   ];
 }
@@ -495,6 +523,7 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
     if (view.state !== "saved") return view;
     if (view.currentRequestId !== input.requestId || view.goalDigest !== input.goalDigest) return fail("conflict", "The goal changed. Review the latest conversation before continuing.");
     const source = sourceFor(intent.request, intent.scope, deps); if ("state" in source) return source;
+    if (kind === "file" && (view.correspondence.state !== "linked" || view.correspondence.pendingInputs !== 0 || view.correspondence.pendingWork !== 0)) return fail("conflict", "A newer chat message has not been resolved. Review its answer and the current draft before filing.");
     if (kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== input.draftDigest)) return fail("conflict", "Review the current completed draft before requesting filing.");
     if (deps.launchAction === undefined) return fail("source_unavailable", "This repository cannot start plan drafting or filing right now. No action was requested.");
     const action: ImprovementAction = previous ?? { version: "improvement-action-v1", operationId, kind, requestId: input.requestId, proposalId: intent.proposalId,
@@ -564,7 +593,7 @@ export async function runImprovementAction(operationId: string, deps: Improvemen
     const view = readImprovementThread(action.requestId, deps);
     const source = sourceFor(intent.request, scope, deps);
     if (view.state !== "saved" || view.currentRequestId !== action.requestId || view.goalDigest !== action.goalDigest || "state" in source ||
-        action.kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== action.draftDigest)) {
+        action.kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== action.draftDigest || view.correspondence.state !== "linked" || view.correspondence.pendingInputs !== 0 || view.correspondence.pendingWork !== 0)) {
       action.state = "refused"; action.reason = "The source, goal, or reviewed draft changed before this action could run."; writeAction(deps.stateDir, action, owns); return action;
     }
     const target = { proposalId: intent.proposalId, repository: intent.request.repository, controlRoot: dirname(scope.inboxStateDir),

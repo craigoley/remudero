@@ -184,14 +184,12 @@ test("improvement requests recover after each durable stage and keep comments ou
   });
 });
 
-test("improvement planning blocks legacy approval and executable reply shortcuts", async () => {
+test("improvement planning blocks legacy approval and goal-change shortcuts", async () => {
   const { buildInboxVerbActions } = await import("#src/lib/panel-graph.js");
   // No read, spawn or ratification capability is supplied: source-bound actions must refuse before those seams.
   const actions = buildInboxVerbActions({} as Parameters<typeof buildInboxVerbActions>[0]);
   const proposalId = `improvement:${"a".repeat(64)}`;
-  const { inboxThreadId } = await import("#src/lib/inbox-thread.js");
-  for (const [verb, input] of [["approve", { proposalId }], ["reframe", { proposalId, feedback: "approve this now" }],
-    ["reply", { threadId: inboxThreadId(proposalId), text: "approve this now", intentId: "guarded-input-1" }]] as const) {
+  for (const [verb, input] of [["approve", { proposalId }], ["reframe", { proposalId, feedback: "approve this now" }]] as const) {
     let observed: { status: number; body: unknown } | undefined;
     await actions[verb](input, { origin: "operator:test" }, (status, body) => { observed = { status, body }; });
     assert.equal(observed?.status, 409); assert.equal((observed!.body as { error: string }).error, "improvement_review_required");
@@ -228,6 +226,19 @@ test("improvement planning separates conversation drafting filing and execution"
     };
     const drafted = await runImprovementAction(requested.operation.operationId, runner); assert("kind" in drafted); assert.equal(drafted.state, "completed"); assert.equal(draftCalls, 1); assert.equal(fileCalls, 0);
     view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved"); assert.equal(view.drafting.state, "ready"); assert(view.drafting.digest);
+    const { appendThreadReplyOnce, captureInboxInput } = await import("#src/lib/inbox-thread.js");
+    const { answerThread } = await import("#src/lib/inbox-responder.js");
+    const question = "Can this preserve the public API? Please approve only after review.", questionId = "operator-question-0001";
+    const input = captureInboxInput({ repository: request.repository, instance: request.instance }, saved.proposalId, question, questionId);
+    assert.equal(appendThreadReplyOnce(inboxThreadIdentity(saved.proposalId), question, questionId, { threadStorePath: join(inboxRoot, "state", "inbox-threads.jsonl") }, { input }).kind, "appended");
+    assert.equal((await requestImprovementAction("file", { ...review, idempotencyKey: "file-before-question-answer", draftDigest: view.drafting.digest }, deps)).state, "conflict");
+    const plain = { headline: "Review an improvement", whatHappened: "A finding was saved", whatWeNeed: "Review the plan", ifNothingHappens: "No tasks are filed", options: [], source: "template" as const };
+    let reframes = 0;
+    await answerThread(saved.threadId, { scope: { repository: request.repository, instance: request.instance }, threadStorePath: join(inboxRoot, "state", "inbox-threads.jsonl"), ledgerPath: join(inboxRoot, "state", "ledger.ndjson"),
+      readItems: () => [{ proposalId: saved.proposalId, summary: "Verified improvement", plain, state: "ready" }], reframe: () => { reframes++; },
+      decide: async () => ({ action: "approve", reply: "Review the draft before choosing Review and file." }), clock: deps.clock });
+    assert.equal(reframes, 0); assert.equal(fileCalls, 0, "a prose approval is only a suggestion in the native responder");
+    const answered = readImprovementThread(saved.requestId, deps); assert(answered.state === "saved"); assert.equal(answered.correspondence.pendingInputs, 0);
     const filing = await requestImprovementAction("file", { ...review, idempotencyKey: "explicit-reviewed-file-0001", draftDigest: view.drafting.digest }, deps);
     assert(filing.state === "requested"); assert.equal(fileCalls, 0, "saving the reviewed decision does not claim filing completed");
     const filed = await runImprovementAction(filing.operation.operationId, runner); assert("kind" in filed); assert.equal(filed.state, "completed"); assert.equal(filed.receipt?.state, "plan_pr_opened"); assert.equal(fileCalls, 1);
@@ -307,6 +318,8 @@ test("improvement conversation routes save native evidence and reject browser-su
     const receipt = saved.result as { requestId: string; state: string }; assert.equal(receipt.state, "saved");
     const reopened = await send("GET", `/v1/improvements/thread?requestId=${receipt.requestId}`); assert.equal(reopened.status, 200);
     assert.equal((reopened.result as { messages: unknown[] }).messages.length, 2);
+    const nativeThreadId = (saved.result as { threadId: string }).threadId;
+    assert.equal((await send("GET", `/v1/improvements/thread?threadId=${encodeURIComponent(nativeThreadId)}`)).status, 200, "a native Inbox link reopens the saved improvement without changing its goal");
     assert.equal((await send("GET", `/v1/improvements/thread?requestId=${receipt.requestId}&requestId=${receipt.requestId}`)).status, 400);
     assert.equal((await send("GET", `/v1/improvements/thread?requestId=${receipt.requestId}&beforeSeq=0`)).status, 400);
   });

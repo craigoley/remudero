@@ -71,6 +71,11 @@ export interface components {
         state: "current" | "stale" | "unavailable";
         reason: unknown;
       };
+      correspondence: {
+        state: "linked" | "unknown";
+        pendingInputs: unknown;
+        pendingWork: unknown;
+      };
       /** At most 512 KiB of native messages. Use nextBeforeSeq to read earlier messages. */
       messages: (ImprovementNativeMessage)[];
       messageCount: number;

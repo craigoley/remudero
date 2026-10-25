@@ -279,6 +279,7 @@ components:
         - constraints
         - goalDigest
         - source
+        - correspondence
         - messages
         - messageCount
         - messagesPartial
@@ -339,6 +340,29 @@ components:
             reason:
               anyOf:
                 - type: string
+                - type: "null"
+        correspondence:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+            - pendingInputs
+            - pendingWork
+          properties:
+            state:
+              type: string
+              enum:
+                - linked
+                - unknown
+            pendingInputs:
+              anyOf:
+                - type: integer
+                  minimum: 0
+                - type: "null"
+            pendingWork:
+              anyOf:
+                - type: integer
+                  minimum: 0
                 - type: "null"
         messages:
           type: array
@@ -14654,9 +14678,9 @@ paths:
     post:
       summary: Save a planning conversation for a verified finding.
       description: "Resolves repository, fleet instance and immutable evidence on the server. Retries reuse native
-        Inbox messages. Opening or replying requests no model draft, filing, dispatch, merge or deployment.
-        Write tier: LOW. All existing authentication, admission, ownership, reservation and review guards remain
-        in force."
+        Inbox messages. Saving this goal requests no model draft, filing, dispatch, merge or deployment.
+        Questions use the existing native Inbox reply path and never approve or file from prose. Write tier:
+        LOW. All existing authentication, admission, ownership, reservation and review guards remain in force."
       security:
         - bearerWrite: []
       requestBody:
@@ -14716,13 +14740,21 @@ paths:
       summary: Read a saved improvement conversation and its current receipts.
       security:
         - bearerRead: []
+      description: Provide exactly one of requestId or the native Inbox threadId. Both reopen the same server-owned
+        conversation without changing its goal.
       parameters:
         - name: requestId
           in: query
-          required: true
+          required: false
           schema:
             type: string
             pattern: ^[a-f0-9]{64}$
+        - name: threadId
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 256
         - name: beforeSeq
           in: query
           required: false
