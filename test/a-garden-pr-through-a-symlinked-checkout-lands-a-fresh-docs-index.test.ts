@@ -137,7 +137,8 @@ for (const asynchronous of [false, true]) {
         } else {
           assert.equal(await withLiveWritesAllowed(() => garden!.land(landing)), "https://github.com/acme/remudero/pull/8");
           assert.equal(preflights, 1);
-          const changed = origin.git("show", "--format=", "--name-only", garden.branch).split("\n").filter(Boolean).sort();
+          assert.equal(garden.branch, "gate-garden-1790195325865");
+          const changed = origin.git("show", "--format=", "--name-only", "gate-garden-1790195325865").split("\n").filter(Boolean).sort();
           assert.deepEqual(changed, [".github/workflows/ci-gate.yml", "MASTER-PLAN.md"]);
           assert.match(origin.git("show", `${garden.branch}:MASTER-PLAN.md`), /3 — ci, proof-discrimination, fixture-check/);
         }
