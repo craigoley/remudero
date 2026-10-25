@@ -9,7 +9,6 @@ import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { loadConfig, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
-import { systemClock } from "../../lib/clock.js";
 import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermits, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
 import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
 import { SPECIALIST_TOOLS } from "../../lib/specialist-panel.js";
@@ -1781,7 +1780,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     // The decline is a review outcome too: ledger it so a skipped closed PR is not a silent gap.
     const closed = raw as RestPullRow;
     appendLedger(ledgerPathFor(loadConfigDep()), {
-      run_id: `review-PR${closed.number}-${systemClock.now()}`, task_id: `PR-${closed.number}`, lane: "review",
+      run_id: `review-PR${closed.number}-${Date.now()}`, task_id: `PR-${closed.number}`, lane: "review",
       step: "review.skipped_closed_before_review", pr_number: closed.number, pr_url: closed.html_url,
       head_sha: closed.head?.sha, merged: typeof closed.merged_at === "string",
     });
@@ -1811,7 +1810,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url),
   );
   const reviewKey = reviewLedgerKeyFor(taskId, view.number);
-  const runId = `review-PR${view.number}-${systemClock.now()}`;
+  const runId = `review-PR${view.number}-${Date.now()}`;
   const reviewAttemptId = acceptedReviewAttemptId(deps.reviewAttemptId, view.number);
   // W1-T10269: a shadow review publishes nothing and its rows are renamed; every terminal row names the judging code's sha.
   const shadow = rest.includes(REVIEWER_SHADOW_FLAG);
