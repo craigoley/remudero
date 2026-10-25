@@ -164,5 +164,3 @@ export function createCodeHealthView(opts: { stateDir?: string; keys?: () => str
     });
   } };
 }
-
-
