@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { hostname } from "node:os";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { buildCodeHealthOpportunities, codeqlQualityProposalId, qualityScanFromCollectedEvidence, readCodeHealthSnapshot, publishCodeHealthSnapshot } from "#src/lib/codeql-quality-intake.js";
@@ -288,6 +289,9 @@ test("code health publishes immutable evidence and refuses stale or occupied pub
     assert.equal(published.state, "published"); assert("snapshotId" in published);
     assert.notEqual(published.snapshotId, first.snapshotId);
     assert.equal(publishCodeHealthSnapshot({ stateDir, input: input(), expectedSnapshotId: first.snapshotId }).state, "superseded");
+    const older = input(); older.scans.forEach(scan => { scan.observedAt = "2026-11-02T04:59:00.000Z"; scan.scanId += ":older"; });
+    assert.equal(publishCodeHealthSnapshot({ stateDir, input: older, expectedSnapshotId: published.snapshotId }).state, "superseded",
+      "even a successful CAS cannot replace a newer measured source with an older one");
     const current = readCodeHealthSnapshot(stateDir, "acme/atlas"); assert.equal(current.state, "observed"); assert("snapshot" in current);
     assert.equal(current.snapshot.snapshotId, published.snapshotId);
     const historical = readCodeHealthSnapshot(stateDir, "acme/atlas", first.snapshotId);
@@ -302,5 +306,23 @@ test("code health publishes immutable evidence and refuses stale or occupied pub
     assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas").state, "unavailable", "corruption cannot become an empty healthy cache");
     assert.equal(publishCodeHealthSnapshot({ stateDir, input: next, expectedSnapshotId: published.snapshotId }).state, "unavailable");
     assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas", first.snapshotId).state, "observed", "retain immutable evidence after pointer failure");
+  });
+});
+
+
+test("code health recovers a proven dead publisher while preserving unknown lock ownership", async () => {
+  await withTempDir("code-health-locks", async root => {
+    for (const kind of ["dead", "unknown"] as const) {
+      const stateDir = join(root, kind), lockDir = join(stateDir, "code-health", "locks"); mkdirSync(lockDir, { recursive: true });
+      const lockPath = join(lockDir, "publication.lock");
+      const startedAt = new Date().toISOString();
+      const deadPid = Number(execFileSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }));
+      const bytes = kind === "dead" ? JSON.stringify({ pid: deadPid, run_id: "completed-own-fixture", host: hostname(), startedAt }) : "unknown ownership";
+      writeFileSync(lockPath, bytes);
+      const result = publishCodeHealthSnapshot({ stateDir, input: input(), expectedSnapshotId: null });
+      assert.equal(result.state, kind === "dead" ? "published" : "busy");
+      if (kind === "unknown") assert.equal(readFileSync(lockPath, "utf8"), bytes);
+      else assert.equal(existsSync(lockPath), false, "release only this fixture's own new publication lock");
+    }
   });
 });
