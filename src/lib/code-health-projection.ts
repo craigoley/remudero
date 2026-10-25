@@ -33,6 +33,7 @@ export interface CodeHealthScan {
   kind: "quality" | "coverage";
   repository: string;
   scanId: string;
+  componentIds?: string[];
   analyzedSha: string;
   observedAt: string;
   state: "complete" | "partial" | "stale" | "not_collected" | "unavailable";
@@ -161,6 +162,9 @@ function validateInput(input: CodeHealthProjectionInput): void {
           scan.exclusions.length > 128 || scan.exclusions.some(path => !text(path)) || scan.checks.length > 256 ||
           new Set(scan.checks.map(check => check.id)).size !== scan.checks.length ||
           scan.checks.some(check => !text(check.id) || typeof check.met !== "boolean" || !text(check.reason, 2048))) throw new Error("Code health scan shape is invalid.");
+      if (scan.componentIds !== undefined && (!Array.isArray(scan.componentIds) || scan.componentIds.length > 32 ||
+          scan.state === "complete" && scan.componentIds.length === 0 || scan.componentIds.some(id => !text(id)) ||
+          new Set(scan.componentIds).size !== scan.componentIds.length)) throw new Error("Code health source component identities are invalid.");
       if (scan.measurement !== undefined && (scan.kind !== "coverage" || !coverageMeasurementShape(scan.measurement))) throw new Error("Code health coverage measurement is invalid.");
       const identities = new Map<string, CodeHealthScanFinding>();
       for (const finding of scan.findings) {
@@ -192,6 +196,15 @@ function confirmedFindingFix(finding: CodeHealthScanFinding | undefined, baselin
   return finding?.status === "fixed" && (finding.fixedAt === undefined || Date.parse(finding.fixedAt) > Date.parse(baselineAt));
 }
 
+/** A changed aggregate does not make reused language or shard measurements independent. */
+export function independentCodeHealthScans(current: CodeHealthScan, prior: CodeHealthScan): boolean {
+  if (current.scanId === prior.scanId || Date.parse(current.observedAt) <= Date.parse(prior.observedAt)) return false;
+  if (current.componentIds === undefined && prior.componentIds === undefined) return true;
+  if (!current.componentIds?.length || !prior.componentIds?.length) return false;
+  const previous = new Set(prior.componentIds);
+  return current.componentIds.every(id => !previous.has(id));
+}
+
 function pairState(input: CodeHealthProjectionInput, current: CodeHealthScan | undefined, prior: CodeHealthScan | undefined): CodeHealthComparison["state"] {
   const baseline = input.baseline;
   if (!baseline || !shaShape.test(baseline.analyzedSha) || scanProblem(current, input.analyzedSha, input.observedAt) ||
@@ -199,7 +212,7 @@ function pairState(input: CodeHealthProjectionInput, current: CodeHealthScan | u
   if (baseline.policyVersion !== input.registry.version || !isDeepStrictEqual(
     [current!.scopeHash, current!.toolVersion, current!.rulesVersion, current!.configHash, [...current!.exclusions].sort()],
     [prior!.scopeHash, prior!.toolVersion, prior!.rulesVersion, prior!.configHash, [...prior!.exclusions].sort()])) return "measurement_changed";
-  if (current!.scanId === prior!.scanId || Date.parse(current!.observedAt) <= Date.parse(prior!.observedAt)) return "insufficient_evidence";
+  if (!independentCodeHealthScans(current!, prior!)) return "insufficient_evidence";
   return "comparable";
 }
 

@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { fixedClock } from "./clock.js";
 import { CODE_HEALTH_SOURCE_KINDS } from "./code-health-contract.js";
-import { projectCodeHealth, type CodeHealthProjectionInput, type CodeHealthScan } from "./code-health-projection.js";
+import { projectCodeHealth, independentCodeHealthScans, type CodeHealthProjectionInput, type CodeHealthScan } from "./code-health-projection.js";
 
 export interface CodeHealthCollection {
   repository: string;
@@ -49,7 +49,7 @@ export function prepareCodeHealthCollection(input: CodeHealthCollection): CodeHe
     priorAssessment.sources.some(source => source.required && source.kind === kind && source.state === "complete" && source.analyzedSha === previous.analyzedSha));
   const independentCollection = previousComplete && CODE_HEALTH_SOURCE_KINDS.every(kind => {
     const current = scans.find(scan => scan.kind === kind)!, prior = previous!.scans.find(scan => scan.kind === kind)!;
-    return current.state === "complete" && current.analyzedSha === analyzedSha && current.scanId !== prior.scanId && Date.parse(current.observedAt) > Date.parse(prior.observedAt);
+    return current.state === "complete" && current.analyzedSha === analyzedSha && independentCodeHealthScans(current, prior);
   });
   const baseline = independentCollection ? { analyzedSha: previous!.analyzedSha, policyVersion: previous!.registry.version, scans: structuredClone(previous!.scans) } : previous?.baseline ?? null;
   const retained = previous ? [...(previous.retainedEvidence ?? []), ...previous.scans.filter(scan => scan.findings.some(finding => finding.status !== "fixed"))

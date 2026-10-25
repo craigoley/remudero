@@ -22,6 +22,7 @@ const orderedCodeHealthValues = <T>(values: readonly T[]): T[] => [...values].so
 function evidenceSnapshotId(input: CodeHealthProjectionInput): string {
   const normalizedScans = (scans: readonly CodeHealthScan[]) => orderedCodeHealthValues(scans.map(scan => ({ ...scan,
     checks: orderedCodeHealthValues(scan.checks), exclusions: [...scan.exclusions].sort(),
+    ...(scan.componentIds === undefined ? {} : { componentIds: [...scan.componentIds].sort() }),
     findings: orderedCodeHealthValues([...new Map(scan.findings.map(finding => [canonicalCodeHealthJson(finding), finding])).values()]),
   })));
   const { observedAt: _observedAt, nextDueAt: _nextDueAt, ...facts } = input;

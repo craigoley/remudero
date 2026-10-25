@@ -113,7 +113,7 @@ export function qualityScanFromCollectedEvidence(input: {
   if (!versions || versions.length > 256) reasons.add("A bounded tool-version inventory is unavailable.");
   return { kind: "quality", repository: repository.toLowerCase(), analyzedSha: analyzedSha.toLowerCase(),
     scanId: `codeql:${createHash("sha256").update(JSON.stringify(ordered.map(artifact => artifact.scanId))).digest("hex")}`,
-    observedAt: ordered.map(artifact => artifact.observedAt).sort()[0] ?? "", state: !input.source.ok ? "unavailable" : reasons.size ? "partial" : "complete",
+    componentIds: ordered.map(artifact => artifact.scanId).sort(), observedAt: ordered.map(artifact => artifact.observedAt).sort()[0] ?? "", state: !input.source.ok ? "unavailable" : reasons.size ? "partial" : "complete",
     scopeHash: digest("scope"), toolVersion: versions && versions.length <= 256 ? versions : null, rulesVersion: digest("rulesVersion"), configHash: digest("configHash"),
     exclusions: [...new Set(ordered.flatMap(artifact => artifact.exclusions))].sort(), reason: reasons.size ? [...reasons].join(" ") : null,
     checks: [{ id: "quality-maintainability-open", met: findings.every(finding => finding.status === "fixed"),
