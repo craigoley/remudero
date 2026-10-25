@@ -193,6 +193,7 @@ import {
   OpenWeightUnsupportedResponseFormatError,
   markOpenWeightDeploymentAbsent,
   type OpenWeightModelSelection,
+  type CashAllowanceLimit,
   codexCapabilityForRequestedModel,
   codexCandidatesForCapability,
   type WorkerExit,
@@ -341,12 +342,13 @@ export interface WorkerResult {
    * from the adapter's price constants and its exact request ceiling); `budgetSettledUsd` is what
    * the provider's own receipts settled it down to. They differ whenever a receipt came back, and
    * a row where they are EQUAL on a failed run is the signal that spend could not be read back and
-   * was deliberately left charged. `budgetRefused` marks a run the daily allowance declined before
-   * any paid request — money not spent, which is a different outcome from a request that failed.
+   * was deliberately left charged. `budgetRefused` marks a request the allowance declined before
+   * transport; earlier requests in the run may already have billed.
    * Never a prompt, never a credential: these are dollars only. */
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
   budgetRefused?: boolean;
+  cashAllowanceLimit?: CashAllowanceLimit;
   cashAllowanceResetAt?: string;
   /** W1-T4079: set when a cash attempt found its deployment absent (HTTP 404), so the ladder walks. */
   openWeightDeploymentAbsent?: string;
@@ -2397,11 +2399,12 @@ export async function runOpenWeightWalkingLadder(
   throw lastRefusal;
 }
 
-/** True when a Foundry Sonnet attempt failed at zero cost, so the Luna ladder may still carry it. */
-function sonnetRefusedBeforeTransport(result: WorkerResult): boolean {
+/** A Foundry sub-cap leaves Luna room even after billing; a fleet refusal leaves no cash path. */
+function sonnetCanFallBackToCash(result: WorkerResult): boolean {
   if (!result.isError) return false;
+  if (result.budgetRefused === true) return result.cashAllowanceLimit === "foundry-claude";
   if ((result.budgetSettledUsd ?? 0) > 0) return false;
-  return result.budgetRefused === true || result.openWeightDeploymentAbsent !== undefined ||
+  return result.openWeightDeploymentAbsent !== undefined ||
     (result.budgetReservedUsd ?? 0) === 0;
 }
 
@@ -3134,9 +3137,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         args.draftRouting ? () => draftContractFailed : undefined,
       );
       result.selectionAssignmentId = selectionAssignmentId;
-      // W1-T4785: a Sonnet attempt refused before any money moved re-enters as plain cash-fallback so
-      // the Luna ladder carries it; a run that billed is returned as is, never charged twice.
-      if (args.cashSonnetEmergency === true && sonnetRefusedBeforeTransport(result)) {
+      // Clearing the emergency flag bounds re-entry to once. Prior Sonnet requests stay settled.
+      if (args.cashSonnetEmergency === true && sonnetCanFallBackToCash(result)) {
         console.error(JSON.stringify({
           event: "worker.provider.cash_sonnet_fallback_refused",
           reason: result.budgetRefused ? "foundry claude cap exhausted"

@@ -3525,6 +3525,8 @@ export function openWeightReservationUsd(
   return (inputTokenCeiling * (rate.reservationInputUsdPerMillion ?? price.reservationInputUsdPerMillion ?? rate.inputUsdPerMillion) + OPENWEIGHT_MAX_COMPLETION_TOKENS * rate.outputUsdPerMillion) / 1_000_000;
 }
 
+export type CashAllowanceLimit = "fleet" | "foundry-claude";
+
 /** Raised INSTEAD of sending a paid request. It is thrown before the transport, never after, so a
  *  caller that sees it knows no money was spent on the refused attempt. */
 export class OpenWeightAllowanceExhaustedError extends RmdError {
@@ -3532,7 +3534,10 @@ export class OpenWeightAllowanceExhaustedError extends RmdError {
   readonly capUsd: number;
   readonly wantUsd: number;
   readonly resetAt: string;
-  constructor(detail: { committedUsd: number; capUsd: number; wantUsd: number; utcDay: string }) {
+  readonly limit: CashAllowanceLimit;
+  readonly posture: "normal" | "squeezed";
+  constructor(detail: { committedUsd: number; capUsd: number; wantUsd: number; utcDay: string;
+    limit: CashAllowanceLimit; posture: "normal" | "squeezed" }) {
     // Kind "usage", the same discriminant `GhReadCadenceRefusal` carries: both are a LIMIT refusing
     // a call that was otherwise well-formed, not a malformed request. Adopting the shared envelope
     // rather than extending `Error` directly is what `test/error-subclass-census.test.ts` asks a new
@@ -3541,14 +3546,18 @@ export class OpenWeightAllowanceExhaustedError extends RmdError {
       "usage",
       1,
       `openweight daily allowance exhausted for ${detail.utcDay}: committed $${detail.committedUsd.toFixed(6)} + ` +
-        `$${detail.wantUsd.toFixed(6)} would exceed the $${detail.capUsd.toFixed(2)} dailyCapUsd`,
-      { committedUsd: detail.committedUsd, capUsd: detail.capUsd, wantUsd: detail.wantUsd, utcDay: detail.utcDay },
+        `$${detail.wantUsd.toFixed(6)} would exceed the $${detail.capUsd.toFixed(2)} ` +
+        `${detail.limit === "fleet" ? "dailyCapUsd" : "FOUNDRY_CLAUDE_DAILY_CAP_USD"} ` +
+        `(${detail.limit}, ${detail.posture})`,
+      { ...detail },
     );
     this.name = "OpenWeightAllowanceExhaustedError";
     this.committedUsd = detail.committedUsd;
     this.capUsd = detail.capUsd;
     this.wantUsd = detail.wantUsd;
     this.resetAt = openWeightAllowanceReset(detail.utcDay);
+    this.limit = detail.limit;
+    this.posture = detail.posture;
   }
 }
 
@@ -3591,12 +3600,15 @@ function configuredCashCap(config: Config, squeezed?: boolean): number {
 }
 
 function cashAllowanceLimits(state: OpenWeightAllowanceState, cap: number, deployment: string, squeezed?: boolean) {
-  const limits = [{ committedUsd: openWeightCommittedUsd(state), capUsd: Math.min(cap, state.fleetCapUsd ?? Infinity) }];
+  const limits: Array<{ committedUsd: number; capUsd: number; limit: CashAllowanceLimit }> = [
+    { committedUsd: openWeightCommittedUsd(state), capUsd: Math.min(cap, state.fleetCapUsd ?? Infinity), limit: "fleet" },
+  ];
   if (isFoundryClaudeDeployment(deployment)) {
     const reservations = Object.fromEntries(Object.entries(state.reservations)
       .filter(([, row]) => row.deployment !== undefined && isFoundryClaudeDeployment(row.deployment)));
     limits.push({ committedUsd: openWeightCommittedUsd({ utcDay: state.utcDay, reservations }),
-      capUsd: squeezed ? FOUNDRY_CLAUDE_DAILY_CAP_USD.squeezed : FOUNDRY_CLAUDE_DAILY_CAP_USD.normal });
+      capUsd: squeezed ? FOUNDRY_CLAUDE_DAILY_CAP_USD.squeezed : FOUNDRY_CLAUDE_DAILY_CAP_USD.normal,
+      limit: "foundry-claude" });
   }
   return limits;
 }
@@ -3736,7 +3748,8 @@ export function reserveOpenWeightBudget(
     }
     for (const limit of limits) {
       if (limit.committedUsd + wantUsd > limit.capUsd)
-        throw new OpenWeightAllowanceExhaustedError({ ...limit, wantUsd, utcDay });
+        throw new OpenWeightAllowanceExhaustedError({ ...limit, wantUsd, utcDay,
+          posture: input.squeezed === true ? "squeezed" : "normal" });
     }
     return {
       next: { ...state, reservations: { ...state.reservations, [input.requestId]: { reservedUsd: wantUsd, settledUsd: null, deployment: input.deployment } } },
@@ -3898,11 +3911,12 @@ export interface OpenWeightWorkerResult {
   webSearchRefused: number;
   webSearchUsd: number;
   /** Attributable cash fields for the ledger. Money, not prompts: no request body, no response
-   *  text and no credential is carried here. `budgetRefused` is true only when the daily allowance
-   *  refused this run BEFORE any paid request was made. */
+   *  text and no credential is carried here. `budgetRefused` marks a refused request; earlier
+   *  requests in the run may already have billed. */
   budgetReservedUsd: number;
   budgetSettledUsd: number;
   budgetRefused: boolean;
+  cashAllowanceLimit?: CashAllowanceLimit;
   cashAllowanceResetAt?: string;
   externalEffect?: ExternalEffectResult;
 }
@@ -4764,7 +4778,9 @@ function openWeightResult(input: {
     budgetReservedUsd: input.budgetReservedUsd ?? 0,
     budgetSettledUsd: input.budgetSettledUsd ?? 0,
     budgetRefused: input.budgetRefused ?? false,
-    ...(input.error instanceof OpenWeightAllowanceExhaustedError ? { cashAllowanceResetAt: input.error.resetAt } : {}),
+    ...(input.error instanceof OpenWeightAllowanceExhaustedError ? {
+      cashAllowanceResetAt: input.error.resetAt, cashAllowanceLimit: input.error.limit,
+    } : {}),
     ...(input.deploymentAbsent ? { openWeightDeploymentAbsent: input.deploymentAbsent } : {}),
     webSearchAttempted: input.webSearchAttempted ?? 0,
     webSearchAccepted: input.webSearchAccepted ?? 0,
