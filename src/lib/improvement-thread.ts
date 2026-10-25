@@ -91,10 +91,10 @@ function scopeFor(request: ImprovementThreadRequest, stateDir: string): Scope | 
   const raw = readCodeHealthArtifactJson(join(stateDir, "read-model", "repositories-sources.json"), 2 * 1024 * 1024) as {
     instances?: Array<{ instanceId: string; options: { controlRoot?: string; ledgerPath?: string; planPath?: string } }> };
   const matching = raw.instances?.filter(row => row.instanceId === instance);
-  if (matching?.length !== 1) return fail("source_unavailable", "The selected fleet instance cannot be resolved.");
+  if (matching?.length !== 1) return fail("source_unavailable", "The selected fleet could not be found.");
   const options = matching[0]!.options;
   if (![options.controlRoot, options.ledgerPath, options.planPath].every(value => text(value, 4096) && isAbsolute(value)))
-    return fail("source_unavailable", "This fleet instance does not provide a verified planning store.");
+    return fail("source_unavailable", "Saved planning is not available for this fleet yet.");
   return { instance, inboxStateDir: join(options.controlRoot!, "state"), ledgerPath: options.ledgerPath!, planPath: options.planPath! };
 }
 function sourceFor(request: ImprovementThreadRequest, scope: Scope, deps: ImprovementThreadDeps): { binding: Binding; context: string; sourceProposalId: string } | Failure {
@@ -116,12 +116,12 @@ function sourceFor(request: ImprovementThreadRequest, scope: Scope, deps: Improv
   const context = [
     `Improvement in ${request.repository} (${scope.instance})`, `Source commit: ${scan.analyzedSha}`, `Source checked: ${scan.observedAt}`,
     `Saved snapshot: ${request.snapshotId}`, `Opportunity: ${opportunity.id}`, `Existing policy: ${CODE_HEALTH_POLICY_VERSION}`,
-    `Observed finding (quoted): ${JSON.stringify(opportunity.title)}`, `Practical consequence: ${opportunity.consequence}`,
+    `Observed finding (quoted): ${JSON.stringify(opportunity.title)}`, `What this may affect: ${opportunity.consequence}`,
     `Expected result: ${opportunity.expectedResult}`, `Evidence: ${excerpt.length} shown of ${opportunity.evidenceCount} findings.`, JSON.stringify(excerpt),
-    `Uncertainty: ${opportunity.uncertainty.join(" ") || "The effect on delivery has not been measured."}`,
+    `What we do not know: ${opportunity.uncertainty.join(" ") || "The effect on delivery has not been measured."}`,
     `Effort: ${opportunity.effortMinutes === null ? "Not estimated." : `${opportunity.effortMinutes} minutes, modeled estimate; not a measured duration.`}`,
     `Related work (${related.state}): ${JSON.stringify(opportunity.relatedWork)}`, related.reason ?? "Review existing work before filing.",
-    `Draft acceptance ideas: ${opportunity.acceptanceIdeas.join(" ")}`, "Falsifier idea: repeat the same analysis; an unresolved linked finding disproves the improvement.",
+    `Ideas for checking the result: ${opportunity.acceptanceIdeas.join(" ")}`, "How to check if the change did not help: repeat the same analysis. A linked finding that is still open means the expected improvement was not confirmed.",
     "This is a saved planning conversation. Choose Draft plan tasks when ready. Creating or replying does not file tasks or start execution.",
   ].join("\n");
   if (Buffer.byteLength(context) > 64 * 1024) return fail("source_unavailable", "This finding's briefing exceeds the saved conversation limit.");
@@ -193,7 +193,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
     owns = () => ownsOpportunity() && ownsRequest!();
     const previous = readIntent(path);
     if (previous && (previous.payloadHash !== payloadHash || previous.actorId !== deps.actorId)) return fail("conflict", "This request identity was already used for a different goal or finding.", requestId);
-    if (previous && hash(previous.scope) !== hash(scope)) return fail("source_unavailable", "The saved conversation's fleet store has changed. Review its source before continuing.", requestId);
+    if (previous && hash(previous.scope) !== hash(scope)) return fail("source_unavailable", "This chat's repository or fleet has changed. Review its source before continuing.", requestId);
     if (previous?.stage === "saved") {
       if (!messagesMatch(previous)) return fail("uncertain", "The saved receipt exists, but its conversation cannot currently be verified.", requestId);
       // Repair only this request's interrupted ready marker. Replaying an older request must never reset a later goal or action.
@@ -251,7 +251,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
       if (!owns()) return fail("uncertain", "The writer changed before the conversation was saved.", requestId);
       const appended = appendThreadMessageOnce(inboxThreadIdentity(intent.proposalId), role, body, id, store,
         { improvement: intent.binding, ...(role === "reply" ? { operator: deps.actorId } : {}) });
-      if (appended.kind !== "appended" && appended.kind !== "existing") return fail(appended.kind === "busy" ? "busy" : "uncertain", "The native Inbox writer could not confirm this message. Retry the same request.", requestId);
+      if (appended.kind !== "appended" && appended.kind !== "existing") return fail(appended.kind === "busy" ? "busy" : "uncertain", "This message could not be confirmed as saved. Retry the same request.", requestId);
     }
     if (!messagesMatch(intent)) return fail("uncertain", "The conversation was written but cannot yet be verified.", requestId);
     persist("messages"); persist("saved");
@@ -349,7 +349,8 @@ export function readImprovementThread(requestId: string, deps: ImprovementThread
       }
     } catch {
       // An unreadable index or pending pointer cannot prove the absence of a filing decision.
-      filing = { state: "uncertain", reason: "This conversation's filing history cannot currently be verified." };
+      filing = { state: "uncertain", reason: "This chat's filing history cannot currently be checked." };
+      if (drafting.state !== "ready") drafting = { state: "unavailable", digest: null, fragmentYaml: null, reason: "This chat's drafting history cannot currently be checked." };
     }
     return { state: "saved", version: IMPROVEMENT_THREAD_VERSION, requestId, currentRequestId: current.requestId, proposalId: proposal.id, threadId: current.threadId,
       repository: current.request.repository, instance: scope.instance, snapshotId: current.request.snapshotId, opportunityId: current.request.opportunityId,
@@ -479,7 +480,7 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
     const intent = readIntent(join(deps.stateDir, "improvement-threads", `${input.requestId}.json`));
     if (!intent || intent.stage !== "saved") return fail("source_unavailable", "Save this conversation before requesting an action.");
     const currentScope = scopeFor(intent.request, deps.stateDir);
-    if ("state" in currentScope || hash(currentScope) !== hash(intent.scope)) return fail("source_unavailable", "The conversation's fleet binding cannot be verified.");
+    if ("state" in currentScope || hash(currentScope) !== hash(intent.scope)) return fail("source_unavailable", "This chat could not be matched to its repository and fleet.");
     lock = requestLock(join(deps.stateDir, "improvement-threads"), hash([intent.request.repository, intent.scope.instance, intent.request.opportunityId]));
     if (!lock) return fail("busy", "This conversation is being updated, or its writer's ownership is not yet known.");
     const ownsConversation = lockOwnership(lock);
@@ -495,7 +496,7 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
     if (view.currentRequestId !== input.requestId || view.goalDigest !== input.goalDigest) return fail("conflict", "The goal changed. Review the latest conversation before continuing.");
     const source = sourceFor(intent.request, intent.scope, deps); if ("state" in source) return source;
     if (kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== input.draftDigest)) return fail("conflict", "Review the current completed draft before requesting filing.");
-    if (deps.launchAction === undefined) return fail("source_unavailable", "This repository's governed action handoff is unavailable. No action was requested.");
+    if (deps.launchAction === undefined) return fail("source_unavailable", "This repository cannot start plan drafting or filing right now. No action was requested.");
     const action: ImprovementAction = previous ?? { version: "improvement-action-v1", operationId, kind, requestId: input.requestId, proposalId: intent.proposalId,
       actorId: deps.actorId, payloadHash, goalDigest: input.goalDigest, draftDigest: input.draftDigest ?? null, requestedAt: (deps.clock ?? systemClock).iso(), state: "requested", reason: null, receipt: null };
     if (!previous) {
@@ -569,7 +570,7 @@ export async function runImprovementAction(operationId: string, deps: Improvemen
     const target = { proposalId: intent.proposalId, repository: intent.request.repository, controlRoot: dirname(scope.inboxStateDir),
       repoRoot: actionTarget(intent).repoRoot, planPath: scope.planPath };
     // Save uncertainty BEFORE any consequential native filing call. A crash cannot look unattempted on restart.
-    action.state = action.kind === "file" ? "uncertain" : "waiting"; action.reason = "Waiting for a receipt from the governed repository lane.";
+    action.state = action.kind === "file" ? "uncertain" : "waiting"; action.reason = "Waiting for the repository workflow to confirm the result.";
     writeAction(deps.stateDir, action, owns);
     if (!owns()) return fail("uncertain", "The action writer changed before execution.");
     if (action.kind === "draft") {
@@ -577,12 +578,12 @@ export async function runImprovementAction(operationId: string, deps: Improvemen
       if (!owns()) return fail("uncertain", "The draft writer changed before acknowledgement.");
       const after = readImprovementThread(action.requestId, deps);
       action.state = after.state === "saved" && after.drafting.state === "ready" ? "completed" : "waiting";
-      action.reason = action.state === "completed" ? null : "The normal drafting lane has not produced a current completed draft. Its admission and retry limits remain in effect.";
+      action.reason = action.state === "completed" ? null : "Plan drafting has not finished. Normal checks and retry limits still apply.";
     } else {
       const receipt = await deps.file({ ...target, goalDigest: action.goalDigest, draftDigest: action.draftDigest! });
       if (!owns()) return fail("uncertain", "The filing writer changed before acknowledgement. Inspect the native receipt.");
       action.receipt = receipt ?? null; action.state = receipt ? "completed" : "uncertain";
-      action.reason = receipt ? null : "The native lane returned without a verified plan pull request receipt. Filing remains unconfirmed.";
+      action.reason = receipt ? null : "A plan pull request could not be confirmed. Check the saved result before retrying.";
     }
     writeAction(deps.stateDir, action, owns); return action;
   } catch {
