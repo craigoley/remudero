@@ -2143,6 +2143,7 @@ export function runReadModelWorker(
   };
   const slowLaneConfig = data.slowLane && { ...data.slowLane,
     instanceInboxes: data.instances.flatMap(i => i.inbox ? [i.inbox] : []),
+    codeHealth: data.slowLane.codeHealth ?? { stateDir: data.stateDir, instances: data.instances.map(i => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) },
     analytics: data.slowLane.analytics ?? { instances: data.instances.map((i) => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) } };
   let snapshotWrites = Promise.resolve();
   if (slowLaneConfig) slowLane = threadSlowLane({ config: slowLaneConfig, log, onBodies: (built) => views.accept(built), onSnapshot: (write) => {

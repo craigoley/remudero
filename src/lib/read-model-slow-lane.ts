@@ -11,12 +11,15 @@
  *
  * Its units: the inbox classification (inbox-view.ts), which the daemon's fleet lane acts on, and the
  * analytics refresh (W1-T5055, analytics-view.ts), which runs per instance off serve's event loop and hands
- * each instance's output to the read-model worker to commit as `source_snapshot` rows. The lane makes no GitHub call: it reads the board snapshot whichever keep-warm owns the fetch
+ * each instance's output to the read-model worker to commit as `source_snapshot` rows. The inbox units make no GitHub call: they read the board snapshot whichever keep-warm owns the fetch
  * (switches.json `github`) persists through serve's gateway, the source the board and now view read.
  * THIS FILE IS LOADED TWICE, as read-model-worker.ts is: `workerData.kind` gates the thread's
  * branch, whose body is {@link runSlowLaneWorker}, named so a test can run it in-process.
  */
 import { join } from "node:path";
+import { collectCodeHealth } from "./code-health-collector.js";
+import { CODE_HEALTH_INTERVAL_MS, CODE_HEALTH_VIEW_NAME, readCodeHealthInventory } from "./code-health-view.js";
+import { codeHealthRepositoryStateDir, readCodeHealthCollectionFailure, readCodeHealthSnapshot } from "./code-health-store.js";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -370,6 +373,7 @@ export function runSlowLaneWorker(
   let ownedInstances = new Set<string>();
   let leaseEpoch = 0;
   let analyticsEpoch = 0;
+  let codeHealthEpoch = 0;
   const post = (message: SlowLaneMessage): void => port.postMessage(message);
   const analytics = data.analytics
     ? [analyticsUnit(data.analytics, clock, post, log, () => BUILT_MODES.has(modes[ANALYTICS_VIEW_NAME]), () => {
@@ -377,12 +381,16 @@ export function runSlowLaneWorker(
       return () => !stopped && held && leaseEpoch === leaseAtStart && analyticsEpoch === viewAtStart && BUILT_MODES.has(modes[ANALYTICS_VIEW_NAME]);
     }, opts.analyticsRefresh ?? scanAnalyticsLedger, name => ownedInstances.has(name))]
     : [];
+  const codeHealth = data.codeHealth ? createCodeHealthCollectionUnit(data.codeHealth, { clock, log, ownsInstance: name => ownedInstances.has(name), captureOwnership: () => {
+    const epoch = leaseEpoch, viewEpoch = codeHealthEpoch;
+    return () => !stopped && held && leaseEpoch === epoch && codeHealthEpoch === viewEpoch && BUILT_MODES.has(modes[CODE_HEALTH_VIEW_NAME]);
+  } }) : undefined;
   const units: SlowLaneUnit[] = [...(data.inbox ? coreUnits(data.inbox, clock, log, opts.inbox ?? {}) : []),
     ...(data.instanceInboxes ?? []).map(config => instanceInboxUnit(config, clock, () => {
       const startedEpoch = leaseEpoch;
       return () => !stopped && held && ownedInstances.has(config.instance) && leaseEpoch === startedEpoch;
     }, log)),
-    ...(data.accountUsage ? [creditEdgeUnit(data.accountUsage, log)] : []), ...analytics];
+    ...(data.accountUsage ? [creditEdgeUnit(data.accountUsage, log)] : []), ...analytics, ...(codeHealth ? [codeHealth] : [])];
   let cancel: () => void = () => {};
   const pass = async (): Promise<void> => {
     cancel = () => {};
@@ -414,6 +422,7 @@ export function runSlowLaneWorker(
         analyticsEpoch += 1;
         for (const unit of analytics) unit.cancel?.();
       }
+      if (next[CODE_HEALTH_VIEW_NAME] !== modes[CODE_HEALTH_VIEW_NAME]) codeHealthEpoch += 1;
       modes = next;
     }
     if (msg.type !== "lease") return;
@@ -538,8 +547,34 @@ export function threadSlowLane(opts: {
 
 
 /** Daily cached assessments share the leased slow lane, independently of Analytics. */
-export function createCodeHealthCollectionUnit(_config: NonNullable<SlowLaneConfig["codeHealth"]>, _opts: {
+export function createCodeHealthCollectionUnit(config: NonNullable<SlowLaneConfig["codeHealth"]>, opts: {
   clock: Clock; captureOwnership: () => () => boolean; ownsInstance: (name: string) => boolean;
   log: (step: string, extra?: Record<string, unknown>) => void;
-  collect?: typeof import("./code-health-collector.js").collectCodeHealth;
-}): SlowLaneUnit { return { name: "code-health", run: async () => ({ views: [] }) }; }
+  collect?: typeof collectCodeHealth;
+}): SlowLaneUnit {
+  const nextDue = new Map<string, number>(); let cursor = 0;
+  return { name: "code-health", run: async () => {
+    const mayPublish = opts.captureOwnership();
+    if (!mayPublish()) return { views: [] };
+    const inventory = readCodeHealthInventory(config.stateDir), repositories = inventory.repositories;
+    for (let visited = 0; visited < repositories.length; visited++) {
+      const member = repositories[cursor % repositories.length]!; cursor = (cursor + 1) % repositories.length;
+      const instance = config.instances.filter(instance => instance.repository?.toLowerCase() === member.repository && member.instanceIds.includes(instance.name) && opts.ownsInstance(instance.name)).sort((a, b) => a.name.localeCompare(b.name))[0];
+      if (!instance) continue;
+      const repository = member.repository, stateDir = codeHealthRepositoryStateDir(config.stateDir, repository), now = opts.clock.now();
+      const saved = readCodeHealthSnapshot(stateDir, repository), failure = readCodeHealthCollectionFailure(stateDir, repository);
+      const attempt = Math.max(saved.state === "observed" && saved.latestAttemptAt ? Date.parse(saved.latestAttemptAt) : Number.NEGATIVE_INFINITY,
+        failure.state === "failed" ? Date.parse(failure.startedAt) : Number.NEGATIVE_INFINITY);
+      if (now < Math.max(nextDue.get(repository) ?? Number.NEGATIVE_INFINITY, attempt + CODE_HEALTH_INTERVAL_MS)) continue;
+      const owns = () => mayPublish() && opts.ownsInstance(instance.name);
+      if (!owns()) break;
+      // One repository per existing lane pass bounds the burst and leaves its other units first.
+      nextDue.set(repository, now + CODE_HEALTH_INTERVAL_MS);
+      const result = await (opts.collect ?? collectCodeHealth)({ stateDir, repository, coverageStateDir: instance.stateDir, clock: opts.clock, mayPublish: owns });
+      if (result.state === "busy" || result.state === "superseded") nextDue.set(repository, now + INBOX_CLASSIFY_INTERVAL_MS);
+      opts.log("code_health.collection", { repository, state: result.state, ...(owns() ? {} : { reason: "ownership_changed" }) });
+      break;
+    }
+    return { views: [] };
+  } };
+}
