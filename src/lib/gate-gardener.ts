@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { join, relative, resolve } from "node:path";
@@ -13,20 +13,21 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency } from "./test-slot.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
-import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations, retirementHoldsOrigin, taskLandedArgs } from "./plan.js";
+import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations, retirementHoldsOrigin, taskLandedArgs, newTestPath, loadPlanForLayout } from "./plan.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 import { loadPolicy } from "./policy.js";
 import { sameTestFile } from "./test-path-resolver.js";
 import { collectCiFailureCorpus, rollupAtSha, type CiFailurePair, type CorpusCommit } from "./ci-failure-corpus.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { checkRunsRestArgs, combinedStatusRestArgs } from "./open-prs-rest.js";
+import { commentCompressionOrigin, nextCommentCompression, readGateFollowupOrigins, type CommentCompressionFinding } from "./comment-compression.js";
 
 /**
  * lib/gate-gardener.ts (W1-T4116) — the gates tend themselves.
  *
  * W1-T4115 measures how often each gate fires; nothing acted on it. Each pass proposes ONE class of
  * change as ONE pull request, every value taken from the ratchet's OWN measurement, never a guess:
- *   - TIGHTEN: a one-way ceiling the code has fallen below — a per-file source-size or comment-load
+ *   - TIGHTEN: a one-way ceiling the code has fallen below — a legacy source-size
  *     row the ratchet itself would now record lower (its `shrunk`). (W1-T4583 retired the
  *     contract-coverage ceiling this also tightened.)
  *   - REFRESH: a stale row — a per-file row for a file that no longer exists (the ratchet's
@@ -36,11 +37,12 @@ import { checkRunsRestArgs, combinedStatusRestArgs } from "./open-prs-rest.js";
  *     gate, moved to ADVISORY with a GATE_RATIONALE — a `review` class, judged by whether its PR merges.
  * TIGHTEN and REFRESH are judged by refusals repaired against refusals overridden across all gates.
  * DEFUSE files a remedy for a fixture about to expire; that tally never measures it, so it is judged
- * by its PR's decision (W1-T5825).
+ * by its PR's decision (W1-T5825). COMPRESS files priority-1 comment maintenance without
+ * blocking the change that exposed it; its decision metric measures proposal acceptance.
  */
 
-export type GateGardenClass = "tighten" | "refresh" | "demote" | "defuse" | "false-positive";
-export const GATE_GARDEN_CLASSES: readonly GateGardenClass[] = ["tighten", "refresh", "demote", "defuse", "false-positive"];
+export type GateGardenClass = "tighten" | "refresh" | "demote" | "defuse" | "false-positive" | "compress";
+export const GATE_GARDEN_CLASSES: readonly GateGardenClass[] = ["tighten", "refresh", "demote", "defuse", "false-positive", "compress"];
 export const DEFUSE_LEAD_DAYS = 21;
 
 export type GateRepairClass = "baseline-only" | "token-dodge" | "rename-dodge" | "off-subject" | "genuine";
@@ -148,14 +150,14 @@ async function evaluateTriggerAsync(rule: GateRepairRule, changed: string[], sha
       missing.set(key, { sha, path });
       return null;
     };
-    let verdict: boolean | undefined, failure: unknown;
+    let verdict: boolean | undefined, failure: { error: unknown } | undefined;
     try {
       verdict = rule.trigger({ changed, readHead: reader(shas.head), readBase: reader(shas.base) });
     } catch (error) {
-      failure = error;
+      failure = { error: error };
     }
     if (!missing.size) {
-      if (failure !== undefined) throw failure;
+      if (failure !== undefined) throw failure.error;
       return verdict;
     }
     for (const [key, { sha, path }] of missing) seen.set(key, await readAt(sha, path));
@@ -390,7 +392,8 @@ export type GateEdit =
   | { kind: "row"; key: string; to: number | null }
   | { kind: "demote"; gate: string; rationale: string }
   | { kind: "defuse"; finding: ExpiringFixture; leadDays: number; urgent: boolean }
-  | { kind: "false-positive"; rule: GateRepairRule; observation: GateRepairObservation; classification: GateRepairClass };
+  | { kind: "false-positive"; rule: GateRepairRule; observation: GateRepairObservation; classification: GateRepairClass }
+  | { kind: "compress"; finding: CommentCompressionFinding };
 
 export interface GateGardenAction extends GardenAction<GateGardenClass> {
   /** Repo-relative file the edit lands in. */
@@ -481,6 +484,33 @@ function defuseCandidates(deps: GardenerDeps, probes: GateProbes, sources: GateD
   });
 }
 
+/** Reuse the gate gardener's normal reservation, admission, plan-PR and decision path. */
+export function commentCompressionCandidates(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources = {}): GateGardenAction[] {
+  const findings = probes.cl.listMeasuredFiles(deps.repoRoot).map(file => ({ file,
+    comments: probes.cl.countCommentLines(readFileSync(join(deps.repoRoot, file), "utf8"), file).comments }));
+  if (!nextCommentCompression(findings, new Set())) return [];
+  const layout = resolveRepoLayout(deps.repoRoot);
+  if (!existsSync(layout.planMonolith)) throw new Error("comment compression plan context is unreadable");
+  const shardDir = join(layout.planDir, "tasks.d");
+  if (lstatSync(shardDir, { throwIfNoEntry: false })) readdirSync(shardDir);
+  const tasks = loadPlanForLayout(layout).tasks;
+  const held = new Set<string>();
+  // An unresolved retirement stays held; this nomination makes no claim that a task shipped.
+  for (const task of tasks) {
+    if (task.origin?.startsWith("comment-compression:") && ((task.status === "queued" && !task.retirement) || retirementHoldsOrigin(task, () => false))) held.add(task.origin);
+    if (task.status === "queued" && !task.retirement && /(?:compress|compact|fold).*comment|comment.*(?:compress|compact|fold)/i.test(task.title)) {
+      for (const file of task.files ?? []) held.add(commentCompressionOrigin(file));
+    }
+  }
+  if (!nextCommentCompression(findings, held)) return [];
+  if (!sources.openOrigins) throw new Error("comment compression requires an awaited open-PR inventory");
+  const open = sources.openOrigins();
+  for (const origin of open) held.add(origin);
+  const finding = nextCommentCompression(findings, held);
+  return finding ? [{ class: "compress", target: commentCompressionOrigin(finding.file), file: finding.file,
+    edit: { kind: "compress", finding }, reason: `${finding.comments} comment lines nominate high-priority follow-up; the originating change is not blocked.` }] : [];
+}
+
 /**
  * W1-T6036: a field-name census is a CANDIDATE generator. Measured 2026-10-06, the widened census
  * named 22 `updated_at`/`updatedAt` rows that no threshold ages, so a finding is filed only when its
@@ -519,7 +549,28 @@ function breLiteral(s: string): string {
   return s.replace(/[\\.*[^$]/g, "\\$&");
 }
 
+export function renderCommentCompressionShard(finding: CommentCompressionFinding, taskId: string) {
+  const testFile = newTestPath(`${taskId}-comment-compression-preserves-code`, [finding.file], finding.file);
+  const rendered = renderMachineShard({
+    taskId, title: `Compress the ${finding.comments} comment lines in ${finding.file} without changing executable code`,
+    origin: commentCompressionOrigin(finding.file), files: [finding.file, testFile],
+    acceptance: [{ claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved.",
+      proof: `unit test: ${taskId}: comment compression preserves executable code` }],
+    rationale: [
+      `Observed ${finding.comments} comment lines in ${finding.file}. This is maintenance debt, never a merge ceiling.`,
+      "Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.",
+      "Compress repeated explanations. Preserve displaced historical detail in the PR review record and retain its citation; keep invariants, traps, falsifiers and text pinned by existing tests.",
+      `Add the named regression in ${testFile}; compare executable tokens against the pre-compression source and verify a real comment-count reduction.`,
+      "Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.",
+      "Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.",
+    ],
+  });
+  // This operator-set priority is explicit, rather than an invented measured-cost population.
+  return { ...rendered, text: rendered.text.replace("  status: queued\n", "  priority: 1\n  status: queued\n") };
+}
+
 export function renderDefuseShard(action: GateGardenAction, taskId: string) {
+  if (action.edit.kind === "compress") return renderCommentCompressionShard(action.edit.finding, taskId);
   if (action.edit.kind !== "defuse") throw new Error("gate gardener: mixed defuse plan");
   const { finding: f, leadDays, urgent } = action.edit;
   const crossing = fixedClock(f.expiresAt).iso();
@@ -572,7 +623,7 @@ function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], dep
     const rendered = action.edit.kind === "false-positive" ? renderFalsePositiveShard(action, taskId) : renderDefuseShard(action, taskId);
     if (rendered.refused) throw new Error(`gate gardener: defuse shard refused (${rendered.refused})`);
     const stem = action.file.replace(/^test\//, "").replace(/\.test\.ts$/, "").replace(/[^a-zA-Z0-9-]/g, "-");
-    const path = join(resolveRepoLayout(ws.root).planDir, "tasks.d", `${taskId}-${action.class}-${stem}.yaml`);
+    const path = join(resolveRepoLayout(ws.root).planDir, "tasks.d", `${taskId}-${action.edit.kind}-${stem}.yaml`);
     mkdirSync(join(path, ".."), { recursive: true });
     writeFileSync(path, rendered.text);
     paths.push(relative(ws.root, path));
@@ -583,24 +634,23 @@ function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], dep
     if (url) for (const a of actions) {
       if (a.edit.kind === "defuse") deps.log("gate_garden.defuse_filed", defuseEvidence(a.edit.finding, a.edit.leadDays));
       if (a.edit.kind === "false-positive") deps.log("gate.false_positive_filed", { gate: a.edit.rule.gate, recognizer: a.file, classification: a.edit.classification });
+      if (a.edit.kind === "compress") deps.log("gate_garden.comment_compression_filed", { file: a.edit.finding.file, observed_comments: a.edit.finding.comments, priority: 1, origin: a.target });
     }
     return url;
   };
-  return { paths, title: `chore(plan): file ${actions.length} ${actions[0]?.class === "false-positive" ? "gate recognizer" : "expiring fixture"} remedy task(s)`, body: [
-    "The gate gardener files remedies against the surface responsible for the refusal.", "", "## Acceptance",
+  const subject = actions[0]?.class === "false-positive" ? "gate recognizer" : actions[0]?.class === "compress" ? "comment compression" : "expiring fixture";
+  return { paths, title: `chore(plan): file ${actions.length} ${subject} remedy task(s)`, body: [
+    "The gate gardener files measured maintenance follow-ups through normal machine-filing admission.", "", "## Acceptance",
     ...actions.flatMap((a, i) => [`- claim: ${a.target} has a machine-filed remedy`, `  proof: grep: ${a.target} in ${paths[i]}`]),
   ].join("\n") };
 }
 
 /** TIGHTEN and REFRESH rows for the two per-file ledgers, from each ratchet's own evaluation. */
-function ledgerCandidates(root: string, { ss, cl }: GateProbes): GateGardenAction[] {
+function ledgerCandidates(root: string, { ss }: GateProbes): GateGardenAction[] {
   const measured: Array<{ file: string; verdict: LedgerVerdict }> = [];
   const lines: Json = {};
   for (const p of ss.listSourceFiles(root)) lines[p] = ss.countLines(readFileSync(join(root, p), "utf8"));
   measured.push({ file: "scripts/source-size-baseline.json", verdict: ss.evaluateSourceSizeRatchet(lines, readJson(join(root, "scripts/source-size-baseline.json"))) });
-  const comments: Json = {};
-  for (const p of cl.listMeasuredFiles(root)) comments[p] = cl.countCommentLines(readFileSync(join(root, p), "utf8"), p).comments;
-  measured.push({ file: "scripts/comment-load-baseline.json", verdict: cl.evaluateCommentLoadRatchet(comments, readJson(join(root, "scripts/comment-load-baseline.json"))) });
   return measured.flatMap(({ file, verdict }) => [
     ...verdict.shrunk.map((s): GateGardenAction => ({ class: "tighten", target: `${file}#${s.path}`, file, edit: { kind: "row", key: s.path, to: s.to }, reason: `The file shrank a whole bucket; the ratchet now records ${s.to}.` })),
     ...verdict.removed.map((path): GateGardenAction => ({ class: "refresh", target: `${file}#${path}`, file, edit: { kind: "row", key: path, to: null }, reason: "The file no longer exists." })),
@@ -698,7 +748,7 @@ export function applyGateActions(root: string, actions: GateGardenAction[], head
   for (const [file, list] of byFile) {
     let text = readFileSync(join(root, file), "utf8");
     for (const a of list) {
-      if (a.edit.kind === "defuse" || a.edit.kind === "false-positive") throw new Error("defuse and false-positive actions require machine filing");
+      if (a.edit.kind === "defuse" || a.edit.kind === "false-positive" || a.edit.kind === "compress") throw new Error("follow-up actions require machine filing");
       text = a.edit.kind === "row" ? editBaselineRow(text, a.edit.key, a.edit.to) : demoteInCiGate(text, a.edit.gate, a.edit.rationale);
     }
     if (file === CI_GATE_YML) {
@@ -715,7 +765,7 @@ export function applyGateActions(root: string, actions: GateGardenAction[], head
 }
 
 function prBody(actions: GateGardenAction[], heading: string): string {
-  const proofs = actions.flatMap((a) => a.edit.kind === "defuse" || a.edit.kind === "false-positive" ? [] :
+  const proofs = actions.flatMap((a) => a.edit.kind === "defuse" || a.edit.kind === "false-positive" || a.edit.kind === "compress" ? [] :
     a.edit.kind === "demote"
       ? [`- claim: ${a.edit.gate} is moved to ADVISORY with a reviewed rationale`, `  proof: grep: GATE_RATIONALE: "W1-T4116 gate gardener: ${a.edit.gate} refused 0 in ${CI_GATE_YML}`]
       : a.edit.to === null
@@ -737,9 +787,10 @@ function prBody(actions: GateGardenAction[], heading: string): string {
 /** The repo's gates as a gardener spec, over probes loaded by {@link loadGateProbes}. */
 export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources = {}): GardenSpec<GateGardenClass, GateInventory, GateGardenAction, GardenCheckout> {
   const clock = deps.clock ?? systemClock;
-  const localInventory = (): GateInventory => {
+  const localInventory = (input: GateDefuseSources): GateInventory => {
     const inv = gateInventory(deps.repoRoot, deps.stateDir, probes);
-    if (!existsSync(join(deps.stateDir, "GATE_OFF-defuse"))) inv.candidates.push(...defuseCandidates(deps, probes, sources));
+    if (!existsSync(join(deps.stateDir, "GATE_OFF-defuse"))) inv.candidates.push(...defuseCandidates(deps, probes, input));
+    if (!existsSync(join(deps.stateDir, "GATE_OFF-compress"))) inv.candidates.push(...commentCompressionCandidates(deps, probes, input));
     return inv;
   };
   const falsePositiveOff = (): boolean => existsSync(join(deps.stateDir, "GATE_OFF-false-positive"));
@@ -748,14 +799,14 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
     landingRefusal: machineShardLandingGuard({ ...deps, admissionViolations: sources.admissionViolations }),
     classes: GATE_GARDEN_CLASSES,
     review: { demote: "demoting a required gate stops it blocking merges, which is a judgement call." },
-    decision: ["defuse"],
+    decision: ["defuse", "compress"],
     cheapFingerprint: () => {
       const head = checkoutHeadStamp(deps.repoRoot, clock);
       const report = gateFireRatesPath(deps.stateDir);
       return `${head}:${existsSync(report) ? readFileSync(report, "utf8").length : 0}:${clock.iso().slice(0, 10)}`;
     },
     inventory: () => {
-      const inv = localInventory();
+      const inv = localInventory(sources);
       if (!falsePositiveOff()) {
         const repairs = falsePositiveInventory(deps, probes, sources);
         inv.candidates.push(...repairs.actions);
@@ -764,26 +815,32 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
       return inv;
     },
     // W1-T9049: the daemon's pass reads GitHub for repair evidence awaited, never as a blocking spawn.
-    inventoryAsync: async () => {
-      const inv = localInventory();
+    ...(sources.openOrigins ? {} : { inventoryAsync: async () => {
+      let input = sources;
+      if (!sources.openOrigins && !existsSync(join(deps.stateDir, "GATE_OFF-compress")) &&
+          commentCompressionCandidates(deps, probes, { ...sources, openOrigins: () => [] }).length > 0) {
+        const origins = await readGateFollowupOrigins(deps.repoRoot);
+        input = { ...sources, openOrigins: () => origins };
+      }
+      const inv = localInventory(input);
       if (!falsePositiveOff()) {
         const repairs = await falsePositiveInventoryAsync(deps, probes, sources);
         inv.candidates.push(...repairs.actions);
         inv.repairTally = repairs.tally;
       }
       return inv;
-    },
+    } }),
     fingerprint: (inv) => inv.candidates.map((a) => a.target).join(","),
     metric: (inv, actionClass) => actionClass === "false-positive" ? inv.repairTally ?? { trials: 0, successes: 0 } : inv.tally,
     candidates: (inv) => inv.candidates,
     scorecard: (inv, plan) => ({ candidates: inv.candidates.length, tally: inv.tally, proposed: plan.actions.length }),
     prepare: (ws, plan, async) => {
-      const actions = plan.acting[0] === "defuse" || plan.acting[0] === "false-positive" ? plan.actions : [];
+      const actions = plan.acting[0] === "defuse" || plan.acting[0] === "false-positive" || plan.acting[0] === "compress" ? plan.actions : [];
       for (const action of actions) assertDefuseAdmission(action, deps, sources);
       return prepareDefuseTaskIds(ws, actions.length, deps, sources, async);
     },
     apply: (ws, plan, _scorecard, heldIds) => {
-      if (plan.acting[0] === "defuse" || plan.acting[0] === "false-positive") return applyDefuseActions(ws, plan.actions, deps, sources, heldIds);
+      if (plan.acting[0] === "defuse" || plan.acting[0] === "false-positive" || plan.acting[0] === "compress") return applyDefuseActions(ws, plan.actions, deps, sources, heldIds);
       const heading = `## Pass ${clock.iso()}`;
       const paths = applyGateActions(ws.root, plan.actions, heading, probes);
       return { paths, title: `chore(gates): the gate gardener proposes to ${plan.acting[0]} ${plan.actions.length} gate row(s)`, body: prBody(plan.actions, heading) };

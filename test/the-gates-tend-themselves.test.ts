@@ -18,7 +18,7 @@ import {
   demotionCandidate,
   editBaselineRow,
   GATE_GARDEN_CLASSES,
-  gateGardenSpec,
+  gateGardenSpec as sourceGateGardenSpec,
   gateInventory,
   loadGateProbes,
   updateTally,
@@ -29,6 +29,10 @@ import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { daemonCommand } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+
+// These unit repositories have no open PRs; the default async reader is exercised separately.
+const gateGardenSpec: typeof sourceGateGardenSpec = (deps, probes, sources = {}) =>
+  sourceGateGardenSpec(deps, probes, { openOrigins: () => [], ...sources });
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const probesPromise = loadGateProbes(REPO_ROOT);

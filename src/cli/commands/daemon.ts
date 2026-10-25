@@ -614,7 +614,7 @@ export async function daemonCommand(
   const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
   const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine);
-  const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs, codeSha: daemonLoadedCodeSha };
+  const gardenContext: GardenBuildContext = { config, repoRoot: effectiveRepoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs, codeSha: daemonLoadedCodeSha };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
   const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);

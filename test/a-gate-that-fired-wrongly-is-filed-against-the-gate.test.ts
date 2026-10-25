@@ -133,4 +133,9 @@ test("W1-T9049: repair evidence is read through awaited gh calls, with the trigg
   // An unreadable repair diff is refused, never read as an empty repair.
   const unreadable = async (args: string[]) => (args[1] ?? "").includes("/compare/red...green") ? { files: [] } : ghJson(args);
   await assert.rejects(loadGateRepairObservations([rule], { ghJson: unreadable, ghText: async () => "" }), /repair diff unreadable/);
+  for (const failure of [new Error("trigger unreadable"), undefined]) {
+    const failing = { ...rule, trigger: () => { throw failure; } };
+    await assert.rejects(loadGateRepairObservations([failing], { ghJson, ghText: async () => "" }),
+      (error: unknown) => error === failure);
+  }
 });

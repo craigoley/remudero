@@ -8,6 +8,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { preserveRetireFixtureArgs } from "#test/helpers/preserve-retire-fixture.js";
 
 const HELPER = join(REPO_ROOT, "deploy/mac/preserve-retire.py");
 const HOUR = 3600;
@@ -62,7 +63,7 @@ function commit(repo: string, file: string, text: string, message: string) {
 }
 
 function helper(fx: Fx, now = NOW, apply = true) {
-  return spawnSync("python3", ["-I", HELPER, "--home", fx.home, "--now", String(now), ...(apply ? ["--apply"] : [])], {
+  return spawnSync("python3", preserveRetireFixtureArgs(fx.home, HELPER, ["--home", fx.home, "--now", String(now), ...(apply ? ["--apply"] : [])]), {
     encoding: "utf8", timeout: 120_000, env: { ...GIT_ENV, PATH: `${fx.bin}:${process.env.PATH}` },
   });
 }
@@ -250,10 +251,11 @@ test("worktree prune leaves a kept or keep-scoped store's stale worktree records
     const before = [records.kept, records.shared].map(bytes);
     const probe = `import importlib.util, json, sys
 spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.account_home = lambda: sys.argv[-1]
 holder = m.Repo(sys.argv[3], "clone"); holder.store = sys.argv[3] + "/.git"; holder.scoped = "a keep marker in its working tree"
 print(json.dumps(m.prune_worktrees([sys.argv[2] + "/.git", holder.store, sys.argv[4] + "/.git"], [holder])))`;
     // -B: importing the helper must not write deploy/mac/__pycache__ into the tracked tree.
-    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, kept, shared, plain], { encoding: "utf8", env: GIT_ENV });
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, kept, shared, plain, fx.home], { encoding: "utf8", env: GIT_ENV });
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(JSON.parse(r.stdout), [join(plain, ".git")], "only the unmarked store is pruned");
     assert.equal(existsSync(records.plain), false, "an unmarked store's stale record is pruned");
@@ -297,6 +299,7 @@ test("an inspection that raises PermissionError holds the path, for every uid", 
     // The denial is injected at the os seam, so root and every other uid see the same refusal.
     const probe = `import importlib.util, json, os, sys
 spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.account_home = lambda: sys.argv[-1]
 top, inner = sys.argv[2], sys.argv[3]
 real_lstat, real_scandir = os.lstat, os.scandir
 def lstat(path, *a, **k):
@@ -317,12 +320,135 @@ out["walk"] = m.keep_scope(top)
 os.scandir = real_scandir
 out["clean"] = m.keep_scope(os.path.join(inner, "deeper"))
 print(json.dumps(out))`;
-    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, top, inner], { encoding: "utf8", env: GIT_ENV });
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, top, inner, fx.home], { encoding: "utf8", env: GIT_ENV });
     assert.equal(r.status, 0, r.stderr);
     const out = JSON.parse(r.stdout);
     assert.match(out.marker, /^keep-inspection-unknown \(\.rmd-janitor-keep: PermissionError\)/, "an unreadable marker holds its folder");
     assert.match(out.below, /^keep-inspection-unknown \(\.rmd-janitor-keep: PermissionError\) at .*\/probe$/, "and everything below it");
     assert.match(out.walk, /^keep-inspection-unknown \(PermissionError\) in .*\/probe$/, "a subtree that cannot be listed holds the whole path");
     assert.equal(out.clean, "", "with nothing denied the same folders are not held");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+
+test("a declaration arriving after discovery holds an external worktree's sibling retirement while an unmarked sibling retires", () => {
+  const fx = setup({});
+  try {
+    const held = clone(fx, "Remudero/held-main"), plain = clone(fx, "Remudero/plain-main");
+    const sibling = join(fx.home, "Remudero/aa-held-sibling"), positive = join(fx.home, "Remudero/aa-plain-sibling");
+    const external = join(fx.root, "external\nlinked-worktree");
+    git(held, "worktree", "add", "--quiet", "-b", "held-sibling", sibling);
+    git(held, "worktree", "add", "--quiet", "-b", "external", external);
+    git(plain, "worktree", "add", "--quiet", "-b", "plain-sibling", positive);
+    for (const repo of [held, plain]) utimesSync(join(repo, "README"), NOW - HOUR, NOW - HOUR);
+    const before = bytes(join(held, ".git/worktrees"));
+    const probe = `import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+original = m.process_snapshot
+external = sys.argv[3]
+calls = 0
+def snapshot():
+    global calls
+    calls += 1
+    if calls == 2:
+        open(os.path.join(external, ".rmd-janitor-keep"), "w").close()
+    return original()
+m.process_snapshot = snapshot
+home, now = sys.argv[2], sys.argv[4]
+m.account_home = lambda: home
+sys.argv = [sys.argv[1], "--home", home, "--now", now, "--apply"]
+raise SystemExit(m.main())`;
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, fx.home, external, String(NOW)], {
+      encoding: "utf8", timeout: 120_000, env: { ...GIT_ENV, PATH: `${fx.bin}:${process.env.PATH}` },
+    });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(join(external, ".rmd-janitor-keep")), true, "the declaration actually arrived after discovery");
+    assert.equal(existsSync(sibling), true, "a sibling cannot rewrite the newly held common store");
+    assert.deepEqual(bytes(join(held, ".git/worktrees")), before, "held admin records remain byte-identical");
+    assert.equal(existsSync(positive), false, "the healthy unmarked worktree really retires");
+    assert.match(r.stdout, /RETIRED worktree .*aa-plain-sibling/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("late declarations in registered external worktrees hold prune while the unmarked store's stale record is pruned", () => {
+  const fx = setup({});
+  try {
+    const held = clone(fx, "Remudero/held"), plain = clone(fx, "Remudero/plain");
+    const external = join(fx.root, "external");
+    git(held, "worktree", "add", "--quiet", "-b", "external", external);
+    const stale = (repo: string, name: string) => {
+      const wt = join(fx.home, "Remudero", name);
+      git(repo, "worktree", "add", "--quiet", "-b", name, wt);
+      rmSync(wt, { recursive: true, force: true });
+      return join(repo, ".git/worktrees", name);
+    };
+    const heldRecord = stale(held, "held-stale"), plainRecord = stale(plain, "plain-stale");
+    const before = bytes(heldRecord);
+    const probe = `import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.account_home = lambda: sys.argv[-1]
+repos = [m.Repo(p, "clone") for p in sys.argv[2:4]]
+for r in repos:
+    m.resolve_git(r)
+    r.scoped = m.keep_scope(r.path)
+assert not any(r.scoped for r in repos)
+open(os.path.join(sys.argv[4], ".rmd-janitor-keep"), "w").close()
+print(json.dumps(m.prune_worktrees([r.store for r in repos], repos)))`;
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, held, plain, external, fx.home], { encoding: "utf8", env: GIT_ENV });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), [join(plain, ".git")]);
+    assert.deepEqual(bytes(heldRecord), before);
+    assert.equal(existsSync(plainRecord), false, "the unmarked stale record is actually pruned");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a declaration arriving after repack selection holds the shared store while an unmarked store is repacked", () => {
+  const fx = setup({ repack_min_packs: 1 });
+  try {
+    const held = clone(fx, "Remudero/held"), plain = clone(fx, "Remudero/plain");
+    const external = join(fx.root, "external");
+    git(held, "worktree", "add", "--quiet", "-b", "external", external);
+    for (const repo of [held, plain]) git(repo, "repack", "-a", "-d", "-q");
+    const before = bytes(join(held, ".git/objects"));
+    const probe = `import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.account_home = lambda: sys.argv[-1]
+repos = [m.Repo(p, "clone") for p in sys.argv[2:4]]
+for r in repos:
+    m.resolve_git(r)
+    r.scoped = m.keep_scope(r.path)
+assert not any(r.scoped for r in repos)
+listing = m.os.listdir
+marked = False
+def arrive(path):
+    global marked
+    if not marked and path == os.path.join(repos[0].store, "objects", "pack"):
+        marked = True
+        open(os.path.join(sys.argv[4], ".rmd-janitor-keep"), "w").close()
+    return listing(path)
+m.os.listdir = arrive
+cfg = dict(m.DEFAULTS, roots=[sys.argv[5]], home=sys.argv[5], repack_min_packs=1)
+result = m.housekeeping(cfg, [], repos, None, 0, True)
+assert marked
+assert result["repacked"] == 1, result`;
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, held, plain, external, fx.home], { encoding: "utf8", env: GIT_ENV });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.deepEqual(bytes(join(held, ".git/objects")), before);
+    assert.match(r.stdout, /REPACKED packs=1->1 .*plain\/\.git/);
+    assert.doesNotMatch(r.stdout, /REPACKED .*held\/\.git/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("unreadable or malformed current worktree listings hold shared-store actions", () => {
+  const fx = setup({});
+  try {
+    const repo = clone(fx, "Remudero/plain");
+    const probe = `import importlib.util, subprocess, sys
+spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+for status, output in [(255, b""), (0, b""), (0, b"bad\\0\\0"), (0, b"worktree relative\\0\\0")]:
+    m.run = lambda *a, **kw: subprocess.CompletedProcess(a, status, output, b"")
+    assert "unknown" in m.store_keep_scope(sys.argv[2] + "/.git", []), (status, output)`;
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, repo], { encoding: "utf8", env: GIT_ENV });
+    assert.equal(r.status, 0, r.stderr);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });

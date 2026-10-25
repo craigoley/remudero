@@ -701,6 +701,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.base_red.refresh",
   "sweep.base_fixed.refresh", // baseRedHistoryFromLedger and refreshRecordsFromLedger read prior refreshes.
   "sweep.contract_amended.refresh", // A failed narrative-adoption attempt remains a decision input after rotation.
+  "sweep.head_contract_refresh.attempted", // An interrupted intent refuses a repeat refresh across rotation.
   "refresh.clearance", // refusedRefreshClearancesFromLedger memoizes refusal evidence across passes.
   "sweep.base_red.refresh_admission", // W1-T9595: the light pass replays its held heads; pacing reads its cohort.
   "sweep.ratchet_judge.decided", // W1-T9962: the armed re-judge's once-per-(head, main tip) memo reads it back.
@@ -775,6 +776,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "fix.progress_judged", // the sweep labels each judged PR from its newest judgement; rotated away, the label reverts to the stale strike ratio.
   "fix.progress_reused", // fixSeedRead distinguishes reused judgment metadata from an owning worker rung.
   "fix.needs_design", // W1-T5532: preserve the explicit hand-off for the next fix-lane decision.
+  "fix.contract_hold", // The sweep compares the actual refused head contract with the approved amendment.
   "fix.scope_amendment", // W1-T5534: runFixRung and lookupIdentity resume pending amendments after rotation.
   "fix.resolved",
   "fix.exhausted", // W1-T5966: with fix.done/resolved, status.ts FIX_LANE_TERMINAL_STEPS ends a fix.dispatch
