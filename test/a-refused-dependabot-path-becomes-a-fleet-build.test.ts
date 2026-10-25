@@ -8,11 +8,12 @@
  * proposal, never a wider allowlist.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
+import { prioritizeDepReviewRepairs, reconcileDependabotRefusedPath, type DepReviewResult } from "#src/lib/dep-review.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
@@ -154,4 +155,69 @@ test("W1-T9797 an unsettled or unproposable refuse is never a silent terminal de
     assert.equal(g.captures.length, 0, `${label}: nothing filed`);
     assert.deepEqual(g.ledger().filter((r) => r.step === "dep-review.refused_path.not_proposed").map((r) => r.reason), [reason], label);
   }
+});
+
+
+test("an aged refused-path repair receives exact-head priority after capture and fold", async t => {
+  const f = fixture(t);
+  assert.equal(await f.run(), 2);
+  const id = f.captures[0].id;
+  const candidates = ["older-incident", id];
+  const snapshot = { owner: "craigoley", repo: "remudero", asOfMs: NOW, prs: [{
+    prNumber: 12191, headSha: HEAD, headRefName: "dependabot/pip/semgrep", checksState: "red" as const,
+    createdAt: new Date(NOW - 7200000).toISOString(),
+  }] };
+  const stateRoot = join(f.root, "state");
+  const dir = join(stateRoot, "dep-review-holds", "craigoley", "remudero");
+  const path = join(dir, "PR12191.json");
+  assert.deepEqual(await prioritizeDepReviewRepairs(candidates, stateRoot, snapshot, NOW), [id, "older-incident"]);
+  assert.deepEqual(candidates, ["older-incident", id]);
+  const original = JSON.parse(readFileSync(path, "utf8"));
+  writeFileSync(path, JSON.stringify({ ...original, preserved: { identity: "keep" } }));
+  assert.equal(await f.run(), 2);
+  assert.equal(f.captures.length, 1);
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).preserved, { identity: "keep" });
+  for (const changed of [
+    { ...snapshot, asOfMs: NOW - 300001 },
+    { ...snapshot, prs: [{ ...snapshot.prs[0], headSha: "different" }] },
+    { ...snapshot, prs: [{ ...snapshot.prs[0], checksState: "pending" as const }] },
+    { ...snapshot, prs: [{ ...snapshot.prs[0], createdAt: new Date(NOW - 3599999).toISOString() }] },
+  ]) assert.deepEqual(await prioritizeDepReviewRepairs(candidates, stateRoot, changed, NOW), candidates);
+  assert.deepEqual(await prioritizeDepReviewRepairs(["older-incident"], stateRoot, snapshot, NOW), ["older-incident"]);
+  rmSync(path);
+  assert.deepEqual(await prioritizeDepReviewRepairs(candidates, stateRoot, snapshot, NOW), candidates);
+  assert.equal(await f.run(), 2, "the normal folded producer reconstructs a missing binding");
+  assert.equal(f.captures.length, 1, "binding recovery captures no new proposal");
+  assert.deepEqual(await prioritizeDepReviewRepairs(candidates, stateRoot, snapshot, NOW), [id, "older-incident"]);
+});
+
+test("a folded refused-path repair binds each observed PR and refuses corrupt local state", async t => {
+  const f = fixture(t);
+  assert.equal(await f.run(), 2);
+  const id = f.captures[0].id;
+  const stateRoot = join(f.root, "state");
+  const dir = join(stateRoot, "dep-review-holds", "craigoley", "remudero");
+  const bind = (prNumber: number) => reconcileDependabotRefusedPath({
+    registryDir: dir, owner: "craigoley", repo: "remudero", prNumber,
+    prUrl: `https://github.com/craigoley/remudero/pull/${prNumber}`, title: TITLE, body: BODY,
+    headSha: HEAD, author: { login: "app/dependabot" }, commits: [DEPENDABOT_COMMIT],
+    result: { decision: "refuse", redChecks: ["ci"], offendingFiles: [LOCK] } as DepReviewResult,
+    capture: () => assert.fail("a folded bump is not captured twice"), nowMs: NOW, log: () => {},
+  });
+  assert.equal(bind(12192), "folded");
+  const registry = JSON.parse(readFileSync(join(dir, "own-red-proposals.json"), "utf8"));
+  assert.deepEqual(registry.proposals[0].prNumbers, [12191, 12192]);
+  const candidates = ["older-incident", id];
+  const snapshot = { owner: "craigoley", repo: "remudero", asOfMs: NOW, prs: [{
+    prNumber: 12192, headSha: HEAD, headRefName: "dependabot/pip/semgrep", checksState: "red" as const,
+    createdAt: new Date(NOW - 7200000).toISOString(),
+  }] };
+  assert.deepEqual(await prioritizeDepReviewRepairs(candidates, stateRoot, snapshot, NOW), [id, "older-incident"]);
+  const corrupt = join(dir, "PR12193.json");
+  writeFileSync(corrupt, "unreadable state");
+  assert.equal(bind(12193), "failed");
+  assert.equal(readFileSync(corrupt, "utf8"), "unreadable state");
+  rmSync(corrupt);
+  assert.equal(bind(12193), "folded");
+  assert.equal(f.captures.length, 1);
 });
