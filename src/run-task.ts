@@ -43878,6 +43878,7 @@ export function approveParkedTask(
   }
   const releaseEvidence = qualifyReleaseEvidence(deps.ledgerLines ?? readReleaseLedgerLines(deps.ledgerPath),
     deps.readDurableReleaseEvidence?.() ?? readOperatorReleaseRecords(dirname(deps.ledgerPath)), releaseContractPins(deps.plan.tasks));
+  if (deps.provenance && releaseEvidence.unknownHistory) return { code: 2, message: `rmd approve: ${taskId} operator release history is unreadable: malformed ledger record` };
   if (deps.provenance && (releaseEvidence.reapproval.has(taskId) || operatorReleaseContractChanged(task))) return { code: 2,
     message: `rmd approve: ${taskId} requires explicit operator reapproval of its current contract` };
   const already = new Set(releaseEvidence.authors.keys());
