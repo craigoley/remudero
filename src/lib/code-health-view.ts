@@ -62,6 +62,7 @@ interface RepositorySummary {
   measuredAt: string | null; analyzedSha: string | null; currentSha: string | null;
   freshness: "fresh" | "stale" | "unavailable"; lastAttemptAt: string | null; nextCheckDueAt: string | null;
   collection: CodeHealthCollectionFailureRead; reason: string | null;
+  sourceClocks: Array<{ kind: string; state: string; measuredAt: string | null; analyzedSha: string | null }>;
 }
 export interface CodeHealthViewData {
   version: "code-health-view-v1"; repository: string; expectedRepositories: string[]; unresolvedInstances: string[];
@@ -71,13 +72,13 @@ export interface CodeHealthViewData {
   page: { nextCursor: string | null };
 }
 const unknownUrgent = (): UrgentCount => ({ value: null, precision: "unavailable", scope: "Findings in the measured quality scope; this is not a complete security assessment." });
-function repositoryReport(stateDir: string, repository: string, now: number, snapshotId?: string): { summary: RepositorySummary; assessment: CodeHealthAssessment | null; opportunities: CodeHealthImprovementOpportunity[]; sources: ViewSource[] } {
+function repositoryReport(stateDir: string, repository: string, now: number, snapshotId?: string, summaryOnly = false): { summary: RepositorySummary; assessment: CodeHealthAssessment | null; opportunities: CodeHealthImprovementOpportunity[]; sources: ViewSource[] } {
   const repoState = codeHealthRepositoryStateDir(stateDir, repository), read = readCodeHealthSnapshot(repoState, repository, snapshotId);
   const collection = readCodeHealthCollectionFailure(repoState, repository);
   const access = collection.state === "failed" ? collection.failureKind : undefined;
   if (snapshotId && read.state !== "observed") throw new CodeHealthNotReady("The selected repository snapshot is unavailable.");
   if (read.state !== "observed") return { summary: { repository, snapshotId: null, state: access === "unauthorized" || access === "rate_limited" ? access : read.state,
-    summary: null, urgentFindings: unknownUrgent(), measuredAt: null, analyzedSha: null, currentSha: null, freshness: "unavailable", lastAttemptAt: collection.state === "failed" ? collection.startedAt : null,
+    summary: null, sourceClocks: [], urgentFindings: unknownUrgent(), measuredAt: null, analyzedSha: null, currentSha: null, freshness: "unavailable", lastAttemptAt: collection.state === "failed" ? collection.startedAt : null,
     nextCheckDueAt: null, collection, reason: read.reason }, assessment: null, opportunities: [], sources: [{ name: `repositories:code-health:${repository}`, kind: "repositories", asOf: null, state: "unavailable", reason: read.reason, budgetMs: CODE_HEALTH_INTERVAL_MS }] };
   const assessment = projectCodeHealth(read.snapshot.input);
   const sources = assessment.sources.filter(source => source.required).map((source): ViewSource => judgeSource({ name: `repositories:code-health:${repository}:${source.id}`, kind: "repositories", asOf: source.observedAt,
@@ -89,8 +90,8 @@ function repositoryReport(stateDir: string, repository: string, now: number, sna
   const urgent = assessment.findings.filter(finding => finding.severity === "high" || finding.severity === "critical").length;
   const urgentFindings: UrgentCount = { value: qualityComplete || urgent > 0 ? urgent : null, precision: qualityComplete ? "exact" : urgent > 0 ? "at_least" : "unavailable", scope: unknownUrgent().scope };
   const lastAttemptAt = collection.state === "failed" ? collection.startedAt : read.latestAttemptAt;
-  return { assessment, opportunities: buildCodeHealthOpportunities(read.snapshot.input), sources, summary: { repository, snapshotId: read.snapshot.snapshotId, state: access === "unauthorized" || access === "rate_limited" ? access : assessment.state,
-    summary: assessment.summary, urgentFindings, measuredAt: assessment.observedAt, analyzedSha: assessment.analyzedSha, currentSha: assessment.currentSha, freshness,
+  return { assessment: summaryOnly ? null : assessment, opportunities: summaryOnly ? [] : buildCodeHealthOpportunities(read.snapshot.input), sources, summary: { repository, snapshotId: read.snapshot.snapshotId, state: access === "unauthorized" || access === "rate_limited" ? access : assessment.state,
+    summary: assessment.summary, sourceClocks: assessment.sources.filter(source => source.required).map(source => ({ kind: source.kind, state: source.state, measuredAt: source.observedAt, analyzedSha: source.analyzedSha })), urgentFindings, measuredAt: assessment.observedAt, analyzedSha: assessment.analyzedSha, currentSha: assessment.currentSha, freshness,
     lastAttemptAt, nextCheckDueAt: lastAttemptAt ? fixedClock(Date.parse(lastAttemptAt) + CODE_HEALTH_INTERVAL_MS).iso() : null, collection, reason: collection.state === "none" ? null : collection.reason } };
 }
 
@@ -100,7 +101,7 @@ export function readCodeHealthReport(opts: { stateDir: string; params: URLSearch
   if (input.repository !== "all" && !expected.includes(input.repository)) throw new RangeError("Unknown repository.");
   if (input.page && input.page.k !== pageScope(input.repository, input.snapshot!)) throw new RangeError("Code health page belongs to another repository scope.");
   const selected = input.repository === "all" ? expected : [input.repository];
-  const reports = selected.map(repo => repositoryReport(opts.stateDir, repo, opts.now, input.snapshot));
+  const reports = selected.map(repo => repositoryReport(opts.stateDir, repo, opts.now, input.snapshot, input.repository === "all"));
   const report = input.repository === "all" ? null : reports[0]!;
   const data: CodeHealthViewData = { version: "code-health-view-v1", repository: input.repository, expectedRepositories: expected, unresolvedInstances: inventory.unresolvedInstances,
     repositories: reports.map(value => value.summary), snapshotId: report?.summary.snapshotId ?? null, assessment: report?.assessment ? { ...report.assessment, findings: [] } : null,
@@ -124,7 +125,13 @@ export function readCodeHealthReport(opts: { stateDir: string; params: URLSearch
     }
   }
   if (Buffer.byteLength(JSON.stringify(data)) > CODE_HEALTH_PAGE_BYTES) throw new CodeHealthNotReady("Code health exceeds the response bound; select a repository.");
-  return { data, sources: [{ name: "repositories:code-health-scope", kind: "repositories", asOf: fixedClock(opts.now).iso(), state: "fresh", budgetMs: SCOPE_BUDGET_MS }, ...reports.flatMap(value => value.sources)] };
+  const evidence = reports.flatMap(value => value.sources);
+  const state = evidence.some(source => source.state === "unavailable") || inventory.unresolvedInstances.length ? "unavailable" : evidence.some(source => source.state === "stale") ? "stale" : "fresh";
+  if (input.repository === "all") data.freshness = state;
+  const clocks = evidence.flatMap(source => source.asOf ? [source.asOf] : []).sort();
+  const sources: ViewSource[] = input.repository === "all" ? [{ name: "repositories:code-health-portfolio", kind: "repositories", asOf: clocks[0] ?? null, state, budgetMs: CODE_HEALTH_INTERVAL_MS,
+    ...(state === "fresh" ? {} : { reason: "Some configured code-check sources are missing, older, or could not be refreshed. Each repository shows its own status and measurement times." }) }] : evidence;
+  return { data, sources: [{ name: "repositories:code-health-scope", kind: "repositories", asOf: fixedClock(opts.now).iso(), state: "fresh", budgetMs: SCOPE_BUDGET_MS }, ...sources] };
 }
 
 /** Memory-only scope and page checks run before a held ETag may answer. */
