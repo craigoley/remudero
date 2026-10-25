@@ -314,7 +314,8 @@ test("W1-T2594: production ordering records only after ownership/push and before
   const source = readFileSync(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url), "utf8");
   // W1-T9337: host qualification preserves the same collaborator and ordering.
   const fixSource = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8") + "\n" +
-    readFileSync(new URL("../src/cli/commands/fix.ts", import.meta.url), "utf8").replace(/\bhost\./g, "");
+    ["fix.ts", "review.ts"].map((owner) =>
+      readFileSync(new URL(`../src/cli/commands/${owner}`, import.meta.url), "utf8").replace(/\bhost\./g, "")).join("\n");
 
   const implementStart = source.indexOf('say("implement worker")');
   const implementSnapshot = source.indexOf("const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath)", implementStart);

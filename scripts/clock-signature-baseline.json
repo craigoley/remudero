@@ -9,6 +9,16 @@
     "dateNow": 1,
     "newDate": 0
   },
+  "src/cli/commands/review.ts": {
+    "legacy": 0,
+    "dateNow": 2,
+    "newDate": 0
+  },
+  "src/cli/commands/run-task-verb.ts": {
+    "legacy": 1,
+    "dateNow": 1,
+    "newDate": 5
+  },
   "src/lib/account-usage.ts": {
     "legacy": 1,
     "dateNow": 0,
@@ -232,7 +242,7 @@
   "src/lib/ledger.ts": {
     "legacy": 2,
     "dateNow": 0,
-    "newDate": 5
+    "newDate": 3
   },
   "src/lib/main-health-rung.ts": {
     "legacy": 1,
@@ -397,7 +407,7 @@
   "src/lib/verdict-calibration.ts": {
     "legacy": 0,
     "dateNow": 0,
-    "newDate": 6
+    "newDate": 2
   },
   "src/lib/wipe-test.ts": {
     "legacy": 1,
@@ -426,17 +436,12 @@
   },
   "src/run-task.ts": {
     "legacy": 20,
-    "dateNow": 47,
-    "newDate": 32
+    "dateNow": 45,
+    "newDate": 29
   },
   "src/spike.ts": {
     "legacy": 0,
     "dateNow": 1,
     "newDate": 1
-  },
-  "src/cli/commands/run-task-verb.ts": {
-    "legacy": 1,
-    "dateNow": 1,
-    "newDate": 5
   }
 }

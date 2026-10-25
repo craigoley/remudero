@@ -262,7 +262,7 @@ test("every worker spawn declares an explicit tool bound", () => {
   // this for review/manual and left five sites behind, which is exactly the shape a census catches
   // and a per-lane test does not.
   // W1-T9337: include the extracted fix implementation in the same source census.
-  const src = ["run-task.ts", "cli/commands/fix.ts"]
+  const src = ["run-task.ts", "cli/commands/fix.ts", "cli/commands/review.ts"]
     .map((owner) => readFileSync(new URL(`../src/${owner}`, import.meta.url), "utf8").replace(/\bhost\./g, ""))
     .join("\n");
   const lines = src.split("\n");
