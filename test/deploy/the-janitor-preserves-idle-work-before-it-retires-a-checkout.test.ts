@@ -98,15 +98,15 @@ function pythonAccountProbe(fx: Fx) {
   const native = execFileSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).trim();
   const bootstrap = join(fx.root, "fixture-preserve-retire.py");
   writeFileSync(bootstrap, `import importlib.util, sys
-gs = sys.argv[1:]
- args[0] == "-I":
-  args.pop(0)
-lper = args.pop(0)
-ec = importlib.util.spec_from_file_location("pr", helper); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-account_home = lambda: ${JSON.stringify(fx.home)}
-s.argv = [helper, *args, "--now", "${NOW}"]
-ise SystemExit(m.main())
-;
+args = sys.argv[1:]
+if args[0] == "-I":
+    args.pop(0)
+helper = args.pop(0)
+spec = importlib.util.spec_from_file_location("pr", helper); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.account_home = lambda: ${JSON.stringify(fx.home)}
+sys.argv = [helper, *args, "--now", "${NOW}"]
+raise SystemExit(m.main())
+`);
   pythonProbe(fx, `exec '${native}' -I -B '${bootstrap}' "$@"`);
 }
 
