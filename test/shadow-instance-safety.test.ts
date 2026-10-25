@@ -545,6 +545,34 @@ test("selected Claude public policy never names private inputs while preserving 
   } finally { fixture.cleanup(); }
 });
 
+for (const intent of ["writer", "review"] as const) {
+  test(`selected Claude public ancestor boundary preserves shell IO for ${intent}`, async () => {
+    const fixture = runtimeRegistryFixture(), sink = { calls: 0 } as { calls: number; options?: Record<string, unknown> };
+    try {
+      const args = privateClaudeArgs(fixture, sink), extra = join(fixture.root, "public-review-source");
+      mkdirSync(extra);
+      if (intent === "review") { args.sandboxIntent = "disposable-review"; args.sandboxReadRoots = [extra]; }
+      await runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected });
+      assert.equal(sink.calls, 1);
+      const policy = sink.options!.settings as { sandbox: { filesystem: { denyRead: string[]; denyWrite: string[]; allowRead: string[]; allowWrite: string[] } }; permissions: { allow: string[]; deny: string[] } };
+      const filesystem = policy.sandbox.filesystem, cwd = realpathSync(args.cwd);
+      assert.equal(filesystem.denyRead.includes("/"), false, "a blanket read deny breaks native shell cwd/stdout bookkeeping");
+      assert.equal(filesystem.denyWrite.includes("/"), false, "a blanket write deny also blocks pipes and legitimate workspace IO");
+      assert.ok(filesystem.denyRead.some(path => fixture.selected.startsWith(path + "/")));
+      assert.ok(filesystem.denyRead.every(path => filesystem.allowRead.some(root => root.startsWith(path + "/"))), "the fixture denial uses an ancestor already public through a granted root");
+      assert.ok(filesystem.allowWrite.includes(join(fixture.root, "public-worker-tmp")), "review still needs its public scratch IO");
+      assert.equal(filesystem.denyWrite.includes(cwd), intent === "review");
+      assert.equal(policy.permissions.allow.includes(`Edit(/${cwd}/**)`), intent === "writer");
+      if (intent === "review") {
+        assert.ok(filesystem.denyWrite.includes(extra));
+        assert.ok(policy.permissions.deny.includes(`Edit(/${cwd}/**)`));
+      }
+      assert.equal(JSON.stringify(policy).includes(fixture.selected), false);
+      assert.equal(JSON.stringify(policy).includes(args.settingsFile), false);
+    } finally { fixture.cleanup(); }
+  });
+}
+
 test("selected Claude actual SDK transport keeps private registry paths out of child arguments", async () => {
   const fixture = runtimeRegistryFixture();
   let argv: string[] | undefined, input = "", policyPath: string | undefined, policy: Record<string, unknown> | undefined;
