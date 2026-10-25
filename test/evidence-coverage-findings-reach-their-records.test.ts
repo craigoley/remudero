@@ -18,7 +18,7 @@ import { gitRepo } from "#test/helpers/git-repo.js";
 import { LANDING_BRANCH, sweepFeedbackLanding } from "#src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { prepareEvidenceRecordContext, taskClosure, type EvidenceContextPorts } from "#src/lib/evidence-coverage-record-context.js";
-import { buildEvidenceRevision, evidenceRevisionOf } from "#src/lib/feedback-evidence-revision.js";
+import { buildEvidenceRevision, evidenceRevisionOf, validateEvidenceRevision } from "#src/lib/feedback-evidence-revision.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { pathToFileURL } from "node:url";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -252,6 +252,27 @@ test("private coverage revision: metadata, human history, invalid measurements a
     assert.throws(() => buildEvidenceRevision({ ...revision, measurement }), /invalid evidence_coverage_revision/);
   }
   assert.throws(() => buildEvidenceRevision({ ...revision, expectedPlan: {} }), /invalid evidence_coverage_revision/);
+});
+
+test("private coverage revision: an accepted record without complete task facts, or an unbuildable revision, is refused", (t) => {
+  const f = fixture(t);
+  f.pass();
+  const bytes = readFileSync(f.queued, "utf8");
+  const revision = evidenceRevisionOf(bytes)!;
+  const accepted = stringify({ ...parse(revision.expectedRecord), status: "accepted" });
+  assert.throws(() => buildEvidenceRevision({ ...revision, expectedRecord: accepted,
+    closure: { eligible: true, reason: "complete task PR evidence" } }), /incomplete task closure facts/);
+  const unbuildable = stringify({ ...parse(bytes), evidence_coverage_revision: { ...revision, expectedPlan: {} } });
+  assert.match(validateEvidenceRevision(revision.expectedRecord, unbuildable) ?? "",
+    /^invalid evidence revision: Error: invalid evidence_coverage_revision/);
+});
+
+test("private coverage producer: a non-new local record that fetched main never held is refused, not overwritten", (t) => {
+  const f = fixture(t, false);
+  assert.deepEqual(f.pass().failed, [f.id]);
+  const failure = f.logs.find((row) => row.step === "evidence_coverage.filing_failed");
+  assert.match(String(failure?.extra?.error), new RegExp(`refuses deleted record ${f.id}`));
+  assert.equal(parse(readFileSync(f.path, "utf8")).raw, f.entry.raw);
 });
 
 test("private coverage context: the default API transport shells out and incomplete local sources refuse explicitly", (t) => {
