@@ -386,3 +386,20 @@ test("improvement draft handoff narrows the native selector and preserves the at
     const attempts = JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-draft-attempts.json"), "utf8")); assert.equal(typeof attempts[saved.proposalId], "string"); assert.equal(attempts["P-UNRELATED"], undefined);
   });
 });
+
+test("improvement decisions recover sealed intent across each publication gap", async () => {
+  const { createImprovementThread, readImprovementThread, requestImprovementAction } = await planningModule();
+  for (const stage of ["prepared", "indexed", "requested"] as const) await withTempDir(`improvement-decision-${stage}`, async dir => {
+    const { deps, request } = sourceFixture(dir), saved = await createImprovementThread(request, deps); assert(saved.state === "saved");
+    const view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
+    const input = { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: `durable-decision-${stage}-0001` };
+    let launched = 0;
+    const interrupted = await requestImprovementAction("draft", input, { ...deps, launchAction: () => { launched++; }, afterActionPersist: at => { if (at === stage) throw new Error("simulated response loss"); } });
+    assert.equal(interrupted.state, "uncertain"); assert.equal(launched, 0);
+    const changed = await requestImprovementAction("draft", { ...input, goalDigest: "f".repeat(64) }, { ...deps, launchAction: () => { launched++; } }); assert.equal(changed.state, "conflict", "a sealed decision identity cannot be reused with changed bytes");
+    const script = 'import {requestImprovementAction} from "#src/lib/improvement-thread.js";import {fixedClock} from "#src/lib/clock.js";const [input,deps]=JSON.parse(process.argv[1]);deps.clock=fixedClock(deps.now);let launched=0;deps.launchAction=()=>{launched++};const result=await requestImprovementAction("draft",input,deps);process.stdout.write(JSON.stringify({result,launched}));';
+    const raw = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, JSON.stringify([input, { stateDir: deps.stateDir, actorId: deps.actorId, now: deps.clock.now() }])], { cwd: repoRoot(), encoding: "utf8", timeout: 15000 });
+    const recovered = JSON.parse(raw); assert.equal(recovered.result.state, "requested"); assert.equal(recovered.result.operation.state, "requested"); assert.equal(recovered.launched, 1);
+    const after = readImprovementThread(saved.requestId, deps); assert(after.state === "saved"); assert.equal(after.drafting.state, "requested"); assert.equal(after.drafting.operationId, recovered.result.operation.operationId);
+  });
+});
