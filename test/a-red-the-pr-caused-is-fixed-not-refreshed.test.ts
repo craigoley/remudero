@@ -550,3 +550,24 @@ test("a trial-merge refusal prevents the ordinary refresh judge from replacing t
   assert.deepEqual(h.refreshed, [], "ordinary overlap cannot overrule the measured failure");
   assert.equal(judgments, 0, "a recorded refusal needs no overlap model call");
 });
+
+
+test("a recorded refresh refusal stays bound to its exact red head and main", async () => {
+  for (const control of ["same", "other-head", "other-main", "green", "unread-main"] as const) {
+    const refusal = { step: "refresh.clearance", pr_number: PR,
+      head_sha: control === "other-head" ? "prior-head" : HEAD,
+      main_sha: control === "other-main" ? "prior-main" : MAIN,
+      refresh: false, evidence: "merged-probe", merged_verdict: "reproduced", test_files: [FILE], checks: [CHECK] };
+    const h = harness([mainHealth(), refusal], {});
+    h.deps.behindMainByPr = new Map([[PR, 50]]);
+    h.deps.baseChangedFilesByPr = new Map([[PR, { files: [], truncated: true }]]);
+    h.deps.readBranchProtectionStrict = () => false;
+    if (control === "unread-main") h.deps.readMainTip = () => undefined;
+    let judgments = 0;
+    h.deps.refreshJudge = async () => { judgments++; return "overlap"; };
+    await runSweep([redPr({ checksState: control === "green" ? "green" : "red", ciFailures: [], lastActivityAt: ago(60) }), peer()], h.deps, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(h.refreshed, control === "same" ? [] : [PR], control);
+    assert.equal(judgments, control === "same" ? 0 : 1, control);
+    assert.deepEqual(h.merges, [], "recorded evidence introduces no new probe");
+  }
+});
