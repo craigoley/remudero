@@ -80,15 +80,23 @@ test("manual fix mines the red aggregator shard without unrelated failures", asy
   assert.ok(!calls.some((c) => c.includes("/actions/jobs/23/logs")), "unrelated failure is outside the required-gate evidence");
 });
 
-for (const state of ["success", null] as const) {
-  test(`manual fix leaves no-red heads without CI log evidence (${state ?? "pending"})`, async (t) => {
-    const { pr, calls } = await observe(t, [check("ci-gate", 30, state), check("unrelated-experiment", 31)]);
-    assert.equal(pr.checksState, state === null ? "pending" : "green");
-    assert.deepEqual(pr.redRequiredChecks, []);
-    assert.equal(pr.ciFailures, undefined);
-    assert.ok(!calls.some((c) => c.includes("/logs")));
+test("manual fix leaves no-red heads without CI log evidence", async (t) => {
+  await t.test("an independently red required check is the positive control", async (child) => {
+    const { pr, calls } = await observe(child, [check("ci-gate", 32, "success"), check("rule-checks", 33)]);
+    assert.deepEqual(pr.ciFailures?.map((f) => f.name), ["rule-checks"]);
+    assert.match(pr.ciFailures![0]!.logTail!, /rule-checks discriminating failure/);
+    assert.ok(calls.some((c) => c.includes("/actions/jobs/33/logs")));
   });
-}
+  for (const state of ["success", null] as const) {
+    await t.test(`no-red aggregate ${state ?? "pending"}`, async (child) => {
+      const { pr, calls } = await observe(child, [check("ci-gate", 30, state), check("unrelated-experiment", 31)]);
+      assert.equal(pr.checksState, state === null ? "pending" : "green");
+      assert.deepEqual(pr.redRequiredChecks, []);
+      assert.equal(pr.ciFailures, undefined);
+      assert.ok(!calls.some((c) => c.includes("/logs")));
+    });
+  }
+});
 
 test("manual fix preserves unavailable log evidence", async (t) => {
   const { pr, calls } = await observe(t, [check("ci-gate", 40, "success"), check("rule-checks", 41)], { unavailable: true });
