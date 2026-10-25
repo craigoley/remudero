@@ -13409,7 +13409,9 @@ export async function dispatchBodyProofRepair(
       new_body_sha256: newBodySha256, claims: validation.validated.map((e) => e.claim) });
     return { kind: "written", newBodySha256 };
   } catch (error) {
-    return refuse("error", String((error as Error)?.message ?? error));
+    const message = String((error as Error)?.message ?? error);
+    params.log("fix.body_proof_repair_error", { head_sha: params.priorHeadSha, error: message });
+    return { kind: "refused", reason: `error (${message})` };
   } finally {
     releaseBaseProofDir(params.reviewBase.headCheckoutDir, baseProof, io.removeBaseWorktreeFn);
   }
