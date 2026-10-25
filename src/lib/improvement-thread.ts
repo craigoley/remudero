@@ -193,6 +193,23 @@ function messagesMatch(intent: Intent): boolean {
   });
 }
 
+/** The source sealed with one explicit goal. A later goal never substitutes its baseline.
+ * SHIPS-UNWIRED: W1-T10562 consumes this read in the existing outcome reconciler. */
+export function readSavedImprovementSource(requestId: string, deps: ImprovementThreadDeps): Failure | {
+  state: "observed"; requestId: string; repository: string; instance: string; snapshotId: string; opportunityId: string;
+  proposalId: string; threadId: string; goal: string; constraints: string[];
+} {
+  if (!/^[a-f0-9]{64}$/.test(requestId)) return fail("invalid_request", "Use the saved planning request identity.");
+  try {
+    const intent = readIntent(join(deps.stateDir, "improvement-threads", `${requestId}.json`));
+    if (!intent || intent.stage !== "saved" || intent.requestId !== requestId || !messagesMatch(intent)) return fail("source_unavailable", "The original planning source cannot be verified.");
+    const scope = scopeFor(intent.request, deps.stateDir);
+    if ("state" in scope || hash(scope) !== hash(intent.scope)) return fail("source_unavailable", "The original planning fleet binding cannot be verified.");
+    return { state: "observed", requestId, repository: intent.request.repository, instance: scope.instance, snapshotId: intent.request.snapshotId,
+      opportunityId: intent.request.opportunityId, proposalId: intent.proposalId, threadId: intent.threadId, goal: intent.request.goal, constraints: intent.request.constraints ?? [] };
+  } catch { return fail("source_unavailable", "The original planning source is unavailable or damaged."); }
+}
+
 /** Resolve server-owned evidence, save native Inbox messages, then acknowledge a durable receipt. */
 export async function createImprovementThread(value: unknown, deps: ImprovementThreadDeps): Promise<ImprovementThreadResult> {
   const request = requestInput(value);
