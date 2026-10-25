@@ -561,6 +561,7 @@ if (a[0] === "api") {
  else if (route.includes("/contents/.github/workflows/codeql.yml")) result = {type:"file",encoding:"base64",size:Buffer.byteLength(p.workflow),content:Buffer.from(p.workflow).toString("base64")};
  else if (route.includes("/actions/runs/123/artifacts")) result = {total_count:p.languages.length,artifacts:p.languages.map((language,n)=>({id:n+1,name:"code-health-quality-"+language,expired:false,size_in_bytes:1000,workflow_run:{id:123,head_sha:p.sha,head_branch:"main",repository_id:1,head_repository_id:1}}))};
  else if (route.includes("/code-scanning/analyses")) result = p.analyses;
+ else if (route.includes("/code-scanning/alerts")) result = [];
  else {process.stderr.write("Unexpected read: "+route);process.exit(42);}
  if (route.includes("/actions/runs/123/artifacts")) {
   if (mode === "truncated") result.total_count++;
@@ -590,6 +591,22 @@ if (a[0] === "api") {
     const scan = qualityScanFromCollectedEvidence({ ...read.quality, repository, source: { ok: true, alerts: [], analysisInstances: [] } });
     assert.equal(scan.state, "complete", "zero findings need all configured original-output and API-analysis controls");
     assert.deepEqual(scan.componentIds, metadata.map(item => item.scanId).sort());
+    await withTempDir("code-health-default-collector", async stateDir => {
+      let now = Date.parse("2026-11-02T06:00:00.000Z"); const clock = clockFromMillisFn(() => now);
+      const published = await collectCodeHealth({ stateDir, repository, clock });
+      assert.equal(published.state, "published", "the complete production collector reaches real fixture processes without injected readers");
+      const saved = readCodeHealthSnapshot(stateDir, repository); assert(saved.state === "observed");
+      assert.equal(saved.snapshot.input.scans.find(scan => scan.kind === "quality")!.state, "complete");
+      assert.equal(saved.snapshot.input.scans.find(scan => scan.kind === "quality")!.observedAt, metadata[0]!.observedAt);
+      assert.equal(projectCodeHealth(saved.snapshot.input).summary.healthy, null, "missing coverage and baseline stay unmeasured");
+      now += 60_000; process.env.RMD_CODE_HEALTH_FIXTURE_CASE = "invalid-json";
+      assert.equal((await collectCodeHealth({ stateDir, repository, clock })).state, "unavailable");
+      const retained = readCodeHealthSnapshot(stateDir, repository); assert(retained.state === "observed");
+      assert.equal(retained.snapshot.snapshotId, saved.snapshot.snapshotId);
+      assert.equal(readCodeHealthCollectionFailure(stateDir, repository).state, "failed");
+      delete process.env.RMD_CODE_HEALTH_FIXTURE_CASE;
+    });
+
     assert.equal(scan.observedAt, metadata[0]!.observedAt);
     assert(!JSON.stringify(read).includes('"environment":'), "retain only the environment fingerprint");
     const readAndScan = async () => {
