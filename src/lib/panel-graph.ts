@@ -3784,8 +3784,11 @@ export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: ()
 function refuseInformationalProposal(proposals: Proposal[], classifications: InboxClassification[], proposalId: string, respond: InboxVerbRespond): boolean {
   const matches = proposals.filter(proposal => proposal.id === proposalId);
   const classified = classifications.filter(item => item.proposalId === proposalId);
-  if (matches.length !== 1 || classified.length !== 1 || !isAgeOnlyInboxInformation({ ...matches[0]!,
-    requiresReview: classified[0]!.retirement?.state === "restored_for_review" })) return false;
+  if (matches.length !== 1 || classified.length !== 1) return false;
+  const retirement = classified[0]!.retirement;
+  const requiresReview = retirement !== undefined && retirement.state === "restored_for_review";
+  const informational = isAgeOnlyInboxInformation({ ...matches[0]!, requiresReview });
+  if (informational !== true) return false;
   respond(409, { error: "informational_only", detail: "This age observation is readable information, not an operator decision or work request." });
   return true;
 }
