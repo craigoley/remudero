@@ -14,7 +14,7 @@
     - src/run-task.ts
     - src/lib/sweep.ts
     - test/a-light-pass-reaches-review-eligibility-without-waiting-on-ready-refresh-reads.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

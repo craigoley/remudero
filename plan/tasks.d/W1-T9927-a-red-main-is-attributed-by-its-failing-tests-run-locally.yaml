@@ -14,7 +14,7 @@
     - src/lib/main-health-rung.ts
     - src/run-task.ts
     - test/a-red-main-is-attributed-by-its-failing-tests-run-locally.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
