@@ -22,9 +22,10 @@ import {
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "../src/lib/host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "../src/lib/gardener-overseer.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildRegisteredGarden, daemonCommand, gardenCommand, runRegisteredGardenPass, type GardenBuildContext } from "../src/run-task.js";
+import { buildRegisteredGarden, daemonCommand, gardenCommand as runGardenCommand, runRegisteredGardenPass, type GardenBuildContext } from "../src/run-task.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { declaredBody, SPEC, violations } from "./helpers/openapi-strict.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // MEASURED 2026-10-01: eleven daemon ticks spent 4,344 s reaching admission; ~1,620 s of the silent-loop gaps ended
 // in a gardener's scorecard, because every garden starter ran its synchronous pass on the daemon's event loop.
@@ -604,6 +605,16 @@ test("W1-T5114: every registered garden's pass records its own failure and never
 });
 
 test("W1-T5114: rmd garden run runs one pass of a registered garden and refuses an unknown one", async (t) => {
+  const origin = gitRepo({ bare: true, scope: t });
+  const source = gitRepo({ scope: t });
+  mkdirSync(join(source.dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(source.dir, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(source.dir, "plan", "tasks.d", ".gitkeep"), "");
+  source.git("add", "plan");
+  source.git("commit", "-qm", "chore: seed complete plan");
+  source.addRemote("origin", origin.dir);
+  source.git("push", "-q", "origin", "main");
+  const gardenCommand = (rest: string[]) => runGardenCommand(rest, { repoRoot: source.dir });
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-cli-home-`));
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });

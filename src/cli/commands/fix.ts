@@ -1084,7 +1084,11 @@ async function fixRungStandDownReason(
       openEscalation.current,
       openEscalation.redCheckNames,
     );
-    if (alreadyAsked) return alreadyAsked;
+    if (alreadyAsked) {
+      log("fix.contract_hold", { kind: "open-escalation", pr_url: prUrl, head_sha: openEscalation.headSha,
+        contract_revision: openEscalation.key.contractRevision, issue_url: candidate?.url });
+      return alreadyAsked;
+    }
     const clearedCause = candidate && escalationHeadSha(candidate.body) === openEscalation.headSha && openEscalation.current
       ? clearedConflictEscalationCause(candidate.body, openEscalation.current)
       : undefined;
