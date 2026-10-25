@@ -3395,7 +3395,7 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
   // is the caller's to answer; a wrong guess here would flag every task that merely EDITS a module.
   if (!opts.moduleExists) return [];
   const severity: LintSeverity = opts.callSite ?? "warn";
-  const declaredSrc = (task.files ?? []).filter((f) => f.startsWith("src/") && (f.endsWith(".ts") || f.endsWith(".tsx")) && !f.includes("*"));
+  const declaredSrc = (task.files ?? []).filter((f) => f.startsWith("src/") && f.endsWith(".ts") && !f.includes("*"));
   const declaredSrcSet = new Set(declaredSrc);
   const created = declaredSrc.filter((f) => !opts.moduleExists!(f));
   const addedExports = (opts.addedExports ?? []).filter(
