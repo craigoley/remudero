@@ -85,6 +85,7 @@ export function validateEvidenceRevision(upstream: string | undefined, local: st
     if (!isDeepStrictEqual(parse(buildEvidenceRevision(revision)), parse(local))) return "evidence revision changes fields outside measured evidence";
     return undefined;
   } catch (error) {
+    // An unparseable revision is refused with its parse error, never read as valid or as absent.
     return `invalid evidence revision: ${String(error)}`;
   }
 }

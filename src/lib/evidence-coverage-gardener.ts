@@ -594,8 +594,8 @@ export function feedbackEvidenceCoverageFiler(root: string, land: LandFeedbackOp
       if (proposed === undefined || onMain === undefined) return queued === undefined
         || measuredLine(String(queued.raw)) !== measuredLine(followup.raw);
       const desired = parseYaml(proposed);
-      const main = parseYaml(onMain);
-      if (main.raw === desired.raw && main.status === desired.status) return false;
+      const landed = parseYaml(onMain);
+      if (landed.raw === desired.raw && landed.status === desired.status) return false;
       const queuedRevision = queued?.evidence_coverage_revision as { expectedRecord?: string; expectedPlan?: Record<string, string> } | undefined;
       if (queued && queuedRevision?.expectedRecord === onMain && validateEvidenceRevision(onMain, stringifyYaml(queued)) !== undefined) {
         throw new Error(`evidence revision refuses concurrent queued record edits: ${followup.id}`);

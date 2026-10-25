@@ -186,6 +186,9 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   planTreeIsBehindMain: 1,
   postReviewPending: 1,
   prepareDefuseTaskIds: 1,
+  // W1-T9553 (operator yes, 2026-10-25): its sync ghExec runs in the evidence-coverage pass, which the daemon spawns
+  // as an off-loop child; only the test-only gardenPassesInProcess seam reaches it by name.
+  prepareEvidenceRecordContext: 1,
   preserveFixHead: 3,
   probeProofSandbox: 1,
   productionGardenerOverseerPorts: 1,
