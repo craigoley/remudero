@@ -100,6 +100,21 @@ export function qualityScanFromCollectedEvidence(input: {
       reason: findings.some(finding => finding.status !== "fixed") ? "Known maintainability findings have not been verified as fixed." : "No open findings in the measured maintainability subset." }], findings };
 }
 
+export interface CodeHealthStoredSnapshot {
+  version: "code-health-snapshot-v1";
+  snapshotId: string;
+  contentHash: string;
+  input: CodeHealthProjectionInput;
+}
+export type CodeHealthSnapshotRead = { state: "observed"; snapshot: CodeHealthStoredSnapshot } | { state: "not_collected" | "unavailable"; reason: string };
+export function readCodeHealthSnapshot(_stateDir: string, _repository: string, _snapshotId?: string): CodeHealthSnapshotRead {
+  return { state: "not_collected", reason: "Code health has not been collected." };
+}
+export function publishCodeHealthSnapshot(_opts: { stateDir: string; input: CodeHealthProjectionInput; expectedSnapshotId: string | null; clock?: import("./clock.js").Clock }):
+  { state: "published" | "duplicate"; snapshotId: string } | { state: "busy" | "superseded" | "unavailable"; reason: string } {
+  return { state: "unavailable", reason: "Code health publication is not implemented." };
+}
+
 /** A read-only briefing over existing evidence and opportunity identities; never files or ranks. */
 export function buildCodeHealthOpportunities(input: CodeHealthProjectionInput, relatedWork: readonly CodeHealthRelatedWork[] = []): CodeHealthImprovementOpportunity[] {
   const assessment = projectCodeHealth(input), scan = input.scans.find(value => value.kind === "quality");

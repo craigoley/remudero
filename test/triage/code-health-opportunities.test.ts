@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { withTempDir } from "#src/lib/tmp.js";
-import { buildCodeHealthOpportunities, codeqlQualityProposalId, qualityScanFromCollectedEvidence } from "#src/lib/codeql-quality-intake.js";
+import { buildCodeHealthOpportunities, codeqlQualityProposalId, qualityScanFromCollectedEvidence, readCodeHealthSnapshot, publishCodeHealthSnapshot } from "#src/lib/codeql-quality-intake.js";
 import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
 import { readCoverageNightlySummary } from "#src/lib/coverage-nightly-intake.js";
+import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { fixedClock } from "#src/lib/clock.js";
 import { readCodeScanningAlerts } from "#src/lib/ops.js";
 import { ghStubPath, pathWith } from "#test/helpers/gh-stub.js";
@@ -267,4 +268,39 @@ test("code health requires every configured analysis before treating quality evi
   assert.equal(retained.state, "complete", "GitHub can retain an open most-recent instance for a dismissed alert");
   assert.equal(retained.findings[0]!.status, "dismissed"); assert.equal(retained.checks[0]!.met, false);
   assert.equal(qualityScanFromCollectedEvidence({ ...value, source: { ok: false, error: "unavailable" } }).state, "unavailable");
+});
+
+
+test("code health publishes immutable evidence and refuses stale or occupied publication", async () => {
+  await withTempDir("code-health-store", async stateDir => {
+    assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas").state, "not_collected");
+    const first = publishCodeHealthSnapshot({ stateDir, input: input(), expectedSnapshotId: null });
+    assert.equal(first.state, "published"); assert("snapshotId" in first);
+    const read = readCodeHealthSnapshot(stateDir, "acme/atlas");
+    assert.equal(read.state, "observed"); assert("snapshot" in read);
+    assert.equal(read.snapshot.snapshotId, first.snapshotId);
+    assert.deepEqual(read.snapshot.input, input());
+    const reread = input(); reread.observedAt = "2026-11-02T05:02:00.000Z";
+    const duplicate = publishCodeHealthSnapshot({ stateDir, input: reread, expectedSnapshotId: first.snapshotId });
+    assert.equal(duplicate.state, "duplicate"); assert("snapshotId" in duplicate); assert.equal(duplicate.snapshotId, first.snapshotId);
+    const next = input(); next.scans.forEach(scan => { scan.scanId += ":independent"; });
+    const published = publishCodeHealthSnapshot({ stateDir, input: next, expectedSnapshotId: first.snapshotId });
+    assert.equal(published.state, "published"); assert("snapshotId" in published);
+    assert.notEqual(published.snapshotId, first.snapshotId);
+    assert.equal(publishCodeHealthSnapshot({ stateDir, input: input(), expectedSnapshotId: first.snapshotId }).state, "superseded");
+    const current = readCodeHealthSnapshot(stateDir, "acme/atlas"); assert.equal(current.state, "observed"); assert("snapshot" in current);
+    assert.equal(current.snapshot.snapshotId, published.snapshotId);
+    const historical = readCodeHealthSnapshot(stateDir, "acme/atlas", first.snapshotId);
+    assert.equal(historical.state, "observed"); assert("snapshot" in historical); assert.deepEqual(historical.snapshot.input, input());
+    assert.equal(readCodeHealthSnapshot(stateDir, "acme/foreign").state, "unavailable");
+    const lock = acquireInflightLock(join(stateDir, "code-health", "locks"), "publication", { run_id: "test-owned-publication" });
+    try {
+      assert.equal(publishCodeHealthSnapshot({ stateDir, input: next, expectedSnapshotId: published.snapshotId }).state, "busy");
+      assert.equal(existsSync(lock.path), true, "preserve a live publisher and its lock");
+    } finally { lock.release(); }
+    writeFileSync(join(stateDir, "code-health", "latest.json"), "broken");
+    assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas").state, "unavailable", "corruption cannot become an empty healthy cache");
+    assert.equal(publishCodeHealthSnapshot({ stateDir, input: next, expectedSnapshotId: published.snapshotId }).state, "unavailable");
+    assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas", first.snapshotId).state, "observed", "retain immutable evidence after pointer failure");
+  });
 });
