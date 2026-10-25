@@ -802,3 +802,26 @@ async function featureModule<T extends object>(load: Promise<T>, leaf: string): 
     return value === undefined ? () => assert.fail(`${leaf}: ${String(key)} is not implemented on this branch`) : value;
   } });
 }
+
+
+test("code health source-age census stays bound to the finding freshness reader", () => {
+  const script = `
+    import assert from "node:assert/strict";
+    import { AGED_FIELDS, assertFieldsStillAged, censusExpiringFixtures, rowAppliesTo } from "#scripts/expiring-fixture-census.mjs";
+    const row = AGED_FIELDS.find(row => row.field === "observedAt" && row.source === "src/lib/codeql-quality-intake.ts");
+    assert.ok(row, "the actual source-age reader must be registered, never exempted");
+    assert.equal(row.offsetDays, 1, "the declared crossing is the existing 24-hour finding policy");
+    assertFieldsStillAged();
+    const consumer = "createImprovementThread(request, deps)";
+    assert.equal(rowAppliesTo(row, consumer), true);
+    assert.equal(rowAppliesTo(row, "projectCodeHealth(input)"), false, "a pure assessment alone does not read the planning clock");
+    const fixture = consumer + String.fromCharCode(10) + 'const input = { observedAt: "2001-01-01T12:00:00.000Z" };';
+    const result = censusExpiringFixtures({ files: ["test/quality-reader-control.test.ts"], readFile: () => fixture,
+      now: Date.parse("2001-01-02T11:00:00.000Z"), thresholdDays: 14 });
+    assert.equal(result.reported.filter(item => item.field === "observedAt").length, 1, "a literal source clock approaching the real reader boundary remains visible");
+    assert.equal(result.exempt.length, 0, "no ignore or exemption supplies the pass");
+    process.stdout.write("source-age registration and crossing control passed");
+  `;
+  const result = execFileSync(process.execPath, ["--input-type=module", "-e", script], { cwd: repoRoot(), encoding: "utf8", timeout: 10000 });
+  assert.equal(result, "source-age registration and crossing control passed");
+});
