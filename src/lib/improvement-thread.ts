@@ -222,6 +222,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
       syncPath(root, true); deps.afterPersist?.(stage === "saved" ? "receipt" : stage);
     };
     if (!previous) persist("intent");
+    if (!readActionIndex(deps.stateDir, intent.proposalId)) writeActionIndex(deps.stateDir, { version: "improvement-actions-v1", proposalId: intent.proposalId, draft: null, file: null }, owns);
     mayHaveWritten = true;
     const registryPath = join(scope.inboxStateDir, "inbox-proposals.json"), draftsPath = join(scope.inboxStateDir, "inbox-drafts.json");
     strictRegistry(registryPath);
@@ -280,14 +281,14 @@ export type ImprovementThreadView = Failure | {
   state: "saved"; version: typeof IMPROVEMENT_THREAD_VERSION; requestId: string; currentRequestId: string; proposalId: string; threadId: string;
   repository: string; instance: string; snapshotId: string; opportunityId: string; goal: string; constraints: string[]; goalDigest: string;
   source: { state: "current" | "stale" | "unavailable"; reason: string | null };
-  messages: import("./inbox-thread.js").ThreadMessage[]; messageCount: number; messagesPartial: boolean;
-  drafting: { state: "not_requested" | "requested" | "ready" | "unavailable"; digest: string | null; fragmentYaml: string | null; reason: string | null };
-  filing: { state: "not_requested" }; execution: { state: "not_requested" };
+  messages: import("./inbox-thread.js").ThreadMessage[]; messageCount: number; messagesPartial: boolean; nextBeforeSeq: number | null;
+  drafting: { state: "not_requested" | "requested" | "ready" | "unavailable" | "refused"; digest: string | null; fragmentYaml: string | null; reason: string | null; operationId?: string; sourceRequestId?: string };
+  filing: { state: "not_requested" | "requested" | "plan_pr_opened" | "refused" | "uncertain"; operationId?: string; sourceRequestId?: string; receipt?: ImprovementPlanReceipt; reason?: string | null }; execution: { state: "not_requested" };
 };
 
 /** A saved chat remains readable when its source ages; new actions still require current evidence. */
-export function readImprovementThread(requestId: string, deps: ImprovementThreadDeps): ImprovementThreadView {
-  if (!/^[a-f0-9]{64}$/.test(requestId)) return fail("invalid_request", "Use the saved conversation's request identity.");
+export function readImprovementThread(requestId: string, deps: ImprovementThreadDeps, beforeSeq?: number): ImprovementThreadView {
+  if (!/^[a-f0-9]{64}$/.test(requestId) || beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1)) return fail("invalid_request", "Use the saved conversation's request identity and a valid message position.");
   try {
     const root = join(deps.stateDir, "improvement-threads"), savedRequest = readIntent(join(root, `${requestId}.json`));
     if (!savedRequest) return fail("source_unavailable", "This saved conversation is unavailable.", requestId);
@@ -318,11 +319,43 @@ export function readImprovementThread(requestId: string, deps: ImprovementThread
     }
     const read = readThread(current.threadId, { threadStorePath: join(scope.inboxStateDir, "inbox-threads.jsonl") });
     if (read.status !== "ok") return fail("uncertain", "The saved messages cannot currently be read.", requestId);
+    const candidates = read.messages.filter(message => beforeSeq === undefined || message.seq < beforeSeq), messages: typeof read.messages = [];
+    let bytes = 0;
+    for (const message of candidates.toReversed()) {
+      const size = Buffer.byteLength(JSON.stringify(message));
+      if (messages.length === 100 || bytes + size > 512 * 1024) break;
+      messages.unshift(message); bytes += size;
+    }
+    if (candidates.length && !messages.length) return fail("source_unavailable", "This conversation message exceeds the supported page size.", requestId);
+    let filing: Extract<ImprovementThreadView, { state: "saved" }>["filing"] = { state: "not_requested" };
+    try {
+      const index = readActionIndex(deps.stateDir, proposal.id);
+      if (!index) throw new Error("The action index is unavailable.");
+      if (index.draft) {
+        const action = readAction(deps.stateDir, index.draft);
+        if (!action || action.proposalId !== proposal.id || action.kind !== "draft") {
+          if (drafting.state !== "ready") drafting = { state: "unavailable", digest: null, fragmentYaml: null, reason: "A draft decision was started, but its saved receipt cannot currently be verified." };
+        } else if (action.goalDigest === proposal.improvement.goalDigest) {
+          if (drafting.state === "not_requested") drafting = { state: action.state === "refused" ? "refused" : action.state === "completed" || action.state === "uncertain" ? "unavailable" : "requested", digest: null, fragmentYaml: null,
+            reason: action.reason ?? (action.state === "completed" ? "The completed draft's cached content cannot currently be verified." : null) };
+          drafting = { ...drafting, operationId: action.operationId, sourceRequestId: action.requestId };
+        }
+      }
+      if (index.file) {
+        const action = readAction(deps.stateDir, index.file);
+        if (!action || action.proposalId !== proposal.id || action.kind !== "file") throw new Error("The filing receipt cannot be verified.");
+        filing = { state: action.state === "completed" && action.receipt ? "plan_pr_opened" : action.state === "refused" ? "refused" : action.state === "uncertain" || action.state === "completed" ? "uncertain" : "requested",
+          operationId: action.operationId, sourceRequestId: action.requestId, ...(action.receipt ? { receipt: action.receipt } : {}), reason: action.reason };
+      }
+    } catch {
+      // An unreadable index or pending pointer cannot prove the absence of a filing decision.
+      filing = { state: "uncertain", reason: "This conversation's filing history cannot currently be verified." };
+    }
     return { state: "saved", version: IMPROVEMENT_THREAD_VERSION, requestId, currentRequestId: current.requestId, proposalId: proposal.id, threadId: current.threadId,
       repository: current.request.repository, instance: scope.instance, snapshotId: current.request.snapshotId, opportunityId: current.request.opportunityId,
       goal: current.request.goal, constraints: current.request.constraints ?? [], goalDigest: proposal.improvement.goalDigest, source: sourceState,
-      messages: read.messages.slice(-100), messageCount: read.messages.length, messagesPartial: read.messages.length > 100, drafting,
-      filing: { state: "not_requested" }, execution: { state: "not_requested" } };
+      messages, messageCount: read.messages.length, messagesPartial: messages.length < read.messages.length,
+      nextBeforeSeq: candidates.length > messages.length ? messages[0]!.seq : null, drafting, filing, execution: { state: "not_requested" } };
   } catch {
     // A store read failed; no empty chat, missing draft, or current-source authority can be inferred.
     return fail("source_unavailable", "This saved conversation cannot currently be read.", requestId);
@@ -363,8 +396,8 @@ export function buildImprovementThreadRoutes(options: { stateDir: string; clock?
     } },
     { method: "GET", path: "/v1/improvements/thread", scope: "read", handler: (req, res) => {
       const params = new URL(req.url ?? "/", "http://localhost").searchParams;
-      if ([...params.keys()].some(key => key !== "requestId") || params.getAll("requestId").length !== 1) { sendJson(res, 400, { error: "invalid_request", detail: "Use one saved conversation request identity." }); return; }
-      const result = readImprovementThread(params.get("requestId")!, { ...options, actorId: bearerTokenId(req) });
+      if ([...params.keys()].some(key => !["requestId", "beforeSeq"].includes(key)) || params.getAll("requestId").length !== 1 || params.getAll("beforeSeq").length > 1 || params.has("beforeSeq") && !/^[1-9][0-9]{0,15}$/.test(params.get("beforeSeq")!)) { sendJson(res, 400, { error: "invalid_request", detail: "Use one saved conversation request identity." }); return; }
+      const result = readImprovementThread(params.get("requestId")!, { ...options, actorId: bearerTokenId(req) }, params.has("beforeSeq") ? Number(params.get("beforeSeq")) : undefined);
       sendJson(res, resultStatus(result), result);
     } },
   ];
@@ -392,6 +425,21 @@ function actionInput(value: unknown, kind: ImprovementAction["kind"]): Improveme
       ![b.requestId, b.goalDigest, ...(kind === "file" ? [b.draftDigest] : [])].every(value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)) ||
       typeof b.idempotencyKey !== "string" || !/^[A-Za-z0-9._:-]{16,128}$/.test(b.idempotencyKey)) return undefined;
   return b as unknown as ImprovementActionRequest;
+}
+interface ActionIndex { version: "improvement-actions-v1"; proposalId: string; draft: string | null; file: string | null }
+function readActionIndex(stateDir: string, proposalId: string): ActionIndex | undefined {
+  let value: unknown;
+  try { value = readCodeHealthArtifactJson(join(stateDir, "improvement-threads", "action-index", `${hash(proposalId)}.json`), 4096); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  const { contentHash, ...index } = value as ActionIndex & { contentHash: string };
+  if (contentHash !== hash(index) || index.version !== "improvement-actions-v1" || index.proposalId !== proposalId ||
+      ![index.draft, index.file].every(id => id === null || typeof id === "string" && /^[a-f0-9]{64}$/.test(id))) throw new Error("The saved action index is invalid.");
+  return index;
+}
+function writeActionIndex(stateDir: string, index: ActionIndex, owns: () => boolean): void {
+  const dir = join(stateDir, "improvement-threads", "action-index");
+  if (!writeAtomic(join(dir, `${hash(index.proposalId)}.json`), JSON.stringify({ ...index, contentHash: hash(index) }), { mode: 0o600, beforeRename: owns })) throw new Error("Improvement action ownership changed.");
+  syncPath(dir, true);
 }
 function actionPath(stateDir: string, operationId: string): string { return join(stateDir, "improvement-threads", "actions", `${operationId}.json`); }
 function readAction(stateDir: string, operationId: string): ImprovementAction | undefined {
@@ -450,7 +498,13 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
     if (deps.launchAction === undefined) return fail("source_unavailable", "This repository's governed action handoff is unavailable. No action was requested.");
     const action: ImprovementAction = previous ?? { version: "improvement-action-v1", operationId, kind, requestId: input.requestId, proposalId: intent.proposalId,
       actorId: deps.actorId, payloadHash, goalDigest: input.goalDigest, draftDigest: input.draftDigest ?? null, requestedAt: (deps.clock ?? systemClock).iso(), state: "requested", reason: null, receipt: null };
-    if (!previous) { writeAction(deps.stateDir, action, owns); wrote = true; }
+    if (!previous) {
+      const index = readActionIndex(deps.stateDir, intent.proposalId);
+      if (!index) throw new Error("The saved action index is unavailable.");
+      // Publish the pointer first: interruption exposes an unverified decision, never a false 'not requested'.
+      writeActionIndex(deps.stateDir, { ...index, [kind]: operationId }, owns); wrote = true;
+      writeAction(deps.stateDir, action, owns);
+    }
     if (kind === "draft" && ["requested", "waiting"].includes(action.state)) {
       const registryPath = join(intent.scope.inboxStateDir, "inbox-proposals.json");
       strictRegistry(registryPath);

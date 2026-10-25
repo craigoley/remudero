@@ -5,6 +5,136 @@
 
 export interface components {
   schemas: {
+    ImprovementThreadRequest: {
+      repository: string;
+      opportunityId: string;
+      snapshotId: string;
+      goal: string;
+      constraints?: (string)[];
+      idempotencyKey: string;
+      instance?: string;
+    };
+    ImprovementFailure: {
+      state: "invalid_request" | "source_unavailable" | "source_stale" | "conflict" | "busy" | "uncertain";
+      reason: string;
+      requestId?: string;
+    };
+    ImprovementSavedResult: {
+      state: "saved";
+      version: "improvement-thread-v1";
+      requestId: string;
+      threadId: string;
+      proposalId: string;
+      repository: string;
+      instance: string;
+      snapshotId: string;
+      opportunityId: string;
+      reused: boolean;
+      planning: {
+        state: "not_requested";
+      };
+      execution: {
+        state: "not_requested";
+      };
+    };
+    ImprovementPlanReceipt: {
+      state: "plan_pr_opened";
+      prUrl: string;
+      branch: string;
+      taskIds: (string)[];
+      nativeReceiptId: string;
+    };
+    ImprovementNativeMessage: {
+      threadId: string;
+      role: "escalation" | "reply";
+      body: string;
+      seq: number;
+      ts: number;
+      /** Native Inbox message metadata. Source context and operator audit are facts; they grant no execution authority. */
+      extra?: Record<string, never>;
+    };
+    ImprovementThreadView: {
+      state: "saved";
+      version: "improvement-thread-v1";
+      requestId: string;
+      threadId: string;
+      proposalId: string;
+      repository: string;
+      instance: string;
+      snapshotId: string;
+      opportunityId: string;
+      currentRequestId: string;
+      goal: string;
+      constraints: (string)[];
+      goalDigest: string;
+      source: {
+        state: "current" | "stale" | "unavailable";
+        reason: unknown;
+      };
+      /** At most 512 KiB of native messages. Use nextBeforeSeq to read earlier messages. */
+      messages: (ImprovementNativeMessage)[];
+      messageCount: number;
+      messagesPartial: boolean;
+      nextBeforeSeq: unknown;
+      drafting: {
+        state: "not_requested" | "requested" | "ready" | "unavailable" | "refused";
+        digest: unknown;
+        fragmentYaml: unknown;
+        reason: unknown;
+        operationId?: string;
+        sourceRequestId?: string;
+      };
+      filing: {
+        state: "not_requested" | "requested" | "plan_pr_opened" | "refused" | "uncertain";
+        operationId?: string;
+        sourceRequestId?: string;
+        receipt?: ImprovementPlanReceipt;
+        reason?: unknown;
+      };
+      execution: {
+        state: "not_requested";
+      };
+    };
+    ImprovementDraftRequest: {
+      requestId: string;
+      goalDigest: string;
+      idempotencyKey: string;
+    };
+    ImprovementFileRequest: {
+      requestId: string;
+      goalDigest: string;
+      idempotencyKey: string;
+      draftDigest: string;
+    };
+    ImprovementAction: {
+      version: "improvement-action-v1";
+      operationId: string;
+      kind: "draft" | "file";
+      requestId: string;
+      proposalId: string;
+      actorId: string;
+      payloadHash: string;
+      goalDigest: string;
+      draftDigest: unknown;
+      requestedAt: string;
+      state: "requested" | "waiting" | "completed" | "refused" | "uncertain";
+      reason: unknown;
+      receipt: unknown;
+    };
+    ImprovementActionRequested: {
+      state: "requested";
+      operation: ImprovementAction;
+      execution: {
+        state: "not_requested";
+      };
+    };
+    ImprovementActionObserved: {
+      state: "observed";
+      operation: ImprovementAction;
+      execution: {
+        state: "not_requested";
+      };
+    };
     /** Bounded read-only answer-v1; missing evidence is explicit and citations are dated. */
     OperatorAgentAnswer: {
       version: "answer-v1";
@@ -3628,6 +3758,113 @@ export interface components {
       ready: boolean;
       reason: string;
     };
+    CodeHealthView: {
+      view: "code-health";
+      version: 1;
+      generatedAt: string;
+      asOf: unknown;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: CodeHealthViewData;
+    };
+    CodeHealthViewData: {
+      version: "code-health-view-v1";
+      /** all, or a configured owner/repository */
+      repository: string;
+      expectedRepositories: (string)[];
+      unresolvedInstances: (string)[];
+      repositories: ({
+        repository: string;
+        snapshotId: unknown;
+        state: "measured" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized" | "rate_limited";
+        summary: unknown;
+        urgentFindings: {
+          value: unknown;
+          precision: "exact" | "at_least" | "unavailable";
+          /** The measured CodeQL scope; this is not a comprehensive security assessment. */
+          scope: string;
+        };
+        measuredAt: unknown;
+        analyzedSha: unknown;
+        currentSha: unknown;
+        freshness: "fresh" | "stale" | "unavailable";
+        lastAttemptAt: unknown;
+        nextCheckDueAt: unknown;
+        collection: ({
+          state: "none";
+        }) | ({
+          state: "failed";
+          startedAt: string;
+          finishedAt: string;
+          snapshotId: unknown;
+          reason: string;
+          failureKind?: "unauthorized" | "rate_limited" | "unavailable";
+        }) | ({
+          state: "unavailable";
+          reason: string;
+        });
+        reason: unknown;
+        sourceClocks: ({
+          kind: string;
+          state: "complete" | "partial" | "stale" | "not_collected" | "unavailable";
+          measuredAt: unknown;
+          analyzedSha: unknown;
+        })[];
+      })[];
+      snapshotId: unknown;
+      isCurrentSnapshot: unknown;
+      assessment: unknown;
+      findingCount: unknown;
+      urgentFindings: {
+        value: unknown;
+        precision: "exact" | "at_least" | "unavailable";
+        /** The measured CodeQL scope; this is not a comprehensive security assessment. */
+        scope: string;
+      };
+      opportunities: ({
+        id: string;
+        snapshotId: string;
+        repository: string;
+        proposalId: string;
+        ruleId: string;
+        title: string;
+        consequence: string;
+        expectedResult: string;
+        acceptanceIdeas: (string)[];
+        uncertainty: (string)[];
+        mayPlan: boolean;
+        /** Total stable findings in this group; evidence entries may be paged. Effort estimates describe the whole group. */
+        evidenceCount: number;
+        evidence: ({
+          fingerprint: string;
+          sourceId: string;
+          scanId: string;
+          analyzedSha: unknown;
+          observedAt: unknown;
+          severity: "critical" | "high" | "medium" | "low";
+          title: string;
+          path: string;
+        })[];
+        effortMinutes: unknown;
+        estimateKind: unknown;
+        relatedWork: ({
+          repository: string;
+          proposalId: string;
+          taskId?: string;
+          prUrl?: string;
+          threadId?: string;
+        })[];
+      })[];
+      relatedWorkState: "reported" | "partial" | "stale" | "unavailable" | "not_collected";
+      relatedWorkAsOf: unknown;
+      relatedWorkReason: unknown;
+      /** Current source evidence can support a planning conversation; this does not approve, file or execute work. */
+      planningAvailable: boolean;
+      freshness: "fresh" | "stale" | "unavailable";
+      page: {
+        nextCursor: unknown;
+      };
+    };
     /** GET /v1/views/repositories (docs/views.md, src/lib/repositories-view.ts): the repository portfolio across every instance serve holds, in one body. Each instance's `summary` IS its GET /v1/i/<instance>/repos/summary body, computed by the read-model worker from that instance's projected `repo_row` table; `projects` precomputes the console's grouping and its "worst is <repo>" line. Dark until state/read-model/switches.json sets `repositories` to `serve`. Version 2 carries no clock stamp in `data`: each summary's `generated_at` is its `repositories:<instance>` source's `asOf`, so the ETag moves only when the content does. */
     RepositoriesView: {
       view: "repositories";
@@ -5704,6 +5941,71 @@ export interface components {
 }
 
 export interface paths {
+  "/v1/improvements/threads": {
+    post: {
+      responses: {
+          "200": ImprovementSavedResult;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/thread": {
+    get: {
+      responses: {
+          "200": ImprovementThreadView;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/threads/draft": {
+    post: {
+      responses: {
+          "202": ImprovementActionRequested;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/threads/file": {
+    post: {
+      responses: {
+          "202": ImprovementActionRequested;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/action": {
+    get: {
+      responses: {
+          "200": ImprovementActionObserved;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
   "/v1/analytics": {
     get: {
       responses: {
@@ -6885,6 +7187,19 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": undefined;
+        };
+    };
+  };
+  "/v1/views/code-health": {
+    get: {
+      responses: {
+          "200": CodeHealthView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+          "503": undefined;
         };
     };
   };

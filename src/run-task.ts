@@ -44151,6 +44151,10 @@ export async function approveCommand(
   } = {},
 ): Promise<number> {
   const proposalId = rest[0];
+  if (rest.some(id => id.startsWith("improvement:")) && (rest.length !== 1 || deps.reviewedImprovement === undefined)) {
+    console.error("rmd approve: review and file this improvement's exact completed draft through its saved conversation");
+    return 1;
+  }
   const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   // W1-T3216: a TASK id takes the release path. Taken BEFORE the proposal registry is consulted,
   // so the proposal path below is byte-for-byte unchanged, and keyed on SHAPE so an unknown but

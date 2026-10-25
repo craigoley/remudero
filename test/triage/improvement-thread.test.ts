@@ -268,9 +268,77 @@ test("improvement CLI handoff requires fresh owned source and records real child
     assert.equal((await gateway.improvement(target)).outcome, "queued");
     assert.deepEqual(JSON.parse(readFileSync(argsPath, "utf8")), ["improvement-action", target.operationId, "--state-dir", target.stateDir, "--repo-root", target.repoRoot]);
     assert.match(readFileSync(ledgerPath, "utf8"), /ratify.cli_started/); assert.match(readFileSync(ledgerPath, "utf8"), /ratify.cli_exited/);
+    writeFileSync(join(bin, "rmd"), `#!${process.execPath}\nprocess.exit(7);\n`); chmodSync(join(bin, "rmd"), 0o700);
+    assert.equal((await gateway.improvement(target)).outcome, "refused", "a real nonzero child exit is a refusal, not a completed filing");
     const unavailable = ratifyCliGateway(dir, join(dir, "error-logs"), { ledgerPath, freshTree: async () => { throw new Error("fresh source unavailable"); } });
     assert(unavailable.improvement); assert.equal((await unavailable.improvement(target)).outcome, "unknown");
     assert.match(readFileSync(ledgerPath, "utf8"), /ratify.handoff_failed/);
     const invalid = await gateway.improvement({ ...target, operationId: "not-an-operation" }); assert.equal(invalid.outcome, "refused");
+  });
+});
+
+
+test("improvement native command defaults refuse unreviewed filing before any model or task action", async () => {
+  await withTempDir("improvement-cli-defaults", dir => {
+    const script = 'import {approveCommand,improvementActionCommand} from "#src/run-task.js";const config={root:process.argv[1],claudeBin:"unreachable-test-worker"};const proposalId="improvement:"+"a".repeat(64);const approve=await approveCommand([proposalId],{config});const invalid=await improvementActionCommand(["invalid-operation"]);process.stdout.write(JSON.stringify({approve,invalid}));';
+    const result = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, dir], { cwd: repoRoot(), encoding: "utf8", timeout: 20000, stdio: ["ignore", "pipe", "pipe"] });
+    assert.deepEqual(JSON.parse(result), { approve: 1, invalid: 2 });
+    assert.equal(existsSync(join(dir, "state")), false, "default command refusals create no worker, task, or state store");
+  });
+});
+
+test("improvement conversation routes save native evidence and reject browser-supplied authority", async () => {
+  const { buildImprovementThreadRoutes } = await planningModule();
+  const { Readable } = await import("node:stream");
+  await withTempDir("improvement-routes", async dir => {
+    const { deps, request } = sourceFixture(dir), routes = buildImprovementThreadRoutes(deps);
+    const send = async (method: string, path: string, body?: unknown) => {
+      const route = routes.find(route => route.method === method && route.path === path.split("?")[0]); assert(route);
+      const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]) as import("node:http").IncomingMessage;
+      req.url = path; req.headers = { authorization: "Bearer test-credential", "content-type": "application/json" };
+      let status = 0, result: unknown;
+      const res = { writeHead: (code: number) => { status = code; }, end: (value: string) => { result = JSON.parse(value); } } as unknown as import("node:http").ServerResponse;
+      await route.handler(req, res, { params: {} } as import("#src/lib/service.js").RouteContext); return { status, result };
+    };
+    assert.equal(routes.find(route => route.path === "/v1/improvements/threads")!.scope, "write");
+    assert.equal(routes.find(route => route.path === "/v1/improvements/threads/file")!.tier, "high");
+    const rejected = await send("POST", "/v1/improvements/threads", { ...request, root: "/another/repository", approved: true }); assert.equal(rejected.status, 400);
+    const saved = await send("POST", "/v1/improvements/threads", request); assert.equal(saved.status, 200);
+    const receipt = saved.result as { requestId: string; state: string }; assert.equal(receipt.state, "saved");
+    const reopened = await send("GET", `/v1/improvements/thread?requestId=${receipt.requestId}`); assert.equal(reopened.status, 200);
+    assert.equal((reopened.result as { messages: unknown[] }).messages.length, 2);
+    assert.equal((await send("GET", `/v1/improvements/thread?requestId=${receipt.requestId}&requestId=${receipt.requestId}`)).status, 400);
+    assert.equal((await send("GET", `/v1/improvements/thread?requestId=${receipt.requestId}&beforeSeq=0`)).status, 400);
+  });
+});
+
+test("improvement conversation pages retain full counts and expose unreadable action history", async () => {
+  const { createImprovementThread, readImprovementThread } = await planningModule();
+  await withTempDir("improvement-message-pages", async dir => {
+    const { deps, request, inboxRoot } = sourceFixture(dir), saved = await createImprovementThread(request, deps); assert(saved.state === "saved");
+    for (let index = 0; index < 120; index++) appendThreadMessage(inboxThreadIdentity(saved.proposalId), "reply", `${index}: ${"x".repeat(8000)}`, { threadStorePath: join(inboxRoot, "state", "inbox-threads.jsonl") });
+    const latest = readImprovementThread(saved.requestId, deps); assert(latest.state === "saved"); assert.equal(latest.messageCount, 122); assert(latest.messagesPartial); assert(latest.nextBeforeSeq);
+    assert(Buffer.byteLength(JSON.stringify(latest.messages)) < 512 * 1024); assert.equal(latest.messages.at(-1)!.seq, 122);
+    const earlier = readImprovementThread(saved.requestId, deps, latest.nextBeforeSeq); assert(earlier.state === "saved");
+    assert.equal(earlier.messageCount, 122); assert(earlier.messages.every(message => message.seq < latest.messages[0]!.seq));
+    const { readdirSync } = await import("node:fs");
+    const indexDir = join(deps.stateDir, "improvement-threads", "action-index"), names = readdirSync(indexDir); assert.equal(names.length, 1, "the action-index corpus was observed");
+    writeFileSync(join(indexDir, names[0]!), "{incomplete");
+    const unknown = readImprovementThread(saved.requestId, deps); assert(unknown.state === "saved"); assert.equal(unknown.filing.state, "uncertain");
+    assert.equal(unknown.drafting.state, "unavailable", "unreadable history cannot mean that no draft decision was made");
+  });
+});
+
+test("improvement concurrent creation processes recover one saved conversation", async () => {
+  const { createImprovementThread } = await planningModule();
+  await withTempDir("improvement-create-processes", async dir => {
+    const { deps, request, inboxRoot } = sourceFixture(dir), run = promisify(execFile);
+    const script = 'import {createImprovementThread} from "#src/lib/improvement-thread.js";import {fixedClock} from "#src/lib/clock.js";const [request,deps]=JSON.parse(process.argv[1]);deps.clock=fixedClock(deps.now);process.stdout.write(JSON.stringify(await createImprovementThread(request,deps)));';
+    const args = ["--import", "tsx", "--input-type=module", "-e", script, JSON.stringify([request, { stateDir: deps.stateDir, actorId: deps.actorId, now: deps.clock.now() }])];
+    const children = await Promise.all([0, 1].map(() => run(process.execPath, args, { cwd: repoRoot(), encoding: "utf8", timeout: 15000 })));
+    const results = children.map(child => JSON.parse(child.stdout)); assert(results.some(result => result.state === "saved")); assert(results.every(result => ["saved", "busy"].includes(result.state)));
+    const retry = await createImprovementThread(request, deps); assert(retry.state === "saved"); assert.equal(retry.reused, true);
+    const thread = readThread(retry.threadId, { threadStorePath: join(inboxRoot, "state", "inbox-threads.jsonl") }); assert(thread.status === "ok"); assert.equal(thread.messages.length, 2);
+    assert.equal(JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-proposals.json"), "utf8")).proposals.length, 1);
   });
 });
