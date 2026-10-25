@@ -5,6 +5,7 @@ import { existsSync, readFileSync, watch, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { join } from "node:path";
 import { SCRIPT, fixture, run, scratchDir } from "./helpers/host-cleanup-fixture.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 test("test/two-janitor-passes-cannot-run-at-the-same-time.test.ts", async () => {
   const fx = fixture();
@@ -85,7 +86,7 @@ test("a full pass gives up after its lock wait bound and acts on nothing", async
     const r = run(fx, { RMD_CLEANUP_LOCK_WAIT_SECONDS: "1" });
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.match(r.stdout, /KEEP pass: another janitor pass still holds the lock after 1 s/);
-    assert.ok(Date.now() - started < 20_000, "the bound must end the wait, not the holder");
+    assertWallClockBound(Date.now() - started, 20_000, "the bound must end the wait, not the holder");
     assert.equal(existsSync(idle), true, "a pass that never got the lock must act on nothing");
   } finally {
     process.kill(-holder.pid!, "SIGKILL"); // the group: flock(1) hands its descriptor to the child
@@ -104,7 +105,7 @@ test("an hourly tmp-only pass skips at once while a full pass holds the lock", a
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.match(r.stdout, /KEEP pass: another janitor pass holds the lock/);
     assert.doesNotMatch(r.stdout, /WAIT pass/);
-    assert.ok(Date.now() - started < 10_000, "a tmp-only pass must not queue");
+    assertWallClockBound(Date.now() - started, 10_000, "a tmp-only pass must not queue");
     assert.equal(existsSync(idle), true);
   } finally {
     process.kill(-holder.pid!, "SIGKILL"); // the group: flock(1) hands its descriptor to the child
