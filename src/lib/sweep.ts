@@ -290,6 +290,7 @@ import {
   type CodeqlHeadObservation,
   type ScannerAlertIdentity,
   type ScannerBlockerObservation,
+  type ChangesRequestedHold,
 } from "./open-prs-rest.js";
 // W1-T2384: the supersession types live in a leaf that imports nothing, so open-prs-rest.ts can
 // declare the producer without closing the type cycle this module's value import would complete.
@@ -11113,6 +11114,16 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       "recording an explicit override with `rmd review <pr> --override-capped-by`",
   },
   {
+    // A HUMAN HOLD IS THE BLOCKER. An armed, green, reviewed PR that GitHub reports `blocked` because a
+    // reviewer's standing verdict is CHANGES_REQUESTED read as `mergeable`: re-arming changed nothing, a
+    // positive distance pressed update-branch after every main move, and it waited forever with nothing
+    // said. No automation may clear a person's hold, so it is named once per head instead.
+    disposition: "blocked-ambiguous",
+    when: (pr) => changesRequestedHold(pr) !== undefined,
+    blocker: "escalated",
+    reason: (pr) => changesRequestedReason(pr),
+  },
+  {
     // W1-T3980 — ONE CURRENT CODEQL THREAD IS THE WHOLE BLOCKER. Ordered strictly before
     // `mergeable`, whose predicate this PR also satisfies: arming again changes nothing while a
     // required conversation stays open. Only the exact singleton on the task's own run branch
@@ -11615,6 +11626,9 @@ export function openPrsBehindMain(
   for (const pr of prs) {
     // W1-T5903: the base requires a merge queue, which validates the merged result itself.
     if (queuedPrNumbers.has(pr.prNumber)) continue;
+    // A person's CHANGES_REQUESTED hold blocks the merge whatever the base: a refresh only re-runs CI and
+    // the review it is waiting behind.
+    if (changesRequestedHold(pr) !== undefined) continue;
     const behindBy = behindMainByPr.get(pr.prNumber);
     if (behindBy === undefined) continue;
     if (pr.mergeState === "dirty" || pr.mergeable === false) continue;
@@ -11721,12 +11735,32 @@ export function repairableCodeqlBlocker(pr: OpenPrView): ScannerAlertIdentity | 
 export function scannerBlockerAmbiguity(pr: OpenPrView, policy: Pick<SweepPolicy, "strikeCap">): string | undefined {
   const blocker = pr.scannerBlocker;
   if (blocker === undefined || !isScannerBlockerCandidate(pr)) return undefined;
-  if (blocker.kind === "base-behind" || blocker.kind === "no-scanner-alert") return undefined;
+  if (blocker.kind === "base-behind" || blocker.kind === "no-scanner-alert" || blocker.kind === "changes-requested") return undefined;
   if (blocker.kind === "ambiguous") return `${blocker.cause}: ${blocker.detail}`;
   if (blocker.headSha !== pr.headSha) return "stale: the CodeQL alert was observed at a different head";
   if (repairableCodeqlBlocker(pr) === undefined) return "foreign-branch: the head is not this PR task's rmd-owned run branch";
   if (pr.priorStrikes >= policy.strikeCap && pr.progressEscalation !== undefined) return `exhausted: fix strikes ${pr.priorStrikes}/${policy.strikeCap}`;
   return undefined;
+}
+
+/** The human CHANGES_REQUESTED holds standing on an armed, green, `blocked` PR, read at this head. */
+export function changesRequestedHold(pr: OpenPrView): ChangesRequestedHold[] | undefined {
+  const blocker = pr.scannerBlocker;
+  if (blocker === undefined || blocker.kind !== "changes-requested") return undefined;
+  if (blocker.headSha !== pr.headSha || !isScannerBlockerCandidate(pr)) return undefined;
+  return blocker.holds;
+}
+
+/** Who holds the PR, at which head, and what lifts it. A hold placed on an older head says so: what it
+ *  asked for may already be done, and only that reviewer's re-review can tell. */
+export function changesRequestedReason(pr: OpenPrView): string {
+  const holds = (changesRequestedHold(pr) ?? []).map((hold) => {
+    const at = hold.commitId === pr.headSha ? "this head" : `${hold.commitId.slice(0, 9)}, before head ${pr.headSha.slice(0, 9)}`;
+    return `${hold.login} (review ${hold.reviewId}, at ${at})`;
+  });
+  return `armed, checks green and review success, but mergeable_state is blocked by a CHANGES_REQUESTED review from ` +
+    `${holds.join(", ")} — no re-arm, branch refresh or repair can clear a person's hold; it needs that reviewer's ` +
+    `re-review (or the review dismissed), so escalating instead of waiting silently`;
 }
 
 /** W1-T3980 — the repair worker's only input, rendered through the ci-log fix mode's fenced,
