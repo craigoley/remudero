@@ -331,3 +331,26 @@ test("code health grades declared code-quality checks separately from urgent sec
   assert.equal(assessment.findings.length, 1, "the urgent source finding stays visible and is not dismissed");
   assert.equal(assessment.summary.healthy, true, "all declared code-quality checks passed; urgency is shown separately and does not invent another grade threshold");
 });
+
+
+test("code health planning follows a qualified finding while other checks remain unknown", async () => {
+  const { withTempDir } = await import("#src/lib/tmp.js"), { mkdirSync, writeFileSync } = await import("node:fs"), { join } = await import("node:path");
+  const { prepareCodeHealthCollection } = await import("#src/lib/code-health-collector.js");
+  const { publishCodeHealthSnapshot, codeHealthRepositoryStateDir } = await import("#src/lib/code-health-store.js");
+  const { readCodeHealthReport } = await import("#src/lib/code-health-view.js");
+  const { buildRepositoryEvidenceInventory } = await import("#src/lib/daily-progress-contract.js"), { fixedClock } = await import("#src/lib/clock.js");
+  await withTempDir("code-health-planning-qualification", stateDir => {
+    const quality = structuredClone(input().scans[0]!); quality.findings = [finding()];
+    quality.checks = [{ id: "quality-maintainability-open", met: false, reason: "This scan reports an unresolved maintainability finding." }];
+    const value = prepareCodeHealthCollection({ repository: "acme/atlas", currentSha: quality.analyzedSha, observedAt: "2026-11-02T05:01:00.000Z", scans: [quality], previous: null });
+    mkdirSync(join(stateDir, "read-model"));
+    writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [], improvementEvidence: buildRepositoryEvidenceInventory([{ instanceId: "atlas", options: { instanceRepository: { owner: "acme", repo: "atlas" } } }]) }));
+    const clock = fixedClock(Date.parse("2026-11-02T06:00:00.000Z"));
+    const saved = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(stateDir, value.repository), input: value, expectedSnapshotId: null, clock }); assert(saved.state === "published");
+    const read = (now: number) => readCodeHealthReport({ stateDir, params: new URLSearchParams({ repository: value.repository }), now }).data;
+    const report = read(clock.now()); assert(report.assessment); assert.equal(report.assessment.summary.healthy, null);
+    assert(report.opportunities.length > 0); assert.equal(report.planningAvailable, true, "unknown coverage must not hide a qualified finding's existing planning path");
+    assert(report.opportunities.every(opportunity => opportunity.mayPlan));
+    assert.equal(read(clock.now() + 2 * 86_400_000).planningAvailable, false, "the finding's own expired source still blocks planning");
+  });
+});
