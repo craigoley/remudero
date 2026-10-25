@@ -269,6 +269,21 @@ test("W1-T10431: reclassified age history remains readable without action author
     assert.equal(cached.data.thread?.attention,"history");assert.deepEqual(cached.data.thread?.messages[0]?.actions,[]);
     assert.equal(cached.data.thread?.messages.at(-1)?.text,legacy.messages.at(-1)?.text);
     assert.equal(cached.sources[0]?.asOf,new Date(T0).toISOString(),"history retains the producer clock");
+    for(const variant of ["missing","foreign","age","unavailable","incomplete","duplicate"] as const){
+      const bad=result.bodies.map(body=>structuredClone(body)),fleet=bad.find(body=>body.data.section==="fleet")!;
+      assert.ok(fleet.data.items.some(item=>item.proposalId===id),"positive control: the producer put age information on its fleet page");
+      if(variant==="missing")bad.splice(bad.indexOf(fleet),1);
+      if(variant==="foreign")fleet.data.snapshotKey="f".repeat(64);
+      if(variant==="age")fleet.sources[0]!.asOf=new Date(T0+1).toISOString();
+      if(variant==="unavailable")fleet.sources[0]!.state="unavailable";
+      if(variant==="incomplete")fleet.data.page.of+=1;
+      if(variant==="duplicate")fleet.data.items.push(structuredClone(fleet.data.items[0]!));
+      f.seed(bad,true);
+      const refused=f.build(key);assert.equal(refused.data.found,false,`${variant} fleet evidence cannot establish retained history membership`);
+      assert.equal(refused.data.thread,undefined,variant);
+    }
+    f.seed(result.bodies,true);
+    assert.equal(f.build(key).data.found,true,"the complete original source cohort recovers after each refused read");
     const actions=buildInboxVerbActions(deps,{repository:"owner/core"});
     const requests={reframe:{proposalId:id,feedback:"old option"},decline:{proposalId:id,reason:"old option"},
       restore:{proposalId:id,reason:"old option"},reply:{threadId,text:"old option",intentId:"stale-age-option"}};

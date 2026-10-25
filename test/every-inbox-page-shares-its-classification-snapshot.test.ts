@@ -16,6 +16,8 @@ import type { PlanSourceOutcome } from "../src/lib/serve-plan-reload.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { buildReadModelViewRoutes, renderView, type ViewBodyEntry, type ViewBodySource } from "../src/lib/views.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import type { Proposal } from "#src/lib/inbox.js";
+import { navBadgeView } from "#src/lib/nav-badge-view.js";
 
 type Ctx = { after(fn: () => void | Promise<void>): void };
 function world(t: Ctx, count = 80) {
@@ -27,7 +29,7 @@ function world(t: Ctx, count = 80) {
   const planPath = join(root, "plan", "tasks.yaml");
   const ledgerPath = join(root, "state", "ledger.ndjson");
   writeFileSync(planPath, "[]\n"); writeFileSync(ledgerPath, "");
-  const proposals = Array.from({ length: count }, (_, i) => ({ id: `ruling:p${i}`, summary: `${"source detail ".repeat(90)}${i}`, evidenceAnchors: [] }));
+  const proposals: Proposal[] = Array.from({ length: count }, (_, i) => ({ id: `ruling:p${i}`, summary: `${"source detail ".repeat(90)}${i}`, evidenceAnchors: [] }));
   const write = () => writeFileSync(registry, JSON.stringify({ proposals }));
   write();
   const deps: PanelGraphDeps = { root, inboxRoot: root, planPath, ledgerPath,
@@ -79,6 +81,36 @@ async function served(t: Ctx, w: ReturnType<typeof world>, initial: InboxRefresh
   };
   return { get, post, put, reads: () => reads, entries };
 }
+
+test("W1-T10431: age-information classification agrees across badges lanes and thread history", async t=>{
+  const w=world(t,3),ageId="board-review:stale:PR-41",threadId=inboxThreadId(ageId);
+  w.proposals[0]={id:ageId,originatingItemId:"PR-41",summary:"board-review: PR-41 has sat open 72.0h, past the 48h depth threshold",evidenceAnchors:[]};
+  w.proposals[1]={id:"ruling:real-human-ask",summary:"An explicit human ruling is required.",evidenceAnchors:[]};
+  w.proposals[2]={id:"proof-debt:W1-T2",summary:"The fleet retains its existing proof work.",evidenceAnchors:[]};w.write();
+  const store=join(w.root,"state/inbox-threads.jsonl");
+  appendThreadMessage(inboxThreadIdentity(ageId),"escalation","The earlier age observation is retained.",{threadStorePath:store,now:()=>w.at-1000});
+  const original=readFileSync(store,"utf8"),first=await w.refresh(),s=await served(t,w,first,{withWrites:true});
+  const badge=()=>navBadgeView({inboxRoot:w.root,scopes:()=>[],clock:fixedClock(w.at)}).compute(new URLSearchParams());
+  const initialBadge=await badge();assert.ok(!("error" in initialBadge));
+  const needs=await s.get("/v1/inbox?section=needsYou"),fleet=await s.get("/v1/inbox?section=fleet");
+  assert.equal(needs.status,200);assert.equal(fleet.status,200);
+  assert.deepEqual(needs.body.items.map((item:any)=>item.proposalId),["ruling:real-human-ask"]);
+  assert.deepEqual(new Set(fleet.body.items.map((item:any)=>item.proposalId)),new Set([ageId,"proof-debt:W1-T2"]));
+  assert.equal(initialBadge.data.inbox.needsYou,needs.body.items.length,"the badge must count the same source-owned asks as the Inbox lanes");
+  assert.equal(initialBadge.data.inbox.fleet,fleet.body.items.length);
+  const history=await s.get("/v1/inbox/threads");assert.equal(history.status,200);
+  assert.equal(history.body.threads.find((item:any)=>item.threadId===threadId)?.attention,"history");
+  assert.equal(readFileSync(store,"utf8"),original,"classification cannot fabricate a reply or retire history");
+  appendThreadMessage(inboxThreadIdentity(ageId),"escalation","Which existing policy should apply?",{threadStorePath:store,now:()=>w.at,extra:{question:true}});
+  const questioned=await w.refresh();s.put(questioned);
+  const current=await s.get("/v1/inbox?section=needsYou"),afterBadge=await badge();assert.ok(!("error" in afterBadge));
+  assert.equal(current.status,200);
+  assert.deepEqual(new Set(current.body.items.map((item:any)=>item.proposalId)),new Set([ageId,"ruling:real-human-ask"]),"a genuine unanswered question stays visible as an operator ask");
+  assert.equal(afterBadge.data.inbox.needsYou,current.body.items.length);
+  const threads=await s.get("/v1/inbox/threads");assert.equal(threads.status,200);
+  assert.equal(threads.body.threads.find((item:any)=>item.threadId===threadId)?.attention,"reply");
+  assert.equal(s.reads(),0,"neither lanes nor history can reclassify mutable inputs on the request");
+});
 
 test("equal-count inbox pages cannot mix classification snapshots", async (t) => {
   const w = world(t), before = await w.refresh(), s = await served(t, w, before);
