@@ -143,3 +143,28 @@ test("a retirement-bearing task is offered for dispatch at `queued` and never at
   const atBlocked = runnableCandidates(solo("blocked"), () => false, 5).map((t) => t.id);
   assert.deepEqual(atBlocked, [], "`blocked` is the only field value that carries the ruling into the dispatcher");
 });
+
+
+import { RETIREMENT_REASONS } from "#src/lib/plan.js";
+import { lintTask } from "#src/lib/task-linter.js";
+
+test("changed-task lint refuses an inert retirement before publication without rewriting the task", () => {
+  const original: Task = { id: "RETIREMENT-LINT", title: "Preserve an approved disposition", repo: "remudero", depends_on: [],
+    type: "implement", verify: "auto", risk: "low", status: "queued", attempts: 0, files: ["LEARNINGS.md"] };
+  for (const retirement of RETIREMENT_REASONS) {
+    const inert: Task = { ...original, retirement };
+    const before = JSON.stringify(inert);
+    const findings = lintTask(inert, { blockedDisposition: { baseTask: original } }).violations
+      .filter(v => v.check === "blocked-task-disposition");
+    assert.equal(findings.length, 1, retirement);
+    assert.equal(findings[0].severity, "block");
+    assert.match(findings[0].message, /retirement.*status: blocked/);
+    assert.equal(JSON.stringify(inert), before, "lint never performs the operator's disposition");
+    assert.equal(lintTask({ ...inert, status: "blocked" }, { blockedDisposition: { baseTask: original } }).violations
+      .some(v => v.check === "blocked-task-disposition"), false, "the effective disposition remains valid");
+    assert.equal(lintTask(inert).violations.some(v => v.check === "blocked-task-disposition"), false,
+      "the unchanged whole-plan path gains no new standing-population refusal");
+  }
+  assert.equal(lintTask(original, { blockedDisposition: { baseTask: original } }).violations
+    .some(v => v.check === "blocked-task-disposition"), false, "an ordinary queued task stays valid");
+});
