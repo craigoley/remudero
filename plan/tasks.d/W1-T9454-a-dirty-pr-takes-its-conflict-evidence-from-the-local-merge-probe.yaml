@@ -15,7 +15,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/a-dirty-pr-takes-its-conflict-evidence-from-the-local-merge-probe.test.ts
-  status: queued
+  status: merged
   priority: 1  # raised 2026-10-15: #11755 (W1-T9415) and #11785 (W1-T8446) alternated conflicted and mergeability-unknown `wait` from 22:43Z to 00:56Z (14 waits on #11785's head 79653b0 across the 23-14Z and 00-00Z archives) while sweep.merge_probe already held conflict_paths [learnings/index.json] for the same head and main; the backstop counts waits from the live ledger only, which kept 5 of them, so it fired at 00:52Z; was 2
   attempts: 0
   rationale: |

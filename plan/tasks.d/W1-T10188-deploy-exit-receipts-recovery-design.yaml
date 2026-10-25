@@ -11,7 +11,7 @@
   plan_refs: ["§4", "§7B", W1-T6160, W1-T6062, W1-T3199]
   files: [plan/deploy-recovery-design.md]
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=0834e700f1ab80c8
   attempts: 0
   rationale: |

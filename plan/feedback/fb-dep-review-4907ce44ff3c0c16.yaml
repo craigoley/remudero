@@ -1,0 +1,250 @@
+id: fb-dep-review-4907ce44ff3c0c16
+ts: 2026-10-25T06:33:47.934Z
+raw: |-
+  Land the dependency bump(s) of Dependabot PR #14094, whose red is its own: chore(deps): bump the pip group across 1 directory with 2 updates
+
+  Dependabot edited dependency file(s) outside the lane's allowlist: .github/semgrep/build-requirements.txt, .github/semgrep/requirements.txt.
+  A companion edit cannot ride the Dependabot branch (dep-review refuses any file outside the manifest
+  allowlist), so rmd must land the SAME version moves plus the companion edits on an owned task branch:
+  tests that pin the old version or action SHA literal, derived pins (the image CLI must equal the locked
+  SDK's claudeCodeVersion), and the bumps of every sibling Dependabot PR named below that the fix needs.
+  Do not edit or close the Dependabot PRs: the superseded-by row closes them once the owned PR carries
+  their hunks, or Dependabot does once main carries the versions.
+
+  PR: https://github.com/craigoley/remudero/pull/14094
+  Head: aa4f5eef17a8a26c776e8e3cb3d5e3d963510cd8
+  Bumps: setuptools 84.0.0 -> 84.1.0, opentelemetry-api 1.37.0 -> 1.45.1
+  Red checks: head-identity-gate, ci, ci-gate
+  Sibling Dependabot PRs folded in: none
+
+  Dependabot proposal body:
+
+  Bumps the pip group with 2 updates in the /.github/semgrep directory: [setuptools](https://github.com/pypa/setuptools) and [opentelemetry-api](https://github.com/open-telemetry/opentelemetry-python).
+
+  Updates `setuptools` from 84.0.0 to 84.1.0
+  <details>
+  <summary>Changelog</summary>
+  <p><em>Sourced from <a href="https://github.com/pypa/setuptools/blob/main/NEWS.rst">setuptools's changelog</a>.</em></p>
+  <blockquote>
+  <h1>v84.1.0</h1>
+  <h2>Features</h2>
+  <ul>
+  <li><code>setuptools.archive_util</code> now raises the new <code>UnsafeMember</code> exception when
+  an archive member would be extracted outside of the extraction directory,
+  where previously such a member was silently skipped. Aborting makes a
+  malicious or malformed archive visible to the caller instead of yielding a
+  quietly incomplete extraction, and matches the behavior of the standard
+  library's <code>tarfile</code> extraction filters.</li>
+  </ul>
+  <h2>Bugfixes</h2>
+  <ul>
+  <li>
+  <p><code>Wheel.install_as_egg</code> no longer creates namespace package directories
+  outside of the destination egg directory. Entries in a wheel's
+  <code>namespace_packages.txt</code> were split on <code>.</code> and passed straight to
+  <code>os.path.join</code>, so an entry that was absolute, drive-qualified, or UNC
+  discarded the destination and placed an <code>__init__.py</code> at a path chosen by
+  the wheel. Namespace entries are now validated as dotted module names on
+  every platform -- see GHSA-xmj3-9gf7-h52w.</p>
+  <p>This code path is reached only by the deprecated <code>setup_requires</code>
+  mechanism when <code>setup()</code> is invoked outside a PEP 517 frontend; the
+  setuptools build backend never reaches it.</p>
+  </li>
+  <li>
+  <p><code>setuptools.archive_util</code> no longer extracts archive members outside of the
+  requested extraction directory. Both the tar and zip formats specify <code>/</code> as
+  the only path separator, but the guard against <code>..</code> components split member
+  names on <code>/</code> alone, so a name such as <code>..\escaped.txt</code> was treated as a
+  single component and then resolved as a traversal by the filesystem on
+  Windows. Member names containing a backslash, a drive letter, or a UNC prefix
+  are now rejected on every platform, as are members whose resolved destination
+  falls outside the extraction directory -- see GHSA-grgh-hr87-3jpw.</p>
+  </li>
+  </ul>
+  </blockquote>
+  </details>
+  <details>
+  <summary>Commits</summary>
+  <ul>
+  <li><a href="https://github.com/pypa/setuptools/commit/77b7ace0aaf660beeb9b3f9da4aabf21cbcf3fa9"><code>77b7ace</code></a> Bump version: 84.0.0 → 84.1.0</li>
+  <li><a href="https://github.com/pypa/setuptools/commit/e66004c64eaf6cf2f8c53ccdfac75cf7abce7ccf"><code>e66004c</code></a> Merge pull request <a href="https://redirect.github.com/pypa/setuptools/issues/5329">#5329</a> from pypa/fix/wheel-namespace-path-escape</li>
+  <li><a href="https://github.com/pypa/setuptools/commit/54b5dcadc1bd938a5a66919e8ab7bcd59805e7fd"><code>54b5dca</code></a> Cover the containment check with a symlink escape test</li>
+  <li><a href="https://github.com/pypa/setuptools/commit/6d07b8d17890dda58d944ac51e58f54af92d52af"><code>6d07b8d</code></a> Validate namespace package names during legacy wheel installation</li>
+  <li><a href="https://github.com/pypa/setuptools/commit/8419f006d4e34c4ecfc7a0bd1bc6993855adc3cc"><code>8419f00</code></a> Merge pull request <a href="https://redirect.github.com/pypa/setuptools/issues/5356">#5356</a> from pypa/skeleton-ruff-0.16</li>
+  <li><a href="https://github.com/pypa/setuptools/commit/6dadc86a3f7dbe1cf49c6301548ffde61d4e74e1"><code>6dadc86</code></a> Remove DTZ011 suppressions that Ruff 0.17 reports as unused.</li>
+  <li><a href="https://github.com/pypa/setuptools/commit/715ec38b46424533806195a96983e3dd70fdf3b9"><code>715ec38</code></a> Merge <a href="https://github.com/jaraco/skeleton">https://github.com/jaraco/skeleton</a></li>
+  <li><a href="https://github.com/pypa/setuptools/commit/9695460ebfa879ada16545d62b26b9a489a6d5ed"><code>9695460</code></a><code>jaraco/skeleton#219</code></li>
+  <li><a href="https://github.com/pypa/setuptools/commit/9e0812976b1154a7aece47188814385c887bc6c9"><code>9e08129</code></a><code>jaraco/skeleton#216</code></li>
+  <li><a href="https://github.com/pypa/setuptools/commit/4e612f9e44ecfad130d0b2a27a2dce0740599b4b"><code>4e612f9</code></a> Ignore PyPy's deprecated check_home warning in tests</li>
+  <li>Additional commits viewable in <a href="https://github.com/pypa/setuptools/compare/v84.0.0...v84.1.0">compare view</a></li>
+  </ul>
+  </details>
+  <br />
+
+  Updates `opentelemetry-api` from 1.37.0 to 1.45.1
+  <details>
+  <summary>Release notes</summary>
+  <p><em>Sourced from <a href="https://github.com/open-telemetry/opentelemetry-python/releases">opentelemetry-api's releases</a>.</em></p>
+  <blockquote>
+  <h2>Version 1.45.1/0.66b1</h2>
+  <p>This is a patch release on the previous 1.45.0/0.66b0 release, fixing the issue(s) below.</p>
+  <h3>Fixed</h3>
+  <ul>
+  <li><code>opentelemetry-api</code>: make <code>AnyValue</code> and <code>AttributeValue</code> explicit type aliases (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5703">#5703</a>)</li>
+  <li><code>opentelemetry-sdk</code>: fix thread leak bug in resource initialization logic for long running resource detectors (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5706">#5706</a>)</li>
+  <li><code>opentelemetry-exporter-otlp-proto-http</code>: restore <code>requests</code> as the default HTTP transport so proxy environment variables such as <code>HTTPS_PROXY</code> are honored again (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5714">#5714</a>)</li>
+  <li><code>opentelemetry-api</code>: fix quadratic time parsing of the <code>tracestate</code> header and discard <code>tracestate</code> headers longer than 8192 characters (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5746">#5746</a>)</li>
+  </ul>
+  <h2>Version 1.45.0/0.66b0</h2>
+  <h3>Added</h3>
+  <ul>
+  <li><code>opentelemetry-exporter-prometheus</code>: add support to configure Resource attributes as metric labels (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5122">#5122</a>)</li>
+  <li>infra: add renovate (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5202">#5202</a>)</li>
+  <li><code>opentelemetry-api</code>, <code>opentelemetry-sdk</code>: add support for extended attribute values everywhere. (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5266">#5266</a>)</li>
+  <li><code>opentelemetry-sdk</code>: wire the top-level <code>log_level</code> field in declarative configuration — when set, maps the OTel <code>SeverityNumber</code> value to a Python logging level and applies it to the <code>opentelemetry</code> logger so SDK internal diagnostics respect the configured severity. (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5351">#5351</a>)</li>
+  <li><code>opentelemetry-sdk</code>: add the new stable <code>AlwaysRecordSampler</code> (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5354">#5354</a>)</li>
+  <li><code>opentelemetry-configuration</code>, <code>opentelemetry-sdk</code>: wire top-level <code>attribute_limits</code> into per-signal providers via declarative config; add <code>log_record_limits</code> support to <code>LoggerProvider</code> (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5365">#5365</a>)</li>
+  <li><code>opentelemetry-exporter-otlp-json-http</code>: add OTLP JSON HTTP exporter package (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5374">#5374</a>)</li>
+  <li><code>opentelemetry-api</code>, <code>opentelemetry-sdk</code>: add <code>enabled()</code> support to the Logger API, SDK, and <code>LogRecordProcessor</code> to let instrumentation skip expensive work when logging is disabled (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5380">#5380</a>)</li>
+  <li><code>opentelemetry-exporter-otlp-json-file</code>: add OTLP JSON file Docker tests (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5412">#5412</a>)</li>
+  <li><code>opentelemetry-configuration</code>: wire the experimental <code>tracer_configurator/development</code>, <code>meter_configurator/development</code> and <code>logger_configurator/development</code> fields into <code>create_tracer_provider</code>, <code>create_meter_provider</code> and <code>create_logger_provider</code>, so per-instrumentation-scope <code>enabled</code> overrides declared in the config file are applied to the provider (previously these fields were parsed but silently discarded). The logger <code>minimum_severity</code>/<code>trace_based</code> fields are not supported by the Python SDK and are ignored with a warning. (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5418">#5418</a>)</li>
+  <li><code>docs/examples</code>: add example on how to manually setup the SDK to get SDK metrics (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5449">#5449</a>)</li>
+  <li><code>opentelemetry-docker-tests</code>: add Prometheus exporter docker tests (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5457">#5457</a>)</li>
+  <li><code>opentelemetry-sdk</code>: count records dropped after shutdown on <code>otel.sdk.processor.{span,log}.processed</code> with <code>error.type=already_shutdown</code> (batch span/log and simple log processors), which the semantic conventions define as a valid value for this metric. (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5509">#5509</a>)</li>
+  <li><code>opentelemetry-semantic-conventions</code>: update semantic conventions to v1.44.0 (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5511">#5511</a>)</li>
+  <li><code>opentelemetry-sdk</code>: add <code>host.id</code> to the host resource detector (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5653">#5653</a>)</li>
+  <li><code>opentelemetry-test-utils</code>: add <code>CapturingSampler</code> to record what samplers receive in instrumentation tests (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5681">#5681</a>)</li>
+  </ul>
+  <h3>Changed</h3>
+  <ul>
+  <li>Enable <code>PIE</code> (flake8-pie) ruff rule and fix all violations (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5150">#5150</a>)</li>
+  <li>The public <code>opentelemetry.util.types.AttributeValue</code> type in package <code>opentelemetry-api</code> is being expanded to include <code>None</code>, heterogeneous sequences of primitive types (and nested sequences) as opposed to only homogeneous primitive sequences, and Mappings of strings to any primitive types or sequences/mappings (which themselves must only contain primitive types or sequences/mappings validated the same way). If a <code>bytes</code> type is set as an attribute value in the SDK, it will no longer be utf-8 decoded to a string, instead it will be passed along as is in accordance with the OTEL spec, since <code>bytes</code> is a valid type in the OTLP proto. (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5266">#5266</a>)</li>
+  <li><code>opentelemetry-exporter-otlp-proto-http</code>: add a <code>max_request_size</code> argument to the OTLP HTTP exporters (traces, logs, metrics); serialized requests larger than the limit are dropped before sending, measured before compression. Defaults to 64 MiB (enabled); set to 0 to disable. Mirrors opentelemetry-go#8157. (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5369">#5369</a>)</li>
+  <li>[BREAKING] <code>opentelemetry-api</code>: subclasses of <code>Logger</code> need to implement the <code>enabled</code> method (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5380">#5380</a>)</li>
+  <li><code>opentelemetry-exporter-otlp-proto-http</code>: refactor to use shared opentelemetry-exporter-otlp-common and opentelemetry-exporter-http-transport packages and switch default HTTP backend to urllib3 (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5389">#5389</a>)</li>
+  <li><code>opentelemetry-sdk</code>: unify logging force_flush timeout defaults to 30000ms (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5438">#5438</a>)</li>
+  <li><code>opentelemetry-python</code>: enable Ruff default ruleset and fix auto-fixable lint issues (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5491">#5491</a>)</li>
+  <li><code>opentelemetry-sdk</code>: <code>SimpleSpanProcessor</code> now drops spans ended after <code>shutdown()</code> instead of passing them to the exporter, and counts them on <code>otel.sdk.processor.span.processed</code> with <code>error.type=already_shutdown</code>. (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5512">#5512</a>)</li>
+  <li>Bump pytest to 9.0.3 (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5518">#5518</a>)</li>
+  <li><code>opentelemetry-exporter-otlp-proto-http</code>: clarify that the <code>endpoint=</code> kwarg requires the full signal path (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5633">#5633</a>)</li>
+  <li><code>opentelemetry-sdk</code>: fix typos in SpanLimits docstring (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5658">#5658</a>)</li>
+  </ul>
+  <h3>Fixed</h3>
+  <ul>
+  <li><code>opentelemetry-configuration</code>: perform environment variable substitution on scalar values after parsing the configuration file, so <code>${VAR}</code> references inside comments and mapping keys are no longer substituted and undefined references in comments no longer abort loading (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5407">#5407</a>)</li>
+  <li><code>opentelemetry-configuration</code>: declarative config environment variable substitution now replaces an unset variable that has no default with an empty value instead of raising an error, per the configuration spec. Resource attributes whose value resolves to null (an unset <code>${VAR}</code> with no default) are skipped with a warning instead of being inserted as a null value. (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5408">#5408</a>)</li>
+  <li>'scripts/build.sh<code>: add </code>opentelemetry-configuration<code>and</code>opentelemetry-proto-json` to the package to release (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5425">#5425</a>)</li>
+  <li><code>opentelemetry-sdk</code>: fix <code>View</code> instrument-name matching so a view configured with an instrument's real (mixed-case) name is applied; matching is now case-insensitive and platform-independent instead of relying on <code>fnmatch</code>'s OS-dependent case handling (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5430">#5430</a>)</li>
+  </ul>
+  <!-- raw HTML omitted -->
+  </blockquote>
+  <p>... (truncated)</p>
+  </details>
+  <details>
+  <summary>Changelog</summary>
+  <p><em>Sourced from <a href="https://github.com/open-telemetry/opentelemetry-python/blob/main/CHANGELOG.md">opentelemetry-api's changelog</a>.</em></p>
+  <blockquote>
+  <h2>Version 1.45.1/0.66b1 (2026-10-06)</h2>
+  <h3>Fixed</h3>
+  <ul>
+  <li><code>opentelemetry-api</code>: make <code>AnyValue</code> and <code>AttributeValue</code> explicit type
+  aliases
+  (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5703">#5703</a>)</li>
+  <li><code>opentelemetry-sdk</code>: fix thread leak bug in resource initialization logic for
+  long running resource detectors
+  (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5706">#5706</a>)</li>
+  <li><code>opentelemetry-exporter-otlp-proto-http</code>: restore <code>requests</code> as the default
+  HTTP transport so proxy environment variables such as <code>HTTPS_PROXY</code> are
+  honored again
+  (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5714">#5714</a>)</li>
+  <li><code>opentelemetry-api</code>: fix quadratic time parsing of the <code>tracestate</code> header
+  and discard <code>tracestate</code> headers longer than 8192 characters
+  (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5746">#5746</a>)</li>
+  </ul>
+  <h2>Version 1.45.0/0.66b0 (2026-09-25)</h2>
+  <h3>Added</h3>
+  <ul>
+  <li><code>opentelemetry-exporter-prometheus</code>: add support to configure Resource
+  attributes as metric labels
+  (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5122">#5122</a>)</li>
+  <li>infra: add renovate
+  (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5202">#5202</a>)</li>
+  <li><code>opentelemetry-api</code>, <code>opentelemetry-sdk</code>: add support for extended attribute
+  values everywhere.
+  (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5266">#5266</a>)</li>
+  <li><code>opentelemetry-sdk</code>: wire the top-level <code>log_level</code> field in declarative
+  configuration — when set, maps the OTel <code>SeverityNumber</code> value to a Python
+  logging level and applies it to the <code>opentelemetry</code> logger so SDK internal
+  diagnostics respect the configured severity.
+  (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5351">#5351</a>)</li>
+  <li><code>opentelemetry-sdk</code>: add the new stable <code>AlwaysRecordSampler</code>
+  (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5354">#5354</a>)</li>
+  <li><code>opentelemetry-configuration</code>, <code>opentelemetry-sdk</code>: wire top-level
+  <code>attribute_limits</code> into per-signal providers via declarative config; add
+  <code>log_record_limits</code> support to <code>LoggerProvider</code>
+  (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5365">#5365</a>)</li>
+  <li><code>opentelemetry-exporter-otlp-json-http</code>: add OTLP JSON HTTP exporter package
+  (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5374">#5374</a>)</li>
+  <li><code>opentelemetry-api</code>, <code>opentelemetry-sdk</code>: add <code>enabled()</code> support to the
+  Logger API, SDK, and <code>LogRecordProcessor</code> to let instrumentation skip
+  expensive work when logging is disabled
+  (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5380">#5380</a>)</li>
+  <li><code>opentelemetry-exporter-otlp-json-file</code>: add OTLP JSON file Docker tests
+  (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/pull/5412">#5412</a>)</li>
+  <li><code>opentelemetry-configuration</code>: wire the experimental</li>
+  </ul>
+  <!-- raw HTML omitted -->
+  </blockquote>
+  <p>... (truncated)</p>
+  </details>
+  <details>
+  <summary>Commits</summary>
+  <ul>
+  <li><a href="https://github.com/open-telemetry/opentelemetry-python/commit/14971cef9c84c2354cbaf6871090896fad0f9a1a"><code>14971ce</code></a> Prepare release 1.45.1/0.66b1 (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/issues/5752">#5752</a>)</li>
+  <li><a href="https://github.com/open-telemetry/opentelemetry-python/commit/44ac26edcee5cc99e03a65d6a1a9978775703e28"><code>44ac26e</code></a> opentelemetry-sdk: fix thread leak bug in resource initialization logic (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/issues/570">#570</a>...</li>
+  <li><a href="https://github.com/open-telemetry/opentelemetry-python/commit/a2ec3f91f1c2b735ccba177eaa77d6019a4428ae"><code>a2ec3f9</code></a> [release/v1.45.x-0.66bx] opentelemetry-exporter-otlp-proto-http: restore requ...</li>
+  <li><a href="https://github.com/open-telemetry/opentelemetry-python/commit/d5224bf4ffdf2aee1b592ad238dcc32ca957f26b"><code>d5224bf</code></a> opentelemetry-api: improve performance of tracestate parsing (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/issues/5746">#5746</a>) (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/issues/5749">#5749</a>)</li>
+  <li><a href="https://github.com/open-telemetry/opentelemetry-python/commit/db61173a56475d4fa1276d16182e46b43db83b9e"><code>db61173</code></a> Declare AnyValue and AttributeValue as explicit type aliases (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/issues/5703">#5703</a>) (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/issues/5750">#5750</a>)</li>
+  <li><a href="https://github.com/open-telemetry/opentelemetry-python/commit/4f0fcfa53e53a8c654a34df0d0a1fd74483ebca2"><code>4f0fcfa</code></a> Prepare release 1.45.0/0.66b0 (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/issues/5690">#5690</a>)</li>
+  <li><a href="https://github.com/open-telemetry/opentelemetry-python/commit/9406f34ca29d78ad760658ccb9f37b7b6c8e58e9"><code>9406f34</code></a> opentelemetry-test-utils: add CapturingSampler for instrumentation tests (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/issues/5681">#5681</a>)</li>
+  <li><a href="https://github.com/open-telemetry/opentelemetry-python/commit/1fe31a9bd00c88c824060506aed49b0611fe6e9c"><code>1fe31a9</code></a> fix: update W3CBaggagePropagator to properly handle whitespace (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/issues/5680">#5680</a>)</li>
+  <li><a href="https://github.com/open-telemetry/opentelemetry-python/commit/008b5b0a06c521203b43842c2604acfce9a2b534"><code>008b5b0</code></a> feat(config): wire top-level attribute_limits into per-signal providers (<a href="https://redirect.github.com/open-telemetry/opentelemetry-python/issues/5365">#5365</a>)</li>
+  <li><a href="https://github.com/open-telemetry/opentelemetry-python/commit/edfad0cafec718ff0f635232390e7f37e2460ab1"><code>edfad0c</code></a> [opentelemetry-sdk] Fix overwriting of the service.instance.id which has been...</li>
+  <li>Additional commits viewable in <a href="https://github.com/open-telemetry/opentelemetry-python/compare/v1.37.0...v1.45.1">compare view</a></li>
+  </ul>
+  </details>
+  <br />
+
+
+  Dependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.
+
+  [//]: # (dependabot-automerge-start)
+  [//]: # (dependabot-automerge-end)
+
+  ---
+
+  <details>
+  <summary>Dependabot commands and options</summary>
+  <br />
+
+  You can trigger Dependabot actions by commenting on this PR:
+  - `@dependabot rebase` will rebase this PR
+  - `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it
+  - `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency
+  - `@dependabot ignore <dependency name> major version` will close this group update PR and stop Dependabot creating any more for the specific dependency's major version (unless you unignore this specific dependency's major version or upgrade to it yourself)
+  - `@dependabot ignore <dependency name> minor version` will close this group update PR and stop Dependabot creating any more for the specific dependency's minor version (unless you unignore this specific dependency's minor version or upgrade to it yourself)
+  - `@dependabot ignore <dependency name>` will close this group update PR and stop Dependabot creating any more for the specific dependency (unless you unignore this specific dependency or upgrade to it yourself)
+  - `@dependabot unignore <dependency name>` will remove all of the ignore conditions of the specified dependency
+  - `@dependabot unignore <dependency name> <ignore condition>` will remove the ignore condition of the specified dependency and ignore conditions
+  You can disable automated security fix PRs for this repo from the [Security Alerts page](https://github.com/craigoley/remudero/network/alerts).
+
+  </details>
+attachments: []
+origin: repair#dep-review
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: dep-review:own-red:craigoley/remudero:opentelemetry-api@1.45.1,setuptools@84.1.0
+thread_id: null
