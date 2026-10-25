@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildFixRungDispatchArgs, runFixRung } from "./run-task-test.js";
-import type { Config } from "../../src/lib/config.js";
-import type { CriterionVerdict } from "../../src/lib/review.js";
-import type { WorkerResult } from "../../src/lib/worker.js";
+import { buildFixRungDispatchArgs, runFixRung } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { CriterionVerdict } from "#src/lib/review.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 export const headSha = "a".repeat(40);
 export const prUrl = "https://github.com/acme/remudero/pull/1";
