@@ -21,6 +21,7 @@ import { setLedgerMemoRetentionContext } from "./ledger-union.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { captureSelectedRegistryIntent, copySelectedRegistryIntent, selectedRegistryObserverFromIntent,
   type SelectedRegistryConsumerOptions, type SelectedRegistryIntent } from "./selected-registry-consumers.js";
+import { CODE_HEALTH_VIEW_NAME, createCodeHealthView } from "./code-health-view.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { AGENT_QUALIFICATION_GENERATION, AGENT_VIEW_NAME, createAgentView } from "./agent-view.js";
 import { ANALYTICS_VIEW_NAME, ANALYTICS_SOURCE_CONSOLE_V1, createAnalyticsView, type HostModelApprovalConfig } from "./analytics-view.js";
@@ -1923,6 +1924,7 @@ export function readModelLaneViews(
   return [
     { name: NAV_BADGE_VIEW_NAME, create: () => createNavBadgeReadModelView(ledgerSource) },
     { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource, selectedRegistryObserver) },
+    { name: CODE_HEALTH_VIEW_NAME, demand: true, create: () => createCodeHealthView({ keys: () => demand.keys(CODE_HEALTH_VIEW_NAME) }) },
     { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView({ modelApprovalConfig: data.modelApprovalConfig }) },
     readModelStatusView,
     { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
