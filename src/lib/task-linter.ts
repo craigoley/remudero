@@ -2115,9 +2115,16 @@ export interface BlockedDispositionContext {
  *  RETIREMENT_REASONS} IS TREATED AS ABSENT — "present" means present AND legal, so a bogus string
  *  cannot slip past, and nothing here writes or infers one. Why: W1-T2487, W1-T2474. */
 export function blockedDispositionViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
-  if (task.status !== "blocked") return [];
   const ctx = opts.blockedDisposition;
   if (!ctx) return []; // whole-plan pass: no base to compare against, so no opinion at all
+  // A disposition on a still-runnable record is inert at every retirement consumer. Diagnose
+  // the changed record before publication; only the operator performs the status transition.
+  if (task.retirement !== undefined && task.status !== "blocked") {
+    return [{ check: "blocked-task-disposition", severity: "block", message:
+      `task ${task.id} carries retirement: ${task.retirement} at status: ${task.status}; ` +
+      "retirement requires status: blocked to reach its reader and stop dispatch" }];
+  }
+  if (task.status !== "blocked") return [];
   const hasLegalDisposition = task.retirement !== undefined && (RETIREMENT_REASONS as readonly string[]).includes(task.retirement);
   if (hasLegalDisposition) return [];
   const legalValues = RETIREMENT_REASONS.join("|");
