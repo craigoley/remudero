@@ -33,6 +33,7 @@ test("independent ci-gate producers preserve the failure GitHub still enforces o
   for (const rows of [[failed, independent], [independent, failed]]) {
     assert.equal(checksStateFromRollup(rows, ["ci-gate"]), "red", "a different workflow cannot supersede CI's failed aggregate");
     assert.deepEqual(redQualityGateNames(rows, ["ci-gate"]), ["ci-gate"]);
+    assert.deepEqual(stillRedRequiredNames(["ci-gate"], rows), ["ci-gate"]);
     assert.equal(classifyRollupSupersession(rows).superseded.length, 0);
     assert.deepEqual(supersededRedsNowPassing(rows), []);
     assert.equal(decideFixSuperseded({ headSha: "head", failingChecks: ["ci-gate"] },
@@ -81,7 +82,7 @@ test("the real aggregate retry targets the failed producer and refuses drift or 
     assert.equal(refusal.kind === "stale-check" && refusal.jobId, "701");
     const effects = buildSweepEffects({ owner: "o", repo: "r", config: { root } as Config,
       ledgerPath: join(root, "ledger.ndjson"), runId: "independent-producers", plan: { tasks: [], byId: new Map() } as unknown as Plan,
-      log: () => {}, readJsonImpl: async (args) => {
+      log: () => {}, restRollupForImpl: rollupForAsync, readJsonImpl: async (args) => {
         if (args[1].includes("/check-runs?")) return { check_runs: raw };
         if (args[1].endsWith("/status")) return { statuses: [] };
         if (args[1].includes("/actions/runs?head_sha=")) return { workflow_runs: workflows };

@@ -7133,9 +7133,9 @@ export function cancelledRequiredCheckNames(
   if (required.size === 0) return [];
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const gate = dedupeRollupByLatestAttempt(all);
-  return gate
+  return [...new Set(gate
     .filter((c) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase() === "CANCELLED")
-    .map((c) => c.name ?? c.context ?? "unknown");
+    .map((c) => c.name ?? c.context ?? "unknown"))];
 }
 
 const qualityGate = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): RollupCheckEntry[] => dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT && ([...(requiredCheckNames ?? [])].includes(c.name ?? "") || [...(requiredCheckNames ?? [])].includes(c.context ?? ""))));
@@ -7143,7 +7143,7 @@ const rollupState = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.statu
 export const redQualityGateNames = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): string[] => {
   const required = [...(requiredCheckNames ?? [])];
   const red = qualityGate(rollup, required).filter((c) => REQUIRED_CHECK_FAIL.has(rollupState(c))).map((c) => c.name ?? c.context ?? "unknown");
-  if (red.length > 0) return red;
+  if (red.length > 0) return [...new Set(red)];
   const latest = dedupeRollupByLatestAttempt(rollup ?? []);
   const families = CI_MATRIX_AGGREGATORS.filter((entry) =>
     (entry.aggregator === "ci" || entry.aggregator === "coverage-ratchet") && required.includes(entry.aggregator) &&
@@ -7214,12 +7214,10 @@ export function stillRedRequiredNames(redNames: readonly string[], rollup: Rollu
   if (redNames.length === 0) return [];
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const deduped = dedupeRollupByLatestAttempt(all);
-  const byKey = new Map(deduped.map((c) => [c.name ?? c.context ?? "", c] as const));
   return redNames.filter((name) => {
-    const fresh = byKey.get(name);
-    if (!fresh || !fresh.startedAt) return true; // unreadable/absent — fail open, still red
-    const s = (fresh.state ?? fresh.conclusion ?? fresh.status ?? "").toUpperCase();
-    return REQUIRED_CHECK_FAIL.has(s);
+    const matches = deduped.filter((c) => (c.name ?? c.context ?? "") === name);
+    return matches.length === 0 || matches.some((fresh) =>
+      !fresh.startedAt || REQUIRED_CHECK_FAIL.has((fresh.state ?? fresh.conclusion ?? fresh.status ?? "").toUpperCase()));
   });
 }
 
