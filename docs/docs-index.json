@@ -716,6 +716,12 @@
       "grepHint": "unwired-gate-check.mjs comment forensics"
     },
     {
+      "path": "docs/forensics/w1-t10191-lifetime-pressure-automate.md",
+      "title": "W1-T10191 lifetime-pressure automate finding",
+      "summary": "Required phrases for the acceptance greps: `W1-T10191` (the task) and `blocked_inflight` (the verdict).",
+      "grepHint": "W1-T10191 lifetime-pressure automate finding"
+    },
+    {
       "path": "docs/forensics/why-a-review-refuses-head-task-metadata-unavailable.md",
       "title": "Why a review refuses head-task-metadata-unavailable",
       "summary": "Partial forensic record for W1-T10346: verified mechanisms and historical reports, with the missing cohort evidence identified explicitly.",
