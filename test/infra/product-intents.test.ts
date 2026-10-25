@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { fsyncSync, fstatSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { fsyncSync, fstatSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join, relative } from "node:path";
 import { test } from "node:test";
 import { ProductIntentStore, productStatePaths } from "#src/lib/product-intent-store.js";
@@ -71,6 +72,11 @@ test("corrupt or unreadable product state cannot become an empty successful stor
   const store = new ProductIntentStore({ root });
   assert.ok(store.write(ACTOR, create).ok);
   const path = productStatePaths(root, ACTOR).state;
+  const original = readFileSync(path, "utf8");
+  const changed = JSON.parse(original);
+  Object.values(changed.products as Record<string, { brief: { idea: string } }>)[0]!.brief.idea = "Changed without a durable receipt";
+  writeFileSync(path, JSON.stringify(changed));
+  assert.equal(store.list(ACTOR).code, "corrupt", "valid JSON must agree with the committed record digest");
   writeFileSync(path, "{broken");
   assert.equal(store.list(ACTOR).code, "corrupt");
   assert.equal(store.write(ACTOR, create).code, "corrupt");
@@ -83,6 +89,18 @@ test("corrupt or unreadable product state cannot become an empty successful stor
   assert.equal(store.list(ACTOR).code, "unavailable");
   assert.equal(readFileSync(elsewhere, "utf8"), "secret outside the product state");
   assert.equal(new ProductIntentStore({}).list(ACTOR).code, "unavailable");
+});
+
+test("product state rejects invalid UTF-8 rather than decoding it as a different saved idea", (t) => {
+  const root = ownedFixtureDir(t, "product-encoding").dir;
+  const store = new ProductIntentStore({ root });
+  assert.ok(store.write(ACTOR, { ...create, brief: { ...brief, idea: "replacement \uFFFD" } }).ok);
+  const path = productStatePaths(root, ACTOR).state;
+  const body = readFileSync(path);
+  const offset = body.indexOf(Buffer.from("\uFFFD"));
+  assert.ok(offset >= 0);
+  writeFileSync(path, Buffer.concat([body.subarray(0, offset), Buffer.from([0xff]), body.subarray(offset + 3)]));
+  assert.equal(store.list(ACTOR).code, "corrupt");
 });
 
 test("product writes refuse actor claims, forged evidence and oversized or invalid briefs", (t) => {
@@ -145,6 +163,34 @@ test("a pre-rename failure leaves the prior product revision intact", (t) => {
   const original = normal.read(ACTOR, update.id);
   assert.ok(original.ok);
   assert.equal(original.value.revision, 1);
+});
+
+test("post-rename close failure remains unknown and a failed cleanup preserves one bounded recovery artifact", (t) => {
+  const root = ownedFixtureDir(t, "product-cleanup").dir;
+  const close = fs.closeSync;
+  t.mock.method(fs, "closeSync", (fd: number) => {
+    const directory = fstatSync(fd).isDirectory();
+    close(fd);
+    if (directory) throw Object.assign(new Error("directory close failed"), { code: "EIO" });
+  });
+  syncBuiltinESMExports();
+  try { assert.equal(new ProductIntentStore({ root }).write(ACTOR, create).code, "outcome_unknown"); }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  assert.ok(new ProductIntentStore({ root }).receipt(ACTOR, create.requestId).ok);
+  const pending = productStatePaths(root, "clerk:bob").pending;
+  const unlink = fs.unlinkSync;
+  t.mock.method(fs, "unlinkSync", (path: fs.PathLike) => {
+    if (path === pending) throw Object.assign(new Error("owned pending cleanup failed"), { code: "EACCES" });
+    unlink(path);
+  });
+  syncBuiltinESMExports();
+  try {
+    const failing = new ProductIntentStore({ root, sync() { throw new Error("file sync failed"); } });
+    assert.equal(failing.write("clerk:bob", create).code, "unavailable");
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  const before = readFileSync(pending);
+  assert.equal(new ProductIntentStore({ root }).write("clerk:bob", create).code, "recovery_required");
+  assert.deepEqual(readFileSync(pending), before);
 });
 
 test("bounded product and receipt capacity refuses new writes without losing old acknowledgments", (t) => {
