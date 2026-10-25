@@ -4360,7 +4360,10 @@ function privateRegistryWorkerSettings(input: unknown, selected: string, policyP
   }
   const parsed: unknown = typeof input === "string" ? JSON.parse(input) : input;
   validateWorkerSettings(parsed);
-  if (JSON.stringify(parsed).includes(selected)) throw new InstanceRegistryRuntimeError("worker_policy_contains_private_source");
+  const serialized = JSON.stringify(parsed);
+  if (paths.some(path => serialized.includes(JSON.stringify(path).slice(1, -1)))) {
+    throw new InstanceRegistryRuntimeError("worker_policy_contains_private_source");
+  }
   const policy = structuredClone(parsed) as { sandbox: { filesystem?: Record<string, unknown> }; permissions?: Record<string, unknown> };
   const filesystem = policy.sandbox.filesystem ?? {};
   const permissions = policy.permissions ?? {};
