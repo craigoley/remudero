@@ -5240,8 +5240,9 @@ export async function spawnOpenWeightWorker(
     // STRANDED. `pendingReservation` is set only between a reservation's commit and its own
     // settlement decision (above), so reaching this with it defined means a 429, a transport
     // fault or an unparseable body cut the turn short before any usage receipt could be read --
-    // exactly the gap `settleOpenWeightBudget`'s own doc names. Settled to the INPUT-ONLY portion
-    // of the same byte-bound estimate the reservation used (zero completion tokens): a failed
+    // exactly the gap `settleOpenWeightBudget`'s own doc names. A definite unbilled refusal settles
+    // to zero; every other outcome keeps the INPUT-ONLY portion of the same byte-bound estimate
+    // the reservation used (zero completion tokens): a failed
     // request produced no completion, so it must not be charged for the
     // `OPENWEIGHT_MAX_COMPLETION_TOKENS` ceiling the reservation assumed it might. `reason` is the
     // failure's own message, so the ledger row itself says which failure settled it.
