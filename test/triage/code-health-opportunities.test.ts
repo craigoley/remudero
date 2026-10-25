@@ -154,3 +154,41 @@ test("code health exports bounded provenance without publishing security results
     assert.throws(() => execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--input", inputPath, "--output", output], { stdio: "pipe" }), /failed/i);
   });
 });
+
+
+test("code health binds coverage provenance to the existing measured inventory and policy", async () => {
+  await withTempDir("code-health-coverage", async dir => {
+    const summary = { kind: "coverage_nightly.measured", repository: "acme/atlas", sha: "a".repeat(40), ref: "refs/heads/main", run_id: "123",
+      measured_at: "2026-11-02T05:00:00.000Z", lines_pct: 100, branches_pct: 90, lf: 2, lh: 2, brf: 10, brh: 9,
+      skipped_records: 0, tier: "healthy", shard_test_exits: Object.fromEntries(Array.from({ length: 8 }, (_, n) => [String(n + 1), 0])) };
+    const lcov = "SF:src/example.ts\nDA:1,1\nDA:2,1\nLF:2\nLH:2\nBRF:10\nBRH:9\nend_of_record\n";
+    const baseline = { tierPassPct: 90, tierBlockPct: 85 };
+    let serial = 0;
+    const run = (value = summary, coverage = lcov, policy = baseline) => {
+      const input = join(dir, "summary.json"), report = join(dir, "lcov.info"), config = join(dir, "baseline.json"), workflow = join(dir, "workflow.yml"), output = join(dir, `coverage-${serial++}.json`);
+      writeFileSync(input, JSON.stringify(value)); writeFileSync(report, coverage); writeFileSync(config, JSON.stringify(policy));
+      writeFileSync(workflow, 'node --experimental-test-coverage --test-coverage-exclude="test/**"\n');
+      execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--coverage-summary", input,
+        "--lcov", report, "--baseline", config, "--workflow", workflow, "--output", output], { stdio: "pipe", env: { ...process.env, GITHUB_REPOSITORY: "acme/atlas" } });
+      return JSON.parse(readFileSync(output, "utf8")).code_health;
+    };
+    const measured = run();
+    assert.equal(measured.state, "complete"); assert.equal(measured.scope.fileCount, 1);
+    assert.equal(measured.repository, "acme/atlas"); assert.equal(measured.analyzedSha, summary.sha);
+    assert.equal(measured.observedAt, summary.measured_at);
+    assert.deepEqual(measured.exclusions, ["test/**"]);
+    assert.equal(measured.check.met, true);
+    const missing = structuredClone(summary); delete (missing.shard_test_exits as Record<string, number>)["8"];
+    assert.equal(run(missing).state, "partial", "all eight required shards must be present");
+    const red = structuredClone(summary); red.shard_test_exits["3"] = 1;
+    assert.equal(run(red).state, "partial", "a failing suite cannot certify complete coverage");
+    const wrongTotal = { ...summary, lf: 3 };
+    assert.equal(run(wrongTotal).state, "partial", "summary and original LCOV must agree");
+    assert.equal(run(summary, "").state, "partial", "an empty measured population is unknown");
+    const changed = run(summary, lcov.replace("src/example.ts", "src/other.ts"));
+    assert.notEqual(changed.scope.hash, measured.scope.hash);
+    const newPolicy = run(summary, lcov, { tierPassPct: 91, tierBlockPct: 85 });
+    assert.notEqual(newPolicy.rulesVersion, measured.rulesVersion);
+    assert.equal(newPolicy.check.met, false, "use existing policy rather than inventing a score threshold");
+  });
+});
