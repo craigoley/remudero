@@ -17,9 +17,10 @@ Invariants (JANITOR.md "Preserve-then-retire"):
 - Housekeeping changes no history: a repository with too many packs is repacked keeping every
   object, and outside any checkout idle dumps are compressed (deleted after dump_retain_days) and
   idle regenerable build folders are removed.
-- Temp roots (`temp_roots`, matched under /private/tmp) count only when owned by this account, and
-  a clone or bare repository there is deleted only when other accounts cannot enter its root. The
-  borrower census always walks the temp folders as well as the home.
+- Temp roots (`temp_roots`, matched under /private/tmp) count only when owned by this account. The
+  borrower census always walks the temp folders as well as the home, so a kept clone of this
+  account keeps a temp lender; macOS clears /private/tmp at boot, so no account can rely on
+  borrowing objects from it.
 - Codex session logs idle for `codex_session_days` (0 = never) and not open are deleted.
 - No action touches a path under a keep declaration (`KEEP_MARKERS`, or a seed generation's
   `ready.json` beside `consumers/`) on it, above it or inside it, or one that cannot be inspected:
@@ -188,11 +189,6 @@ def owned_temp_roots(base, patterns):
         if stat.S_ISDIR(st.st_mode) and st.st_uid == uid and os.path.realpath(m) == m:
             out.append(m)
     return out
-
-
-def shared_temp(path, cfg):
-    """True when `path` is inside a temp root that other accounts can enter."""
-    return any((path + "/").startswith(r + "/") and os.lstat(r).st_mode & 0o011 for r in cfg.get("temp_roots", []))
 
 
 def protected_paths(home, cfg):
@@ -958,8 +954,6 @@ def main_authorized():
             keep[r.path] = r.scoped
         elif os.lstat(r.path).st_uid != os.getuid():
             keep[r.path] = "foreign-owner"
-        elif r.kind != "worktree" and shared_temp(r.path, cfg):
-            keep[r.path] = "shared-temp-root (other accounts may borrow its objects)"
         elif snap is None:
             keep[r.path] = "process-visibility-unknown"
         else:
