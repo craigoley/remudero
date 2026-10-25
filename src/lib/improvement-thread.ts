@@ -192,7 +192,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
   const request = requestInput(value);
   if (!request || !text(deps.actorId, 256)) return fail("invalid_request", "Choose a repository finding and provide a goal and request identity.");
   const requestId = hash([deps.actorId, request.idempotencyKey]), payloadHash = hash(request), root = join(deps.stateDir, "improvement-threads"), path = join(root, `${requestId}.json`);
-  let lock: InflightLockHandle | undefined, requestOwner: InflightLockHandle | undefined, owns: (() => boolean) | undefined, ownsRequest: (() => boolean) | undefined;
+  let lock: InflightLockHandle | undefined, requestOwner: InflightLockHandle | undefined, owns: (() => boolean) | undefined, ownsRequest: (() => boolean) | undefined, ownsResource: (() => boolean) | undefined;
   let mayHaveWritten = false;
   try {
     const scope = scopeFor(request, deps.stateDir); if ("state" in scope) return scope;
@@ -202,8 +202,8 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
     // Serialize requests for the same source opportunity, including different retry keys and goals.
     lock = requestLock(root, hash([request.repository, scope.instance, request.opportunityId]));
     if (!lock) return fail("busy", "This improvement is being saved, or its writer's ownership is not yet known.", requestId);
-    const ownsOpportunity = lockOwnership(lock);
-    owns = () => ownsOpportunity() && ownsRequest!();
+    ownsResource = lockOwnership(lock);
+    owns = () => ownsResource!() && ownsRequest!();
     const previous = readIntent(path);
     if (previous && (previous.payloadHash !== payloadHash || previous.actorId !== deps.actorId)) return fail("conflict", "This request identity was already used for a different goal or finding.", requestId);
     if (previous && hash(previous.scope) !== hash(scope)) return fail("source_unavailable", "This chat's repository or fleet has changed. Review its source before continuing.", requestId);
@@ -286,7 +286,8 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
     // A write may have reached disk. Only the same-key retry and the native messages can establish its outcome.
     return fail(mayHaveWritten ? "uncertain" : "source_unavailable", mayHaveWritten ? "The conversation could not be confirmed. Retry the same request; drafting and execution were not requested." : "The saved source or planning store is unavailable. No new conversation was confirmed.", requestId);
   } finally {
-    if (lock && owns?.()) lock.release();
+    // Losing the request lease refuses every write; it does not transfer our separate resource lease.
+    if (lock && ownsResource?.()) lock.release();
     if (requestOwner && ownsRequest?.()) requestOwner.release();
   }
 }
@@ -500,7 +501,7 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
   const input = actionInput(value, kind);
   if (!input || !text(deps.actorId, 256)) return fail("invalid_request", "Use this conversation's current goal and an explicit request identity.");
   const operationId = hash([deps.actorId, "improvement-action", input.idempotencyKey]);
-  let lock: InflightLockHandle | undefined, owns: (() => boolean) | undefined;
+  let lock: InflightLockHandle | undefined, owns: (() => boolean) | undefined, ownsResource: (() => boolean) | undefined;
   let requestOwner: InflightLockHandle | undefined, ownsRequest: (() => boolean) | undefined;
   let wrote = false;
   try {
@@ -513,8 +514,8 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
     if ("state" in currentScope || hash(currentScope) !== hash(intent.scope)) return fail("source_unavailable", "This chat could not be matched to its repository and fleet.");
     lock = requestLock(join(deps.stateDir, "improvement-threads"), hash([intent.request.repository, intent.scope.instance, intent.request.opportunityId]));
     if (!lock) return fail("busy", "This conversation is being updated, or its writer's ownership is not yet known.");
-    const ownsConversation = lockOwnership(lock);
-    owns = () => ownsConversation() && ownsRequest!();
+    ownsResource = lockOwnership(lock);
+    owns = () => ownsResource!() && ownsRequest!();
     const previous = readAction(deps.stateDir, operationId), payloadHash = hash([kind, input]);
     if (previous && (previous.payloadHash !== payloadHash || previous.actorId !== deps.actorId)) return fail("conflict", "This action identity was already used for a different decision.");
     if (previous && ["completed", "refused", "uncertain"].includes(previous.state)) {
@@ -572,7 +573,8 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
     // A saved decision can precede a failed handoff. Recovery must inspect the operation, not invent success.
     return fail(wrote ? "uncertain" : "source_unavailable", "The action could not be confirmed. Reuse the same request identity to inspect or recover it.");
   } finally {
-    if (lock && owns?.()) lock.release();
+    // Losing the request lease refuses every write; it does not transfer our separate resource lease.
+    if (lock && ownsResource?.()) lock.release();
     if (requestOwner && ownsRequest?.()) requestOwner.release();
   }
 }
