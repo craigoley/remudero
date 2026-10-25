@@ -9,8 +9,8 @@ import type { Plan } from "../src/lib/plan.js";
 import {
   buildSweepEffects, cancelledRequiredCheckNames, checkJobId, checksStateFromRollup,
   classifyRollupSupersession, dedupeRollupByLatestAttempt, redQualityGateNames,
-  stillRedRequiredNames, type OpenPrView,
-} from "../src/lib/sweep.js";
+  decideFixSuperseded, stillRedRequiredNames, supersededRedsNowPassing, type OpenPrView,
+} from "#src/lib/sweep.js";
 
 const NAME = "coverage-ratchet";
 const OLD = 37217449601;
@@ -22,6 +22,38 @@ const check = (run: number, id: number, conclusion: string, minute: string) => (
   details_url: `https://github.com/o/r/actions/runs/${run}/job/${id}`,
 });
 const triple = [check(OLD, 101, "failure", "16:54"), check(NEW, 102, "success", "17:13"), check(OLD, 103, "failure", "17:45")];
+
+test("independent ci-gate producers preserve the failure GitHub still enforces on PR 14160", () => {
+  const failed = { name: "ci-gate", workflowName: "CI", status: "COMPLETED", conclusion: "FAILURE",
+    startedAt: "2026-10-25T14:14:10Z", completedAt: "2026-10-25T14:24:36Z",
+    detailsUrl: "https://github.com/craigoley/remudero/actions/runs/40199725167/job/121192783427" };
+  const independent = { name: "ci-gate", workflowName: "CI gate", status: "COMPLETED", conclusion: "SUCCESS",
+    startedAt: "2026-10-25T14:49:49Z", completedAt: "2026-10-25T14:50:40Z" };
+  for (const rows of [[failed, independent], [independent, failed]]) {
+    assert.equal(checksStateFromRollup(rows, ["ci-gate"]), "red", "a different workflow cannot supersede CI's failed aggregate");
+    assert.deepEqual(redQualityGateNames(rows, ["ci-gate"]), ["ci-gate"]);
+    assert.equal(classifyRollupSupersession(rows).superseded.length, 0);
+    assert.deepEqual(supersededRedsNowPassing(rows), []);
+    assert.equal(decideFixSuperseded({ headSha: "head", failingChecks: ["ci-gate"] },
+      { headSha: "head", rollup: rows }, () => false).kind, "continue");
+    const repaired = { ...failed, conclusion: "SUCCESS", startedAt: "2026-10-25T16:06:00Z", completedAt: "2026-10-25T16:07:08Z" };
+    const fixed = [...rows, repaired];
+    assert.equal(checksStateFromRollup(fixed, ["ci-gate"]), "green", "the original producer's actual retry clears its failure");
+    assert.equal(classifyRollupSupersession(fixed).superseded[0]?.supersededBy, repaired);
+    assert.equal(decideFixSuperseded({ headSha: "head", failingChecks: ["ci-gate"] },
+      { headSha: "head", rollup: fixed }, () => false).kind, "superseded");
+  }
+});
+
+test("a required commit status and same-named check must each pass", () => {
+  const status = { context: "required", state: "FAILURE", startedAt: "2026-10-25T14:00:00Z" };
+  const passed = { name: "required", conclusion: "SUCCESS", startedAt: "2026-10-25T15:00:00Z" };
+  for (const rows of [[status, passed], [passed, status]]) {
+    assert.equal(checksStateFromRollup(rows, ["required"]), "red");
+    assert.equal(classifyRollupSupersession(rows).superseded.length, 0);
+  }
+  assert.equal(checksStateFromRollup([{ ...status, state: "SUCCESS" }, passed], ["required"]), "green");
+});
 
 test("test/a-superseded-runs-rerun-never-overrides-the-newest-run.test.ts: #9124 triple, same-run retry, and lone failure", () => {
   const rollup = rollupFromRest(triple, [], workflows);
