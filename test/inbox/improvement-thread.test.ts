@@ -492,6 +492,7 @@ test("improvement CLI preserves fleet execution config when selecting a reposito
     let filingCalls = 0;
     const filedCode = await improvementActionCommand([filing.operation.operationId, "--state-dir", stateDir], { config, clock: deps.clock,
       approve: async (ids, options) => {
+        assert(options);
         filingCalls++; assert.deepEqual(ids, [saved.proposalId]); assert.equal(options.config, config);
         assert.equal(options.inboxRoot, inboxRoot); assert.equal(options.inboxLedgerPath, join(inboxRoot, "state", "ledger.ndjson"));
         assert.equal(options.planPath, join(repoRoot(), "plan", "tasks.yaml"));
