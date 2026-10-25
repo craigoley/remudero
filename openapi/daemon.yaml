@@ -93,8 +93,14 @@ components:
         value: {type: [integer, "null"], minimum: 0}
         precision: {type: string, enum: [exact, at_least, unavailable]}
       oneOf:
-        - properties: {precision: {enum: [unavailable]}, value: {type: "null"}}
-        - properties: {precision: {enum: [exact, at_least]}, value: {type: integer, minimum: 0}}
+        - type: object
+          additionalProperties: false
+          required: [value, precision]
+          properties: {precision: {type: string, enum: [unavailable]}, value: {type: "null"}}
+        - type: object
+          additionalProperties: false
+          required: [value, precision]
+          properties: {precision: {type: string, enum: [exact, at_least]}, value: {type: integer, minimum: 0}}
     DailyProgressSource:
       type: object
       additionalProperties: false
