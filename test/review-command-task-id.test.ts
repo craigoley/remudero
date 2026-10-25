@@ -32,7 +32,7 @@ function stoppedMaterialization() {
 
 test("W1-T2846: reviewCommand and the board builder call the same higher-level task-id resolver", () => {
   // W1-T9722: the board builder's resolver call moved with the tick-read producer; reviewCommand's stayed.
-  const [source, board] = ["run-task.ts", join("lib", "tick-read-worker.ts")].map((file) => readFileSync(join(REPO_ROOT, "src", file), "utf8"));
+  const [source, board] = [join("cli", "commands", "review.ts"), join("lib", "tick-read-worker.ts")].map((file) => readFileSync(join(REPO_ROOT, "src", file), "utf8"));
   assert.match(source, /const taskId = resolveReviewTaskId\(\s*body,\s*view\.headRefName,/);
   assert.match(board, /return resolveReviewTaskId\(pr\.body \?\? "", pr\.headRefName,/);
 });

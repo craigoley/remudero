@@ -2942,6 +2942,8 @@ export const OPENWEIGHT_OUTPUT_CONTRACT = [
  * with no as-of is unauditable.
  */
 export interface OpenWeightPrice {
+  /** Explicit Azure OpenAI billing policy, never inferred for another vendor or deployment. */
+  unbilledAzureOpenAi429?: true;
   inputUsdPerMillion: number;
   outputUsdPerMillion: number;
   /** Upper bound used before transport when a provider can bill cache writes above base input. */
@@ -2974,7 +2976,7 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   // W1-T3598: cheaper than gpt-oss-120b on BOTH axes (3x on input, 1.5x on output) and an
   // Azure-OpenAI-family deployment, so it rides `openWeightEndpoint`'s existing
   // `openai/deployments/...` route with no second endpoint shape.
-  "gpt-5-nano": { inputUsdPerMillion: 0.05, outputUsdPerMillion: 0.4, readAt: "2026-09-15" },
+  "gpt-5-nano": { inputUsdPerMillion: 0.05, outputUsdPerMillion: 0.4, unbilledAzureOpenAi429: true, readAt: "2026-09-15" },
   // gpt-5-mini was REMOVED, not demoted. Luna is cheaper on BOTH axes ($0.20/$1.20 vs
   // $0.25/$2.00) and measurably more efficient -- on an identical trivial prompt Luna spent 0
   // reasoning tokens where mini spent 64 of 76 -- so mini had no lane left where it was the right
@@ -2984,18 +2986,20 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   // These are the SAME models the Codex subscription already routes (`gpt-5.6-luna`/`-terra` lead
   // the codex economy and balanced rows), so a squeeze diverts a lane to identical intelligence on
   // a different bill rather than to a cheaper substitute of unknown quality.
-  "gpt-5.6-luna": { inputUsdPerMillion: 0.2, outputUsdPerMillion: 1.2, readAt: "2026-09-16" },
+  "gpt-5.6-luna": { inputUsdPerMillion: 0.2, outputUsdPerMillion: 1.2, unbilledAzureOpenAi429: true, readAt: "2026-09-16" },
   // TERRA IS 10x LUNA ON BOTH AXES. It exists for the frontier band alone; nothing else may lead
   // with it. Sol ($5.00/$30.00) is deliberately NOT here -- 2.5x terra for the same band.
-  "gpt-5.6-terra": { inputUsdPerMillion: 2.0, outputUsdPerMillion: 12.0, readAt: "2026-09-16" },
+  "gpt-5.6-terra": { inputUsdPerMillion: 2.0, outputUsdPerMillion: 12.0, unbilledAzureOpenAi429: true, readAt: "2026-09-16" },
   // Foundry Global Standard, 2026-09-24; requests above 272K input use long-context rates.
   "gpt-6-luna": {
+    unbilledAzureOpenAi429: true,
     inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5,
     longContext: { thresholdInputTokens: 272_000, inputUsdPerMillion: 0.2, outputUsdPerMillion: 0.75 },
     readAt: "2026-09-24",
   },
   // Azure Global Standard, verified 2026-10-02; long context bills the entire request.
   "gpt-6.1-sol": {
+    unbilledAzureOpenAi429: true,
     inputUsdPerMillion: 2, outputUsdPerMillion: 10, cachedInputUsdPerMillion: 0.1, cacheWriteUsdPerMillion: 2.5,
     reservationInputUsdPerMillion: 2.5,
     longContext: { thresholdInputTokens: 272_000, inputUsdPerMillion: 4, outputUsdPerMillion: 15,
@@ -3173,6 +3177,19 @@ class CashHttpFailure extends RmdError {
     super("usage", 1, message, { status, retryAfterMs });
     this.name = "CashHttpFailure";
   }
+}
+
+/** Operator-approved prospectively: Azure OpenAI throttles are unbilled (Microsoft Q&A 1632971).
+ * A model name alone is not provider identity: another HTTPS endpoint keeps conservative charging. */
+function unbilledAzureOpenAi429Policy(model: string, endpoint: string): boolean {
+  const url = new URL(endpoint);
+  return openWeightPriceFor(model).unbilledAzureOpenAi429 === true && url.protocol === "https:" &&
+    url.port === "" && (url.hostname.endsWith(".openai.azure.com") || url.hostname.endsWith(".cognitiveservices.azure.com"));
+}
+
+function unbilledCashRefusal(error: unknown, azureOpenAi429: boolean): boolean {
+  return error instanceof OpenWeightDeploymentNotFoundError ||
+    (azureOpenAi429 && error instanceof CashHttpFailure && error.status === 429);
 }
 
 const CASH_ERROR_CATEGORY_TYPES = new Set(["invalid_request_error", "authentication_error", "permission_error",
@@ -5012,6 +5029,7 @@ export async function spawnOpenWeightWorker(
   // outer `catch` settles down instead of stranding: everything before it in a PRIOR turn already
   // reached its own decision and is no longer "pending".
   let pendingReservation: { requestId: string; deployment: string; requestBodyBytes: number } | undefined;
+  let azureOpenAi429Unbilled = false;
   // Metered SEPARATELY from conversation turns (W1-T3558). They share the day cap — one cap is the
   // only way it bounds total Azure spend — but are counted apart so an operator can read what web
   // access cost, and how often it was refused, without inferring it from a conversation total.
@@ -5059,6 +5077,8 @@ export async function spawnOpenWeightWorker(
     // Resolved ONCE, beside the temperature field and before the turn loop, so an unsupported
     // request refuses before the first reservation rather than once per turn.
     const responseFormatField = openWeightResponseFormatField(selection.model, args.responseFormat);
+    const endpoint = openWeightEndpoint(config, selection.model);
+    azureOpenAi429Unbilled = unbilledAzureOpenAi429Policy(selection.model, endpoint);
     for (;;) {
       const body = responses ? responses.body(selection.model, selection.effort, OPENWEIGHT_MAX_COMPLETION_TOKENS, tools, args.responseFormat) : JSON.stringify({
         model: selection.model,
@@ -5072,11 +5092,12 @@ export async function spawnOpenWeightWorker(
       });
       const requestBodyBytes = Buffer.byteLength(body, "utf8");
       const { envelope, attempt: { requestId, reservation } } = await cashRequestJson({
-        args, deployment: selection.model, source: "openweight", endpoint: openWeightEndpoint(config, selection.model), body,
+        args, deployment: selection.model, source: "openweight", endpoint, body,
         headers: { "content-type": "application/json", "api-key": key },
         canContinue: () => turns < maxTurns,
         chargeFailure: (error) => {
-          const inputOnlyUsd = usesResponses ? openWeightReservationUsd(selection.model, requestBodyBytes)
+          const inputOnlyUsd = unbilledCashRefusal(error, azureOpenAi429Unbilled) ? 0
+            : usesResponses ? openWeightReservationUsd(selection.model, requestBodyBytes)
             : openWeightUsageUsd(selection.model, requestBodyBytes, 0);
           settleOpenWeightBudget(config, { requestId: pendingReservation!.requestId, actualUsd: inputOnlyUsd,
             atIso: clock.iso(), reason: error.message });
@@ -5219,14 +5240,15 @@ export async function spawnOpenWeightWorker(
     // STRANDED. `pendingReservation` is set only between a reservation's commit and its own
     // settlement decision (above), so reaching this with it defined means a 429, a transport
     // fault or an unparseable body cut the turn short before any usage receipt could be read --
-    // exactly the gap `settleOpenWeightBudget`'s own doc names. Settled to the INPUT-ONLY portion
-    // of the same byte-bound estimate the reservation used (zero completion tokens): a failed
+    // exactly the gap `settleOpenWeightBudget`'s own doc names. A definite unbilled refusal settles
+    // to zero; every other outcome keeps the INPUT-ONLY portion of the same byte-bound estimate
+    // the reservation used (zero completion tokens): a failed
     // request produced no completion, so it must not be charged for the
     // `OPENWEIGHT_MAX_COMPLETION_TOKENS` ceiling the reservation assumed it might. `reason` is the
     // failure's own message, so the ledger row itself says which failure settled it.
     if (pendingReservation !== undefined) {
-      // A 404 reached no model, so nothing was billed: settle it to zero, not to the input.
-      const inputOnlyUsd = error instanceof OpenWeightDeploymentNotFoundError
+      // Only a definite unbilled refusal releases this request's reservation. Unknown outcomes stay charged.
+      const inputOnlyUsd = unbilledCashRefusal(error, azureOpenAi429Unbilled)
         ? 0
         : usesResponses ? openWeightReservationUsd(pendingReservation.deployment, pendingReservation.requestBodyBytes)
         : openWeightUsageUsd(pendingReservation.deployment, pendingReservation.requestBodyBytes, 0);

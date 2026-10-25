@@ -123,7 +123,7 @@ test("the production call site actually uses reviewViewArgs and normalises throu
   // is built through the helper rather than inline — which the executing tests below cannot
   // distinguish from an inline copy that happens to produce the same argv. Both are kept: this
   // one catches a re-inlining, those catch a wiring that never runs.
-  const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const src = readFileSync(join(REPO_ROOT, "src", "cli", "commands", "review.ts"), "utf8");
   assert.match(
     src,
     /const args = reviewViewArgs\(owner, repo, prArg\);/,
