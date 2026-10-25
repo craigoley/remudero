@@ -88,14 +88,14 @@ test("improvement chat concurrent processes and reload keep one message per writ
 });
 
 
-function sourceFixture(dir: string) {
+function sourceFixture(dir: string, options: { findingTitle?: string; findingCount?: number } = {}) {
   const stateDir = join(dir, "fleet-state"), inboxRoot = join(dir, "atlas-instance"), repository = "acme/atlas", instance = "atlas";
   const now = Date.parse("2026-11-02T06:00:00.000Z"), clock = fixedClock(now), sha = "a".repeat(40);
   const finding = { id: "42", ruleId: "js/repeated-work", status: "open" as const, severity: "medium" as const, category: "maintainability",
-    path: "src/example.ts", title: "Repeated work makes this function difficult to change.", effortMinutes: null };
+    path: "src/example.ts", title: options.findingTitle ?? "Repeated work makes this function difficult to change.", effortMinutes: null };
   const scans: CodeHealthProjectionInput["scans"] = ["quality", "coverage"].map(kind => ({ kind: kind as "quality" | "coverage", repository, scanId: `${kind}:new`, componentIds: [`${kind}:new`], analyzedSha: sha,
     observedAt: "2026-11-02T05:00:00.000Z", state: "complete", scopeHash: `${kind}:scope`, toolVersion: "tool1", rulesVersion: "rules1", configHash: "config1", exclusions: [], reason: null,
-    checks: [{ id: kind === "quality" ? "quality-maintainability-open" : "coverage-existing-tier", met: kind !== "quality", reason: kind === "quality" ? "A known code-maintenance finding remains open." : "Meets the existing coverage tier." }], findings: kind === "quality" ? [finding] : [] }));
+    checks: [{ id: kind === "quality" ? "quality-maintainability-open" : "coverage-existing-tier", met: kind !== "quality", reason: kind === "quality" ? "A known code-maintenance finding remains open." : "Meets the existing coverage tier." }], findings: kind === "quality" ? Array.from({ length: options.findingCount ?? 1 }, (_, index) => ({ ...finding, id: String(42 + index) })) : [] }));
   const input: CodeHealthProjectionInput = { repository, analyzedSha: sha, currentSha: sha, observedAt: "2026-11-02T05:01:00.000Z", nextDueAt: null,
     registry: { version: CODE_HEALTH_POLICY_VERSION, checks: [{ id: "quality-maintainability-open", sourceKind: "quality", category: "maintainability", description: "No unresolved findings in the measured maintainability scope." },
       { id: "coverage-existing-tier", sourceKind: "coverage", category: "tests", description: "Meets the existing instrumented coverage tier." }] }, scans,
@@ -429,5 +429,37 @@ test("improvement saves release their own resource lease after a separate reques
       assert.equal(later.state, "requested", "loss of a request lease does not strand our separate conversation lease");
     }
     assert(replaced); assert.equal(readFileSync(replaced, "utf8"), '{"replacement":"preserve unknown holder"}', "the replacement holder is never removed");
+  });
+});
+
+
+test("improvement creation can recover the full valid Unicode goal and briefing", async () => {
+  const { createImprovementThread, readImprovementThread } = await planningModule();
+  await withTempDir("improvement-unicode-record", async dir => {
+    const { deps, request } = sourceFixture(dir, { findingTitle: "検証".repeat(450), findingCount: 10 });
+    const large = { ...request, goal: "界".repeat(2000), constraints: Array.from({ length: 16 }, () => "界".repeat(1000)) };
+    const saved = await createImprovementThread(large, deps); assert(saved.state === "saved");
+    const view = readImprovementThread(saved.requestId, deps); assert.equal(view.state, "saved", "a saved valid request must fit its own recovery reader"); assert(view.state === "saved");
+    assert.equal(view.goal, large.goal); assert.deepEqual(view.constraints, large.constraints); assert.equal(view.messages.length, 2);
+    const retry = await createImprovementThread(large, { ...deps }); assert(retry.state === "saved"); assert.equal(retry.requestId, saved.requestId); assert.equal(retry.threadId, saved.threadId);
+  });
+});
+
+test("improvement actions refresh changed related-work context before drafting or filing", async () => {
+  const { createImprovementThread, readImprovementThread, requestImprovementAction } = await planningModule();
+  await withTempDir("improvement-work-context", async dir => {
+    const { deps, request, inboxRoot, input } = sourceFixture(dir), saved = await createImprovementThread(request, deps); assert(saved.state === "saved");
+    const first = readImprovementThread(saved.requestId, deps); assert(first.state === "saved"); assert.equal(first.source.state, "current");
+    const proposalId = buildCodeHealthOpportunities(input)[0]!.proposalId;
+    writeFileSync(join(inboxRoot, "state", "opportunity-outcomes.json"), JSON.stringify([{ key: `${request.repository}/${proposalId}`, proposalId, at: deps.clock.iso(), state: "filed", sourceIds: ["quality:original"],
+      candidate: { repo: request.repository, key: proposalId, observedAt: input.observedAt }, task: { repo: request.repository, key: proposalId, id: "W1-T7" },
+      pr: { repo: request.repository, taskId: "W1-T7", url: "https://github.com/acme/atlas/pull/7" } }]));
+    let launches = 0;
+    const result = await requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: first.goalDigest, idempotencyKey: "changed-context-draft-0001" }, { ...deps, launchAction: () => { launches++; } });
+    assert.equal(result.state, "source_stale", "new related work must be reviewed before generating another plan"); assert.equal(launches, 0);
+    const changed = readImprovementThread(saved.requestId, deps); assert(changed.state === "saved"); assert.equal(changed.source.state, "stale");
+    const reopened = await createImprovementThread({ ...request, idempotencyKey: "refresh-changed-context-0001" }, deps); assert(reopened.state === "saved");
+    const refreshed = readImprovementThread(reopened.requestId, deps); assert(refreshed.state === "saved"); assert.equal(refreshed.source.state, "current");
+    assert(refreshed.messages.some(message => message.body.includes("https://github.com/acme/atlas/pull/7")), "the actual reported task and PR stay visible in the refreshed briefing");
   });
 });
