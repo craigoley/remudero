@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { validateCodeHealthAssessment } from "#src/lib/code-health-contract.js";
-import { compareCodeHealthEvidence, projectCodeHealth, type CodeHealthProjectionInput, type CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
+const { validateCodeHealthAssessment } = await featureModule(import("#src/lib/code-health-contract.js"), "code-health-contract");
+import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
+const { compareCodeHealthEvidence, projectCodeHealth } = await featureModule(import("#src/lib/code-health-projection.js"), "code-health-projection");
 
 function input(): CodeHealthProjectionInput {
   const scans: CodeHealthProjectionInput["scans"] = ["quality", "coverage"].map(kind => ({
@@ -304,3 +305,19 @@ test("code health consolidated view stays within the existing source limit witho
     assert(Buffer.byteLength(JSON.stringify(report)) < 1024 * 1024);
   });
 });
+
+/** On a branch before this feature exists, fail the behavior test with its normal test summary.
+ * A missing dependency of an existing module remains a load error, never a false discrimination. */
+async function featureModule<T extends object>(load: Promise<T>, leaf: string): Promise<T> {
+  const loaded = await load.catch((error: unknown) => {
+    const e = error as { code?: string; url?: string };
+    if (e?.code !== "ERR_MODULE_NOT_FOUND" || typeof e.url !== "string") throw error;
+    const path = new URL(e.url).pathname;
+    if (!path.endsWith(`/src/lib/${leaf}.js`) && !path.endsWith(`/src/lib/${leaf}.ts`)) throw error;
+    return {} as T;
+  });
+  return new Proxy(loaded, { get(target, key, receiver) {
+    const value = Reflect.get(target, key, receiver);
+    return value === undefined ? () => assert.fail(`${leaf}: ${String(key)} is not implemented on this branch`) : value;
+  } });
+}

@@ -6,15 +6,15 @@ import { dirname, join } from "node:path";
 import { hostname } from "node:os";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { withTempDir } from "#src/lib/tmp.js";
-import { buildCodeHealthOpportunities, codeqlQualityProposalId, qualityScanFromCollectedEvidence } from "#src/lib/codeql-quality-intake.js";
-import { prepareCodeHealthCollection, readCodeHealthQualityEvidence, collectCodeHealth } from "#src/lib/code-health-collector.js";
-import { projectCodeHealth, codeHealthFindingFingerprint } from "#src/lib/code-health-projection.js";
-import { readCodeHealthSnapshot, publishCodeHealthSnapshot, readCodeHealthCoverageSource, saveCodeHealthCoverageSource, readCodeHealthCollectionFailure } from "#src/lib/code-health-store.js";
+const { buildCodeHealthOpportunities, codeqlQualityProposalId, qualityScanFromCollectedEvidence } = await featureModule(import("#src/lib/codeql-quality-intake.js"), "codeql-quality-intake");
+const { prepareCodeHealthCollection, readCodeHealthQualityEvidence, collectCodeHealth } = await featureModule(import("#src/lib/code-health-collector.js"), "code-health-collector");
+const { projectCodeHealth, codeHealthFindingFingerprint } = await featureModule(import("#src/lib/code-health-projection.js"), "code-health-projection");
+const { readCodeHealthSnapshot, publishCodeHealthSnapshot, readCodeHealthCoverageSource, saveCodeHealthCoverageSource, readCodeHealthCollectionFailure } = await featureModule(import("#src/lib/code-health-store.js"), "code-health-store");
 import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
 import { readCoverageNightlySummary } from "#src/lib/coverage-nightly-intake.js";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { fixedClock, clockFromMillisFn } from "#src/lib/clock.js";
-import { readCodeScanningAlerts, readCodeScanningAlertsAsync, codeScanningReadFailureKind } from "#src/lib/ops.js";
+const { readCodeScanningAlerts, readCodeScanningAlertsAsync, codeScanningReadFailureKind } = await featureModule(import("#src/lib/ops.js"), "ops");
 import { ghStubPath, pathWith } from "#test/helpers/gh-stub.js";
 
 function copyMeasurementMethod(dir: string): string {
@@ -768,3 +768,19 @@ test("code health bounded evidence reads refuse a pipe without blocking the work
     assert.equal(read, "refused", "an invalid file type is an unavailable source, never an unbounded blocking read");
   });
 });
+
+/** On a branch before this feature exists, fail the behavior test with its normal test summary.
+ * A missing dependency of an existing module remains a load error, never a false discrimination. */
+async function featureModule<T extends object>(load: Promise<T>, leaf: string): Promise<T> {
+  const loaded = await load.catch((error: unknown) => {
+    const e = error as { code?: string; url?: string };
+    if (e?.code !== "ERR_MODULE_NOT_FOUND" || typeof e.url !== "string") throw error;
+    const path = new URL(e.url).pathname;
+    if (!path.endsWith(`/src/lib/${leaf}.js`) && !path.endsWith(`/src/lib/${leaf}.ts`)) throw error;
+    return {} as T;
+  });
+  return new Proxy(loaded, { get(target, key, receiver) {
+    const value = Reflect.get(target, key, receiver);
+    return value === undefined ? () => assert.fail(`${leaf}: ${String(key)} is not implemented on this branch`) : value;
+  } });
+}
