@@ -221,3 +221,11 @@ export function saveCodeHealthCoverageSource(opts: { stateDir: string; repositor
 export function readCodeHealthArtifactJson(path: string): unknown {
   return boundedEvidenceJson(path, 128 * 1024);
 }
+
+export type CodeHealthCollectionFailureRead = { state: "none" }
+  | { state: "failed"; startedAt: string; finishedAt: string; snapshotId: string | null; reason: string }
+  | { state: "unavailable"; reason: string };
+
+export function readCodeHealthCollectionFailure(_stateDir: string, _repository: string): CodeHealthCollectionFailureRead {
+  return { state: "none" };
+}

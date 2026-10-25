@@ -182,3 +182,16 @@ export async function readCodeHealthQualityEvidence(repository: string, readText
   if (artifacts.some(artifact => !qualityObject(artifact) || !analyses.some(analysis => analysis.sarifId === artifact.sarifId))) throw new Error("The bounded analysis page does not cover every configured artifact.");
   return { currentSha: head.sha.toLowerCase(), quality: { analyzedSha, runId, requiredLanguages, artifacts, analyses } };
 }
+
+export interface CollectCodeHealthOptions {
+  stateDir: string;
+  repository: string;
+  coverageStateDir?: string;
+  clock?: import("./clock.js").Clock;
+  source?: import("./ops.js").CodeScanningAlertsRead;
+  readQualityEvidence?: typeof readCodeHealthQualityEvidence;
+}
+
+export async function collectCodeHealth(_opts: CollectCodeHealthOptions): Promise<ReturnType<typeof import("./code-health-store.js").publishCodeHealthSnapshot>> {
+  throw new Error("Code health has not been collected.");
+}

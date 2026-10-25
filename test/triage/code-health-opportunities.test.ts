@@ -7,13 +7,13 @@ import { hostname } from "node:os";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { buildCodeHealthOpportunities, codeqlQualityProposalId, qualityScanFromCollectedEvidence } from "#src/lib/codeql-quality-intake.js";
-import { prepareCodeHealthCollection, readCodeHealthQualityEvidence } from "#src/lib/code-health-collector.js";
+import { prepareCodeHealthCollection, readCodeHealthQualityEvidence, collectCodeHealth } from "#src/lib/code-health-collector.js";
 import { projectCodeHealth, codeHealthFindingFingerprint } from "#src/lib/code-health-projection.js";
-import { readCodeHealthSnapshot, publishCodeHealthSnapshot, readCodeHealthCoverageSource, saveCodeHealthCoverageSource } from "#src/lib/code-health-store.js";
+import { readCodeHealthSnapshot, publishCodeHealthSnapshot, readCodeHealthCoverageSource, saveCodeHealthCoverageSource, readCodeHealthCollectionFailure } from "#src/lib/code-health-store.js";
 import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
 import { readCoverageNightlySummary } from "#src/lib/coverage-nightly-intake.js";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
-import { fixedClock } from "#src/lib/clock.js";
+import { fixedClock, clockFromMillisFn } from "#src/lib/clock.js";
 import { readCodeScanningAlerts } from "#src/lib/ops.js";
 import { ghStubPath, pathWith } from "#test/helpers/gh-stub.js";
 
@@ -599,4 +599,50 @@ test("code health collection compacts redundant known facts without dropping unr
   const result = prepareCodeHealthCollection({ repository: value.repository, currentSha: sha, observedAt: new Date(at + 1000).toISOString(), scans: fixed, previous });
   assert.equal(result.retainedEvidence?.length ?? 0, 0, "only independently confirmed fixes retire unresolved source facts");
   assert.equal(projectCodeHealth(result).summary.healthy, true);
+});
+
+
+test("code health collection publishes cached facts and keeps failed refreshes visible without replacing evidence", async () => {
+  await withTempDir("code-health-collect", async stateDir => {
+    const repository = "acme/atlas", sha = "a".repeat(40), at = "2026-11-02T05:00:00.000Z", sarifId = "12345678-1234-1234-1234-123456789012";
+    let now = Date.parse(at) + 60_000; const clock = clockFromMillisFn(() => now);
+    const provenance = { version: "code-health-source-v1", kind: "coverage", repository, analyzedSha: sha, ref: "refs/heads/main", runId: "234",
+      observedAt: at, scanId: "coverage-nightly:234", state: "complete", reasons: [], toolVersion: "node:24", rulesVersion: "b".repeat(64), configHash: "c".repeat(64), exclusions: ["test/**"],
+      scope: { kind: "instrumented-source-files", fileCount: 2, hash: "d".repeat(64) }, measurement: { branches: { covered: 9, total: 10 }, lines: { covered: 2, total: 2 } },
+      check: { id: "coverage-existing-tier", met: true, reason: "Meets the existing repository coverage tier." } };
+    assert.equal(saveCodeHealthCoverageSource({ stateDir, repository, provenance, clock }).state, "published");
+    const artifact = { version: "code-health-source-v1", kind: "quality", repository, analyzedSha: sha, ref: "refs/heads/main", runId: "123", runAttempt: "1", observedAt: at,
+      language: "actions", sarifId, scanId: `codeql:123:1:actions:${sarifId}`, state: "complete", reasons: [], toolVersion: "2.23.0", rulesVersion: "b".repeat(64), configHash: "c".repeat(64), ruleCount: 12,
+      exclusions: ["test/**"], scope: { kind: "explicit-analysis-targets", fileCount: 2, hash: "d".repeat(64) }, completion: { kind: "workflow-analysis-step", state: "success", at } };
+    const evidence = { currentSha: sha, quality: { analyzedSha: sha, runId: "123", requiredLanguages: ["actions"], artifacts: [artifact], analyses: [{ sarifId, analyzedSha: sha,
+      category: "/language:actions", toolVersion: "2.23.0", analysisKey: ".github/workflows/codeql.yml:analyze", environmentHash: "e".repeat(64), createdAt: at, rulesCount: 12, error: "", warning: "" }] } };
+    const opts = { stateDir, repository, clock, source: { ok: true as const, alerts: [], analysisInstances: [] }, readQualityEvidence: async () => evidence };
+    const first = await collectCodeHealth(opts); assert.equal(first.state, "published"); assert("snapshotId" in first);
+    const saved = readCodeHealthSnapshot(stateDir, repository); assert("snapshot" in saved);
+    assert.equal(saved.snapshot.input.scans.length, 2); assert(saved.snapshot.input.scans.every(scan => scan.state === "complete" && scan.observedAt === at));
+    assert.equal(projectCodeHealth(saved.snapshot.input).summary.healthy, null, "one measurement cannot invent a comparison baseline");
+    now += 60_000;
+    const failed = await collectCodeHealth({ ...opts, readQualityEvidence: async () => { throw new Error("private-source-detail-do-not-publish"); } });
+    assert.equal(failed.state, "unavailable");
+    const afterFailure = readCodeHealthSnapshot(stateDir, repository); assert("snapshot" in afterFailure); assert.equal(afterFailure.snapshot.snapshotId, first.snapshotId);
+    const status = readCodeHealthCollectionFailure(stateDir, repository); assert.equal(status.state, "failed");
+    assert(!JSON.stringify(status).includes("private-source-detail"));
+    now += 60_000;
+    assert.equal((await collectCodeHealth(opts)).state, "duplicate");
+    assert.equal(readCodeHealthCollectionFailure(stateDir, repository).state, "none", "a successful later refresh supersedes its earlier failure without moving source clocks");
+    const repeated = readCodeHealthSnapshot(stateDir, repository); assert("snapshot" in repeated); assert.equal(repeated.snapshot.input.scans[0]!.observedAt, at);
+    now += 60_000;
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const old = collectCodeHealth({ ...opts, readQualityEvidence: async () => { await blocked; throw new Error("late failure"); } });
+    await Promise.resolve(); now += 60_000;
+    assert.equal((await collectCodeHealth(opts)).state, "duplicate");
+    now += 60_000; release();
+    const stale = await old; assert.equal(stale.state, "superseded", "a late failed collector cannot replace the status of a newer successful refresh");
+    assert.equal(readCodeHealthCollectionFailure(stateDir, repository).state, "none");
+    const empty = join(stateDir, "first-read-failed");
+    assert.equal((await collectCodeHealth({ ...opts, stateDir: empty, readQualityEvidence: async () => { throw new Error("no source"); } })).state, "unavailable");
+    assert.equal(readCodeHealthSnapshot(empty, repository).state, "not_collected");
+    assert.equal(readCodeHealthCollectionFailure(empty, repository).state, "failed", "a failed first read is explicit, never an empty healthy assessment");
+  });
 });
