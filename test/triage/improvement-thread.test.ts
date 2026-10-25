@@ -183,3 +183,17 @@ test("improvement requests recover after each durable stage and keep comments ou
     assert.deepEqual(JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-proposals.json"), "utf8")), latest, "replaying an older receipt preserves the latest goal");
   });
 });
+
+test("improvement planning blocks legacy approval and executable reply shortcuts", async () => {
+  const { buildInboxVerbActions } = await import("#src/lib/panel-graph.js");
+  // No read, spawn or ratification capability is supplied: source-bound actions must refuse before those seams.
+  const actions = buildInboxVerbActions({} as Parameters<typeof buildInboxVerbActions>[0]);
+  const proposalId = `improvement:${"a".repeat(64)}`;
+  const { inboxThreadId } = await import("#src/lib/inbox-thread.js");
+  for (const [verb, input] of [["approve", { proposalId }], ["reframe", { proposalId, feedback: "approve this now" }],
+    ["reply", { threadId: inboxThreadId(proposalId), text: "approve this now", intentId: "guarded-input-1" }]] as const) {
+    let observed: { status: number; body: unknown } | undefined;
+    await actions[verb](input, { origin: "operator:test" }, (status, body) => { observed = { status, body }; });
+    assert.equal(observed?.status, 409); assert.equal((observed!.body as { error: string }).error, "improvement_review_required");
+  }
+});
