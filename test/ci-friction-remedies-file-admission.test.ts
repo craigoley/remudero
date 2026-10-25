@@ -54,7 +54,7 @@ test("the legacy docs-only ci-friction shard still files, so existing records ke
   assert.deepEqual(admit(legacy), []);
 });
 
-test("a drafted remedy passes the base linter's sizing and admission checks with a grep proof its build makes true", () => {
+test("a drafted remedy passes the base linter's sizing and admission checks with an executable proof its build must pass", () => {
   const key = "check:ci-log:coverage-ratchet";
   const yaml = ciFrictionShardYaml(
     { price: { cause: { kind: "check", name: "ci-log:coverage-ratchet" }, minutes: 1441, rounds: 457, prs: 291 }, rung: 1, owner: { files: ["src/lib/ci-parity.ts", "src/run-task.ts"], why: ["a", "b"] }, rounds: [] },
@@ -67,8 +67,8 @@ test("a drafted remedy passes the base linter's sizing and admission checks with
   assert.deepEqual(task.files, ["src/lib/ci-parity.ts", testPath], "one owner file plus a test named for the shard, in its computed folder");
   assert.equal(sizingViolation(task, { duplicateSlug: stem }), undefined, "the test is the shard's own falsifier, so the span is one concern");
   const proof = task.acceptance?.[0]?.proof ?? "";
-  assert.equal(proof, `grep: test("${ciFrictionRemedyTestTitle("W1-T99995", key)}" in ${testPath}`);
-  assert.equal(proof.split(" in ").length, 2, "the title never splits the proof's path");
+  assert.equal(proof, `unit test: ${ciFrictionRemedyTestTitle("W1-T99995", key)}`);
+  assert.equal(proof.split(" in ").length, 1, "the executable title has no grep path delimiter");
   assert.equal(ciFrictionRemedyTestTitle("W1-T1", "check:pass in ci"), "W1-T1: check:pass within ci is prevented, not retried");
   const lint = lintTask(task, { duplicateSlug: stem, machineFilingAdmission: { plan, releasedIds: new Set(), pathExists: (p) => existsSync(join(REPO_ROOT, p)) } });
   assert.deepEqual(lint.violations.filter((v) => v.severity === "block"), []);
