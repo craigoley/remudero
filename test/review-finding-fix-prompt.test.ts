@@ -28,7 +28,7 @@ const receipt = (over: Record<string, unknown> = {}): Record<string, unknown> =>
   ...over,
 });
 
-async function promptFrom(rows: Array<Record<string, unknown>>, sweep: boolean, head = headSha, contract = task): Promise<string> {
+export async function promptFrom(rows: Array<Record<string, unknown>>, sweep: boolean, head = headSha, contract = task): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), "rmd-finding-fix-"));
   const ledgerPath = join(root, "ledger.ndjson");
   writeFileSync(ledgerPath, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
