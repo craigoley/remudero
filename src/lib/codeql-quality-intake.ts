@@ -35,7 +35,7 @@ export interface CodeHealthImprovementOpportunity {
 }
 
 export function qualityScanFromCollectedEvidence(input: {
-  repository: string; analyzedSha: string; runId: string; requiredLanguages: string[]; artifacts: unknown[]; knownFindingIds?: readonly string[];
+  repository: string; analyzedSha: string; runId: string; requiredLanguages: string[]; artifacts: unknown[]; knownFindingIds?: readonly string[]; collectedAt?: string;
   analyses: Array<{ sarifId: string; analyzedSha: string; category: string; toolVersion: string; analysisKey: string; environmentHash: string; createdAt: string; rulesCount: number; error: string; warning: string }>;
   source: import("./ops.js").CodeScanningAlertsRead;
 }): CodeHealthScan {

@@ -49,6 +49,7 @@ test("code health deduplicates opportunities and preserves urgent findings", () 
   const opportunity = opportunities[0]!;
   assert.equal(opportunity.proposalId, proposalId);
   assert.equal(opportunity.id, `acme/atlas/${proposalId}`);
+  assert.equal(opportunity.evidenceCount, 2, "group count remains explicit when finding evidence is paged");
   assert.equal(opportunity.evidence.length, 2, "duplicate copies cannot inflate evidence or effort");
   assert.deepEqual(new Set(opportunity.evidence.map(finding => finding.severity)), new Set(["critical", "low"]));
   assert.deepEqual(opportunity.relatedWork, [related[0]], "reuse scoped existing work without linking a foreign repository");
@@ -323,6 +324,13 @@ test("code health requires every configured analysis before treating quality evi
   const positive = qualityScanFromCollectedEvidence(value);
   assert.equal(positive.state, "complete"); assert.equal(positive.findings.length, 1); assert.equal(positive.checks[0]!.met, false);
   assert.equal(positive.observedAt, artifacts[0]!.observedAt);
+  const indexedLater = structuredClone(value); indexedLater.analyses[0]!.createdAt = "2026-11-02T05:01:00.000Z";
+  const delayedIndex = qualityScanFromCollectedEvidence({ ...indexedLater, collectedAt: "2026-11-02T06:00:00.000Z" });
+  assert.equal(delayedIndex.state, "complete", "GitHub indexing can finish after the original analysis measurement");
+  assert.equal(delayedIndex.observedAt, artifacts[0]!.observedAt, "index or read time cannot renew the source measurement clock");
+  indexedLater.analyses[0]!.createdAt = "2026-11-02T06:01:00.000Z";
+  assert.equal(qualityScanFromCollectedEvidence({ ...indexedLater, collectedAt: "2026-11-02T06:00:00.000Z" }).state, "partial", "a future index cannot be claimed by an earlier collection");
+
   assert.deepEqual(positive.componentIds, artifacts.map(artifact => artifact.scanId).sort(), "retain each original language analysis identity for independence checks");
   const zero = qualityScanFromCollectedEvidence({ ...value, source: { ok: true, alerts: [], analysisInstances: [] } });
   assert.equal(zero.state, "complete", "a zero-alert result has all required source-population controls"); assert.equal(zero.checks[0]!.met, true);
