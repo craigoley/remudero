@@ -1,6 +1,14 @@
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { validateRepositoryEvidenceInventory, type RepositoryEvidenceInventory } from "./daily-progress-contract.js";
+import { parseProposalRegistryResult } from "./inbox.js";
+import { inboxThreadId } from "./inbox-thread.js";
+import { OPPORTUNITY_EVIDENCE_FILE, OPPORTUNITY_EVIDENCE_MAX_BYTES, projectGardenerOpportunityEvidence } from "./gardener-opportunity-evidence.js";
+
+export const CODE_HEALTH_INTERVAL_MS = 86_400_000;
+export interface CodeHealthSavedWork { repository: string; proposalId: string; taskId?: string; prUrl?: string; threadId?: string }
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { acquireInflightLock, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -308,4 +316,82 @@ export function improvementOutcomeStateDir(fleetStateDir: string, repository: st
   if (!/^[A-Za-z0-9._/-]{1,128}$/.test(instance) || instance.split("/").some(part => !part || part === "." || part === "..")) throw new RangeError("Invalid improvement instance.");
   return join(codeHealthRepositoryStateDir(fleetStateDir, repository), "improvement-effects",
     createHash("sha256").update(JSON.stringify([repository.toLowerCase(), instance])).digest("hex"));
+}
+
+export const isCodeHealthRepository = (value: string): boolean => /^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/.test(value) && ![".", ".."].includes(value.split("/")[1]!);
+function repositoryPullRequestUrl(value: unknown, repository: string): value is string {
+  const prefix = `https://github.com/${repository}/pull/`;
+  return typeof value === "string" && value.slice(0, prefix.length).toLowerCase() === prefix && /^[1-9][0-9]*$/.test(value.slice(prefix.length));
+}
+/** Server-owned roster; absent configuration never becomes an empty measured portfolio. */
+export function readCodeHealthInventory(stateDir: string): RepositoryEvidenceInventory {
+  const raw = readCodeHealthArtifactJson(join(stateDir, "read-model", "repositories-sources.json"), 2 * 1024 * 1024) as { improvementEvidence?: RepositoryEvidenceInventory };
+  const checked = validateRepositoryEvidenceInventory(raw?.improvementEvidence);
+  if (!checked.ok || !checked.value.repositories.length || checked.value.repositories.length > 256 || checked.value.unresolvedInstances.length > 256 ||
+      checked.value.repositories.some(repo => !isCodeHealthRepository(repo.repository))) throw new RmdError("read-model", GENERIC_EXIT_CODE, "Code health is waiting for the configured repository list.");
+  return checked.value;
+}
+export function readCodeHealthSavedWork(stateDir: string, inventory: RepositoryEvidenceInventory, repository: string, now: number): {
+  state: "reported" | "partial" | "stale" | "unavailable" | "not_collected"; asOf: string | null; work: CodeHealthSavedWork[]; reason: string | null;
+} {
+  const work: CodeHealthSavedWork[] = [], clocks: string[] = []; let missing = 0, invalid = 0, stale = false;
+  const member = inventory.repositories.find(repo => repo.repository === repository)!;
+  try {
+    const publisher = readCodeHealthArtifactJson(join(stateDir, "read-model", "repositories-sources.json"), 2 * 1024 * 1024) as { instances?: Array<{ instanceId: string; options?: { ledgerPath?: string; controlRoot?: string } }> };
+    if (publisher === null || publisher === undefined || !Array.isArray(publisher.instances) || publisher.instances.length > 256) throw new Error("Saved work scope is unavailable.");
+    for (const instanceId of member.instanceIds) {
+      const instances = publisher.instances.filter(instance => instance?.instanceId === instanceId), path = instances[0]?.options?.ledgerPath;
+      if (instances.length !== 1 || typeof path !== "string" || path.length > 4096 || path.includes("\0") || !isAbsolute(path)) { missing++; continue; }
+      const options = instances[0]!.options;
+      if (typeof options?.controlRoot === "string" && options.controlRoot.length <= 4096 && !options.controlRoot.includes("\0") && isAbsolute(options.controlRoot)) {
+        try {
+          const raw = readCodeHealthArtifactJson(join(options.controlRoot, "state", "inbox-proposals.json"), 2 * 1024 * 1024), parsed = parseProposalRegistryResult(JSON.stringify(raw));
+          if (parsed.kind !== "ok" || parsed.proposals.length > 2048) throw new Error("Saved planning links are unavailable.");
+          for (const row of parsed.proposals) {
+            const saved = (row as unknown as { improvement?: { version?: string; repository?: string; instance?: string; opportunityId?: string; snapshotId?: string; requestId?: string; goalDigest?: string; conversationReady?: boolean; threadId?: string } }).improvement;
+            if (!saved || saved.version !== "improvement-thread-v1" || saved.conversationReady !== true || saved.repository !== repository || saved.instance !== instanceId ||
+                typeof saved.opportunityId !== "string" || !saved.opportunityId.startsWith(`${repository}/codeql-quality:`) || saved.opportunityId.length > 1024 ||
+                ![saved.snapshotId, saved.requestId, saved.goalDigest].every(value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value))) continue;
+            const proposalId = saved.opportunityId.slice(repository.length + 1), expectedId = `improvement:${createHash("sha256").update(JSON.stringify([repository, instanceId, proposalId])).digest("hex")}`;
+            if (row.id === expectedId && saved.threadId === inboxThreadId(expectedId)) work.push({ repository, proposalId, threadId: saved.threadId });
+          }
+          // Existence is useful for navigation. Neither a read time nor file mtime refreshes the chat's source clock.
+        } catch (error) {
+          // Missing chats remain uncollected; unreadable or malformed chats make link completeness unavailable.
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") missing++; else invalid++;
+        }
+      }
+      const savedPaths = [join(dirname(path), OPPORTUNITY_EVIDENCE_FILE), join(improvementOutcomeStateDir(stateDir, repository, instanceId), OPPORTUNITY_EVIDENCE_FILE)];
+      for (const [index, savedPath] of savedPaths.entries()) try {
+        const raw = readCodeHealthArtifactJson(savedPath, OPPORTUNITY_EVIDENCE_MAX_BYTES);
+        const evidence = projectGardenerOpportunityEvidence(raw, repository, fixedClock(now));
+        if (evidence.state !== "reported") { invalid++; continue; }
+        if (!evidence.oldestReconciledAt) { if (index === 0) missing++; continue; }
+        clocks.push(evidence.oldestReconciledAt);
+        stale ||= now - Date.parse(evidence.oldestReconciledAt) > CODE_HEALTH_INTERVAL_MS;
+        for (const row of raw as Array<{ proposalId: string; candidate: { repo: string; key: string }; task?: { repo?: string; key?: string; id?: string }; pr?: { repo?: string; taskId?: string; url?: string }; improvement?: { repository?: string; opportunityId?: string; threadId?: string; snapshotId?: string; taskIds?: string[]; sourceVerified?: boolean } }>) {
+          const source = row.improvement;
+          if (source && source.sourceVerified !== false && source.repository === repository && typeof source.opportunityId === "string" && source.opportunityId.startsWith(`${repository}/codeql-quality:`) && source.opportunityId.length <= 1024 &&
+              typeof source.snapshotId === "string" && /^[a-f0-9]{64}$/.test(source.snapshotId) && typeof source.threadId === "string" && /^thread:[A-Za-z0-9:._/-]{1,500}$/.test(source.threadId) &&
+              Array.isArray(source.taskIds) && source.taskIds.length <= 64 && source.taskIds.every(id => /^[A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?$/.test(id))) {
+            const proposalId = source.opportunityId.slice(repository.length + 1), tasks = source.taskIds.length ? source.taskIds : [undefined];
+            for (const taskId of tasks) work.push({ repository, proposalId, threadId: source.threadId, ...(taskId ? { taskId } : {}),
+              ...(row.pr?.repo?.toLowerCase() === repository && row.pr.taskId === taskId && repositoryPullRequestUrl(row.pr.url, repository) ? { prUrl: row.pr.url } : {}) });
+            continue;
+          }
+          if (!row.task || row.task.repo?.toLowerCase() !== repository || row.task.key !== row.candidate.key || typeof row.task.id !== "string") continue;
+          work.push({ repository, proposalId: row.proposalId, taskId: row.task.id,
+            ...(row.pr?.repo?.toLowerCase() === repository && row.pr.taskId === row.task.id && repositoryPullRequestUrl(row.pr.url, repository) ? { prUrl: row.pr.url } : {}) });
+        }
+      } catch (error) {
+        // Older publishers do not have the derived projection yet. Its absence does not erase native links.
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") { if (index === 0) missing++; } else invalid++;
+      }
+    }
+  } catch {
+    // deliberate: failed scope reads withhold related-work completeness; they never certify no existing work.
+    return { state: "unavailable", asOf: null, work: [], reason: "The configured sources for saved work could not be read or verified." };
+  }
+  return { state: invalid ? clocks.length ? "partial" : "unavailable" : missing ? clocks.length ? "partial" : "not_collected" : stale ? "stale" : "reported", asOf: clocks.sort()[0] ?? null, work: [...new Map(work.map(row => [JSON.stringify(row), row])).values()],
+    reason: invalid ? "Some saved work could not be read or verified. These links may be incomplete." : missing ? "Some saved work has not been collected. These links may be incomplete." : stale ? "Saved work links have not been checked within the daily cadence." : null };
 }
