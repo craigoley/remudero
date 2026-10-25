@@ -7,7 +7,8 @@
   risk: high
   band_meaning: blast-radius
   priority: 1.22
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:coverage-ratchet:error-diff-coverage-blocked-this-diff-adds-source-line-s-wit"
@@ -63,3 +64,14 @@
       - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
     judged_at: "2026-10-25T18:50:06.673Z"
     pin: "bf11a6b0b157074128a0d12953002d41dd2eb992163fc6d59e462dd1de47ebed"
+  amendment: |
+    Disposition proposal: withdraw this unsupported workflow-owner contract; no remedy credit.
+    Preserve the original criteria, proof, scope, priced observations and ruling as history.
+    The captured failures name uncovered lines in src/lib/gate-gardener.ts and
+    src/lib/commit-message.ts. The workflow row identifies the check producer, but no
+    observation establishes a defect in .github/workflows/ci.yml. A coverage refusal
+    over missing covering tests is not evidence that the workflow should be changed.
+    The preventive cause-location correction merged separately in PR #14227
+    (0b0a4848f911939c68bf0a3c9acf85655c609edd); it supplies no implementation credit here.
+    Any future repair must first identify an observed code or workflow cause with a
+    discriminating behavioral control, preserving existing coverage and review policy.
