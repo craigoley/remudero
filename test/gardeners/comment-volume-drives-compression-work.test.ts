@@ -96,6 +96,7 @@ test("the gate gardener files one priority-one compression task through normal a
   assert.equal(result.paths.length, 1);
   const filed = readFileSync(join(repo.dir, result.paths[0]), "utf8");
   assert.equal(parse(filed)[0].priority, 1);
+  assert.equal(spec.landingRefusal!(repo.dir, result.paths), undefined, "the actual filed path passes full machine-filing admission");
   assert.equal(events.some(event => event.step === "gate_garden.comment_compression_filed"), false);
   assert.equal(workspace.land(result), "https://github.com/fixture/comments/pull/5");
   assert.deepEqual(events.find(event => event.step === "gate_garden.comment_compression_filed")?.extra,
@@ -149,4 +150,18 @@ test("the gate gardener files one priority-one compression task through normal a
 
 
 
+});
+
+
+test("comment compression names its own falsifier for actual shard admission", () => {
+  for (const file of ["src/run-task.ts", "src/lib/sweep.ts"]) {
+    const rendered = renderCommentCompressionShard({ file, comments: 900 }, "W1-T999902");
+    const slug = `compress-${file.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+    const source = `plan/tasks.d/W1-T999902-${slug}.yaml`;
+    const paths = { pathExists: (path: string) => path === file };
+    assert.equal(machineShardFilingRefusal(rendered.text, source, paths), undefined);
+    assert.match(machineShardFilingRefusal(rendered.text, "plan/tasks.d/W1-T999902-unrelated.yaml", paths) ?? "", /sizing/);
+    assert.equal(parse(rendered.text)[0].priority, 1);
+    assert.equal(parse(rendered.text)[0].verify, "human");
+  }
 });
