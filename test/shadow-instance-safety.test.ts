@@ -598,7 +598,7 @@ test("selected read-only Claude scopes refuse contradictory scratch grants befor
     try {
       const args = privateClaudeArgs(fixture, sink); args.sandboxIntent = "disposable-review";
       if (mode === "temp-in-cwd") args.env!.TMPDIR = args.cwd;
-      if (mode === "home-in-cwd") args.config = { ...args.config, root: args.cwd };
+      if (mode === "home-in-cwd") args.config = { root: args.cwd, claudeBin: "/unused" };
       if (mode === "temp-is-review-source") args.sandboxReadRoots = [args.env!.TMPDIR!];
       await assert.rejects(runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected }), /worker_scope_readonly_scratch_overlap/);
       assert.equal(sink.calls, 0, "unknown read/write overlap is not a private-input grant");
