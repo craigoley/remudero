@@ -40,6 +40,11 @@ test("code health related work joins isolated improvement outcomes to the origin
     assert(result.work.some(row => row.proposalId === proposalId && row.threadId === source.threadId && row.taskId === "W1-T7" && row.prUrl?.endsWith("/pull/7")));
     assert(result.work.some(row => row.proposalId === proposalId && row.taskId === "W1-T8"));
     assert(!result.work.some(row => row.proposalId === "improvement:one"), "the finding group is the join key; the planning proposal is separate");
+    const path = join(target, "opportunity-outcomes.json"), saved = JSON.parse(readFileSync(path, "utf8"));
+    for (const url of ["javascript:alert(1)", "https://github.com/acme/foreign/pull/7", `https://github.com/${repository}/pull/7?unexpected=1`]) {
+      saved[0].pr.url = url; writeFileSync(path, JSON.stringify(saved));
+      assert(readCodeHealthRelatedWork(dir, inventory, repository, Date.parse(now)).work.every(work => work.prUrl === undefined), "a saved repository label cannot authorize a foreign or executable link");
+    }
     assert.notEqual(locate(dir, repository, instance), locate(dir, repository, "another-instance"));
     assert.throws(() => locate(dir, repository, "../other"));
   });
