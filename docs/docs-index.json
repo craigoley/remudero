@@ -718,7 +718,7 @@
     {
       "path": "docs/forensics/w1-t10191-lifetime-pressure-automate.md",
       "title": "W1-T10191 lifetime-pressure automate finding",
-      "summary": "The reported `blocked_inflight` verdict is a benign scheduling deferral, not evidence that W1-T10191 failed to build. W1-T10191's lifetime-pressure `automate`…",
+      "summary": "Required phrases for the acceptance greps: `W1-T10191` (the task) and `blocked_inflight` (the verdict).",
       "grepHint": "W1-T10191 lifetime-pressure automate finding"
     },
     {
