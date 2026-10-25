@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "#src/lib/learnings.js";
+import { loadInjectableSkills, selectSkillsForTask, renderSkillsPart } from "#src/lib/skill-workshop.js";
 
 import { gitRepo } from "./helpers/git-repo.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "prompt-surface-gate.mjs");
 
 type GateResult = {
@@ -370,5 +371,113 @@ test("W1-T4332: a learnings shard data edit is still refused without a golden fi
     const result = mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
     assert.equal(result.ok, false, "the macro exemption must not carry a learnings edit through with it");
     assert.deepEqual(result.surfaces, ["learnings/testing.yaml"]);
+  });
+});
+
+const INJECTED_PATH = ".claude/skills/procedure/SKILL.md";
+const EFFECT_PATH = "test/fixtures/golden-verdicts/injected-skill-effect.yaml";
+const skillSource = (body: string, front = "applies-to: implement") => `---\nname: procedure\n${front}\n---\n\n${body}\n`;
+function renderedSkillPrompt(root: string, taskType = "implement", files = ["src/lib/example.ts"]) {
+  return renderSkillsPart(selectSkillsForTask(loadInjectableSkills(join(root, ".claude", "skills")), taskType, DEFAULT_KNOWLEDGE_BUDGET_CHARS, files));
+}
+function effectFixture(before: string, after: string, extra: Record<string, unknown> = {}) {
+  return JSON.stringify({ kind: "injected-skill-prompt-effect", skill: "procedure", task_type: "implement", task_files: ["src/lib/example.ts"], before, after, ...extra });
+}
+
+test("an approved injected skill edit without prompt-effect evidence is refused", () => {
+  withFixture(root => {
+    write(root, INJECTED_PATH, skillSource("Check the original invariant."));
+    commit(root, "approved base skill");
+    write(root, INJECTED_PATH, skillSource("Check the changed invariant."));
+    // The old any-golden-path shortcut must not satisfy an injected skill obligation.
+    write(root, EFFECT_PATH, "id: unrelated-golden\n");
+    commit(root, "body edit with unrelated evidence");
+    const result = mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.surfaces, [INJECTED_PATH]);
+    assert.match(result.message, /actual maintained loading/);
+  });
+});
+
+test("deleting or opting out a formerly injected skill retains its base-side prompt evidence obligation", () => {
+  for (const change of ["delete", "rename", "opt-out", "selector"] as const) withFixture(root => {
+    write(root, INJECTED_PATH, skillSource("Check the invariant."));
+    commit(root, "approved skill");
+    if (change === "delete") rmSync(join(root, INJECTED_PATH));
+    if (change === "rename") {
+      const renamed = ".claude/skills/renamed/SKILL.md";
+      mkdirSync(dirname(join(root, renamed)), { recursive: true });
+      renameSync(join(root, INJECTED_PATH), join(root, renamed));
+    }
+    if (change === "opt-out") write(root, INJECTED_PATH, skillSource("Check the invariant.", "disable-model-invocation: true"));
+    if (change === "selector") write(root, INJECTED_PATH, skillSource("Check the invariant.", "applies-to: implement\nwhen-paths: docs/**"));
+    commit(root, change);
+    const result = mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
+    assert.equal(result.ok, false, change);
+    assert.ok(result.surfaces.includes(INJECTED_PATH), change);
+    assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "a-missing-base" }), /git cat-file/);
+  });
+  withFixture(root => {
+    write(root, INJECTED_PATH, skillSource("Check the invariant."));
+    commit(root, "regular skill");
+    rmSync(join(root, ".claude/skills/procedure"), { recursive: true });
+    symlinkSync("unresolved-target", join(root, ".claude/skills/procedure"));
+    commit(root, "unresolved symbolic skill");
+    assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }), /symbolic skill/);
+  });
+});
+
+test("injected skill evidence qualifies only the actual maintained prompt effect", () => {
+  withFixture(root => {
+    write(root, INJECTED_PATH, skillSource("Check the old invariant."));
+    const before = renderedSkillPrompt(root);
+    commit(root, "base");
+    const base = git(root, ["rev-parse", "HEAD"]).trim();
+    write(root, INJECTED_PATH, skillSource("Check the new invariant."));
+    const after = renderedSkillPrompt(root);
+    assert.notEqual(before, after);
+    assert.match(after, /Check the new invariant/);
+    write(root, EFFECT_PATH, effectFixture(before, after));
+    commit(root, "actual maintained prompt golden");
+    assert.deepEqual(mod.evaluatePromptSurfaceGate({ root, base }).evidence, [EFFECT_PATH]);
+    assert.equal(mod.evaluatePromptSurfaceGate({ root, base }).ok, true);
+    for (const invalid of [
+      effectFixture(before, after, { skill: "unrelated" }),
+      effectFixture("invented before", after),
+      effectFixture(before, "invented after"),
+      effectFixture("", "", { task_type: "review" }),
+      effectFixture(before, after, { task_files: "not a list" }),
+      "{unparseable",
+    ]) {
+      write(root, EFFECT_PATH, invalid);
+      commit(root, "unqualified fixture");
+      assert.equal(mod.evaluatePromptSurfaceGate({ root, base }).ok, false);
+    }
+  });
+});
+
+test("injected skill surface regressions preserve selection and operator-only macro behavior", () => {
+  withFixture(root => {
+    write(root, INJECTED_PATH, skillSource("Old skill."));
+    write(root, "settings/macros.yaml", MACRO_ROW("old operator macro"));
+    const before = renderedSkillPrompt(root);
+    commit(root, "base skill and operator macro");
+    write(root, INJECTED_PATH, skillSource("New skill."));
+    write(root, "settings/macros.yaml", MACRO_ROW("new operator macro"));
+    write(root, EFFECT_PATH, effectFixture(before, renderedSkillPrompt(root)));
+    commit(root, "independent macro exemption and qualified skill");
+    const result = mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.surfaces, [INJECTED_PATH]);
+  });
+  withFixture(root => {
+    write(root, INJECTED_PATH, skillSource("x".repeat(DEFAULT_KNOWLEDGE_BUDGET_CHARS + 1)));
+    assert.equal(renderedSkillPrompt(root), renderSkillsPart([]));
+    const before = renderedSkillPrompt(root);
+    commit(root, "over-budget skill");
+    write(root, INJECTED_PATH, skillSource("y".repeat(DEFAULT_KNOWLEDGE_BUDGET_CHARS + 1)));
+    write(root, EFFECT_PATH, effectFixture(before, renderedSkillPrompt(root)));
+    commit(root, "cannot fake selection of an over-budget skill");
+    assert.equal(mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }).ok, false);
   });
 });

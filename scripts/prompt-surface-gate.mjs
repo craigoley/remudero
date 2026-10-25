@@ -9,6 +9,8 @@ import { renderMacroSkill } from "./generate-macro-skills.mjs";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
+import { loadInjectableSkills, selectSkillsForTask, renderSkillsPart } from "../src/lib/skill-workshop.js";
+import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../src/lib/learnings.js";
 
 export const PROMPT_SURFACE_FUNCTIONS = new Set([
   "implementPromptParts",
@@ -26,6 +28,7 @@ const FUNCTION_SOURCE_RE = /^(?:src\/lib\/prompt-render\.ts|src\/lib\/learnings\
 const LEARNINGS_SHARD_RE = /^learnings\/[^/]+\.ya?ml$/;
 const GOLDEN_FIXTURE_RE = /^test\/fixtures\/golden-verdicts\//;
 const TEST_FILE_RE = /^test\/.*\.test\.ts$/;
+const INJECTED_SKILL_PATH_RE = /^\.claude\/skills\/([^/]+)\/SKILL\.md$/;
 
 function runGit(root, args) {
   const result = git(args, { cwd: root });
@@ -270,6 +273,63 @@ function changedPaths(files) {
   return [...new Set(files.map((file) => (file.newPath === "/dev/null" ? file.oldPath : file.newPath)))];
 }
 
+// Read one immutable approved tree through the production loader. Known absence is
+// empty; failed Git reads, symlinks and ambiguous tree shapes are never absence.
+function revisionSkills(root, revision) {
+  if (runGit(root, ["cat-file", "-t", revision]).trim() !== "commit") throw new Error(`skill reachability: ${revision} is not a commit`);
+  const tree = runGit(root, ["ls-tree", "-z", revision, "--", ".claude/skills"]);
+  if (tree === "") return [];
+  if (!tree.startsWith("040000 tree ")) throw new Error("skill reachability: approved skill root is not a tree");
+  const entries = runGit(root, ["ls-tree", "-z", `${revision}:.claude/skills`]).split("\0").filter(Boolean);
+  const names = [];
+  const texts = new Map();
+  for (const entry of entries) {
+    const [metadata, name] = entry.split("\t");
+    if (!name || /[\r\n/]/.test(name)) throw new Error("skill reachability: ambiguous approved skill name");
+    if (metadata.startsWith("120000 ")) throw new Error("skill reachability: a symbolic skill entry cannot be resolved from Git");
+    if (!metadata.startsWith("040000 tree ")) continue;
+    const path = `.claude/skills/${name}/SKILL.md`;
+    const record = runGit(root, ["ls-tree", "-z", revision, "--", path]);
+    if (record === "") continue;
+    if (!/^(100644|100755) blob /.test(record)) throw new Error(`skill reachability: ${path} is not a regular source blob`);
+    names.push(name);
+    texts.set(join("approved-skills", name, "SKILL.md"), runGit(root, ["show", `${revision}:${path}`]));
+  }
+  return loadInjectableSkills("approved-skills", () => names, path => {
+    if (!texts.has(path)) throw new Error("skill reachability: snapshot is incomplete");
+    return texts.get(path);
+  });
+}
+
+function skillSurfaceContext(root, base, head, files) {
+  const candidates = [...new Set(files.flatMap(file => [file.oldPath, file.newPath]).filter(path => INJECTED_SKILL_PATH_RE.test(path)))];
+  if (!candidates.length) return { surfaces: [], before: [], after: [] };
+  const before = revisionSkills(root, base), after = revisionSkills(root, head);
+  const loaded = new Set([...before, ...after].map(skill => skill.name));
+  return { before, after, surfaces: candidates.filter(path => loaded.has(INJECTED_SKILL_PATH_RE.exec(path)[1])) };
+}
+
+function skillEvidenceFor(root, head, files, context) {
+  const candidates = changedPaths(files).filter(path => GOLDEN_FIXTURE_RE.test(path));
+  const qualified = new Map();
+  for (const path of candidates) {
+    let fixture;
+    try { fixture = parseYaml(readRevisionFile(root, head, path)); }
+    catch { continue; }
+    if (!fixture || fixture.kind !== "injected-skill-prompt-effect" || typeof fixture.skill !== "string" ||
+        typeof fixture.task_type !== "string" || !Array.isArray(fixture.task_files) ||
+        !fixture.task_files.every(p => typeof p === "string") || typeof fixture.before !== "string" || typeof fixture.after !== "string") continue;
+    const select = skills => selectSkillsForTask(skills, fixture.task_type, DEFAULT_KNOWLEDGE_BUDGET_CHARS, fixture.task_files);
+    const before = select(context.before), after = select(context.after);
+    if (![...before, ...after].some(skill => skill.name === fixture.skill)) continue;
+    const beforePrompt = renderSkillsPart(before), afterPrompt = renderSkillsPart(after);
+    if (beforePrompt === afterPrompt || fixture.before !== beforePrompt || fixture.after !== afterPrompt) continue;
+    qualified.set(fixture.skill, path);
+  }
+  return context.surfaces.every(path => qualified.has(INJECTED_SKILL_PATH_RE.exec(path)[1]))
+    ? [...new Set(context.surfaces.map(path => qualified.get(INJECTED_SKILL_PATH_RE.exec(path)[1])))] : [];
+}
+
 function readWorktreeFile(root, path) {
   try {
     return readFileSync(join(root, path), "utf8");
@@ -333,21 +393,25 @@ export function refusalMessage(surfaces) {
 
 export function evaluatePromptSurfaceDiff(diffText, { root = REPO_ROOT, base = "origin/main", head = "HEAD" } = {}) {
   const files = parseUnifiedDiff(diffText);
+  const skillContext = skillSurfaceContext(root, base, head, files);
+  const ordinarySurfaces = [...new Set(files.flatMap(file => [...touchedPathSurfaces(root, head, file), ...touchedSymbolSurfaces(root, base, head, file)]))];
   const surfaces = [
-    ...new Set(files.flatMap((file) => [...touchedPathSurfaces(root, head, file), ...touchedSymbolSurfaces(root, base, head, file)])),
+    ...new Set([...ordinarySurfaces, ...skillContext.surfaces]),
   ];
   if (surfaces.length === 0) {
     return { ok: true, message: "prompt-surface-gate: OK — no prompt surface touched", surfaces, evidence: [] };
   }
-  const evidence = evidenceFor(root, head, files, surfaces);
-  if (evidence.length > 0) {
+  const ordinaryEvidence = ordinarySurfaces.length ? evidenceFor(root, head, files, ordinarySurfaces) : [];
+  const skillEvidence = skillContext.surfaces.length ? skillEvidenceFor(root, head, files, skillContext) : [];
+  const evidence = [...new Set([...ordinaryEvidence, ...skillEvidence])];
+  if ((!ordinarySurfaces.length || ordinaryEvidence.length) && (!skillContext.surfaces.length || skillEvidence.length)) {
     return { ok: true, message: `prompt-surface-gate: OK — evidence: ${evidence.join(", ")}`, surfaces, evidence };
   }
   return {
     ok: false,
     surfaces,
     evidence,
-    message: refusalMessage(surfaces),
+    message: refusalMessage(surfaces) + (skillContext.surfaces.length ? " Injected skills require a changed golden fixture with kind: injected-skill-prompt-effect, skill, task_type, task_files, before and after. Both prompts must match actual maintained loading, default-budget selection and rendering at base and head, and differ for a context that selects that skill." : ""),
   };
 }
 
