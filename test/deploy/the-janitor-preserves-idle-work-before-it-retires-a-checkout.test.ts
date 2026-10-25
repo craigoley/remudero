@@ -6,9 +6,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { preserveRetireFixtureArgs } from "#test/helpers/preserve-retire-fixture.js";
 
-const HELPER = join(process.cwd(), "deploy/mac/preserve-retire.py");
-const JANITOR = join(process.cwd(), "deploy/mac/remudero-janitor.sh");
+const HELPER = join(REPO_ROOT, "deploy/mac/preserve-retire.py");
+const JANITOR = join(REPO_ROOT, "deploy/mac/remudero-janitor.sh");
 const HOUR = 3600;
 // The helper's clock runs two days ahead, so every fixture file is idle unless a test dates it later.
 const NOW = Math.floor(Date.now() / 1000) + 48 * HOUR;
@@ -67,7 +69,7 @@ function commit(repo: string, file: string, text: string, message: string) {
 }
 
 function helper(fx: Fx, args: string[] = ["--apply"], env: Record<string, string> = {}, now = NOW) {
-  return spawnSync("python3", ["-I", HELPER, "--home", fx.home, "--now", String(now), ...args], {
+  return spawnSync("python3", preserveRetireFixtureArgs(fx.home, HELPER, ["--home", fx.home, "--now", String(now), ...args]), {
     encoding: "utf8", timeout: 120_000,
     env: { ...GIT_ENV, PATH: `${fx.bin}:${process.env.PATH}`, ...env },
   });
@@ -90,6 +92,22 @@ case " $* " in *"/preserve-retire.py "*) ${script} ;; esac
 exec '${native}' "$@"
 `, { mode: 0o755 });
   return native;
+}
+
+function pythonAccountProbe(fx: Fx) {
+  const native = execFileSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).trim();
+  const bootstrap = join(fx.root, "fixture-preserve-retire.py");
+  writeFileSync(bootstrap, `import importlib.util, sys
+args = sys.argv[1:]
+if args[0] == "-I":
+    args.pop(0)
+helper = args.pop(0)
+spec = importlib.util.spec_from_file_location("pr", helper); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.account_home = lambda: ${JSON.stringify(fx.home)}
+sys.argv = [helper, *args, "--now", "${NOW}"]
+raise SystemExit(m.main())
+`);
+  pythonProbe(fx, `exec '${native}' -I -B '${bootstrap}' "$@"`);
 }
 
 function preserved(fx: Fx, rel: string): string {
@@ -152,7 +170,7 @@ test("preserved restore instructions name the actual upstream repository", () =>
     const copy = preserved(fx, "Remudero/a-different-project");
     const manifest = JSON.parse(readFileSync(join(copy, "manifest.json"), "utf8"));
     assert.equal(manifest.remotes.origin, fx.origin);
-    assert.ok(readFileSync(join(copy, "MANIFEST.txt"), "utf8").includes(`git clone ${fx.origin} <dir>`));
+    assert.ok(readFileSync(join(copy, "MANIFEST.txt"), "utf8").includes(`git remote add origin ${fx.origin} `));
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
@@ -318,6 +336,7 @@ test("retention expires only stamped copies older than retain_days", () => {
 test("the janitor runs the preserve-then-retire phase and rotates its human log", () => {
   const fx = setup();
   try {
+    pythonAccountProbe(fx);
     const log = join(fx.root, "janitor.log");
     writeFileSync(log, "x".repeat(16 * 1024 * 1024 + 1));
     const r = spawnSync("bash", [JANITOR, "--dry-run"], { encoding: "utf8", timeout: 120_000, env: {
@@ -339,8 +358,7 @@ test("the janitor summary counts an actual preserved retirement in its total", (
   try {
     const repo = clone(fx, "Remudero/unpublished");
     commit(repo, "work.ts", "export const work = true;\n", "unpublished work");
-    const native = execFileSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).trim();
-    pythonProbe(fx, `exec '${native}' "$@" --now ${NOW}`);
+    pythonAccountProbe(fx);
     const r = janitor(fx, true);
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.equal(existsSync(repo), false, r.stdout);
@@ -481,7 +499,7 @@ test("dump expiry spares small files, a package root's files and anything inside
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
-test("an owned temp root is scanned, a clone in a shared one is held, and a symlinked one is never a root", () => {
+test("an owned temp root is scanned, a clone in a root other accounts can enter is preserved then retired, and a symlinked one is never a root", () => {
   const fx = setup({ temp_roots: ["remudero-*"] });
   try {
     const tmp = join(fx.root, "tmp");
@@ -503,10 +521,12 @@ test("an owned temp root is scanned, a clone in a shared one is held, and a syml
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.match(r.stdout, /RETIRED worktree .*remudero-shared\/task/);
     assert.match(r.stdout, /RETIRED clone .*remudero-private\/repo/);
-    assert.match(r.stdout, /HOLD shared-temp-root .*remudero-shared\/repo/);
+    assert.match(r.stdout, /RETIRED clone .*remudero-shared\/repo/);
+    assert.doesNotMatch(r.stdout, /shared-temp-root/);
     assert.equal(existsSync(worktree), false);
     assert.equal(existsSync(owned), false);
-    assert.equal(existsSync(shared), true);
+    assert.equal(existsSync(shared), false, "a 755 temp root no longer holds its clone forever");
+    assert.ok(readdirSync(join(fx.home, "Remudero-preserved")).some(n => n.includes("remudero-shared__repo@")), "it is preserved before it goes");
     assert.equal(existsSync(linked), true, r.stdout);
     assert.doesNotMatch(r.stdout, /remudero-link|outside\/remudero-elsewhere/);
     const back = restore(fx, readdirSync(join(fx.home, "Remudero-preserved")).filter(n => n.includes("remudero-shared__task@"))
@@ -570,12 +590,12 @@ test("a failed preservation bundle is held with git's own reason", () => {
     commit(repo, "work.ts", "export const work = 1;\n", "unpublished local work");
     const native = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
     writeFileSync(join(fx.bin, "git"), `#!/bin/bash
-case " $* " in *" bundle create "*) echo "fatal: simulated pack failure" >&2; exit 128 ;; esac
+case " $* " in *" pack-objects "*) echo "fatal: simulated pack failure" >&2; exit 128 ;; esac
 exec '${native}' "$@"
 `, { mode: 0o755 });
     const r = helper(fx);
     assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.match(r.stdout, /HOLD bundle-create-failed \(fatal: simulated pack failure\) .*Remudero\/task-run\/repo/);
+    assert.match(r.stdout, /HOLD git-copy-pack-failed \(fatal: simulated pack failure\) .*Remudero\/task-run\/repo/);
     assert.equal(existsSync(repo), true);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });

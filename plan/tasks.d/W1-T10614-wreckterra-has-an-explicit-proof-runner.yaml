@@ -1,0 +1,40 @@
+- id: W1-T10614
+  title: Register the owned Wreckterra web test profile without weakening unknown-target refusals
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: operator-request#wreckterra-console-product-2026-10-25
+  plan_refs:
+    - W1-T4264
+    - W1-T4265
+    - W1-T4266
+    - W1-T4657
+    - W1-T4658
+    - W1-T4694
+  files:
+    - src/lib/review.ts
+    - src/lib/project-init.ts
+    - .remudero/managed-repos.json
+    - test/review/wreckterra-web-profile.test.ts
+    - test/managed-repos.test.ts
+  status: queued
+  attempts: 0
+  rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required.
+  design: Add an exact craigoley/wreckterra profile to the closed acceptance-suite registry using its chosen unit/browser roots and checkout-pinned test CLIs. Existing core/site/console behavior and unknown-owner/unknown-repo refusal remain intact. Add managed repository discovery only through reviewed source. Ensure ts-web inheritance can bootstrap this empty repository with real commands, strict TypeScript, always-reporting ci-gate, security and measured nonzero baselines; do not invent baseline measurements or disable a scanner. The live baseline/protection application is a separate observable receipt after meaningful tests exist. Do not start a persistent daemon or commandeer existing jobs. The authorized initial build may use the existing bounded target-repo drain path after real runner acceptance and normal admission.
+  acceptance:
+    - claim: Wreckterra proofs execute only the registered pinned web runner
+      proof: "unit test: W1-T10614: Wreckterra proofs execute only the registered pinned web runner"
+    - claim: unknown owners and zero matching web tests refuse acceptance
+      proof: "unit test: W1-T10614: unknown owners and zero matching web tests refuse acceptance"
+    - claim: a failing Wreckterra test cannot produce a passing proof
+      proof: "unit test: W1-T10614: a failing Wreckterra test cannot produce a passing proof"
+    - claim: the closed registry explicitly names the owned Wreckterra target
+      proof: 'grep: repo: "wreckterra" in src/lib/review.ts'
+  falsifier: Remove the named ownership, idempotency, evidence or refusal guard independently. Its corresponding behavioral proof must fail against the same fixture and pass when restored. Test real durable files/default transport boundaries plus each catch arm; never a zero-test wrapper result. Keep initial live read/write/dispatch/deployment receipts separate from fixtures.

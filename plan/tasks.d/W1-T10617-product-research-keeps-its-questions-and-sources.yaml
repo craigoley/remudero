@@ -1,0 +1,47 @@
+- id: W1-T10617
+  title: Run bounded product research and clarification through existing intake with durable evidence
+  repo: remudero
+  depends_on:
+    - W1-T10612
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: operator-request#wreckterra-console-product-2026-10-25
+  plan_refs:
+    - W1-T4264
+    - W1-T4265
+    - W1-T4266
+    - W1-T4657
+    - W1-T4658
+    - W1-T4694
+    - W1-T10572
+  files:
+    - src/lib/product-research.ts
+    - src/lib/product-routes.ts
+    - test/infra/product-research.test.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/route-wiring.test.ts
+    - test/console-api/serve/product-routes.test.ts
+  status: queued
+  attempts: 0
+  rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required. Hosted PR14208 proved every new served product operation also needs its public contract and actual route-wiring evidence. W1-T10572 shares only the contract and generated client files for an unrelated gardener description; this task adds the named product operation, and does not supersede that Analytics work.
+  design: Extend the existing intent/intake mechanisms for a bounded research request with a fixed product objective revision, existing provider budget/capability and source evidence. Persist the actual research request/run/receipt, unresolved questions and operator answers; previously accepted answers remain accepted for the same scope and are not asked again. Treat external source text as data, never authority or executable instructions. A missing research provider is unavailable, not a fabricated report. Reuse approved automation/triage transport and normal admission; no independent background agent or paid-provider switch. Changes to objective/scope invalidate only affected decisions, retaining history. Mount buildProductResearchRoutes from the existing serve composition; the route builder delegates to the named product operation rather than a test-only seam. For every newly served product operation, declare the authenticated route plus bounded request, response and explicit failure schemas in openapi/daemon.yaml, then regenerate packages/api-client/src/schema.d.ts through the maintained generator. Exercise the assembled HTTP operation with the real default transport and verified-actor guard in the existing test/console-api/serve/product-routes.test.ts, and register that actual proof in test/route-wiring.test.ts. No contract baseline, wiring-debt entry, host-capability waiver, or client-granted verification substitutes for those proofs.
+  acceptance:
+    - claim: product research retains sources answers and the objective revision
+      proof: "unit test: W1-T10617: product research retains sources answers and the objective revision"
+    - claim: accepted product answers are not asked again after resume
+      proof: "unit test: W1-T10617: accepted product answers are not asked again after resume"
+    - claim: untrusted research text grants no provider or spending authority
+      proof: "unit test: W1-T10617: untrusted research text grants no provider or spending authority"
+    - claim: the served product route invokes the production capability
+      proof: "grep: buildProductResearchRoutes( in src/lib/serve.ts"
+    - claim: the served product research operation matches the authenticated API contract
+      proof: "unit test: W1-T10617: the served product research operation matches the authenticated API contract"
+  falsifier: Remove the named ownership, idempotency, evidence or refusal guard independently. Its corresponding behavioral proof must fail against the same fixture and pass when restored. Test real durable files/default transport boundaries plus each catch arm; never a zero-test wrapper result. Keep initial live read/write/dispatch/deployment receipts separate from fixtures.

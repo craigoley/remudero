@@ -17,6 +17,8 @@
   budget_usd: 60
   files:
     - src/lib/daily-progress-calendar.ts
+    - scripts/expiring-fixture-census.mjs
+    - test/view-etags-are-deterministic.test.ts
     - src/lib/daily-progress-store.ts
     - src/lib/daily-progress-collector.ts
     - src/lib/daily-progress-view.ts

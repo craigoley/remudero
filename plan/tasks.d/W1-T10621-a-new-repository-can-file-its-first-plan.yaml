@@ -1,0 +1,31 @@
+- id: W1-T10621
+  title: Lint a new repository's first plan against a confirmed empty base
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: operator-request#wreckterra-console-product-2026-10-25
+  files:
+    - src/lib/plan-base-reader.ts
+    - src/run-task.ts
+    - test/plan/plan-base-reader.test.ts
+  status: queued
+  attempts: 0
+  rationale: The first real Wreckterra product case executed all nine filing proofs, but remudero-review refused its initial plan because lint-plan --base assumes plan/tasks.yaml already exists at the merge base. The live refusal is lint-plan exited 1 with no summary. A new-product flow must support an empty repository without weakening review or substituting a whole-plan lint for changed-record qualification.
+  design: Extract a bounded base-plan reader used by lintPlanCommand. Resolve and pin a real commit first; inspect that exact commit's tree to distinguish a confirmed absent plan from invalid refs, transport/process failures, symlinks, unexpected object types and unreadable blobs. Only confirmed absence at a valid commit yields an empty prior plan, so every new head record is linted with ordinary reservation, dialect, scope, monolith and dependency guards. Existing valid and malformed-base behavior must retain its current semantics. Preserve the target repo root, exact merge-base and meaningful summary through lintPlanForReview; never catch arbitrary git failure as an empty plan or skip lint. Exercise real Git fixtures with a README-only base, an invalid new task, an existing sharded plan, an invalid ref and a failed blob read. The first filing must pass only when its actual changed records are valid. This task repairs onboarding preparation; it grants no runner, dispatch, protection or release authority.
+  acceptance:
+    - claim: a README-only repository can qualify its first valid sharded plan
+      proof: "unit test: W1-T10621: a README-only repository can qualify its first valid sharded plan"
+    - claim: the first plan still refuses malformed or unreserved new task records
+      proof: "unit test: W1-T10621: the first plan still refuses malformed or unreserved new task records"
+    - claim: unreadable commits and blobs never become an empty base
+      proof: "unit test: W1-T10621: unreadable commits and blobs never become an empty base"
+    - claim: the real lint command consumes the verified base reader
+      proof: "grep: readPlanBase( in src/run-task.ts"
+  falsifier: Remove only the confirmed-absence handling and the valid initial-plan fixture must fail; restore it and pass. Separately collapse a failed Git read into absence and the invalid-ref/blob fixture must fail. Verify physical test paths and nonzero TAP summaries, then qualify the stored Wreckterra plan body using the merged judging code. A local helper pass is not a live review pass.

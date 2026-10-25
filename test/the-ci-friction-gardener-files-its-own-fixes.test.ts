@@ -208,7 +208,7 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
   assert.match(yaml, /^ {4}- src\/lib\/shared\.ts$/m);
   const sharedTest = newTestPath("main-merge-src-lib-shared-ts", ["src/lib/shared.ts"], "ci-friction-gardener");
   assert.match(yaml, new RegExp(`^ {4}- ${sharedTest.replaceAll(".", "\\.")}$`, "m"));
-  assert.ok(yaml.includes(`proof: "grep: test(\\"W1-T9001: main_merge:src/lib/shared.ts is prevented, not retried\\" in ${sharedTest}"`));
+  assert.ok(yaml.includes(`proof: "unit test: W1-T9001: main_merge:src/lib/shared.ts is prevented, not retried"`));
   assert.doesNotMatch(yaml, new RegExp(CI_FRICTION_REMEDIES_FILE.replace(".", "\\.")));
   const verdict = ciFrictionRecordVerdict(yaml, "test");
   assert.equal(verdict.ok, true, verdict.reason);

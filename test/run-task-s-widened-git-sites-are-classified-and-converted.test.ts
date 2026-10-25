@@ -62,8 +62,7 @@ export const RUN_TASK_WIDENED_SITES: Readonly<Record<string, { count: number; cl
   syncPlanFromOrigin: { count: 2, cls: "CHECKOUT", reason: `${MANAGED}: plan fetch and origin/main blob reads` },
   planSyncGitRunnerAsync: { count: 1, cls: "CHECKOUT", reason: `${MANAGED}: the async plan-sync runner` },
   refreshManagedCheckout: { count: 1, cls: "CHECKOUT", reason: MANAGED },
-  resolveReviewSubjectCheckout: { count: 1, cls: "CHECKOUT", reason: "config.root/repos/<repo>, the target's managed checkout, read for its origin before any review" },
-  planTreeIsBehindMain: { count: 1, cls: "CHECKOUT", reason: MANAGED },
+  reviewCommandHost: { count: 2, cls: "CHECKOUT", reason: `${MANAGED}; config.root/repos/<repo>, the target's managed checkout, read for its origin before any review` },
   taskIdsEverFiled: { count: 1, cls: "CHECKOUT", reason: OWN },
   remotePlanCeilingOnRef: { count: 1, cls: "CHECKOUT", reason: OWN },
   reapBranchesSteps: { count: 1, cls: "CHECKOUT", reason: `${OWN}: exec binds cwd to opts.root ?? repoRoot` },
@@ -125,7 +124,7 @@ const sorted = (r: Record<string, number>): Record<string, number> =>
   Object.fromEntries(Object.entries(r).sort(([a], [b]) => a.localeCompare(b)));
 
 describe("W1-T6135: every widened git site left in run-task.ts is a classed CHECKOUT site", () => {
-  const text = `${readFileSync(SOURCE, "utf8")}\n${readFileSync(MOVED_SOURCE, "utf8")}\n${readFileSync(DAEMON_SOURCE, "utf8")}\n${readFileSync(EXTRACTED_SOURCE, "utf8")}`;
+  const text = `${readFileSync(fileURLToPath(new URL("../src/cli/commands/review.ts", import.meta.url)), "utf8")}\n${readFileSync(SOURCE, "utf8")}\n${readFileSync(MOVED_SOURCE, "utf8")}\n${readFileSync(DAEMON_SOURCE, "utf8")}\n${readFileSync(EXTRACTED_SOURCE, "utf8")}`;
   const actual = widenedByFunction(text);
 
   it("the census sees the file: a positive control on the widened pattern", () => {

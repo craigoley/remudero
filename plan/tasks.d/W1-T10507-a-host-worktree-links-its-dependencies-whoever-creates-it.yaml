@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern, a worktree's dependencies at creation, across one hook, its installer check, its test and its doctrine line
   band_meaning: span
   priority: 1  # coordinator brief 2026-10-23: the host's operator namespace grew to 85 GB from per-worktree installs
-  status: queued
+  status: merged
   attempts: 0
   origin: "coordinator brief 2026-10-23: worktrees of the host's operator checkout each carry a private node_modules; instructions to use hand-worktree and dependency seeds did not change what sessions do"
   plan_refs: [W1-T5533, W1-T10257, W1-T6147, W1-T10265, W1-T9432, W1-T10501]

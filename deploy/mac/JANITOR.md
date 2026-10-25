@@ -349,9 +349,12 @@ other `Developer` or `Downloads` content or protected roots), at most once every
 `["remudero-*", "rmd*"]`. macOS on this host has no periodic `/tmp` cleaner, so agent scratch
 there lasts until a reboot: on 2026-10-23 one `remudero-pr-queue-*` folder held 7.9 GiB, 5.6 GiB
 of it in 60 subfolders idle for over six hours. A match counts only when this account owns it
-and it is not a symlink. A worktree there is preserved and retired like any other; a clone or
-bare repository is held (`shared-temp-root`) unless other accounts cannot enter its root, since
-they could borrow its objects. Preserved copies are named `tmp__<path>@<UTC>`.
+and it is not a symlink. Worktrees, clones and bare repositories there are preserved and retired
+like any other. Until 2026-10-25 a clone or bare repository in a root other accounts could enter
+was held (`shared-temp-root`). Agents create those roots with mode 755, so every such clone was
+held forever: 907 held, about 6 GiB, on that day. A lender in `/private/tmp` cannot be relied on
+by any account, because macOS clears it at boot, and the borrower census still keeps a temp
+lender of this account's own kept clones. Preserved copies are named `tmp__<path>@<UTC>`.
 
 A checkout, standalone clone or bare repository is a candidate when nothing in it
 (dependencies included, its own Git metadata excluded) changed in `idle_hours` by
@@ -494,3 +497,34 @@ the discovery roots. An unreadable or malformed worktree listing holds the store
 Previously observed holds remain held for the pass. Unmarked stores retain their
 ordinary eligibility, activity and preservation guards. This is a fresh pre-action
 check, not an atomic lock against another process creating a marker after that check.
+
+### The installed account hold is independent of invocation policy
+
+Every maintained preserve-retire action rereads the running account's default
+`~/.local/state/remudero/preserve-retire.json` and requires its owner-private
+`enabled: true`. Account identity comes from the OS user database, not `HOME`,
+`--home` or `--config`. Those arguments cannot replace a disabled account hold.
+Missing, unsafe, malformed, oversized or unreadable hold evidence refuses action.
+Preservation output and stamps are gated too; an unfinished copy or compression
+artifact is retained if the hold activates during work. A started filesystem or
+Git operation is not interrupted; the next action rechecks the hold.
+
+Disposable tests substitute the OS account-home resolver only inside an imported
+test module. No production environment variable, CLI flag or alternate config
+unlocks that resolver. Updated maintained routes do not constrain old standalone
+copies or arbitrary same-account Python code. Keep old copies unused, both account
+holds disabled, and require separate explicit release after qualification and
+installation; code installation does not enable either account.
+
+Preservation Git copies are self-contained: the stable `unpublished.bundle` name now
+contains the complete object closure of every recorded ref and HEAD, including custom
+checkpoint, remote, tag and non-commit refs. Published-main counts remain diagnostic
+only. Before retirement, the helper unbundles into a new empty store, recreates every
+saved ref and HEAD, compares its exact object set and runs full Git integrity checks.
+No upstream or source-store object can satisfy that qualification. Ref or symbolic-HEAD
+changes during preservation or before retirement retain the source. Shallow/unsupported
+object formats and insufficient space for both the complete bundle and independent
+verification store retain it too. This covers recorded Git roots, not unreferenced
+objects or a byte-for-byte copy of the index, reflogs, configuration or working files;
+patch and untracked-archive preservation remain separate. Installation never releases
+an account's disabled hold.

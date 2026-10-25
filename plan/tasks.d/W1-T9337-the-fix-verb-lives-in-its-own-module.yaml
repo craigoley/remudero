@@ -24,6 +24,8 @@
     - test/review-provider-provenance.test.ts
     - test/run-review-evidence-target.test.ts
     - test/the-regime-helper-has-one-derivation.test.ts
+    - scripts/house-layout-census.mjs
+    - test/census-precheck-counts-the-house-layout-ratchet.test.ts
   # refusal-amendment (W1-T9337, run DAEMON-1792797246750@7ecddddd77f973a141331e2d6bba6dc421d8994e, 2026-10-24T00:28:15.288Z): the worker refused criterion 4 [contradicts-another-criterion] — proposed re-scope-criteria: reconcile the contradicting criteria — re-scope one so both can hold at once
   #   worker evidence: Existing source-text tests require moved fix-rung statements in `src/run-task.ts`, while criteria 1 and 3 require those statements in `fix.ts` behind thin delegates.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
@@ -71,6 +73,13 @@
        by the same 1500 (14750 to 13250 on today's main, or 1500 below whatever row an earlier
        extraction left), conserving the aggregate. Where comment volume no longer blocks on the
        adopted base (#14087), leaving the baseline untouched also satisfies this step.
+       The house-layout census's W1-T9332 qualified structural split (scripts/house-layout-census.mjs
+       qualifiedRunTaskLayoutSplit) may name src/cli/commands/fix.ts as a second moved owner of src/run-task.ts.
+       Relief stays one physical duplicate per moved owner, and only while run-task.ts plus every moved owner hold
+       no more occurrences of a literal than run-task.ts held at the merge base. A moved owner already present at the
+       merge base still gets none. This permits fixRungScopeStandDownReason's original MASTER-PLAN.md literal in
+       fix.ts (run-task.ts 40 -> 38 occurrences, fix.ts 0 -> 2), with a fixture test for the new owner
+       (operator approved, 2026-10-25).
        Every other entry, exclusion, population, threshold and falsifier stays unchanged.
     5. The PR body reports the moved symbol count and line count, and the host's member count. A large host is
        acceptable. Never shrink it by importing run-task.ts.

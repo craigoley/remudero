@@ -122,7 +122,7 @@ test("W1-T4772: runReview keeps the timer firing while its production proof runs
 test("W1-T3529: runReview does not re-derive the target from a bare repo name", () => {
   assert.equal(SOURCE_TEXT_SUBJECT_MARKER, "@source-text-subject");
   const src = readRunTaskSource();
-  const runReviewStart = src.indexOf("async function runReview(args:");
+  const runReviewStart = src.indexOf("async function runReview(host: ReviewCommandHost, args:");
   assert.notEqual(runReviewStart, -1, "runReview must still be present");
   const judgeCall = src.indexOf("const computed = await preparedDecision.judge({", runReviewStart);
   assert.notEqual(judgeCall, -1, "runReview must still await the prepared judgeReviewAsync");
@@ -143,7 +143,7 @@ test("W1-T3529: the fix-rung path still relies on its existing runReview owner/r
 
 test("W1-T3529: every pre-existing judgeReview evidence field remains in the runReview call", () => {
   const src = readRunTaskSource();
-  const runReviewStart = src.indexOf("async function runReview(args:");
+  const runReviewStart = src.indexOf("async function runReview(host: ReviewCommandHost, args:");
   const judgeCall = src.indexOf("const computed = await preparedDecision.judge({", runReviewStart);
   const evidence = src.slice(judgeCall, src.indexOf("});", judgeCall));
   for (const field of [
@@ -160,5 +160,8 @@ test("W1-T3529: every pre-existing judgeReview evidence field remains in the run
 });
 
 function readRunTaskSource(): string {
-  return readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  // W1-T9337: runReview and its fix-rung caller each have an extracted owner.
+  return ["run-task.ts", "cli/commands/fix.ts", "cli/commands/review.ts"]
+    .map((owner) => readFileSync(fileURLToPath(new URL(`../src/${owner}`, import.meta.url)), "utf8").replace(/\bhost\./g, ""))
+    .join("\n");
 }

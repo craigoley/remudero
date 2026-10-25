@@ -17,7 +17,7 @@
   design: |
     Name the census test "every applies-to skill satisfies the discovery invariants" and the fixture test
     "discovery rejects malformed applies-to and dead when-paths by skill name".
-    ADD test/every-applies-to-skill-is-selectable-and-bounded.test.ts. It globs .claude/skills/*/SKILL.md, keeps
+    ADD test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts. It globs .claude/skills/*/SKILL.md, keeps
     those whose frontmatter has applies-to:, and per skill asserts: (1) applies-to is a TASK_TYPES member;
     (2) every when-paths glob matches at least one tracked file (skip cleanly when absent); (3) the skill body alone
     fits DEFAULT_KNOWLEDGE_BUDGET_CHARS; (4) observeSkillSelection selects it for a matching task type and excludes
@@ -28,14 +28,14 @@
     Do not change selection or scan behaviour."
   acceptance:
     - claim: "the discovery test declares the new skill-conformance census"
-      proof: "grep: every applies-to skill satisfies the discovery invariants in test/every-applies-to-skill-is-selectable-and-bounded.test.ts"
+      proof: "grep: every applies-to skill satisfies the discovery invariants in test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts"
     - claim: "the discovery test covers all five live-skill invariants and rejects typo applies-to and dead when-paths fixtures by skill name"
       kind: guard
-      proof: "unit test: test/every-applies-to-skill-is-selectable-and-bounded.test.ts"
+      proof: "unit test: test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts"
   risk: low
   origin: feedback#fb-1791856366583-e5a5e9
   plan_refs: ["§7B"]
-  files: [test/every-applies-to-skill-is-selectable-and-bounded.test.ts]
+  files: [test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts]
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=27ce200e0ea1f88a

@@ -459,7 +459,10 @@ test("W1-T3337: the implementation run records a blocked verdict when its inject
 });
 
 test("W1-T3337 wiring: every production terminal-review path supplies a just-in-time code-freshness reader", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  // W1-T9337: include both fix-rung re-reviews and the extracted review command.
+  const source = ["run-task.ts", "cli/commands/fix.ts", "cli/commands/review.ts"]
+    .map((owner) => readFileSync(new URL(`../src/${owner}`, import.meta.url), "utf8").replace(/\bhost\./g, ""))
+    .join("\n");
   const runTaskBody = readFileSync(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url), "utf8");
   // E36: the awaited reader — the sync one's git fetch held the daemon loop 49 s.
   const readers = [source, runTaskBody].flatMap((text) => text.match(/reviewerCodeFreshness: \(\) => checkReviewerCodeFreshnessAsync\(repoRoot, process\.env\)/g) ?? []);

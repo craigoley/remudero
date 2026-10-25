@@ -4,6 +4,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { spawnDetachedGroup } from "#src/lib/worker-containment.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { laneDeliveryFailure } from "../src/lib/drain.js";
 import { GhJsonUnreadableResponseError } from "../src/lib/github-transport.js";
 import { defaultGeneration } from "../src/lib/host-memory-ledger.js";
@@ -225,8 +227,9 @@ test("W1-T9070: every settle-loop error class round-trips and an unknown one is 
     // A credential refusal is the fleet's failure, not the lane's: it stays unclassified, as the daemon keeps it fatal.
     const credential = ghError("Command failed: git push\nremote: Permission denied (publickey)");
     assert.equal(classifyRunChildError(credential), "unknown");
-    // An error nothing recognizes is unknown, and an unknown failure settles as a lost run — never a success.
-    for (const stray of [new TypeError("rmd's own defect"), "a string", undefined, credential]) {
+    // A non-Error value is still unknown/lost. Actual terminal Errors are represented
+    // separately, without turning a credential refusal or programmer defect into lane delivery.
+    for (const stray of ["a string", undefined]) {
       const failure = toRunChildFailure(stray);
       assert.equal(failure.class, "unknown");
       assert.equal(fromRunChildFailure(failure).kind, "lost");
@@ -249,6 +252,99 @@ test("W1-T9070: every settle-loop error class round-trips and an unknown one is 
   } finally {
     rmSync(state, { recursive: true, force: true });
   }
+});
+
+function terminalRoundTrip(original: unknown) {
+  const state = tmp();
+  try {
+    const dir = runDir(state, "terminal-representation");
+    writeStatus(dir, status({ state: "failed", failure: toRunChildFailure(original) }));
+    const read = readStatus(dir);
+    assert.ok(read.ok && read.value.failure);
+    return fromRunChildFailure(read.value.failure);
+  } finally { rmSync(state, { recursive: true, force: true }); }
+}
+
+test("a terminal Git output overflow remains a failed error through the run-child status file", () => {
+  const repo = gitRepo();
+  try {
+    let original: unknown;
+    try { execFileSync("git", ["-C", repo.dir, "log", "-1", "--format=%H"], { maxBuffer: 8, encoding: "utf8" }); }
+    catch (error) { original = error; }
+    assert.ok(original instanceof Error);
+    assert.equal((original as NodeJS.ErrnoException).code, "ENOBUFS");
+    assert.equal(toRunChildFailure(original).class, "terminal_error");
+    const settled = terminalRoundTrip(original);
+    assert.equal(settled.kind, "error");
+    assert.ok(settled.kind === "error");
+    assert.equal(settled.error.name, original.name);
+    assert.equal(settled.error.message, original.message);
+    assert.equal((settled.error as NodeJS.ErrnoException).code, "ENOBUFS");
+    assert.equal(classifyRunChildError(settled.error), classifyRunChildError(original));
+    assert.deepEqual(laneDeliveryFailure(settled.error), laneDeliveryFailure(original));
+  } finally { rmSync(repo.dir, { recursive: true, force: true }); }
+});
+
+test("a no-pid spawn failure remains a failed terminal error rather than an absent child", async () => {
+  const state = tmp();
+  try {
+    let original: unknown;
+    try { spawnDetachedGroup({ command: process.execPath, args: ["-e", ""], cwd: join(state, "missing"), env: {} }); }
+    catch (error) { original = error; }
+    assert.ok(original instanceof Error);
+    assert.match(original.message, /no pid/i);
+    const settled = terminalRoundTrip(original);
+    assert.ok(settled.kind === "error");
+    assert.equal(settled.error.name, original.name);
+    assert.equal(settled.error.message, original.message);
+    // Let the already-handled asynchronous ENOENT event finish before retiring the fixture.
+    await new Promise<void>(resolve => setImmediate(resolve));
+  } finally { rmSync(state, { recursive: true, force: true }); }
+});
+
+test("terminal error representation preserves the original daemon failure consequences", () => {
+  const credential = ghError("Command failed: git push\nremote: Permission denied (publickey)");
+  const programmer = Object.assign(new TypeError("rmd's own defect"), { reasonClass: "programmer_failure" });
+  for (const original of [...SETTLE_LOOP_ERRORS.map(([, error]) => error), credential, programmer]) {
+    const settled = terminalRoundTrip(original);
+    assert.ok(settled.kind === "error");
+    assert.equal(classifyRunChildError(settled.error), classifyRunChildError(original));
+    assert.deepEqual(laneDeliveryFailure(settled.error), laneDeliveryFailure(original));
+    assert.equal(isSpawnInfraBlockedError(settled.error), isSpawnInfraBlockedError(original));
+    assert.equal(settled.error instanceof TaskAdmissionError, original instanceof TaskAdmissionError);
+  }
+  const rebuilt = terminalRoundTrip(programmer);
+  assert.ok(rebuilt.kind === "error");
+  assert.equal(rebuilt.error.name, "TypeError");
+  assert.equal((rebuilt.error as Error & { reasonClass?: string }).reasonClass, "programmer_failure");
+  assert.equal(laneDeliveryFailure(rebuilt.error), undefined, "a programmer defect remains fatal, not lane-local");
+  const bounded = toRunChildFailure(new Error("x".repeat(RUN_CHILD_FAILURE_TEXT_BOUND + 1)));
+  assert.equal(bounded.message.length, RUN_CHILD_FAILURE_TEXT_BOUND);
+});
+
+test("genuine lost and unknown run-child contracts are not rescued by terminal error representation", () => {
+  for (const value of [undefined, "not an Error", { message: "not an Error instance" }]) {
+    assert.equal(terminalRoundTrip(value).kind, "lost");
+  }
+  const state = tmp();
+  try {
+    const dir = runDir(state, "legacy-and-future");
+    for (const failureClass of ["unknown", "a_future_class"]) {
+      writeStatus(dir, status({ schema: { major: 1, minor: 0 }, state: "failed", failure: {
+        class: failureClass as RunChildFailure["class"], reasonClass: "unknown", name: "Error", message: "not rescued by name",
+      } }));
+      const read = readStatus(dir);
+      assert.ok(read.ok && read.value.failure);
+      assert.equal(fromRunChildFailure(read.value.failure).kind, "lost");
+    }
+    writeStatus(dir, status({ identity: { ...status().identity, startTicks: "other" } }));
+    assert.equal(classifyRunDir(dir, probe(() => ({ state: "alive", start: "proc:100" }))).kind, "lost");
+    writeFileSync(join(dir, "status.json"), JSON.stringify({ ...status(), schema: { major: 2, minor: 0 } }));
+    assert.equal(readStatus(dir).ok, false);
+    writeFileSync(join(dir, "status.json"), "{torn");
+    assert.equal(readStatus(dir).ok, false);
+    assert.equal(readStatus(join(state, "missing")).ok, false);
+  } finally { rmSync(state, { recursive: true, force: true }); }
 });
 
 test("W1-T9070: an unknown contract major is refused as contract_mismatch", () => {
