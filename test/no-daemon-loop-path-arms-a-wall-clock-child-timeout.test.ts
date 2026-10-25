@@ -87,13 +87,38 @@ function seamsOver(body: string, childNames: readonly string[]): string[] {
   return [...new Set([...body.matchAll(seam), ...body.matchAll(line)].map((m) => m[1]!))];
 }
 
+/** W1-T9703: local names a body binds to a WRAPPER over a child — a parameter whose type is a function and whose
+ *  DEFAULT is an arrow or function that calls a child primitive or the loop-bounded helpers (the `executeAsync`
+ *  seam of ciLearningTaskIdMinter). The default is not a bare child name, so `seamsOver` cannot see it. */
+function wrapperSeams(body: string, childNames: readonly string[]): string[] {
+  const calls = new RegExp(`(?<![\\w$])(?:${[...childNames, "execFileLoopBounded", "boundChildByLoopTime"].join("|")})\\(`);
+  const line = /(?:^|[(,])\s*([A-Za-z_$][\w$]*)\s*\??\s*:\s*\(.*[^=]=(?!>)\s*(?:async\s*)?(?:function\b[^(]*\([^)]*\)\s*\{|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)(.*)$/gm;
+  return [...body.matchAll(line)].filter((m) => calls.test(m[2]!)).map((m) => m[1]!);
+}
+
+/** W1-T9703: wall-clock timers a body arms to stop a child through an AbortController — `controller.abort()` beside a
+ *  `setTimeout`/`AbortSignal.timeout`, where `signal: controller.signal` reaches an async child call, a loop-bounded
+ *  helper, or a seam over one. A signal that reaches only a fetch, a stream or an in-process function is not a child
+ *  kill. `.kill(` is not in such a body, which is why the kill count below reads 0 for it. */
+function abortKills(body: string, childNames: readonly string[]): number {
+  const timers = (body.match(/\bsetTimeout\(|\bAbortSignal\.timeout\(/g) ?? []).length;
+  if (timers === 0) return 0;
+  const callees = [...childNames, ...seamsOver(body, childNames), ...wrapperSeams(body, childNames), "execFileLoopBounded", "boundChildByLoopTime"];
+  const call = new RegExp(`(?<![\\w$])(?:${callees.join("|")})\\(`, "g");
+  const spans = [...body.matchAll(call)].map((m) => parenSpan(body, m.index! + m[0].length - 1));
+  const aborted = [...body.matchAll(/\b([A-Za-z_$][\w$]*)\s*\.abort\(/g)].map((m) => m[1]!);
+  const stopsChild = aborted.some((c) => spans.some((span) => new RegExp(`\\bsignal\\s*:\\s*${c}\\.signal\\b`).test(span)));
+  return stopsChild ? timers : 0;
+}
+
 /** Wall-clock bounds one function arms on an async child: its `timeout` options, and the setTimeout or
  *  AbortSignal.timeout timers it arms beside a child kill. 0 when the body starts no async child. */
 function wallClockChildArms(fn: Fn, childNames: readonly string[]): number {
   if (fn.file === MECHANISM_FILE) return 0;
+  const aborts = abortKills(fn.body, childNames);
   const body = withoutSyncOrBoundedCalls(fn.body);
   const asyncCall = new RegExp(`(?<![\\w$])(?:${[...childNames, ...seamsOver(body, childNames)].join("|")})\\(|promisify\\((?:execFile|exec)\\)\\(`);
-  if (!asyncCall.test(body)) return 0;
+  if (!asyncCall.test(body)) return aborts;
   // A body that arms the loop bound reads its `timeout` as that bound's budget; there only a raw child call's own
   // `timeout` option counts. Elsewhere any `timeout` the body passes or forwards (`timeout?:` typed and spread into
   // the call, as a wrapper does) is execFile's own wall-clock timer.
@@ -101,7 +126,7 @@ function wallClockChildArms(fn: Fn, childNames: readonly string[]): number {
     ? [...body.matchAll(new RegExp(asyncCall.source, "g"))].filter((m) => /\btimeout\s*[:,}]/.test(parenSpan(body, m.index! + m[0].length - 1))).length
     : (body.match(/\btimeout\s*\??\s*[:,}]/g) ?? []).length;
   const kills = /\.kill\(/.test(body) ? (body.match(/\bsetTimeout\(|\bAbortSignal\.timeout\(/g) ?? []).length : 0;
-  return options + kills;
+  return options + kills + aborts;
 }
 
 /** Wall-clock child bounds per function NAME (same-named functions in different files sum). */
@@ -214,4 +239,60 @@ test("a row above its real count is refused and names the row to delete", () => 
   assert.deepEqual(refusals(fns, { ...WALL_CLOCK_CHILD_LOOP_BASELINE, ghTextAsync: 1 }), [
     `ghTextAsync arms 0 wall-clock bound(s) < row 1 — delete the \`ghTextAsync\` row from WALL_CLOCK_CHILD_LOOP_BASELINE (${BASELINE_FILE}) in this PR`,
   ]);
+});
+
+/** The pre-fix shape of ciLearningTaskIdMinter's async member (W1-T7742): a seam whose default WRAPS execFileLoopBounded,
+ *  a re-arming setTimeout, and `controller.abort()` whose signal reaches the seam. No `.kill(` anywhere. */
+const PRE_FIX_MINTER = `
+  function mintLike(executeAsync: (file: string, args: string[], options: { timeout: number; signal: AbortSignal }) => Promise<{ stdout: string }> = (file, args, options) => execFileLoopBounded(file, args, { ...options, encoding: "utf8" })) {
+    const controller = new AbortController();
+    let timer;
+    const expired = new Promise((_, reject) => {
+      const expire = () => {
+        if (bound - (now() - started) > 0) { timer = setTimeout(expire, 1); return; }
+        reject(new Error("timed out"));
+        controller.abort();
+      };
+      timer = setTimeout(expire, bound);
+    });
+    return Promise.race([executeAsync(process.execPath, [], { timeout: bound, signal: controller.signal }), expired]);
+  }`;
+
+test("W1-T9703: the census names an AbortController-plus-timer kill of a daemon-reachable child", () => {
+  const fns = topLevelFunctions({ objectLiterals: true });
+  const reach = loopReachable(fns, "daemonCommand");
+  assert.ok(reach.has("sweepLandingSteps"), "the walk reaches the function the shape is planted in");
+
+  // Control on the real source: the minter's own body is counted 0 after the fix, and the table stays empty.
+  assert.ok(fns.some((f) => f.name === "ciLearningTaskIdMinter"), "the minter is in the population");
+  assert.deepEqual(refusals(fns, WALL_CLOCK_CHILD_LOOP_BASELINE), []);
+
+  // Positive: the pre-fix shape, planted in a reached function, is named.
+  const planted = fns.map((f) => (f.name === "sweepLandingSteps" ? { ...f, body: f.body + PRE_FIX_MINTER } : f));
+  const named = refusals(planted, WALL_CLOCK_CHILD_LOOP_BASELINE);
+  assert.equal(named.length, 1);
+  assert.match(named[0]!, /^sweepLandingSteps arms 2 wall-clock bound\(s\) on an async child and is reachable from the daemon loop/);
+
+  const childNames = ["execFile", "spawn", "fork"];
+  // The seam may also be a bare child name, and the signal may go straight to a child call or a loop-bounded helper.
+  for (const body of [
+    '  const c = new AbortController(); setTimeout(() => c.abort(), 1000); await execFileLoopBounded("git", [], { signal: c.signal });',
+    '  const c = new AbortController(); setTimeout(() => c.abort(), 1000); execFile("git", [], { signal: c.signal }, cb);',
+    '  async function g(run: typeof execFile) { const c = new AbortController(); setTimeout(() => c.abort(), 1000); return run("git", [], { signal: c.signal }); }',
+  ]) {
+    assert.equal(wallClockChildArms({ name: "x", file: "x", body }, childNames), 1, body);
+  }
+
+  // Not counted: a controller whose signal reaches only a fetch, a stream or an in-process function.
+  for (const body of [
+    '  const c = new AbortController(); setTimeout(() => c.abort(), 1000); return fetch(url, { signal: c.signal });',
+    '  const c = new AbortController(); const t = setTimeout(() => c.abort(), 1000); await refreshAnalytics({ signal: c.signal }); clearTimeout(t);',
+    '  const c = new AbortController(); setTimeout(() => c.abort(), 1000); const s = createWriteStream(p, { signal: c.signal });',
+    // A seam whose default is an in-process function, not a child.
+    '  function m(read: (a: string, options: { signal: AbortSignal }) => Promise<string> = (a, options) => readFileText(a, options)) { const c = new AbortController(); setTimeout(() => c.abort(), 1000); return read("x", { signal: c.signal }); }',
+    // A signal that is never aborted by a timer in the body.
+    '  const c = new AbortController(); await execFileLoopBounded("git", [], { signal: c.signal });',
+  ]) {
+    assert.equal(wallClockChildArms({ name: "x", file: "x", body }, childNames), 0, body);
+  }
 });
