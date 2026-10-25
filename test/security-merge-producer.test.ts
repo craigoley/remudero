@@ -143,3 +143,52 @@ const child=spawnSync(${JSON.stringify(answer)},args,{encoding:'utf8'});process.
  assert.deepEqual(calls[0],calls[1],'only the same association read is repeated');
  assert.equal(calls.filter(call=>call.includes('POST')).length,1,'status writes retain their single attempt');
 });
+
+
+test('security metadata retries a recorded HTTP 503 within the existing budget and keeps permanent failures closed',async()=>{
+ const path=`repos/craigoley/remudero/commits/${head}/pulls?per_page=100`;
+ for(const kind of ['transient-503','persistent-503','permanent-403','signalled-503','text-only-503'] as const){
+  const calls:any[]=[];const waits:number[]=[];
+  const failure=Object.assign(Error('metadata unavailable'),{status:kind==='signalled-503'?null:1,
+   stderr:kind==='permanent-403'?'gh: HTTP 403':kind==='text-only-503'?'body mentioned gh: HTTP 503':'gh: HTTP 503\n'});
+  const read=createSecurityMetadataReader({exec:(command:string,args:string[],options:any)=>{
+   calls.push({command,args:[...args],options});
+   if(kind==='transient-503'&&calls.length===2)return '[{"number":1}]';
+   throw failure;
+  },wait:async(ms:number)=>{waits.push(ms);}});
+  if(kind==='transient-503')assert.deepEqual(await read(path),[{number:1}]);
+  else await assert.rejects(()=>read(path),(error:unknown)=>error===failure);
+  assert.equal(calls.length,kind==='persistent-503'?4:kind==='transient-503'?2:1,kind);
+  assert.deepEqual(waits,kind==='persistent-503'?[1000,2000,4000]:kind==='transient-503'?[1000]:[],kind);
+  assert.ok(calls.every(call=>JSON.stringify(call)===JSON.stringify(calls[0])), 'only the identical bounded read repeats');
+ }
+});
+
+
+test('security producer CLI recovers HTTP 503 and publishes its exact-head decision once',t=>{
+ const dir=mkdtempSync(join(tmpdir(),'rmd-security-503-retry-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+ const eventPath=join(dir,'event.json'),log=join(dir,'calls.jsonl'),marker=join(dir,'failed-once');
+ writeFileSync(eventPath,JSON.stringify({repository,workflow_run:{name:'CodeQL',head_sha:head}}));
+ const shim=ghShim([{when:'POST',stdout:'{}'},
+  {when:'/commits/'+head+'/pulls?',stdout:JSON.stringify([{number:1,state:'open',head:{sha:head}}])},
+  {when:'/files?',stdout:JSON.stringify([{filename:'docs/a.md'}])},
+  {when:'GET',stdout:JSON.stringify({state:'open',head:{sha:head},base:{sha:base,ref:'main',repo:repository},changed_files:1})}],{command:'security-metadata-answer'});
+ t.after(()=>rmSync(shim.dir,{recursive:true,force:true}));
+ const answer=join(shim.dir,'security-metadata-answer');
+ const wrapper=ghStubPath(`#!/usr/bin/env node
+const fs=require('node:fs'),{spawnSync}=require('node:child_process');
+const args=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(args)+'\\n');
+if(!fs.existsSync(${JSON.stringify(marker)})){fs.writeFileSync(${JSON.stringify(marker)},'failed');process.stderr.write('gh: HTTP 503\\n');process.exit(1);}
+const child=spawnSync(${JSON.stringify(answer)},args,{encoding:'utf8'});process.stdout.write(child.stdout||'');process.stderr.write(child.stderr||'');process.exit(child.status??1);
+`);
+ t.after(()=>rmSync(dirname(wrapper),{recursive:true,force:true}));
+ const child=spawnSync(process.execPath,[new URL('../scripts/security-merge-producer.mjs',import.meta.url).pathname],{
+  encoding:'utf8',timeout:15000,env:{...process.env,PATH:wrapper+':'+process.env.PATH,GH_TOKEN:'',
+   GITHUB_EVENT_PATH:eventPath,GITHUB_EVENT_NAME:'workflow_run',GITHUB_RUN_ID:'1'}});
+ assert.equal(child.status,0,child.stderr||child.stdout);
+ const result=JSON.parse(child.stdout).results[0];assert.equal(result.headSha,head);
+ assert.equal(result.decision.state,'not-applicable');assert.equal(result.published,true);
+ const calls=readFileSync(log,'utf8').trim().split('\n').map(line=>JSON.parse(line));
+ assert.deepEqual(calls[0],calls[1],'only the same association read is repeated');
+ assert.equal(calls.filter(call=>call.includes('POST')).length,1,'status writes retain their single attempt');
+});

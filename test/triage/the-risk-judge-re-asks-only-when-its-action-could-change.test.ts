@@ -7,7 +7,7 @@ import { test, type TestContext } from "node:test";
 import { machineShardHeaderLines } from "#src/lib/machine-filing.js";
 import {
   MACHINE_JUDGE_REASK_SCALE_MS as DAY, MACHINE_JUDGE_STATE_FILE,
-  runMachineFilingJudge, type MachineJudgePorts,
+  readOperatorReleaseRecords, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts,
 } from "#src/lib/machine-filing-judge.js";
 import { loadPlan } from "#src/lib/plan.js";
 import type { RiskJudgeVerdict } from "#src/lib/risk-judge.js";
@@ -172,7 +172,8 @@ test("an edit re-pins fresh and an operator release never re-asks", async (t) =>
   await f.run();
   assert.equal(f.calls(), 2);
   assert.notEqual(f.plan().byId.get(ID)!.risk_ruling!.pin, pin);
-  f.ports.operatorReleases = () => new Set([ID]);
+  recordOperatorRelease(f.root, f.plan().byId.get(ID)!, new Date(START).toISOString());
+  f.ports.operatorReleases = () => readOperatorReleaseRecords(f.root);
   f.time(START + 2 * DAY);
   f.cost(40);
   await f.run();

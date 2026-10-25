@@ -1,3 +1,4 @@
+import { operatorReleaseContractChanged } from "./operator-release.js";
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
 import type { AcceptanceCriterion, MachineFilingAdmissionContext, Plan, Task, TaskStatus } from "./plan.js";
@@ -51,6 +52,7 @@ import { unresolvedDoctrineCitations, type DoctrineCitationFacts } from "./doctr
  *  (W1-T6/T9/T12, W1-T100/T101, W1-T180, W1-T246, W1-T310, W1-T326, W1-T519). */
 
 export type LintCheck =
+  | "operator-release-contract"
   | "sizing"
   | "headless-fitness"
   | "proof-shape"
@@ -3803,6 +3805,8 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...duplicateTitleViolations(task, opts));
   violations.push(...unansweredDuplicateTitleViolations(task, opts));
   violations.push(...duplicateSurfaceViolations(task, opts));
+  if (operatorReleaseContractChanged(task)) violations.push({ check: "operator-release-contract", severity: "block",
+    message: `task ${task.id} changed its operator-approved contract; explicit reapproval required` });
   const prov = provenanceViolation(task);
   if (prov) violations.push(prov);
   const ruling = rulingVerifyViolation(task);
