@@ -63,16 +63,26 @@ export function taskClosure(taskId: string, repository: string, gh: (args: strin
 /** Coverage records and both plan sources come from ONE immutable fetched main object. */
 export function prepareEvidenceRecordContext(root: string, ports: EvidenceContextPorts = {}): EvidenceRecordContext {
   const git = ports.git ?? ((args: string[]) => hostWorktreeGit(root, args, { maxBuffer: 1 << 26 }));
-  const layout = resolveRepoLayout(root);
-  const monolith = relative(root, layout.planMonolith), shards = relative(root, join(layout.planDir, "tasks.d"));
   git(["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main", "--quiet"]);
   const mainSha = git(["rev-parse", "origin/main"]).trim();
+  const layoutPath = relative(root, join(resolveRepoLayout(root, () => undefined).stateDir, "layout.json"));
+  const layoutEntry = git(["ls-tree", mainSha, "--", layoutPath]).trim();
+  if (layoutEntry !== "" && !/^100(?:644|755) blob /.test(layoutEntry)) {
+    throw new Error("complete evidence layout unavailable: canonical plan-source layout is not a regular file");
+  }
+  const layoutBytes = layoutEntry === "" ? undefined : git(["show", `${mainSha}:${layoutPath}`]);
+  const layout = resolveRepoLayout(root, () => layoutBytes);
+  const monolith = relative(root, layout.planMonolith), shards = relative(root, join(layout.planDir, "tasks.d"));
+  const monolithEntry = git(["ls-tree", mainSha, "--", monolith]).trim();
+  const shardsEntry = git(["ls-tree", mainSha, "--", shards]).trim();
+  if (!/^100(?:644|755) blob /.test(monolithEntry) || shardsEntry !== "" && !/^040000 tree /.test(shardsEntry)) {
+    throw new Error("complete evidence plan unavailable: canonical plan-source is missing or has an unsupported object type");
+  }
   const listing = git(["ls-tree", "-r", "--name-only", mainSha, "--", monolith, shards, "plan/feedback"]);
   const paths = listing.split("\n").filter(Boolean);
   if (!paths.includes(monolith)) throw new Error(`complete evidence plan unavailable: ${monolith} missing`);
-  const expectedPlan: Record<string, string> = { [monolith]: git(["rev-parse", `${mainSha}:${monolith}`]).trim(),
-    [shards]: "absent" };
-  if (paths.some((path) => path.startsWith(`${shards}/`))) expectedPlan[shards] = git(["rev-parse", `${mainSha}:${shards}`]).trim();
+  const expectedPlan: Record<string, string> = { [monolith]: monolithEntry.split(/[ \t]/)[2]!,
+    [shards]: shardsEntry === "" ? "absent" : shardsEntry.split(/[ \t]/)[2]! };
   const blobs = paths.filter((path) => path === monolith || (path.startsWith(`${shards}/`) && /\.ya?ml$/.test(path)))
     .map((path) => ({ label: `${mainSha}:${path}`, text: git(["show", `${mainSha}:${path}`]) }));
   const plan = mergePlanBlobs(blobs);

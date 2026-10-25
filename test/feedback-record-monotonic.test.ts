@@ -17,7 +17,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -503,5 +503,139 @@ test("private coverage carry: a pending revision is revalidated even when only t
     const tree = f.origin.git("ls-tree", "-r", LANDING_BRANCH, "--", f.rel);
     if (change === "deletion") assert.equal(tree, "");
     else assert.equal(parseYaml(readOnBranch(f.origin.dir, LANDING_BRANCH, f.rel)).status, "rejected");
+  }
+});
+
+
+test("coverage revisions cannot replace canonical plan pins with lookalike paths", async t => {
+  for (const source of ["monolith", "shards"] as const) for (const writer of ["disk", "content"] as const) {
+    await t.test(`${source}/${writer}`, t => {
+      const good = coverageSource(t);
+      const positive = fakeGh("https://github.com/o/r/pull/6090");
+      if (writer === "disk") writeFileSync(join(good.root.dir, good.rel), good.revision);
+      const accepted = withLiveWritesAllowed(() => writer === "disk"
+        ? landFeedback(good.root.dir, { gh: positive.gh })
+        : landFeedbackStatusContent(good.root.dir, good.rel, good.revision, { gh: positive.gh }));
+      assert.equal(accepted.landed, true, "the actual writer accepts the complete canonical context");
+      assert.ok(positive.calls.some(args => args[1] === "create"));
+
+      const f = coverageSource(t);
+      const canonical = source === "monolith" ? "plan/tasks.yaml" : "plan/tasks.d";
+      const lookalike = source === "monolith" ? "plan/not-the-plan/tasks.yaml" : "elsewhere/tasks.d";
+      if (source === "monolith") {
+        mkdirSync(join(f.seed.dir, "plan", "not-the-plan"), { recursive: true });
+        writeFileSync(join(f.seed.dir, lookalike), readOnBranch(f.origin.dir, "main", canonical));
+        f.publish();
+      }
+      const ctx = prepareEvidenceRecordContext(f.root.dir);
+      const revision = parseYaml(f.revision).evidence_coverage_revision;
+      const expectedPlan = { ...ctx.expectedPlan };
+      const priorCanonical = expectedPlan[canonical];
+      assert.ok(priorCanonical);
+      delete expectedPlan[canonical];
+      expectedPlan[lookalike] = source === "monolith" ? priorCanonical : "absent";
+      const malformedContext = buildEvidenceRevision({ ...revision, mainSha: ctx.mainSha, expectedPlan });
+      if (source === "monolith") writeFileSync(join(f.seed.dir, canonical), "# actual monolith moved\n[]\n");
+      else writeFileSync(join(f.seed.dir, "plan", "tasks.d", "actual-plan-moved.yaml"), "[]\n");
+      f.publish();
+      const negative = fakeGh("https://github.com/o/r/pull/6091");
+      if (writer === "disk") writeFileSync(join(f.root.dir, f.rel), malformedContext);
+      const result = withLiveWritesAllowed(() => writer === "disk"
+        ? landFeedback(f.root.dir, { gh: negative.gh })
+        : landFeedbackStatusContent(f.root.dir, f.rel, malformedContext, { gh: negative.gh }));
+      const observedCanonical = f.root.git("rev-parse", `origin/main:${canonical}`);
+      assert.notEqual(observedCanonical, priorCanonical, "the actual canonical plan source really moved");
+      t.diagnostic(JSON.stringify({ source, writer, positiveLanded: accepted.landed,
+        malformedLanded: result.landed, priorCanonical, observedCanonical }));
+      assert.equal(result.landed, false, "the real plan source moved while the supplied lookalike stayed unchanged");
+      assert.ok(result.refused?.some(row => row.path === f.rel));
+      assert.match(result.refused![0].reason, /canonical plan-source/);
+      assert.equal(negative.calls.length, 0, "a malformed canonical plan binding cannot create a PR");
+    });
+  }
+});
+
+function publishAlternateEvidenceLayout(f: ReturnType<typeof coverageSource>, shape = "valid") {
+  mkdirSync(join(f.seed.dir, ".remudero"), { recursive: true });
+  const path = join(f.seed.dir, ".remudero", "layout.json");
+  if (shape === "tree") {
+    mkdirSync(path);
+    writeFileSync(join(path, "entry"), "not a regular layout blob\n");
+  } else writeFileSync(path, shape === "valid"
+    ? JSON.stringify({ planDir: "elsewhere", planMonolith: "elsewhere/tasks.yaml" })
+    : shape === "array" ? "[]" : "{");
+  mkdirSync(join(f.seed.dir, "elsewhere", "tasks.d"), { recursive: true });
+  writeFileSync(join(f.seed.dir, "elsewhere", "tasks.yaml"), "[]\n");
+  writeFileSync(join(f.seed.dir, "elsewhere", "tasks.d", ".gitkeep"), "");
+  f.seed.git("add", ".");
+  f.publish();
+  assert.equal(existsSync(join(f.root.dir, ".remudero", "layout.json")), false, "the checkout intentionally retains its old layout");
+}
+
+test("coverage context and landing follow fetched layout instead of a stale checkout", t => {
+  for (const writer of ["disk", "content"] as const) {
+    const f = coverageSource(t);
+    publishAlternateEvidenceLayout(f);
+    const ctx = prepareEvidenceRecordContext(f.root.dir);
+    assert.deepEqual(Object.keys(ctx.expectedPlan).sort(), ["elsewhere/tasks.d", "elsewhere/tasks.yaml"]);
+    const revision = buildEvidenceRevision({ ...parseYaml(f.revision).evidence_coverage_revision,
+      mainSha: ctx.mainSha, expectedPlan: ctx.expectedPlan });
+    const api = fakeGh("https://github.com/o/r/pull/6092");
+    if (writer === "disk") writeFileSync(join(f.root.dir, f.rel), revision);
+    const result = withLiveWritesAllowed(() => writer === "disk" ? landFeedback(f.root.dir, { gh: api.gh })
+      : landFeedbackStatusContent(f.root.dir, f.rel, revision, { gh: api.gh }));
+    assert.equal(result.landed, true, JSON.stringify(result));
+    assert.ok(api.calls.some(args => args[1] === "create"), "positive control reaches actual PR preparation");
+  }
+});
+
+test("a fetched layout change cannot preserve obsolete plan pins in either evidence writer", t => {
+  for (const writer of ["disk", "content"] as const) {
+    const f = coverageSource(t);
+    publishAlternateEvidenceLayout(f);
+    const api = fakeGh("https://github.com/o/r/pull/6093");
+    if (writer === "disk") writeFileSync(join(f.root.dir, f.rel), f.revision);
+    const result = withLiveWritesAllowed(() => writer === "disk" ? landFeedback(f.root.dir, { gh: api.gh })
+      : landFeedbackStatusContent(f.root.dir, f.rel, f.revision, { gh: api.gh }));
+    assert.equal(result.landed, false, "unchanged old plan blobs cannot stand for newly selected canonical sources");
+    assert.match(result.refused![0].reason, /canonical plan-source/);
+    assert.equal(api.calls.length, 0);
+  }
+});
+
+test("unreadable fetched layouts refuse evidence context and both landing writers", t => {
+  for (const shape of ["malformed", "array", "tree"] as const) for (const writer of ["disk", "content"] as const) {
+    const f = coverageSource(t);
+    publishAlternateEvidenceLayout(f, shape);
+    assert.throws(() => prepareEvidenceRecordContext(f.root.dir), /layout|JSON|overrides/);
+    const api = fakeGh("https://github.com/o/r/pull/6094");
+    if (writer === "disk") writeFileSync(join(f.root.dir, f.rel), f.revision);
+    const result = withLiveWritesAllowed(() => writer === "disk" ? landFeedback(f.root.dir, { gh: api.gh })
+      : landFeedbackStatusContent(f.root.dir, f.rel, f.revision, { gh: api.gh }));
+    assert.equal(result.landed, false, `${shape}/${writer}: unavailable layout is UNKNOWN`);
+    assert.match(result.refused![0].reason, /canonical plan-source|expectation unreadable/);
+    assert.equal(api.calls.length, 0);
+  }
+});
+
+test("unsupported canonical plan objects cannot authorize an evidence revision", t => {
+  for (const form of ["monolith-link", "shards-link", "monolith-missing"] as const) for (const writer of ["disk", "content"] as const) {
+    const f = coverageSource(t);
+    const source = form === "shards-link" ? "plan/tasks.d" : "plan/tasks.yaml";
+    rmSync(join(f.seed.dir, source), { recursive: true });
+    if (form !== "monolith-missing") symlinkSync("[]", join(f.seed.dir, source));
+    f.publish();
+    assert.throws(() => prepareEvidenceRecordContext(f.root.dir), /canonical plan-source/);
+    const revision = parseYaml(f.revision).evidence_coverage_revision;
+    const forged = buildEvidenceRevision({ ...revision, mainSha: f.seed.git("rev-parse", "HEAD"),
+      expectedPlan: { ...revision.expectedPlan, [source]: form === "monolith-missing" ? revision.expectedPlan[source]
+        : f.seed.git("rev-parse", `HEAD:${source}`) } });
+    const api = fakeGh("https://github.com/o/r/pull/6095");
+    if (writer === "disk") writeFileSync(join(f.root.dir, f.rel), forged);
+    const result = withLiveWritesAllowed(() => writer === "disk" ? landFeedback(f.root.dir, { gh: api.gh })
+      : landFeedbackStatusContent(f.root.dir, f.rel, forged, { gh: api.gh }));
+    assert.equal(result.landed, false, `${form}/${writer}: an unsupported or missing canonical plan cannot authorize staging`);
+    assert.match(result.refused![0].reason, /unreadable canonical plan-source/);
+    assert.equal(api.calls.length, 0);
   }
 });
