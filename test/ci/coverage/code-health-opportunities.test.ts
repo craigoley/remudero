@@ -315,6 +315,15 @@ test("code health requires every configured analysis before treating quality evi
   assert.deepEqual(positive.componentIds, artifacts.map(artifact => artifact.scanId).sort(), "retain each original language analysis identity for independence checks");
   const zero = qualityScanFromCollectedEvidence({ ...value, source: { ok: true, alerts: [], analysisInstances: [] } });
   assert.equal(zero.state, "complete", "a zero-alert result has all required source-population controls"); assert.equal(zero.checks[0]!.met, true);
+  for (const category of ["security", "reliability"]) {
+    const urgent = structuredClone(value); urgent.source.alerts[0]!.ruleTags = ["quality", category];
+    const urgentScan = qualityScanFromCollectedEvidence(urgent);
+    assert.equal(urgentScan.findings.length, 1, "urgent CodeQL findings outside maintainability stay visible");
+    assert.equal(urgentScan.findings[0]!.category, category); assert.equal(urgentScan.findings[0]!.severity, "high");
+    assert.equal(urgentScan.checks[0]!.met, true, "urgent findings do not redefine the declared maintainability check");
+    const assessmentInput = input(); assessmentInput.scans[0] = { ...urgentScan, checks: [{ ...urgentScan.checks[0]!, id: "quality" }] };
+    assert.equal(buildCodeHealthOpportunities(assessmentInput).length, 0, "existing security/reliability intake keeps ownership; no duplicate maintainability proposal");
+  }
   const missing = qualityScanFromCollectedEvidence({ ...value, artifacts: artifacts.slice(0, 2) });
   assert.equal(missing.state, "partial"); assert.equal(missing.findings.length, 1);
   const foreign = structuredClone(value); foreign.artifacts[0]!.repository = "acme/foreign";
