@@ -1,0 +1,42 @@
+- id: W1-T10615
+  title: Connect product onboarding and plan handoff to the existing guarded target-repo builder
+  repo: remudero
+  depends_on:
+    - W1-T10612
+    - W1-T10613
+    - W1-T10614
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: operator-request#wreckterra-console-product-2026-10-25
+  plan_refs:
+    - W1-T4264
+    - W1-T4265
+    - W1-T4266
+    - W1-T4657
+    - W1-T4658
+    - W1-T4694
+  files:
+    - src/lib/product-build.ts
+    - src/lib/product-routes.ts
+    - src/lib/serve.ts
+    - test/infra/product-build.test.ts
+  status: queued
+  attempts: 0
+  rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required.
+  design: Compose repository readiness, actual executable test/profile acceptance, persisted approved task-plan identity and the existing runnable selector/admission into a high-tier product build action. Reuse the actual target-repository bounded drain/kick mechanism; no new shell interpreter, raw browser command, alternate worker launcher or detached fallback. Verify repo ID, owner, branch/head, task provenance, claims, merged credit, target runner and inherited budget immediately before action. Record acknowledged/queued/admitted/running independently, link real run/PR evidence and never call queued work building. Missing permission, capacity, installation, runner or target remains actionable blocked/unknown. Wreckterra is the first target. Enroll a target only with verifiable baseline/runner receipts; reviewed registry/shadow promotion remains separate. Preserve all active slots and jobs.
+  acceptance:
+    - claim: product build refuses missing runner claims and stale task ownership
+      proof: "unit test: W1-T10615: product build refuses missing runner claims and stale task ownership"
+    - claim: a product build starts through the admitted target repository path
+      proof: "unit test: W1-T10615: a product build starts through the admitted target repository path"
+    - claim: queued and refused product work never reads as running
+      proof: "unit test: W1-T10615: queued and refused product work never reads as running"
+    - claim: the production route calls the product mechanism
+      proof: "grep: productBuildOperation( in src/lib/product-routes.ts"
+  falsifier: Remove the named ownership, idempotency, evidence or refusal guard independently. Its corresponding behavioral proof must fail against the same fixture and pass when restored. Test real durable files/default transport boundaries plus each catch arm; never a zero-test wrapper result. Keep initial live read/write/dispatch/deployment receipts separate from fixtures.
