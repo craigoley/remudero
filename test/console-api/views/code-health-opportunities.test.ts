@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { join } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { withTempDir } from "#src/lib/tmp.js";
 import { inboxThreadId } from "#src/lib/inbox-thread.js";
@@ -10,7 +10,7 @@ import * as store from "#src/lib/code-health-store.js";
 
 function roster(dir: string) {
   const repository = "acme/atlas", instance = "atlas", root = join(dir, "atlas"); mkdirSync(join(root, "state"), { recursive: true }); mkdirSync(join(dir, "read-model"));
-  writeFileSync(join(dir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [{ instanceId: instance, options: { controlRoot: root, ledgerPath: join(root, "state", "ledger.ndjson") } }], improvementEvidence: { version: "repository-evidence-inventory-v1", measurementState: "not_collected", repositories: [{ repository, instanceIds: [instance], expectedQualitySources: ["quality", "coverage"] }], unresolvedInstances: [] } }));
+  writeFileSync(join(dir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [{ instanceId: instance, options: { controlRoot: root, ledgerPath: join(root, "state", "ledger.ndjson") } }], improvementEvidence: { version: "repository-evidence-inventory-v1", measurementState: "not_collected", repositories: [{ repository, instanceIds: [instance], expectedDailySources: ["pull_requests", "ledger_activity", "deployments"], expectedQualitySources: ["quality", "coverage"] }], unresolvedInstances: [] } }));
   return { repository, instance, root, inventory: readCodeHealthInventory(dir) };
 }
 
@@ -42,5 +42,21 @@ test("code health related work joins isolated improvement outcomes to the origin
     assert(!result.work.some(row => row.proposalId === "improvement:one"), "the finding group is the join key; the planning proposal is separate");
     assert.notEqual(locate(dir, repository, instance), locate(dir, repository, "another-instance"));
     assert.throws(() => locate(dir, repository, "../other"));
+  });
+});
+
+
+test("code health refuses contradictory configured source expectations", async () => {
+  await withTempDir("code-health-inventory-contract", dir => {
+    const configured = roster(dir); assert.equal(configured.inventory.repositories.length, 1);
+    const path = join(dir, "read-model", "repositories-sources.json"), valid = JSON.parse(readFileSync(path, "utf8"));
+    for (const mutate of [
+      (value: typeof valid) => { value.improvementEvidence.measurementState = "measured"; },
+      (value: typeof valid) => { value.improvementEvidence.repositories[0].expectedDailySources = []; },
+      (value: typeof valid) => { value.improvementEvidence.repositories.push({ ...value.improvementEvidence.repositories[0], repository: "acme/foreign" }); },
+    ]) {
+      const changed = structuredClone(valid); mutate(changed); writeFileSync(path, JSON.stringify(changed));
+      assert.throws(() => readCodeHealthInventory(dir), /configured repository list/, "an invalid scope must not publish another portfolio");
+    }
   });
 });

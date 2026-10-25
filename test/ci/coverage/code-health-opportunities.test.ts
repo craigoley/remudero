@@ -755,7 +755,7 @@ test("code health background collection is leased, daily, restart-aware and inde
     const clock = clockFromMillisFn(() => now), repository = "acme/atlas";
     mkdirSync(join(stateDir, "read-model"));
     writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ improvementEvidence: {
-      version: "repository-evidence-inventory-v1", measurementState: "not_collected", unresolvedInstances: [], repositories: [{ repository, instanceIds: ["atlas"], expectedQualitySources: ["quality", "coverage"] }] } }));
+      version: "repository-evidence-inventory-v1", measurementState: "not_collected", unresolvedInstances: [], repositories: [{ repository, instanceIds: ["atlas"], expectedDailySources: ["pull_requests", "ledger_activity", "deployments"], expectedQualitySources: ["quality", "coverage"] }] } }));
     const config = { stateDir, instances: [{ name: "atlas", stateDir: join(stateDir, "legacy-atlas"), repository }] };
     const calls: Parameters<typeof collectCodeHealth>[0][] = [];
     const opts = { clock, captureOwnership: () => { const started = owned; return () => started && owned; }, ownsInstance: (name: string) => name === "atlas" && owned, log: () => {},

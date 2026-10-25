@@ -199,7 +199,7 @@ test("code health cached view preserves scope, pinned pages and saved source clo
     mkdirSync(join(stateDir, "read-model"));
     writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [], improvementEvidence: {
       version: "repository-evidence-inventory-v1", measurementState: "not_collected", unresolvedInstances: ["unresolved"],
-      repositories: ["acme/atlas", "acme/missing"].map(repository => ({ repository, instanceIds: [repository], expectedDailySources: [], expectedQualitySources: ["quality", "coverage"] })) } }));
+      repositories: ["acme/atlas", "acme/missing"].map(repository => ({ repository, instanceIds: [repository], expectedDailySources: ["pull_requests", "ledger_activity", "deployments"], expectedQualitySources: ["quality", "coverage"] })) } }));
     const value = input();
     value.scans[0]!.findings = Array.from({ length: 205 }, (_, i) => ({ ...finding(), id: String(i + 1), severity: i === 204 ? "critical" : "low" }));
     const now = Date.parse("2026-11-02T06:00:00.000Z"), clock = fixedClock(now);
@@ -295,7 +295,7 @@ test("code health consolidated view stays within the existing source limit witho
   const { readCodeHealthReport } = await import("#src/lib/code-health-view.js");
   await withTempDir("code-health-portfolio", stateDir => {
     mkdirSync(join(stateDir, "read-model"));
-    const repositories = Array.from({ length: 256 }, (_, n) => ({ repository: `acme/repo-${n}`, instanceIds: [`instance-${n}`], expectedQualitySources: ["quality", "coverage"] }));
+    const repositories = Array.from({ length: 256 }, (_, n) => ({ repository: `acme/repo-${n}`, instanceIds: [`instance-${n}`], expectedDailySources: ["pull_requests", "ledger_activity", "deployments"], expectedQualitySources: ["quality", "coverage"] }));
     writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ improvementEvidence: {
       version: "repository-evidence-inventory-v1", measurementState: "not_collected", unresolvedInstances: [], repositories } }));
     const report = readCodeHealthReport({ stateDir, params: new URLSearchParams(), now: Date.parse("2026-11-02T06:00:00.000Z") });
