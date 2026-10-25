@@ -1012,6 +1012,28 @@ function loadGitSpawnShapes() {
   return gitSpawnShapesModule;
 }
 
+/**
+ * W1-T10191: the reach ratchet's own graph builder (src/lib/affected-suites.ts) is loaded the same way as
+ * git-spawn-shapes above: on demand, with a kept load failure rather than one thrown at import time. A sparse
+ * census fixture (e.g. test/a-census-this-branch-grows-is-refused-before-the-push.test.ts) copies only the
+ * handful of files census-precheck.mjs is known to need, so a NEW static top-level import of a src/lib module
+ * that fixture never copies would crash every such fixture at module load — this must stay lazy.
+ */
+let affectedSuitesModule = null;
+let affectedSuitesError = null;
+try {
+  affectedSuitesModule = await import("../src/lib/affected-suites.ts");
+} catch (e) {
+  affectedSuitesError = e;
+}
+
+function loadAffectedSuitesGraph() {
+  if (affectedSuitesModule === null) {
+    throw new Error(`affected-suites graph builder (src/lib/affected-suites.ts) could not be loaded: ${affectedSuitesError?.message ?? affectedSuitesError}`);
+  }
+  return affectedSuitesModule;
+}
+
 /** True when the diff touches the leaf, the census, or the shared shapes, or adds a src/ git spawn of any shape the census counts. */
 export function gitSpawnTrigger(input, load = loadGitSpawnShapes) {
   const shapes = load();
@@ -1441,7 +1463,94 @@ function runCausedCensusSuites({ root, files, mergeBase, runSuites, ...optionsFo
 }
 
 const SNAPSHOT_REACH = "test/the-affected-suite-reach-ratchet.test.ts";
+const AFFECTED_REACH_BASELINE_PATH = "scripts/affected-reach-baseline.json";
+const AFFECTED_REACH_SUITE_RE = /^test\/.*\.test\.ts$/;
+const AFFECTED_REACH_CODE_RE = /\.(?:ts|mts|mjs|js|cjs)$/;
 const GIT_NAME_RE = /^git(?:[-.]|$)/;
+
+/**
+ * W1-T10191: fix_refusal:census-precheck cost 19.2 PR-minute(s) across 10 round(s) on 9 PRs; two of the cited
+ * rounds (#12700, #12830) were SNAPSHOT_REACH refusing a push for growing its reach, naming the grown metrics
+ * and the new importer names in its assertion message but never the exact replacement JSON — so a dev had to
+ * hand-compute scripts/affected-reach-baseline.json's three metrics and its sorted importers array, which cost
+ * a SECOND round when the hand-computed patch did not match exactly. This takes the same measurement the
+ * ratchet test itself takes (buildAffectedSuitesGraph, src/lib/affected-suites.ts), so the printed patch below
+ * is correct on the first try.
+ */
+export function measureAffectedReach(files, load = loadAffectedSuitesGraph) {
+  const { buildAffectedSuitesGraph } = load();
+  const { dependencies, importers: reverse, directImports } = buildAffectedSuitesGraph(files);
+  const suites = [...dependencies.keys()].filter((f) => AFFECTED_REACH_SUITE_RE.test(f));
+  const modules = [...dependencies.keys()].filter((f) => f.startsWith("src/"));
+  if (suites.length === 0 || modules.length === 0) throw new Error("the census needs source modules and suites");
+  const importers = suites.filter((f) => directImports.get(f)?.has("src/run-task.ts")).sort();
+  const reachable = (start) => {
+    const seen = new Set();
+    const queue = [start];
+    for (let i = 0; i < queue.length; i += 1) {
+      const file = queue[i];
+      if (seen.has(file)) continue;
+      seen.add(file);
+      queue.push(...(reverse.get(file) ?? []));
+    }
+    return seen;
+  };
+  const reach = modules.map((f) => [...reachable(f)].filter((p) => AFFECTED_REACH_SUITE_RE.test(p)).length)
+    .sort((a, b) => a - b);
+  const middle = Math.floor(reach.length / 2);
+  const median = reach.length % 2 === 0 ? (reach[middle - 1] + reach[middle]) / 2 : reach[middle];
+  const seen = new Set();
+  const order = [];
+  const visit = (file) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    for (const dep of dependencies.get(file) ?? []) visit(dep);
+    order.push(file);
+  };
+  for (const file of dependencies.keys()) visit(file);
+  seen.clear();
+  let largestScc = 0;
+  for (const file of order.reverse()) {
+    if (seen.has(file)) continue;
+    const component = new Set();
+    const queue = [file];
+    for (let i = 0; i < queue.length; i += 1) {
+      const node = queue[i];
+      if (seen.has(node)) continue;
+      seen.add(node);
+      component.add(node);
+      queue.push(...(reverse.get(node) ?? []));
+    }
+    largestScc = Math.max(largestScc, component.size);
+  }
+  return { importerCount: importers.length, largestScc, medianReachPercent: median * 100 / suites.length, importers };
+}
+
+/** The exact scripts/affected-reach-baseline.json text to record `measured`: every field `recorded` already
+ *  carries (its `_comment`) stays, only the three metrics and the importers list move to the measured values. */
+export function affectedReachBaselinePatch(measured, recorded) {
+  return `${JSON.stringify({ ...recorded, importerCount: measured.importerCount, largestScc: measured.largestScc,
+    medianReachPercent: measured.medianReachPercent, importers: measured.importers }, null, 2)}\n`;
+}
+
+/** Reads the tracked src/scripts/bin/test code tree at `root` — the same population the reach ratchet walks. */
+function readAffectedReachTree(root) {
+  const paths = gitOut(root, ["ls-files", "--", "src", "scripts", "bin", "test"]).trim().split("\n")
+    .filter((p) => /^(?:src|scripts|bin|test)\//.test(p) && AFFECTED_REACH_CODE_RE.test(p));
+  return new Map(paths.map((p) => [p, readFileSync(join(root, p), "utf8")]));
+}
+
+/** Best-effort only: a failure to print the exact patch must never turn a measurable push into an unmeasured
+ *  one, so every error is swallowed into a diagnostic line instead of thrown. */
+export function reportAffectedReachExactBaseline(root, report = (line) => console.log(line)) {
+  try {
+    const measured = measureAffectedReach(readAffectedReachTree(root));
+    const recorded = JSON.parse(readFileSync(join(root, AFFECTED_REACH_BASELINE_PATH), "utf8"));
+    report(`affected-reach-exact-baseline: ${AFFECTED_REACH_BASELINE_PATH}:\n${affectedReachBaselinePatch(measured, recorded)}`);
+  } catch (e) {
+    report(`census-precheck: affected-reach exact baseline NOT PRINTED - ${String(e?.message ?? e)}`);
+  }
+}
 
 /** W1-T9484: the suites a snapshot-mode round can run with no git, declared `gitFree: true` on their census row. */
 export function gitFreeCensusSuites() {
@@ -1640,6 +1749,12 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       },
     });
     violations.push(...suites.violations);
+    // W1-T10191: SNAPSHOT_REACH's refusal names the grown metrics but never the exact replacement JSON, so a
+    // dev had to hand-derive scripts/affected-reach-baseline.json across a second round (#12700, #12830).
+    // Printing the exact patch here, next to the refusal, lets it be applied in the SAME round it is seen in.
+    if (!snapshot && suites.violations.some((v) => v.startsWith(`census-suite: ${SNAPSHOT_REACH} fails`))) {
+      reportAffectedReachExactBaseline(root, (line) => console.error(line));
+    }
     const suiteReasons = [...(suites.unmeasured === null ? [] : [suites.unmeasured]), ...snapshotUnmeasured];
     // W1-T9919: time-bound only when every unmeasured cause is a head child stopped on the backstop. A merge-base
     // run's stop is rewrapped without the mark: its head already failed a suite, so that stays a refusal.
