@@ -524,7 +524,6 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
     if (view.currentRequestId !== input.requestId || view.goalDigest !== input.goalDigest) return fail("conflict", "The goal changed. Review the latest conversation before continuing.");
     const source = sourceFor(intent.request, intent.scope, deps); if ("state" in source) return source;
     if (kind === "file" && (view.correspondence.state !== "linked" || view.correspondence.pendingInputs !== 0 || view.correspondence.pendingWork !== 0)) return fail("conflict", "A newer chat message has not been resolved. Review its answer and the current draft before filing.");
-    if (kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== input.draftDigest)) return fail("conflict", "Review the current completed draft before requesting filing.");
     if (deps.launchAction === undefined) return fail("source_unavailable", "This repository cannot start plan drafting or filing right now. No action was requested.");
     const action: ImprovementAction = previous ?? { version: "improvement-action-v1", operationId, kind, requestId: input.requestId, proposalId: intent.proposalId,
       actorId: deps.actorId, payloadHash, goalDigest: input.goalDigest, draftDigest: input.draftDigest ?? null, requestedAt: (deps.clock ?? systemClock).iso(), state: "requested", reason: null, receipt: null };
