@@ -197,8 +197,12 @@ export interface CollectCodeHealthOptions {
 export async function collectCodeHealth(opts: CollectCodeHealthOptions): Promise<ReturnType<typeof publishCodeHealthSnapshot>> {
   const clock = opts.clock ?? systemClock, startedAt = clock.iso();
   const previous = readCodeHealthSnapshot(opts.stateDir, opts.repository);
-  if (previous.state === "unavailable") return previous;
+  if (previous.state === "unavailable") return { state: "unavailable", reason: previous.reason };
   const expectedSnapshotId = previous.state === "observed" ? previous.snapshot.snapshotId : null;
+  const failed = (reason: string): ReturnType<typeof publishCodeHealthSnapshot> => {
+    const status = recordCodeHealthCollectionFailure({ stateDir: opts.stateDir, repository: opts.repository, expectedSnapshotId, startedAt, reason, clock });
+    return status.state === "recorded" ? { state: "unavailable", reason } : status;
+  };
   try {
     const read = await (opts.readQualityEvidence ?? readCodeHealthQualityEvidence)(opts.repository);
     const [owner, repo] = opts.repository.split("/") as [string, string];
@@ -219,12 +223,10 @@ export async function collectCodeHealth(opts: CollectCodeHealthOptions): Promise
       scans.push({ kind: "coverage", repository: opts.repository, scanId: "unavailable:coverage", analyzedSha: "", observedAt: "", state: "unavailable",
         scopeHash: null, toolVersion: null, rulesVersion: null, configHash: null, exclusions: [], reason: coverage.reason, checks: [], findings: [] });
     }
-    const input = prepareCodeHealthCollection({ repository: opts.repository, currentSha: read.currentSha, observedAt: startedAt, scans, previous: old });
-    return publishCodeHealthSnapshot({ stateDir: opts.stateDir, input, expectedSnapshotId, clock });
+    const input = prepareCodeHealthCollection({ repository: opts.repository, currentSha: read.currentSha, observedAt: clock.iso(), scans, previous: old });
+    const result = publishCodeHealthSnapshot({ stateDir: opts.stateDir, input, expectedSnapshotId, clock });
+    return "reason" in result && result.state === "unavailable" ? failed(result.reason) : result;
   } catch {
-    const reason = "The latest code check results could not be loaded or verified. Any earlier results are still available.";
-    const status = recordCodeHealthCollectionFailure({ stateDir: opts.stateDir, repository: opts.repository, expectedSnapshotId, startedAt, reason, clock });
-    if (status.state === "superseded" || status.state === "busy") return { state: status.state, reason: status.reason };
-    return { state: "unavailable", reason: status.state === "unavailable" ? status.reason : reason };
+    return failed("The latest code check results could not be loaded or verified. Any earlier results are still available.");
   }
 }
