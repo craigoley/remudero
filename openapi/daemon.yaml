@@ -8700,6 +8700,7 @@ components:
         - opportunities
         - relatedWorkState
         - relatedWorkAsOf
+        - relatedWorkReason
         - planningAvailable
         - freshness
         - page
@@ -9323,6 +9324,10 @@ components:
           anyOf:
             - type: string
               format: date-time
+            - type: "null"
+        relatedWorkReason:
+          anyOf:
+            - type: string
             - type: "null"
         planningAvailable:
           type: boolean
