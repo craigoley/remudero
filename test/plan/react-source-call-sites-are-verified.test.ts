@@ -6,7 +6,7 @@ type Task = Parameters<typeof callSiteViolations>[0];
 function task(files: string[], proofs: string[]): Task {
   return { id: "W1-T10649", title: "Connect the implemented mechanism to the game", repo: "remudero",
     depends_on: [], type: "implement", verify: "auto", files,
-    acceptance: proofs.map((proof) => ({ claim: "the runtime consumes the mechanism", proof })) } as Task;
+    acceptance: proofs.map((proof) => ({ claim: "the runtime consumes the mechanism", proof })) } as unknown as Task;
 }
 const held = (...files: string[]) => (path: string) => files.includes(path);
 
