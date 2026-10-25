@@ -342,12 +342,13 @@ test("a declaration arriving after discovery holds an external worktree's siblin
     const probe = `import importlib.util, os, sys
 spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 original = m.process_snapshot
+external = sys.argv[3]
 calls = 0
 def snapshot():
     global calls
     calls += 1
     if calls == 2:
-        open(os.path.join(sys.argv[3], ".rmd-janitor-keep"), "w").close()
+        open(os.path.join(external, ".rmd-janitor-keep"), "w").close()
     return original()
 m.process_snapshot = snapshot
 home, now = sys.argv[2], sys.argv[4]
