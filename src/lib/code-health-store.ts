@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { acquireInflightLock, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { projectCodeHealth, validateCodeHealthProvenance, type CodeHealthProjectionInput, type CodeHealthScan, type CodeHealthSourceProvenance } from "./code-health-projection.js";
 
 function canonicalCodeHealthValue(value: unknown): unknown {
@@ -226,6 +226,60 @@ export type CodeHealthCollectionFailureRead = { state: "none" }
   | { state: "failed"; startedAt: string; finishedAt: string; snapshotId: string | null; reason: string }
   | { state: "unavailable"; reason: string };
 
-export function readCodeHealthCollectionFailure(_stateDir: string, _repository: string): CodeHealthCollectionFailureRead {
-  return { state: "none" };
+interface CodeHealthCollectionFailure {
+  version: "code-health-collection-failure-v1";
+  repository: string;
+  snapshotId: string | null;
+  startedAt: string;
+  finishedAt: string;
+  reason: string;
+}
+const codeHealthFailureTime = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)) && fixedClock(Date.parse(value)).iso() === value;
+
+export function readCodeHealthCollectionFailure(stateDir: string, repository: string): CodeHealthCollectionFailureRead {
+  try {
+    const raw = boundedEvidenceJson(join(stateDir, "code-health", "collection-failure.json"), 4096) as CodeHealthCollectionFailure & { contentHash: string };
+    const { contentHash, ...sealed } = raw;
+    if (!raw || Object.keys(raw).sort().join(",") !== "contentHash,finishedAt,reason,repository,snapshotId,startedAt,version" ||
+        raw.version !== "code-health-collection-failure-v1" || raw.repository !== repository.toLowerCase() || contentHash !== evidenceDigest(sealed) ||
+        !(raw.snapshotId === null || /^[a-f0-9]{64}$/.test(raw.snapshotId)) || !codeHealthFailureTime(raw.startedAt) || !codeHealthFailureTime(raw.finishedAt) ||
+        Date.parse(raw.startedAt) > Date.parse(raw.finishedAt) || typeof raw.reason !== "string" || !raw.reason || raw.reason.length > 2048 || raw.reason.includes("\0"))
+      throw new Error("Code health refresh status is invalid.");
+    const pointer = evidencePointer(stateDir);
+    if (pointer && pointer.repository !== repository.toLowerCase()) throw new Error("Code health refresh status belongs to another repository.");
+    if ((pointer?.snapshotId ?? null) !== raw.snapshotId || pointer && Date.parse(pointer.attemptAt) > Date.parse(raw.startedAt)) return { state: "none" };
+    return { state: "failed", startedAt: raw.startedAt, finishedAt: raw.finishedAt, snapshotId: raw.snapshotId, reason: raw.reason };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? { state: "none" }
+      : { state: "unavailable", reason: "The latest refresh status could not be read. Saved code check results were retained." };
+  }
+}
+
+/** A failed refresh is operational status. It never replaces, renews, or erases measured evidence. */
+export function recordCodeHealthCollectionFailure(opts: { stateDir: string; repository: string; expectedSnapshotId: string | null; startedAt: string; reason: string; clock?: import("./clock.js").Clock }):
+  { state: "recorded" } | { state: "busy" | "superseded" | "unavailable"; reason: string } {
+  let lock: InflightLockHandle | undefined, owns: (() => boolean) | undefined;
+  try {
+    const finishedAt = (opts.clock ?? systemClock).iso();
+    if (!/^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/i.test(opts.repository) ||
+        !(opts.expectedSnapshotId === null || /^[a-f0-9]{64}$/.test(opts.expectedSnapshotId)) || !codeHealthFailureTime(opts.startedAt) ||
+        !codeHealthFailureTime(finishedAt) || Date.parse(opts.startedAt) > Date.parse(finishedAt) || !opts.reason || opts.reason.length > 2048 || opts.reason.includes("\0")) throw new Error("Invalid code health refresh status.");
+    lock = codeHealthPublicationLock(opts.stateDir);
+    if (!lock) return { state: "busy", reason: "Another code health publication is active or its ownership is unknown." };
+    owns = codeHealthPublicationOwnership(lock);
+    const pointer = evidencePointer(opts.stateDir);
+    if (pointer && pointer.repository !== opts.repository.toLowerCase()) throw new Error("Code health publication belongs to another repository.");
+    if ((pointer?.snapshotId ?? null) !== opts.expectedSnapshotId || pointer && Date.parse(pointer.attemptAt) > Date.parse(opts.startedAt))
+      return { state: "superseded", reason: "A newer successful refresh already saved its results." };
+    const prior = readCodeHealthCollectionFailure(opts.stateDir, opts.repository);
+    if (prior.state === "unavailable") throw new Error("Previous refresh status is unavailable.");
+    if (prior.state === "failed" && Date.parse(prior.startedAt) > Date.parse(opts.startedAt)) return { state: "superseded", reason: "A newer collection attempt already reported its outcome." };
+    const sealed: CodeHealthCollectionFailure = { version: "code-health-collection-failure-v1", repository: opts.repository.toLowerCase(), snapshotId: opts.expectedSnapshotId,
+      startedAt: opts.startedAt, finishedAt, reason: opts.reason };
+    const root = join(opts.stateDir, "code-health");
+    if (!writeAtomic(join(root, "collection-failure.json"), JSON.stringify({ ...sealed, contentHash: evidenceDigest(sealed) }), { mode: 0o600, beforeRename: owns })) throw new Error("Code health refresh status ownership changed.");
+    syncEvidenceDirectory(root); syncEvidenceDirectory(opts.stateDir);
+    return { state: "recorded" };
+  } catch { return { state: "unavailable", reason: "The failed refresh status could not be saved safely. Earlier evidence was retained." }; }
+  finally { if (lock && owns?.()) lock.release(); }
 }

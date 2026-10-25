@@ -3,9 +3,11 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { ghTextAsync } from "./github-transport.js";
 import { withTempDir } from "./tmp.js";
-import { readCodeHealthArtifactJson } from "./code-health-store.js";
+import { readCodeHealthArtifactJson, readCodeHealthSnapshot, readCodeHealthCoverageSource, publishCodeHealthSnapshot, recordCodeHealthCollectionFailure } from "./code-health-store.js";
+import { qualityScanFromCollectedEvidence } from "./codeql-quality-intake.js";
+import { readCodeScanningAlerts } from "./ops.js";
 import { isDeepStrictEqual } from "node:util";
-import { fixedClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { CODE_HEALTH_SOURCE_KINDS } from "./code-health-contract.js";
 import { projectCodeHealth, independentCodeHealthScans, compareCodeHealthScanPair, codeHealthFindingFingerprint, codeHealthFindingFixedAfter, codeHealthSeverityAtLeast, type CodeHealthProjectionInput, type CodeHealthScan } from "./code-health-projection.js";
 
@@ -192,6 +194,37 @@ export interface CollectCodeHealthOptions {
   readQualityEvidence?: typeof readCodeHealthQualityEvidence;
 }
 
-export async function collectCodeHealth(_opts: CollectCodeHealthOptions): Promise<ReturnType<typeof import("./code-health-store.js").publishCodeHealthSnapshot>> {
-  throw new Error("Code health has not been collected.");
+export async function collectCodeHealth(opts: CollectCodeHealthOptions): Promise<ReturnType<typeof publishCodeHealthSnapshot>> {
+  const clock = opts.clock ?? systemClock, startedAt = clock.iso();
+  const previous = readCodeHealthSnapshot(opts.stateDir, opts.repository);
+  if (previous.state === "unavailable") return previous;
+  const expectedSnapshotId = previous.state === "observed" ? previous.snapshot.snapshotId : null;
+  try {
+    const read = await (opts.readQualityEvidence ?? readCodeHealthQualityEvidence)(opts.repository);
+    const [owner, repo] = opts.repository.split("/") as [string, string];
+    const source = opts.source ?? readCodeScanningAlerts(owner, repo, { includeAnalysisInstances: true });
+    const old = previous.state === "observed" ? previous.snapshot.input : null;
+    const knownFindingIds = [...new Set((old ? [...old.scans, ...(old.baseline?.scans ?? []), ...(old.retainedEvidence ?? []).map(entry => entry.scan)] : [])
+      .filter(scan => scan.kind === "quality").flatMap(scan => scan.findings.map(finding => finding.id)))];
+    const quality = qualityScanFromCollectedEvidence({ ...read.quality, repository: opts.repository, source, knownFindingIds });
+    const coverage = readCodeHealthCoverageSource(opts.coverageStateDir ?? opts.stateDir, opts.repository);
+    const scans: CodeHealthScan[] = [quality];
+    if (coverage.state === "observed") {
+      const p = coverage.provenance;
+      if (p.kind !== "coverage" || !p.check || !p.measurement) throw new Error("Coverage source evidence is incomplete.");
+      scans.push({ kind: "coverage", repository: p.repository, scanId: p.scanId, componentIds: [p.scanId], analyzedSha: p.analyzedSha, observedAt: p.observedAt,
+        state: p.state, scopeHash: p.scope.hash, toolVersion: p.toolVersion, rulesVersion: p.rulesVersion, configHash: p.configHash, exclusions: p.exclusions,
+        reason: p.reasons.length ? p.reasons.join(" ") : null, checks: [p.check], findings: [], measurement: p.measurement });
+    } else if (coverage.state === "unavailable") {
+      scans.push({ kind: "coverage", repository: opts.repository, scanId: "unavailable:coverage", analyzedSha: "", observedAt: "", state: "unavailable",
+        scopeHash: null, toolVersion: null, rulesVersion: null, configHash: null, exclusions: [], reason: coverage.reason, checks: [], findings: [] });
+    }
+    const input = prepareCodeHealthCollection({ repository: opts.repository, currentSha: read.currentSha, observedAt: startedAt, scans, previous: old });
+    return publishCodeHealthSnapshot({ stateDir: opts.stateDir, input, expectedSnapshotId, clock });
+  } catch {
+    const reason = "The latest code check results could not be loaded or verified. Any earlier results are still available.";
+    const status = recordCodeHealthCollectionFailure({ stateDir: opts.stateDir, repository: opts.repository, expectedSnapshotId, startedAt, reason, clock });
+    if (status.state === "superseded" || status.state === "busy") return { state: status.state, reason: status.reason };
+    return { state: "unavailable", reason: status.state === "unavailable" ? status.reason : reason };
+  }
 }
