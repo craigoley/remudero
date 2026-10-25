@@ -155,6 +155,14 @@ const CHMOD_REMEDY =
  */
 const DECLARED: readonly Declared[] = [
   {
+    kind: "chmod", file: "infra/product-intents.test.ts", key: "0o644", count: 1,
+    reason: "The product store explicitly rejects group/world-readable stat modes before reading private state. This tests mode classification, not OS access denial, so the refusal holds for every uid.",
+  },
+  {
+    kind: "chmod", file: "infra/product-intents.test.ts", key: "0o600", count: 1,
+    reason: "Restores the product state fixture to private mode so subsequent corruption and symlink controls reach their own guards. No assertion depends on an OS permission denial or root skip.",
+  },
+  {
     kind: "chmod", file: "ci/suites/a-dead-test-slot-owner-is-proven-ended-by-its-scope.test.ts", key: "0o644", count: 2,
     reason: "The shared-slot fixture must have a public mode bit for the reader to select legacy recovery. This tests explicit mode classification, not an OS access denial, and works at every uid.",
   },

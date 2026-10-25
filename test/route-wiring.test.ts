@@ -304,6 +304,8 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([
+  // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts, W1-T10612 identity/mount test.
+  "POST /v1/products",
   "POST /v1/control/assistant-action",
   "POST /v1/control/stop",
   "POST /v1/control/resume",
@@ -495,6 +497,25 @@ test("every declared write route is either wiring-tested here or listed as expli
 });
 
 // ── 1. STOP — the highest-consequence control ────────────────────────────────
+
+test("POST /v1/products persists only the verified operator's brief under the fleet root", async () => {
+  await withProductionServer(async (h) => {
+    const command = { version: "product-intent-v1", requestId: "wiring-product-0001", expectedRevision: 0,
+      brief: { idea: "private product wiring fixture" } };
+    assert.equal((await post(h.base, "/v1/products", command)).status, 403);
+    const headers = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json",
+      [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+    const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify(command) });
+    assert.equal(saved.status, 200);
+    const { receipt } = await saved.json() as { receipt: { productId: string } };
+    const own = await fetch(`${h.base}/v1/products?id=${receipt.productId}`, { headers });
+    assert.equal(own.status, 200);
+    assert.equal((await own.json()).product.brief.idea, command.brief.idea);
+    assert.ok(existsSync(join(h.fleetRoot, "state/products/v1")));
+    assert.ok(!existsSync(join(h.questionsRoot, "state/products")));
+    assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "saving a draft preserves the ledger");
+  }, true);
+});
 
 test("POST /v1/control/assistant-action binds a verified operator to the fleet root and ledger", async () => {
   await withProductionServer(async (h) => {
