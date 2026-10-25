@@ -5,7 +5,7 @@ import { acquireInflightLock, parseInflightLockInfo, type InflightLockHandle } f
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { systemClock } from "./clock.js";
-import { projectCodeHealth, type CodeHealthProjectionInput, type CodeHealthScan } from "./code-health-projection.js";
+import { projectCodeHealth, validateCodeHealthProvenance, type CodeHealthProjectionInput, type CodeHealthScan, type CodeHealthSourceProvenance } from "./code-health-projection.js";
 
 function canonicalCodeHealthValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalCodeHealthValue);
@@ -104,6 +104,15 @@ function codeHealthPublicationLock(stateDir: string): InflightLockHandle | undef
   try { return acquire(); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return undefined; throw error; }
 }
+function codeHealthPublicationOwnership(lock: InflightLockHandle): () => boolean {
+  const held = lstatSync(lock.path), identity = { ...lock.info }, lockPath = lock.path;
+  return () => {
+    try {
+      const now = lstatSync(lockPath), info = boundedEvidenceJson(lockPath, 4096);
+      return now.isFile() && now.dev === held.dev && now.ino === held.ino && evidenceDigest(info) === evidenceDigest(identity);
+    } catch { return false; }
+  };
+}
 function syncEvidenceDirectory(path: string): void {
   const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try { fsyncSync(fd); } finally { closeSync(fd); }
@@ -122,13 +131,7 @@ export function publishCodeHealthSnapshot(opts: { stateDir: string; input: CodeH
     if (Buffer.byteLength(serialized) > CODE_HEALTH_SNAPSHOT_MAX_BYTES) throw new Error("Code health snapshot exceeds its bound.");
     lock = codeHealthPublicationLock(opts.stateDir);
     if (!lock) return { state: "busy", reason: "Another code health run is saving evidence, or its ownership is not yet known." };
-    const held = lstatSync(lock.path), identity = { ...lock.info }, lockPath = lock.path;
-    owns = () => {
-      try {
-        const now = lstatSync(lockPath), info = boundedEvidenceJson(lockPath, 4096);
-        return now.isFile() && now.dev === held.dev && now.ino === held.ino && evidenceDigest(info) === evidenceDigest(identity);
-      } catch { return false; }
-    };
+    owns = codeHealthPublicationOwnership(lock);
     const prior = evidencePointer(opts.stateDir);
     if (prior && prior.repository !== repository) throw new Error("The publication belongs to another repository.");
     if ((prior?.snapshotId ?? null) !== opts.expectedSnapshotId) return { state: "superseded", reason: "A newer code health result was saved while this run was collecting evidence." };
@@ -163,8 +166,52 @@ export function publishCodeHealthSnapshot(opts: { stateDir: string; input: CodeH
 }
 
 
-export type CodeHealthCoverageRead = { state: "observed"; provenance: import("./code-health-projection.js").CodeHealthSourceProvenance }
+export type CodeHealthCoverageRead = { state: "observed"; provenance: CodeHealthSourceProvenance }
   | { state: "not_collected" | "unavailable"; reason: string };
-export function readCodeHealthCoverageSource(_stateDir: string, _repository: string): CodeHealthCoverageRead {
-  return { state: "not_collected", reason: "Coverage source evidence has not been saved." };
+const COVERAGE_SOURCE_MAX_BYTES = 128 * 1024;
+
+/** A bounded cache of the artifact already validated by the existing coverage intake. */
+export function readCodeHealthCoverageSource(stateDir: string, repository: string): CodeHealthCoverageRead {
+  try {
+    const raw = boundedEvidenceJson(join(stateDir, "code-health", "coverage-source.json"), COVERAGE_SOURCE_MAX_BYTES) as
+      { version: string; provenance: CodeHealthSourceProvenance; contentHash: string };
+    if (!raw || Object.keys(raw).sort().join(",") !== "contentHash,provenance,version" || raw.version !== "code-health-coverage-cache-v1") throw new Error("Invalid coverage source cache.");
+    const { contentHash, ...sealed } = raw;
+    if (contentHash !== evidenceDigest(sealed)) throw new Error("Coverage source cache integrity does not match.");
+    const provenance = validateCodeHealthProvenance(raw.provenance, { repository, analyzedSha: raw.provenance.analyzedSha, runId: raw.provenance.runId, kind: "coverage" });
+    return { state: "observed", provenance };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? { state: "not_collected", reason: "Coverage source evidence has not been saved." }
+      : { state: "unavailable", reason: "Saved coverage source evidence is invalid, unavailable, or belongs to another repository." };
+  }
+}
+
+export function saveCodeHealthCoverageSource(opts: { stateDir: string; repository: string; provenance: unknown; clock?: import("./clock.js").Clock }):
+  { state: "published" | "duplicate" } | { state: "busy" | "superseded" | "unavailable"; reason: string } {
+  let lock: InflightLockHandle | undefined, owns: (() => boolean) | undefined;
+  try {
+    const raw = opts.provenance as CodeHealthSourceProvenance;
+    const provenance = validateCodeHealthProvenance(raw, { repository: opts.repository.toLowerCase(), analyzedSha: raw.analyzedSha, runId: raw.runId, kind: "coverage" });
+    if (Date.parse(provenance.observedAt) > (opts.clock ?? systemClock).now()) throw new Error("Coverage evidence is later than this collection attempt.");
+    const sealed = { version: "code-health-coverage-cache-v1", provenance }, serialized = JSON.stringify({ ...sealed, contentHash: evidenceDigest(sealed) });
+    if (Buffer.byteLength(serialized) > COVERAGE_SOURCE_MAX_BYTES) throw new Error("Coverage source evidence exceeds its bound.");
+    lock = codeHealthPublicationLock(opts.stateDir);
+    if (!lock) return { state: "busy", reason: "Another code health publication is active or its ownership is unknown." };
+    owns = codeHealthPublicationOwnership(lock);
+    const prior = readCodeHealthCoverageSource(opts.stateDir, opts.repository);
+    if (prior.state === "unavailable") throw new Error("Prior coverage source evidence is unavailable.");
+    if (prior.state === "observed") {
+      if (prior.provenance.scanId === provenance.scanId) {
+        if (evidenceDigest(prior.provenance) !== evidenceDigest(provenance)) throw new Error("The same coverage measurement identity returned different facts.");
+        return { state: "duplicate" };
+      }
+      if (Date.parse(prior.provenance.observedAt) >= Date.parse(provenance.observedAt)) return { state: "superseded", reason: "Saved coverage evidence is newer than this collection." };
+    }
+    const root = join(opts.stateDir, "code-health");
+    if (!writeAtomic(join(root, "coverage-source.json"), serialized, { mode: 0o600, beforeRename: owns })) throw new Error("Coverage source publication ownership changed.");
+    syncEvidenceDirectory(root); syncEvidenceDirectory(opts.stateDir);
+    return { state: "published" };
+  } catch { return { state: "unavailable", reason: "Coverage source evidence could not be saved safely; prior evidence was retained." }; }
+  finally { if (lock && owns?.()) lock.release(); }
 }

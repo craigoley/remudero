@@ -1,3 +1,4 @@
+import { saveCodeHealthCoverageSource } from "./code-health-store.js";
 import { validateCodeHealthProvenance } from "./code-health-projection.js";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -143,6 +144,10 @@ export async function readCoverageNightlySummary(opts: {
       ...summary, step: COVERAGE_NIGHTLY_MEASURED_STEP, task_id: "coverage-nightly",
       run_id: runId, head_sha: run.head_sha, conclusion: run.conclusion, repository,
     }, { clock });
+    if (summary.code_health !== undefined) {
+      const saved = saveCodeHealthCoverageSource({ stateDir, repository, provenance: summary.code_health, clock });
+      if (saved.state !== "published" && saved.state !== "duplicate") log(`Code health coverage evidence was not saved: ${saved.reason}`);
+    }
     return { status: "appended", runId };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);

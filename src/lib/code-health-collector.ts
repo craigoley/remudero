@@ -47,7 +47,11 @@ export function prepareCodeHealthCollection(input: CodeHealthCollection): CodeHe
   const priorAssessment = previous ? projectCodeHealth(previous) : null;
   const previousComplete = previous !== null && priorAssessment !== null && CODE_HEALTH_SOURCE_KINDS.every(kind =>
     priorAssessment.sources.some(source => source.required && source.kind === kind && source.state === "complete" && source.analyzedSha === previous.analyzedSha));
-  const baseline = previousComplete ? { analyzedSha: previous!.analyzedSha, policyVersion: previous!.registry.version, scans: structuredClone(previous!.scans) } : previous?.baseline ?? null;
+  const independentCollection = previousComplete && CODE_HEALTH_SOURCE_KINDS.every(kind => {
+    const current = scans.find(scan => scan.kind === kind)!, prior = previous!.scans.find(scan => scan.kind === kind)!;
+    return current.state === "complete" && current.analyzedSha === analyzedSha && current.scanId !== prior.scanId && Date.parse(current.observedAt) > Date.parse(prior.observedAt);
+  });
+  const baseline = independentCollection ? { analyzedSha: previous!.analyzedSha, policyVersion: previous!.registry.version, scans: structuredClone(previous!.scans) } : previous?.baseline ?? null;
   const retained = previous ? [...(previous.retainedEvidence ?? []), ...previous.scans.filter(scan => scan.findings.some(finding => finding.status !== "fixed"))
     .map(scan => ({ policyVersion: previous.registry.version, scan }))] : [];
   const known = new Map<string, typeof retained[number]>();
