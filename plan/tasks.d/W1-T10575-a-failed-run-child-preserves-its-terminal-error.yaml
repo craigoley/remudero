@@ -9,7 +9,10 @@
   dispatch_hold: true
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=2bc5a91603846dca
+  # backlog gardener: placed=2026-10-25T06:35:30.274Z
   attempts: 0
   author_class: machine
   origin: "feedback-terminal-error:issue-13161-source-qualified-20261024"
@@ -42,5 +45,5 @@
     confidence: 1
     reasons:
       - "deterministic backstop: it touches secrets, auth, tokens or permissions (\"credential\") — irreversible or privileged work goes to a person"
-    judged_at: "2026-10-24T18:06:40.806Z"
-    pin: "3a6297a8b72b0d0b9dc8fa73794a86034d7956f1979846c3f8904e60b9bacbac"
+    judged_at: "2026-10-25T07:15:09.186Z"
+    pin: "ffc2b0c0ad0e62402384d10071fe7142a907b2d4c7f688a98f91faac2b8a7470"

@@ -8,7 +8,7 @@ import { projectCodeHealth, type CodeHealthProjectionInput } from "./code-health
 import type { CodeHealthAssessment } from "./code-health-contract.js";
 import { buildCodeHealthOpportunities, type CodeHealthImprovementOpportunity, type CodeHealthRelatedWork } from "./codeql-quality-intake.js";
 import { codeHealthRepositoryStateDir, improvementOutcomeStateDir, readCodeHealthArtifactJson, readCodeHealthCollectionFailure, readCodeHealthSnapshot, type CodeHealthCollectionFailureRead } from "./code-health-store.js";
-import type { RepositoryEvidenceInventory } from "./daily-progress-contract.js";
+import { validateRepositoryEvidenceInventory, type RepositoryEvidenceInventory } from "./daily-progress-contract.js";
 import { readModelSidecarDir } from "./read-model-db.js";
 import type { ReadModelView } from "./read-model-worker.js";
 import { OPPORTUNITY_EVIDENCE_FILE, OPPORTUNITY_EVIDENCE_MAX_BYTES, projectGardenerOpportunityEvidence } from "./gardener-opportunity-evidence.js";
@@ -50,13 +50,10 @@ function pageScope(repository: string, snapshot: string): string { return create
 /** Server-owned roster; absent configuration never becomes an empty measured portfolio. */
 export function readCodeHealthInventory(stateDir: string): RepositoryEvidenceInventory {
   const raw = readCodeHealthArtifactJson(join(stateDir, "read-model", "repositories-sources.json"), 2 * 1024 * 1024) as { improvementEvidence?: RepositoryEvidenceInventory };
-  const value = raw?.improvementEvidence;
-  if (!value || value.version !== "repository-evidence-inventory-v1" || !Array.isArray(value.repositories) || value.repositories.length > 256 || !Array.isArray(value.unresolvedInstances) || value.unresolvedInstances.length > 256 ||
-      !value.unresolvedInstances.every(id => typeof id === "string" && id.length > 0 && id.length <= 128) ||
-      !value.repositories.every(repo => typeof repo.repository === "string" && qualifiedRepo(repo.repository) && Array.isArray(repo.instanceIds) && repo.instanceIds.length > 0 && repo.instanceIds.every(id => typeof id === "string" && id.length > 0 && id.length <= 128) && Array.isArray(repo.expectedQualitySources) && ["quality", "coverage"].every(kind => repo.expectedQualitySources.includes(kind))) ||
-      new Set(value.repositories.map(repo => repo.repository)).size !== value.repositories.length || !value.repositories.length)
-    throw new CodeHealthNotReady("Code health is waiting for the configured repository list.");
-  return value;
+  const checked = validateRepositoryEvidenceInventory(raw?.improvementEvidence);
+  if (!checked.ok || !checked.value.repositories.length || checked.value.repositories.length > 256 || checked.value.unresolvedInstances.length > 256 ||
+      checked.value.repositories.some(repo => !qualifiedRepo(repo.repository))) throw new CodeHealthNotReady("Code health is waiting for the configured repository list.");
+  return checked.value;
 }
 type UrgentCount = { value: number | null; precision: "exact" | "at_least" | "unavailable"; scope: string };
 interface RepositorySummary {

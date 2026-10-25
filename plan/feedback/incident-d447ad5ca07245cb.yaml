@@ -1,0 +1,29 @@
+id: incident-d447ad5ca07245cb
+ts: 2026-10-25T09:55:22.234Z
+raw: >-
+  Incident d447ad5ca072: flow pr-stage-stall:awaiting-arm:review success,
+  required checks green — a plan PR is never armed (W1-T5615): merging directly
+
+  First seen: 2026-10-25T09:54:26.953Z
+
+  Last seen: 2026-10-25T09:54:26.953Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=14085 awaiting-arm: repeat: "review success, required checks green — a plan PR is never armed (W1-T5615): merging directly" x8
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#d447ad5ca07245cb4b8a3ac3f5a2bc976fcb775f42404516689e8d98b708af21
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
