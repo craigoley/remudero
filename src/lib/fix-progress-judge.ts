@@ -61,6 +61,17 @@ export type FixProgressFailureEvidence =
   | { supplied: false; reason: string; checks?: FixProgressCheckEvidence[] };
 
 /** One failing check as the sweep reads it: its name and the tail of its log. */
+/** Current review findings supplied by the existing exact-head producer, never reconstructed from CI. */
+export interface FixProgressReviewFailure {
+  claim: string; proof: string; met: boolean; reason: string; proof_exec: string;
+  proofFailureOutput?: string; failureTail?: string; loadError?: string; holdout?: boolean;
+}
+
+export interface FixProgressReviewEvidence {
+  claim: string; proof: string; reason: string; proof_exec: string; digest: string;
+  output?: string; loadError?: string;
+}
+
 export interface FixProgressCiFailure {
   name: string; logTail: string; tailSource?: string; logUnavailable?: { kind: string; detail?: string };
 }
@@ -111,6 +122,8 @@ export interface FixProgressInput {
   /** W1-T9297: the failing checks' own evidence, or why there is none. The judge's checkout is not the PR head,
    *  so this is the only place it can read the red it rules on. Always set by {@link buildFixProgressInput}. */
   failureEvidence?: FixProgressFailureEvidence;
+  /** Current semantic/proof findings, independent of the presence of CI logs. */
+  reviewFailureEvidence?: FixProgressReviewEvidence[];
   rounds: FixProgressRound[];
   remedyHistory?: readonly Record<string, unknown>[];
   operatorAnswer?: string;
@@ -244,6 +257,7 @@ export function buildFixProgressInput(facts: {
   pendingChecks?: readonly string[];
   /** W1-T9297: the head's failing CI checks with their log tails; recorded as absent, with why, when not given. */
   ciFailures?: readonly FixProgressCiFailure[];
+  reviewFailures?: readonly FixProgressReviewFailure[];
 }): FixProgressInput {
   const rounds: FixProgressRound[] = [];
   const byId = new Map<string, FixProgressRound>();
@@ -344,7 +358,17 @@ export function buildFixProgressInput(facts: {
   const checkClass = fixRedClass(currentRed);
   const otherClassRounds = rounds.filter(r => r.redClass !== undefined && r.redClass !== checkClass).length;
   if (otherClassRounds > 0) signals.otherClassRounds = otherClassRounds;
-  return { taskId: facts.taskId, prNumber: facts.prNumber, headSha: facts.headSha,
+  const reviewFailureEvidence = facts.reviewFailures?.filter(c => !c.met && c.holdout !== true).map(c => {
+    const identity = { claim: c.claim, proof: c.proof, reason: c.reason, proof_exec: c.proof_exec,
+      proofFailureOutput: c.proofFailureOutput, failureTail: c.failureTail, loadError: c.loadError };
+    const output = c.proofFailureOutput ?? c.failureTail;
+    return { claim: c.claim, proof: c.proof, reason: c.reason.slice(0, FIX_PROGRESS_EVIDENCE_EXCERPT_CAP),
+      proof_exec: c.proof_exec, digest: createHash("sha256").update(JSON.stringify(identity)).digest("hex"),
+      ...(output ? { output: output.slice(-FIX_PROGRESS_EVIDENCE_EXCERPT_CAP) } : {}),
+      ...(c.loadError ? { loadError: c.loadError.slice(0, FIX_PROGRESS_EVIDENCE_EXCERPT_CAP) } : {}) };
+  });
+  return { ...(reviewFailureEvidence?.length ? { reviewFailureEvidence } : {}),
+    taskId: facts.taskId, prNumber: facts.prNumber, headSha: facts.headSha,
     strikesSpent: facts.strikesSpent ?? 0, currentRed, ...(pendingChecks.length > 0 ? { pendingChecks } : {}), redClass: fixRedClass(facts.redClassNames ?? currentRed), failureEvidence: failureEvidenceOf(facts.ciFailures), rounds,
     operatorAnswer: facts.operatorAnswer, formerCeiling: facts.formerCeiling, parkedReason: facts.parkedReason, signals,
     ...(persistentReviewerFailures.length > 0 ? { persistentReviewerFailures } : {}) };
