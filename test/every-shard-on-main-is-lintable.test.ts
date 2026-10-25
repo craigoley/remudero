@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { loadPlan } from "../src/lib/plan.js";
 import { lintPlan } from "../src/lib/task-linter.js";
-import { CENSUS_POPULATION } from "../src/lib/ci-parity.js";
+import { listRuleSuites, MIN_RULE_SUITE_COUNT } from "../src/lib/ci-parity.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -170,7 +170,7 @@ test("W1-T3086: the full-plan lint cost is recorded beside the ratchet", () => {
   );
 });
 
-// ── W1-T3086: the registration, which is also what lets this suite's proofs DISCRIMINATE ─────────
+// ── W1-T3086: the rule-checks enrollment, once a census registration that let the proofs DISCRIMINATE
 //
 // THE REVIEW FAILED ON THIS PR WITH GREEN CHECKS, and the cause is mechanical rather than about the
 // code. All four of W1-T3086's criteria carry the pure-path proof
@@ -183,30 +183,23 @@ test("W1-T3086: the full-plan lint cost is recorded beside the ratchet", () => {
 // identical on both trees. So a PR whose whole substance is a new test cannot discriminate by
 // construction, because the base tree receives the added `test/**` and nothing else this PR changes.
 //
-// The one thing this PR adds OUTSIDE test/** is its own census registration in
-// `src/lib/ci-parity.ts`. Asserting it here is not a tripwire bolted on for the grader: the repo
-// REQUIRES every suite that walks a population to be registered, that registration is precisely
-// what this PR had to add to be admissible, and a suite silently losing it would be reported
-// UNMODELLED later by a census nobody reads on this PR. So the assertion is load-bearing on its own
-// terms — and because the registration exists only at head, it is also what makes every proof above
-// fail at the base and pass here, which is the discrimination W1-T362 requires of every dialect.
-test("W1-T3086: this ratchet is REGISTERED with the census, and the registration names this very file", () => {
-  // READ AS DATA, NOT AS TEXT (W1-T2905): importing the registry asserts the REGISTRATION rather
-  // than the spelling of a file that happens to contain the path, so a moved entry, a renamed
-  // helper or a commented-out line all still fail here. The claim is unchanged; the evidence is
-  // the registry itself.
+// The one thing this PR added OUTSIDE test/** was its own census registration in
+// `src/lib/ci-parity.ts`, and that registration is what enrolled this suite in rule-checks. W1-T9050
+// removed every predicate-refused CENSUS_POPULATION row (this suite walks plan/, not src/), and
+// `RETAINED_RULE_SUITES` in `src/lib/rule-suites.ts` now keeps each such suite in the run set. So
+// the load-bearing claim is the enrollment itself: a suite that silently left the rule-checks run
+// set would stop gating every plan shard on main, and nothing on the PR that dropped it would say so.
+test("W1-T3086: this ratchet is enrolled in the rule-checks run set, by this very file's path", () => {
+  // READ AS DATA, NOT AS TEXT (W1-T2905): the run set is listed from the tree, so a renamed file,
+  // a moved roster entry or a commented-out line all still fail here.
   const SELF = "test/every-shard-on-main-is-lintable.test.ts";
+  const suites = listRuleSuites(REPO_ROOT);
 
-  // POSITIVE CONTROL: the registry must be a real population, or membership below is vacuous.
-  assert.ok(CENSUS_POPULATION.length > 20, "the census population did not load as a real registry");
+  // POSITIVE CONTROL: the listing must be a real population, or membership below is vacuous.
+  assert.ok(suites.length >= MIN_RULE_SUITE_COUNT, "the rule-checks run set did not list as a real population");
 
-  const entry = CENSUS_POPULATION.find((m) => m.testFile === SELF);
   assert.ok(
-    entry,
-    SELF +
-      " is not registered in CENSUS_POPULATION. Unregistered, the census reports this suite" +
-      " UNMODELLED; and because this is the only change this PR makes outside test/**, its absence" +
-      " is also what makes every acceptance proof read executed_stale against the merge base.",
+    suites.includes(SELF),
+    SELF + " is not in the rule-checks run set. Unlisted, nothing runs this ratchet over main's plan shards.",
   );
-  assert.equal(entry?.verdict.status, "REFUSED", "this ratchet walks plan/, not src/ — it is predicate-refused");
 });

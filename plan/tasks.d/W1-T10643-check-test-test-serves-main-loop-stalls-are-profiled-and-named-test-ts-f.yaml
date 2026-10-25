@@ -1,0 +1,108 @@
+- id: W1-T10643
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/serves-main-loop-stalls-are-profiled-and-named.test.ts:flaky cost 25.1 PR minute(s) across 5 round(s) on 5 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.23
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/serves-main-loop-stalls-are-profiled-and-named.test.ts:flaky"
+  files:
+    - src/lib/daemon-health.ts
+    - test/daemon/check-test-test-serves-main-loop-stalls-are-profiled-and-named-test-ts-f.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/serves-main-loop-stalls-are-profiled-and-named.test.ts:flaky"
+      proof: "unit test: W1-T10643: check:test:test/serves-main-loop-stalls-are-profiled-and-named.test.ts:flaky is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/serves-main-loop-stalls-are-profiled-and-named.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/serves-main-loop-stalls-are-profiled-and-named.test.ts:flaky cost 25.1 PR minute(s) (seven-day half-life) across 5 fix round(s) on 5 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/daemon-health.ts: test/serves-main-loop-stalls-are-profiled-and-named.test.ts imports it
+    - test/serves-main-loop-stalls-are-profiled-and-named.test.ts: named by the failing check
+    - the rounds name a failing test: test/serves-main-loop-stalls-are-profiled-and-named.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13992 (https://github.com/craigoley/remudero/pull/13992) at 2026-10-24T18:30:09.718Z: ci-log round — coverage-shard (1/8): test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts; coverage-shard (4/8): test/the-machine-judge-settles-an-operator-released-ruling.
+        failing tests: W1-T4917: the real deploy-run is not the install-separation no-op; an edit re-pins fresh and an operator release never re-asks; an operator-released ruling that differs from main in any field but judged_at still lands; an operator release the linter refuses is refused once and staged as one inbox proposal, an unchanged released record the linter refused is not re-rendered and opens no workspace, an edited released record is taken again after a refusal, an operator-released ruling main carries with an earlier judged_at is settled and lands nothing, an operator-released ruling that differs from main in any field but judged_at still lands; W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame
+        log excerpt:
+          | not ok 3543 - W1-T4917: the real deploy-run is not the install-separation no-op
+          |   ---
+          |   duration_ms: 30253.129828
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts:202:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     env: ‘/tmp/rmd-deploy-code-qcAY1v/state-root/daemon-install/deploy/install-host-units.sh’: No such file or directory
+          |     rmd-relaunch: units -- converge FAILED; the next tick re-asks.
+          |     unexpected simulated git command: ls-files --error-unmatch -- benchmark-run.ts
+          | 
+          | 
+          |     null !== 0
+    - PR #13868 (https://github.com/craigoley/remudero/pull/13868) at 2026-10-24T01:36:39.896Z: ci-log round — coverage-shard (4/8): test/serves-main-loop-stalls-are-profiled-and-named.test.ts
+        failing tests: W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame; W1-T5048: the task view reads pr state from the gateway and spawns no github read; the feedback filer captures a new follow-up once and lands an update without resetting its status, W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame, W1-T5048: the task view reads pr state from the gateway and spawns no github read; the feedback filer captures a new follow-up once and lands an update without resetting its status
+        log excerpt:
+          | ...
+          | not ok 4020 - W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame
+          |   ---
+          |   duration_ms: 12481.225711
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/serves-main-loop-stalls-are-profiled-and-named.test.ts:109:1'
+          |   failureType: 'testCodeFailure'
+          |   error: 'timed out waiting'
+          |   code: 'ERR_TEST_FAILURE'
+          |   stack: |-
+          |     waitFor (/home/runner/work/remudero/remudero/test/serves-main-loop-stalls-are-profiled-and-named.test.ts:24:38)
+          |     async TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/serves-main-loop-stalls
+    - PR #13382 (https://github.com/craigoley/remudero/pull/13382) at 2026-10-21T18:35:46.519Z: ci-log round — coverage-shard (6/8): test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts; coverage-shard (3/8): test/inbox/an-amended-contract-releases-a-design-or-scope-h
+        failing tests: W1-T4917: the real deploy-run is not the install-separation no-op; a refused report requesting an out-of-scope file routes to a scope amendment, W1-T4917: the real deploy-run is not the install-separation no-op; a refused report requesting an out-of-scope file routes to a scope amendment; test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts; a NEEDS_SCOPE hold releases when the task's scope is amended on main, test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
+        log excerpt:
+          | ...
+          | not ok 3816 - W1-T4917: the real deploy-run is not the install-separation no-op
+          |   ---
+          |   duration_ms: 30277.075986
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts:202:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     env: ‘/tmp/rmd-deploy-code-xZVI9e/state-root/daemon-install/deploy/install-host-units.sh’: No such file or directory
+          |     rmd-relaunch: units -- converge FAILED; the next tick re-asks.
+          |     unexpected simulated git command: ls-files --error-unmatch -- benchmark-run.ts
+          | 
+          | 
+          |     null !==
+    - PR #12964 (https://github.com/craigoley/remudero/pull/12964) at 2026-10-19T18:55:36.912Z: ci-log round — coverage-shard (2/8): test/serves-main-loop-stalls-are-profiled-and-named.test.ts
+        failing tests: W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame; ["W1-T4579: every served /v1 route is in the contract or its shrink-only baseline, and every declared route is served","W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame"]; W1-T4579: every served /v1 route is in the contract or its shrink-only baseline, and every declared route is served; ["W1-T4579: every served /v1 route is in the contract or its shrink-only baseline, and every declared route is served"]
+        log excerpt:
+          | ...
+          | not ok 2755 - W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame
+          |   ---
+          |   duration_ms: 12300.726031
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/serves-main-loop-stalls-are-profiled-and-named.test.ts:109:1'
+          |   failureType: 'testCodeFailure'
+          |   error: 'timed out waiting'
+          |   code: 'ERR_TEST_FAILURE'
+          |   stack: |-
+          |     waitFor (/home/runner/work/remudero/remudero/test/serves-main-loop-stalls-are-profiled-and-named.test.ts:24:38)
+          |     runNextTicks (node:internal/process/task_queues:65:5)
+          |     process.processTimers (node:internal/
+    - PR #12892 (https://github.com/craigoley/remudero/pull/12892) at 2026-10-19T10:36:02.894Z: ci-log round — coverage-shard (3/8): test/every-view-body-matches-its-schema.test.ts; coverage-shard (8/8): pool defect: test/b.test.ts leaks into test/c.test.ts; coverage-shard (2/8): test/serves-mai
+        failing tests: every registered view body validates against its declared schema; W1-T8950: a ready item serves its recommendation with its route, W1-T8826: keep and untagged options carry no action, W1-T8826: actions are recomputed from the current lane without trusting stored routes, W1-T8826: a carried slow-lane message recomputes actions for a deferred item, every registered view body validates against its declared schema; every declared write route is either wiring-tested here or listed as explicit debt; inbox approval ignores the read snapshot and resolves the target ref, every declared write route is either wiring-tested here or listed as explicit debt; W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame
+        log excerpt:
+          | ...
+          | not ok 21 - every registered view body validates against its declared schema
+          |   ---
+          |   duration_ms: 540.861965
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/every-view-body-matches-its-schema.test.ts:192:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          | ","asOf":"2026-09-30T12:00:00.000Z","stale":false,"sources":[{"name":"inbox-store:core","asOf":"2026-09-30T12:00:00.000Z","state":"fresh","kind":"inbox-store","instance":"core","budgetMs":180000,"lagMs":0}],"data":{"snapshotKey":"bb0b83acc4fffe15a68a27b7587682036ef58c92c2b65c9902a7295e126cca56","section":"needsYou","items
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

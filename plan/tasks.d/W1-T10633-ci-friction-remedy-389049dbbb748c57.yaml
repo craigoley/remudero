@@ -1,0 +1,65 @@
+- id: W1-T10633
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:coverage-ratchet:error-diff-coverage-blocked-this-diff-adds-source-line-s-wit cost 26 PR minute(s) across 3 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.22
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-ratchet:error-diff-coverage-blocked-this-diff-adds-source-line-s-wit"
+  files:
+    - .github/workflows/ci.yml
+    - test/gardeners/ci-friction-remedy-389049dbbb748c57.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:coverage-ratchet:error-diff-coverage-blocked-this-diff-adds-source-line-s-wit"
+      proof: "grep: test(\"W1-T10633: check:ci-log:coverage-ratchet:error-diff-coverage-blocked-this-diff-adds-source-line-s-wit is prevented, not retried\" in test/gardeners/ci-friction-remedy-389049dbbb748c57.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:coverage-ratchet:error-diff-coverage-blocked-this-diff-adds-source-line-s-wit's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:coverage-ratchet:error-diff-coverage-blocked-this-diff-adds-source-line-s-wit cost 26 PR minute(s) (seven-day half-life) across 3 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/ci.yml: declares job coverage-ratchet-required for coverage-ratchet
+
+    RECENT ROUNDS (newest first):
+    - PR #14013 (https://github.com/craigoley/remudero/pull/14013) at 2026-10-25T10:48:03.026Z: ci-log round — coverage-ratchet: ##[error]diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for ; remudero-review
+        log excerpt:
+          | (Use `node --trace-warnings ...` to show where the warning was created)
+          | ##[error]diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:
+          |   - src/lib/gate-gardener.ts:242
+          |   - src/lib/gate-gardener.ts:244
+          |   - src/lib/gate-gardener.ts:245
+          |   - src/lib/gate-gardener.ts:246
+          |   - src/lib/gate-gardener.ts:247
+          |   - src/lib/gate-gardener.ts:248
+          |   - src/lib/gate-gardener.ts:263
+          |   - src/lib/gate-gardener.ts:264
+          | ##[error]Process co
+    - PR #13736 (https://github.com/craigoley/remudero/pull/13736) at 2026-10-23T18:10:21.397Z: ci-log round — coverage-ratchet: ##[error]diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for
+        log excerpt:
+          | - src/lib/commit-message.ts:53
+          | ##[error]diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:
+          |   - src/lib/commit-message.ts:46
+          |   - src/lib/commit-message.ts:47
+          |   - src/lib/commit-message.ts:48
+          |   - src/lib/commit-message.ts:49
+          |   - src/lib/commit-message.ts:50
+          |   - src/lib/commit-message.ts:51
+          |   - src/lib/commit-message.ts:52
+          |   - src/lib/commit-message.ts:53
+          | ##[error]Process completed with exit code 1.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-25T18:50:06.673Z"
+    pin: "bf11a6b0b157074128a0d12953002d41dd2eb992163fc6d59e462dd1de47ebed"
