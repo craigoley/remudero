@@ -547,3 +547,15 @@ test("improvement follow-up reads the source saved for the original filing reque
     assert.notEqual(original.snapshotId, latest.snapshotId);
   });
 });
+
+
+test("improvement planning preserves a qualified finding when another check is missing", async () => {
+  const { createImprovementThread } = await planningModule();
+  await withTempDir("improvement-partial-health", async dir => {
+    const { deps, request, input } = sourceFixture(dir), value = structuredClone(input);
+    value.scans[1]!.state = "not_collected"; value.scans[1]!.reason = "Coverage has not supplied a current result."; value.scans[1]!.checks = [];
+    const next = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(deps.stateDir, request.repository), input: value, expectedSnapshotId: request.snapshotId, clock: deps.clock }); assert(next.state === "published");
+    const created = await createImprovementThread({ ...request, snapshotId: next.snapshotId, idempotencyKey: "partial-health-finding-01" }, deps);
+    assert.equal(created.state, "saved", "the existing service qualifies the finding's current source; it does not require every other health check to be complete");
+  });
+});
