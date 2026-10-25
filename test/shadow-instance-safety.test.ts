@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,9 @@ import { runTask as directRunTask } from "#src/cli/commands/run-task-verb.js";
 import { main } from "#src/run-task.js";
 import { spawnCodexWorker } from "#src/lib/worker-provider.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { workerHomeDir } from "#src/lib/config.js";
+import { perRunWorkerHomeDir } from "#src/lib/worker-home.js";
+import { renderWorkerSettings } from "#src/lib/worker.js";
 
 import { parseInstanceRegistry } from "../src/lib/instance-registry.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -291,6 +294,33 @@ test("selected runtime worker unknown and cleanup outcomes stay explicit", async
       if (mode === "profile-unlinked") assert.equal(existsSync(profileFile), false, "absence is not falsely certified retained evidence");
     } finally { fixture.cleanup(); }
   }
+});
+
+test("selected private file denial follows actual scratch-backed Claude worker homes", async () => {
+  const fixture = runtimeRegistryFixture(), operator = join(fixture.root, "operator");
+  const selected = join(operator, ".config", "remudero", "selected-registry.yaml");
+  mkdirSync(join(operator, ".config", "remudero"), { recursive: true, mode: 0o700 });
+  writeFileSync(selected, registry("shadow"), { mode: 0o600 });
+  const config: Config = { root: join(operator, "Remudero"), claudeBin: "/unused", installRoot: REPO_ROOT };
+  const home = (env: NodeJS.ProcessEnv) => perRunWorkerHomeDir(workerHomeDir(config, env), "fixture", { perSpawn: true });
+  const rendered = join(fixture.root, "worker-settings.json");
+  // This oracle tests the paths named by the actual rendered policy, not a claim about SDK/OS enforcement.
+  const namesSelectedFile = (rules: string[], workerHome: string) => rules.some(rule => {
+    const absolute = rule.startsWith("~/") ? resolve(workerHome, rule.slice(2)) : rule;
+    return absolute.endsWith("/**")
+      ? selected === absolute.slice(0, -3) || selected.startsWith(absolute.slice(0, -3) + "/")
+      : selected === absolute;
+  });
+  try {
+    await runtimeRegistryRunner()(() => {
+      renderWorkerSettings({ templatePath: join(REPO_ROOT, "settings", "worker.json"), hooksDir: join(REPO_ROOT, "hooks"), outPath: rendered });
+      const rules = JSON.parse(readFileSync(rendered, "utf8")).sandbox.filesystem.denyRead as string[];
+      assert.equal(namesSelectedFile(rules, home({})), true, "healthy default-home positive control sees the maintained private-config denial");
+      const scratch = home({ RMD_WORKER_HOME_DIR: `${config.root}:${join(fixture.root, "scratch", "worker-homes")}` });
+      assert.equal(namesSelectedFile(rules, scratch), true,
+        "the actual per-spawn policy must name the selected physical file even when HOME moves to scratch");
+    }, { envPath: selected });
+  } finally { fixture.cleanup(); }
 });
 
 test("selected runtime invalid evidence refuses before the unchanged legacy effect", async () => {
