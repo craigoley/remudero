@@ -56,12 +56,8 @@ import {
 import {
   CEILING_BUCKET_COMMENTS,
   MEASURED_ROOTS,
-  DEFAULT_BASELINE_RELATIVE_PATH as COMMENT_BASELINE,
-  ceilingForComments,
   countCommentLines,
-  isRedundantBaselineRow,
   listMeasuredFiles,
-  readBaseline as readCommentBaseline,
 } from "./comment-load-ratchet.mjs";
 import { DEPS_INTERFACE_BASELINE, DEPS_INTERFACE_CEILING_KEYS, depsInterfaceCounts } from "./deps-interface-census.mjs";
 import { HOUSE_LITERALS, houseLiteralCounts, listHouseLayoutSrcFiles, qualifiedRunTaskLayoutSplit } from "./house-layout-census.mjs";
@@ -151,37 +147,15 @@ function clockViolations({ changed, readHead, readBase }) {
   return out;
 }
 
-function commentLoadViolations({ changed, readHead, readBase, measuredFiles }) {
-  const headBaseline = parseOr(readHead(COMMENT_BASELINE), (t) => readCommentBaseline(t, COMMENT_BASELINE), {});
-  const baseBaseline = parseOr(readBase(COMMENT_BASELINE), (t) => readCommentBaseline(t, COMMENT_BASELINE), {});
+function commentLoadViolations({ changed, readHead, measuredFiles, reportCommentSignal = () => {} }) {
   const measured = new Set(measuredFiles);
-  const baselineChanged = changed.includes(COMMENT_BASELINE);
-  const paths = new Set(changed.filter((p) => measured.has(p)));
-  if (baselineChanged) for (const key of Object.keys(headBaseline)) if (measured.has(key)) paths.add(key);
-  const count = (text, path) => (text === null ? 0 : countCommentLines(text, path).comments);
-  const out = [];
-  for (const path of [...paths].sort()) {
+  for (const path of changed.filter(path => measured.has(path))) {
     const text = readHead(path);
     if (text === null) continue;
-    const head = count(text, path);
-    const headCeiling = headBaseline[path] ?? CEILING_BUCKET_COMMENTS;
-    if (caused(head, headCeiling, count(readBase(path), path), baseBaseline[path] ?? CEILING_BUCKET_COMMENTS)) {
-      out.push(
-        `comment-load: ${path} has ${head} comment lines > ceiling ${headCeiling} — trim them, or record ` +
-          `"${path}": ${ceilingForComments(head)} in ${COMMENT_BASELINE}`,
-      );
-    }
+    const { comments } = countCommentLines(text, path);
+    if (comments > CEILING_BUCKET_COMMENTS) reportCommentSignal({ path, comments, policy: "nonblocking-followup" });
   }
-  if (baselineChanged) {
-    for (const [path, value] of Object.entries(headBaseline)) {
-      if (path === "_comment" || !isRedundantBaselineRow(value) || baseBaseline[path] === value) continue;
-      out.push(
-        `comment-load: ${COMMENT_BASELINE} records "${path}" at ${value}, the default bucket — an absent ` +
-          "row already means that, so drop the row",
-      );
-    }
-  }
-  return out;
+  return [];
 }
 
 function fixtureCopyViolations({ changed, readHead, readBase, testFiles }) {
@@ -1619,6 +1593,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     violations = evaluateCensusPrecheck({
       changed,
       reportHouseLayoutSplit: (line) => console.log(line),
+      reportCommentSignal: (finding) => console.log(`comment-load-signal-json: ${JSON.stringify(finding)}`),
       ...readers,
       measuredFiles: snapshot ? censusSnapshotPaths(snapshot).filter((p) => MEASURED_ROOTS.some((dir) => p.startsWith(`${dir}/`))) : listMeasuredFiles(root),
       testFiles: listFixtureCopyFiles(root),

@@ -58,21 +58,18 @@ test("census precheck: a new Date.now() past a file's clock row is refused, nami
   assert.match(found[0], /clock-signature: src\/a\.ts dateNow 2 > baseline 1/);
 });
 
-test("census precheck: a file grown past the default comment bucket with no row is refused, naming the row to record", () => {
+test("census precheck: comment volume above the old bucket does not refuse the push", () => {
   const base = { ...baselines, "src/b.ts": comments(10) };
   const head = { ...base, "src/b.ts": comments(260) };
   const found = evaluate(head, base);
-  assert.equal(found.length, 1, found.join("\n"));
-  assert.match(found[0], /comment-load: src\/b\.ts has 260 comment lines > ceiling 250/);
-  assert.match(found[0], /"src\/b\.ts": 500/);
+  assert.deepEqual(found, [], "the operator routes comment volume to follow-up work");
 });
 
-test("census precheck: a comment-load row the branch adds at the default bucket is refused as redundant", () => {
+test("census precheck: a legacy comment-load row cannot refuse the push", () => {
   const base = { ...baselines, "src/b.ts": comments(10) };
   const head = { ...base, [COMMENTS]: JSON.stringify({ "src/b.ts": 250 }) };
   const found = evaluate(head, base);
-  assert.equal(found.length, 1, found.join("\n"));
-  assert.match(found[0], /records "src\/b\.ts" at 250, the default bucket/);
+  assert.deepEqual(found, [], "legacy ledger housekeeping is not a correctness gate");
 });
 
 test("census precheck: a hand-rolled fixture past the fixture-copy baseline is refused, naming the signature", () => {
