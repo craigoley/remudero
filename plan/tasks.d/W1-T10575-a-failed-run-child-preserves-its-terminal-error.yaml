@@ -39,3 +39,11 @@
     On the contract blob b9c820177c0b6878c291bcc45a9da11584dbf609, actual execFileSync Git output overflow and real spawnDetachedGroup missing-cwd controls serialize as unknown and settle as lost. Known lane-delivery and unknown-future controls distinguish the intended boundary. Recheck current source; preserve failed and incomplete diagnostics rather than transferring assurance.
     Correct only truthful terminal failure representation. An authenticated failed terminal record is not a success and not an automatic local-lane failure. Preserve the original daemon failure policy, existing diagnostic bounds, identity and mixed-version fences. Do not treat every unknown class as representable.
     Normal full author/CI/coverage/security/review requirements remain for implementation. Filing publication alone has the approved author NOT RUN/full-CI first-push exception; no new hosted attempt, production lifecycle action or failed-task retry is authorized.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it touches secrets, auth, tokens or permissions (\"credential\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-25T07:15:09.186Z"
+    pin: "ffc2b0c0ad0e62402384d10071fe7142a907b2d4c7f688a98f91faac2b8a7470"
