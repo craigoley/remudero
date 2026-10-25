@@ -1,3 +1,4 @@
+import { validateCodeHealthProvenance } from "./code-health-projection.js";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
@@ -56,7 +57,7 @@ export function coverageNightlyGithubReader(
   };
 }
 
-function validatedSummary(value: unknown, run: CoverageNightlyRun): Record<string, unknown> {
+function validatedSummary(value: unknown, run: CoverageNightlyRun, repository: string): Record<string, unknown> {
   const s = value as Record<string, unknown> | null;
   if (!s || s.kind !== COVERAGE_NIGHTLY_MEASURED_STEP || s.run_id !== String(run.id) ||
       s.sha !== run.head_sha || s.ref !== "refs/heads/main" ||
@@ -79,10 +80,14 @@ function validatedSummary(value: unknown, run: CoverageNightlyRun): Record<strin
       Object.values(s.shard_test_exits).some((exit) => !Number.isInteger(exit) || exit < 0)) {
     throw new Error("coverage-nightly summary has invalid totals, tier or shard exits");
   }
-  return Object.fromEntries([
+  const provenance = s.code_health === undefined ? undefined : validateCodeHealthProvenance(s.code_health, {
+    repository, analyzedSha: run.head_sha, runId: String(run.id), kind: "coverage",
+  });
+  if (provenance && provenance.observedAt !== s.measured_at) throw new Error("coverage-nightly provenance clock does not match the original measurement");
+  return { ...(provenance ? { code_health: provenance } : {}), ...Object.fromEntries([
     "kind", "sha", "ref", "measured_at", "lines_pct", "branches_pct", "lf", "lh", "brf", "brh",
     "skipped_records", "tier", "shard_test_exits",
-  ].map((key) => [key, s[key]]));
+  ].map((key) => [key, s[key]])) };
 }
 
 export type CoverageNightlyIntakeResult =
@@ -131,7 +136,7 @@ export async function readCoverageNightlySummary(opts: {
     if (duplicate) {
       return { status: "duplicate", runId };
     }
-    const summary = validatedSummary(await reader.summaryForRun(opts.owner, opts.repo, run), run);
+    const summary = validatedSummary(await reader.summaryForRun(opts.owner, opts.repo, run), run, repository);
     appendLedger(opts.ledgerPath, {
       ...summary, step: COVERAGE_NIGHTLY_MEASURED_STEP, task_id: "coverage-nightly",
       run_id: runId, head_sha: run.head_sha, conclusion: run.conclusion, repository,
