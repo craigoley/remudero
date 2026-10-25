@@ -231,9 +231,9 @@ test("code health checks scope before cached ETags and retains off and shadow po
   const { fixedClock } = await import("#src/lib/clock.js");
   const now = Date.parse("2026-11-02T06:00:00.000Z"), clock = fixedClock(now);
   const data = { version: "code-health-view-v1", repository: "all", expectedRepositories: ["acme/atlas"] };
-  const entry = { view: "code-health", version: 1, key: "", etag: viewEtag("code-health", 1, false, data), body: { view: "code-health", version: 1, generatedAt: clock.iso(), asOf: clock.iso(), stale: false, sources: [{ name: "repositories:code-health-scope", asOf: clock.iso(), state: "fresh" as const }], data } };
+  const entry = { generation: 1, view: "code-health", version: 1, key: "", etag: viewEtag("code-health", 1, false, data), body: { view: "code-health", version: 1, generatedAt: clock.iso(), asOf: clock.iso(), stale: false, sources: [{ name: "repositories:code-health-scope", asOf: clock.iso(), state: "fresh" as const }], data } };
   let mode: "serve" | "off" | "shadow" = "serve", reads = 0, wants = 0;
-  const source = { switches: () => ({ views: { "code-health": mode } }), body: (_view: string, key?: string) => { reads++; return !key || key === CODE_HEALTH_SCOPE_KEY ? entry : undefined; }, judge: (sources: typeof entry.body.sources) => sources, want: () => { wants++; return true; } };
+  const source: import("#src/lib/views.js").ViewBodySource = { switches: () => ({ views: { "code-health": mode } }), body: (_view: string, key?: string) => { reads++; return !key || key === CODE_HEALTH_SCOPE_KEY ? entry : undefined; }, judge: sources => [...sources], want: () => { wants++; return true; } };
   const route = buildReadModelViewRoutes({ legacy: [], readModelViews: ["code-health"], readModel: source, clock, requestValidators: { "code-health": (params, held) => validateCodeHealthRequest(params, held, now) } })[0]!;
   assert.equal(route.scope, "read");
   async function answer(query: string) {
