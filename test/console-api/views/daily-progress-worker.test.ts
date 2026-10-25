@@ -1,17 +1,21 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
+import type { Worker } from "node:worker_threads";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
 import { fixedClock, systemClock } from "#src/lib/clock.js";
 import { dailyDateAt, dailyWindow, shiftDailyDate } from "#src/lib/daily-progress-calendar.js";
 import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
 import { collectDailyProgress } from "#src/lib/daily-progress-collector.js";
-import { dailyProgressDayKey, prepareDailyProgressPublication, readDailyProgressManifest, readDailyProgressRevision } from "#src/lib/daily-progress-store.js";
+import { dailyProgressDayKey, dailyProgressStorePath, prepareDailyProgressPublication, readDailyProgressManifest, readDailyProgressRevision } from "#src/lib/daily-progress-store.js";
 import { acquireLease, flushReadModelTransactions, openReadModel, readModelLeaseEpoch, releaseLease } from "#src/lib/read-model-db.js";
 import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "#src/lib/ledger-projector.js";
 import { withTempDir } from "#src/lib/tmp.js";
-import { createReadModelTicker, createReadModelWorker, readModelSwitchesPath } from "#src/lib/read-model-worker.js";
+import { createReadModelTicker, createReadModelWorker, readModelSwitchesPath, runReadModelWorker, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { trackWorkerThreads } from "#src/lib/worker-heaps.js";
 import { createRepositoriesSourcePublisher } from "#src/lib/repositories-view.js";
 import { runSlowLaneWorker, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
 import { readModelInstances } from "#src/lib/serve.js";
@@ -57,6 +61,55 @@ test("daily default projector publishes through the real parent and slow-lane th
     } finally {
       assert.equal(worker.stop(), true, "the real worker confirms shutdown and releases its own leases");
       await flushReadModelTransactions();
+    }
+  });
+});
+
+test("daily parent reports a manifest persistence refusal and preserves last-good history before retrying", { timeout: 30_000 }, async t => {
+  await withTempDir("daily-publication-refused", async root => {
+    const stateDir = join(root, "state"); mkdirSync(stateDir); writeFileSync(join(stateDir, "ledger.ndjson"), "");
+    const seed = openReadModel({ stateDir, instance: "seed", schemaVersion: 1 });
+    try {
+      const held = acquireLease(seed); assert.ok(held.ok);
+      prepareDailyProgressPublication(stateDir, [], []).commit(seed, held.lease);
+    } finally { seed.close(); await flushReadModelTransactions(); }
+    const before = readDailyProgressManifest(stateDir), manifestPath = join(dailyProgressStorePath(stateDir), "manifest.json");
+    const rename = fs.renameSync;
+    let rejectedWrites = 0;
+    const failure = t.mock.method(fs, "renameSync", (...args: Parameters<typeof fs.renameSync>) => {
+      if (args[1] === manifestPath) { rejectedWrites++; throw new Error("injected daily manifest rename failure"); }
+      return rename(...args);
+    });
+    syncBuiltinESMExports();
+    const threads = trackWorkerThreads(), posted: ReadModelWorkerMessage[] = [];
+    let receive: ((message: { type?: string }) => void) | undefined;
+    const port = { on(_event: "message", run: (message: { type?: string }) => void) { receive = run; },
+      postMessage(message: unknown) { posted.push(message as ReadModelWorkerMessage); }, close() {} };
+    const logs = (step: string) => posted.filter(message => message.type === "log" && message.step === step);
+    try {
+      runReadModelWorker(port, { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir: stateDir }],
+        tickMs: 50, signal: new SharedArrayBuffer(8), slowLane: { intervalMs: 50,
+          dailyProgress: { stateDir, expectedRepositories: ["acme/app"], instances: [{ name: "core", repository: "acme/app", stateDir, root }] } } });
+      // BACKSTOP: wait for parent receipts, not the slow lane's staged-publication message.
+      for (let attempt = 0; !rejectedWrites && attempt < 600; attempt++) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.ok(rejectedWrites > 0, "the real publication reaches the failing manifest rename");
+      const refusal = logs("read_model.daily_publication_refused")[0];
+      assert.ok(refusal?.type === "log", JSON.stringify(posted.filter(message => message.type === "log")));
+      assert.equal(refusal.extra.reason, "injected daily manifest rename failure");
+      assert.equal(logs("read_model.daily_committed").length, 0, "failed persistence never emits success");
+      assert.deepEqual(readDailyProgressManifest(stateDir), before, "the committed manifest survives the failed replacement");
+      failure.mock.restore(); syncBuiltinESMExports();
+      for (let attempt = 0; !logs("read_model.daily_committed").length && attempt < 600; attempt++) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(logs("read_model.daily_committed").length, 1, "the same owner retries after persistence recovers");
+      const after = readDailyProgressManifest(stateDir);
+      assert.equal(after.generation, before.generation + 1);
+      assert.ok(Object.keys(after.days).length > 0, "successful persistence publishes the staged reports");
+    } finally {
+      receive?.({ type: "stop" });
+      failure.mock.restore(); syncBuiltinESMExports();
+      await flushReadModelTransactions();
+      await Promise.all(threads.live().map(({ thread }) => (thread as Worker).terminate()));
+      threads.stop();
     }
   });
 });
@@ -115,7 +168,7 @@ test("daily progress collector reuses complete snapshots with truthful attributi
       const retained = readDailyProgressRevision(stateDir, readDailyProgressManifest(stateDir).days[key]!);
       assert.equal(retained.report.totals.mergedChanges.value, 207);
       assert.equal(retained.report.coverage.sources.find(s => s.kind === "pull_requests")!.state, "unavailable");
-    } finally { db.close(); }
+    } finally { db.close(); await flushReadModelTransactions(); }
   });
 });
 
@@ -185,7 +238,7 @@ test("daily progress collects hourly and closes local days without page demand",
         const afterExpiry = acquireLease(peer, { holder: "daily-worker-proof", clock }); assert.ok(afterExpiry.ok);
         if (afterExpiry.ok) assert.notEqual(readModelLeaseEpoch(peer, afterExpiry.lease), epoch, "an expired lease starts a new ownership epoch even without an intervening holder");
       } finally { peer.close(); }
-    } finally { lane.stop(); ticker.release(); }
+    } finally { lane.stop(); ticker.release(); await flushReadModelTransactions(); }
   });
 });
 
@@ -244,7 +297,7 @@ test("daily collector keeps every configured PR source visible before counting e
         assert.equal(report.coverage.sources.filter(source => source.kind === "pull_requests" && source.required).length, 2);
         assert.equal(report.totals.mergedChanges.precision, both ? "exact" : "unavailable", "one complete sibling cannot erase a missing required source");
         if (both) assert.equal(report.totals.mergedChanges.value, 0, "complete persisted source receipts support the measured zero");
-      } finally { db.close(); }
+      } finally { db.close(); await flushReadModelTransactions(); }
     }
   });
 });
