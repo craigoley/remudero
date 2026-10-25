@@ -202,7 +202,10 @@ export function readCodeHealthRelatedWork(stateDir: string, inventory: Repositor
             if (row.id === expectedId && saved.threadId === inboxThreadId(expectedId)) work.push({ repository, proposalId, threadId: saved.threadId });
           }
           // Existence is useful for navigation. Neither a read time nor file mtime refreshes the chat's source clock.
-        } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") missing++; else invalid++; }
+        } catch (error) {
+          // Missing chats remain uncollected; unreadable or malformed chats make link completeness unavailable.
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") missing++; else invalid++;
+        }
       }
       const savedPaths = [join(dirname(path), OPPORTUNITY_EVIDENCE_FILE), join(improvementOutcomeStateDir(stateDir, repository, instanceId), OPPORTUNITY_EVIDENCE_FILE)];
       for (const [index, savedPath] of savedPaths.entries()) try {
