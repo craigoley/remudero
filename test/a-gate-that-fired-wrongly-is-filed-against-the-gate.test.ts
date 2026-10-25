@@ -3,12 +3,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { classifyGateRepair, gateGardenSpec, gateRepairCandidates, loadGateProbes, loadGateRepairObservations, renderFalsePositiveShard } from "#src/lib/gate-gardener.js";
+import { classifyGateRepair, gateGardenSpec, gateRepairCandidates, loadGateProbes, loadGateRepairObservations, renderFalsePositiveShard, type GateRepairRule } from "#src/lib/gate-gardener.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations } from "#src/lib/plan.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // @ts-ignore executable census module has no declaration file.
-import { PRECHECK_TRIGGERED_SUITES, PRECHECK_PATH_TRIGGERED_SUITES } from "#scripts/census-precheck.mjs";
+import { GATE_REPAIR_RULES, PRECHECK_TRIGGERED_SUITES, PRECHECK_PATH_TRIGGERED_SUITES } from "#scripts/census-precheck.mjs";
 
 interface PrecheckEntry { testFile: string; ownFiles?: string[]; recognizer?: string; symbol?: string }
 
@@ -26,6 +26,12 @@ function candidates(diff: string, repair = pair, open: string[] = []) {
   return { result, rows };
 }
 
+function productionRule(testFile: string): GateRepairRule {
+  const found = (GATE_REPAIR_RULES as GateRepairRule[]).find(entry => entry.gate === testFile);
+  assert.ok(found, `production rule missing: ${testFile}`);
+  return found;
+}
+
 test("W1-T9049: a repair that only edits the gate's own baseline is a suspected false positive", () => {
   const repair = { ...pair, repairFiles: [baseline] };
   assert.equal(classifyGateRepair(repair, "-1\n+2", rule.ownFiles, rule.gateRegex), "baseline-only");
@@ -34,6 +40,27 @@ test("W1-T9049: a repair that only edits the gate's own baseline is a suspected 
   assert.equal(result[0].file, rule.recognizer);
   assert.equal(rows[0].step, "gate.false_positive_suspected");
   assert.equal(rows[0].extra?.classification, "baseline-only");
+  for (const [gate, owned, recognizer, symbol] of [
+    ["test/env-var-registry.test.ts", "src/lib/config-schema.ts", "test/env-var-registry.test.ts", "harnessEnvNamesInSource"],
+    ["test/error-subclass-census.test.ts", "scripts/error-subclass-baseline.json", "test/error-subclass-census.test.ts", "census:error-subclass"],
+  ]) {
+    const production = productionRule(gate!);
+    const evidence = { pair: { ...pair, gate: production.gate, repairFiles: [owned!] }, repairDiff: "-1\n+2" };
+    const events: Array<Record<string, unknown> | undefined> = [];
+    const actions = gateRepairCandidates([evidence], GATE_REPAIR_RULES, [], (step, extra) => {
+      assert.equal(step, "gate.false_positive_suspected");
+      events.push(extra);
+    });
+    assert.equal(actions.length, 1);
+    assert.equal(events[0]?.classification, "baseline-only");
+    assert.equal(events[0]?.recognizer, recognizer);
+    assert.equal(events[0]?.symbol, symbol);
+    const rendered = renderFalsePositiveShard(actions[0]!, "NEW-1");
+    assert.equal(rendered.refused, undefined);
+    const task = loadPlanFromYaml(rendered.text, "production-baseline").tasks[0]!;
+    assert.deepEqual(task.files, [recognizer]);
+    assert.equal(task.origin, `gate-false-positive:${production.gate}`);
+  }
 });
 
 test("W1-T9049: a token rebuilt at runtime to dodge a gate's regex is a suspected false positive", () => {
@@ -52,6 +79,25 @@ test("W1-T9049: a token rebuilt at runtime to dodge a gate's regex is a suspecte
   assert.equal(task.author_class, "machine");
   // The new origin needs admission outside this task's declared files; do not bypass it.
   assert.match(machineFilingAdmissionViolations(task, { plan, releasedIds: new Set(), pathExists: () => true }).join(";"), /verify:human/);
+  const production = productionRule("test/env-var-registry.test.ts");
+  const before = 'const token = "RMD_EXAMPLE";';
+  for (const after of ['const token = "RMD_" + "EXAMPLE";', 'const token = ["RMD", "EXAMPLE"].join("_");']) {
+    const triggered = (head: string, base: string) => production.trigger!({ changed: ["src/lib/example.ts"],
+      readHead: () => head, readBase: () => base });
+    assert.equal(triggered(before, ""), true);
+    assert.equal(triggered(after, before), false);
+    const evidence = { pair: { ...pair, gate: production.gate, repairFiles: ["src/lib/example.ts"], triggered: true },
+      repairDiff: `-${before}\n+${after}` };
+    assert.equal(classifyGateRepair(evidence.pair, evidence.repairDiff, production.ownFiles, production.gateRegex), "token-dodge");
+    const events: string[] = [];
+    const actions = gateRepairCandidates([evidence], GATE_REPAIR_RULES, [], (step, extra) => {
+      events.push(step);
+      assert.equal(extra?.classification, "token-dodge");
+    });
+    assert.deepEqual(events, ["gate.false_positive_suspected"]);
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0]!.file, "test/env-var-registry.test.ts");
+  }
 });
 
 test("W1-T9049: a repair that changes the gated code is genuine", () => {
@@ -59,6 +105,37 @@ test("W1-T9049: a repair that changes the gated code is genuine", () => {
   const { result, rows } = candidates('-const count = 0;\n+const count = 1;');
   assert.deepEqual(result, []);
   assert.deepEqual(rows, []);
+  const production = productionRule("test/env-var-registry.test.ts");
+  const events: string[] = [];
+  assert.deepEqual(gateRepairCandidates([{ pair: { ...pair, gate: production.gate },
+    repairDiff: '-const token = "RMD_EXAMPLE";\n+const token = "RMD_OTHER";' }], GATE_REPAIR_RULES, [],
+  step => events.push(step)), []);
+  assert.deepEqual(events, []);
+});
+
+test("W1-T9049: production regexes recognize token reconstruction in its source context", () => {
+  for (const [gate, before, after] of [
+    ["test/ledger-rotation.test.ts", 'if (step === "example.step") {}', 'if (step === ["example", "step"].join(".")) {}'],
+    ["test/a-union-read-of-an-unretained-step-is-refused.test.ts", 'if (step === "example.step") {}', 'if (step === ["example", "step"].join(".")) {}'],
+    ["test/spend-is-counted-once-at-its-producer.test.ts", 'log("example.step", {});', 'log(["example", "step"].join("."), {});'],
+    ["test/cycle-ratchet.test.ts", 'require("./example");', 'require([".", "example"].join("/"));'],
+    ["test/source-size-baseline-is-enforced.test.ts", 'require("../run-task.js");', 'require(["..", "run-task.js"].join("/"));'],
+    ["test/the-affected-suite-reach-ratchet.test.ts", 'require("../src/run-task.js");', 'require(["../src", "run-task.js"].join("/"));'],
+    ["test/node-24-runtime-compatibility.test.ts", 'run(["--test"]);', 'run(["--" + "test"]);'],
+    ["test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts", 'log("example.step", { cost_usd: 1 });', 'log(["example", "step"].join("."), { cost_usd: 1 });'],
+    ["test/host-capability-fixtures.test.ts", 'const command = "hostname";', 'const command = "host" + "name";'],
+    ["test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts", 'main(["preflight"]);', 'main(["pre" + "flight"]);'],
+    ["test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts", 'execFile("git", []);', 'execFile("g" + "it", []);'],
+    ["test/worktree-creation-census.test.ts", 'run(["worktree", "add"]);', 'run(["work" + "tree", "add"]);'],
+    ["test/every-ci-census-is-asked-before-the-push.test.ts", 'const token = "ls-files";', 'const token = ["ls", "files"].join("-");'],
+  ]) {
+    const production = productionRule(gate!);
+    const diff = `-${before}\n+${after}`;
+    assert.equal(classifyGateRepair({ ...pair, gate: production.gate }, diff,
+      production.ownFiles, production.gateRegex), "token-dodge", gate);
+    assert.equal(classifyGateRepair({ ...pair, gate: production.gate }, diff.replace(after!, 'const changed = "other";'),
+      production.ownFiles, production.gateRegex), "genuine", `${gate}: unrelated edit`);
+  }
 });
 
 test("W1-T9049: only a pure identifier rename is a rename dodge", () => {
@@ -107,6 +184,18 @@ test("W1-T9049: precheck gate ownership is explicit and names the census recogni
   assert.ok(census.ownFiles!.includes(baseline));
   assert.equal(census.recognizer, "src/lib/ci-parity.ts");
   assert.equal(census.symbol, "censusCandidateWalks");
+  const pathOnly = ["test/citation-anchor-census.test.ts", "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts"];
+  for (const production of GATE_REPAIR_RULES as GateRepairRule[]) {
+    if (!pathOnly.includes(production.gate)) {
+      assert.ok(production.gateRegex instanceof RegExp, `${production.gate}: missing source predicate`);
+      continue;
+    }
+    assert.equal(production.gateRegex, null, `${production.gate}: explicitly path-triggered`);
+    const repair = { ...pair, gate: production.gate };
+    assert.equal(classifyGateRepair(repair, dodge, production.ownFiles, null), "genuine");
+    assert.equal(classifyGateRepair({ ...repair, triggered: false }, dodge, production.ownFiles, null), "off-subject");
+    assert.equal(classifyGateRepair({ ...repair, repairFiles: [...production.ownFiles] }, "-1\n+2", production.ownFiles, null), "baseline-only");
+  }
 });
 
 test("W1-T9049: repair evidence is read through awaited gh calls, with the trigger's files fetched on demand", async () => {

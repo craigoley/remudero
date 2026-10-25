@@ -52,7 +52,8 @@ export interface GateRepairRule {
   recognizer: string;
   symbol: string;
   ownFiles: readonly string[];
-  gateRegex: RegExp;
+  /** Null only for gates that measure paths or executions rather than source tokens. */
+  gateRegex: RegExp | null;
   trigger?: (input: { changed: string[]; readHead: (path: string) => string | null; readBase: (path: string) => string | null }) => boolean;
 }
 export interface GateRepairObservation { pair: GateRepairPair; repairDiff: string }
@@ -71,11 +72,12 @@ function rebuiltTokens(line: string): Array<{ expression: string; value: string 
   });
 }
 
-export function classifyGateRepair(pair: GateRepairPair, repairDiff: string, ownFiles: readonly string[], gateRegex: RegExp): GateRepairClass {
+export function classifyGateRepair(pair: GateRepairPair, repairDiff: string, ownFiles: readonly string[], gateRegex: RegExp | null): GateRepairClass {
   const repairFiles = pair.repairFiles ?? [];
   if (pair.state !== "repaired" || !pair.greenSha || repairFiles.length === 0) return "genuine";
   if (repairFiles.every((file) => ownFiles.includes(file))) return "baseline-only";
   if (pair.triggered === false) return "off-subject";
+  if (gateRegex === null) return "genuine";
   const chunks = repairDiff.split(/^(?:diff --git .*|@@.*)$/m);
   for (const chunk of chunks) {
     const removed = chunk.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---")).map((line) => line.slice(1));
@@ -84,7 +86,6 @@ export function classifyGateRepair(pair: GateRepairPair, repairDiff: string, own
     const before = removed.join("\n"), after = added.join("\n");
     if (!matchesGate(gateRegex, before) || matchesGate(gateRegex, after)) continue;
     for (const rebuilt of rebuiltTokens(after)) {
-      if (!matchesGate(gateRegex, rebuilt.value)) continue;
       for (const [literal] of before.matchAll(STRING_LITERAL)) {
         if (stringValue(literal) === rebuilt.value && before.replace(literal, "<token>") === after.replace(rebuilt.expression, "<token>")) return "token-dodge";
       }
