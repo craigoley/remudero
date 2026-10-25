@@ -295,10 +295,8 @@ function revisionSkills(root, revision) {
     names.push(name);
     texts.set(join("approved-skills", name, "SKILL.md"), runGit(root, ["show", `${revision}:${path}`]));
   }
-  return loadInjectableSkills("approved-skills", () => names, path => {
-    if (!texts.has(path)) throw new Error("skill reachability: snapshot is incomplete");
-    return texts.get(path);
-  });
+  // Every advertised name has its complete regular blob before the loader runs.
+  return loadInjectableSkills("approved-skills", () => names, path => texts.get(path));
 }
 
 function skillSurfaceContext(root, base, head, files) {

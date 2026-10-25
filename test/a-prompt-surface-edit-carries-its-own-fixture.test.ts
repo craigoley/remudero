@@ -425,6 +425,22 @@ test("deleting or opting out a formerly injected skill retains its base-side pro
     commit(root, "unresolved symbolic skill");
     assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }), /symbolic skill/);
   });
+  for (const change of ["symbolic-root", "symbolic-file", "ambiguous-name"] as const) withFixture(root => {
+    write(root, INJECTED_PATH, skillSource("Old invariant."));
+    commit(root, "regular base");
+    if (change === "symbolic-root") {
+      rmSync(join(root, ".claude/skills"), { recursive: true });
+      symlinkSync("unresolved-target", join(root, ".claude/skills"));
+    } else if (change === "symbolic-file") {
+      rmSync(join(root, INJECTED_PATH));
+      symlinkSync("unresolved-target", join(root, INJECTED_PATH));
+    } else {
+      write(root, INJECTED_PATH, skillSource("New invariant."));
+      write(root, ".claude/skills/two\tparts/SKILL.md", skillSource("Ambiguous name."));
+    }
+    commit(root, change);
+    assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }), /skill reachability/);
+  });
 });
 
 test("injected skill evidence qualifies only the actual maintained prompt effect", () => {
@@ -457,6 +473,17 @@ test("injected skill evidence qualifies only the actual maintained prompt effect
 });
 
 test("injected skill surface regressions preserve selection and operator-only macro behavior", () => {
+  withFixture(root => {
+    write(root, INJECTED_PATH, skillSource("Old operator-only macro.", "disable-model-invocation: true"));
+    write(root, ".claude/skills/README.md", "Not a skill directory.\n");
+    write(root, ".claude/skills/orphan/README.md", "No skill file.\n");
+    commit(root, "operator-only and non-skill entries");
+    write(root, INJECTED_PATH, skillSource("New operator-only macro.", "disable-model-invocation: true"));
+    commit(root, "operator-only body edit");
+    assert.equal(mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }).ok, true);
+    const diff = mod.readGitDiff(root, "HEAD^");
+    assert.throws(() => mod.evaluatePromptSurfaceDiff(diff, { root, base: `HEAD:${INJECTED_PATH}` }), /not a commit/);
+  });
   withFixture(root => {
     write(root, INJECTED_PATH, skillSource("Unchanged actual prompt.", "applies-to: implement, review"));
     commit(root, "base");
