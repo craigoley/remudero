@@ -42721,12 +42721,12 @@ export async function improvementActionCommand(rest: string[], deps: {
       const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(target.ledgerPath, { run_id: runId, task_id: target.proposalId, step, ...extra });
       await (deps.draftHook ?? buildInboxDraftHook)(identity.owner, identity.repo, config, runId, log, undefined, undefined, undefined, undefined, undefined, target.proposalId, planningStore)();
     },
-    recoverFiling: target => improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, repository),
+    recoverFiling: target => improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, repository, deps.clock),
     file: async target => {
       checkTarget(target);
       await (deps.approve ?? approveCommandMirrored)([target.proposalId], { config, inboxRoot: target.controlRoot, inboxLedgerPath: target.ledgerPath, root: target.controlRoot, planPath: target.planPath,
         reviewedImprovement: { goalDigest: target.goalDigest, draftDigest: target.draftDigest } });
-      return improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, repository);
+      return improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, repository, deps.clock);
     },
   });
   console.log(JSON.stringify(result));

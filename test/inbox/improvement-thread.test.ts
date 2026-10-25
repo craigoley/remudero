@@ -501,7 +501,7 @@ test("improvement CLI preserves fleet execution config when selecting a reposito
         return 0;
       } });
     assert.equal(filedCode, 0); assert.equal(filingCalls, 1);
-    const filed = readImprovementThread(saved.requestId, deps); assert(filed.state === "saved"); assert.equal(filed.filing.state, "completed");
+    const filed = readImprovementThread(saved.requestId, deps); assert(filed.state === "saved"); assert.equal(filed.filing.state, "plan_pr_opened");
   });
 });
 
