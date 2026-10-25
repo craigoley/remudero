@@ -700,6 +700,33 @@ for (const adapter of ["foundry-direct", "cash-foundry", "cash-chat"] as const) 
   });
 }
 
+test("selected provider retry rechecks immutable binding before another request", async () => {
+  for (const adapter of ["foundry-direct", "cash-foundry", "cash-chat"] as const) for (const revised of [false, true]) {
+    const fixture = runtimeRegistryFixture(), cwd = join(fixture.root, "cash-checkout"), home = join(fixture.root, "cash-home");
+    mkdirSync(cwd); mkdirSync(home);
+    const model = adapter === "cash-chat" ? "gpt-oss-120b" : "claude-haiku-5-5";
+    let sent = 0;
+    const args: OpenWeightSpawnArgs = { cwd, workerHome: home, prompt: "public synthetic retry control", maxTurns: 2,
+      env: { RMD_OPENWEIGHT_API_KEY: "synthetic", RMD_FOUNDRY_CLAUDE_API_KEY: "synthetic", RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.invalid/anthropic" },
+      fetchImpl: async () => {
+        if (++sent === 1) {
+          if (revised) writeFileSync(fixture.selected, registry("live"));
+          return new Response(JSON.stringify({ error: { message: "synthetic bounded retry" } }), { status: 429, headers: { "retry-after-ms": "1" } });
+        }
+        return new Response(JSON.stringify(adapter === "cash-chat"
+          ? { id: "fixture", model, choices: [{ index: 0, message: { role: "assistant", content: "complete" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
+          : { id: "fixture", model, stop_reason: "end_turn", content: [{ type: "text", text: "complete" }], usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200 }); } };
+    const config: Config = { root: fixture.root, claudeBin: "/unused", dailyCapUsd: 25, workerProviders: { cashEndpoint: "https://cash.example.invalid" } };
+    try {
+      const result = await runtimeRegistryRunner()(() => adapter === "foundry-direct"
+        ? spawnFoundryClaudeWorker(args, config, { model, effort: "low" }) : spawnOpenWeightWorker(args, config, { model, effort: "low" }), { envPath: fixture.selected });
+      assert.equal(result.isError, revised, result.stderr);
+      assert.equal(sent, revised ? 1 : 2, "a timeout/retry delay cannot turn changed bytes into transport permission");
+      if (revised) { assert.match(result.stderr, /selected instance registry unavailable/); assert.equal(result.stderr.includes(fixture.root), false); }
+    } finally { fixture.cleanup(); }
+  }
+});
+
 test("selected read-only Claude scopes refuse contradictory scratch grants before query", async () => {
   for (const mode of ["temp-in-cwd", "home-in-cwd", "temp-is-review-source"] as const) {
     const fixture = runtimeRegistryFixture(), sink = { calls: 0 };
