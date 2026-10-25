@@ -1,4 +1,5 @@
 - id: W1-T10431
+  # reservation hand-off: codex/console-inbox-evidence-followups-20261022 -> codex/w10431-age-info
   title: "Route age-only PR findings as readable fleet information without granting automatic work eligibility"
   repo: remudero
   depends_on: [W1-T10283]
