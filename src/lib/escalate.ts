@@ -697,17 +697,45 @@ const FAIL_OPEN_JUDGE_VERDICT: EscalationJudgeVerdict = {
     "(never silently hide work from the operator)",
 };
 
+type EscalationJudgeOutputState = "accepted" | "unparseable";
+interface EscalationJudgeReceipt {
+  state: EscalationJudgeOutputState;
+  decision: EscalationJudgeDecision;
+  runId: string;
+  assignmentId?: string;
+}
+// Keep telemetry off the public verdict shape. The rejudge memo reuses the same verdict object;
+// a clone or an injected verdict has no producer receipt and must remain explicitly unknown.
+const escalationJudgeReceipts = new WeakMap<EscalationJudgeVerdict, EscalationJudgeReceipt>();
+
+/** Original model-output evidence, not the final triage decision or verified correctness.
+ * Only the real judge producer can supply it; arbitrary properties are never ledgered. */
+export function escalationJudgeReceiptFields(verdict: EscalationJudgeVerdict): Record<string, string> {
+  const receipt = escalationJudgeReceipts.get(verdict);
+  if (!receipt) return { judge_output_state: "unknown" };
+  return {
+    judge_output_state: receipt.state,
+    judge_output_decision: receipt.decision,
+    judge_run_id: receipt.runId,
+    ...(receipt.assignmentId === undefined ? {} : { judge_selection_assignment_id: receipt.assignmentId }),
+  };
+}
+
 /** Parse the judge's `ESCALATION_JUDGE_DECISION`/`ESCALATION_JUDGE_REASON` lines. A missing or
  *  unrecognised decision fails OPEN ({@link FAIL_OPEN_JUDGE_VERDICT} — `deliver`, never `demote`). */
 export function parseEscalationJudgeVerdict(text: string): EscalationJudgeVerdict {
+  return parseEscalationJudgeOutput(text).verdict;
+}
+
+function parseEscalationJudgeOutput(text: string): { verdict: EscalationJudgeVerdict; state: EscalationJudgeOutputState } {
   const decisionMatch = text.match(/ESCALATION_JUDGE_DECISION:\s*(\w+)/i);
   const decision = decisionMatch?.[1]?.toLowerCase() as EscalationJudgeDecision | undefined;
   if (!decision || !VALID_JUDGE_DECISIONS.has(decision)) {
-    return { ...FAIL_OPEN_JUDGE_VERDICT };
+    return { verdict: { ...FAIL_OPEN_JUDGE_VERDICT }, state: "unparseable" };
   }
   const reasonMatch = text.match(/ESCALATION_JUDGE_REASON:\s*(.+)/i);
   const reason = reasonMatch?.[1]?.trim() || "(no reason stated)";
-  return { decision, reason };
+  return { verdict: { decision, reason }, state: "accepted" };
 }
 
 /** Injectable judge dependency — real callers wire this to {@link realEscalationJudge}; tests
@@ -809,7 +837,14 @@ export function realEscalationJudge(opts: {
       settingsFile: opts.settingsFile,
       spawn: opts.spawn,
     });
-    return parseEscalationJudgeVerdict(result.text);
+    const parsed = parseEscalationJudgeOutput(result.text);
+    const assignmentId = result.selectionAssignmentId;
+    escalationJudgeReceipts.set(parsed.verdict, {
+      state: parsed.state, decision: parsed.verdict.decision, runId: escalationJudgeRunId(e),
+      ...(typeof assignmentId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(assignmentId)
+        ? { assignmentId } : {}),
+    });
+    return parsed.verdict;
   };
 }
 
@@ -1602,6 +1637,7 @@ function* triageRoute(
       appendLedger(deps.ledgerPath, {
         run_id: deps.runId, task_id: e.taskId, step: ESCALATION_JUDGED_STEP,
         class: e.class, judge_decision: verdict.decision, judge_reason: verdict.reason,
+        ...escalationJudgeReceiptFields(verdict),
       });
       outcome = triageEscalation(e, evidence, verdict);
     }
