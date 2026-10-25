@@ -1135,6 +1135,81 @@ export interface EscalationDedupKey {
   contractRevision?: string;
 }
 
+/** The conflict context recorded by the escalation producer and read by both repair gates. */
+export const CONFLICT_EVIDENCE_MISSING_REASON_CODE = "conflict-evidence-missing";
+export const CONFLICT_NOT_ADMITTED_REASON_CODE = "conflict-not-admitted";
+export const RAISED_BY_LINE_RE = /^\*\*Raised-by:\*\*\s*(\S+)\s*$/m;
+export const BASE_SHA_LINE_RE = /^\*\*Base:\*\*\s*(\S+)\s*$/m;
+
+/** W1-T5908 — an open conflict escalation's cause when THIS round shows it cleared (evidence now
+ *  captured, or the base moved); `undefined` when it still holds or was never recorded. */
+export function clearedConflictEscalationCause(
+  body: string | undefined,
+  current: { conflictEvidenceCaptured: boolean; baseSha?: string },
+): string | undefined {
+  const raisedBy = RAISED_BY_LINE_RE.exec(body ?? "")?.[1];
+  if (raisedBy === CONFLICT_EVIDENCE_MISSING_REASON_CODE && current.conflictEvidenceCaptured) {
+    return `raised by ${raisedBy} — the conflicting-file evidence is now captured and the PR dispositions conflicted`;
+  }
+  const raisedBase = BASE_SHA_LINE_RE.exec(body ?? "")?.[1];
+  if (raisedBase !== undefined && current.baseSha !== undefined && raisedBase !== current.baseSha) {
+    return `raised against base ${raisedBase} — the base has moved to ${current.baseSha}`;
+  }
+  return undefined;
+}
+
+/** The false-block question both the sweep and the fix rung would re-ask. */
+export function fixEscalationDedupKey(
+  taskId: string, prUrl: string, headSha: string, conflicted: boolean, ciFailing: boolean,
+  contractRevision?: string,
+): EscalationDedupKey {
+  return { class: "BLOCKED", taskId, summary: `review false-block — ${prUrl}`, detail: "",
+    headSha, cause: escalationCause(conflicted, ciFailing), contractRevision };
+}
+
+/** A duplicate may refuse a repair only when it positively names this head. A changed recorded
+ * contract, cleared conflict, or unspent operator answer releases the same question in both lanes. */
+export function openEscalationStandDownReason(
+  headSha: string,
+  candidate: OpenIssue | undefined,
+  currentContractRevision?: string,
+  current?: { conflictEvidenceCaptured: boolean; baseSha?: string },
+  redCheckNames?: readonly string[],
+  pendingAnswer?: { spent?: true },
+): { reason: string } | undefined {
+  if (pendingAnswer && !pendingAnswer.spent) return undefined;
+  if (!candidate) return undefined; // nothing open on this key — the ordinary path
+  // The sweep writes the question immediately after its clarification context paragraph.
+  const question = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]*\n\n([^\n]*)/.exec(candidate.body ?? "")?.[1];
+  if (question?.startsWith("PR stage stalled:")) return undefined;
+  const summary = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]* to BLOCKED-AMBIGUOUS: ([^\n]*)/.exec(candidate.body ?? "")?.[1];
+  const metadataChecks = /^metadata-only required checks (.+?) need title\/body repair:/.exec(summary ?? "")?.[1].split(", ");
+  if (metadataChecks && redCheckNames?.some(name => !metadataChecks.includes(name))) return undefined;
+  const candidateHead = escalationHeadSha(candidate.body);
+  // STRICTER THAN THE MATCHER (both arms): a candidate naming NO head, or naming a DIFFERENT one,
+  // never refuses a worker. The first arm is the legacy-issue case, the second is a genuinely new
+  // push whose issue has not been filed yet — in both, the failure direction of guessing wrong is
+  // "stop fixing things", so both fail open.
+  if (candidateHead === undefined || candidateHead !== headSha) return undefined;
+  const candidateRevision = escalationContractRevision(candidate.body);
+  // W1-T3579: a genuine disagreement between the RECORDED and CURRENT contract revision means the
+  // question this issue asked has since changed underneath it — re-admit rather than stand down.
+  // Either side missing (a legacy issue, or a caller with no live task to hash) says nothing, so
+  // the original head-only stand-down applies unchanged — fail toward standing down, never toward
+  // mass-retrying, on anything short of a positively OBSERVED contract change.
+  if (candidateRevision !== undefined && currentContractRevision !== undefined && candidateRevision !== currentContractRevision) {
+    return undefined;
+  }
+  if (current && clearedConflictEscalationCause(candidate.body, current) !== undefined) return undefined;
+  return {
+    reason:
+      `a needs-human escalation for this exact (task, PR, head ${headSha}, cause) is ALREADY OPEN and ` +
+      `awaiting a human (${candidate.url}) — a strike here would re-ask a question already in front of ` +
+      `someone and append to that same issue; standing down until it is closed, the head moves, or the ` +
+      `task contract changes, or an operator answers`,
+  };
+}
+
 /** Replace a bare CR, U+2028 (LINE SEPARATOR) or U+2029 (PARAGRAPH SEPARATOR) with a single space
  *  (W1-T974). These are the three characters besides `\n` itself that JavaScript's `m` regex flag
  *  treats as a line start, and the ones a producer's log-tail splice can leave sitting INSIDE one
@@ -1153,7 +1228,7 @@ function normalizeCandidateBody(body: string): string {
 /** Scan an already-fetched OPEN-issue list for a duplicate of `e` — the pure matching predicate
  *  {@link findDuplicateEscalation} and {@link lookupDuplicateEscalation} both apply to whatever
  *  `listOpen` returned, so a change to the matching rule can never drift between the two callers. */
-function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): OpenIssue | undefined {
+export function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): OpenIssue | undefined {
   const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
   return open.find((issue) => {
     const body = normalizeCandidateBody(issue.body ?? "");
