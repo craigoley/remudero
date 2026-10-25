@@ -1,7 +1,7 @@
 import { CODE_HEALTH_POLICY_VERSION } from "./code-health-collector.js";
 import { fixedClock } from "./clock.js";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { projectCodeHealth, type CodeHealthProjectionInput } from "./code-health-projection.js";
 import type { CodeHealthAssessment } from "./code-health-contract.js";

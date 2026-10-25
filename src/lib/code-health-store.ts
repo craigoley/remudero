@@ -331,7 +331,7 @@ export function readCodeHealthInventory(stateDir: string): RepositoryEvidenceInv
       checked.value.repositories.some(repo => !isCodeHealthRepository(repo.repository))) throw new RmdError("read-model", GENERIC_EXIT_CODE, "Code health is waiting for the configured repository list.");
   return checked.value;
 }
-export function readCodeHealthSavedWork(stateDir: string, inventory: RepositoryEvidenceInventory, repository: string, now: number): {
+export function readCodeHealthRelatedWork(stateDir: string, inventory: RepositoryEvidenceInventory, repository: string, now: number): {
   state: "reported" | "partial" | "stale" | "unavailable" | "not_collected"; asOf: string | null; work: CodeHealthSavedWork[]; reason: string | null;
 } {
   const work: CodeHealthSavedWork[] = [], clocks: string[] = []; let missing = 0, invalid = 0, stale = false;
