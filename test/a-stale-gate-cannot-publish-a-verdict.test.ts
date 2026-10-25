@@ -459,8 +459,8 @@ test("W1-T3337: the implementation run records a blocked verdict when its inject
 });
 
 test("W1-T3337 wiring: every production terminal-review path supplies a just-in-time code-freshness reader", () => {
-  // W1-T9337: include fix-rung re-reviews at their new physical owner.
-  const source = ["run-task.ts", "cli/commands/fix.ts"]
+  // W1-T9337: include both fix-rung re-reviews and the extracted review command.
+  const source = ["run-task.ts", "cli/commands/fix.ts", "cli/commands/review.ts"]
     .map((owner) => readFileSync(new URL(`../src/${owner}`, import.meta.url), "utf8").replace(/\bhost\./g, ""))
     .join("\n");
   const runTaskBody = readFileSync(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url), "utf8");

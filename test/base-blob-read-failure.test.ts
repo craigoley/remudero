@@ -461,7 +461,7 @@ test("W1-T460 (5): the call site spreads BOTH of buildBaseProofDir's facts onto 
   // repo-wide, while both files changed here scored BETTER). The executing test below still drives
   // the call site — this pin adds the half execution cannot distinguish: that BOTH facts are
   // forwarded, not just the dir impl-GE already wired.
-  const sources = ["run-task.ts", "lib/check-proof.ts"].map((file) => readFileSync(join(REPO_ROOT, "src", file), "utf8"));
+  const sources = ["cli/commands/review.ts", "lib/check-proof.ts"].map((file) => readFileSync(join(REPO_ROOT, "src", file), "utf8"));
   const src = sources[0]!;
   assert.match(
     src,

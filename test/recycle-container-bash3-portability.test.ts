@@ -351,6 +351,9 @@ function runRecycleForCapture(opts: {
       RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
       RMD_RECYCLE_FIRST_BOOT: "1",
       RMD_RECYCLE_DOCKERENV_PATH: noDockerenvMarker(),
+      // This env drops NODE_TEST_CONTEXT, so deploy/scratch-mounts.sh's test guard cannot see a test:
+      // on the Azure host it left /mnt/scratch/rmd/rmd-recycle-bash3-capture-state-* behind.
+      RMD_SCRATCH: "off",
       ...NEUTRAL_CREDENTIAL_ENV,
       ...opts.shellEnv,
     },

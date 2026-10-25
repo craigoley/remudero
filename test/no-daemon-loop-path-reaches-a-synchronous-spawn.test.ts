@@ -183,7 +183,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   pinnedConfigValue: 1,
   planPrPreflightAtCommit: 1,
   planSafetyGitSync: 1,
-  planTreeIsBehindMain: 1,
   postReviewPending: 1,
   prepareDefuseTaskIds: 1,
   // W1-T9553 (operator yes, 2026-10-25): its sync ghExec runs in the evidence-coverage pass, which the daemon spawns
@@ -240,7 +239,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   resolveMergeLogReadOptions: 1,
   resolveOwnerRepoAt: 1,
   resolvePlanCriteriaAtHead: 1,
-  resolveReviewSubjectCheckout: 1,
+  reviewCommandHost: 2,
   retroShippedGithubGateway: 1,
   reuseDonor: 1,
   reviewCommand: 1,

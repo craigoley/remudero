@@ -1,0 +1,30 @@
+id: incident-3648590677de3677
+ts: 2026-10-25T11:40:44.768Z
+raw: >-
+  Incident 3648590677de: intervention
+  escalated:none:structured-instrument-entanglement-would
+
+  First seen: 2026-10-25T11:40:44.158Z
+
+  Last seen: 2026-10-25T11:40:44.158Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#13895@48b3a3fa9 actor=claude cause=escalated:none:structured-instrument-entanglement-would — a hand action answered a fleet state no lane resolved
+    - surface=pr action=update-branch target=pr#13895@3b467d4ea actor=claude cause=escalated:none:structured-instrument-entanglement-would — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#3648590677de3677a3aebe0262579d926d07883e518264b6b468836553be4e3e
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

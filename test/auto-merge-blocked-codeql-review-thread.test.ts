@@ -361,7 +361,12 @@ test("a positive-distance stale-blocked PR stays with the branch refresh and nev
   const seen: string[] = [];
   const observed = observeScannerBlocker(OWNER, REPO, CANDIDATE, sceneFetch({ aheadBy: 3, seen }));
   assert.deepEqual(observed, { kind: "base-behind", behindBy: 3 });
-  assert.deepEqual(seen, [`repos/${OWNER}/${REPO}/compare/${HEAD}...main`], "one read, no scanner read on a stale merge ref");
+  // The review listing comes first (a person's hold outranks the distance), then the distance; still no
+  // scanner read on a stale merge ref.
+  assert.deepEqual(seen, [
+    `repos/${OWNER}/${REPO}/pulls/${PR}/reviews?per_page=100`,
+    `repos/${OWNER}/${REPO}/compare/${HEAD}...main`,
+  ], "the hold read and the distance read, no scanner read on a stale merge ref");
 
   const pr = blockedPr({ scannerBlocker: observed });
   assert.equal(scannerBlockerAmbiguity(pr, DEFAULT_SWEEP_POLICY), undefined);

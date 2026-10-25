@@ -250,7 +250,7 @@ test("BEHAVIORAL: a real runTask implement dispatch carries implement's OWN decl
   assert.ok(spawnCalls[1]!.tools!.includes("Bash"), "a Claude implement still runs the suite and the local gate");
 });
 
-// @census-reads: src/run-task.ts src/cli/commands/fix.ts — both owners of worker spawn sites.
+// @census-reads: src/run-task.ts src/cli/commands/fix.ts src/cli/commands/review.ts — worker spawn owners.
 // @source-text-subject — this test's SUBJECT genuinely IS src/run-task.ts's own text, not a stand-in
 // for behaviour it could exercise instead (test/source-text-assertion-census.test.ts's remedy (2)).
 // The claim under test is "every spawn call site in the file declares a tool bound", a property
@@ -261,8 +261,8 @@ test("every worker spawn declares an explicit tool bound", () => {
   // the claim is about EVERY spawn site, including ones no test happens to drive. W1-T3573 closed
   // this for review/manual and left five sites behind, which is exactly the shape a census catches
   // and a per-lane test does not.
-  // W1-T9337: include the extracted fix implementation in the same source census.
-  const src = ["run-task.ts", "cli/commands/fix.ts"]
+  // W1-T9337: census the entrypoint and both extracted command implementations.
+  const src = ["run-task.ts", "cli/commands/fix.ts", "cli/commands/review.ts"]
     .map((owner) => readFileSync(new URL(`../src/${owner}`, import.meta.url), "utf8").replace(/\bhost\./g, ""))
     .join("\n");
   const lines = src.split("\n");

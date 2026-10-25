@@ -249,7 +249,7 @@ test("an untrailered body is unchanged — still resolves from its own PR body A
   // STRUCTURAL: `reviewCommand` only calls `resolvePlanCriteriaAtHead` inside `if (taskId)` — the
   // same gate test/resolver-divergence-detector.test.ts pins for the same reason — so a body
   // carrying no anchored trailer can never make it touch a git object at all.
-  const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "cli", "commands", "review.ts"), "utf8");
   assert.match(
     runTaskSrc,
     /if\s*\(taskId\)\s*{\s*const resolved = await resolvePlanCriteriaAtHeadAsync\(body, subjectRepoDir, /,
@@ -307,7 +307,7 @@ test("the swap costs no second network fetch and stays synchronous — one fetch
   // site — its result is hand straight into the criteria used to build runReview's own arguments
   // in the same synchronous block, exactly claim 5 requires ("resolving and judging in the same
   // tick").
-  const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "cli", "commands", "review.ts"), "utf8");
   // W1-T7743: the review command awaits the AWAITED form (its git runs off the loop); the sync form is never awaited.
   assert.doesNotMatch(
     runTaskSrc,
