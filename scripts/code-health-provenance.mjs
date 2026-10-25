@@ -39,12 +39,15 @@ export function codeqlProvenance(input) {
     else reasons.push("A measured file cannot be resolved within this repository.");
   }
   if (!targets.size) reasons.push("Explicit measured files are unavailable; result locations do not establish scan scope.");
-  if (!Array.isArray(run.invocations) || !run.invocations.length || run.invocations.length > 64 ||
-      run.invocations.some(invocation => invocation.executionSuccessful !== true ||
-        !timestamp(invocation.endTimeUtc) || Date.parse(invocation.endTimeUtc) > Date.parse(input.observedAt) ||
-        [...(invocation.toolExecutionNotifications ?? []), ...(invocation.toolConfigurationNotifications ?? [])].some(value => value.level === "error"))) {
-    reasons.push("Successful analysis completion is not fully attested in the original output.");
-  }
+  const invocations = Array.isArray(run.invocations) && run.invocations.length <= 64 ? run.invocations : [];
+  const contradictoryCompletion = invocations.some(invocation => invocation.executionSuccessful === false ||
+    typeof invocation.endTimeUtc === "string" && (!timestamp(invocation.endTimeUtc) || Date.parse(invocation.endTimeUtc) > Date.parse(input.observedAt)) ||
+    [...(invocation.toolExecutionNotifications ?? []), ...(invocation.toolConfigurationNotifications ?? [])].some(value => value.level === "error"));
+  const originalCompletion = invocations.length > 0 && invocations.every(invocation => invocation.executionSuccessful === true && timestamp(invocation.endTimeUtc));
+  const completion = contradictoryCompletion ? null : originalCompletion ? { kind: "original-invocations", state: "success",
+    at: invocations.map(invocation => invocation.endTimeUtc).sort().at(-1) } : input.analysisSucceeded === true ?
+    { kind: "workflow-analysis-step", state: "success", at: input.observedAt } : null;
+  if (completion === null) reasons.push("Successful analysis completion is not fully attested in the original output or workflow step.");
   if (components.length > 128 || components.some(component => !component || !text(component.name) ||
       component.rules && (!Array.isArray(component.rules) || component.rules.length > 20_000 || component.rules.some(rule => !text(rule.id))))) {
     throw new Error("Code health tool or rule inventory is invalid.");
@@ -56,7 +59,7 @@ export function codeqlProvenance(input) {
   const hasScope = targets.size > 0 && !reasons.some(reason => reason.includes("resolved"));
   return { version: "code-health-source-v1", kind: "quality", repository: input.repository.toLowerCase(), analyzedSha: input.analyzedSha.toLowerCase(),
     ref: input.ref, runId: input.runId, runAttempt: input.runAttempt, observedAt: input.observedAt, language: input.language, sarifId: input.sarifId,
-    scanId: `codeql:${input.runId}:${input.runAttempt}:${input.language}:${input.sarifId}`,
+    scanId: `codeql:${input.runId}:${input.runAttempt}:${input.language}:${input.sarifId}`, completion,
     state: reasons.length ? "partial" : "complete", reasons: [...new Set(reasons)],
     toolVersion: text(driver?.version) ? driver.version : null, rulesVersion: ruleCount ? hash(rules) : null, ruleCount,
     configHash: hash([input.config, [...input.exclusions].sort()]), exclusions: [...new Set(input.exclusions)].sort(),
@@ -137,6 +140,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       const config = boundedRead(values.config, 1024 ** 2), workflow = boundedRead(values.workflow, 1024 ** 2), exclusions = exclusionsFromConfig(config);
       input = { repository: process.env.GITHUB_REPOSITORY, analyzedSha: process.env.GITHUB_SHA, ref: process.env.GITHUB_REF,
         runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT, observedAt: new Date().toISOString(),
+        analysisSucceeded: process.env.CODE_HEALTH_ANALYSIS_OUTCOME === "success",
         language: process.env.CODE_HEALTH_LANGUAGE, sarifId: process.env.CODE_HEALTH_SARIF_ID,
         config: JSON.stringify([config, workflow]), exclusions: exclusions.values, exclusionsKnown: exclusions.known,
         sarif: JSON.parse(boundedRead(join(values["sarif-dir"], files[0]), 64 * 1024 ** 2)) };

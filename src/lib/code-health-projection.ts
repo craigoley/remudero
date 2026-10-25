@@ -71,6 +71,7 @@ export interface CodeHealthSourceProvenance {
   configHash: string;
   exclusions: string[];
   scope: { kind: "explicit-analysis-targets" | "instrumented-source-lines"; fileCount: number; hash: string | null };
+  completion?: { kind: "original-invocations" | "workflow-analysis-step"; state: "success"; at: string } | null;
   runAttempt?: string;
   language?: string;
   sarifId?: string;
@@ -84,7 +85,7 @@ export function validateCodeHealthProvenance(value: unknown, expected: { reposit
   const p = value as CodeHealthSourceProvenance, digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
   const only = (value: object, keys: string): boolean => Object.keys(value).every(key => keys.split(" ").includes(key));
   const common = "version kind repository analyzedSha ref runId observedAt scanId state reasons toolVersion rulesVersion configHash exclusions scope";
-  if (!only(p, `${common} ${p.kind === "quality" ? "runAttempt language sarifId ruleCount" : "check"}`) ||
+  if (!only(p, `${common} ${p.kind === "quality" ? "runAttempt language sarifId ruleCount completion" : "check"}`) ||
       p.version !== "code-health-source-v1" || p.kind !== expected.kind || !repositoryShape.test(p.repository) ||
       p.repository !== expected.repository.toLowerCase() || !shaShape.test(p.analyzedSha) || p.analyzedSha !== expected.analyzedSha.toLowerCase() ||
       p.ref !== "refs/heads/main" || !/^[1-9][0-9]{0,19}$/.test(p.runId) || p.runId !== expected.runId || !time(p.observedAt) || !text(p.scanId) ||
@@ -95,12 +96,15 @@ export function validateCodeHealthProvenance(value: unknown, expected: { reposit
       p.scope.kind !== (p.kind === "quality" ? "explicit-analysis-targets" : "instrumented-source-lines") ||
       !Number.isSafeInteger(p.scope.fileCount) || p.scope.fileCount < 0 || p.scope.fileCount > 100_000 || !(p.scope.hash === null || digest(p.scope.hash))) return fail();
   if (p.kind === "quality") {
+    if (p.completion !== null && (!p.completion || typeof p.completion !== "object" || !only(p.completion, "kind state at") ||
+        !["original-invocations", "workflow-analysis-step"].includes(p.completion.kind) || p.completion.state !== "success" || !time(p.completion.at) ||
+        Date.parse(p.completion.at) > Date.parse(p.observedAt))) return fail();
     if (!p.runAttempt || !/^[1-9][0-9]{0,5}$/.test(p.runAttempt) || !p.language || !/^[a-z][a-z0-9-]{0,63}$/.test(p.language) ||
         !p.sarifId || !/^[a-f0-9-]{36}$/i.test(p.sarifId) || !Number.isSafeInteger(p.ruleCount) || p.ruleCount! < 0 || p.ruleCount! > 2_560_000 ||
         p.scanId !== `codeql:${p.runId}:${p.runAttempt}:${p.language}:${p.sarifId}`) return fail();
   } else if (!p.check || typeof p.check !== "object" || !only(p.check, "id met reason") || p.check.id !== "coverage-existing-tier" ||
       typeof p.check.met !== "boolean" || !text(p.check.reason, 2048) || p.scanId !== `coverage-nightly:${p.runId}`) return fail();
-  if (p.state === "complete" ? p.reasons.length > 0 || !p.toolVersion || !p.rulesVersion || !p.scope.hash || !p.scope.fileCount || p.kind === "quality" && !p.ruleCount : !p.reasons.length) return fail();
+  if (p.state === "complete" ? p.reasons.length > 0 || !p.toolVersion || !p.rulesVersion || !p.scope.hash || !p.scope.fileCount || p.kind === "quality" && (!p.ruleCount || !p.completion) : !p.reasons.length) return fail();
   return structuredClone(p);
 }
 

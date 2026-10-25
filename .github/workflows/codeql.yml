@@ -90,6 +90,7 @@ jobs:
       - name: Export code-health measurement metadata
         if: github.ref == 'refs/heads/main'
         env:
+          CODE_HEALTH_ANALYSIS_OUTCOME: ${{ steps.analyze.outcome }}
           CODE_HEALTH_LANGUAGE: ${{ matrix.language }}
           CODE_HEALTH_SARIF_ID: ${{ steps.analyze.outputs.sarif-id }}
           CODE_HEALTH_SARIF_DIR: ${{ steps.analyze.outputs.sarif-output }}
