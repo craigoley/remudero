@@ -499,7 +499,7 @@ test("dump expiry spares small files, a package root's files and anything inside
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
-test("an owned temp root is scanned, a clone in a shared one is held, and a symlinked one is never a root", () => {
+test("an owned temp root is scanned, a clone in a root other accounts can enter is preserved then retired, and a symlinked one is never a root", () => {
   const fx = setup({ temp_roots: ["remudero-*"] });
   try {
     const tmp = join(fx.root, "tmp");
@@ -521,10 +521,12 @@ test("an owned temp root is scanned, a clone in a shared one is held, and a syml
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.match(r.stdout, /RETIRED worktree .*remudero-shared\/task/);
     assert.match(r.stdout, /RETIRED clone .*remudero-private\/repo/);
-    assert.match(r.stdout, /HOLD shared-temp-root .*remudero-shared\/repo/);
+    assert.match(r.stdout, /RETIRED clone .*remudero-shared\/repo/);
+    assert.doesNotMatch(r.stdout, /shared-temp-root/);
     assert.equal(existsSync(worktree), false);
     assert.equal(existsSync(owned), false);
-    assert.equal(existsSync(shared), true);
+    assert.equal(existsSync(shared), false, "a 755 temp root no longer holds its clone forever");
+    assert.ok(readdirSync(join(fx.home, "Remudero-preserved")).some(n => n.includes("remudero-shared__repo@")), "it is preserved before it goes");
     assert.equal(existsSync(linked), true, r.stdout);
     assert.doesNotMatch(r.stdout, /remudero-link|outside\/remudero-elsewhere/);
     const back = restore(fx, readdirSync(join(fx.home, "Remudero-preserved")).filter(n => n.includes("remudero-shared__task@"))

@@ -613,7 +613,8 @@ import {
   type EscalateDeps,
   type EscalateTriageSettings,
   escalationHeadSha,
-  escalationContractRevision,
+  openEscalationStandDownReason,
+  fixEscalationDedupKey,
   findDuplicateEscalation,
   taskContractRevision,
   taskSemanticRevision,
@@ -2501,6 +2502,7 @@ export function buildSweepEffects(
   | "readLiveState"
   | "terminalFixStandDown"
   | "readRedBaseRefreshFacts"
+  | "readOpenEscalations"
   | "depReview"
   | "postReview"
   | "repushAbsent"
@@ -9377,104 +9379,7 @@ export function unchangedTreeStandDownReason(
  *  latch and its escalations version themselves by the SAME function the fix rung's guard reads. */
 export { taskContractRevision };
 
-/**
- * W1-T2799 (the fix-rung pre-strike gate's SIXTH reason source, composed into {@link
- * fixRungStandDownReason} below — never a parallel early return): has a human ALREADY been asked
- * about this exact state?
- *
- * THE DEFECT THIS CLOSES. The review false-block escape (`detectReviewFalseBlock` -> `escalate`,
- * below) opens a needs-human issue and returns `escalated`. NOTHING RECORDS THAT IT FIRED. The
- * next level-triggered sweep builds a FRESH {@link runFixRung} with `strikes` reset, re-reads the
- * same still-failing review on the same unchanged head, and spends a fix worker BEFORE the escape
- * can fire again — which it then does, appending to the very issue already open and waiting on a
- * human. MEASURED on #3889: ten escalations across four heads, EIGHT consecutive on head d8fa22b,
- * seven of which dispatched a worker that pushed nothing at all.
- *
- * THE DEDUP THAT EXISTS IS AT THE WRONG LAYER, WHICH IS THE WHOLE DEFECT. `escalate()` already
- * consults {@link findDuplicateEscalation} and correctly appended all ten to ONE issue rather
- * than opening ten siblings (W1-T104/W1-T345) — but it runs INSIDE `escalate()`, by which time
- * the strike is already spent. The right predicate, consulted at the wrong moment. So this reuses
- * that EXACT predicate (the caller passes its result in) rather than re-implementing a second
- * opinion about which issues are duplicates.
- *
- * DELIBERATELY STRICTER THAN THAT PREDICATE, AND THIS IS THE LOAD-BEARING PART.
- * `matchesOptionalDimension` is permissive when either side omits a dimension, so a probe carrying
- * a head matches a legacy issue carrying none. That is RIGHT for its own purpose — it fails toward
- * APPENDING to an open issue, which is cheap and visible. REUSING IT TO REFUSE A FIX WORKER
- * INVERTS THE POLARITY: it would fail toward NOT FIXING, silently, on a head that may carry real
- * new work. So a stand-down additionally requires the candidate to carry a `**Head:**` line EQUAL
- * to the head about to be struck against, read through {@link escalationHeadSha} — the SAME
- * `HEAD_SHA_LINE_RE` the matcher uses, one parser and not two.
- *
- * THE RESET IS THE HUMAN, AND THAT IS THE POINT. `listOpen` stops returning the issue the moment
- * the operator closes it, so acting on the escalation — the thing the rung is waiting for — is
- * what resumes the rung. A new push resumes it too, by moving the head out from under the key.
- *
- * THE FAIL-OPEN CONSEQUENCE, STATED SO NOBODY DISCOVERS IT BY SURPRISE. Because a candidate with
- * no `**Head:**` line never refuses a worker, and because #3889 — the issue this was filed from —
- * CARRIES NO SUCH LINE (it predates the producer fix below), THIS DOES NOT STOP THE #3889 LOOP
- * RETROACTIVELY. It stops one escalation AFTER merge: the next false-block escalation is the first
- * head-qualified one, and the sweep after that is the first to stand down.
- *
- * PURE and exported so the boundary is unit-testable independent of the rung's issue plumbing,
- * exactly like {@link unchangedTreeStandDownReason} beside it.
- *
- * W1-T3579 extends this SAME function with a FOURTH parameter, `currentContractRevision` — again
- * never a parallel early-return path. `headSha` alone answers "is this the same push", not "is
- * this the same QUESTION": a plan-only scope/acceptance amendment re-authorizes a repair on the
- * identical head an open issue already names, and the head-only check above stood that repair
- * down permanently (the PORTAL-T4/#21 defect this task closes — see {@link taskContractRevision}'s
- * own doc). So once a candidate is HEAD-QUALIFIED (survived the check above), its RECORDED
- * contract revision (read through {@link escalationContractRevision}, the same
- * `CONTRACT_REVISION_LINE_RE` {@link matchDuplicateEscalation} matches on) is compared against
- * the CURRENT one. A candidate recording NO revision at all (every issue predating this task,
- * W1-T2799's own legacy shape) keeps the ORIGINAL head-only stand-down untouched — permissive
- * exactly like `matchesOptionalDimension`'s absent-side rule, never a second matcher, and
- * consistent with design note (iii): "an existing head-qualified escalation without a contract
- * revision remains a stand-down; this task does not mass-retry old issues". Only a candidate that
- * DOES record one, and disagrees with the current, live revision, re-admits — exactly ONE strike,
- * because the next round either resolves it (no new escalation) or the false-block producer files
- * a REVISION-DISTINCT issue (the dedup key's 4th dimension, above), so a second loop on the SAME
- * unchanged contract is caught exactly as before.
- */
-export function openEscalationStandDownReason(
-  headSha: string,
-  candidate: OpenIssue | undefined,
-  currentContractRevision?: string,
-  current?: { conflictEvidenceCaptured: boolean; baseSha?: string },
-  redCheckNames?: readonly string[],
-): { reason: string } | undefined {
-  if (!candidate) return undefined; // nothing open on this key — the ordinary path
-  // The sweep writes the question immediately after its clarification context paragraph.
-  const question = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]*\n\n([^\n]*)/.exec(candidate.body ?? "")?.[1];
-  if (question?.startsWith("PR stage stalled:")) return undefined;
-  const summary = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]* to BLOCKED-AMBIGUOUS: ([^\n]*)/.exec(candidate.body ?? "")?.[1];
-  const metadataChecks = /^metadata-only required checks (.+?) need title\/body repair:/.exec(summary ?? "")?.[1].split(", ");
-  if (metadataChecks && redCheckNames?.some(name => !metadataChecks.includes(name))) return undefined;
-  const candidateHead = escalationHeadSha(candidate.body);
-  // STRICTER THAN THE MATCHER (both arms): a candidate naming NO head, or naming a DIFFERENT one,
-  // never refuses a worker. The first arm is the legacy-issue case, the second is a genuinely new
-  // push whose issue has not been filed yet — in both, the failure direction of guessing wrong is
-  // "stop fixing things", so both fail open.
-  if (candidateHead === undefined || candidateHead !== headSha) return undefined;
-  const candidateRevision = escalationContractRevision(candidate.body);
-  // W1-T3579: a genuine disagreement between the RECORDED and CURRENT contract revision means the
-  // question this issue asked has since changed underneath it — re-admit rather than stand down.
-  // Either side missing (a legacy issue, or a caller with no live task to hash) says nothing, so
-  // the original head-only stand-down applies unchanged — fail toward standing down, never toward
-  // mass-retrying, on anything short of a positively OBSERVED contract change.
-  if (candidateRevision !== undefined && currentContractRevision !== undefined && candidateRevision !== currentContractRevision) {
-    return undefined;
-  }
-  if (current && clearedConflictEscalationCause(candidate.body, current) !== undefined) return undefined;
-  return {
-    reason:
-      `a needs-human escalation for this exact (task, PR, head ${headSha}, cause) is ALREADY OPEN and ` +
-      `awaiting a human (${candidate.url}) — a strike here would re-ask a question already in front of ` +
-      `someone and append to that same issue; standing down until it is closed, the head moves, or the ` +
-      `task contract changes`,
-  };
-}
+export { openEscalationStandDownReason } from "./lib/escalate.js";
 
 export function resolveClearedEscalation(
   issues: IssueGateway,
@@ -9639,6 +9544,7 @@ async function fixRungStandDownReason(
     key: EscalationDedupKey;
     find: (key: EscalationDedupKey) => OpenIssue | undefined;
     redCheckNames?: readonly string[];
+    pendingAnswer?: { spent?: true };
     current?: { conflictEvidenceCaptured: boolean; baseSha?: string };
     resolve?: (candidate: OpenIssue, clearedCause: string) => void;
   },
@@ -9740,6 +9646,7 @@ async function fixRungStandDownReason(
       openEscalation.key.contractRevision,
       openEscalation.current,
       openEscalation.redCheckNames,
+      openEscalation.pendingAnswer,
     );
     if (alreadyAsked) {
       log("fix.contract_hold", { kind: "open-escalation", pr_url: prUrl, head_sha: openEscalation.headSha,
@@ -10920,7 +10827,9 @@ export function formerBoundStandIn(reached: () => boolean,
   };
 }
 
-export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0]): ReturnType<RunTaskCommandHost["runFixRung"]> {
+export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
+  pendingAnswer?: OpenPrView["pendingAnswer"];
+}): ReturnType<RunTaskCommandHost["runFixRung"]> {
   const roundRows: Record<string, unknown>[] = [];
   const deps = { ...opts.deps, log: (step: string, extra?: Record<string, unknown>) => {
     roundRows.push({ ...extra, task_id: opts.taskId, step });
@@ -11295,17 +11204,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       deps.issues.listOpen
         ? {
             headSha: review.headSha,
-            key: {
-              class: "BLOCKED" as const,
-              taskId: opts.taskId,
-              summary: `review false-block — ${opts.prUrl}`,
-              detail: "",
-              headSha: review.headSha,
-              cause: escalationCause(currentMergeConflict !== undefined, noReviewYet),
-              // W1-T3579: the 4th dedup dimension — see this function's own `openEscalation` doc.
-              contractRevision: currentContractRevision,
-            },
+            key: fixEscalationDedupKey(opts.taskId, opts.prUrl, review.headSha,
+              currentMergeConflict !== undefined, noReviewYet, currentContractRevision),
             find: (key: EscalationDedupKey) => findDuplicateEscalation(key, { issues: deps.issues }),
+            pendingAnswer: opts.pendingAnswer ?? (opts.constraint !== undefined ? {} : undefined),
             redCheckNames: noReviewYet ? currentCiFailures?.map(f => f.name) : undefined,
             current: { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha },
             resolve: (candidate: OpenIssue, clearedCause: string) =>
@@ -35865,7 +35767,7 @@ export function buildFixRungDispatchArgs(args: {
     headSha: string;
     reviewInputDigest?: string;
     reviewSummary?: string;
-    pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; contributions?: unknown[] };
+    pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; spent?: true; contributions?: unknown[] };
     checksState?: OpenPrView["checksState"];
     redRequiredChecks?: readonly string[];
   };
@@ -35971,6 +35873,7 @@ export function buildFixRungDispatchArgs(args: {
     progressReviewInputDigest: pr.reviewInputDigest,
     initialCriterionIndices,
     constraint: feedbackFixConstraint(pr.pendingAnswer),
+    pendingAnswer: pr.pendingAnswer,
     feedbackContributions: pr.pendingAnswer?.contributions === undefined ? undefined : feedbackLineageSnapshot(pr.pendingAnswer.contributions),
     progressDecision: evidence.progressDecision,
     progressApproach: evidence.progressApproach,

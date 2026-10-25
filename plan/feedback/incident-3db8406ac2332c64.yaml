@@ -1,0 +1,29 @@
+id: incident-3db8406ac2332c64
+ts: 2026-10-25T11:41:41.986Z
+raw: >-
+  Incident 3db8406ac233: intervention
+  review-failed:fix-lane:structured-instrument-entanglement-would
+
+  First seen: 2026-10-25T11:40:44.158Z
+
+  Last seen: 2026-10-25T11:40:44.158Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#13895@591f9bcd0 actor=claude cause=review-failed:fix-lane:structured-instrument-entanglement-would — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#3db8406ac2332c64b8f920c39db71f72701eddd70e0832f779542bac55a339d8
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
