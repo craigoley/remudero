@@ -122,7 +122,9 @@ function sourceFor(request: ImprovementThreadRequest, scope: Scope, deps: Improv
     const otherWork = { ...row }; delete otherWork.threadId;
     return otherWork.taskId || otherWork.prUrl ? [otherWork] : [];
   });
-  const briefRelated = [...new Map(linkedWork.map(row => [JSON.stringify(row), row])).values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const briefRelated = [...new Map(linkedWork.map(row => [JSON.stringify(row), row])).values()].sort((a, b) => {
+    const left = JSON.stringify(a), right = JSON.stringify(b); return left < right ? -1 : left > right ? 1 : 0;
+  });
   const context = [
     `Improvement in ${request.repository} (${scope.instance})`,
     `Observed finding (quoted): ${JSON.stringify(opportunity.title)}`, `What this may affect: ${opportunity.consequence}`,
@@ -136,7 +138,7 @@ function sourceFor(request: ImprovementThreadRequest, scope: Scope, deps: Improv
     `Saved snapshot: ${request.snapshotId}`, `Opportunity: ${opportunity.id}`, `Existing policy: ${CODE_HEALTH_POLICY_VERSION}`,
     `Evidence: ${excerpt.length} shown of ${opportunity.evidenceCount} findings.`, JSON.stringify(excerpt),
     `Linked work available from saved records: ${JSON.stringify(briefRelated)}`,
-    "These links may be incomplete. The filing workflow checks current work before opening a plan. This conversation's own link does not change its goal.",
+    "These links may be incomplete. The filing workflow checks current work before opening a plan.",
   ].join("\n");
   if (Buffer.byteLength(context) > 64 * 1024) return fail("source_unavailable", "This finding's briefing exceeds the saved conversation limit.");
   return { binding, context, sourceProposalId: opportunity.proposalId };
