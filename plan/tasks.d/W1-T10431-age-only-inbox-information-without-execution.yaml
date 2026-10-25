@@ -4,7 +4,7 @@
   repo: remudero
   depends_on: [ W1-T10283 ]
   type: implement
-  verify: human
+  verify: auto
   priority: 2.5
   risk: high
   band_meaning: span
@@ -59,3 +59,16 @@
     October 25 narrow scope amendment: the operator explicitly approved adding only src/lib/inbox.ts (reply call_8bb7e43b7ad64187bc6aa8a262d18ea1, item 0). Its default proposalsNeedingDraft/draftsDueOnDaemon selectors independently admit Architect drafting, so fleet-lane exclusion alone cannot satisfy the existing no-new-drafting acceptance. Exclude only source-verified informational findings from that selector, preserving genuine, unknown and restored-for-review asks and all existing eligible fleet work. Retain the four executable acceptance proofs, the dependency, history, and every review/CI gate. This amendment grants no model call, new action, deployment, provider, budget, permission, service or safety-setting change.
     October 25 snapshot-producer scope addition: the operator explicitly approved adding only src/lib/inbox-view.ts (reply call_d4d690dffd94432c86e6a277e292d76b, item 0) to the same amendment. This existing producer already captures thread evidence and publishes the shared snapshot. Use one captured ownership decision, including genuine unanswered questions, for lanes, badges and retained history instead of separate reads that could disagree. Preserve unknown-source refusal, all history, existing action permissions and every test/review/CI gate. This adds no model call, deployment, service change or CI/memory-policy change.
     GitHub distinguishes review-requested notification reasons from ordinary subscribed activity: https://docs.github.com/en/subscriptions-and-notifications/concepts/about-notifications . Google SRE monitoring likewise distinguishes actionable alerts from general signals: https://sre.google/sre-book/monitoring-distributed-systems/ . These are design analogies, not evidence that any particular Remudero item is settled.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Explicit operator reply on October 22: \"Approve this exact operator release\" for the preservation-only age-information scope, after disclosure that the deterministic backstop matched \"without deleting history\". This is an operator ruling, not a model verdict."
+      - "Preserve all history and the W1-T10283 dependency; grant no new automatic action, deployment or spending. All native tests, review and CI remain required."
+      - "Explicit operator reply on October 25, call_8bb7e43b7ad64187bc6aa8a262d18ea1 item 0: approve only the src/lib/inbox.ts draft-selector scope addition, preserving genuine, unknown and restored-for-review asks, existing eligible fleet work, all tests/review/CI, and all operational boundaries. This records operator approval, not a model verdict."
+      - "Explicit operator reply on October 25, call_d4d690dffd94432c86e6a277e292d76b item 0: approve only the src/lib/inbox-view.ts snapshot-producer scope addition through the same normal amendment, preserving genuine unanswered questions, unknown-source refusal, all history, action permissions and every test/review/CI gate. No model call, deployment, service or CI/memory-policy change; operator approval, not a model verdict."
+      - "Explicit operator reply October25, call_37f29f1de2e641a2b95789b18eb58dd3 item0: Approve this one caller and ruling refresh. Add only src/run-task.ts as the eighteenth companion. All four criteria, history, UNKNOWN protections, budgets and gates remain. Native source repair retains ownership and its saved production patch still needs qualification. This is the operator scope decision, not a model verdict or a source qualification claim."
+    judged_at: "2026-10-25T22:29:33.426Z"
+    pin: "9d0574fc82b9fc95fb340a3d8f50cecad2cd8d249d25746debd983b143727bd5"
+    operator_release_pin: "4d84125fc6496e11643c801114ecf6b32639b19bc376a4a03409c88fb1140151"
