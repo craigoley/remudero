@@ -43,6 +43,7 @@ import { sweepStaleTempDirsAsync, type TempSweepOpts, type TempSweepSummary } fr
 import { IMAGE_BUILD_SHA_PATH } from "../../lib/deployer.js";
 import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "../../lib/baked-closure-catalog.js";
 import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
+import { instanceRegistryRuntimePresent, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import type { RegistryFileIO } from "../../lib/instance-registry-selection.js";
 import { resolveInstallRoot } from "../../lib/install-root.js";
 import { escalate, escalateAsync, ghIssueGateway, ghIssueGatewayAsync, tryEscalate, type Escalation, type EscalationJudgeVerdict, type AsyncIssueGateway, type IssueGateway } from "../../lib/escalate.js";
@@ -4264,6 +4265,9 @@ export async function runTask(
   } = {},
   host: RunTaskCommandHost,
 ): Promise<RunResult> {
+  if (process.env.RMD_INSTANCE_REGISTRY !== undefined && !instanceRegistryRuntimePresent()) {
+    return withInstanceRegistryRuntime(() => runTask(taskId, opts, host));
+  }
   const {
     BRANCH_NAME_CONTRACT_PART,
     syncPlanOrRefuse,
