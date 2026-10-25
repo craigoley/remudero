@@ -12,7 +12,7 @@ import { deriveJudgeCalibration } from "#src/lib/judge-calibration.js";
 import { renderMachineShard } from "#src/lib/machine-filing.js";
 import {
   earnedConfidenceBar, familyTrackRecord, gardenFamilyRecord, judgeMachineShard, MACHINE_JUDGE_STATE_FILE,
-  readOperatorReleases, recordOperatorRelease, renderRetiredShard, runMachineFilingJudge,
+  readOperatorReleases, readOperatorReleaseRecords, recordOperatorRelease, renderRetiredShard, runMachineFilingJudge,
   type MachineJudgePorts,
 } from "#src/lib/machine-filing-judge.js";
 import { loadPlan, loadPlanFromYaml, type Task } from "#src/lib/plan.js";
@@ -43,7 +43,7 @@ function fixture(t: { after(fn: () => void): void }, shards: Record<string, stri
   const ports: MachineJudgePorts = {
     stateDir: root, writeRoot: root, plan: () => loadPlan(join(root, "plan", "tasks.yaml")),
     riskJudge: async input => { inputs.push(input); return { verdict: "low", confidence: 0.65, reasons: ["bounded remedy"] }; },
-    operatorReleases: () => readOperatorReleases(root),
+    operatorReleases: () => readOperatorReleaseRecords(root),
     log: (step, extra) => { rows.push({ ts: CLOCK.iso(), step, ...extra }); },
     stageProposal: () => undefined, clock: CLOCK,
   };
@@ -54,8 +54,8 @@ test("W1-T9045: an operator approval moves the family's earned bar before the ta
   const f = fixture(t, { "W1-T9901": shard("W1-T9901"), "W1-T9902": shard("W1-T9902") });
   f.ports.isMerged = () => false;
   delete f.ports.operatorReleases;
-  recordOperatorRelease(f.root, "W1-T9901", CLOCK.iso());
-  recordOperatorRelease(f.root, "W1-T9901", CLOCK.iso());
+  recordOperatorRelease(f.root, loadPlan(join(f.root, "plan/tasks.yaml")).byId.get("W1-T9901")!, CLOCK.iso());
+  recordOperatorRelease(f.root, loadPlan(join(f.root, "plan/tasks.yaml")).byId.get("W1-T9901")!, CLOCK.iso());
   const report = await runMachineFilingJudge(f.ports);
   assert.deepEqual(report.proceeded, ["W1-T9901", "W1-T9902"]);
   const row = f.rows.find(r => r.step === "machine_judge.ruled" && r.task_id === "W1-T9902");
@@ -66,7 +66,7 @@ test("W1-T9045: an operator approval moves the family's earned bar before the ta
   const record = familyTrackRecord(plan, "flow-blocker", () => false);
   assert.equal(record.alpha, 2, "the pinned operator ruling retains its credit without the release store");
   assert.equal(familyTrackRecord(plan, "flow-blocker", id => id === "W1-T9901", undefined,
-    { released: readOperatorReleases(f.root) }).alpha, 3, "a merged build adds a separate credit; release and pin count once");
+    { released: readOperatorReleases(f.root, plan.tasks) }).alpha, 3, "a merged build adds a separate credit; release and pin count once");
 });
 
 test("W1-T9045: every ladder gardener's origin family reads its own gardener record", t => {
@@ -168,7 +168,7 @@ test("W1-T9045: model verdicts reach calibration once while operator releases ad
   const f = fixture(t, { "W1-T9901": shard("W1-T9901"), "W1-T9902": shard("W1-T9902") });
   mkdirSync(join(f.root, ".remudero"));
   writeFileSync(join(f.root, ".remudero", "mounts.yaml"), readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml")));
-  recordOperatorRelease(f.root, "W1-T9901", CLOCK.iso());
+  recordOperatorRelease(f.root, loadPlan(join(f.root, "plan/tasks.yaml")).byId.get("W1-T9901")!, CLOCK.iso());
   await runMachineFilingJudge(f.ports);
   const decisions = f.rows.filter(r => r.step === "risk_judge.decision");
   assert.equal(decisions.length, 1);

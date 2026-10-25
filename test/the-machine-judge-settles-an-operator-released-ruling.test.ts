@@ -14,6 +14,7 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { readOperatorReleaseRecords, recordOperatorRelease } from "#src/lib/machine-filing-judge.js";
 
 import { fixedClock, type Clock } from "../src/lib/clock.js";
 import type { GardenCheckout } from "../src/lib/gardener.js";
@@ -90,6 +91,7 @@ interface Pass {
 function judge(stale: string, landing: ReturnType<typeof landingOnto>) {
   return async ({ stateDir, clock, released }: Pass) => {
     const logs: { step: string; extra?: Record<string, unknown> }[] = [];
+    for (const id of released ?? []) recordOperatorRelease(stateDir, loadPlan(join(stale, "plan", "tasks.yaml")).byId.get(id)!, clock.iso());
     const p: MachineJudgePorts = {
       stateDir,
       plan: () => loadPlan(join(stale, "plan", "tasks.yaml")),
@@ -99,7 +101,7 @@ function judge(stale: string, landing: ReturnType<typeof landingOnto>) {
       stageProposal: () => undefined,
       log: (step, extra) => void logs.push({ step, extra }),
       clock,
-      ...(released ? { operatorReleases: () => new Set(released) } : {}),
+      operatorReleases: () => readOperatorReleaseRecords(stateDir),
     };
     return { report: await runMachineFilingJudge(p), logs };
   };
