@@ -11,6 +11,7 @@ import { parseTasksFromYaml } from "#src/lib/plan.js";
 import { renderFixPrompt } from "#src/lib/prompt-render.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
 
 /**
@@ -243,6 +244,54 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
       await runSweep([pr()], { ...damaged.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined });
       assert.equal(damaged.state.refreshed, 0, "an unattributed damaged row cannot prove an empty attempt history");
       assert.equal(damaged.state.dispatched, 0);
+    }
+  });
+
+  test("the light pass refuses non-object live rows through the real contract history reader", async t => {
+    const { dir } = ownedFixtureDir(t, "contract-non-object-history");
+    const ledger = join(dir, "ledger.ndjson");
+    const hold = JSON.stringify(headContractHold()) + "\n";
+    const f = fixture([headContractHold()]);
+    f.state.revision = "contract-B";
+    const deps = { ...f.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined };
+    writeFileSync(ledger, hold);
+    const healthy = await lightPassHeadContractRefresh([pr()], deps);
+    assert.equal(healthy.headContractRefreshFor?.(pr()), f.deps.updateBranch);
+    for (const row of [null, false, 17, "unattributed", []]) {
+      writeFileSync(ledger, hold + JSON.stringify(row) + "\n" +
+        JSON.stringify({ step: "unrelated.completed" }) + "\n");
+      assert.deepEqual(await lightPassHeadContractRefresh([pr()], deps), {}, JSON.stringify(row));
+    }
+    assert.equal(f.state.refreshed, 0);
+    assert.equal(f.state.dispatched, 0);
+    assert.equal(f.state.admissions, 0);
+  });
+
+  test("the light pass logs failed ledger reads and grants no contract refresh capability", async () => {
+    for (const failure of ["live", "history"]) {
+      const f = fixture([headContractHold()]);
+      f.state.revision = "contract-B";
+      const error = new Error(`${failure} ledger unavailable`);
+      const logged: unknown[] = [];
+      let historyReads = 0;
+      const capability = await lightPassHeadContractRefresh([pr()], {
+        ...f.deps,
+        readLedger: () => {
+          if (failure === "live") throw error;
+          return [headContractHold()];
+        },
+        readHeadContractRefreshHistory: async () => {
+          historyReads++;
+          throw error;
+        },
+        log: (step, data) => { logged.push({ step, data }); },
+      });
+      assert.deepEqual(capability, {});
+      assert.deepEqual(logged, [{ step: "sweep.head_contract_refresh.unreadable", data: { reason: String(error) } }]);
+      assert.equal(historyReads, failure === "history" ? 1 : 0);
+      assert.equal(f.state.refreshed, 0);
+      assert.equal(f.state.dispatched, 0);
+      assert.equal(f.state.admissions, 0);
     }
   });
 
