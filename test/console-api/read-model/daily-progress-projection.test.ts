@@ -33,6 +33,12 @@ test("daily progress uses calendar days across DST and midnight", () => {
   assert.equal(Date.parse(fall.windowEnd) - Date.parse(fall.windowStart), 25 * 3_600_000);
   assert.equal(fall.windowStart, "2026-11-01T04:00:00.000Z");
   assert.equal(fall.windowEnd, "2026-11-02T05:00:00.000Z");
+  const repeatedMidnight = dailyWindow("2026-11-01", "America/Havana");
+  assert.equal(repeatedMidnight.windowStart, "2026-11-01T04:00:00.000Z", "a repeated midnight starts at its first occurrence");
+  const skippedMidnight = dailyWindow("2018-11-04", "America/Sao_Paulo");
+  assert.equal(skippedMidnight.windowStart, "2018-11-04T03:00:00.000Z", "a civil day begins at its first actual instant even when 00:00 was skipped");
+  assert.equal(skippedMidnight.windowEnd, "2018-11-05T02:00:00.000Z");
+  assert.throws(() => dailyWindow("2011-12-30", "Pacific/Apia"), RangeError, "a skipped civil date cannot become an invented report day");
   const midnight = Date.parse(fall.windowEnd);
   assert.equal(resolveDailyDate("today", midnight - 1), "2026-11-01");
   assert.equal(resolveDailyDate("today", midnight), "2026-11-02");
