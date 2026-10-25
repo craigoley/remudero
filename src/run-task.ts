@@ -9441,11 +9441,15 @@ export function openEscalationStandDownReason(
   candidate: OpenIssue | undefined,
   currentContractRevision?: string,
   current?: { conflictEvidenceCaptured: boolean; baseSha?: string },
+  redCheckNames?: readonly string[],
 ): { reason: string } | undefined {
   if (!candidate) return undefined; // nothing open on this key — the ordinary path
   // The sweep writes the question immediately after its clarification context paragraph.
   const question = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]*\n\n([^\n]*)/.exec(candidate.body ?? "")?.[1];
   if (question?.startsWith("PR stage stalled:")) return undefined;
+  const summary = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]* to BLOCKED-AMBIGUOUS: ([^\n]*)/.exec(candidate.body ?? "")?.[1];
+  const metadataChecks = /^metadata-only required checks (.+?) need title\/body repair:/.exec(summary ?? "")?.[1].split(", ");
+  if (metadataChecks && redCheckNames?.some(name => !metadataChecks.includes(name))) return undefined;
   const candidateHead = escalationHeadSha(candidate.body);
   // STRICTER THAN THE MATCHER (both arms): a candidate naming NO head, or naming a DIFFERENT one,
   // never refuses a worker. The first arm is the legacy-issue case, the second is a genuinely new
@@ -9633,6 +9637,7 @@ async function fixRungStandDownReason(
     headSha: string;
     key: EscalationDedupKey;
     find: (key: EscalationDedupKey) => OpenIssue | undefined;
+    redCheckNames?: readonly string[];
     current?: { conflictEvidenceCaptured: boolean; baseSha?: string };
     resolve?: (candidate: OpenIssue, clearedCause: string) => void;
   },
@@ -9733,6 +9738,7 @@ async function fixRungStandDownReason(
       // revision "current" names.
       openEscalation.key.contractRevision,
       openEscalation.current,
+      openEscalation.redCheckNames,
     );
     if (alreadyAsked) return alreadyAsked;
     const clearedCause = candidate && escalationHeadSha(candidate.body) === openEscalation.headSha && openEscalation.current
@@ -11295,6 +11301,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
               contractRevision: currentContractRevision,
             },
             find: (key: EscalationDedupKey) => findDuplicateEscalation(key, { issues: deps.issues }),
+            redCheckNames: noReviewYet ? currentCiFailures?.map(f => f.name) : undefined,
             current: { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha },
             resolve: (candidate: OpenIssue, clearedCause: string) =>
               resolveClearedEscalation(deps.issues, deps.log, opts.taskId, candidate.url, clearedCause),
