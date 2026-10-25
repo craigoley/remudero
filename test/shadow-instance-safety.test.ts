@@ -486,7 +486,7 @@ test("selected policy late default reads cannot outlive their original invocatio
     let release!: () => void, entered!: () => void, intercept = false;
     const blocked = new Promise<void>(resolve => { release = resolve; });
     const started = new Promise<void>(resolve => { entered = resolve; });
-    const mocked = t.mock.method(runtimeRegistry.registryFileIO, "open", async path => {
+    const mocked = t.mock.method(runtimeRegistry.registryFileIO, "open", async (path: string) => {
       if (path === args.settingsFile && intercept) { entered(); await blocked; }
       return actualOpen(path);
     });
