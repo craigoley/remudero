@@ -253,7 +253,7 @@ test("W1-T10431: reclassified age history remains readable without action author
   const deps={...f.deps,inboxFromSlowLane:true};
   const serviceErrors:unknown[]=[];
   const route=buildInboxThreadRoute(deps);
-  const server=createService({tokens:{read:"read"},routes:[{...route,handler:async(req,res,context)=>{
+  const server=createService({tokens:{read:"read",write:"write"},routes:[{...route,handler:async(req,res,context)=>{
     try{await route.handler(req,res,context);}catch(error){serviceErrors.push({stack:error instanceof Error?error.stack:String(error)});throw error;}
   }}],
     log:(step,fields)=>{if(step==="service.error")serviceErrors.push(fields);}});
