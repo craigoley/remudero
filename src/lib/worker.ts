@@ -341,8 +341,9 @@ export interface WorkerResult {
    * from the adapter's price constants and its exact request ceiling); `budgetSettledUsd` is what
    * the provider's own receipts settled it down to. They differ whenever a receipt came back, and
    * a row where they are EQUAL on a failed run is the signal that spend could not be read back and
-   * was deliberately left charged. `budgetRefused` marks a run the daily allowance declined before
-   * any paid request — money not spent, which is a different outcome from a request that failed.
+   * was deliberately left charged. `budgetRefused` marks an allowance refusal before a request,
+   * possibly on a later turn after earlier requests were paid. It alone does not prove the model
+   * was never invoked; retain the accumulated reservation, settlement and usage evidence.
    * Never a prompt, never a credential: these are dollars only. */
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
