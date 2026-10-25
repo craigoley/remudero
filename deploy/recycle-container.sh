@@ -190,6 +190,55 @@ trap 'commission_on_exit' EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 DEFAULT_INSTANCE_REGISTRY="${SCRIPT_DIR%/deploy}/.remudero/daemon-instances.yaml"
+SELECTED_REGISTRY_ACTIVE=0
+SELECTED_REGISTRY_INPUT="${RMD_INSTANCE_REGISTRY-}"
+SELECTED_REGISTRY_DIGEST=""
+SELECTED_REGISTRY_PACKET=""
+SELECTED_REGISTRY_TEXT=""
+SELECTED_REGISTRY_HOST_FILE=""
+SELECTED_REGISTRY_CONTAINER_FILE="/home/node/.config/remudero/selected-registry.yaml"
+selected_registry_refuse() {
+  local reason="${1:-reader_unavailable}"
+  case "$reason" in ""|*[!a-z_]*) reason=reader_unavailable ;; esac
+  echo "recycle-container: REFUSING -- selected registry unavailable (${reason})." >&2
+  return 2
+}
+selected_registry_packet() (
+  cd "${SCRIPT_DIR%/deploy}" || exit 2
+  export RMD_INSTANCE_REGISTRY="${SELECTED_REGISTRY_INPUT}"
+  if [ -n "${SELECTED_REGISTRY_DIGEST}" ]; then export RMD_INSTANCE_REGISTRY_DIGEST="${SELECTED_REGISTRY_DIGEST}"; fi
+  node --import tsx --input-type=module -e '
+    const {pathToFileURL}=await import("node:url");
+    try {
+      const m=await import(pathToFileURL(process.argv[1]).href);
+      await m.withInstanceRegistryRuntime(()=>process.stdout.write(m.trustedInstanceRegistryLaunchPacket()),
+        {envPath:process.env.RMD_INSTANCE_REGISTRY,instanceName:process.argv[2],expectedDigest:process.env.RMD_INSTANCE_REGISTRY_DIGEST});
+    } catch(error) {
+      const reason=error?.details?.reason;
+      process.stdout.write(typeof reason==="string" && /^[a-z_]+$/.test(reason) ? reason : "reader_unavailable");
+      process.exitCode=2;
+    }
+  ' "${SCRIPT_DIR%/deploy}/src/lib/instance-registry-selection.ts" "${INSTANCE_NAME}" 2>/dev/null
+)
+selected_registry_recheck() {
+  [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
+  local current
+  if ! current="$(selected_registry_packet)"; then selected_registry_refuse "$current"; return 2; fi
+  if [ "$(printf '%s\n' "$current" | sed -n '1,5p')" != "$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '1,5p')" ]; then
+    selected_registry_refuse revision_changed; return 2
+  fi
+}
+if [ "${RMD_INSTANCE_REGISTRY+x}" = x ]; then
+  SELECTED_REGISTRY_ACTIVE=1
+  [ -n "${INSTANCE_NAME}" ] || { selected_registry_refuse instance_missing; exit 2; }
+  if ! SELECTED_REGISTRY_PACKET="$(selected_registry_packet)"; then selected_registry_refuse "${SELECTED_REGISTRY_PACKET}"; exit 2; fi
+  if [ "${#SELECTED_REGISTRY_PACKET}" -gt 400000 ] || [ "$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '1p')" != rmd-private-registry-v1 ]; then
+    selected_registry_refuse unsupported_reader; exit 2
+  fi
+  SELECTED_REGISTRY_HOST_FILE="$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '2p')"
+  SELECTED_REGISTRY_DIGEST="$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '3p')"
+  SELECTED_REGISTRY_TEXT="$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '6p' | node -e 'process.stdout.write(Buffer.from(require("node:fs").readFileSync(0,"utf8").trim(),"base64"))')"
+fi
 
 validate_instance_name() {
   case "$1" in
@@ -240,12 +289,16 @@ list_instance_names() {
 if [ -n "$INSTANCE_NAME" ]; then
   validate_instance_name "$INSTANCE_NAME"
   COMMISSION_TARGET="$INSTANCE_NAME"
-  INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY:-$DEFAULT_INSTANCE_REGISTRY}"
+  INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY-$DEFAULT_INSTANCE_REGISTRY}"
   if [ ! -r "$INSTANCE_REGISTRY" ]; then
     echo "recycle-container: REFUSING -- instance registry '${INSTANCE_REGISTRY}' is not readable." >&2
     exit 2
   fi
-  record="$(read_instance_registry "$INSTANCE_REGISTRY" "$INSTANCE_NAME")"
+  if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+    record="$(read_instance_registry /dev/stdin "$INSTANCE_NAME" <<< "${SELECTED_REGISTRY_TEXT}")"
+  else
+    record="$(read_instance_registry "$INSTANCE_REGISTRY" "$INSTANCE_NAME")"
+  fi
   if [ -z "$record" ]; then
     echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' is not declared in ${INSTANCE_REGISTRY}." >&2
     exit 2
