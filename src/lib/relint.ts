@@ -200,7 +200,8 @@ export async function runRelintLoop<D>(opts: {
   log: (step: string, extra?: Record<string, unknown>) => void;
 }): Promise<{ decision: D; violations: RelintViolation[]; attempts: number; stop: RelintStop }> {
   const maxAttempts = opts.maxAttempts ?? MAX_RELINT_ATTEMPTS;
-  let prompt = opts.initialPrompt;
+  const initialPrompt = opts.initialPrompt;
+  let prompt = initialPrompt;
   let decision!: D;
   let violations: RelintViolation[] = [];
   let attempt = 0;
@@ -229,7 +230,7 @@ export async function runRelintLoop<D>(opts: {
       opts.log(`${opts.lane}.relint`, { attempt, filed: [...opts.filedIds], violations: violations.map((v) => v.message) });
       // Each attempt may be a fresh worker; retain its original scope, feedback and verdict protocol.
       // Rebuild from that contract, so superseded findings do not accumulate across attempts.
-      prompt = [opts.initialPrompt, filedTaskRelintPrompt(opts.lane, opts.filedIds, violations)].join("\n\n");
+      prompt = [initialPrompt, filedTaskRelintPrompt(opts.lane, opts.filedIds, violations)].join("\n\n");
     }
   }
   return { decision, violations, attempts: attempt, stop };

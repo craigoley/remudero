@@ -618,7 +618,9 @@ test("triage relint keeps the original contract for a fresh worker", async () =>
         const id = reservedFromPrompt(args.prompt);
         const dir = join(args.cwd, "plan", "tasks.d");
         mkdirSync(dir, { recursive: true });
-        writeFileSync(join(dir, `${id}-x.yaml`), prompts.length === 1 ? DIRTY_TASK(id) : CLEAN_TASK(id));
+        const yaml = (prompts.length === 1 ? DIRTY_TASK(id) : CLEAN_TASK(id))
+          .replace("origin: architect", `origin: feedback#${FEEDBACK_ID}`);
+        writeFileSync(join(dir, `${id}-x.yaml`), yaml);
         // A fresh worker can follow only the protocol actually present in this invocation.
         const text = args.prompt.includes("Exactly one of ALREADY_DECIDED / AMBIGUOUS / PROPOSED must be the LAST line")
           ? `PROPOSED: file ${id}` : "The YAML is now fixed.";
@@ -630,7 +632,7 @@ test("triage relint keeps the original contract for a fresh worker", async () =>
   assert.ok(prompts[1].startsWith(`${prompts[0]}\n\n`), "the exact original feedback envelope, scope and verdict contract survive");
   assert.match(prompts[1], /\[proof-dialect\]/, "the current real lint failure is appended");
   assert.equal(ledger.filter(row => row.step === "triage.relint").length, 1);
-  assert.equal(ledger.filter(row => row.step === "triage.error").length, 0, "a missing protocol is not mistaken for a corrected filing");
+  assert.equal(ledger.filter(row => row.step === "triage.error").length, 0, JSON.stringify(ledger.filter(row => row.step === "triage.error")));
 });
 
 test("relint preserves one original contract and only the current findings at every attempt", async () => {
