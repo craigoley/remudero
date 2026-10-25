@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { hostname } from "node:os";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { withTempDir } from "#src/lib/tmp.js";
@@ -16,6 +16,13 @@ import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { fixedClock } from "#src/lib/clock.js";
 import { readCodeScanningAlerts } from "#src/lib/ops.js";
 import { ghStubPath, pathWith } from "#test/helpers/gh-stub.js";
+
+function copyMeasurementMethod(dir: string): string {
+  for (const relative of ["scripts/code-health-provenance.mjs", "scripts/coverage-ratchet.mjs", "scripts/lib/lcov.mjs", "scripts/lib/argv.mjs"]) {
+    const target = join(dir, relative); mkdirSync(dirname(target), { recursive: true }); copyFileSync(join(repoRoot(), relative), target);
+  }
+  return join(dir, "scripts/code-health-provenance.mjs");
+}
 
 function input(): CodeHealthProjectionInput {
   const findings: CodeHealthScanFinding[] = [
@@ -118,13 +125,17 @@ test("code health exports bounded provenance without publishing security results
         results: [{ ruleId: "js/example", message: { text: "private security detail must not escape" }, codeFlows: [{ private: "secret source code" }] }] }] } };
     const inputPath = join(dir, "input.json"), output = join(dir, "provenance.json");
     let outputIndex = 0;
-    const run = (value: unknown) => {
+    const run = (value: unknown, script = join(repoRoot(), "scripts/code-health-provenance.mjs")) => {
       writeFileSync(inputPath, JSON.stringify(value));
       const outputPath = join(dir, `output-${outputIndex++}.json`);
-      execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--input", inputPath, "--output", outputPath], { encoding: "utf8" });
+      execFileSync(process.execPath, [script, "--input", inputPath, "--output", outputPath], { encoding: "utf8" });
       return JSON.parse(readFileSync(outputPath, "utf8"));
     };
     const manifest = run(raw);
+    const copiedScript = copyMeasurementMethod(join(dir, "method"));
+    assert.equal(run(raw, copiedScript).configHash, manifest.configHash, "identical method bytes have the same identity in another checkout");
+    writeFileSync(copiedScript, readFileSync(copiedScript, "utf8") + "\n// Changed measurement implementation.\n");
+    assert.notEqual(run(raw, copiedScript).configHash, manifest.configHash, "a changed quality measurement method cannot reuse its predecessor's comparison identity");
     const original = structuredClone(raw.sarif);
     original.runs[0]!.invocations[0]!.endTimeUtc = new Date(Date.now() - 1000).toISOString();
     const sarifDir = join(dir, "original"); mkdirSync(sarifDir);
@@ -186,11 +197,11 @@ test("code health binds coverage provenance to the existing measured inventory a
     const lcov = "SF:src/example.ts\nDA:1,1\nDA:2,1\nLF:2\nLH:2\nBRF:10\nBRH:9\nend_of_record\n";
     const baseline = { tierPassPct: 90, tierBlockPct: 85 };
     let serial = 0;
-    const run = (value = summary, coverage = lcov, policy = baseline) => {
+    const run = (value = summary, coverage = lcov, policy = baseline, script = join(repoRoot(), "scripts/code-health-provenance.mjs")) => {
       const input = join(dir, "summary.json"), report = join(dir, "lcov.info"), config = join(dir, "baseline.json"), workflow = join(dir, "workflow.yml"), output = join(dir, `coverage-${serial++}.json`);
       writeFileSync(input, JSON.stringify(value)); writeFileSync(report, coverage); writeFileSync(config, JSON.stringify(policy));
       writeFileSync(workflow, 'node --select-all --experimental-test-coverage --test-coverage-exclude="test/**"\n');
-      execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--coverage-summary", input,
+      execFileSync(process.execPath, [script, "--coverage-summary", input,
         "--lcov", report, "--baseline", config, "--workflow", workflow, "--output", output], { stdio: "pipe", env: { ...process.env, GITHUB_REPOSITORY: "acme/atlas" } });
       return JSON.parse(readFileSync(output, "utf8")).code_health;
     };
@@ -200,6 +211,14 @@ test("code health binds coverage provenance to the existing measured inventory a
     assert.equal(measured.observedAt, summary.measured_at);
     assert.deepEqual(measured.exclusions, ["test/**"]);
     assert.equal(measured.check.met, true);
+    const copiedScript = copyMeasurementMethod(join(dir, "method"));
+    assert.equal(run(summary, lcov, baseline, copiedScript).configHash, measured.configHash);
+    const parser = join(dirname(copiedScript), "lib/lcov.mjs");
+    writeFileSync(parser, readFileSync(parser, "utf8") + "\n// Changed coverage measurement implementation.\n");
+    const methodChanged = run(summary, lcov, baseline, copiedScript);
+    assert.notEqual(methodChanged.configHash, measured.configHash, "a parser change is a measurement-method change, not a code improvement");
+    assert.equal(methodChanged.rulesVersion, measured.rulesVersion, "the repository's tier policy has not changed");
+    assert.deepEqual(methodChanged.measurement, measured.measurement);
     const missing = structuredClone(summary); delete (missing.shard_test_exits as Record<string, number>)["8"];
     assert.equal(run(missing).state, "partial", "all eight required shards must be present");
     const red = structuredClone(summary); red.shard_test_exits["3"] = 1;
