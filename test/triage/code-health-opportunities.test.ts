@@ -504,8 +504,10 @@ test("code health reads configured original-output artifacts through the real Gi
   const payload = { sha, repository, languages, metadata, analyses, workflow };
   const bin = ghStubPath(`#!/usr/bin/env node
 const { mkdirSync, writeFileSync } = require("node:fs"); const { join } = require("node:path");
-const p = ${JSON.stringify(payload)}, a = process.argv.slice(2), route = a[1] || "";
+const p = ${JSON.stringify(payload)}, a = process.argv.slice(2), route = a[1] || "", mode=process.env.RMD_CODE_HEALTH_FIXTURE_CASE || "";
 if (a[0] === "api") {
+ if (!route.startsWith("repos/"+p.repository+"/")) process.exit(45);
+ if (mode === "transport") process.exit(42);
  let result;
  if (route.includes("/commits/main")) result = {sha:p.sha};
  else if (route.includes("/actions/workflows/codeql.yml/runs")) result = {workflow_runs:[{id:123,head_sha:p.sha,head_branch:"main",status:"completed",conclusion:"success",path:".github/workflows/codeql.yml"}]};
@@ -513,13 +515,26 @@ if (a[0] === "api") {
  else if (route.includes("/actions/runs/123/artifacts")) result = {total_count:p.languages.length,artifacts:p.languages.map((language,n)=>({id:n+1,name:"code-health-quality-"+language,expired:false,size_in_bytes:1000,workflow_run:{id:123,head_sha:p.sha,head_branch:"main",repository_id:1,head_repository_id:1}}))};
  else if (route.includes("/code-scanning/analyses")) result = p.analyses;
  else {process.stderr.write("Unexpected read: "+route);process.exit(42);}
- process.stdout.write(JSON.stringify(result));
+ if (route.includes("/actions/runs/123/artifacts")) {
+  if (mode === "truncated") result.total_count++;
+  if (mode === "foreign-run") result.artifacts[0].workflow_run.head_sha="b".repeat(40);
+  if (mode === "expired") result.artifacts[0].expired=true;
+  if (mode === "oversized-artifact") result.artifacts[0].size_in_bytes=256*1024+1;
+ }
+ if (route.includes("/code-scanning/analyses")) {
+  if (mode === "missing-analysis") result=result.slice(0,2);
+  if (mode === "many-analyses") result=result.concat(Array.from({length:97},(_,n)=>({...result[0],sarif_id:String(n+100).padStart(8,"0")+"-1234-1234-1234-123456789012",commit_sha:"b".repeat(40),created_at:"2026-11-01T04:00:00Z"})));
+  if (mode === "newer-analysis") result=[{...result[0],sarif_id:"92345678-1234-1234-1234-123456789012",created_at:"2026-11-02T05:01:00Z"},...result];
+  if (mode === "unordered-analysis") result[result.length-1].created_at="2026-11-02T05:02:00Z";
+ }
+ process.stdout.write(mode === "invalid-json" ? "{" : JSON.stringify(result));
 } else if (a[0] === "run" && a[1] === "download") {
  const name=a[a.indexOf("--name")+1], dir=a[a.indexOf("--dir")+1], item=p.metadata.find(item=>"code-health-quality-"+item.language===name);
- if (!item || !dir) process.exit(43); mkdirSync(dir,{recursive:true}); writeFileSync(join(dir,"code-health-quality.json"),JSON.stringify(item));
+ if (!item || !dir || a[2]!=="123" || a[a.indexOf("--repo")+1]!==p.repository) process.exit(43);
+ mkdirSync(dir,{recursive:true}); writeFileSync(join(dir,"code-health-quality.json"),mode === "oversized-metadata" ? " ".repeat(128*1024+1) : JSON.stringify(mode === "foreign-metadata" ? {...item,repository:"acme/foreign"} : item));
 } else {process.stderr.write("Unexpected command");process.exit(44);}
 `);
-  const saved = process.env.PATH; process.env.PATH = pathWith(bin);
+  const saved = process.env.PATH, savedMode = process.env.RMD_CODE_HEALTH_FIXTURE_CASE; process.env.PATH = pathWith(bin); delete process.env.RMD_CODE_HEALTH_FIXTURE_CASE;
   try {
     const read = await readCodeHealthQualityEvidence(repository);
     assert.equal(read.currentSha, sha);
@@ -530,5 +545,20 @@ if (a[0] === "api") {
     assert.deepEqual(scan.componentIds, metadata.map(item => item.scanId).sort());
     assert.equal(scan.observedAt, metadata[0]!.observedAt);
     assert(!JSON.stringify(read).includes('"environment":'), "retain only the environment fingerprint");
-  } finally { process.env.PATH = saved; }
+    const readAndScan = async () => {
+      const result = await readCodeHealthQualityEvidence(repository);
+      return qualityScanFromCollectedEvidence({ ...result.quality, repository, source: { ok: true, alerts: [], analysisInstances: [] } });
+    };
+    process.env.RMD_CODE_HEALTH_FIXTURE_CASE = "many-analyses";
+    assert.equal((await readAndScan()).state, "complete", "a full recent page is usable when it covers every selected original identity and all newer analyses");
+    process.env.RMD_CODE_HEALTH_FIXTURE_CASE = "newer-analysis";
+    assert.equal((await readAndScan()).state, "partial", "a later unrepresented analysis cannot be replaced by an older artifact");
+    for (const mode of ["transport", "invalid-json", "truncated", "foreign-run", "expired", "oversized-artifact", "missing-analysis", "unordered-analysis", "foreign-metadata", "oversized-metadata"]) {
+      process.env.RMD_CODE_HEALTH_FIXTURE_CASE = mode;
+      await assert.rejects(readAndScan, undefined, `refuse ${mode} without an empty successful scan`);
+    }
+  } finally {
+    process.env.PATH = saved;
+    if (savedMode === undefined) delete process.env.RMD_CODE_HEALTH_FIXTURE_CASE; else process.env.RMD_CODE_HEALTH_FIXTURE_CASE = savedMode;
+  }
 });

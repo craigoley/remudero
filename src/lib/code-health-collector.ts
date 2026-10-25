@@ -128,8 +128,9 @@ export async function readCodeHealthQualityEvidence(repository: string, readText
   const requiredLanguages = configuredQualityLanguages(parseYaml(workflow.toString("utf8")));
   const listed = await json(`actions/runs/${runId}/artifacts?per_page=100`);
   if (!qualityObject(listed) || !Number.isSafeInteger(listed.total_count) || Number(listed.total_count) > 100 || !Array.isArray(listed.artifacts) || listed.artifacts.length !== listed.total_count) throw new Error("The CodeQL artifact inventory is incomplete or exceeds its bound.");
+  const availableArtifacts = listed.artifacts;
   const selected = requiredLanguages.map(language => {
-    const name = `code-health-quality-${language}`, matches = listed.artifacts.filter(artifact => qualityObject(artifact) && artifact.name === name);
+    const name = `code-health-quality-${language}`, matches = availableArtifacts.filter(artifact => qualityObject(artifact) && artifact.name === name);
     if (matches.length !== 1) throw new Error("A configured original-output artifact is missing or repeated.");
     const artifact = matches[0] as Record<string, unknown>, source = artifact.workflow_run;
     if (!Number.isSafeInteger(artifact.id) || Number(artifact.id) <= 0 || artifact.expired !== false || !Number.isSafeInteger(artifact.size_in_bytes) ||
