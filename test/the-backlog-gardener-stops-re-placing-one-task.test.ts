@@ -98,6 +98,10 @@ test("an open backlog decision defers the same async proposal despite a new evid
   const first = backlogInventory(f.sources).candidates[0]!;
   assert.ok(first, "a positive candidate proves this is not an empty inventory");
   const decision = first.disposition.kind === "band" ? `band ${first.disposition.band}` : first.disposition.retirement;
+  f.setRows(hits(1, T0 - 48 * HOUR));
+  const changed = backlogInventory(f.sources).candidates[0]!;
+  assert.notEqual(changed.evidence.signature, first.evidence.signature);
+  assert.deepEqual(changed.disposition, first.disposition, "older evidence changes the hash, not the decision");
   let open = [{ target: ID, decision, prNumber: 14156, headSha: "a".repeat(40) }];
   const events: Array<{ step: string; extra: unknown }> = [];
   const deps = { repoRoot: f.root, stateDir: join(f.root, "state"),
@@ -115,6 +119,35 @@ test("an open backlog decision defers the same async proposal despite a new evid
   assert.equal((await inventory()).candidates.length, 1, "a different decision remains eligible");
   open = [];
   assert.equal((await inventory()).candidates.length, 1, "closed or merged proposals no longer defer it");
+
+  const other = { ...f.task, id: "W1-T6118" };
+  const plan = f.sources.plan();
+  plan.open.push(other);
+  plan.all.push(other);
+  const otherShard = `plan/tasks.d/${other.id}.yaml`;
+  f.shards.set(other.id, otherShard);
+  writeFileSync(join(f.root, otherShard), `- id: ${other.id}\n  title: t\n  status: queued\n`);
+  f.sources.mergedLastDay = () => 1;
+  const landed: Array<{ paths: string[]; body: string }> = [];
+  const gardenDeps = { ...deps, openWorkspace: () => ({ root: f.root,
+    land: (proposal: { paths: string[]; body: string }) => {
+      landed.push(proposal);
+      return "https://example.test/pull/2";
+    }, dispose: () => {} }) };
+  open = [{ target: ID, decision, prNumber: 14156, headSha: "a".repeat(40) }];
+  const bounded = backlogGardenSpec(gardenDeps, { ...f.sources, openDecisions: async () => open });
+  const available = await bounded.inventoryAsync!();
+  assert.equal(available.mergeBudget, 1);
+  assert.deepEqual(available.candidates.map(a => a.target), [other.id], "an owned prefix cannot spend the only proposal slot");
+  open = [{ ...open[0]!, decision: "band 3" }];
+  assert.deepEqual((await bounded.inventoryAsync!()).candidates.map(a => a.target), [ID], "a changed decision still takes its normal place within the budget");
+  open = [{ ...open[0]!, decision }];
+  assert.equal((await runGardenAsync(bounded, gardenDeps)).prUrl, "https://example.test/pull/2");
+  assert.equal(landed.length, 1);
+  assert.deepEqual(landed[0]!.paths, [otherShard]);
+  assert.match(landed[0]!.body, /\*\*W1-T6118\*\*: band 4\./);
+  assert.equal(f.read(), `- id: ${ID}\n  title: t\n  status: queued\n`, "the existing open proposal's task stays untouched");
+  assert.match(readFileSync(join(f.root, otherShard), "utf8"), /priority: 4/);
 });
 
 test("unread open backlog ownership refuses the async proposal without opening a workspace", async (t) => {

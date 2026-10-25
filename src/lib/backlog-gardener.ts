@@ -225,7 +225,7 @@ export function judgeBacklog(e: BacklogEvidence): { disposition: BacklogDisposit
   return { disposition: { kind: "band", band: 4 }, reason: "No observed live symptom or open dependent; the task remains valid." };
 }
 
-export function backlogInventory(sources: BacklogSources): BacklogInventory {
+export function backlogInventory(sources: BacklogSources, include: (action: BacklogAction) => boolean = () => true): BacklogInventory {
   const plan = sources.plan();
   const now = sources.clock.date();
   const mergeBudget = Math.max(0, Math.floor(sources.mergedLastDay()));
@@ -275,8 +275,10 @@ export function backlogInventory(sources: BacklogSources): BacklogInventory {
     // W1-T9053: a band placed within the last day stands; routine volume does not re-band it.
     const placedAt = PLACED.exec(readFileSync(join(sources.repoRoot, plan.shards.get(task.id)!), "utf8"));
     if (marker && placedAt && judged.disposition.kind === "band" && (now.getTime() - Date.parse(placedAt[1]!)) >= 0 && now.getTime() - Date.parse(placedAt[1]!) < REBAND_FLOOR_MS) continue;
+    const action: BacklogAction = { class: judged.disposition.kind === "retire" ? "retire" : "place", target: task.id, reason: judged.reason, disposition: judged.disposition, evidence };
+    if (!include(action)) continue;
     examined++;
-    candidates.push({ class: judged.disposition.kind === "retire" ? "retire" : "place", target: task.id, reason: judged.reason, disposition: judged.disposition, evidence });
+    candidates.push(action);
   }
   return { plan, candidates, mergeBudget, examined };
 }
@@ -389,14 +391,12 @@ export function backlogGardenSpec(
     cheapFingerprint: () => `${planCheapFingerprint(deps.repoRoot, deps.stateDir)}:${gardenLedgerBucket(deps.clock ?? systemClock)}`,
     inventory: () => backlogInventory(sources),
     inventoryAsync: async () => {
-      const inventory = backlogInventory(sources);
-      if (inventory.candidates.length === 0) return inventory;
       const open = await (sources.openDecisions ?? (() => readOpenBacklogDecisions(deps.repoRoot)))();
-      const deferred = inventory.candidates.flatMap(action => open.filter(pr =>
-        pr.target === action.target && pr.decision === backlogDecision(action)));
-      if (deferred.length > 0) deps.log("backlog.open_decision_deferred", { decisions: deferred });
-      return { ...inventory, candidates: inventory.candidates.filter(action => !open.some(pr =>
-        pr.target === action.target && pr.decision === backlogDecision(action))) };
+      return backlogInventory(sources, action => {
+        const decisions = open.filter(pr => pr.target === action.target && pr.decision === backlogDecision(action));
+        if (decisions.length > 0) deps.log("backlog.open_decision_deferred", { decisions });
+        return decisions.length === 0;
+      });
     },
     fingerprint: (i) => i.candidates.map((a) => `${a.target}:${a.evidence.signature}`).join("|") + `:${i.mergeBudget}`,
     unfinished: (i) => i.candidates.length > 0,
