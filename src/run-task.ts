@@ -1512,7 +1512,11 @@ import {
   skillWithheldForRun,
   stageSkillDrafts,
   stageSkillLifecycleProposal,
-  workerAllowlistFromSettings,
+  workerAllowlistFromCapabilityContext,
+  skillDraftConsumerLanes,
+  type WorkerAllowlist,
+  type SkillDraft,
+  type SkillWorkerCapabilityContext,
 } from "./lib/skill-workshop.js";
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -22938,7 +22942,7 @@ async function retroCommand(
   stageSkillDrafts(
     followupRegistryPath,
     gather.skillDrafts,
-    workerAllowlistFromSettings(undefined),
+    draft => skillDraftWorkerAllowlist(config, draft),
     describeSkillInjectionReachability,
     log,
   );
@@ -30685,6 +30689,38 @@ function worktreeGitRunner(worktreePath: string): GitRunner {
  * right and the behaviour is wrong. Returning the pair from one function makes the coherence rule
  * a property of the value rather than of two call sites that must be kept in step.
  */
+/** Reports the same lane/provider bounds a worker would receive, without changing or invoking it. */
+export function skillDraftWorkerAllowlist(config: Config, draft: SkillDraft, settingsPath = join(resolveInstallRoot(config), "settings", "worker.json")): WorkerAllowlist {
+  const lanes = skillDraftConsumerLanes(draft);
+  const providers = enabledWorkerProviders(config);
+  const pin = workerBoundaryStack.harnessRevision;
+  const current = executingHarnessRevision(fileURLToPath(import.meta.url));
+  const revision = (value: typeof pin): string => value && !Array.isArray(value) && "revision" in value ? value.revision : "";
+  if (lanes.length === 0 || providers.length === 0 || new Set(providers).size !== providers.length) return workerAllowlistFromCapabilityContext(undefined, undefined);
+  const consumers: SkillWorkerCapabilityContext["consumers"][number][] = [];
+  for (const lane of lanes) {
+    for (const provider of providers) {
+      let tools: readonly string[] | undefined;
+      let source: string;
+      if (lane === "implement") { tools = implementToolBound(provider, undefined); source = "src/lib/worker.ts#implementToolBound"; }
+      else if (lane === SKILL_FIX_TASK_TYPE) {
+        const ownership = fixRoundGitOwnership(config);
+        if (provider === "cash" && !ownership.harnessCommits) continue;
+        tools = provider === "cash" ? ownership.cashTools : ownership.harnessCommits ? FIX_WORKER_TOOLS_HARNESS_COMMITS : FIX_WORKER_TOOLS;
+        source = "src/lib/fix-fence.ts#FIX_WORKER_TOOLS+fixRoundGitOwnership";
+      } else if (lane === "recon" || lane === "diagnose") {
+        tools = resolveDispatchLaneToolBound(lane, provider === "cash" ? "openweight" : "claude");
+        source = "src/lib/worker.ts#resolveDispatchLaneToolBound";
+      } else if (lane === "review" || lane === "manual") {
+        tools = implementToolBound(provider, resolveGenericRouteToolBound(lane));
+        source = "src/lib/worker.ts#resolveGenericRouteToolBound+implementToolBound";
+      } else return workerAllowlistFromCapabilityContext(undefined, undefined);
+      consumers.push({ lane, provider, source, tools: tools! });
+    }
+  }
+  return workerAllowlistFromCapabilityContext(JSON.parse(readFileSync(settingsPath, "utf8")), { generation: revision(pin), currentGeneration: revision(current), consumers });
+}
+
 export function fixRoundGitOwnership(
   config: Pick<Config, "workerProviders">,
 ): { harnessCommits: boolean; cashTools: string[] | undefined } {

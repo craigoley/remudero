@@ -20,7 +20,8 @@ import { createHash } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { systemClock, type Clock } from "./clock.js";
 import { SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
-import type { Task } from "./plan.js";
+import { TASK_TYPES, type Task } from "./plan.js";
+import { WORKER_PROVIDER_IDS } from "./config-schema.js";
 import {
   mineTranscriptWorkflows,
   renderTranscriptWorkflowSteps,
@@ -213,6 +214,8 @@ export interface WorkerAllowlist {
   allowedHosts: string[];
   deniedPathPatterns: string[];
   allowedTools: string[];
+  contextRefusal?: string;
+  capabilityContext?: { generation: string; consumers: ReadonlyArray<{ lane: string; provider: string; source: string }> };
 }
 
 /** Unwraps a `permissions.deny` entry's `Read(<path>)` shape into `<path>`; `null` for anything
@@ -239,6 +242,46 @@ export function workerAllowlistFromSettings(settings: unknown): WorkerAllowlist 
   };
 }
 
+/** A reporting-only view of existing bounds; no consumer may use this as a runtime grant. */
+export interface SkillWorkerCapabilityContext {
+  generation: string;
+  currentGeneration: string;
+  consumers: ReadonlyArray<{ lane: string; provider: string; source: string; tools: readonly string[] }>;
+}
+
+/** Resolve availability from the execution contract, never from auto-approval rules. */
+export function workerAllowlistFromCapabilityContext(settings: unknown, context: SkillWorkerCapabilityContext | undefined): WorkerAllowlist {
+  const unknown = (reason: string): WorkerAllowlist => ({ allowedHosts: [], deniedPathPatterns: [], allowedTools: [], contextRefusal: `worker-capability-context:${reason}` });
+  if (!context || typeof context !== "object") return unknown("missing");
+  if (typeof context.generation !== "string" || context.generation.length === 0 || context.generation !== context.currentGeneration) return unknown("stale-or-unknown-generation");
+  if (!Array.isArray(context.consumers) || context.consumers.length === 0) return unknown("no-consumers");
+  const identities = new Set<string>();
+  for (const consumer of context.consumers) {
+    if (!consumer || typeof consumer.lane !== "string" || ![...TASK_TYPES, SKILL_FIX_TASK_TYPE].includes(consumer.lane)
+      || typeof consumer.provider !== "string" || !(WORKER_PROVIDER_IDS as readonly string[]).includes(consumer.provider)
+      || typeof consumer.source !== "string" || consumer.source.length === 0
+      || !Array.isArray(consumer.tools) || !consumer.tools.every(tool => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_]*$/.test(tool))) return unknown("malformed-or-unbounded-consumer");
+    const identity = `${consumer.lane}/${consumer.provider}`;
+    if (identities.has(identity)) return unknown("ambiguous-consumer");
+    identities.add(identity);
+  }
+  const s = settings as { permissions?: { allow?: unknown; deny?: unknown }; sandbox?: { network?: { allowedDomains?: unknown }; filesystem?: { denyRead?: unknown } } } | null;
+  const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === "string");
+  const allow = s?.permissions?.allow, deny = s?.permissions?.deny, hosts = s?.sandbox?.network?.allowedDomains, denyRead = s?.sandbox?.filesystem?.denyRead;
+  if (!strings(allow) || !strings(deny) || !strings(hosts) || !strings(denyRead)) return unknown("settings-unavailable-or-malformed");
+  const tools = context.consumers[0]!.tools.filter(tool => context.consumers.every(c => c.tools.includes(tool))
+    && !deny.includes(tool) && !deny.includes("*"));
+  const paths = [...denyRead, ...deny.flatMap(entry => entry.match(READ_WRAPPER_RE)?.[1] ?? [])];
+  return { allowedHosts: [...hosts], deniedPathPatterns: [...new Set(paths)], allowedTools: [...tools],
+    capabilityContext: { generation: context.generation, consumers: context.consumers.map(c => ({ lane: c.lane, provider: c.provider, source: c.source })) } };
+}
+
+/** The injection domain includes fix, which is not a plan TASK_TYPES member. */
+export function skillDraftConsumerLanes(draft: SkillDraft): string[] {
+  const match = SKILL_APPLIES_TO_RE.exec(splitFrontmatter(draft.markdown).front);
+  return match ? [...new Set(match[1].split(",").map(lane => lane.trim().toLowerCase()).filter(Boolean))] : [];
+}
+
 /** Turn one `settings/worker.json`-shaped glob (`~/../../.ssh/**`) into a `RegExp` matched as a
  *  SUBSTRING test against a draft line — `**` widens to "anything", a single `*` stays within one
  *  path segment, everything else is escaped literally. */
@@ -262,7 +305,7 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(out);
 }
 
-const KNOWN_TOOL_NAMES = ["Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"] as const;
+const KNOWN_TOOL_NAMES = ["Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Grep", "Glob", "RunCheck"] as const;
 
 /** Phrasings the untrusted envelope (W1-T2700) would fence as an instruction aimed at the reader
  *  rather than data describing a procedure — a small, curated set of classic injection shapes,
@@ -306,6 +349,7 @@ function restatesOutcome(line: string, description: string): boolean {
  * `draft.markdown` line by line and returns on the FIRST offence, named.
  */
 export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): SkillDraftScanResult {
+  if (allowlist.contextRefusal) return { ok: false, offendingLine: "<worker-capability-context>", reason: allowlist.contextRefusal };
   const deniedPatterns = allowlist.deniedPathPatterns.map(globToRegExp);
   const descriptions = draft.outcomeDescriptions?.length ? draft.outcomeDescriptions : [draft.description];
   const outcomeTokens = descriptions.map((description) => new Set(stepContentTokens(description)));
@@ -321,9 +365,11 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
         return { ok: false, offendingLine: line, reason: `names a path the worker's deny-floor already refuses ('${pattern.source}')` };
       }
     }
-    const toolMatch = line.match(new RegExp(`\\b(${KNOWN_TOOL_NAMES.join("|")})\\b`));
-    if (toolMatch && !allowlist.allowedTools.some((t) => t.includes(toolMatch[1]))) {
-      return { ok: false, offendingLine: line, reason: `names tool '${toolMatch[1]}' outside the worker allowlist` };
+    const toolMatches = line.matchAll(new RegExp(`\\b(${KNOWN_TOOL_NAMES.join("|")})\\b`, "g"));
+    for (const toolMatch of toolMatches) {
+      if (!allowlist.allowedTools.some(t => t === toolMatch[1] || (!allowlist.capabilityContext && t.startsWith(`${toolMatch[1]}(`)))) {
+        return { ok: false, offendingLine: line, reason: `names tool '${toolMatch[1]}' outside the worker allowlist` };
+      }
     }
     for (const pattern of INSTRUCTION_INJECTION_PATTERNS) {
       if (pattern.test(line)) {
@@ -1112,14 +1158,14 @@ export function stageSkillLifecycleProposal(
 export function stageSkillDrafts(
   registryPath: string,
   drafts: readonly SkillDraft[],
-  allowlist: WorkerAllowlist,
+  allowlist: WorkerAllowlist | ((draft: SkillDraft) => WorkerAllowlist),
   reachability: (draft: SkillDraft) => { reachable: boolean; reason: string },
   log: (step: string, extra?: Record<string, unknown>) => void,
   stageOne: typeof stageSkillDraft = stageSkillDraft,
 ): void {
   for (const draft of drafts) {
     try {
-      const r = stageOne(registryPath, draft, allowlist, reachability(draft));
+      const r = stageOne(registryPath, draft, typeof allowlist === "function" ? allowlist(draft) : allowlist, reachability(draft));
       log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refreshed: r.refreshed === true, refused: r.refused, reason: r.reason });
     } catch (e) {
       log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });
