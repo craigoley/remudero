@@ -191,7 +191,7 @@ function messagesMatch(intent: Intent): boolean {
 export async function createImprovementThread(value: unknown, deps: ImprovementThreadDeps): Promise<ImprovementThreadResult> {
   const request = requestInput(value);
   if (!request || !text(deps.actorId, 256)) return fail("invalid_request", "Choose a repository finding and provide a goal and request identity.");
-  const requestId = hash([deps.actorId, request.idempotencyKey, randomUUID()]), payloadHash = hash(request), root = join(deps.stateDir, "improvement-threads"), path = join(root, `${requestId}.json`);
+  const requestId = hash([deps.actorId, request.idempotencyKey]), payloadHash = hash(request), root = join(deps.stateDir, "improvement-threads"), path = join(root, `${requestId}.json`);
   let lock: InflightLockHandle | undefined, requestOwner: InflightLockHandle | undefined, owns: (() => boolean) | undefined, ownsRequest: (() => boolean) | undefined;
   let mayHaveWritten = false;
   try {
