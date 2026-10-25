@@ -231,7 +231,10 @@ export function readCodeHealthRelatedWork(stateDir: string, inventory: Repositor
         if ((error as NodeJS.ErrnoException).code === "ENOENT") { if (index === 0) missing++; } else invalid++;
       }
     }
-  } catch { return { state: "unavailable", asOf: null, work: [], reason: "The configured sources for saved work could not be read or verified." }; }
+  } catch {
+    // deliberate: failed scope reads withhold related-work completeness; they never certify no existing work.
+    return { state: "unavailable", asOf: null, work: [], reason: "The configured sources for saved work could not be read or verified." };
+  }
   return { state: invalid ? clocks.length ? "partial" : "unavailable" : missing ? clocks.length ? "partial" : "not_collected" : stale ? "stale" : "reported", asOf: clocks.sort()[0] ?? null, work: [...new Map(work.map(row => [JSON.stringify(row), row])).values()],
     reason: invalid ? "Some saved work could not be read or verified. These links may be incomplete." : missing ? "Some saved work has not been collected. These links may be incomplete." : stale ? "Saved work links have not been checked within the daily cadence." : null };
 }
