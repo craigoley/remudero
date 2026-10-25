@@ -170,7 +170,7 @@ test("preserved restore instructions name the actual upstream repository", () =>
     const copy = preserved(fx, "Remudero/a-different-project");
     const manifest = JSON.parse(readFileSync(join(copy, "manifest.json"), "utf8"));
     assert.equal(manifest.remotes.origin, fx.origin);
-    assert.ok(readFileSync(join(copy, "MANIFEST.txt"), "utf8").includes(`git clone ${fx.origin} <dir>`));
+    assert.ok(readFileSync(join(copy, "MANIFEST.txt"), "utf8").includes(`git remote add origin ${fx.origin} `));
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
@@ -590,12 +590,12 @@ test("a failed preservation bundle is held with git's own reason", () => {
     commit(repo, "work.ts", "export const work = 1;\n", "unpublished local work");
     const native = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
     writeFileSync(join(fx.bin, "git"), `#!/bin/bash
-case " $* " in *" bundle create "*) echo "fatal: simulated pack failure" >&2; exit 128 ;; esac
+case " $* " in *" pack-objects "*) echo "fatal: simulated pack failure" >&2; exit 128 ;; esac
 exec '${native}' "$@"
 `, { mode: 0o755 });
     const r = helper(fx);
     assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.match(r.stdout, /HOLD bundle-create-failed \(fatal: simulated pack failure\) .*Remudero\/task-run\/repo/);
+    assert.match(r.stdout, /HOLD git-copy-pack-failed \(fatal: simulated pack failure\) .*Remudero\/task-run\/repo/);
     assert.equal(existsSync(repo), true);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
