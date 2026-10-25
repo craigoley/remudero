@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 // Sanitized evidence from existing measurements; no scanner, network or filing side effects.
+import { parseLcovRecords } from "./lib/lcov.mjs";
+import { parseLcovTotals, classifyCoverageTier } from "./coverage-ratchet.mjs";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
@@ -61,6 +63,38 @@ export function codeqlProvenance(input) {
     scope: { kind: "explicit-analysis-targets", fileCount: targets.size, hash: hasScope ? hash([...targets].sort()) : null } };
 }
 
+/** Keep the original LCOV population and the existing policy; never turn a missing denominator into 100%. */
+export function coverageProvenance(summary, lcov, baseline, workflow, repository) {
+  if (!summary || summary.kind !== "coverage_nightly.measured" || !/^[a-f0-9]{40}$/i.test(summary.sha) ||
+      summary.ref !== "refs/heads/main" || !/^[1-9][0-9]{0,19}$/.test(summary.run_id) || !timestamp(summary.measured_at) ||
+      !/^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/i.test(repository) ||
+      summary.repository && summary.repository.toLowerCase() !== repository.toLowerCase()) throw new Error("Coverage provenance identity is invalid.");
+  const records = parseLcovRecords(lcov), totals = parseLcovTotals(lcov), reasons = [];
+  if (!records.length || records.length > 100_000 || !totals.lf || !totals.brf) reasons.push("A nonempty bounded coverage population is unavailable.");
+  if (records.some(record => !relativePath(record.sourceFile) ||
+      ![record.lf, record.lh, record.brf, record.brh].every(value => Number.isSafeInteger(value) && value >= 0) ||
+      record.lh > record.lf || record.brh > record.brf || record.da.some(value => !Number.isSafeInteger(value.line) || value.line <= 0 || !Number.isSafeInteger(value.hits) || value.hits < 0)) ||
+      new Set(records.map(record => record.sourceFile)).size !== records.length ||
+      lcov.split(/\r?\n/).filter(line => line === "end_of_record").length !== records.length) reasons.push("The measured coverage inventory is incomplete or malformed.");
+  if (!["lf", "lh", "brf", "brh"].every(key => summary[key] === totals[key]) || summary.skipped_records !== totals.skippedRecords ||
+      !Number.isFinite(summary.lines_pct) || !Number.isFinite(summary.branches_pct) ||
+      Math.abs(summary.lines_pct - totals.linesPct) > 1e-9 || Math.abs(summary.branches_pct - totals.branchesPct) > 1e-9 || totals.skippedRecords) reasons.push("The summary does not match the original measured coverage.");
+  const exits = summary.shard_test_exits;
+  if (!exits || typeof exits !== "object" || Array.isArray(exits) || Object.keys(exits).sort().join(",") !== "1,2,3,4,5,6,7,8" ||
+      Object.values(exits).some(exit => exit !== 0)) reasons.push("All eight required instrumented shards have not completed successfully.");
+  const exclusions = [...workflow.matchAll(/--test-coverage-exclude=(?:"([^"\n]+)"|'([^'\n]+)'|([^\s\n]+))/g)].map(match => match[1] ?? match[2] ?? match[3]);
+  if (!workflow.includes("--select-all") || !exclusions.length) reasons.push("The complete selection and coverage exclusions are not attested.");
+  const tier = classifyCoverageTier(totals, baseline);
+  const validScope = records.length > 0 && !reasons.some(reason => /population|inventory|summary/.test(reason));
+  return { version: "code-health-source-v1", kind: "coverage", repository: repository.toLowerCase(), analyzedSha: summary.sha.toLowerCase(),
+    ref: summary.ref, runId: summary.run_id, observedAt: summary.measured_at, scanId: `coverage-nightly:${summary.run_id}`,
+    state: reasons.length ? "partial" : "complete", reasons, toolVersion: process.version,
+    rulesVersion: hash(canonical(baseline)), configHash: hash(workflow), exclusions: [...new Set(exclusions)].sort(),
+    scope: { kind: "instrumented-source-lines", fileCount: records.length, hash: validScope ? hash(records.map(record =>
+      [record.sourceFile, [...new Set(record.da.map(value => value.line))].sort((a, b) => a - b), record.lf, record.brf]).sort(([a], [b]) => a.localeCompare(b))) : null },
+    check: { id: "coverage-existing-tier", met: tier.tier === "healthy", reason: `Instrumented branch coverage is in this repository's existing ${tier.tier} tier.` } };
+}
+
 function boundedRead(path, limit) {
   if (!path || !statSync(path).isFile() || statSync(path).size > limit) throw new Error("Unbounded or unavailable analysis input.");
   return readFileSync(path, "utf8");
@@ -86,9 +120,15 @@ function exclusionsFromConfig(config) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const { values } = parseArgs({ options: { input: { type: "string" }, output: { type: "string" },
+      "coverage-summary": { type: "string" }, lcov: { type: "string" }, baseline: { type: "string" },
       "sarif-dir": { type: "string" }, config: { type: "string" }, workflow: { type: "string" } } });
-    let input;
-    if (values.input) {
+    let input, result;
+    if (values["coverage-summary"]) {
+      if (values.input || values["sarif-dir"] || values.config) throw new Error("Choose one evidence source.");
+      const summary = JSON.parse(boundedRead(values["coverage-summary"], 1024 ** 2));
+      result = { ...summary, code_health: coverageProvenance(summary, boundedRead(values.lcov, 64 * 1024 ** 2),
+        JSON.parse(boundedRead(values.baseline, 1024 ** 2)), boundedRead(values.workflow, 1024 ** 2), process.env.GITHUB_REPOSITORY) };
+    } else if (values.input) {
       if (values["sarif-dir"] || values.config || values.workflow) throw new Error("Choose one original-output input mechanism.");
       input = JSON.parse(boundedRead(values.input, 64 * 1024 ** 2));
     } else {
@@ -101,7 +141,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         config: JSON.stringify([config, workflow]), exclusions: exclusions.values, exclusionsKnown: exclusions.known,
         sarif: JSON.parse(boundedRead(join(values["sarif-dir"], files[0]), 64 * 1024 ** 2)) };
     }
-    const serialized = JSON.stringify(codeqlProvenance(input)) + "\n";
+    const serialized = JSON.stringify(result ?? codeqlProvenance(input)) + "\n";
     if (!values.output || Buffer.byteLength(serialized) > 32 * 1024) throw new Error("Invalid or oversized evidence publication.");
     writeFileSync(values.output, serialized, { flag: "wx", mode: 0o600 });
   } catch {

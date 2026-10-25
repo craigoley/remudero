@@ -167,7 +167,7 @@ test("code health binds coverage provenance to the existing measured inventory a
     const run = (value = summary, coverage = lcov, policy = baseline) => {
       const input = join(dir, "summary.json"), report = join(dir, "lcov.info"), config = join(dir, "baseline.json"), workflow = join(dir, "workflow.yml"), output = join(dir, `coverage-${serial++}.json`);
       writeFileSync(input, JSON.stringify(value)); writeFileSync(report, coverage); writeFileSync(config, JSON.stringify(policy));
-      writeFileSync(workflow, 'node --experimental-test-coverage --test-coverage-exclude="test/**"\n');
+      writeFileSync(workflow, 'node --select-all --experimental-test-coverage --test-coverage-exclude="test/**"\n');
       execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--coverage-summary", input,
         "--lcov", report, "--baseline", config, "--workflow", workflow, "--output", output], { stdio: "pipe", env: { ...process.env, GITHUB_REPOSITORY: "acme/atlas" } });
       return JSON.parse(readFileSync(output, "utf8")).code_health;
