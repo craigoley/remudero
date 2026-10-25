@@ -107,7 +107,7 @@ function sourceFor(request: ImprovementThreadRequest, scope: Scope, deps: Improv
       !Number.isFinite(Date.parse(scan.observedAt)) || Date.parse(scan.observedAt) > now || now - Date.parse(scan.observedAt) > 86_400_000)
     return fail("source_stale", "This finding needs a current, complete source before planning can begin.");
   const inventory = readCodeHealthInventory(deps.stateDir), related = readCodeHealthRelatedWork(deps.stateDir, inventory, request.repository, now);
-  const opportunity = buildCodeHealthOpportunities(input, related.work).find(() => true);
+  const opportunity = buildCodeHealthOpportunities(input, related.work).find(row => row.id === request.opportunityId);
   if (!opportunity || !opportunity.mayPlan || opportunity.snapshotId !== request.snapshotId) return fail("source_unavailable", "The selected finding is not available in this repository snapshot.");
   const binding: Binding = { repository: request.repository, instance: scope.instance, opportunityId: opportunity.id, snapshotId: request.snapshotId,
     policyVersion: CODE_HEALTH_POLICY_VERSION, analyzedSha: scan.analyzedSha };
