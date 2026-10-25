@@ -48,6 +48,8 @@
     WHAT THE LAST RUNG TRIED: W1-T5097 (a docs-only record, which changed no code path; its advice is under ci-friction:check:ci-log:comment-load-ratchet in docs/ci-friction-remedies.md).
     Do something structurally different from it.
 
+    The follow-up to wire the classifier into fix round dispatch is moot: mechanicalRatchetOf is absent from main, and PR #12776 landed no caller.
+
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

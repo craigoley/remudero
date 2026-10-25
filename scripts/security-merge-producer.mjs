@@ -55,7 +55,9 @@ export function createSecurityMetadataReader({exec=execFileSync,wait=delay}={}) 
       } catch (error) {
         const truncated=typeof error?.stderr === 'string' && error.stderr.trim() === 'unexpected end of JSON input' &&
           Number.isInteger(error.status) && error.status !== 0;
-        if (!truncated || attempt >= SECURITY_METADATA_READ_ATTEMPTS) throw error;
+        const unavailable=typeof error?.stderr === 'string' && /(?:^|\n)gh: HTTP 503(?:\b|$)/.test(error.stderr) &&
+          Number.isInteger(error.status) && error.status !== 0;
+        if ((!truncated && !unavailable) || attempt >= SECURITY_METADATA_READ_ATTEMPTS) throw error;
         await wait(1000 * 2 ** (attempt-1));
       }
     }

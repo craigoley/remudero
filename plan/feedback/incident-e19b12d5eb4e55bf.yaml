@@ -1,0 +1,30 @@
+id: incident-e19b12d5eb4e55bf
+ts: 2026-10-24T17:44:00.230Z
+raw: >-
+  Incident e19b12d5eb4e: intervention
+  own-red:fix-lane:rule-checks-failed-on-ci-shard-failed-on
+
+  First seen: 2026-10-24T17:19:34.446Z
+
+  Last seen: 2026-10-24T17:34:56.838Z
+
+  Count: 4, burn: 4.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10817@765af25fa actor=cao825 cause=own-red:fix-lane:rule-checks-failed-on-ci-shard-failed-on — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#11398@93918ceb2 actor=cao825 cause=own-red:fix-lane:rule-checks-failed-on-ci-shard-failed-on — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#e19b12d5eb4e55bfadea06abb1f50aec337823cf2ef64724743b37cb53136e5d
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

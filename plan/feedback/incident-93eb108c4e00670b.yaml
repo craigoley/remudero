@@ -1,0 +1,29 @@
+id: incident-93eb108c4e00670b
+ts: 2026-10-24T17:55:27.170Z
+raw: >-
+  Incident 93eb108c4e00: intervention
+  awaiting-review:review-lane:checks-green-remudero-review-pending-a-r
+
+  First seen: 2026-10-24T17:53:23.307Z
+
+  Last seen: 2026-10-24T17:55:25.025Z
+
+  Count: 3, burn: 3.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#11255@da6f7d7e1 actor=cao825 cause=awaiting-review:review-lane:checks-green-remudero-review-pending-a-r — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#93eb108c4e00670b8581903d6325190e75117d9abc9aa84691dfae8e70def377
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -1,0 +1,30 @@
+id: incident-650abd2d3b9ad493
+ts: 2026-10-24T17:49:50.789Z
+raw: >-
+  Incident 650abd2d3b9a: intervention
+  awaiting-ci:ci:zero-check-runs-on-head-but-only-since-t
+
+  First seen: 2026-10-24T17:34:56.838Z
+
+  Last seen: 2026-10-24T17:49:49.711Z
+
+  Count: 14, burn: 14.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10350@d8d237cdb actor=cao825 cause=awaiting-ci:ci:zero-check-runs-on-head-but-only-since-t — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10350@9a5f06e23 actor=cao825 cause=awaiting-ci:ci:zero-check-runs-on-head-but-only-since-t — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#650abd2d3b9ad493f26dd854c1ad66d6f2673d0332c267cf9a1c00153db499a9
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

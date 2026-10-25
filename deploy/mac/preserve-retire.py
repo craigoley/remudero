@@ -21,6 +21,10 @@ Invariants (JANITOR.md "Preserve-then-retire"):
   a clone or bare repository there is deleted only when other accounts cannot enter its root. The
   borrower census always walks the temp folders as well as the home.
 - Codex session logs idle for `codex_session_days` (0 = never) and not open are deleted.
+- No action touches a path under a keep declaration (`KEEP_MARKERS`, or a seed generation's
+  `ready.json` beside `consumers/`) on it, above it or inside it, or one that cannot be inspected:
+  it is never retired, repacked, pruned, compressed, expired or removed. Seed stores belong to the
+  reference-aware seed sweeper alone.
 Usage: preserve-retire.py --home DIR [--apply] [--config PATH]
 """
 import argparse, glob, gzip, json, os, re, shlex, shutil, stat, subprocess, sys, tarfile, tempfile, time
@@ -45,6 +49,9 @@ BUILD_DIRS = ("node_modules", "coverage", ".turbo", ".next")
 DUMP_SUFFIXES = (".json", ".jsonl", ".ndjson", ".log", ".lcov", ".info")
 # An application or framework bundle is an installed program, never a pile of dumps.
 BUNDLE_SUFFIXES = (".app", ".framework", ".xcframework", ".bundle")
+# Keep declarations shared with cache-reclaim.py KEEP and dependency-seed-guard.sh. Seed stores and their
+# generations are collected only by the reference-aware seed sweeper (deploy/DEPENDENCY-SEEDS.md).
+KEEP_MARKERS = (".rmd-janitor-keep", ".rmd-scratch-keep", ".rmd-dependency-seed-root.json")
 CENSUS_PRUNE = {"Library", ".Trash", "Music", "Movies", "Pictures", "node_modules"}
 TEMP_BASE = "/private/tmp"
 CODEX_SESSION_DIRS = (".codex/sessions", ".codex/archived_sessions")
@@ -69,6 +76,7 @@ class Repo:
         self.path, self.kind = path, kind  # kind: worktree | clone | bare
         self.gitdir = self.store = None    # store = the object-store owner (common git dir)
         self.lenders, self.hold = [], ""
+        self.scoped = ""                   # keep_scope reason for this checkout or its store
 
     def git(self, *args, **kw):
         if self.kind == "bare":
@@ -167,6 +175,59 @@ def protected_paths(home, cfg):
 
 def inside(path, parents):
     return any(path == p or path.startswith(p + "/") for p in parents)
+
+
+def keep_here(folder):
+    """Why `folder` itself must be left alone: a keep marker of any kind (file, folder, symlink,
+    dangling link), or the layout of a seed generation even without a marker. Unreadable holds."""
+    for name in KEEP_MARKERS + ("ready.json",):
+        try:
+            os.lstat(os.path.join(folder, name))
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as error:
+            return f"keep-inspection-unknown ({name}: {error.__class__.__name__})"
+        if name != "ready.json":
+            return f"keep-declared ({name})"
+        # A consumers entry of any kind (a link, a dangling link, a file) is seed-shaped evidence the
+        # seed sweeper cannot verify either, so it holds as firmly as a real consumers folder.
+        try:
+            st = os.lstat(os.path.join(folder, "consumers"))
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as error:
+            return f"keep-inspection-unknown (consumers: {error.__class__.__name__})"
+        if stat.S_ISDIR(st.st_mode):
+            return "managed-seed-generation (ready.json, consumers)"
+        return "seed-shaped-unknown (ready.json beside a consumers entry that is not a folder)"
+    return ""
+
+
+def keep_scope(path, below=True):
+    """Why no action of this phase may touch `path`: a keep declaration on it, on any folder above it,
+    or (with `below`) anywhere inside it. Every remove, retire, repack, prune, compress and expiry asks
+    this first, so a kept tree keeps its objects, refs and working files; failing to look holds."""
+    p = path if os.path.isdir(path) and not os.path.islink(path) else os.path.dirname(path)
+    while True:
+        why = keep_here(p)
+        if why:
+            return f"{why} at {p}"
+        if os.path.dirname(p) == p:
+            break
+        p = os.path.dirname(p)
+    if not below or os.path.islink(path) or not os.path.isdir(path):
+        return ""
+    try:
+        for dirpath, dirs, files in os.walk(path, onerror=_raise):
+            why = keep_here(dirpath) if dirpath != path else ""
+            if why:
+                return f"{why} at {dirpath}"
+            # A Git object or admin store holds history, not declarations; links are never followed.
+            dirs[:] = [d for d in dirs if d != ".git" and not os.path.islink(os.path.join(dirpath, d))
+                       and not (d == "objects" and "HEAD" in files and "refs" in dirs)]
+    except OSError as error:
+        return f"keep-inspection-unknown ({error.__class__.__name__}) in {path}"
+    return ""
 
 
 # ---------- discovery and facts ----------
@@ -556,13 +617,25 @@ def remove(repo, roots, protected):
         shutil.rmtree(p)
 
 
+def prune_worktrees(stores, repos):
+    """`git worktree prune` each store, except one a keep-scoped checkout shares or one under a keep
+    declaration: its stale worktree records are admin data of a held store. Returns those pruned."""
+    pruned = []
+    for store in stores:
+        if any(q.scoped for q in repos if q.store == store) or keep_scope(store, below=False):
+            continue
+        run(["git", "--git-dir", store, "worktree", "prune"])
+        pruned.append(store)
+    return pruned
+
+
 def expire(cfg, now):
     root, cutoff = cfg["preserve_root"], now - cfg["retain_days"] * 86400
     if not os.path.isdir(root):
         return
     for name in sorted(os.listdir(root)):
         path = os.path.join(root, name)
-        if os.path.islink(path) or not os.path.isdir(path):
+        if os.path.islink(path) or not os.path.isdir(path) or keep_scope(path):
             continue
         if name.startswith(".incoming-") and os.lstat(path).st_mtime < now - 86400:
             shutil.rmtree(path)  # an interrupted preservation; it never counted as a copy
@@ -613,13 +686,13 @@ def rmtree_writable(path):
 
 
 def loose_folders(cfg, protected):
-    """Folders under the roots that belong to no repository, walked top-down."""
+    """Folders under the roots that belong to no repository and no keep declaration, walked top-down."""
     for root in cfg["roots"]:
-        if not os.path.isdir(root) or os.path.islink(root):
+        if not os.path.isdir(root) or os.path.islink(root) or keep_scope(root, below=False):
             continue
         for dirpath, dirs, files in os.walk(root):
             if inside(dirpath, protected) or ".git" in dirs or ".git" in files or (
-                    "HEAD" in files and "objects" in dirs and "refs" in dirs):
+                    "HEAD" in files and "objects" in dirs and "refs" in dirs) or keep_here(dirpath):
                 dirs[:] = []
                 continue
             dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(dirpath, d)) and not d.endswith(BUNDLE_SUFFIXES)]
@@ -655,9 +728,11 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
     planned = {"REPACKED": "WOULD-REPACK", "REMOVED": "WOULD-REMOVE", "EXPIRED": "WOULD-EXPIRE",
                "COMPRESSED": "WOULD-COMPRESS"}
     verb = (lambda done: done) if apply else planned.get
+    # A store shared by any keep-scoped checkout (a marker in its working tree, say) is never rewritten.
+    held = {r.store for r in repos if r.store and r.scoped}
     stores = sorted({r.store for r in repos if r.store and os.path.isdir(r.store)
                      and any(r.store.startswith(root + "/") for root in cfg["roots"])
-                     and not inside(r.store, protected)})
+                     and not inside(r.store, protected) and r.store not in held and not keep_scope(r.store)})
     for store in stores:
         pack_dir = os.path.join(store, "objects", "pack")
         packs = len([f for f in os.listdir(pack_dir) if f.endswith(".pack")]) if os.path.isdir(pack_dir) else 0
@@ -684,6 +759,10 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
             # node_modules is always an install; the others only at a package root, since a folder
             # of the same name elsewhere may be fixture data.
             if (d != "node_modules" and "package.json" not in files) or changed_after(p, cutoff) or in_use(p, snap):
+                continue
+            why = keep_scope(p)  # a seed store or keep marker inside the build dir holds all of it
+            if why:
+                say("HOLD", why, p)
                 continue
             if apply:
                 try:
@@ -725,7 +804,7 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
     days = cfg["codex_session_days"]
     for p in codex_sessions(cfg["home"]) if days else []:
         st = os.lstat(p)
-        if max(st.st_mtime, st.st_ctime) >= now - days * 86400 or in_use(p, snap):
+        if max(st.st_mtime, st.st_ctime) >= now - days * 86400 or in_use(p, snap) or keep_scope(p, below=False):
             continue
         if apply:
             os.remove(p)
@@ -774,8 +853,17 @@ def main():
     keep = {}
     for r in repos:
         resolve_git(r)
+        r.scoped = keep_scope(r.path) or (r.store and keep_scope(r.store, below=False)) or ""
+    # Every checkout of a store a keep-scoped checkout shares is held too: removing one would rewrite
+    # the held store's worktree admin data, and its prune would follow.
+    held_stores = {r.store for r in repos if r.store and r.scoped}
+    for r in repos:
+        if not r.scoped and r.store in held_stores:
+            r.scoped = "store-of-a-keep-scoped-checkout"
         if r.hold:
             keep[r.path] = r.hold
+        elif r.scoped:
+            keep[r.path] = r.scoped
         elif os.lstat(r.path).st_uid != os.getuid():
             keep[r.path] = "foreign-owner"
         elif r.kind != "worktree" and shared_temp(r.path, cfg):
@@ -845,6 +933,9 @@ def main():
                 raise Hold("not-preserved")
             if fresh is None or in_use(r.path, fresh) or recent_path(r, cutoff):
                 raise Hold("became-active-before-retire")
+            why = keep_scope(r.path) or (r.store and keep_scope(r.store, below=False))
+            if why:
+                raise Hold(f"{why} (declared before retire)")
             remove(r, cfg["roots"], protected)
             retired += 1
             say("RETIRED", r.kind, r.path)
@@ -856,8 +947,8 @@ def main():
             keep[r.path] = f"remove-failed ({error.__class__.__name__})"
             keep_closure(repos, keep, borrowers, lenders_ok)
             say("HOLD", f"remove-failed ({error.__class__.__name__})", r.path)
-    for store in sorted({r.store for r in order if r.kind == "worktree" and r.store and os.path.isdir(r.store)}):
-        run(["git", "--git-dir", store, "worktree", "prune"])
+    if a.apply:  # a dry run plans only: pruning stale worktree records is a write
+        prune_worktrees(sorted({r.store for r in order if r.kind == "worktree" and r.store and os.path.isdir(r.store)}), repos)
     tidy = housekeeping(cfg, protected, repos, fresh, now, a.apply)
     say("housekeeping", " ".join(f"{k}={v}" for k, v in tidy.items()) + f" apply={int(a.apply)}")
     if a.apply:

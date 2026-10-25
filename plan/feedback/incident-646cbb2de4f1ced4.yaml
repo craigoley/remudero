@@ -1,0 +1,30 @@
+id: incident-646cbb2de4f1ced4
+ts: 2026-10-24T17:45:41.535Z
+raw: >-
+  Incident 646cbb2de4f1: intervention
+  review-failed:fix-lane:unmet-criterion-fix-round-judge-continue
+
+  First seen: 2026-10-24T17:19:34.446Z
+
+  Last seen: 2026-10-24T17:44:48.369Z
+
+  Count: 6, burn: 6.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10785@254ad2d26 actor=cao825 cause=review-failed:fix-lane:unmet-criterion-fix-round-judge-continue — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#11515@b60665df5 actor=cao825 cause=review-failed:fix-lane:unmet-criterion-fix-round-judge-continue — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#646cbb2de4f1ced48f3e79372126ffe8111d931dedf2fc73440b3c999ab9e93c
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

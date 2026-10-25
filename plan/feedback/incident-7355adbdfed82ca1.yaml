@@ -1,0 +1,29 @@
+id: incident-7355adbdfed82ca1
+ts: 2026-10-24T18:28:56.474Z
+raw: >-
+  Incident 7355adbdfed8: flow pr-stage-stall:plan-proof-unrunnable:unknown
+  signature
+
+  First seen: 2026-10-24T18:27:08.016Z
+
+  Last seen: 2026-10-24T18:27:08.016Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=14002 plan-proof-unrunnable: unknown signature
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#7355adbdfed82ca14cc29e4478c2639a8704e748cd051c160147cf1dccd9d590
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
