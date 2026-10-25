@@ -32,7 +32,30 @@ function productionRule(testFile: string): GateRepairRule {
   return found;
 }
 
-test("W1-T9049: a repair that only edits the gate's own baseline is a suspected false positive", () => {
+async function productionRepair(gate: string, repairFile: string, patch: string, redSource: string) {
+  const source = "src/lib/example.ts";
+  const ghJson = async (args: string[]): Promise<unknown> => {
+    const path = args[1] ?? "";
+    if (args[0] === "repo") return { nameWithOwner: "o/r" };
+    if (path.includes("/pulls?")) return [{ number: pair.pr, base: { sha: "base" } }];
+    if (path.endsWith(`/pulls/${pair.pr}/commits?per_page=100`)) return [{ sha: "red" }, { sha: "green" }];
+    if (path.includes("/check-runs")) return { check_runs: [{ id: 7, name: gate, status: "completed",
+      conclusion: path.includes("/commits/red/") ? "failure" : "success" }] };
+    if (path.endsWith("/status")) return { statuses: [] };
+    if (path.includes("/compare/red...green")) return { files: [{ filename: repairFile, patch }] };
+    if (path.includes("/compare/base...red")) return { merge_base_commit: { sha: "base" }, files: [{ filename: source }] };
+    if (path.includes(`/contents/${source}?ref=`)) return { encoding: "base64",
+      content: Buffer.from(path.endsWith("ref=red") ? redSource : "").toString("base64") };
+    throw new Error(`unexpected production evidence read: ${args.join(" ")}`);
+  };
+  const observations = await loadGateRepairObservations(GATE_REPAIR_RULES, { ghJson,
+    ghText: async args => { throw new Error(`unexpected production log read: ${args.join(" ")}`); } });
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0]!.pair.triggered, true, `${gate}: the original PR must trigger the production rule`);
+  return observations[0]!;
+}
+
+test("W1-T9049: a repair that only edits the gate's own baseline is a suspected false positive", async () => {
   const repair = { ...pair, repairFiles: [baseline] };
   assert.equal(classifyGateRepair(repair, "-1\n+2", rule.ownFiles, rule.gateRegex), "baseline-only");
   const { result, rows } = candidates("-1\n+2", repair);
@@ -45,7 +68,9 @@ test("W1-T9049: a repair that only edits the gate's own baseline is a suspected 
     ["test/error-subclass-census.test.ts", "scripts/error-subclass-baseline.json", "test/error-subclass-census.test.ts", "census:error-subclass"],
   ]) {
     const production = productionRule(gate!);
-    const evidence = { pair: { ...pair, gate: production.gate, repairFiles: [owned!] }, repairDiff: "-1\n+2" };
+    const evidence = await productionRepair(production.gate, owned!, "@@\n-1\n+2",
+      'const token = "RMD_EXAMPLE"; class ExampleError extends Error {}');
+    assert.deepEqual(evidence.pair.repairFiles, [owned]);
     const events: Array<Record<string, unknown> | undefined> = [];
     const actions = gateRepairCandidates([evidence], GATE_REPAIR_RULES, [], (step, extra) => {
       assert.equal(step, "gate.false_positive_suspected");
@@ -63,7 +88,7 @@ test("W1-T9049: a repair that only edits the gate's own baseline is a suspected 
   }
 });
 
-test("W1-T9049: a token rebuilt at runtime to dodge a gate's regex is a suspected false positive", () => {
+test("W1-T9049: a token rebuilt at runtime to dodge a gate's regex is a suspected false positive", async () => {
   assert.equal(classifyGateRepair(pair, dodge, rule.ownFiles, rule.gateRegex), "token-dodge");
   const { result, rows } = candidates(dodge);
   assert.equal(rows[0].extra?.classification, "token-dodge");
@@ -86,8 +111,7 @@ test("W1-T9049: a token rebuilt at runtime to dodge a gate's regex is a suspecte
       readHead: () => head, readBase: () => base });
     assert.equal(triggered(before, ""), true);
     assert.equal(triggered(after, before), false);
-    const evidence = { pair: { ...pair, gate: production.gate, repairFiles: ["src/lib/example.ts"], triggered: true },
-      repairDiff: `-${before}\n+${after}` };
+    const evidence = await productionRepair(production.gate, "src/lib/example.ts", `@@\n-${before}\n+${after}`, before);
     assert.equal(classifyGateRepair(evidence.pair, evidence.repairDiff, production.ownFiles, production.gateRegex), "token-dodge");
     const events: string[] = [];
     const actions = gateRepairCandidates([evidence], GATE_REPAIR_RULES, [], (step, extra) => {
@@ -97,6 +121,11 @@ test("W1-T9049: a token rebuilt at runtime to dodge a gate's regex is a suspecte
     assert.deepEqual(events, ["gate.false_positive_suspected"]);
     assert.equal(actions.length, 1);
     assert.equal(actions[0]!.file, "test/env-var-registry.test.ts");
+    const rendered = renderFalsePositiveShard(actions[0]!, "NEW-1");
+    assert.equal(rendered.refused, undefined);
+    const task = loadPlanFromYaml(rendered.text, "production-token").tasks[0]!;
+    assert.deepEqual(task.files, [production.recognizer]);
+    assert.equal(task.origin, `gate-false-positive:${production.gate}`);
   }
 });
 
