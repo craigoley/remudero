@@ -231,6 +231,7 @@ export function validateDailyProgressReport(value: unknown): ContractResult<Dail
     const s = sources.get(e.sourceId), kind = { merged: "pull_requests", activity: "ledger_activity", deployment: "deployments" }[e.kind];
     if (!included.has(repoKey(e.repository)) || !s || repoKey(s.repository) !== repoKey(e.repository) || s.kind !== kind) return fail("event identity contradicts its source scope");
     if (Date.parse(e.occurredAt) < Date.parse(report.windowStart) || Date.parse(e.occurredAt) >= Date.parse(report.windowEnd) || Date.parse(e.observedAt) > Date.parse(report.generatedAt)) return fail("event clock is outside the report evidence window");
+    if (Date.parse(e.occurredAt) > Date.parse(e.observedAt)) return fail("event occurrence follows ingestion");
     if (e.kind === "deployment" && (s.state === "not_collected" || s.lastSuccessAt === null)) return fail("deployment lacks an independent source receipt");
   }
   const confirmed = report.events.filter((e) => e.kind === "merged" && e.fleetAttribution === "confirmed");

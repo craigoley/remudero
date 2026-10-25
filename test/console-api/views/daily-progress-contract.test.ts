@@ -127,6 +127,26 @@ test("daily contracts preserve coverage and reject contradictory day identity", 
     const r = structuredClone(ongoing); Object.assign(r.coverage.sources.at(-1)!, patch);
     assert.equal(validateDailyProgressReport(r).ok, false, "every required source must cover the entire elapsed report window");
   }
+  for (const fleetAttribution of ["confirmed", "unknown", "non_fleet"] as const) {
+    for (const [occurredAt, observedAt, valid] of [
+      ["2026-11-01T11:00:00.000Z", "2026-11-01T11:00:00.000Z", true],
+      ["2026-11-01T11:00:00.000Z", ongoing.generatedAt, true],
+      [ongoing.generatedAt, ongoing.generatedAt, true],
+      [ongoing.generatedAt, "2026-11-01T12:00:00Z", true],
+      ["2026-11-01T12:00:00Z", ongoing.generatedAt, true],
+      ["2026-11-01T12:00:00.001Z", ongoing.generatedAt, false],
+      ["2026-11-01T13:00:00.000Z", ongoing.generatedAt, false],
+      ["2026-11-01T11:00:00.000Z", "2026-11-01T10:59:59.999Z", false],
+      ["2026-11-01T13:00:00.000Z", "2026-11-01T13:00:00.000Z", false],
+    ] as const) {
+      const r = structuredClone(ongoing);
+      r.events = [{ id: "pr:1", repository: "acme/atlas", kind: "merged", sourceId: "atlas-prs", occurredAt, observedAt, fleetAttribution, taskIds: ["W1-T1"], title: "A merged change", url: null }];
+      const credited = fleetAttribution === "confirmed" ? 1 : 0;
+      r.totals = { mergedChanges: { value: credited, precision: "exact" }, completedTasks: { value: credited, precision: "exact" } };
+      r.page.totalEvents = 1;
+      assert.equal(validateDailyProgressReport(r).ok, valid, `merge occurrence must precede ingestion and generation: ${fleetAttribution}, ${occurredAt}, ${observedAt}`);
+    }
+  }
 });
 
 test("daily source evidence must match independently declared repository and instance identities", () => {
