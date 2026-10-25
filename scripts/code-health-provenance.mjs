@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Sanitized evidence from existing measurements; no scanner, network or filing side effects.
 import { createHash } from "node:crypto";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const hash = value => createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
@@ -25,7 +26,7 @@ export function codeqlProvenance(input) {
     throw new Error("Code health provenance identity, configuration or original SARIF is invalid.");
   }
   const run = input.sarif.runs[0], driver = run.tool?.driver;
-  const reasons = [], targets = new Set(), components = [driver, ...(run.tool?.extensions ?? [])];
+  const reasons = input.exclusionsKnown === false ? ["The configured exclusions could not be read without ambiguity."] : [], targets = new Set(), components = [driver, ...(run.tool?.extensions ?? [])];
   if (!driver || !/CodeQL/i.test(driver.name ?? "") || !text(driver.version)) reasons.push("The original analysis has no supported tool version.");
   if (!Array.isArray(run.artifacts) || run.artifacts.length > 100_000) reasons.push("The original analysis has no bounded measured-file inventory.");
   else for (const artifact of run.artifacts) {
@@ -60,12 +61,52 @@ export function codeqlProvenance(input) {
     scope: { kind: "explicit-analysis-targets", fileCount: targets.size, hash: hasScope ? hash([...targets].sort()) : null } };
 }
 
+function boundedRead(path, limit) {
+  if (!path || !statSync(path).isFile() || statSync(path).size > limit) throw new Error("Unbounded or unavailable analysis input.");
+  return readFileSync(path, "utf8");
+}
+
+// Recognize the repository's simple YAML block list; unsupported YAML stays explicitly unknown.
+function exclusionsFromConfig(config) {
+  const lines = config.split(/\r?\n/), starts = lines.map((line, index) => /^paths-ignore\s*:/.test(line) ? index : -1).filter(index => index >= 0);
+  if (!starts.length) return { values: [], known: true };
+  if (starts.length !== 1 || !/^paths-ignore:\s*(?:#.*)?$/.test(lines[starts[0]])) return { values: [], known: false };
+  const values = [];
+  for (const line of lines.slice(starts[0] + 1)) {
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    if (/^\S/.test(line)) break;
+    const match = line.match(/^\s+-\s+("(?:[^"\\]|\\.)*"|'(?:[^']|'')*')\s*(?:#.*)?$/);
+    if (!match) return { values: [], known: false };
+    try { values.push(match[1].startsWith('"') ? JSON.parse(match[1]) : match[1].slice(1, -1).replaceAll("''", "'")); }
+    catch { return { values: [], known: false }; }
+  }
+  return { values, known: true };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const { values } = parseArgs({ options: { input: { type: "string" }, output: { type: "string" } } });
-  if (!values.input || !values.output || !statSync(values.input).isFile() || statSync(values.input).size > 64 * 1024 ** 2)
-    throw new Error("Code health export requires a bounded input file and a new output file.");
-  const result = codeqlProvenance(JSON.parse(readFileSync(values.input, "utf8")));
-  const serialized = JSON.stringify(result) + "\n";
-  if (Buffer.byteLength(serialized) > 32 * 1024) throw new Error("Code health provenance exceeds its publication bound.");
-  writeFileSync(values.output, serialized, { flag: "wx", mode: 0o600 });
+  try {
+    const { values } = parseArgs({ options: { input: { type: "string" }, output: { type: "string" },
+      "sarif-dir": { type: "string" }, config: { type: "string" }, workflow: { type: "string" } } });
+    let input;
+    if (values.input) {
+      if (values["sarif-dir"] || values.config || values.workflow) throw new Error("Choose one original-output input mechanism.");
+      input = JSON.parse(boundedRead(values.input, 64 * 1024 ** 2));
+    } else {
+      const files = readdirSync(values["sarif-dir"]).filter(name => name.endsWith(".sarif") && !name.endsWith(".quality.sarif") && !name.endsWith(".csra.sarif"));
+      if (files.length !== 1) throw new Error("Each language job must supply exactly one original analysis.");
+      const config = boundedRead(values.config, 1024 ** 2), workflow = boundedRead(values.workflow, 1024 ** 2), exclusions = exclusionsFromConfig(config);
+      input = { repository: process.env.GITHUB_REPOSITORY, analyzedSha: process.env.GITHUB_SHA, ref: process.env.GITHUB_REF,
+        runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT, observedAt: new Date().toISOString(),
+        language: process.env.CODE_HEALTH_LANGUAGE, sarifId: process.env.CODE_HEALTH_SARIF_ID,
+        config: JSON.stringify([config, workflow]), exclusions: exclusions.values, exclusionsKnown: exclusions.known,
+        sarif: JSON.parse(boundedRead(join(values["sarif-dir"], files[0]), 64 * 1024 ** 2)) };
+    }
+    const serialized = JSON.stringify(codeqlProvenance(input)) + "\n";
+    if (!values.output || Buffer.byteLength(serialized) > 32 * 1024) throw new Error("Invalid or oversized evidence publication.");
+    writeFileSync(values.output, serialized, { flag: "wx", mode: 0o600 });
+  } catch {
+    // Raw SARIF parse failures may contain security text. Keep the public diagnostic allowlisted too.
+    process.stderr.write("Code health evidence export failed: invalid input or unavailable original analysis.\n");
+    process.exitCode = 1;
+  }
 }
