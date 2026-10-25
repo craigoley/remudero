@@ -26,10 +26,11 @@
     - src/lib/product-case.ts
     - src/lib/product-routes.ts
     - test/infra/wreckterra-product-case.test.ts
+    - src/lib/serve.ts
   status: queued
   attempts: 0
   rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required.
-  design: Add a reusable import/adoption case mechanism and executable integration proof using Wreckterra as the first input. Import the user-approved original-IP/mobile-first/solo-network-ready/OSM-fidelity/existing-resource decisions with provenance and existing repository identity. Do not create a duplicate repo or pretend the record already existed. Carry one persisted product ID across adopt, verified onboarding, versioned task plan and actual guarded build request. Rehydrate after each stage and lost response. Store source/local/hosted/review/merge/deploy/mobile evidence separately. The real signed-in Console case is executed after deployment, with its durable receipts, and remains distinct from fixture tests.
+  design: Add a reusable import/adoption case mechanism and executable integration proof using Wreckterra as the first input. Import the user-approved original-IP/mobile-first/solo-network-ready/OSM-fidelity/existing-resource decisions with provenance and existing repository identity. Do not create a duplicate repo or pretend the record already existed. Carry one persisted product ID across adopt, verified onboarding, versioned task plan and actual guarded build request. Rehydrate after each stage and lost response. Store source/local/hosted/review/merge/deploy/mobile evidence separately. The real signed-in Console case is executed after deployment, with its durable receipts, and remains distinct from fixture tests. Mount buildProductCaseRoutes from the existing serve composition; the route builder delegates to the named product operation rather than a test-only seam.
   acceptance:
     - claim: Wreckterra resumes the same product and repository across every stage
       proof: "unit test: W1-T10618: Wreckterra resumes the same product and repository across every stage"
@@ -37,6 +38,6 @@
       proof: "unit test: W1-T10618: Wreckterra carries approved mobile Central Park requirements into its build"
     - claim: metadata alone cannot satisfy the Wreckterra end to end case
       proof: "unit test: W1-T10618: metadata alone cannot satisfy the Wreckterra end to end case"
-    - claim: the production route calls the product mechanism
-      proof: "grep: productCaseOperation( in src/lib/product-routes.ts"
+    - claim: the served product route invokes the production capability
+      proof: "grep: buildProductCaseRoutes( in src/lib/serve.ts"
   falsifier: Remove the named ownership, idempotency, evidence or refusal guard independently. Its corresponding behavioral proof must fail against the same fixture and pass when restored. Test real durable files/default transport boundaries plus each catch arm; never a zero-test wrapper result. Keep initial live read/write/dispatch/deployment receipts separate from fixtures.

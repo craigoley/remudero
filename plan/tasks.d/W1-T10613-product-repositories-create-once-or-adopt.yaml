@@ -23,10 +23,11 @@
     - src/lib/product-repository.ts
     - src/lib/product-routes.ts
     - test/infra/product-repository.test.ts
+    - src/lib/serve.ts
   status: queued
   attempts: 0
   rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required.
-  design: Add a high-tier action-bound create/adopt operation to the product workflow, with an immutable payload digest, durable operation identity and exact GitHub owner/name/visibility/repository ID. Reuse the existing GitHub transport and capability checks. Read and reconcile the external outcome before retrying after timeout; never assume POST supports idempotency. Adoption of existing craigoley/wreckterra ID 1432832754 must perform zero create calls and retain the already-authorized public/name decision. Conflicting identity, denied organization creation, malformed metadata and unreadable outcomes refuse or remain outcome_unknown. No automatic repository deletion as compensation. Unit fixtures exercise lost HTTP response after real provider success plus concurrent duplicate requests and restart.
+  design: Add a high-tier action-bound create/adopt operation to the product workflow, with an immutable payload digest, durable operation identity and exact GitHub owner/name/visibility/repository ID. Reuse the existing GitHub transport and capability checks. Read and reconcile the external outcome before retrying after timeout; never assume POST supports idempotency. Adoption of existing craigoley/wreckterra ID 1432832754 must perform zero create calls and retain the already-authorized public/name decision. Conflicting identity, denied organization creation, malformed metadata and unreadable outcomes refuse or remain outcome_unknown. No automatic repository deletion as compensation. Unit fixtures exercise lost HTTP response after real provider success plus concurrent duplicate requests and restart. Mount buildProductRepositoryRoutes from the existing serve composition; the route builder delegates to the named product operation rather than a test-only seam.
   acceptance:
     - claim: adopting Wreckterra never creates a repository
       proof: "unit test: W1-T10613: adopting Wreckterra never creates a repository"
@@ -34,6 +35,6 @@
       proof: "unit test: W1-T10613: a lost creation response reconciles one repository after restart"
     - claim: denied or conflicting repository ownership writes nothing
       proof: "unit test: W1-T10613: denied or conflicting repository ownership writes nothing"
-    - claim: the production route calls the product mechanism
-      proof: "grep: productRepositoryOperation( in src/lib/product-routes.ts"
+    - claim: the served product route invokes the production capability
+      proof: "grep: buildProductRepositoryRoutes( in src/lib/serve.ts"
   falsifier: Remove the named ownership, idempotency, evidence or refusal guard independently. Its corresponding behavioral proof must fail against the same fixture and pass when restored. Test real durable files/default transport boundaries plus each catch arm; never a zero-test wrapper result. Keep initial live read/write/dispatch/deployment receipts separate from fixtures.

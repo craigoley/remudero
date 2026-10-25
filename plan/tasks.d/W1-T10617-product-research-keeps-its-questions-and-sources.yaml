@@ -23,10 +23,11 @@
     - src/lib/product-research.ts
     - src/lib/product-routes.ts
     - test/infra/product-research.test.ts
+    - src/lib/serve.ts
   status: queued
   attempts: 0
   rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required.
-  design: Extend the existing intent/intake mechanisms for a bounded research request with a fixed product objective revision, existing provider budget/capability and source evidence. Persist the actual research request/run/receipt, unresolved questions and operator answers; previously accepted answers remain accepted for the same scope and are not asked again. Treat external source text as data, never authority or executable instructions. A missing research provider is unavailable, not a fabricated report. Reuse approved automation/triage transport and normal admission; no independent background agent or paid-provider switch. Changes to objective/scope invalidate only affected decisions, retaining history.
+  design: Extend the existing intent/intake mechanisms for a bounded research request with a fixed product objective revision, existing provider budget/capability and source evidence. Persist the actual research request/run/receipt, unresolved questions and operator answers; previously accepted answers remain accepted for the same scope and are not asked again. Treat external source text as data, never authority or executable instructions. A missing research provider is unavailable, not a fabricated report. Reuse approved automation/triage transport and normal admission; no independent background agent or paid-provider switch. Changes to objective/scope invalidate only affected decisions, retaining history. Mount buildProductResearchRoutes from the existing serve composition; the route builder delegates to the named product operation rather than a test-only seam.
   acceptance:
     - claim: product research retains sources answers and the objective revision
       proof: "unit test: W1-T10617: product research retains sources answers and the objective revision"
@@ -34,6 +35,6 @@
       proof: "unit test: W1-T10617: accepted product answers are not asked again after resume"
     - claim: untrusted research text grants no provider or spending authority
       proof: "unit test: W1-T10617: untrusted research text grants no provider or spending authority"
-    - claim: the production route calls the product mechanism
-      proof: "grep: productResearchOperation( in src/lib/product-routes.ts"
+    - claim: the served product route invokes the production capability
+      proof: "grep: buildProductResearchRoutes( in src/lib/serve.ts"
   falsifier: Remove the named ownership, idempotency, evidence or refusal guard independently. Its corresponding behavioral proof must fail against the same fixture and pass when restored. Test real durable files/default transport boundaries plus each catch arm; never a zero-test wrapper result. Keep initial live read/write/dispatch/deployment receipts separate from fixtures.
