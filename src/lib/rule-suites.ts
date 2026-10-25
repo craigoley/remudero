@@ -256,14 +256,53 @@ function basename(path: string): string {
 const ROSTER_BASENAMES = new Set(CENSUS_POPULATION.map((member) => basename(member.testFile)));
 
 /**
- * Is `path` a rule suite? Anything under test/rules/ and any roster member (matched by basename, so
- * a moved member stays enrolled) is, and cannot opt out. Otherwise the BASENAME must match
- * RULE_SUITE_NAME_RE and `text`'s leading comments must carry no `@not-a-rule-suite: <reason>`.
+ * W1-T9050: suites whose CENSUS_POPULATION rows left when the census recognizer began admitting a
+ * suite by what it EXECUTES rather than by the `ls-files`/`src/` text it mentions. The recognizer no
+ * longer counts them as tree-walk candidates, so censusPopulationDrift would call their rows stale,
+ * but rule-checks ran every one of them through the roster and must keep running them: no rule suite
+ * stops running because its census row left. Exactly the 26 the row removals dropped from
+ * listRuleSuites (129 on main before the change, 103 after without this list).
+ */
+export const RETAINED_RULE_SUITES: readonly string[] = [
+  "test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts",
+  "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts",
+  "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",
+  "test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts",
+  "test/architecture-fitness.test.ts",
+  "test/checkout-writers.test.ts",
+  "test/ci-filed-fold-debt-reaches-the-daemon.test.ts",
+  "test/config-fixture-path-parity.test.ts",
+  "test/coverage-session-blanking.test.ts",
+  "test/deploy-scripts-use-mktemp.test.ts",
+  "test/every-shard-on-main-is-lintable.test.ts",
+  "test/every-test-basename-is-unique.test.ts",
+  "test/every-test-finds-the-repo-root-through-one-helper.test.ts",
+  "test/host-capability-fixtures.test.ts",
+  "test/host-parity-azure-pole.test.ts",
+  "test/mkdtemp-callsite-check.test.ts",
+  "test/moving-base-changed-files.test.ts",
+  "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts",
+  "test/operator-gated-default-reachability.test.ts",
+  "test/orphan-sweep-names-the-third-party.test.ts",
+  "test/proof-grep-target-stays-inside-checkout.test.ts",
+  "test/state-citation-check.test.ts",
+  "test/the-affected-suite-selector-runs-in-shadow.test.ts",
+  "test/the-merge-queue-runs-the-recorded-literal-gates.test.ts",
+  "test/the-mutant-loader-resolves-every-relative-import.test.ts",
+  "test/tracked-source-write-guard.test.ts",
+];
+
+const RETAINED_BASENAMES = new Set(RETAINED_RULE_SUITES.map(basename));
+
+/**
+ * Is `path` a rule suite? Anything under test/rules/, any roster member and any retained suite
+ * (matched by basename, so a moved member stays enrolled) is, and cannot opt out. Otherwise the
+ * BASENAME must match RULE_SUITE_NAME_RE and `text`'s leading comments must carry no `@not-a-rule-suite: <reason>`.
  */
 export function isRuleSuitePath(path: string, text = ""): boolean {
   if (!path.startsWith("test/") || !path.endsWith(".test.ts")) return false;
   const name = basename(path);
-  if (path.startsWith(RULE_SUITE_DIR) || ROSTER_BASENAMES.has(name)) return true;
+  if (path.startsWith(RULE_SUITE_DIR) || ROSTER_BASENAMES.has(name) || RETAINED_BASENAMES.has(name)) return true;
   if (!RULE_SUITE_NAME_RE.test(name)) return false;
   const header = text.match(/^\s*(?:(?:\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/)\s*)*/)![0];
   const markers = [...header.matchAll(/@not-a-rule-suite\b([^\r\n]*)/g)];

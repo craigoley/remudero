@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
-import { censusCandidateWalks, discoverCensusCandidates } from "#src/lib/ci-parity.js";
+import { censusCandidateWalks, discoverCensusCandidates, listRuleSuites } from "#src/lib/ci-parity.js";
+import { CENSUS_POPULATION, RETAINED_RULE_SUITES, RULE_SUITE_NAME_RE } from "#src/lib/rule-suites.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function candidates(text: string) {
   return discoverCensusCandidates("/repo", () => ({
@@ -94,4 +98,19 @@ test("W1-T9050: git wrappers retain executable argv and repository scope", () =>
     'function tracked(root, dirs) { return execFileSync("git", ["-C", root, "ls-files", "--", ...dirs]); }\n' +
     'function scan(root, dirs) { return tracked(root, dirs); } scan(REPO_ROOT, AREAS);';
   assert.deepEqual(censusCandidateWalks(nested), ["scripts/", "src/"]);
+});
+
+test("W1-T9050: rule-checks still runs every suite whose census row the recognizer change removed", () => {
+  const suites = new Set(listRuleSuites(REPO_ROOT));
+  const members = new Set(CENSUS_POPULATION.map((member) => member.testFile));
+  assert.equal(RETAINED_RULE_SUITES.length, 26, "the 26 suites the row removals dropped from listRuleSuites");
+  assert.equal(new Set(RETAINED_RULE_SUITES).size, RETAINED_RULE_SUITES.length, "no retained suite is listed twice");
+  for (const path of RETAINED_RULE_SUITES) {
+    assert.ok(existsSync(join(REPO_ROOT, path)), `${path} must exist`);
+    assert.ok(suites.has(path), `${path} must stay in the rule-checks run set`);
+    // Only the retained roster enrolls it: no census row, no rule-suite name, not under test/rules/.
+    assert.ok(!members.has(path), `${path} has a census row again; drop it from RETAINED_RULE_SUITES`);
+    assert.ok(!RULE_SUITE_NAME_RE.test(path.slice(path.lastIndexOf("/") + 1)), `${path} is named as a rule suite`);
+    assert.ok(!path.startsWith("test/rules/"), `${path} is enrolled by its folder`);
+  }
 });
