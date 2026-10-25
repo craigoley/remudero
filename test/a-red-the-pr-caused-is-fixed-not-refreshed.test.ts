@@ -537,12 +537,12 @@ test("W1-T8396: the trial merge really merges the head through the hardened leaf
 
 test("a trial-merge refusal prevents the ordinary refresh judge from replacing the same red head", async () => {
   const h = harness([mainHealth()], { baseChanged: ["src/lib/sweep.ts"], merged: "fails" });
-  h.deps.behindMainByPr = new Map();
+  h.deps.behindMainByPr = new Map([[PR, 50]]);
   h.deps.baseChangedFilesByPr = new Map([[PR, { files: [], truncated: true }]]);
   h.deps.readBranchProtectionStrict = () => false;
   let judgments = 0;
   h.deps.refreshJudge = async () => { judgments++; return "overlap"; };
-  await runSweep([redPr({ taskId: "unfiled", headRefName: "run-unfiled-1792944600000", lastActivityAt: ago(60) }), peer()], h.deps, DEFAULT_SWEEP_POLICY);
+  await runSweep([redPr({ lastActivityAt: ago(60) }), peer()], h.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(clearances(h.rows)[0]?.refresh, false, "the real trial merge refuses this head and main");
   assert.equal(clearances(h.rows)[0]?.merged_verdict, "reproduced");
   assert.deepEqual(h.merges, [`${HEAD}+${MAIN}`]);
