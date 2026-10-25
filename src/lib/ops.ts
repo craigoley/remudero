@@ -131,6 +131,8 @@ export interface GhCodeScanningAlertJson {
   number?: number;
   state?: string;
   created_at?: string;
+  fixed_at?: string | null;
+  dismissed_at?: string | null;
   html_url?: string;
   rule?: { id?: string; description?: string; security_severity_level?: string; severity?: string; tags?: string[] };
   tool?: { name?: string; version?: string };
@@ -266,14 +268,17 @@ export interface CodeScanningAnalysisInstance {
   category: string | null;
   environmentHash: string | null;
   instanceState: string | null;
+  fixedAt?: string | null;
+  dismissedAt?: string | null;
 }
 
 function analysisInstance(raw: GhCodeScanningAlertJson): CodeScanningAnalysisInstance {
   const bounded = (value: unknown, max = 256): string | null => typeof value === "string" && value.length > 0 && value.length <= max && !value.includes("\0") ? value : null;
+  const ownTime = (value: unknown): string | null => typeof value === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(value) && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
   const instance = raw.most_recent_instance, sha = bounded(instance?.commit_sha), environment = bounded(instance?.environment, 4096);
   return { alertId: String(raw.number ?? "?"), analyzedSha: sha !== null && /^[a-f0-9]{40}$/i.test(sha) ? sha.toLowerCase() : null,
     toolVersion: bounded(raw.tool?.version), ref: bounded(instance?.ref), analysisKey: bounded(instance?.analysis_key), category: bounded(instance?.category),
-    environmentHash: environment === null ? null : createHash("sha256").update(environment).digest("hex"), instanceState: bounded(instance?.state) };
+    environmentHash: environment === null ? null : createHash("sha256").update(environment).digest("hex"), instanceState: bounded(instance?.state), fixedAt: ownTime(raw.fixed_at), dismissedAt: ownTime(raw.dismissed_at) };
 }
 
 const codeScanningReadPacer = createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {});
