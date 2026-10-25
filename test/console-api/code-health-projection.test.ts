@@ -142,3 +142,20 @@ test("code health binds missing known findings to their original source evidence
   assert.equal(report.summary.healthy, null);
   assert.equal(report.sources.filter(source => source.required).length, 2);
 });
+
+test("code health keeps known partial findings when the next source read fails", () => {
+  const value = input(), old = structuredClone(value.baseline!.scans[0]!);
+  old.state = "partial"; old.reason = "One configured language did not finish."; old.findings = [{ ...finding(), severity: "critical" }];
+  value.baseline = null; value.scans[0]!.state = "unavailable"; value.scans[0]!.reason = "The source could not be read.";
+  const carried = { ...value, retainedEvidence: [{ policyVersion: value.registry.version, scan: old }] };
+  const report = projectCodeHealth(carried);
+  assert.equal(report.findings.length, 1, "a later failed read must retain a previously known urgent finding");
+  const known = report.findings[0]!, original = report.sources.find(source => source.id === known.sourceId)!;
+  assert.equal(known.severity, "critical"); assert.equal(known.status, "unknown");
+  assert.equal(original.observedAt, old.observedAt); assert.equal(original.analyzedSha, old.analyzedSha); assert.equal(original.state, "partial");
+  assert.equal(original.required, false); assert.equal(report.summary.healthy, null);
+  const cleanRead = structuredClone(carried); cleanRead.scans[0]!.state = "complete"; cleanRead.scans[0]!.reason = null;
+  const missing = projectCodeHealth(cleanRead);
+  assert.equal(missing.findings.length, 1, "absence in a clean read still does not prove the known finding was fixed");
+  assert.notEqual(missing.checks[0]!.state, "met");
+});
