@@ -1720,24 +1720,6 @@ export function resolveReleases(deps: ReleaseReaders, plan?: Plan): ReleaseResol
   };
 }
 
-/** Each released id's author from its `ratify.approved` rows: an operator row outranks a machine one for the same task. */
-export function releaseAuthorsFromLedger(lines: readonly string[]): Map<string, ReleaseAuthor> {
-  const out = new Map<string, ReleaseAuthor>();
-  for (const line of lines) {
-    if (!line.includes(RELEASE_LEDGER_STEP)) continue; // cheap reject before the parse
-    let row: { step?: unknown; task_id?: unknown; author_class?: unknown };
-    try {
-      row = JSON.parse(line) as typeof row;
-    } catch {
-      continue; // an unparseable line releases nothing — the safe direction
-    }
-    if (row.step !== RELEASE_LEDGER_STEP || typeof row.task_id !== "string" || !row.task_id) continue;
-    if (row.author_class !== "machine") out.set(row.task_id, "operator");
-    else if (!out.has(row.task_id)) out.set(row.task_id, "machine");
-  }
-  return out;
-}
-
 /**
  * RECORD-TASK ROUTING LOG (W1-T4818). The selection scan re-offers a record task every tick, so the
  * ledger line is written at most once per task id per drain run (`seen` is the run's own set).
