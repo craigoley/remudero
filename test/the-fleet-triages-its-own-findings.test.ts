@@ -34,6 +34,7 @@ import { createService } from "../src/lib/service.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { type RunResult } from "../src/run-task.js";
 import { inboxOwner } from "#src/lib/inbox-owner.js";
+import { draftsDueOnDaemon, proposalsNeedingDraft, type DraftSelectionContext } from "#src/lib/inbox.js";
 
 const A1 = "adoption:field-no-writer:src/lib/plan.ts:context:";
 const A2 = "adoption:export-no-caller:src/lib/plan.ts:loadPlanAtRef";
@@ -95,6 +96,14 @@ test("W1-T10431: informational routing grants no new fleet execution eligibility
   assert.equal(f.ledger().filter(row => row.task_id === AGE_INFORMATION.id).length, 0,
     "information causes no approve, merge, decline, retry or other recorded execution");
   assert.equal(readFleetLaneStore(f.stateDir)[AGE_INFORMATION.id], undefined);
+  const human={id:VH,summary:"A person must decide.",evidenceAnchors:[]},existing={id:P1,summary:"Existing fleet work.",evidenceAnchors:[]};
+  const population=[AGE_INFORMATION,human,existing];
+  assert.deepEqual(proposalsNeedingDraft(population,{}).map(p=>p.id),[VH,P1],"manual/default selection cannot synthesize work from an observation");
+  assert.deepEqual(draftsDueOnDaemon(population,{},{}).map(p=>p.id),[P1,VH],"the real default daemon selector retains its existing eligible population");
+  const unknown:DraftSelectionContext={isRatified:()=>false,isDeclined:()=>undefined,boardReferents:new Map(),grepAnchorTrue:()=>true,openProposalIds:new Set(),retirement:()=>({unknown:"unreadable lifecycle"})};
+  assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},unknown).length,1,"unknown lifecycle is not proof a human review can be suppressed");
+  assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},{...unknown,isRatified:()=>true}).length,0,"unknown lifecycle cannot bypass existing ratification exclusion");
+  assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},{...unknown,isDeclined:()=>"held by operator"}).length,0,"unknown lifecycle cannot bypass an existing decline");
 });
 
 interface Fx {

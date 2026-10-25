@@ -104,7 +104,9 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
   const history=await s.get("/v1/inbox/threads");assert.equal(history.status,200);
   assert.equal(history.body.threads.find((item:any)=>item.threadId===threadId)?.attention,"history");
   assert.equal(readFileSync(store,"utf8"),original,"classification cannot fabricate a reply or retire history");
-  appendThreadMessage(inboxThreadIdentity(ageId),"escalation","Which existing policy should apply?",{threadStorePath:store,now:()=>w.at,extra:{question:true}});
+  appendThreadMessage(inboxThreadIdentity(ageId),"escalation","Which existing policy should apply?",{threadStorePath:store,now:()=>w.at},{question:true});
+  const sourceQuestion=readThread(threadId,{threadStorePath:store});assert.equal(sourceQuestion.status,"ok");
+  assert.equal(sourceQuestion.messages.at(-1)?.extra?.question,true,"positive control: the real append API retained the question marker");
   const questioned=await w.refresh();s.put(questioned);
   const current=await s.get("/v1/views/inbox?section=needsYou"),afterBadge=await badge();assert.ok(!("error" in afterBadge));
   assert.equal(current.status,200);
