@@ -1,3 +1,4 @@
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import { dailyDateAt, dailyWindow, DEFAULT_DAILY_PROGRESS_ZONE, resolveDailyDate, shiftDailyDate } from "./daily-progress-calendar.js";
@@ -16,7 +17,9 @@ export const DAILY_PROGRESS_SCOPE_KEY = "__daily_progress_scope";
 export const DAILY_PROGRESS_PAGE_BYTES = 1024 * 1024;
 /** PRIMARY CONTROL: source age follows the agreed hourly cadence; retry scheduling cannot renew it. */
 const DAILY_SOURCE_FRESHNESS_MS = 3_600_000;
-class DailyProgressNotReady extends Error {}
+class DailyProgressNotReady extends RmdError {
+  constructor(message: string) { super("read-model", GENERIC_EXIT_CODE, message); }
+}
 interface Page { r: number; o: number; k: string }
 interface Request { repository: string; timeZone: string; reportDate: string; revision?: number; page?: Page }
 
