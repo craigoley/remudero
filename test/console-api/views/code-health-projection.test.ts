@@ -241,6 +241,8 @@ test("code health cached view preserves scope, pinned pages and saved source clo
     denied.scans[0]!.reason = "GitHub did not allow this code-check read.";
     const deniedSave = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(stateDir, value.repository), input: denied, expectedSnapshotId: published.snapshotId, clock });
     assert.equal(deniedSave.state, "published");
+    const historical = readCodeHealthReport({ stateDir, params: new URLSearchParams({ repository: value.repository, snapshot: published.snapshotId }), now });
+    assert.equal(historical.data.planningAvailable, false, "an older saved snapshot cannot be offered as current planning evidence");
     const deniedReport = readCodeHealthReport({ stateDir, params, now });
     assert.equal(deniedReport.data.repositories[0]!.state, "unauthorized", "a denied alert read stays distinct even when the metadata read succeeded");
     assert.equal(deniedReport.data.planningAvailable, false);
