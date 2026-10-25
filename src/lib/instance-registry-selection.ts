@@ -50,6 +50,7 @@ interface RegistryBytes {
   kind: "bytes";
   bytes: Buffer;
   identity: Readonly<RegistryFileStamp>;
+  canonicalPath?: string;
 }
 const stamp = (s: Awaited<ReturnType<typeof lstat>>): RegistryFileStamp => ({
   regular: s.isFile(), size: Number(s.size), dev: Number(s.dev), ino: Number(s.ino),
@@ -71,7 +72,7 @@ export const registryFileIO: RegistryFileIO = {
 
 type UnknownReason = "missing" | "not_regular" | "oversized" | "revision_changed"
   | "lstat_failed" | "open_failed" | "stat_failed" | "read_failed" | "close_failed"
-  | "cancelled" | "timeout" | "invalid_encoding" | "malformed" | "digest_mismatch";
+  | "cancelled" | "timeout" | "invalid_encoding" | "malformed" | "digest_mismatch" | "file_identity_unqualified";
 type RefusalReason = "invalid_path" | "invalid_bounds" | "invalid_digest"
   | "unsupported_contract" | "unsupported_capability" | "unsupported_field";
 type Unknown = { kind: "unknown"; reason: UnknownReason };
@@ -108,7 +109,7 @@ function requireActive(signal: AbortSignal): void {
   if (signal.aborted) throw new ReadRefusal("cancelled");
 }
 
-async function readBounded(path: string, maxBytes: number, signal: AbortSignal, io: RegistryFileIO): Promise<RegistryBytes | Unknown> {
+async function readBounded(path: string, maxBytes: number, signal: AbortSignal, io: RegistryFileIO, physicalIdentity: boolean): Promise<RegistryBytes | Unknown> {
   let handle: RegistryFileHandle | undefined;
   let phase: UnknownReason = "lstat_failed";
   let result: RegistryBytes | Unknown;
@@ -134,7 +135,17 @@ async function readBounded(path: string, maxBytes: number, signal: AbortSignal, 
     const after = await handle.stat(), current = await io.lstat(path);
     requireFile(after, maxBytes); requireFile(current, maxBytes);
     if (length !== opened.size || !sameStamp(opened, after) || !sameStamp(after, current)) throw new ReadRefusal("revision_changed");
-    result = { kind: "bytes", bytes: bytes.subarray(0, length), identity: Object.freeze({ ...after }) };
+    let canonicalPath: string | undefined;
+    if (physicalIdentity) {
+      phase = "file_identity_unqualified";
+      canonicalPath = await io.canonicalPath?.(path);
+      requireActive(signal);
+      if (!canonicalPath || !isAbsolute(canonicalPath) || after.nlink !== 1) throw new ReadRefusal(phase);
+      const physical = await io.lstat(canonicalPath);
+      requireActive(signal); requireFile(physical, maxBytes);
+      if (!sameStamp(after, physical)) throw new ReadRefusal("revision_changed");
+    }
+    result = { kind: "bytes", bytes: bytes.subarray(0, length), identity: Object.freeze({ ...after }), canonicalPath };
   } catch (error) {
     // Unknown I/O is not absence or a healthy fallback; never surface OS messages/private paths.
     result = { kind: "unknown", reason: error instanceof ReadRefusal ? error.reason
@@ -151,7 +162,7 @@ async function readBounded(path: string, maxBytes: number, signal: AbortSignal, 
   return result!;
 }
 
-async function readWithDeadline(path: string, maxBytes: number, timeoutMs: number, external: AbortSignal | undefined, io: RegistryFileIO): Promise<RegistryBytes | Unknown> {
+async function readWithDeadline(path: string, maxBytes: number, timeoutMs: number, external: AbortSignal | undefined, io: RegistryFileIO, physicalIdentity: boolean): Promise<RegistryBytes | Unknown> {
   if (external?.aborted) return { kind: "unknown", reason: "cancelled" };
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout>;
@@ -162,7 +173,7 @@ async function readWithDeadline(path: string, maxBytes: number, timeoutMs: numbe
     external?.addEventListener("abort", onAbort, { once: true });
   });
   try {
-    return await Promise.race([readBounded(path, maxBytes, controller.signal, io), stopped]);
+    return await Promise.race([readBounded(path, maxBytes, controller.signal, io, physicalIdentity), stopped]);
   } finally {
     clearTimeout(timer!); external?.removeEventListener("abort", onAbort!);
   }
@@ -180,7 +191,7 @@ function supportedFields(text: string): boolean {
 }
 
 /** True absence is explicit; an empty/invalid higher-precedence value is never skipped. */
-export async function readSelectedInstanceRegistry(input: RegistrySelectionInput, io: RegistryFileIO = registryFileIO): Promise<SelectedRegistryRead> {
+export async function readSelectedInstanceRegistry(input: RegistrySelectionInput, io: RegistryFileIO = registryFileIO, physicalIdentity = false): Promise<SelectedRegistryRead> {
   const source = input.cliPath !== undefined ? "cli" : input.envPath !== undefined ? "environment"
     : input.configuredPath !== undefined ? "configuration" : undefined;
   if (source === undefined) return { kind: "legacy" };
@@ -196,7 +207,7 @@ export async function readSelectedInstanceRegistry(input: RegistrySelectionInput
   if (expectedDigest !== undefined && !/^[a-f0-9]{64}$/.test(expectedDigest)) return { kind: "refused", reason: "invalid_digest" };
   // Copy every selected value before the first await; caller mutation cannot retarget this read.
   const capabilities = Object.freeze([...CAPABILITIES]);
-  const bytes = await readWithDeadline(path, maxBytes, timeoutMs, input.signal, io);
+  const bytes = await readWithDeadline(path, maxBytes, timeoutMs, input.signal, io, physicalIdentity);
   if (bytes.kind === "unknown") return bytes;
   const digest = createHash("sha256").update(bytes.bytes).digest("hex");
   if (expectedDigest !== undefined && digest !== expectedDigest) return { kind: "unknown", reason: "digest_mismatch" };
@@ -225,7 +236,7 @@ export async function readSelectedInstanceRegistry(input: RegistrySelectionInput
       return current as Unknown | Refused;
     },
   });
-  trustedRegistryBytes.set(binding, { path, text, identity: bytes.identity, io, maxBytes, timeoutMs, contractVersion });
+  trustedRegistryBytes.set(binding, { path, text, identity: bytes.identity, canonicalPath: bytes.canonicalPath, io, maxBytes, timeoutMs, contractVersion });
   return { kind: "ready", binding };
 }
 
@@ -233,6 +244,7 @@ interface TrustedRegistryBytes {
   readonly path: string;
   readonly text: string;
   readonly identity: Readonly<RegistryFileStamp>;
+  readonly canonicalPath?: string;
   readonly io: RegistryFileIO;
   readonly maxBytes: number;
   readonly timeoutMs: number;
@@ -277,27 +289,14 @@ export async function withInstanceRegistryRuntime<T>(
     // Unreadable input or transport cannot establish a selected runtime, never a legacy fallback.
     throw new InstanceRegistryRuntimeError("input_unreadable");
   }
-  const read = await readSelectedInstanceRegistry(snapshot, stableIO);
+  const read = await readSelectedInstanceRegistry(snapshot, stableIO, true);
   if (read.kind !== "ready" && read.kind !== "legacy") throw new InstanceRegistryRuntimeError(read.reason);
   if (read.kind === "ready" && snapshot.instanceName !== undefined && (typeof snapshot.instanceName !== "string" || !/^[A-Za-z0-9_-]+$/.test(snapshot.instanceName))) {
     throw new InstanceRegistryRuntimeError("invalid_instance");
   }
-  let canonicalPath: string | undefined;
-  if (read.kind === "ready") {
-    const original = trustedRegistryBytes.get(read.binding)!;
-    try {
-      canonicalPath = await stableIO.canonicalPath?.(original.path);
-      if (!canonicalPath || !isAbsolute(canonicalPath) || original.identity.nlink !== 1
-        || !sameStamp(original.identity, await stableIO.lstat(canonicalPath))) {
-        throw new InstanceRegistryRuntimeError("file_identity_unqualified");
-      }
-    } catch {
-      // A pathname-only denial cannot protect pre-existing hardlink aliases or unknown physical identity.
-      throw new InstanceRegistryRuntimeError("file_identity_unqualified");
-    }
-  }
   const scope: InstanceRegistryRuntime = { active: true,
-    ...(read.kind === "ready" ? { binding: read.binding, instanceName: snapshot.instanceName, canonicalPath } : {}) };
+    ...(read.kind === "ready" ? { binding: read.binding, instanceName: snapshot.instanceName,
+      canonicalPath: trustedRegistryBytes.get(read.binding)!.canonicalPath } : {}) };
   try { return await runtimeRegistry.run(scope, operation); }
   finally { scope.active = false; }
 }
@@ -330,16 +329,10 @@ export async function assertInstanceRegistryRuntimeCurrent(): Promise<void> {
   if (scope?.binding === undefined) return;
   const original = trustedRegistryBytes.get(scope.binding)!;
   const read = await readSelectedInstanceRegistry({ cliPath: original.path, expectedDigest: scope.binding.digest,
-    contractVersion: original.contractVersion, maxBytes: original.maxBytes, timeoutMs: original.timeoutMs }, original.io);
+    contractVersion: original.contractVersion, maxBytes: original.maxBytes, timeoutMs: original.timeoutMs }, original.io, true);
   if (read.kind !== "ready") throw new InstanceRegistryRuntimeError(read.kind === "legacy" ? "selection_missing" : read.reason);
   const current = trustedRegistryBytes.get(read.binding)!;
-  if (!sameStamp(original.identity, current.identity)) throw new InstanceRegistryRuntimeError("revision_changed");
-  try {
-    if (await original.io.canonicalPath?.(original.path) !== scope.canonicalPath || current.identity.nlink !== 1) {
-      throw new InstanceRegistryRuntimeError("revision_changed");
-    }
-  } catch {
-    // Revised/unknown alias evidence never becomes permission for the selected target.
+  if (!sameStamp(original.identity, current.identity) || current.canonicalPath !== scope.canonicalPath) {
     throw new InstanceRegistryRuntimeError("revision_changed");
   }
   if (!scope.active) throw new InstanceRegistryRuntimeError("invocation_closed");
