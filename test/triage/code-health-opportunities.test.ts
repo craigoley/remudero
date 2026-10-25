@@ -8,7 +8,7 @@ import { repoRoot } from "#test/helpers/repo-root.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { buildCodeHealthOpportunities, codeqlQualityProposalId, qualityScanFromCollectedEvidence } from "#src/lib/codeql-quality-intake.js";
 import { prepareCodeHealthCollection } from "#src/lib/code-health-collector.js";
-import { projectCodeHealth } from "#src/lib/code-health-projection.js";
+import { projectCodeHealth, codeHealthFindingFingerprint } from "#src/lib/code-health-projection.js";
 import { readCodeHealthSnapshot, publishCodeHealthSnapshot } from "#src/lib/code-health-store.js";
 import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
 import { readCoverageNightlySummary } from "#src/lib/coverage-nightly-intake.js";
@@ -437,6 +437,6 @@ test("code health collection rejects foreign evidence and flags changed facts un
     observedAt: "2026-11-02T06:00:00.000Z", scans, previous });
   assert.equal(changed.scans[0]!.state, "partial", "one saved measurement identity cannot silently change its measured facts");
   const report = projectCodeHealth(changed);
-  assert(report.findings.some(finding => finding.severity === "critical" && finding.fingerprint.includes(":")), "keep newly known urgent evidence explicit while unassessed");
+  assert(report.findings.some(finding => finding.severity === "critical" && finding.fingerprint === codeHealthFindingFingerprint(previous.repository, "quality", scans[0]!.findings[0]!)), "keep newly known urgent evidence explicit while unassessed");
   assert.equal(report.summary.healthy, null);
 });
