@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { join } from "node:path";
-import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { repoRoot } from "#test/helpers/repo-root.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { CODE_HEALTH_POLICY_VERSION } from "#src/lib/code-health-collector.js";
+import { codeHealthRepositoryStateDir, publishCodeHealthSnapshot } from "#src/lib/code-health-store.js";
+import { buildCodeHealthOpportunities } from "#src/lib/codeql-quality-intake.js";
+import type { CodeHealthProjectionInput } from "#src/lib/code-health-projection.js";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { inboxThreadIdentity, readThread, appendThreadMessage } from "#src/lib/inbox-thread.js";
@@ -79,5 +84,57 @@ test("improvement chat concurrent processes and reload keep one message per writ
     assert(saved.status === "ok"); assert.equal(saved.messages.length, 5);
     assert.deepEqual(saved.messages.map(message => message.seq), [1, 2, 3, 4, 5]);
     assert.equal(new Set(saved.messages.slice(1).map(message => message.extra!.messageId)).size, 4);
+  });
+});
+
+
+function sourceFixture(dir: string) {
+  const stateDir = join(dir, "fleet-state"), inboxRoot = join(dir, "atlas-instance"), repository = "acme/atlas", instance = "atlas";
+  const now = Date.parse("2026-11-02T06:00:00.000Z"), clock = fixedClock(now), sha = "a".repeat(40);
+  const finding = { id: "42", ruleId: "js/repeated-work", status: "open" as const, severity: "medium" as const, category: "maintainability",
+    path: "src/example.ts", title: "Repeated work makes this function difficult to change.", effortMinutes: null };
+  const scans: CodeHealthProjectionInput["scans"] = ["quality", "coverage"].map(kind => ({ kind: kind as "quality" | "coverage", repository, scanId: `${kind}:new`, componentIds: [`${kind}:new`], analyzedSha: sha,
+    observedAt: "2026-11-02T05:00:00.000Z", state: "complete", scopeHash: `${kind}:scope`, toolVersion: "tool1", rulesVersion: "rules1", configHash: "config1", exclusions: [], reason: null,
+    checks: [{ id: kind === "quality" ? "quality-maintainability-open" : "coverage-existing-tier", met: kind !== "quality", reason: kind === "quality" ? "A known code-maintenance finding remains open." : "Meets the existing coverage tier." }], findings: kind === "quality" ? [finding] : [] }));
+  const input: CodeHealthProjectionInput = { repository, analyzedSha: sha, currentSha: sha, observedAt: "2026-11-02T05:01:00.000Z", nextDueAt: null,
+    registry: { version: CODE_HEALTH_POLICY_VERSION, checks: [{ id: "quality-maintainability-open", sourceKind: "quality", category: "maintainability", description: "No unresolved findings in the measured maintainability scope." },
+      { id: "coverage-existing-tier", sourceKind: "coverage", category: "tests", description: "Meets the existing instrumented coverage tier." }] }, scans,
+    baseline: { analyzedSha: "b".repeat(40), policyVersion: CODE_HEALTH_POLICY_VERSION, scans: scans.map(scan => ({ ...structuredClone(scan), scanId: `${scan.kind}:old`, componentIds: [`${scan.kind}:old`], analyzedSha: "b".repeat(40), observedAt: "2026-11-01T05:00:00.000Z" })) } };
+  mkdirSync(join(stateDir, "read-model"), { recursive: true });
+  writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [{ instanceId: instance, options: { root: inboxRoot, controlRoot: inboxRoot, ledgerPath: join(inboxRoot, "state", "ledger.ndjson"), planPath: join(inboxRoot, "repos", "atlas", "plan", "tasks.yaml") } }], improvementEvidence: {
+    version: "repository-evidence-inventory-v1", measurementState: "not_collected", repositories: [{ repository, instanceIds: [instance], expectedQualitySources: ["quality", "coverage"] }], unresolvedInstances: [] } }));
+  const saved = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(stateDir, repository), input, expectedSnapshotId: null, clock });
+  assert(saved.state === "published"); const opportunity = buildCodeHealthOpportunities(input)[0]!; assert(opportunity.mayPlan);
+  return { deps: { stateDir, actorId: "operator:test", clock }, request: { repository, instance, opportunityId: opportunity.id, snapshotId: saved.snapshotId,
+    goal: "Simplify the repeated work while preserving behavior.", constraints: ["Keep required checks passing."], idempotencyKey: "creation-request-00000001" }, inboxRoot, input };
+}
+
+async function planningModule() {
+  const loaded = await import("#src/lib/improvement-thread.js").catch((error: unknown) => {
+    const e = error as { code?: string; url?: string };
+    if (e?.code === "ERR_MODULE_NOT_FOUND" && typeof e.url === "string" && /\/src\/lib\/improvement-thread\.(?:js|ts)$/.test(new URL(e.url).pathname)) return undefined;
+    throw error;
+  });
+  assert(loaded && typeof loaded.createImprovementThread === "function", "saved improvement planning must be implemented on this branch");
+  return loaded;
+}
+
+test("improvement planning reuses one durable conversation across retries and reloads", async () => {
+  const { createImprovementThread } = await planningModule();
+  await withTempDir("improvement-planning-create", async dir => {
+    const { deps, request, inboxRoot } = sourceFixture(dir);
+    const first = await createImprovementThread(request, deps); assert.equal(first.state, "saved"); assert(first.state === "saved");
+    const retry = await createImprovementThread(request, { ...deps }); assert(retry.state === "saved");
+    assert.equal(retry.threadId, first.threadId); assert.equal(retry.requestId, first.requestId); assert.equal(retry.reused, true);
+    const stored = readThread(first.threadId, { threadStorePath: join(inboxRoot, "state", "inbox-threads.jsonl") });
+    assert(stored.status === "ok"); assert.equal(stored.messages.length, 2, "one source briefing and one operator goal survive retries");
+    assert.equal(stored.messages[0]!.role, "escalation"); assert.match(stored.messages[0]!.body, /acme\/atlas/);
+    assert.equal(stored.messages[1]!.role, "reply"); assert.match(stored.messages[1]!.body, /Simplify the repeated work/);
+    const changedKey = await createImprovementThread({ ...request, idempotencyKey: "creation-request-00000002", goal: "Keep the public API stable while simplifying the code." }, deps);
+    assert(changedKey.state === "saved"); assert.equal(changedKey.threadId, first.threadId, "the source opportunity has one durable conversation");
+    const after = readThread(first.threadId, { threadStorePath: join(inboxRoot, "state", "inbox-threads.jsonl") });
+    assert(after.status === "ok"); assert.equal(after.messages.length, 3, "another explicit goal appends once without duplicating source context");
+    assert.equal(first.planning.state, "not_requested"); assert.equal(first.execution.state, "not_requested");
+    assert.equal(existsSync(join(inboxRoot, "plan", "tasks.yaml")), false, "opening a chat does not file a plan task");
   });
 });
