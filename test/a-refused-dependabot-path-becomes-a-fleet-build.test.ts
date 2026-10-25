@@ -220,4 +220,17 @@ test("a folded refused-path repair binds each observed PR and refuses corrupt lo
   rmSync(corrupt);
   assert.equal(bind(12193), "folded");
   assert.equal(f.captures.length, 1);
+  const healthy = JSON.parse(readFileSync(join(dir, "PR12192.json"), "utf8"));
+  for (const [prNumber, invalid] of [
+    [12194, { ...healthy, asks: "not-an-array" }],
+    [12195, { ...healthy, refusedPathRepair: { ...healthy.refusedPathRepair, headSha: 42 } }],
+    [12196, { ...healthy, refusedPathRepair: { ...healthy.refusedPathRepair, feedbackId: "fb-other-repair" } }],
+  ] as const) {
+    const statePath = join(dir, `PR${prNumber}.json`);
+    const bytes = JSON.stringify(invalid);
+    writeFileSync(statePath, bytes);
+    assert.equal(bind(prNumber), "failed", `PR${prNumber}: invalid or contradictory identity refuses`);
+    assert.equal(readFileSync(statePath, "utf8"), bytes, "refusal preserves the exact prior evidence");
+  }
+  assert.equal(f.captures.length, 1, "invalid bindings never capture another proposal");
 });
