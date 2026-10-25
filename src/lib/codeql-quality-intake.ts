@@ -8,6 +8,14 @@ import { codeHealthEvidenceSnapshotId } from "./code-health-store.js";
 import { dirname, join } from "node:path";
 import { codeHealthFindingFingerprint, projectCodeHealth, validateCodeHealthProvenance, type CodeHealthProjectionInput, type CodeHealthScan } from "./code-health-projection.js";
 
+/** Qualify the finding's source, independently of unrelated missing checks or its quality grade. */
+export function qualifiedCodeHealthPlanningSource(input: CodeHealthProjectionInput, now: number, policyVersion: string): CodeHealthProjectionInput["scans"][number] | null {
+  const scan = input.scans.find(value => value.kind === "quality");
+  if (input.registry.version !== policyVersion || !scan || scan.state !== "complete" || scan.analyzedSha !== input.currentSha) return null;
+  const observedAt = Date.parse(scan.observedAt);
+  return Number.isFinite(observedAt) && observedAt <= now && now - observedAt <= 86_400_000 ? scan : null;
+}
+
 export interface CodeHealthRelatedWork {
   repository: string;
   proposalId: string;
