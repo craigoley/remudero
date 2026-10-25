@@ -140,7 +140,9 @@ async function readBounded(path: string, maxBytes: number, signal: AbortSignal, 
       phase = "file_identity_unqualified";
       canonicalPath = await io.canonicalPath?.(path);
       requireActive(signal);
-      if (!canonicalPath || !isAbsolute(canonicalPath) || after.nlink !== 1) throw new ReadRefusal(phase);
+      if (!canonicalPath || !isAbsolute(canonicalPath) || after.nlink !== 1
+        || !Number.isSafeInteger(after.dev) || !Number.isSafeInteger(after.ino)
+        || !Number.isFinite(after.mtimeMs) || !Number.isFinite(after.ctimeMs)) throw new ReadRefusal(phase);
       const physical = await io.lstat(canonicalPath);
       requireActive(signal); requireFile(physical, maxBytes);
       if (!sameStamp(after, physical)) throw new ReadRefusal("revision_changed");
@@ -274,7 +276,8 @@ function selectedRuntime(): InstanceRegistryRuntime | undefined {
 /** Trusted invocation scope only. No private path or raw lifecycle bytes are serialized on a binding. */
 export async function withInstanceRegistryRuntime<T>(
   operation: () => T | Promise<T>,
-  input: InstanceRegistryRuntimeInput = { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME },
+  input: InstanceRegistryRuntimeInput = { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME,
+    expectedDigest: process.env.RMD_INSTANCE_REGISTRY_DIGEST },
   io: RegistryFileIO = registryFileIO,
 ): Promise<T> {
   let snapshot: InstanceRegistryRuntimeInput, stableIO: RegistryFileIO;
@@ -305,6 +308,22 @@ export function instanceRegistryRuntimePresent(): boolean { return runtimeRegist
 
 /** Trusted harness input only: never forward this value to worker env, prompt, argv or diagnostics. */
 export function runtimeInstanceRegistryPrivateFile(): string | undefined { return selectedRuntime()?.canonicalPath; }
+
+export function runtimeInstanceRegistryDigest(): string | undefined { return selectedRuntime()?.binding?.digest; }
+
+/** Explicit trusted launcher channel, never a public projection, diagnostic or untrusted worker input. */
+export function trustedInstanceRegistryLaunchPacket(): string {
+  const scope = selectedRuntime();
+  if (!scope?.binding || !scope.instanceName) throw new InstanceRegistryRuntimeError("instance_missing");
+  const rows = scope.binding.instances.filter(row => row.name === scope.instanceName && row.live);
+  if (rows.length !== 1) throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
+  const original = trustedRegistryBytes.get(scope.binding)!;
+  if (!original.canonicalPath || /[\r\n,]/.test(original.canonicalPath)) throw new InstanceRegistryRuntimeError("unsupported_mount_path");
+  const identity = { stamp: original.identity, digest: scope.binding.digest, instance: scope.instanceName };
+  const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  return ["rmd-private-registry-v1", original.canonicalPath, scope.binding.digest,
+    digest({ ...identity, path: original.canonicalPath }), digest(identity), Buffer.from(original.text).toString("base64")].join("\n");
+}
 
 export function runtimeInstanceRegistryText(): string | undefined {
   const scope = selectedRuntime();
