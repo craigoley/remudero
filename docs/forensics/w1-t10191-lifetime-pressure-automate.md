@@ -4,6 +4,11 @@ Required phrases for the acceptance greps: `W1-T10191` (the task) and `blocked_i
 
 The reported `blocked_inflight` verdict is a benign scheduling deferral, not evidence that W1-T10191 failed to build. W1-T10191's lifetime-pressure `automate` verdict therefore needs nothing further before ordinary dispatch.
 
+Observed state versus scheduling meaning: the judge saw one attributable dispatch whose last
+terminal verdict was `blocked_inflight`. That verdict records a deferred dispatch (another
+worker held the live claim), so W1-T10191 has no build-failure record; the dispatch queue
+simply retries it once the claim releases.
+
 ## Judge evidence
 
 The 2026-10-25 proposal, preserved in
@@ -28,7 +33,8 @@ evidence; its attributable terminal-verdict history is explicitly `none`.
 ## Current task fields
 
 Read from [W1-T10191's shard](../../plan/tasks.d/W1-T10191-ci-friction-remedy-f9833e0a349fb48b.yaml)
-in this checkout and independently confirmed against GitHub `main` on 2026-10-25:
+in this checkout on 2026-10-25 (re-read by the round-1 fix worker; no separate GitHub `main`
+comparison is claimed):
 
 | Field | Value |
 | --- | --- |
