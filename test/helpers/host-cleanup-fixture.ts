@@ -45,22 +45,29 @@ export interface Fixture {
  * The janitor's whole-pass lock is util-linux `flock -n -E 73 9`, and macOS ships no flock, so on a
  * Mac every case reached "REFUSE: cannot acquire janitor lock" and exited 2 before judging anything.
  * Where no flock is on PATH the fixture lends this port instead: the same flock(2) exclusive lock
- * (perl's flock), in the two forms the suites use, the inherited-descriptor form the script runs and
- * the file-and-command form a case uses to hold the lock. A host with the real flock keeps using it.
+ * (perl's flock, with -n, -w <seconds> and -E), in the two forms the suites use: the
+ * inherited-descriptor form the script runs and the file-and-command form a case uses to hold the
+ * lock. A host with the real flock keeps using it.
  */
 const FLOCK_PORT = `#!/usr/bin/env perl
 use strict; use warnings; use Fcntl qw(:flock);
-my ($nb, $conflict) = (0, 1);
+my ($nb, $conflict, $wait) = (0, 1, undef);
 while (@ARGV && $ARGV[0] =~ /^-/) {
   my $o = shift @ARGV;
-  if ($o eq "-n") { $nb = 1 } elsif ($o eq "-E") { $conflict = shift @ARGV } else { exit 64 }
+  if ($o eq "-n") { $nb = 1 } elsif ($o eq "-E") { $conflict = shift @ARGV }
+  elsif ($o eq "-w") { $wait = shift @ARGV } else { exit 64 }
 }
 my $target = shift @ARGV;
 defined $target or exit 64;
 my $fh;
 if (!@ARGV && $target =~ /^[0-9]+$/) { open($fh, "<&=", $target) or exit 66 }
 else { open($fh, "<", $target) or open($fh, ">>", $target) or exit 66 }
-flock($fh, LOCK_EX | ($nb ? LOCK_NB : 0)) or exit $conflict;
+if (defined $wait) {
+  my $deadline = time + $wait;
+  until (flock($fh, LOCK_EX | LOCK_NB)) { exit $conflict if time >= $deadline; select(undef, undef, undef, 0.1) }
+} else {
+  flock($fh, LOCK_EX | ($nb ? LOCK_NB : 0)) or exit $conflict;
+}
 exit 0 unless @ARGV;
 my $rc = system @ARGV;
 exit($rc == -1 ? 127 : $rc >> 8);

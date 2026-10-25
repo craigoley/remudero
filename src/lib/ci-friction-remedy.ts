@@ -333,6 +333,11 @@ export function ownerSearchTerms(key: string, details: readonly string[]): strin
   return [...new Set(terms)];
 }
 
+/** A bare required review verdict locates a producer, not the mechanism a repair must change. */
+export function reviewStatusWithoutMechanism(key: string, details: readonly string[]): boolean {
+  return key === "check:ci-log:remudero-review" && ownerSearchTerms(key, details).length === 1;
+}
+
 /**
  * The code that owns a cause. A refusal is owned by whatever raises its reason; a CI check by the
  * scripts and source that name it; a main-merge cause by the file it conflicts on. `undefined` when
@@ -371,6 +376,7 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
       failingTest: testPath,
     };
   }
+  if (reviewStatusWithoutMechanism(key, details)) return undefined;
   const generic = (term: string) => /^(ci|test|tests|coverage|build|check|checks)$/i.test(term.replace(/\s*\(\d+\/\d+\)\s*$/, "").trim());
   const signatures = distinctive.filter(term => !generic(term)).map(term => ({ term, files: search.filesContaining(term) })).filter(m => m.files.length > 0);
   const workflow = signatures.length === 0 && family ? search.workflowOwner?.(family) : undefined;

@@ -8271,6 +8271,17 @@ components:
         rows the slow lane's analytics refresh commits per instance, so it answers from them after a
         restart. One `analytics:<instance>` source per instance: unavailable before its first refresh,
         stale with phase `failed` when its last refresh failed (the kept snapshot is still merged).
+        The independent gardener source is named `gardener-spend:<instance>` with kind `analytics`.
+        It records the separately committed gardener capture for `instances[].gardenerSpend`.
+        Its own persisted asOf qualifies gardenerSpend without promoting historical Analytics or benchmark completeness.
+        The independent source is unavailable before its first successful capture and is stale with
+        phase `failed` or `behind` when its evidence cannot qualify a current reading. Historical
+        source clocks, historical coverage, benchmark incompleteness and envelope staleness remain independent.
+        Before any independent row exists, legacy embedded spend retains its historical source clock.
+        Once an independent row exists even a failed first capture old embedded success cannot substitute for it.
+        A later failed capture retains the last committed gardener evidence with an explicitly failed
+        source; it does not certify current success. Unknown prices remain unknown. The existing
+        64-KiB fleet budget reserves monetary data before optional worker-call coverage.
       required: [view, version, generatedAt, asOf, stale, sources, data]
       properties:
         view:

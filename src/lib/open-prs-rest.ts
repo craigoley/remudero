@@ -858,7 +858,7 @@ export function hydrateMergeStates(
 
 /** W1-T3980 — REST-only scanner-blocker read for an armed, green, `blocked` PR; its safety case is documented on
  *  `repairableCodeqlBlocker` (sweep.ts). Every failed or truncated read is a named `unreadable`, never absence. */
-export const SCANNER_BLOCKER_HYDRATION_CAP = 3; // BACKSTOP: above the one-at-a-time population (#1579, #7495); 3 REST reads each
+export const SCANNER_BLOCKER_HYDRATION_CAP = 3; // BACKSTOP: above the one-at-a-time population (#1579, #7495); up to 4 REST reads each
 export const SCANNER_DIAGNOSTIC_MAX_CHARS = 400; // PRIMARY CONTROL: sizes the untrusted scanner text a repair prompt carries
 const SCANNER_PAGE_SIZE = 100; // one full REST page; a response this long may be truncated, so reads as unreadable
 const CODE_SCANNING_BOT_LOGIN = "github-advanced-security[bot]"; // the author of every code-scanning review thread
@@ -893,8 +893,17 @@ export interface ScannerAlertIdentity {
 
 export type ScannerBlockerAmbiguity = "unreadable" | "stale" | "multiple" | "non-codeql" | "human-thread" | "unthreaded";
 
+/** One human reviewer whose latest decisive review on this PR is CHANGES_REQUESTED. */
+export interface ChangesRequestedHold {
+  login: string;
+  reviewId: number;
+  commitId: string; // the head the hold was placed on; it can predate the current head
+  submittedAt: string;
+}
+
 export type ScannerBlockerObservation =
   | { kind: "codeql-singleton"; headSha: string; mergeCommitSha: string; alert: ScannerAlertIdentity }
+  | { kind: "changes-requested"; headSha: string; holds: ChangesRequestedHold[] }
   | { kind: "ambiguous"; cause: ScannerBlockerAmbiguity; detail: string }
   | { kind: "base-behind"; behindBy: number }
   | { kind: "no-scanner-alert" };
@@ -905,6 +914,52 @@ export function scannerAlertsRestArgs(owner: string, repo: string, prNumber: num
 
 export function reviewCommentsRestArgs(owner: string, repo: string, prNumber: number): string[] {
   return ["api", `repos/${owner}/${repo}/pulls/${prNumber}/comments?per_page=${SCANNER_PAGE_SIZE}`];
+}
+
+export function pullReviewsRestArgs(owner: string, repo: string, prNumber: number): string[] {
+  return ["api", `repos/${owner}/${repo}/pulls/${prNumber}/reviews?per_page=${SCANNER_PAGE_SIZE}`];
+}
+
+interface RestPullReview {
+  id?: unknown;
+  state?: unknown;
+  commit_id?: unknown;
+  submitted_at?: unknown;
+  user?: { login?: unknown; type?: unknown } | null;
+}
+
+/** States that set a reviewer's standing verdict; a COMMENTED review leaves the previous one in force. */
+const DECISIVE_REVIEW_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
+
+/**
+ * The human CHANGES_REQUESTED holds standing on a PR, by each reviewer's latest decisive review (the
+ * order GitHub lists them in). `undefined` when no hold stands; a listing that is not a complete page
+ * is `unreadable`, never "no hold".
+ */
+export function classifyChangesRequested(
+  candidate: Pick<ScannerBlockerCandidate, "headSha">,
+  reviews: unknown,
+): ScannerBlockerObservation | undefined {
+  if (!Array.isArray(reviews) || reviews.length >= SCANNER_PAGE_SIZE) {
+    return ambiguousScanner("unreadable", "pull request review listing was not a complete page");
+  }
+  const latest = new Map<string, RestPullReview>();
+  for (const review of reviews as RestPullReview[]) {
+    const login = review.user ? review.user.login : undefined;
+    if (typeof login !== "string" || (review.user ? review.user.type : undefined) === "Bot") continue;
+    if (typeof review.state === "string" && DECISIVE_REVIEW_STATES.has(review.state)) latest.set(login, review);
+  }
+  const holds: ChangesRequestedHold[] = [];
+  for (const [login, review] of latest) {
+    if (review.state !== "CHANGES_REQUESTED") continue;
+    holds.push({
+      login,
+      reviewId: typeof review.id === "number" ? review.id : 0,
+      commitId: typeof review.commit_id === "string" ? review.commit_id : "",
+      submittedAt: typeof review.submitted_at === "string" ? review.submitted_at : "",
+    });
+  }
+  return holds.length === 0 ? undefined : { kind: "changes-requested", headSha: candidate.headSha, holds };
 }
 
 export interface ScannerBlockerCandidate {
@@ -1033,6 +1088,17 @@ function* observeScannerBlockerSteps(
   candidate: ScannerBlockerCandidate,
   fetch: GhApiFetcher,
 ): GhReadSteps<ScannerBlockerObservation> {
+  // A human hold blocks the merge whatever main, the scanner or a branch refresh does, so it is read
+  // first: neither a refresh nor a scanner repair can clear it.
+  let reviews: unknown;
+  try {
+    reviews = yield* ghRead(fetch, pullReviewsRestArgs(owner, repo, candidate.number));
+  } catch {
+    const reason = "the pull request review read failed";
+    return ambiguousScanner("unreadable", reason);
+  }
+  const hold = classifyChangesRequested(candidate, reviews);
+  if (hold !== undefined) return hold;
   let behindBy: unknown;
   try {
     const compare = (yield* ghRead(fetch, ["api", `repos/${owner}/${repo}/compare/${candidate.headSha}...main`])) as { ahead_by?: unknown } | null;

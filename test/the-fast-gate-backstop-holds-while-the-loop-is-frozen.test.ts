@@ -315,6 +315,43 @@ test("W1-T9556: signalGroup rethrows an error that is not an empty group", async
   assert.throws(() => signalGroup(process.pid, "SIGNOTASIGNAL" as NodeJS.Signals), { code: "ERR_UNKNOWN_SIGNAL" });
 });
 
+/** Resume this fixture's runner even if observing the frozen interval throws. */
+async function whileRunnerStopped<T>(child: ReturnType<typeof spawn>, observe: () => Promise<T>): Promise<T> {
+  assert.equal(child.kill("SIGSTOP"), true, "the owned runner is present for the freeze");
+  try {
+    return await observe();
+  } finally { child.kill("SIGCONT"); }
+}
+
+test("a failed frozen-clock observation resumes its owned runner before cleanup", async () => {
+  const dir = scratch("observation-error");
+  const marker = join(dir, "runner.ready");
+  const child = spawn(process.execPath, ["-e", `process.on("SIGTERM", () => process.exit(0));
+    require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ready"); setInterval(() => {}, 1000);`], { stdio: "ignore" });
+  const closed = new Promise<void>((resolve, reject) => { child.once("close", () => resolve()); child.once("error", reject); });
+  let rescued = false;
+  const rescue = setTimeout(() => {
+    rescued = true;
+    child.kill("SIGCONT");
+    child.kill("SIGKILL");
+  }, 6_000);
+  try {
+    await waitForStartupMarker(marker, child, Date.now() + DEADLINE_MS);
+    await assert.rejects(whileRunnerStopped(child, async () => {
+      await sleep(50);
+      readFileSync(join(dir, "missing.alive"), "utf8");
+    }), /ENOENT/);
+    child.kill("SIGTERM");
+    await closed;
+    assert.equal(rescued, false, "a thrown observation must not leave the runner stopped until rescue");
+  } finally {
+    clearTimeout(rescue);
+    child.kill("SIGCONT");
+    child.kill("SIGKILL");
+    await closed;
+  }
+});
+
 const timeoutBin = gateTimeoutBin();
 test("W1-T9556: coreutils timeout ends the gate group at the deadline even while the runner itself is frozen", { skip: timeoutBin ? false : "no coreutils timeout on PATH" }, async () => {
   const dir = scratch("kernel");
@@ -327,11 +364,10 @@ test("W1-T9556: coreutils timeout ends the gate group at the deadline even while
   const closed = new Promise<number | null>((resolve) => child.on("close", resolve));
   await waitForStartupMarker(join(dir, "stub.alive"), child, startedAt + DEADLINE_MS);
   // Stop the runner outright: its own deadline timer cannot run, so only `timeout` can end the group.
-  child.kill("SIGSTOP");
-  await sleep(FREEZE_MS);
-  const stubLast = lastAlive(dir, "stub.alive");
-  const gcLast = lastAlive(dir, "gc.alive");
-  child.kill("SIGCONT");
+  const { stubLast, gcLast } = await whileRunnerStopped(child, async () => {
+    await sleep(FREEZE_MS);
+    return { stubLast: lastAlive(dir, "stub.alive"), gcLast: lastAlive(dir, "gc.alive") };
+  });
   assert.equal(await closed, GATE_DEADLINE_EXIT_CODE, stderr);
   assert.ok(stubLast - startedAt < DEADLINE_MS + SLACK_MS, `the stub beat ${stubLast - startedAt} ms after start`);
   assert.ok(gcLast - startedAt < DEADLINE_MS + SLACK_MS, `the grandchild beat ${gcLast - startedAt} ms after start`);
