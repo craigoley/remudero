@@ -51,3 +51,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The filing labels the cause flaky, but its supplied failure excerpt reports a missing function; no evidence shown establishes intermittent behavior or its root cause.; on the change's description/files alone, no diff was read — The proposed remedy permits preventing fix-round dispatch or self-healing through src/lib/sweep.ts, without specifying how the underlying failure is corrected. The supplied evidence cannot verify that this prevents the defect rather than suppressing its repair.; on the change's description/files alone, no diff was read — The historical references include changes to sweep.ts and estimated repair costs, but do not establish a causal remedy for this named test failure."
+    judged_at: "2026-10-25T20:51:48.536Z"
+    pin: "20a828a62f63e25be9e431e0b6806a0accaa82863c1250ffe0f2ef09e46c7cc0"
