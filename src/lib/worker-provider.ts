@@ -2711,7 +2711,12 @@ export function codexTestSlotArgs(env: NodeJS.ProcessEnv = process.env): string[
   return args;
 }
 
-function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">, privateProfile?: string): string[] {
+interface PrivateRegistryCodexProfile {
+  name: string;
+  overrides: readonly string[];
+}
+
+function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">, privateProfile?: PrivateRegistryCodexProfile): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
   if (!model) throw new Error("refusing a Codex spawn with no model: the account default would run unreviewed");
@@ -2742,7 +2747,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     "--ignore-user-config",
     ...codexPreToolUseProfile(args.settingsFile),
     ...disposableReviewProfile,
-    ...(privateProfile === undefined ? [] : ["--profile", privateProfile, "--strict-config",
+    ...(privateProfile === undefined ? [] : ["--profile", privateProfile.name, "--strict-config", ...privateProfile.overrides,
       ...(disposableReview ? ["--enable", "network_proxy"] : [])]),
     // W1-T2754: Codex refuses to start when its `-C` cwd is neither a git repository nor a
     // configured trusted directory — "Not inside a trusted directory and --skip-git-repo-check
@@ -2796,32 +2801,64 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
 }
 
 async function withPrivateRegistryCodexProfile<T>(
-  args: CodexSpawnArgs, config: Config, selected: string, operation: (profile: string) => Promise<T>,
+  args: CodexSpawnArgs, config: Config, selected: string, operation: (profile: PrivateRegistryCodexProfile) => Promise<T>,
 ): Promise<T> {
   await assertInstanceRegistryRuntimeCurrent();
   // A saved session may carry older permissions. Never silently resume it with unqualified private access.
   if (args.resumeSessionId) throw new InstanceRegistryRuntimeError("worker_resume_not_qualified");
   const name = `rmd_registry_${randomUUID().replaceAll("-", "")}`;
-  let path: string, text: string, identity: { dev: number; ino: number };
+  let path: string, text: string, identity: { dev: number; ino: number }, profile: PrivateRegistryCodexProfile;
   try {
     // An exclusive invocation file only: do not create a home, copy credentials or edit base configuration.
     path = join(realpathSync(codexHome(config)), `${name}.config.toml`);
     const review = args.sandboxIntent === "disposable-review", readOnly = codexReadOnly(args);
-    const filesystem = new Map<string, string>(review ? [[":slash_tmp", "deny"], [":tmpdir", "write"],
-      ...[...new Set((args.sandboxReadRoots ?? []).filter(isAbsolute).map(physicalPath))].map(root => [root, "read"] as [string, string])] : []);
-    // Set denies last, so an overlapping reviewer read grant cannot replace either narrow denial.
-    filesystem.set(selected, "deny"); filesystem.set(path, "deny");
-    text = `default_permissions="rmd_registry"\n[permissions.rmd_registry]\nextends="${readOnly ? ":read-only" : ":workspace"}"\n`
-      + `[permissions.rmd_registry.network]\nenabled=${review || !readOnly}\n[permissions.rmd_registry.filesystem]\n`
+    const directory = (target: string): string => {
+      if (!isAbsolute(target)) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+      const canonical = realpathSync(target);
+      if (!lstatSync(canonical).isDirectory()) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+      return canonical;
+    };
+    const cwd = directory(args.cwd), roots = new Set<string>([cwd]);
+    if (review) for (const root of args.sandboxReadRoots ?? []) roots.add(directory(root));
+    if (existsSync(join(cwd, "node_modules"))) roots.add(directory(join(cwd, "node_modules")));
+    const recordedGit = recordedWorktreeGitDir(cwd);
+    if (recordedGit !== null) {
+      const gitDir = directory(recordedGit); roots.add(gitDir);
+      const common = join(gitDir, "commondir");
+      if (existsSync(common)) {
+        const relativeCommon = readFileSync(common, "utf8").trim();
+        if (relativeCommon.length === 0 || relativeCommon.length > 4096 || relativeCommon.includes("\0")) {
+          throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+        }
+        roots.add(directory(resolve(gitDir, relativeCommon)));
+      }
+    }
+    // A positive public read scope must never include the selected source or its invocation artifact.
+    // The file-backed profile alone was insufficient in a real exec tool call; the same public-only
+    // policy is therefore also supplied through supported CLI overrides. Neither surface names private paths.
+    if ([...roots].some(root => isWithin(root, selected) || isWithin(root, path))) {
+      throw new InstanceRegistryRuntimeError("worker_scope_contains_private_file");
+    }
+    const filesystem = new Map<string, string>([[":root", "deny"], [":minimal", "read"],
+      ...(process.platform === "darwin" ? [["/System/Library", "read"] as [string, string]] : []),
+      [":workspace_roots", readOnly ? "read" : "write"], [":slash_tmp", "deny"], [":tmpdir", readOnly ? "read" : "write"],
+      ...[...roots].filter(root => root !== cwd).map(root => [root, "read"] as [string, string])]);
+    text = `default_permissions=${JSON.stringify(name)}\n[permissions.${name}]\nextends="${readOnly ? ":read-only" : ":workspace"}"\n`
+      + `[permissions.${name}.network]\nenabled=${review || !readOnly}\n[permissions.${name}.filesystem]\n`
       + [...filesystem].map(([target, access]) => `${JSON.stringify(target)}=${JSON.stringify(access)}`).join("\n") + "\n";
+    const inline = [...filesystem].map(([target, access]) => `${JSON.stringify(target)}=${JSON.stringify(access)}`).join(",");
+    profile = { name, overrides: ["-c", `default_permissions=${JSON.stringify(name)}`,
+      "-c", `permissions.${name}.extends=${JSON.stringify(readOnly ? ":read-only" : ":workspace")}`,
+      "-c", `permissions.${name}.filesystem={${inline}}`, "-c", `permissions.${name}.network.enabled=${review || !readOnly}`] };
     writeFileSync(path, text, { flag: "wx", mode: 0o600 });
     identity = lstatSync(path);
-  } catch {
+  } catch (error) {
     // Unavailable private profile is unknown containment, never a fallback to broad workspace reads.
+    if (error instanceof InstanceRegistryRuntimeError) throw error;
     throw new InstanceRegistryRuntimeError("worker_profile_unavailable");
   }
   let operationFailed = false, originalError: unknown;
-  try { return await operation(name); }
+  try { await assertInstanceRegistryRuntimeCurrent(); return await operation(profile); }
   catch (error) { operationFailed = true; originalError = error; throw error; }
   finally {
     try {
@@ -5418,7 +5455,7 @@ async function spawnCodexWorkerInPrivateTemp(
   config: Config,
   privateTmpDir: string,
   selection?: Pick<ProviderCapacity, "model" | "effort">,
-  privateProfile?: string,
+  privateProfile?: PrivateRegistryCodexProfile,
 ): Promise<CodexWorkerResult> {
   const bin = resolveCodexBin(config);
   const startedAt = Date.now();

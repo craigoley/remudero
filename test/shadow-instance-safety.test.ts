@@ -277,7 +277,8 @@ test("selected trusted launcher target cannot contradict its original invocation
 
 test("selected runtime Codex spawn denies private bytes without adding them to child arguments", async () => {
   const fixture = runtimeRegistryFixture(), codexHome = join(fixture.root, "codex-home");
-  mkdirSync(codexHome);
+  const cwd = join(fixture.root, "checkout"), publicSource = join(fixture.root, "public-source");
+  mkdirSync(codexHome); mkdirSync(cwd); mkdirSync(publicSource);
   let profileFile = "", spawns = 0;
   try {
     for (const intent of ["reader", "writer", "review"] as const) {
@@ -290,21 +291,25 @@ test("selected runtime Codex spawn denies private bytes without adding them to c
         queueMicrotask(() => child.emit("exit", 0));
       });
       await runtimeRegistryRunner()(() => spawnCodexWorker({
-        cwd: fixture.root, workerHome: fixture.root, prompt: "contained boundary probe",
+        cwd, workerHome: fixture.root, prompt: "contained boundary probe",
         settingsFile: join(REPO_ROOT, "settings", "worker.json"),
         tools: intent === "writer" ? ["Read", "Edit", "Bash"] : ["Read", "Bash"],
-        ...(intent === "review" ? { sandboxIntent: "disposable-review" as const, sandboxReadRoots: [fixture.root] } : {}),
+        ...(intent === "review" ? { sandboxIntent: "disposable-review" as const, sandboxReadRoots: [publicSource] } : {}),
         containment: { spawn: options => {
           spawns++;
           const index = options.args.indexOf("--profile");
           assert.ok(index >= 0, "actual worker spawn must use the protected per-invocation profile");
           profileFile = join(codexHome, options.args[index + 1]! + ".config.toml");
           const text = readFileSync(profileFile, "utf8");
-          assert.ok(text.includes(`${JSON.stringify(fixture.selected)}="deny"`));
-          assert.ok(text.includes(`${JSON.stringify(profileFile)}="deny"`), "the profile must not launder its private target");
+          assert.equal(text.includes(fixture.selected), false, "permissions must not disclose the private source");
+          assert.equal(text.includes(profileFile), false, "permissions must not disclose their own artifact");
+          assert.ok(text.includes('\":root\"="deny"'));
+          const inline = options.args.filter((_, i) => options.args[i - 1] === "-c").join("\n");
+          assert.ok(inline.includes('filesystem={\":root\"="deny"'), "real exec must receive the enforceable inline policy too");
+          assert.ok(inline.includes(`default_permissions=${JSON.stringify(options.args[index + 1])}`));
           assert.ok(text.includes(`extends="${intent === "reader" ? ":read-only" : ":workspace"}"`));
           if (intent === "review") {
-            assert.ok(text.includes(`${JSON.stringify(fixture.root)}="read"`), "existing reviewer read roots compose with the narrower denial");
+            assert.ok(text.includes(`${JSON.stringify(publicSource)}="read"`), "existing public reviewer read roots stay available");
             assert.ok(text.includes('\":slash_tmp\"="deny"'));
             assert.ok(options.args.includes("network_proxy"));
           }
@@ -327,7 +332,7 @@ test("selected runtime Codex spawn denies private bytes without adding them to c
 
 test("selected Codex dispatch snapshots caller-owned arguments before its first asynchronous boundary", async () => {
   const fixture = runtimeRegistryFixture(), codexHome = join(fixture.root, "codex-home");
-  mkdirSync(codexHome);
+  const cwd = join(fixture.root, "checkout"); mkdirSync(codexHome); mkdirSync(cwd);
   const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough();
   const child = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
   let prompt = "", spawns = 0;
@@ -337,18 +342,18 @@ test("selected Codex dispatch snapshots caller-owned arguments before its first 
     queueMicrotask(() => child.emit("exit", 0));
   });
   const args: Parameters<typeof spawnCodexWorker>[0] = {
-    cwd: fixture.root, workerHome: fixture.root, prompt: "original public prompt",
+    cwd, workerHome: fixture.root, prompt: "original public prompt",
     settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: ["Read", "Bash"],
-    sandboxIntent: "disposable-review", sandboxReadRoots: [fixture.root], env: { PUBLIC_CANARY: "original" },
+    sandboxIntent: "disposable-review", sandboxReadRoots: [cwd], env: { PUBLIC_CANARY: "original" },
     containment: { spawn: options => {
       spawns++;
-      assert.equal(options.cwd, fixture.root, "queued mutation cannot move the contained worker");
+      assert.equal(options.cwd, cwd, "queued mutation cannot move the contained worker");
       assert.equal(options.env.HOME, fixture.root);
       assert.equal(options.env.PUBLIC_CANARY, "original");
       assert.equal(options.command, "/bin/sh", "provider binary/config are part of the invocation snapshot");
       const i = options.args.indexOf("--profile"); assert.ok(i >= 0);
       const profile = readFileSync(join(codexHome, options.args[i + 1]! + ".config.toml"), "utf8");
-      assert.ok(profile.includes(`${JSON.stringify(fixture.root)}="read"`));
+      assert.ok(profile.includes('\":workspace_roots\"="write"'));
       assert.equal(profile.includes("queued-mutant"), false);
       assert.equal(options.args[options.args.indexOf("--model") + 1], "gpt-6-luna");
       return { process: child as never, pid: 9876 };
@@ -377,8 +382,9 @@ test("selected Codex dispatch snapshots caller-owned arguments before its first 
 });
 
 test("selected runtime worker unknown and cleanup outcomes stay explicit", async () => {
-  for (const mode of ["resume", "home-missing", "config-uncopyable", "spawn-error", "profile-replaced", "profile-unlinked"] as const) {
+  for (const mode of ["resume", "home-missing", "scope-overlap", "scope-relative", "config-uncopyable", "spawn-error", "profile-replaced", "profile-unlinked"] as const) {
     const fixture = runtimeRegistryFixture(), codexHome = join(fixture.root, "codex-home");
+    const cwd = join(fixture.root, "checkout"); mkdirSync(cwd);
     const original = new Error("contained spawn failure");
     let spawns = 0, profileFile = "";
     if (mode !== "home-missing") mkdirSync(codexHome);
@@ -387,9 +393,11 @@ test("selected runtime worker unknown and cleanup outcomes stay explicit", async
         enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome,
       } };
       const result = runtimeRegistryRunner()(() => spawnCodexWorker({
-        cwd: fixture.root, workerHome: fixture.root, prompt: "no model call",
+        cwd, workerHome: fixture.root, prompt: "no model call",
         settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: ["Read", "Bash"],
         ...(mode === "resume" ? { resumeSessionId: "old-permissions" } : {}),
+        ...(mode === "scope-overlap" || mode === "scope-relative" ? { sandboxIntent: "disposable-review" as const,
+          sandboxReadRoots: [mode === "scope-overlap" ? fixture.root : "relative"] } : {}),
         containment: { spawn: options => {
           spawns++;
           const index = options.args.indexOf("--profile"); assert.ok(index >= 0);
@@ -407,10 +415,12 @@ test("selected runtime worker unknown and cleanup outcomes stay explicit", async
           assert.match(error.message, /worker_profile_cleanup_unknown/);
           assert.equal(error.cause, original, "cleanup uncertainty preserves the actual original failure");
         } else assert.match(error.message, mode === "resume" ? /worker_resume_not_qualified/
-          : mode === "config-uncopyable" ? /worker_arguments_unqualified/ : /worker_profile_unavailable/);
+          : mode === "config-uncopyable" ? /worker_arguments_unqualified/
+          : mode === "scope-overlap" ? /worker_scope_contains_private_file/
+          : mode === "scope-relative" ? /worker_scope_unqualified/ : /worker_profile_unavailable/);
         return true;
       });
-      if (mode === "resume" || mode === "home-missing" || mode === "config-uncopyable") assert.equal(spawns, 0);
+      if (["resume", "home-missing", "config-uncopyable", "scope-overlap", "scope-relative"].includes(mode)) assert.equal(spawns, 0);
       if (mode === "spawn-error") assert.equal(existsSync(profileFile), false);
       if (mode === "profile-replaced") assert.equal(readFileSync(profileFile, "utf8"), "replacement", "never delete a replacement as if it were our artifact");
       if (mode === "profile-unlinked") assert.equal(existsSync(profileFile), false, "absence is not falsely certified retained evidence");
