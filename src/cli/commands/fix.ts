@@ -2676,6 +2676,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
             isHarnessPath: isCiHarnessPath, matchedPaths: decision.matchingBaseFiles }),
           priorRefresh: refreshedOnSameRed(refreshRecordsFromLedger((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))()),
             prNumber, refreshChecks, refreshTestFiles),
+          // The same reach rule over the PR's own diff: a path it changes that reaches the red needs a clear trial merge.
+          ...(facts.prAddedLines === undefined ? {} : { ownReach: mainPathsReachingRed({ failingTestFiles: refreshTestFiles,
+            mainChangedFiles: Object.keys(facts.prAddedLines), closure: undefined, isHarnessPath: isCiHarnessPath })!.counted }),
         }, probeMerge && refreshMainSha !== undefined
           ? () => probeMerge({ prNumber, headSha: review.headSha } as OpenPrView, refreshTestFiles, refreshMainSha!) : undefined)
           : undefined;
