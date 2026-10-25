@@ -1,6 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
+import { parse as parseYaml } from "yaml";
+import { buildEvidenceRevision, measuredLine, validateEvidenceRevision, type EvidenceMeasurement } from "./feedback-evidence-revision.js";
+import { prepareEvidenceRecordContext, type EvidenceContextPorts, type EvidenceRecordContext } from "./evidence-coverage-record-context.js";
 
 import {
   BENCHMARK_QUALITY_VERSION,
@@ -341,10 +344,12 @@ export interface EvidenceCoverageFollowup {
   lane: string;
   field: EvidenceCoverageField | "source";
   raw: string;
+  measurement?: EvidenceMeasurement;
 }
 
 export type EvidenceCoverageFiler = ((followup: EvidenceCoverageFollowup) => void) & {
   needsUpdate?: (followup: Omit<EvidenceCoverageFollowup, "action">) => boolean;
+  beginPass?: () => void;
 };
 
 export type EvidenceRowsRead = { ok: true; rows: readonly Row[] } | { ok: false; reason: string };
@@ -451,13 +456,14 @@ export function runEvidenceCoverageGardener(deps: EvidenceCoverageInput): Eviden
     return { ...result, ran: false, skipped: "not-due" };
   }
   const discarded = discardSubFloorBaselines(state);
+  deps.file.beginPass?.();
   if (discarded.length > 0) deps.log("evidence_coverage.baseline_discarded", { cells: discarded, reason: "a baseline under its field's floor is a chronic gap, not a healthy reading" });
 
   let budget = EVIDENCE_COVERAGE_MAX_FILINGS_PER_PASS;
   const fileOnce = (open: OpenGap, digest: string, followup: Omit<EvidenceCoverageFollowup, "action">): void => {
     const action = open.filedDigest === undefined ? "file" : "update";
     try {
-      if (open.filedDigest !== undefined && (deps.file.needsUpdate ? !deps.file.needsUpdate(followup) : open.filedDigest === digest)) return;
+      if (deps.file.needsUpdate ? !deps.file.needsUpdate(followup) : open.filedDigest !== undefined && open.filedDigest === digest) return;
       if (budget <= 0) {
         result.deferred += 1;
         return;
@@ -516,7 +522,11 @@ export function runEvidenceCoverageGardener(deps: EvidenceCoverageInput): Eviden
         // Filers without a record reader retain whole-percent dedup; the production filer checks
         // the record's measured coverage even when this digest has not moved.
         const digest = `${open.kind}|${open.firstSeenAt}|${Math.round((count.observed / count.denominator) * 100)}`;
-        fileOnce(open, digest, { id: evidenceCoverageFollowupId(lane, field), lane, field, raw: gapFollowupRaw(gap) });
+        const raw = gapFollowupRaw(gap);
+        fileOnce(open, digest, { id: evidenceCoverageFollowupId(lane, field), lane, field, raw,
+          measurement: { lane, field, observed: count.observed, denominator: count.denominator, floor,
+            ...(cell.baseline !== undefined ? { baseline: cell.baseline } : {}), at: nowIso,
+            since: fixedClock(now - EVIDENCE_COVERAGE_WINDOW_MS).iso(), line: measuredLine(raw)! } });
       }
     }
   }
@@ -537,16 +547,35 @@ export function runEvidenceCoverageGardener(deps: EvidenceCoverageInput): Eviden
 
 /** Compare against the checkout or pending record, so lost landings can be retried without rewriting
  *  tracked entries. Landing failures must reach the pass's retry path. */
-export function feedbackEvidenceCoverageFiler(root: string, land: LandFeedbackOpts = {}): EvidenceCoverageFiler {
+export function feedbackEvidenceCoverageFiler(root: string, land: LandFeedbackOpts = {}, ports: EvidenceContextPorts = {}): EvidenceCoverageFiler {
+  let context: EvidenceRecordContext | undefined;
+  const source = () => context ??= prepareEvidenceRecordContext(root, ports);
   const current = (id: string): FeedbackEntry | undefined => {
     const queued = land.stateRoot === undefined ? undefined : readQueuedFeedbackRecords(land.stateRoot).get(feedbackEntryRepoPath(id));
     return (queued as unknown as FeedbackEntry | undefined) ?? (existsSync(feedbackEntryPath(root, id)) ? readFeedbackEntry(root, id) : undefined);
   };
   const coverageLine = (raw: string): string => raw.split("\n").find((line) => line.startsWith("Coverage:")) ?? raw;
+  const revisionFor = (followup: Omit<EvidenceCoverageFollowup, "action">): string | undefined => {
+    if (!followup.measurement) return undefined;
+    const ctx = source();
+    const expectedRecord = ctx.records.get(feedbackEntryRepoPath(followup.id));
+    if (expectedRecord === undefined) {
+      if (ctx.wasDeleted(feedbackEntryRepoPath(followup.id))) throw new Error(`evidence revision refuses deleted record ${followup.id}`);
+      return undefined;
+    }
+    const entry = parseYaml(expectedRecord);
+    return buildEvidenceRevision({ version: 1, mainSha: ctx.mainSha, expectedRecord, expectedPlan: ctx.expectedPlan,
+      measurement: followup.measurement, closure: ctx.closure(followup.id, entry.status, entry.proposal_pr ?? undefined) });
+  };
   const file: EvidenceCoverageFiler = (followup) => {
-    const entry = current(followup.id);
+    const revision = revisionFor(followup);
+    const entry = followup.measurement ? (source().records.has(feedbackEntryRepoPath(followup.id))
+      ? parseYaml(source().records.get(feedbackEntryRepoPath(followup.id))!) as FeedbackEntry : current(followup.id)) : current(followup.id);
+    if (followup.measurement && revision === undefined && entry && (entry.status !== "new" || "evidence_coverage_revision" in entry)) {
+      throw new Error(`evidence revision refuses deleted record ${followup.id}`);
+    }
     if (entry) {
-      const result = landFeedbackStatusContent(root, feedbackEntryRepoPath(followup.id), stringifyYaml({ ...entry, raw: followup.raw }), land);
+      const result = landFeedbackStatusContent(root, feedbackEntryRepoPath(followup.id), revision ?? stringifyYaml({ ...entry, raw: followup.raw }), land);
       const queued = result.queued !== undefined && result.queued.includes(feedbackEntryRepoPath(followup.id));
       if (!result.landed && !queued) {
         throw new Error(result.error ?? `feedback landing did not land or queue ${followup.id}`);
@@ -556,7 +585,25 @@ export function feedbackEvidenceCoverageFiler(root: string, land: LandFeedbackOp
     const captured = stageFeedbackCapture(root, land.stateRoot, { raw: followup.raw, origin: "cli", id: followup.id });
     if (captured.error) throw new Error(captured.error);
   };
+  file.beginPass = () => { context = undefined; };
   file.needsUpdate = (followup) => {
+    if (followup.measurement) {
+      const proposed = revisionFor(followup);
+      const onMain = source().records.get(feedbackEntryRepoPath(followup.id));
+      const queued = land.stateRoot === undefined ? undefined : readQueuedFeedbackRecords(land.stateRoot).get(feedbackEntryRepoPath(followup.id));
+      if (proposed === undefined || onMain === undefined) return queued === undefined
+        || measuredLine(String(queued.raw)) !== measuredLine(followup.raw);
+      const desired = parseYaml(proposed);
+      const main = parseYaml(onMain);
+      if (main.raw === desired.raw && main.status === desired.status) return false;
+      const queuedRevision = queued?.evidence_coverage_revision as { expectedRecord?: string; expectedPlan?: Record<string, string> } | undefined;
+      if (queued && queuedRevision?.expectedRecord === onMain && validateEvidenceRevision(onMain, stringifyYaml(queued)) !== undefined) {
+        throw new Error(`evidence revision refuses concurrent queued record edits: ${followup.id}`);
+      }
+      return queued === undefined || queuedRevision?.expectedRecord !== onMain
+        || Object.entries(source().expectedPlan).some(([path, sha]) => queuedRevision?.expectedPlan?.[path] !== sha)
+        || measuredLine(String(queued.raw)) !== measuredLine(desired.raw) || queued.status !== desired.status;
+    }
     const entry = current(followup.id);
     return entry === undefined || coverageLine(entry.raw) !== coverageLine(followup.raw);
   };
@@ -566,14 +613,14 @@ export function feedbackEvidenceCoverageFiler(root: string, land: LandFeedbackOp
 /** The daemon's deps (src/run-task.ts): the windowed ledger union, refused whole when any file in the
  *  window is unreadable, and feedback filed into the daemon's own checkout. W1-T9695: a status update
  *  queues under `landingStateRoot` for the per-poll async sweep, so no plan-PR preflight runs on the loop. */
-export function daemonEvidenceCoverageInput(input: { stateDir: string; root: string; log: EvidenceCoverageInput["log"]; landingStateRoot?: string }): EvidenceCoverageInput {
+export function daemonEvidenceCoverageInput(input: { stateDir: string; root: string; log: EvidenceCoverageInput["log"]; landingStateRoot?: string; contextPorts?: EvidenceContextPorts }): EvidenceCoverageInput {
   return {
     stateDir: input.stateDir,
     readRows: (sinceTs) => {
       const read = readLedgerUnionRecordsSync(input.stateDir, { sinceTs, step: EVIDENCE_STEPS, refuseIncomplete: true });
       return read.ok ? { ok: true, rows: read.rows } : { ok: false, reason: `ledger union incomplete: ${read.unread.length} unread` };
     },
-    file: feedbackEvidenceCoverageFiler(input.root, input.landingStateRoot === undefined ? {} : { stateRoot: input.landingStateRoot }),
+    file: feedbackEvidenceCoverageFiler(input.root, input.landingStateRoot === undefined ? {} : { stateRoot: input.landingStateRoot }, input.contextPorts),
     log: input.log,
   };
 }
