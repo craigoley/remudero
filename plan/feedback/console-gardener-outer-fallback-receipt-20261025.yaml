@@ -1,0 +1,47 @@
+id: console-gardener-outer-fallback-receipt-20261025
+ts: 2026-10-25T13:14:08.187Z
+raw: "Approved Console gardener-telemetry follow-up, submitted by Codex for the
+  operator, not an operator risk ruling or model verdict. A completed natural
+  gardener pass has initial Sonnet selections without terminal attempt coverage,
+  followed by priced Luna attempts. Current src/lib/worker.ts
+  cashSonnetEmergency/sonnetRefusedBeforeTransport recursively returns
+  spawnWorker after worker.provider.cash_sonnet_fallback_refused without
+  invoking onModelFallbackAttempt for the first selection. The real
+  benchmark/machine-judge wrapper records callback attempts plus the final
+  result. Static source supports a missing-terminal-receipt mechanism; it does
+  not prove every historical branch executed, that a refused selection reached a
+  provider, or that any missing attempt was billed. Reconcile current main, all
+  advertised open heads, task credit and claims before filing; adopt an existing
+  owner if present. File only the minimal separately scoped task through atomic
+  reservation, genuine native ruling, tests, review and CI. Preserve one
+  terminal coverage receipt per immutable selection/pass/repo/generation,
+  distinguish refused-before-transport from attempted-failed and completed, and
+  deduplicate callbacks without collapsing distinct attempts. Keep any reported
+  price unchanged, absent price unknown, and subscription placeholder zero
+  nonmonetary. Telemetry callback errors must not change fallback, retry,
+  result, routing, budgets or providers. Exercise the default outer fallback and
+  benchmark/machine-judge composition with only actual external provider work
+  faked; retain existing inner-ladder, final-result, hook-error,
+  positive-price/unknown-price and no-new-call controls. Delete only observer
+  wiring and require the initial selection assertion to fail while the later
+  fallback positive control passes; restore and retain exact-head
+  source-positive coverage, stored executable proofs, governed review, hosted
+  checks and normal merge. Audit risk_judge.decision metadata-role duplication
+  separately: do not silently reclassify historical spend or infer zero. No
+  synthetic live model call, historical backfill,
+  permission/budget/billing/cadence/service/CI/memory-policy or guard changes.
+  Merge, adoption, a natural pass, cached API and signed-in UI are separate
+  acceptance stages. OTel error recording supports consistent terminal status,
+  not inferred invoice data:
+  https://opentelemetry.io/docs/specs/semconv/general/recording-errors/ . CI
+  infrastructure and Azure memory remain with their existing owners. Field
+  Trials and the canceled heartbeat remain out of scope."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: console-followup:008cfbbb-c1f0-4ad8-93a7-9777ae2bcd3f
+thread_id: null

@@ -370,6 +370,10 @@ function launcherFixture(): { root: string; log: string; proc: string; env: Node
     RMD_INSTANCE_REGISTRY: join(root, "no-registry"), RMD_MEMINFO_PATH: join(root, "no-meminfo"), RMD_SERVE_BANNER_WAIT_S: "1",
     RMD_SERVE_ADMIT_MEMINFO_PATH: join(proc, "meminfo"), RMD_SERVE_ADMIT_VMSTAT_PATH: join(proc, "vmstat"),
     RMD_SERVE_ADMIT_PSI_PATH: join(proc, "psi"), RMD_SERVE_ADMIT_SAMPLE_S: "0.05",
+    // This env drops NODE_TEST_CONTEXT, so deploy/scratch-mounts.sh's test guard cannot see a test.
+    // On the Azure host (switch on, /mnt/scratch mounted) every admitted replace laid out
+    // /mnt/scratch/rmd/rmd-serve-policy-*; 47 empty layouts were left there 2026-10-12..20.
+    RMD_SCRATCH: "off",
   };
   // The shipped process seam, with only its environment contained.
   const exec = (cmd: string, args: string[]): string => execFileSync(cmd, args, { encoding: "utf8", env, stdio: "pipe" });
@@ -478,6 +482,35 @@ test("the serve launcher's admission counts swap-in served from zswap: pswpin pl
     writeFileSync(join(f.proc, "vmstat.after"), "pswpin 100\n");
     const calm = harness({ replaceServe: seams.replaceServe });
     assert.equal(runServePolicyCycle(calm.deps, TICK).replaced, true);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+/** What a host whose scratch binds are ON looks like to the launcher: its switch file exists and the
+ *  mounts table lists the scratch root. Pointed at a fixture root so a leak lands there, not in /mnt. */
+function scratchOnHost(root: string): { scratch: string; env: NodeJS.ProcessEnv } {
+  const scratch = join(root, "host-scratch");
+  mkdirSync(scratch, { recursive: true });
+  writeFileSync(join(root, "scratch-mounts.on"), "");
+  writeFileSync(join(root, "mounts"), `/dev/fixture ${scratch} ext4 rw 0 0\n`);
+  return {
+    scratch,
+    env: { RMD_SCRATCH_SWITCH: join(root, "scratch-mounts.on"), RMD_SCRATCH_MOUNTS_FILE: join(root, "mounts"), RMD_SCRATCH_ROOT: scratch },
+  };
+}
+
+test("an admitted launcher fixture lays out nothing under a host's mounted scratch root", () => {
+  const budget = loadHostMemoryBudgetPolicy(join(REPO_ROOT, "plan", "policy.yaml"));
+  const f = launcherFixture();
+  try {
+    const host = scratchOnHost(f.root);
+    Object.assign(f.env, host.env);
+    const seams = realServePolicyDeps({ installPath: f.root, stateRoot: f.root }, f.exec, undefined, () => budget);
+    const h = harness({ replaceServe: seams.replaceServe });
+    const out = runServePolicyCycle(h.deps, TICK);
+    assert.equal(out.replaced, true, `the launcher must reach its container start for this to mean anything: ${out.reason}`);
+    assert.equal(existsSync(join(host.scratch, "rmd")), false, "the fixture's state dir got a scratch layout on the host's scratch disk");
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
