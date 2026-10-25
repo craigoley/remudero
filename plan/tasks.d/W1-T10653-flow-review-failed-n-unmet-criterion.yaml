@@ -1,0 +1,27 @@
+- id: W1-T10653
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — review-failed:<n> unmet criterion cost 4.96 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.27
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:review-failed:<n> unmet criterion#r2"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/flow-review-failed-n-unmet-criterion.test.ts
+  acceptance:
+    - claim: "review-failed:<n> unmet criterion is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T10653: flow-review-failed-n-unmet-criterion clears without a person\" in test/sweep/flow-review-failed-n-unmet-criterion.test.ts"
+  note: "Filed by flow at rung 2; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    review-failed:<n> unmet criterion cost 4.96 PR-hours; owner fix-lane
+    Owner fix-lane failed to clear eligible episodes.
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #14195: 4.53 PR-hours — 1 unmet criterion — fix round 1 — judge: continue (first fix round: no round, strike or parked wait yet, so there is no progress...) — NOT DISPATCHED this pass: a needs-human escalation for this exact (task, PR, head 5c01a485db1199cb21b656aa83403305362b5930, cause) is ALREADY OPEN and awaiting a human (https://github.com/craigoley/remudero/issues/14219) — a strike here would re-ask a question already in front of someone and append to that same issue; standing down until it is closed, the head moves, or the task contract changes, or an operator answers
+    - PR #10265: 2.32 PR-hours — 1 unmet criterion — strike 1/2
+    Previous remedy W1-T7091: src/lib/sweep.ts, test/flow-review-failed-n-unmet-criterion.test.ts, src/lib/read-model-worker.ts; did not fall: share of PR-hours 1.3% (13.641401666666654/1086.0243058333326) before, 1.8% (61.39990749999996/3345.4502200000006) after, over 14 day(s) each side. Take a structurally different remedy.
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
