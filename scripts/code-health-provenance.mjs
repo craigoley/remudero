@@ -9,6 +9,8 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const hash = value => createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
+// Fingerprint measurement code, not the application commit or its changing line counts.
+const methodHash = files => hash(files.map(path => [path, readFileSync(new URL(path, import.meta.url), "utf8")]));
 const text = (value, bound = 256) => typeof value === "string" && value.length > 0 && value.length <= bound && !value.includes("\0");
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ?
   Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
@@ -62,7 +64,7 @@ export function codeqlProvenance(input) {
     scanId: `codeql:${input.runId}:${input.runAttempt}:${input.language}:${input.sarifId}`, completion,
     state: reasons.length ? "partial" : "complete", reasons: [...new Set(reasons)],
     toolVersion: text(driver?.version) ? driver.version : null, rulesVersion: ruleCount ? hash(rules) : null, ruleCount,
-    configHash: hash([input.config, [...input.exclusions].sort()]), exclusions: [...new Set(input.exclusions)].sort(),
+    configHash: hash([input.config, [...input.exclusions].sort(), methodHash(["./code-health-provenance.mjs"])]), exclusions: [...new Set(input.exclusions)].sort(),
     scope: { kind: "explicit-analysis-targets", fileCount: targets.size, hash: hasScope ? hash([...targets].sort()) : null } };
 }
 
@@ -92,7 +94,7 @@ export function coverageProvenance(summary, lcov, baseline, workflow, repository
   return { version: "code-health-source-v1", kind: "coverage", repository: repository.toLowerCase(), analyzedSha: summary.sha.toLowerCase(),
     ref: summary.ref, runId: summary.run_id, observedAt: summary.measured_at, scanId: `coverage-nightly:${summary.run_id}`,
     state: reasons.length ? "partial" : "complete", reasons, toolVersion: process.version,
-    rulesVersion: hash(canonical(baseline)), configHash: hash(workflow), exclusions: [...new Set(exclusions)].sort(),
+    rulesVersion: hash(canonical(baseline)), configHash: hash([workflow, methodHash(["./code-health-provenance.mjs", "./coverage-ratchet.mjs", "./lib/lcov.mjs"])]), exclusions: [...new Set(exclusions)].sort(),
     scope: { kind: "instrumented-source-files", fileCount: records.length, hash: validScope ? hash(["instrumented-source-files", records.map(record => record.sourceFile).sort()]) : null },
     measurement: { branches: { covered: totals.brh, total: totals.brf }, lines: { covered: totals.lh, total: totals.lf } },
     check: { id: "coverage-existing-tier", met: reasons.length === 0 && tier.tier === "healthy", reason: reasons.length ? "Coverage could not be assessed because its source evidence is incomplete." : `Instrumented branch coverage is in this repository's existing ${tier.tier} tier.` } };
