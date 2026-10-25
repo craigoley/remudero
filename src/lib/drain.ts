@@ -1,3 +1,4 @@
+import { operatorReleaseContractChanged, qualifyReleaseEvidence, releaseContractPins, type ReleaseEvidence } from "./operator-release.js";
 /** `rmd drain` is a bounded, deterministic loop over the proven run-task machinery (WS-1): each pass
  *  resolves the next runnable task from the DAG, runs it through run-task, and repeats. It invents no
  *  orchestration — deps are plan.ts's ({@link unmetDependencies}), status is GitHub-derived
@@ -692,6 +693,10 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
   }
   if (t.dispatch_hold === true) {
     opts.onFiltered?.(t, "blocked");
+    return false;
+  }
+  if (operatorReleaseContractChanged(t)) {
+    opts.onFiltered?.(t, "verify-not-auto");
     return false;
   }
   if (t.verify !== "auto" && opts.releasedIds?.has(t.id) !== true) {
@@ -1516,7 +1521,7 @@ export interface DrainDeps extends TaskPreconditionOptions {
   readLedgerLines?: () => readonly string[];
   /** W1-T10348 — the operator releases kept in state/operator-releases.json, where rotation cannot shed
    *  them. A seam like `readLedgerLines`; absent, only the ledger's rows release. */
-  readDurableReleases?: () => ReadonlySet<string>;
+  readDurableReleases?: () => ReleaseEvidence;
   /** The in-flight guard (W1-T80): the OPEN PR number for a task, re-derived from the SAME
    *  projection `refreshMerged` just built, never a second GitHub read path. Optional. */
   isOpenPr?: OpenPrCheck;
@@ -1670,72 +1675,49 @@ export interface ReleaseResolution {
   ids: ReadonlySet<string>;
   /** Who released each id read, honoured or set aside. */
   authors: ReadonlyMap<string, ReleaseAuthor>;
-  /** Machine releases set aside because the record carries a current-pin `escalate` ruling. */
+  /** Releases held for escalation, unknown history or explicit operator reapproval. */
   setAside: ReadonlySet<string>;
+  reapprovalRequired?: ReadonlySet<string>;
+  unknownReleaseHistory?: ReadonlySet<string>;
   /** Why operator-releases.json could not be read; the ledger's releases still stand. */
   durableUnreadable?: string;
   /** Why the ledger could not be read; the durable releases still stand. */
   ledgerUnreadable?: string;
 }
 
-/**
- * W1-T10348 — THE ONE RELEASE RESOLVER every admission site shares (daemon tick, lane refill, console
- * kick, `rmd drain`, the run child). It unions the ledger's `ratify.approved` rows with the durable
- * operator-releases.json, so a release that ledger rotation shed is still honoured.
- *
- * WHICH RELEASES COUNT. An operator release (a row without `author_class: machine`, or an id in the
- * durable file) is honoured as written. A machine release is honoured unless the record carries a
- * current-pin risk ruling of `action: escalate`: that escalation went to a person (operator ruling
- * 2026-09-29), and a second machine judge may not overrule it. Such an id lands in `setAside`. With no
- * plan to read the ruling from, a machine release cannot be checked, so it is set aside too.
- */
+/** Resolve both stores against the current contract. Legacy or drifted human receipts require
+ *  explicit reapproval, and a machine receipt cannot clear that hold. A matching operator receipt
+ *  is independent positive authority; a machine also needs readable operator history and cannot
+ *  override a current-pin escalation. No plan means no qualified release. */
 export function resolveReleases(deps: ReleaseReaders, plan?: Plan): ReleaseResolution {
-  const authors = new Map<string, ReleaseAuthor>();
+  let lines: readonly string[] = [];
+  let durable: ReleaseEvidence = new Map();
   let ledgerUnreadable: string | undefined;
-  try {
-    for (const [id, author] of releaseAuthorsFromLedger(deps.readLedgerLines?.() ?? [])) authors.set(id, author);
-  } catch (e) {
-    // the ledger unreadable: it releases nothing (the safe direction), and the tick names the reason.
+  let durableUnreadable: string | undefined;
+  try { lines = deps.readLedgerLines?.() ?? []; } catch (e) {
+    // Carry ledgerUnreadable to the caller; an unreadable store is distinct from an empty history.
     ledgerUnreadable = String((e as Error)?.message ?? e);
   }
-  let durableUnreadable: string | undefined;
-  try {
-    for (const id of deps.readDurableReleases?.() ?? []) authors.set(id, "operator");
-  } catch (e) {
-    // operator-releases.json unreadable: it releases nothing (the safe direction), and the tick names the reason.
+  try { durable = deps.readDurableReleases?.() ?? new Map(); } catch (e) {
+    // Carry durableUnreadable to the caller and refuse machine receipts that cannot exclude a human hold.
     durableUnreadable = String((e as Error)?.message ?? e);
   }
+  const { authors, reapproval, unknownHistory } = qualifyReleaseEvidence(lines, durable, releaseContractPins(plan?.tasks ?? []));
   const ids = new Set<string>();
-  const setAside = new Set<string>();
+  const setAside = new Set<string>(reapproval);
+  const unknownReleaseHistory = new Set<string>();
   for (const [id, author] of authors) {
     const t = plan?.byId.get(id);
     const escalated = plan === undefined || (t?.risk_ruling?.action === "escalate" && t.risk_ruling.pin === taskRulingPin(t));
-    if (author === "machine" && escalated) setAside.add(id);
+    if (author === "machine" && (durableUnreadable !== undefined || unknownHistory)) { setAside.add(id); unknownReleaseHistory.add(id); }
+    else if (author === "machine" && escalated) setAside.add(id);
     else ids.add(id);
   }
   return {
-    ids, authors, setAside,
+    ids, authors, setAside, reapprovalRequired: reapproval, unknownReleaseHistory,
     ...(durableUnreadable !== undefined ? { durableUnreadable } : {}),
     ...(ledgerUnreadable !== undefined ? { ledgerUnreadable } : {}),
   };
-}
-
-/** Each released id's author from its `ratify.approved` rows: an operator row outranks a machine one for the same task. */
-export function releaseAuthorsFromLedger(lines: readonly string[]): Map<string, ReleaseAuthor> {
-  const out = new Map<string, ReleaseAuthor>();
-  for (const line of lines) {
-    if (!line.includes(RELEASE_LEDGER_STEP)) continue; // cheap reject before the parse
-    let row: { step?: unknown; task_id?: unknown; author_class?: unknown };
-    try {
-      row = JSON.parse(line) as typeof row;
-    } catch {
-      continue; // an unparseable line releases nothing — the safe direction
-    }
-    if (row.step !== RELEASE_LEDGER_STEP || typeof row.task_id !== "string" || !row.task_id) continue;
-    if (row.author_class !== "machine") out.set(row.task_id, "operator");
-    else if (!out.has(row.task_id)) out.set(row.task_id, "machine");
-  }
-  return out;
 }
 
 /**

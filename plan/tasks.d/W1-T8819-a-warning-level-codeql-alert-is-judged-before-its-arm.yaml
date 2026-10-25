@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: CodeQL new-alert ratchet (operator approved, \"go with 1-4\")"
   plan_refs: [W1-T5633, W1-T3980, W1-T4070]
   files: [src/lib/open-prs-rest.ts, test/a-warning-level-codeql-alert-is-judged-before-its-arm.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

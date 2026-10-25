@@ -5,9 +5,13 @@ import { fixedClock } from "./clock.js";
 
 export const DAILY_PROGRESS_VERSION = "daily-progress-v1" as const;
 export type EvidenceState = "complete" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized";
-export interface SourceCoverage {
+/** Configured expectations survive missing receipts; null instanceId means repository-wide evidence. */
+export interface ExpectedDailySource {
   id: string; repository: string; kind: "pull_requests" | "ledger_activity" | "deployments";
-  required: boolean; state: EvidenceState; lastAttemptAt: string | null; lastSuccessAt: string | null;
+  instanceId: string | null; required: boolean;
+}
+export interface SourceCoverage extends ExpectedDailySource {
+  state: EvidenceState; lastAttemptAt: string | null; lastSuccessAt: string | null;
   coverageStart: string | null; coverageThrough: string | null; nextDueAt: string | null;
   reason: string | null;
 }
@@ -24,7 +28,7 @@ export interface DailyProgressReport {
   reportDate: string; timeZone: string; windowStart: string; windowEnd: string;
   revision: number; correctionReason: string | null; generatedAt: string;
   phase: "provisional" | "finalizing" | "complete" | "corrected";
-  coverage: { state: EvidenceState; expectedRepositories: string[]; includedRepositories: string[]; sources: SourceCoverage[] };
+  coverage: { state: EvidenceState; expectedRepositories: string[]; includedRepositories: string[]; expectedSources: ExpectedDailySource[]; sources: SourceCoverage[] };
   totals: { mergedChanges: MeasuredCount; completedTasks: MeasuredCount };
   events: DailyProgressEvent[];
   page: { totalEvents: number; nextCursor: string | null };
@@ -38,12 +42,13 @@ export interface RepositoryEvidenceInventory {
 }
 
 /** Expected sources are configuration, not evidence that a collector has run. */
-export function buildRepositoryEvidenceInventory(instances: ReadonlyArray<{ instanceId: string; options: { instanceRepository?: ManagedRepo } }>): RepositoryEvidenceInventory {
+export function buildRepositoryEvidenceInventory(instances: ReadonlyArray<{ instanceId: string; evidenceRepository?: string; options: { instanceRepository?: ManagedRepo } }>): RepositoryEvidenceInventory {
   const repos = new Map<string, Set<string>>(), unresolved = new Set<string>();
   for (const instance of instances) {
     if (!text(instance.instanceId, 128)) throw new TypeError("invalid configured instance identity");
     const r = instance.options.instanceRepository;
-    const id = r && typeof r.owner === "string" && typeof r.repo === "string" ? `${r.owner}/${r.repo}`.toLowerCase() : undefined;
+    const configured = instance.evidenceRepository ?? (r && typeof r.owner === "string" && typeof r.repo === "string" ? `${r.owner}/${r.repo}` : undefined);
+    const id = typeof configured === "string" ? configured.toLowerCase() : undefined;
     if (!repository(id)) { unresolved.add(instance.instanceId); continue; }
     const members = repos.get(id) ?? new Set<string>(); members.add(instance.instanceId); repos.set(id, members);
   }
@@ -71,27 +76,74 @@ const repoKey = (v: string): string => v.toLowerCase();
 const repoList = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 256 && v.every(repository) && new Set(v.map(repoKey)).size === v.length;
 const states: readonly string[] = ["complete", "partial", "stale", "not_collected", "unavailable", "unauthorized"];
 
-/** Validate exact local midnight bounds, including real 23- and 25-hour days. */
+/** Inventory describes expectations only; it cannot claim collection or duplicate instance ownership. */
+export function validateRepositoryEvidenceInventory(value: unknown): ContractResult<RepositoryEvidenceInventory> {
+  const fail = (reason: string): ContractResult<RepositoryEvidenceInventory> => ({ ok: false, reason });
+  if (!record(value) || !only(value, "version repositories unresolvedInstances measurementState") || value.version !== "repository-evidence-inventory-v1" || value.measurementState !== "not_collected") return fail("invalid inventory identity or measurement state");
+  if (!Array.isArray(value.repositories) || !Array.isArray(value.unresolvedInstances)) return fail("invalid inventory members");
+  const repos = new Set<string>(), instances = new Set<string>();
+  const expectedSources = (v: unknown, expected: readonly string[]): boolean => Array.isArray(v) && v.length === expected.length && expected.every((kind) => v.includes(kind));
+  for (const row of value.repositories) {
+    if (!record(row) || !only(row, "repository instanceIds expectedDailySources expectedQualitySources") || !repository(row.repository) || repos.has(repoKey(row.repository))) return fail("invalid or duplicate repository identity");
+    repos.add(repoKey(row.repository));
+    if (!Array.isArray(row.instanceIds) || !row.instanceIds.length || !row.instanceIds.every((id) => text(id, 128))) return fail("invalid configured instance identity");
+    if (!expectedSources(row.expectedDailySources, ["pull_requests", "ledger_activity", "deployments"]) || !expectedSources(row.expectedQualitySources, codeHealthSourceRequirements())) return fail("invalid expected source inventory");
+    for (const id of row.instanceIds) {
+      if (instances.has(id)) return fail("duplicate instance identity");
+      instances.add(id);
+    }
+  }
+  for (const id of value.unresolvedInstances) {
+    if (!text(id, 128)) return fail("invalid unresolved instance identity");
+    if (instances.has(id)) return fail("duplicate instance identity");
+    instances.add(id);
+  }
+  return { ok: true, value: value as unknown as RepositoryEvidenceInventory };
+}
+
+/** Validate the first instants of civil dates, including repeated or skipped midnight. */
 function calendarWindow(report: DailyProgressReport): ContractResult<true> {
   if (!/^\d{4}-\d\d-\d\d$/.test(report.reportDate) || !instant(`${report.reportDate}T00:00:00.000Z`) || !/^[A-Za-z][A-Za-z0-9_+/-]*$/.test(report.timeZone)) return { ok: false, reason: "invalid calendar date or zone" };
   const next = fixedClock(Date.parse(`${report.reportDate}T00:00:00.000Z`)).date(); next.setUTCDate(next.getUTCDate() + 1);
   const nextDate = next.toISOString().slice(0, 10);
   try {
     const formatter = new Intl.DateTimeFormat("en-CA", { timeZone: report.timeZone, calendar: "iso8601", numberingSystem: "latn", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
-    const localMidnight = (stamp: string, date: string) => {
-      const p = Object.fromEntries(formatter.formatToParts(fixedClock(Date.parse(stamp)).date()).map((part) => [part.type, part.value]));
-      return `${p.year}-${p.month}-${p.day}` === date && p.hour === "00" && p.minute === "00" && p.second === "00" && Date.parse(stamp) % 1000 === 0;
+    const parts = (stamp: number) => Object.fromEntries(formatter.formatToParts(fixedClock(stamp).date()).map((part) => [part.type, part.value]));
+    const localDate = (stamp: number) => { const p = parts(stamp); return `${p.year}-${p.month}-${p.day}`; };
+    const dayStart = (date: string, required: boolean) => {
+      const nominal = Date.parse(`${date}T00:00:00.000Z`), hour = 60 * 60_000;
+      // All IANA offsets fit inside this bracket, including historical date-line changes.
+      let lo = nominal - 36 * hour, hi = nominal + 36 * hour;
+      while (hi - lo > 1) {
+        const mid = lo + Math.floor((hi - lo) / 2);
+        if (localDate(mid) < date) lo = mid; else hi = mid;
+      }
+      let first = !required || localDate(hi) === date ? hi : Infinity;
+      // A rollback just after midnight can briefly enter a date, then return to yesterday.
+      // Resolve midnight under the surrounding offsets too, retaining its earliest occurrence.
+      for (let sample = nominal - 36 * hour; sample <= nominal + 36 * hour; sample += 6 * hour) {
+        const p = parts(sample);
+        const wall = Date.parse(`${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}.000Z`);
+        const candidate = nominal - (wall - sample);
+        if (candidate < first && localDate(candidate) === date) first = candidate;
+      }
+      return first;
     };
-    return localMidnight(report.windowStart, report.reportDate) && localMidnight(report.windowEnd, nextDate)
+    return Date.parse(report.windowStart) === dayStart(report.reportDate, true) && Date.parse(report.windowEnd) === dayStart(nextDate, false)
       ? { ok: true, value: true } : { ok: false, reason: "report bounds are not the named local calendar day" };
   } catch (error) {
     return { ok: false, reason: error instanceof RangeError ? "unsupported reporting time zone" : "calendar conversion unavailable" };
   }
 }
 
+function sourceIdentity(v: unknown): v is ExpectedDailySource {
+  return record(v) && text(v.id) && repository(v.repository) && ["pull_requests", "ledger_activity", "deployments"].includes(String(v.kind)) &&
+    (v.instanceId === null || text(v.instanceId, 128)) && typeof v.required === "boolean";
+}
+
 function sourceShape(v: unknown, report: DailyProgressReport): v is SourceCoverage {
-  if (!record(v) || !only(v, "id repository kind required state lastAttemptAt lastSuccessAt coverageStart coverageThrough nextDueAt reason")) return false;
-  if (!text(v.id) || !repository(v.repository) || !["pull_requests", "ledger_activity", "deployments"].includes(String(v.kind)) || typeof v.required !== "boolean" || !states.includes(String(v.state))) return false;
+  if (!record(v) || !only(v, "id repository kind instanceId required state lastAttemptAt lastSuccessAt coverageStart coverageThrough nextDueAt reason")) return false;
+  if (!sourceIdentity(v) || !states.includes(String(v.state))) return false;
   if (![v.lastAttemptAt, v.lastSuccessAt, v.coverageStart, v.coverageThrough, v.nextDueAt].every((x) => x === null || instant(x)) || !(v.reason === null || text(v.reason, 2048))) return false;
   if (v.state !== "complete" && !text(v.reason, 2048)) return false;
   const t = (x: unknown) => typeof x === "string" ? Date.parse(x) : undefined;
@@ -135,26 +187,46 @@ export function validateDailyProgressReport(value: unknown): ContractResult<Dail
   if (report.phase === "corrected" && (report.revision < 2 || !text(report.correctionReason, 2048))) return fail("corrected reports need a new revision and reason");
   const scope = report.scope, c = report.coverage;
   if (!record(scope) || !(scope.kind === "all" ? only(scope, "kind") : scope.kind === "repository" && only(scope, "kind repository") && repository(scope.repository))) return fail("invalid report scope");
-  if (!record(c) || !only(c, "state expectedRepositories includedRepositories sources") || !states.includes(c.state) || !repoList(c.expectedRepositories) || !repoList(c.includedRepositories)) return fail("invalid source coverage inventory");
+  if (!record(c) || !only(c, "state expectedRepositories includedRepositories expectedSources sources") || !states.includes(c.state) || !repoList(c.expectedRepositories) || !repoList(c.includedRepositories)) return fail("invalid source coverage inventory");
   const expected = new Set(c.expectedRepositories.map(repoKey)), included = new Set(c.includedRepositories.map(repoKey));
   if ([...included].some((r) => !expected.has(r)) || (scope.kind === "repository" && (expected.size !== 1 || !expected.has(repoKey(scope.repository))))) return fail("report repositories contradict its scope");
+  if (!Array.isArray(c.expectedSources) || c.expectedSources.length > 1024 || !c.expectedSources.every((s) => record(s) && only(s, "id repository kind instanceId required") && sourceIdentity(s)) || new Set(c.expectedSources.map((s) => s.id)).size !== c.expectedSources.length) return fail("invalid or duplicate expected source identities");
+  const instanceRepositories = new Map<string, string>();
+  for (const s of c.expectedSources) {
+    if (!expected.has(repoKey(s.repository))) return fail("expected source belongs to a foreign repository");
+    if (s.instanceId !== null) {
+      const owner = instanceRepositories.get(s.instanceId);
+      if (owner !== undefined && owner !== repoKey(s.repository)) return fail("expected instance belongs to contradictory repositories");
+      instanceRepositories.set(s.instanceId, repoKey(s.repository));
+    }
+  }
+  for (const r of expected) {
+    if (!["pull_requests", "ledger_activity", "deployments"].every((kind) => c.expectedSources.some((s) => repoKey(s.repository) === r && s.kind === kind))) return fail("repository omits an expected source kind");
+  }
   if (!Array.isArray(c.sources) || c.sources.length > 1024 || !c.sources.every((s) => sourceShape(s, report)) || new Set(c.sources.map((s) => s.id)).size !== c.sources.length) return fail("invalid or duplicate source evidence");
-  if (c.sources.some((s) => !expected.has(repoKey(s.repository)))) return fail("source belongs to a foreign repository");
+  const identities = new Map(c.expectedSources.map((s) => [s.id, s]));
+  if (c.sources.some((s) => {
+    const identity = identities.get(s.id);
+    return !identity || repoKey(s.repository) !== repoKey(identity.repository) || s.kind !== identity.kind || s.instanceId !== identity.instanceId || s.required !== identity.required;
+  })) return fail("source evidence contradicts its expected identity");
   for (const r of included) {
     if (!["pull_requests", "ledger_activity", "deployments"].every((kind) => c.sources.some((s) => repoKey(s.repository) === r && s.kind === kind))) return fail("included repository omits an expected source kind");
   }
+  const sources = new Map(c.sources.map((s) => [s.id, s]));
   const fullScope = expected.size > 0 && expected.size === included.size;
-  if (c.state === "complete" && (!fullScope || !c.sources.length || c.sources.some((s) => s.state !== "complete"))) return fail("complete coverage omits expected repositories or sources");
+  if (c.state === "complete" && (!fullScope || !c.sources.length || c.expectedSources.some((s) => sources.get(s.id)?.state !== "complete"))) return fail("complete coverage omits expected repositories or sources");
   const ended = report.phase === "complete" || report.phase === "corrected";
   if (ended && Date.parse(report.generatedAt) < Date.parse(report.windowEnd)) return fail("a finished day cannot precede its ending instant");
   const through = Math.min(Date.parse(report.generatedAt), Date.parse(report.windowEnd));
   const coversWindow = (s: SourceCoverage) => s.state === "complete" && s.coverageStart !== null && s.coverageThrough !== null && Date.parse(s.coverageStart) <= Date.parse(report.windowStart) && Date.parse(s.coverageThrough) >= through;
-  const exactMerges = fullScope && [...included].every((r) => c.sources.some((s) => repoKey(s.repository) === r && s.kind === "pull_requests" && s.required && coversWindow(s)));
-  if (ended && c.sources.some((s) => s.required && !coversWindow(s))) return fail("finished report lacks its required source window");
+  if (c.state === "complete" && c.sources.some((s) => !coversWindow(s))) return fail("complete coverage lacks a source window through the report cutoff");
+  const covered = (s: ExpectedDailySource) => { const observed = sources.get(s.id); return observed !== undefined && coversWindow(observed); };
+  const mergeSources = c.expectedSources.filter((s) => s.kind === "pull_requests" && s.required);
+  const exactMerges = fullScope && [...included].every((r) => mergeSources.some((s) => repoKey(s.repository) === r)) && mergeSources.every(covered);
+  if (ended && c.expectedSources.some((s) => s.required && !covered(s))) return fail("finished report lacks its required source window");
   if (!record(report.totals) || !only(report.totals, "mergedChanges completedTasks") || !Object.values(report.totals).every(count) || !count(report.totals.mergedChanges) || !count(report.totals.completedTasks)) return fail("invalid measured totals");
   if (Object.values(report.totals).some((v) => v.precision === "exact") && !exactMerges) return fail("exact totals require complete expected merge evidence");
   if (!Array.isArray(report.events) || report.events.length > 200 || !report.events.every(eventShape) || new Set(report.events.map((e) => e.id)).size !== report.events.length) return fail("invalid or duplicate evidence page");
-  const sources = new Map(c.sources.map((s) => [s.id, s]));
   for (const e of report.events) {
     const s = sources.get(e.sourceId), kind = { merged: "pull_requests", activity: "ledger_activity", deployment: "deployments" }[e.kind];
     if (!included.has(repoKey(e.repository)) || !s || repoKey(s.repository) !== repoKey(e.repository) || s.kind !== kind) return fail("event identity contradicts its source scope");

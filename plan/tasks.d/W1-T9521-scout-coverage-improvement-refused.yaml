@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.75
   status: queued
@@ -22,9 +22,10 @@
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
   risk_ruling:
     verdict: "low"
-    action: escalate
+    action: proceed
     confidence: 0.7
     reasons:
       - "low-confidence verdict (0.70 < 0.8) — on the change's description/files alone, no diff was read — The declared file is a single new test file (test/scout-coverage-improvement-refused.test.ts). Nothing in the description or files list touches secrets, credentials, auth, permissions, merge/deploy/infrastructure policy, or data deletion.; on the change's description/files alone, no diff was read — The task is a recurring-symptom fix, and the rationale says the code that writes the step still has to be located first. This makes the final scope uncertain. However, the description does not state that the fix would touch any escalation-category area, and the PR still goes through CI and review.; on the change's description/files alone, no diff was read — The acceptance criterion is a grep-verifiable test name, so the result can be checked from what is shown, and no operator-only decision is requested.; on the change's description/files alone, no diff was read — The scout family has a weak record (0 merged, 1 declined, Beta mean 0.33), and the evidence shows 0 PR citations. These are reasons for caution but not escalation triggers under the stated rule."
-    judged_at: "2026-10-15T00:53:55.058Z"
-    pin: "5d97f648f34e72cc80b0f1edda225c10a9b216d211ee5e6a7e61ecf404fa77c9"
+      - "confidence bar crossing: 0.925 -> 0.6709677419354838; recorded confidence 0.7 now clears the bar"
+    judged_at: "2026-10-24T20:43:58.359Z"
+    pin: "5d8b3e1816de15366080c563be541fe2de42e0e8cdeb34d743f078c59ac69d74"

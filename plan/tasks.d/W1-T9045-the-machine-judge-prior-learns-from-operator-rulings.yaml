@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: gardener loop audit"
   plan_refs: [W1-T5406, W1-T8830]
   files: [src/lib/machine-filing-judge.ts, test/the-machine-judge-prior-learns-from-operator-rulings.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

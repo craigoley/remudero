@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: file the core daemon's remaining synchronous spawns that block its event loop (coordinator brief, loop-block follow-up to W1-T9527); standing rulings: no hard fixed thresholds, automated flow"
   plan_refs: [W1-T4423, W1-T9114, W1-T8778, W1-T7745, W1-T246, W1-T9544, W1-T9549, W1-T9550, W1-T9552, W1-T9554, W1-T9556]
   files: [src/run-task.ts, test/a-reviews-plan-lint-runs-in-a-child-not-on-the-loop.test.ts, "src/lib/sweep.ts"]
-  status: queued
+  status: merged
   priority: 1  # P1: the second-largest attributed caller on core's loop, and the 182 s block of 04:50Z; the costly fix (W1-T9114) waits on three queued tasks
   attempts: 0
   rationale: |

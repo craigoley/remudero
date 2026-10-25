@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { taskContractRevision, taskSemanticRevision } from "#src/lib/escalate.js";
-import { CONTRACT_AMENDED_REFRESH_STEP, runSweep, type OpenPrView, type SweepDeps, type UpdateBranchOutcome } from "#src/lib/sweep.js";
+import { CONTRACT_AMENDED_REFRESH_STEP, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps, type UpdateBranchOutcome } from "#src/lib/sweep.js";
+import * as sweepModule from "#src/lib/sweep.js";
 import { parseTasksFromYaml } from "#src/lib/plan.js";
 import { renderFixPrompt } from "#src/lib/prompt-render.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
 
 /**
@@ -20,6 +23,11 @@ import { runFixRung } from "#test/helpers/run-task-test.js";
  * on main never moves. These tests pin the release: each hold remembers the contract it stands on, and a
  * different one on main takes main into the branch once, as the escalated progress latch already does.
  */
+
+const lightPassHeadContractRefresh = (...args: Parameters<typeof sweepModule.lightPassHeadContractRefresh>) => {
+  assert.equal(typeof sweepModule.lightPassHeadContractRefresh, "function");
+  return sweepModule.lightPassHeadContractRefresh(...args);
+};
 
 const TASK = "W1-T9265";
 const HEAD = "0dad88f".padEnd(40, "0");
@@ -36,7 +44,7 @@ function fixture(rows: Record<string, unknown>[]) {
   const state = { revision: "contract-A" as string | undefined, escalated: 0, dispatched: 0, refreshed: 0, admissions: 0 };
   const deps: SweepDeps = {
     ledgerPath: "/unused/contract-hold-ledger", runId: "contract-hold-test", now: () => NOW,
-    readLedger: () => rows, appendLine: (_path, row) => { rows.push(row); },
+    readLedger: () => rows, readHeadContractRefreshHistory: async () => ({ complete: true, lines: rows }), appendLine: (_path, row) => { rows.push(row); },
     fixProgressJudge: async () => ({ verdict: "continue", reason: "the red names one failing test" }),
     readTaskContractRevision: (taskId) => (taskId === TASK ? state.revision : undefined),
     updateBranch: async (): Promise<UpdateBranchOutcome> => { state.refreshed++; return "updated"; },
@@ -49,6 +57,8 @@ function fixture(rows: Record<string, unknown>[]) {
 }
 
 const lastDisposed = (rows: Record<string, unknown>[]) => rows.findLast(row => row.step === "sweep.disposed")!;
+const headContractHold = (over: Record<string, unknown> = {}) => ({ step: "fix.contract_hold", kind: "open-escalation",
+  task_id: TASK, pr_url: pr().prUrl, head_sha: HEAD, contract_revision: "contract-A", ...over });
 const designRow = (revision?: string) => ({ step: "fix.needs_design", task_id: TASK, head_sha: HEAD,
   reason: "decide whether the scout or the draft ladder changes", ...(revision !== undefined ? { contract_revision: revision } : {}) });
 
@@ -63,6 +73,249 @@ function designRows(revision?: string): Record<string, unknown>[] {
 }
 
 describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts", () => {
+  test("a head-held escalation adopts an approved amendment before another fix round", async () => {
+    const rows: Record<string, unknown>[] = [headContractHold()];
+    const f = fixture(rows);
+    f.state.revision = "contract-B";
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.refreshed, 1);
+    assert.equal(f.state.dispatched, 0);
+    assert.equal(f.state.admissions, 0);
+    const receipt = rows.findLast(row => row.step === CONTRACT_AMENDED_REFRESH_STEP)!;
+    assert.deepEqual([receipt.escalated_under, receipt.contract_revision, receipt.head_sha], ["contract-A", "contract-B", HEAD]);
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.refreshed, 1, "an unchanged snapshot cannot repeat a successful refresh");
+    const rotated = [headContractHold(), receipt];
+    const fresh = fixture(rotated);
+    fresh.state.revision = "contract-B";
+    await runSweep([pr()], fresh.deps);
+    assert.equal(fresh.state.refreshed, 0, "the attempt receipt, rather than process memory, prevents repeats");
+  });
+
+  test("a head-contract refresh preserves unknown outcomes and selects only one head per pass", async () => {
+    for (const outcome of ["conflict", "error: unavailable", undefined]) {
+      const rows: Record<string, unknown>[] = [headContractHold(), { step: CONTRACT_AMENDED_REFRESH_STEP,
+        task_id: TASK, pr_number: pr().prNumber, head_sha: HEAD, contract_revision: "contract-B", outcome }];
+      const f = fixture(rows);
+      f.state.revision = "contract-B";
+      await runSweep([pr()], f.deps);
+      assert.equal(f.state.refreshed, 0, String(outcome));
+      assert.equal(f.state.dispatched, 0, String(outcome));
+    }
+    const second = pr({ prNumber: 13040, prUrl: "https://github.com/o/remudero/pull/13040" });
+    const rows = [headContractHold(), headContractHold({ pr_url: second.prUrl })];
+    const f = fixture(rows);
+    f.state.revision = "contract-B";
+    await runSweep([pr(), second], f.deps);
+    assert.equal(f.state.refreshed, 1);
+    assert.equal(f.state.dispatched, 0);
+  });
+
+  test("a head-contract receipt grants no refresh for unchanged foreign unread or held inputs", async () => {
+    for (const over of [{ task_id: "W1-T9999" }, { head_sha: "f".repeat(40) }, { pr_url: "https://github.com/o/remudero/pull/9" }]) {
+      const f = fixture([headContractHold(over)]);
+      f.state.revision = "contract-B";
+      await runSweep([pr()], f.deps);
+      assert.equal(f.state.refreshed, 0);
+    }
+    for (const revision of ["contract-A", undefined]) {
+      const f = fixture([headContractHold()]);
+      f.state.revision = revision;
+      await runSweep([pr()], f.deps);
+      assert.equal(f.state.refreshed, 0);
+    }
+    for (const extra of [{ dryRun: true }, { actionable: () => false }]) {
+      const f = fixture([headContractHold()]);
+      f.state.revision = "contract-B";
+      await runSweep([pr()], { ...f.deps, ...extra });
+      assert.equal(f.state.refreshed, 0);
+      assert.equal(f.state.dispatched, 0);
+    }
+  });
+
+  test("the light pass offers one contract refresh without opening generic branch updates", async () => {
+    const second = pr({ prNumber: 13040, prUrl: "https://github.com/o/remudero/pull/13040" });
+    const rows = [headContractHold(), headContractHold({ pr_url: second.prUrl })];
+    const f = fixture(rows);
+    f.state.revision = "contract-B";
+    const capability = await lightPassHeadContractRefresh([second, pr()], f.deps);
+    assert.equal(capability.headContractRefreshFor?.(second), undefined);
+    assert.equal(capability.headContractRefreshFor?.(pr()), f.deps.updateBranch);
+    assert.equal(capability.headContractRefreshFor?.(pr({ headSha: "f".repeat(40) })), undefined);
+    await runSweepLightPass([second, pr()], { ...f.deps, updateBranch: undefined, ...capability });
+    assert.equal(f.state.refreshed, 1);
+    assert.equal(f.state.dispatched, 0);
+    assert.equal(f.state.admissions, 0);
+    assert.equal(rows.filter(row => row.step === "sweep.head_contract_refresh.attempted").length, 1);
+    const next = await lightPassHeadContractRefresh([second, pr()], f.deps);
+    assert.equal(next.headContractRefreshFor?.(pr()), undefined);
+    assert.equal(next.headContractRefreshFor?.(second), f.deps.updateBranch);
+  });
+
+  test("a contract refresh refuses incomplete history and records intent before its effect", async t => {
+    const rows: Record<string, unknown>[] = [headContractHold()];
+    const f = fixture(rows);
+    f.state.revision = "contract-B";
+    const unread = { ...f.deps, readHeadContractRefreshHistory: async () => ({ complete: false, lines: [] }) };
+    assert.deepEqual(await lightPassHeadContractRefresh([pr()], unread), {});
+    await runSweep([pr()], unread);
+    assert.equal(f.state.refreshed, 0);
+    assert.equal(f.state.dispatched, 0);
+    await runSweep([pr()], { ...f.deps, appendLine: (_path, row) => {
+      if (row.step === "sweep.head_contract_refresh.attempted") throw new Error("intent write refused");
+      rows.push(row);
+    } });
+    assert.equal(f.state.refreshed, 0, "a missing durable intent authorizes no external effect");
+    assert.equal(f.state.dispatched, 0);
+    const unknownRows = [headContractHold(), { step: "sweep.head_contract_refresh.attempted", task_id: TASK,
+      pr_number: pr().prNumber, head_sha: HEAD, contract_revision: "contract-B" }];
+    const fresh = fixture(unknownRows);
+    fresh.state.revision = "contract-B";
+    await runSweep([pr()], fresh.deps);
+    assert.equal(fresh.state.refreshed, 0, "a prior intent without an outcome stays UNKNOWN across a restart");
+
+    const repo = gitRepo({ scope: t, kind: "contract-incomplete-live" });
+    const dir = join(repo.dir, "state");
+    mkdirSync(dir);
+    const ledger = join(dir, "ledger.ndjson");
+    writeFileSync(ledger, JSON.stringify(headContractHold()) + "\n" +
+      '{"task_id":"' + TASK + '","contract_revision":"contract-B",}\n' +
+      JSON.stringify({ step: "unrelated.completed" }) + "\n");
+    const real = fixture([headContractHold()]);
+    real.state.revision = "contract-B";
+    await runSweep([pr()], { ...real.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined });
+    assert.equal(real.state.refreshed, 0, "a torn intent followed by a valid row cannot authorize the effect");
+    assert.equal(real.state.dispatched, 0);
+  });
+
+  test("a selected contract refresh rechecks authority and history at the action boundary", async () => {
+    const rows = [headContractHold()];
+    const f = fixture(rows);
+    f.state.revision = "contract-B";
+    const capability = await lightPassHeadContractRefresh([pr()], f.deps);
+    f.state.revision = "contract-C";
+    await runSweep([pr()], { ...f.deps, updateBranch: undefined, ...capability });
+    assert.equal(f.state.refreshed, 0, "a capability selected under B cannot act on changed contract C");
+    f.state.revision = "contract-B";
+    const selected = await lightPassHeadContractRefresh([pr()], f.deps);
+    const unseenAttempt = { step: "sweep.head_contract_refresh.attempted", task_id: TASK,
+      pr_number: pr().prNumber, head_sha: HEAD, contract_revision: "contract-B" };
+    await runSweep([pr()], { ...f.deps, updateBranch: undefined, ...selected,
+      readHeadContractRefreshHistory: async () => ({ complete: true, lines: [unseenAttempt] }) });
+    assert.equal(f.state.refreshed, 0, "an intent arriving after selection still blocks the write");
+    assert.equal(f.state.dispatched, 0);
+  });
+
+  test("the real contract-refresh history finds an archived attempt and refuses unread history", async t => {
+    const repo = gitRepo({ scope: t, kind: "contract-refresh-history" });
+    const dir = join(repo.dir, "state");
+    mkdirSync(dir);
+    const ledger = join(dir, "ledger.ndjson");
+    const attempt = { step: "sweep.head_contract_refresh.attempted", task_id: TASK, pr_number: pr().prNumber,
+      head_sha: HEAD, contract_revision: "contract-B", ts: new Date(NOW).toISOString() };
+    writeFileSync(join(dir, "ledger.2026-10-23.ndjson"), JSON.stringify(attempt) + "\n");
+    writeFileSync(ledger, JSON.stringify(headContractHold()) + "\n");
+    const f = fixture([headContractHold()]);
+    f.state.revision = "contract-B";
+    await runSweep([pr()], { ...f.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined });
+    assert.equal(f.state.refreshed, 0, "the production archive reader, rather than a retained live row, finds the intent");
+    assert.equal(f.state.dispatched, 0);
+    const missing = join(dir, "missing", "ledger.ndjson");
+    await runSweep([pr()], { ...f.deps, ledgerPath: missing, readHeadContractRefreshHistory: undefined });
+    assert.equal(f.state.refreshed, 0, "an absent corpus is UNKNOWN rather than proof of no prior attempt");
+    assert.equal(f.state.dispatched, 0);
+  });
+
+  test("the real contract-refresh reader distinguishes empty evidence from an unattributed torn row", async t => {
+    const repo = gitRepo({ scope: t, kind: "contract-torn-history" });
+    const dir = join(repo.dir, "state");
+    mkdirSync(dir);
+    const ledger = join(dir, "ledger.ndjson");
+    const hold = JSON.stringify(headContractHold()) + "\n";
+    writeFileSync(ledger, hold);
+    const healthy = fixture([headContractHold()]);
+    healthy.state.revision = "contract-B";
+    await runSweep([pr()], { ...healthy.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined });
+    assert.equal(healthy.state.refreshed, 1, "the real readable corpus is a positive control for the history boundary");
+    for (const broken of ['{"unknown-truncated-record":\n', '{"unknown":"malformed",}\n']) {
+      writeFileSync(ledger, hold + broken + JSON.stringify({ step: "unrelated.completed" }) + "\n");
+      const damaged = fixture([headContractHold()]);
+      damaged.state.revision = "contract-B";
+      await runSweep([pr()], { ...damaged.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined });
+      assert.equal(damaged.state.refreshed, 0, "an unattributed damaged row cannot prove an empty attempt history");
+      assert.equal(damaged.state.dispatched, 0);
+    }
+  });
+
+  test("the light pass refuses non-object live rows through the real contract history reader", async t => {
+    const { dir } = ownedFixtureDir(t, "contract-non-object-history");
+    const ledger = join(dir, "ledger.ndjson");
+    const hold = JSON.stringify(headContractHold()) + "\n";
+    const f = fixture([headContractHold()]);
+    f.state.revision = "contract-B";
+    const deps = { ...f.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined };
+    writeFileSync(ledger, hold);
+    const healthy = await lightPassHeadContractRefresh([pr()], deps);
+    assert.equal(healthy.headContractRefreshFor?.(pr()), f.deps.updateBranch);
+    for (const row of [null, false, 17, "unattributed", []]) {
+      writeFileSync(ledger, hold + JSON.stringify(row) + "\n" +
+        JSON.stringify({ step: "unrelated.completed" }) + "\n");
+      assert.deepEqual(await lightPassHeadContractRefresh([pr()], deps), {}, JSON.stringify(row));
+    }
+    assert.equal(f.state.refreshed, 0);
+    assert.equal(f.state.dispatched, 0);
+    assert.equal(f.state.admissions, 0);
+  });
+
+  test("the light pass logs failed ledger reads and grants no contract refresh capability", async () => {
+    for (const failure of ["live", "history"]) {
+      const f = fixture([headContractHold()]);
+      f.state.revision = "contract-B";
+      const error = new Error(`${failure} ledger unavailable`);
+      const logged: unknown[] = [];
+      let historyReads = 0;
+      const capability = await lightPassHeadContractRefresh([pr()], {
+        ...f.deps,
+        readLedger: () => {
+          if (failure === "live") throw error;
+          return [headContractHold()];
+        },
+        readHeadContractRefreshHistory: async () => {
+          historyReads++;
+          throw error;
+        },
+        log: (step, data) => { logged.push({ step, data }); },
+      });
+      assert.deepEqual(capability, {});
+      assert.deepEqual(logged, [{ step: "sweep.head_contract_refresh.unreadable", data: { reason: String(error) } }]);
+      assert.equal(historyReads, failure === "history" ? 1 : 0);
+      assert.equal(f.state.refreshed, 0);
+      assert.equal(f.state.dispatched, 0);
+      assert.equal(f.state.admissions, 0);
+    }
+  });
+
+  test("the contract refresh reader preserves torn evidence and reuses exact rotation digests", async t => {
+    const repo = gitRepo({ scope: t, kind: "contract-history-digests" });
+    const dir = join(repo.dir, "state");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "ledger.ndjson"), "");
+    writeFileSync(join(dir, "ledger.2026-10-23.ndjson"), '{"unknown-truncated-record":\n');
+    let reads = 0;
+    const opts = { parseAll: true, slice: { holder: "contract-refresh-fixture", version: "1",
+      steps: ["sweep.head_contract_refresh.attempted"], project: (row: Record<string, unknown>) => ({ step: row.step }) },
+      readFile: async (path: string) => { reads++; return readFile(path); } };
+    const reader = sweepModule.createEscalationTriageHistoryReader(opts);
+    assert.equal((await reader(dir)).torn, 1);
+    assert.equal(reads, 1);
+    assert.equal((await reader(dir)).torn, 1);
+    assert.equal(reads, 1, "a repeated pass does not decompress the same archive again");
+    const restarted = sweepModule.createEscalationTriageHistoryReader(opts);
+    assert.equal((await restarted(dir)).torn, 1);
+    assert.equal(reads, 1, "a fresh reader consumes the exact durable digest");
+    assert.equal(restarted.lastLoad().digestHits, 1);
+  });
+
   test("a NEEDS_DESIGN hold takes main once when the task contract is amended under it", async () => {
     const rows: Record<string, unknown>[] = designRows("contract-A");
     const f = fixture(rows);

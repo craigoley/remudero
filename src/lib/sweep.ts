@@ -15,7 +15,7 @@ import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from ".
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -106,7 +106,7 @@ import {
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
-  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries,
+  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
   readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
@@ -4400,9 +4400,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T7735 — read once per pass by the refresh value test. A shape without a boolean `strict` is
     // unread (`undefined`), which keeps the pre-W1-T7735 refresh.
     readBranchProtectionStrict: () => {
-      const protection = ghJsonForBuild(["api", `repos/${owner}/${repo}/branches/main/protection/required_status_checks`]) as
-        { strict?: unknown } | null | undefined;
-      return typeof protection?.strict === "boolean" ? protection.strict : undefined;
+      const args = ["api", `repos/${owner}/${repo}/branches/main/protection/required_status_checks`];
+      const strict = (value: unknown): boolean | undefined => {
+        const protection = value as { strict?: unknown } | null | undefined;
+        return typeof protection?.strict === "boolean" ? protection.strict : undefined;
+      };
+      // Explicit synchronous fixtures keep their seam; production never blocks the loop here.
+      return deps.ghJsonImpl ? strict(ghJsonForBuild(args)) : readJsonImpl(args).then(strict);
     },
     // W1-T7735 — the LLM overlap judge spends only for a production entrypoint, the same flag the
     // progress judge reads; a fixture gets none, and ambiguous overlap reads `judge-unavailable`.
@@ -9183,6 +9187,82 @@ export const BASE_FIXED_REFRESH_STEP = "sweep.base_fixed.refresh";
 export const BASE_FIXED_INHERITED_STEP = "sweep.base_fixed.inherited";
 /** remudero-console #2035 — an escalated head whose task contract was amended on main took main once. */
 export const CONTRACT_AMENDED_REFRESH_STEP = "sweep.contract_amended.refresh";
+const HEAD_CONTRACT_REFRESH_ATTEMPT_STEP = "sweep.head_contract_refresh.attempted";
+let headContractRefreshInFlight = false;
+let headContractHistoryReader: EscalationTriageHistoryReader | undefined;
+
+function refusedHeadContract(lines: readonly Record<string, unknown>[], pr: OpenPrView) {
+  return lines.findLast(row => row.step === "fix.contract_hold" && row.kind === "open-escalation" &&
+    row.task_id === fixLedgerTaskIdFor(pr) && row.pr_url === pr.prUrl && row.head_sha === pr.headSha &&
+    typeof row.contract_revision === "string");
+}
+
+async function headContractRefreshHistory(deps: Pick<SweepDeps, "ledgerPath" | "readHeadContractRefreshHistory">) {
+  if (deps.readHeadContractRefreshHistory) return deps.readHeadContractRefreshHistory();
+  headContractHistoryReader ??= createEscalationTriageHistoryReader({ parseAll: true, slice: {
+    holder: "sweep.head-contract-refresh", version: "1",
+    steps: [HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, CONTRACT_AMENDED_REFRESH_STEP],
+    project: row => ({ step: row.step, task_id: row.task_id, pr_number: row.pr_number, head_sha: row.head_sha,
+      contract_revision: row.contract_revision, outcome: row.outcome }),
+  } });
+  const read = await headContractHistoryReader(dirname(deps.ledgerPath));
+  // The incremental step reader only parses live lines that mention a tracked step or have
+  // unfinished braces. An unattributed damaged row framed by braces can therefore disappear
+  // from its torn count. Absence authorizes an external write here, so validate every live row.
+  let liveComplete = false;
+  if (read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0) {
+    try {
+      liveComplete = true;
+      for await (const raw of ndjsonLines(fs.createReadStream(deps.ledgerPath))) {
+        if (!raw.trim()) continue;
+        const row: unknown = JSON.parse(raw);
+        if (row === null || typeof row !== "object" || Array.isArray(row)) {
+          liveComplete = false;
+          break;
+        }
+      }
+    } catch (error) {
+      return { complete: false, lines: read.rows, reason: `live ledger validation failed: ${String(error)}` };
+    }
+  }
+  return { complete: liveComplete, lines: read.rows };
+}
+
+function headContractRefreshAttempted(lines: readonly Record<string, unknown>[], pr: OpenPrView, revision: string) {
+  return lines.some(row => [HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, CONTRACT_AMENDED_REFRESH_STEP].includes(String(row.step)) &&
+    row.pr_number === pr.prNumber && row.task_id === fixLedgerTaskIdFor(pr) &&
+    row.head_sha === pr.headSha && row.contract_revision === revision);
+}
+
+/** One selected capability over the whole light snapshot; the generic fanout update port stays closed. */
+export async function lightPassHeadContractRefresh(
+  prs: readonly OpenPrView[],
+  deps: Pick<SweepDeps, "ledgerPath" | "readLedger" | "readHeadContractRefreshHistory" | "readTaskContractRevision" | "updateBranch" | "log">,
+): Promise<Pick<SweepDeps, "headContractRefreshFor" | "readHeadContractRefreshHistory">> {
+  if (!deps.updateBranch || headContractRefreshInFlight) return {};
+  try {
+    const lines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath); // ledger-read-intent: live — candidate holds; attempts use the strict union below.
+    const candidates = prs.flatMap(pr => {
+      const hold = refusedHeadContract(lines, pr);
+      const revision = hold && pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+      return hold && revision !== undefined && revision !== hold.contract_revision ? [{ pr, revision }] : [];
+    });
+    if (candidates.length === 0) return {};
+    const history = await headContractRefreshHistory(deps);
+    if (!history.complete) return {};
+    const selected = candidates.filter(({ pr, revision }) => !headContractRefreshAttempted(history.lines, pr, revision))
+      .sort((a, b) => a.pr.prNumber - b.pr.prNumber)[0];
+    return selected === undefined ? {} : {
+      readHeadContractRefreshHistory: deps.readHeadContractRefreshHistory,
+      headContractRefreshFor: pr => pr.prNumber === selected.pr.prNumber && pr.headSha === selected.pr.headSha &&
+        pr.taskId !== undefined && deps.readTaskContractRevision?.(pr.taskId) === selected.revision
+        ? deps.updateBranch : undefined,
+    };
+  } catch (error) {
+    deps.log?.("sweep.head_contract_refresh.unreadable", { reason: String(error) });
+    return {};
+  }
+}
 
 /** W1-T6405 — the failing test files of a red head that is BEHIND main and whose every failing test file
  *  a recorded probe found passing at main's CURRENT tip (`clear`, never partial or unrunnable); else `undefined`.
@@ -13364,6 +13444,8 @@ export interface SweepDeps {
    *  holds on its input key alone, as before. */
   readTaskContractRevision?: (taskId: string) => string | undefined;
   readTaskSemanticRevision?: (taskId: string) => string | undefined;
+  headContractRefreshFor?: (pr: OpenPrView) => SweepDeps["updateBranch"];
+  readHeadContractRefreshHistory?: () => Promise<{ complete: boolean; lines: readonly Record<string, unknown>[] }>;
   headRehome?: HeadRehomePorts;
   /** The already-listed peers retained when the light pass reconciles one PR at a time. */
   stuckStagePeers?: readonly OpenPrView[];
@@ -16723,6 +16805,7 @@ export async function runSweep(
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   deps.markPrelude?.("armed_body_guard");
   const ledgerLines = readLedger(deps.ledgerPath);
+  let contractHoldRefreshSpent = false;
   // An unreadable contract is an unreadable witness (undefined → judged afresh, never reused); it must not
   // abort the PR's disposition, which still owes the fix rung its dispatch.
   const readWitnessContractRevision = (taskId: string): string | undefined => {
@@ -19477,6 +19560,7 @@ export async function runSweep(
     const refreshAmendedContract = async (
       latched: readonly Record<string, unknown>[], inputKey?: string, observedRevision?: string,
       semantic?: { standingOn: string; observed: string },
+      updateBranch = deps.updateBranch,
     ): Promise<string | undefined> => {
       const current = pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
       let currentSemantic: string | undefined, semanticReadError: { reason: string } | undefined;
@@ -19510,12 +19594,12 @@ export async function runSweep(
           row.contract_revision === current && row.outcome !== "updated" && row.outcome !== "head-moved")) {
         return "amendment refresh failed; awaiting new evidence/operator answer — no repeat update or fix admitted";
       }
-      if (!deps.updateBranch) {
+      if (!updateBranch) {
         return "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
       }
       let outcome: string;
       recordForcedRefresh(deps, pr, "contract-amended"); // W1-T7735
-      try { outcome = await deps.updateBranch(pr); }
+      try { outcome = await updateBranch(pr); }
       catch (error) { outcome = `error: ${String(error)}`; }
       appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
         step: CONTRACT_AMENDED_REFRESH_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
@@ -19819,6 +19903,38 @@ export async function runSweep(
                 const amended = await refreshAmendedContract([{ progress_contract_revision: terminalDesignHold.revision }], undefined, terminalDesignHold.observedRevision, terminalDesignHold.semantic);
                 if (amended === undefined) acted = false;
                 standDownReason = amended ?? "task contract changed during design-handoff observation — no fix admitted";
+                break;
+              }
+              const headContractHold = refusedHeadContract(ledgerLines, pr);
+              const currentHoldContract = headContractHold && pr.taskId !== undefined
+                ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+              if (headContractHold && currentHoldContract !== undefined && currentHoldContract !== headContractHold.contract_revision) {
+                acted = false;
+                spent = false;
+                if (contractHoldRefreshSpent || headContractRefreshInFlight) {
+                  standDownReason = "another head-contract amendment owns the refresh";
+                  break;
+                }
+                const refresh = deps.updateBranch ?? deps.headContractRefreshFor?.(pr);
+                if (!refresh) {
+                  standDownReason = "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
+                  break;
+                }
+                headContractRefreshInFlight = true;
+                try {
+                  const history = await headContractRefreshHistory(deps);
+                  if (!history.complete || headContractRefreshAttempted([...history.lines, ...ledgerLines], pr, currentHoldContract)) {
+                    standDownReason = history.complete ? "head-contract amendment refresh already attempted — awaiting new evidence"
+                      : "head-contract refresh history unreadable — no refresh or fix admitted";
+                    break;
+                  }
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: fixLedgerTaskIdFor(pr),
+                    step: HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
+                    contract_revision: currentHoldContract });
+                  contractHoldRefreshSpent = true;
+                  standDownReason = await refreshAmendedContract([{ progress_contract_revision: headContractHold.contract_revision }],
+                    undefined, currentHoldContract, undefined, refresh) ?? "head contract changed during amendment observation — no fix admitted";
+                } finally { headContractRefreshInFlight = false; }
                 break;
               }
               const scopeHold = scopeEscalationStandDown(ledgerLines, pr);
@@ -21832,12 +21948,61 @@ function ledgerDependabotDeferrals(
 
 let lightPassReadyRefreshInFlight = false;
 
+/** Wall phases and synchronous execution attributed to this pass's async context, excluding sibling work. */
+export class LightPassPreReviewTiming {
+  readonly phaseMs: Record<string, number> = Object.fromEntries([
+    "open_pr_views", "review_eligibility", "main_tip", "compare", "ready_ledger", "ready_actions", "ready_value_gate",
+    "ready_update", "refresh_admission", "armed_ratchet_rejudge",
+  ].map((phase) => [phase, 0]));
+  readonly compareReads: Array<Record<string, unknown>> = [];
+  private readonly scope = new AsyncLocalStorage<boolean>();
+  private depth = 0;
+  private started = 0;
+  private syncMs = 0;
+  private readonly hook = createHook({
+    before: () => { if (this.scope.getStore()) this.enter(); },
+    after: () => { if (this.scope.getStore()) this.leave(); },
+  });
+
+  constructor(readonly clock: Pick<Clock, "now"> = clockFromMillisFn(() => performance.now())) { this.hook.enable(); }
+
+  private enter(): void { if (this.depth++ === 0) this.started = performance.now(); }
+  private leave(): void { if (--this.depth === 0) this.syncMs += performance.now() - this.started; }
+
+  run<T>(action: () => T): T {
+    this.enter();
+    try { return this.scope.run(true, action); }
+    finally { this.leave(); }
+  }
+
+  sync<T>(phase: string, action: () => T): T {
+    const start = this.clock.now();
+    try { return action(); }
+    finally { this.phaseMs[phase] = (this.phaseMs[phase] ?? 0) + this.clock.now() - start; }
+  }
+
+  async measure<T>(phase: string, action: () => T | Promise<T>): Promise<T> {
+    const start = this.clock.now();
+    try { return await action(); }
+    finally { this.phaseMs[phase] = (this.phaseMs[phase] ?? 0) + this.clock.now() - start; }
+  }
+
+  finish(): Record<string, unknown> {
+    if (this.depth > 0) this.syncMs += performance.now() - this.started;
+    this.hook.disable();
+    this.scope.disable();
+    return { phase_ms: { ...this.phaseMs }, compare_count: this.compareReads.filter((r) => !r.cache_hit).length,
+      compare_reads: [...this.compareReads], sync_on_loop_ms: this.syncMs };
+  }
+}
+
 export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-overlap refresh, once per light pass
   openPrs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "mergeQueue" | "readActionsStatusSummary" |
     "readPrFileSource" | "behindMainByPr" | "baseChangedFilesByPr" | "inFlightTaskIds" | "now" | "readLedger" |
     "appendLine" | "dryRun" | "readBranchProtectionStrict" | "refreshJudge" | "log">,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  timing?: LightPassPreReviewTiming,
 ): Promise<number | undefined> {
   const updateBranch = deps.updateBranch;
   if (deps.dryRun || !updateBranch || deps.baseChangedFilesByPr === undefined || lightPassReadyRefreshInFlight) return undefined;
@@ -21845,7 +22010,8 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
   try {
     const appendLine = deps.appendLine ?? appendLedger;
     const now = clockFromMillisFn(deps.now).now();
-    const ledgerLines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+    const readLedger = () => (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+    const ledgerLines = timing ? timing.sync("ready_ledger", readLedger) : readLedger();
     const spentHeads = new Set<string>();
     for (const l of ledgerLines) {
       if (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") {
@@ -21860,8 +22026,9 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     let candidates = select(facts);
     if (candidates.length === 0) return undefined;
     if (deps.readActionsStatusSummary !== undefined) {
-      const incident = await Promise.resolve().then(() => deps.readActionsStatusSummary!())
+      const readActions = () => Promise.resolve().then(() => deps.readActionsStatusSummary!())
         .then((s) => classifyActionsIncident(s), (error) => unreadableActionsIncident(error));
+      const incident = await (timing ? timing.measure("ready_actions", readActions) : readActions());
       if (actionsIncidentHoldDecision(incident, undefined, now) === "hold") return undefined;
     }
     const mergeQueue = deps.mergeQueue;
@@ -21887,7 +22054,8 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     const dependabotDeferred = candidates.filter((c) => byNumber.get(c.prNumber)!.isDependabot === true);
     ledgerDependabotDeferrals(dependabotDeferred, ledgerLines, (row) => appendLine(deps.ledgerPath, row), deps.runId, "light_pass");
     // W1-T7735: the same value test as the full sweep's slot, built once for this light pass.
-    const valueGate = await buildRefreshValueGate(deps, openPrs, ledgerLines, now, appendLine);
+    const readValueGate = () => buildRefreshValueGate(deps, openPrs, ledgerLines, now, appendLine);
+    const valueGate = await (timing ? timing.measure("ready_value_gate", readValueGate) : readValueGate());
     const eligible = candidates.filter((c) => {
       const view = byNumber.get(c.prNumber)!;
       const runTaskId = taskIdFromRunBranch(view.headRefName);
@@ -21896,7 +22064,9 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     });
     const winner = oldestActivityFirst(eligible.map((c) => byNumber.get(c.prNumber)!), now);
     const target = eligible.find((c) => c.prNumber === winner?.prNumber);
-    if (!target || !(await valueGate.settle(target, byNumber.get(target.prNumber)!, "ready-light"))) return undefined;
+    if (!target) return undefined;
+    const settleValue = () => valueGate.settle(target, byNumber.get(target.prNumber)!, "ready-light");
+    if (!(await (timing ? timing.measure("ready_value_gate", settleValue) : settleValue()))) return undefined;
     const row = {
       run_id: deps.runId, task_id: target.taskId ?? "SWEEP", pr_number: target.prNumber, pr_url: target.prUrl,
       head_sha: target.headSha, ...(target.behindBy === undefined ? {} : { behind_by: target.behindBy }),
@@ -21906,7 +22076,9 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     };
     appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.attempted" });
     try {
-      appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${await updateBranch(target)}` });
+      const update = () => updateBranch(target);
+      const outcome = await (timing ? timing.measure("ready_update", update) : update());
+      appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${outcome}` });
     } catch (e) {
       appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.error", error: String((e as Error)?.message ?? e) });
     }
@@ -22101,6 +22273,35 @@ export function reviewAdmissionBound(width: number): { bound: number; inFlight: 
   return { bound: Math.max(0, width - inFlight), inFlight };
 }
 
+/** Publish eligibility from the same selection inputs the light batch uses, before ready-only reads. */
+export function observeLightPassReviewEligibility(
+  openPrs: OpenPrView[], deps: SweepDeps, policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): ReadonlyArray<Record<string, unknown>> {
+  if (openPrs.length === 0 || deps.dryRun) return [];
+  const now = deps.now ? deps.now() : systemClock.now();
+  const lines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+  const retryViews = openPrs.map(pr => promiseHarvestRetryView(pr, lines));
+  const prior = priorActionsFromLedger(lines, retryViews);
+  const views = retryViews.map(pr => completedRefusalRetryView(pr, prior));
+  const freshnessBackoffs = new Set<string>();
+  for (const pr of views) {
+    const key = reviewOutcomeKeyForPr(pr);
+    const refusal = prior.reviewFreshnessRefusals.get(key);
+    const probe = refusal?.probe?.loadedCodeSha === deps.reviewerCodeRecovery?.loadedCodeSha
+      ? refusal?.probe : undefined;
+    const probeDue = refusal?.freshness === "unreadable" && deps.reviewerCodeRecovery?.loadedCodeSha &&
+      refusal.attemptedAt !== undefined && now - (probe?.attemptedAt ?? refusal.attemptedAt) >=
+        Math.min(probe?.backoffMinutes ?? UNREADABLE_REVIEWER_BACKOFF_MINUTES, policy.pendingCeilingMinutes) * 60_000;
+    if (!probeDue && reviewerCodeFreshnessBackoffReason(prior.reviewFreshnessRefusals,
+      key, policy, now, deps.reviewerCodeRecovery) !== undefined) freshnessBackoffs.add(key);
+  }
+  observeReviewEligibility(views, deps, policy, now, lines, {
+    delivered: prior.reviewDelivered, refused: prior.reviewRefused,
+    retryableThrows: prior.reviewRetryableThrows, freshnessBackoffs,
+  }, "light");
+  return lines;
+}
+
 export async function runSweepLightPass(
   openPrs: OpenPrView[],
   deps: SweepDeps,
@@ -22202,8 +22403,7 @@ export async function runSweepLightPass(
   let refillAgain = false;
   // Assigned once the fan-out's own controller exists.
   let refillFreedLanes: () => Promise<void> = async () => {};
-  // Only a lane freed AFTER this pass returns refills: one freed during the fan-out is re-derived by
-  // the next pass, so a pass's own rows always describe the admission it actually made.
+  // Releases during fan-out are picked up once refill setup completes; later releases refill directly.
   const onOwnLaneFreed = (): void => {
     if (refillArmed) void refillFreedLanes();
   };
@@ -22501,6 +22701,8 @@ export async function runSweepLightPass(
   // Let completed effects release their capacity before a caller starts the next pass.
   if (detachedNumbers.size > 0) await new Promise<void>((resolve) => setImmediate(resolve));
   refillArmed = true;
+  // W1-T9904: a review may have settled before its release callback could reach this controller.
+  if (unsettledSpawning < spawning.length) setImmediate(() => { void refillFreedLanes(); });
   return summaries;
   } finally {
     releasePlanMerge();
@@ -24462,14 +24664,16 @@ export interface EscalationTriageHistoryLoad { rotations: number; digestHits: nu
  * {@link ESCALATION_TRIAGE_HISTORY_SLICE}. Each holder keeps its own durable digest and incremental union.
  */
 export function createEscalationTriageHistoryReader(
-  io: { fs?: LedgerGrepFsDeps; readFile?: (path: string) => Promise<Buffer>; slice?: EscalationTriageSlice } = {},
+  io: { fs?: LedgerGrepFsDeps; readFile?: (path: string) => Promise<Buffer>; slice?: EscalationTriageSlice;
+    /** Preserve unattributed torn rows when absence of an attempt authorizes a write. */
+    parseAll?: boolean } = {},
 ): EscalationTriageHistoryReader {
   const fsDeps = io.fs ?? realLedgerFs;
   const stat = fsDeps.statSync ?? realLedgerFs.statSync;
   const slice = io.slice ?? ESCALATION_TRIAGE_HISTORY_SLICE;
   const steps = [...slice.steps];
   const project = slice.project ?? ((row: Record<string, unknown>) => row);
-  const identity = { holder: slice.holder, reducerVersion: slice.version ?? "1", project };
+  const identity = { holder: slice.holder, reducerVersion: `${slice.version ?? "1"}${io.parseAll ? "-all-lines" : ""}`, project };
   const union = createIncrementalLedgerUnion(identity, fsDeps);
   // The digest version the union's own rotation hook reads (see createIncrementalLedgerUnion).
   const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
@@ -24505,7 +24709,7 @@ export function createEscalationTriageHistoryReader(
     }
     if (fresh.length > 0) {
       const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.includes(row.step)).map(project), {
-        holder: identity.holder, durableDigest, statKey, pattern, ...(io.readFile ? { readFile: io.readFile } : {}),
+        holder: identity.holder, durableDigest, statKey, ...(io.parseAll ? {} : { pattern }), ...(io.readFile ? { readFile: io.readFile } : {}),
       });
       await memo.load(fresh);
       const { digestHits = 0, digestMisses = 0 } = memo.retention();

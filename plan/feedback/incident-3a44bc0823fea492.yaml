@@ -1,0 +1,28 @@
+id: incident-3a44bc0823fea492
+ts: 2026-10-24T19:58:48.347Z
+raw: >-
+  Incident 3a44bc0823fe: flow idle-capacity:memory
+
+  First seen: 2026-10-24T19:58:46.975Z
+
+  Last seen: 2026-10-24T19:58:46.975Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - instance=core hold=governor:_memory setter=unrecorded since=2026-10-24T19:40:41.838Z since=2026-10-24T19:40:41.838Z slot_minutes=34.76 dispatchable=3 cause=memory reason="governor: memory" — idle lane slots held by a named hold beyond the cause's own history
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#3a44bc0823fea4928dec1bbdd8461310245ad5e5276bd1c7f67cb53db38d4108
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

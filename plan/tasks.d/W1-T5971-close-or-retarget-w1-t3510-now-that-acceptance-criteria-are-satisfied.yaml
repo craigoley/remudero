@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 4
+  # refusal-amendment (W1-T5971, run W1-T5971-1792906388520, 2026-10-25T06:30:42.534Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: The earlier REFUSED block for criterion 1 still stands; this pass changed nothing about the W1-T5971 premise.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   # backlog gardener: band=4 evidence=96846d7c305a5453
   attempts: 0
