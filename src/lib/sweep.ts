@@ -11,7 +11,8 @@ import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehome
 import { argmaxTypedJudgmentOption, runTypedJudgment } from "./typed-judgment.js";
 import { diffCoverageTargets } from "./diff-coverage-targets.js";
 import { execFileSync } from "node:child_process";
-import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from "./worktree-git.js";
+import { HOST_GIT_CONFIG, hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError } from "./worktree-git.js";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -30,6 +31,7 @@ import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import { mintNextTaskId } from "./task-id.js";
 import { gatedRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } from "./task-id-reservation.js";
 import { basename, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
@@ -87,7 +89,7 @@ import {
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
-import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
+import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync, type GhJsonReadOptions } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
@@ -188,6 +190,9 @@ import {
   judgeReviewAsync,
   parseAcceptanceBlock,
   parseWhitelistedProof,
+  proofChildEnv,
+  proofSandboxArgv,
+  proofSandboxStatus,
   postedArmFactsFromLedger,
   REVIEW_CONTEXT,
   reviewLedgerKeyFor,
@@ -195,6 +200,7 @@ import {
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
 } from "./review.js";
+import { withTempDir } from "./tmp.js";
 import type {
   ArmDecision,
   AutomergeHold,
@@ -227,8 +233,11 @@ import {
   listRegisteredWorktrees,
   renderWorkerSettings,
   STDERR_EXCERPT_CAP,
+  excludeNodeModulesFromGit,
+  provisionWorktreeNodeModules,
   worktreeAdd,
   worktreeRemove,
+  worktreeRemoveAsync,
   worktreesDir,
   type QuestionEntry,
   type SpawnWorkerArgs,
@@ -1903,6 +1912,226 @@ export function rebaseDirtyFleetBranchViaGit(
   }
 }
 
+export interface ConflictRegenerationOutcome {
+  outcome: "pushed" | "fell-through" | "lease-mismatch" | "error";
+  paths: Array<{ path: string; action: string }>;
+  newHeadSha?: string;
+  reason?: string;
+  cleanupError?: string;
+}
+
+const inFlightConflictRegenerations = new Set<string>();
+
+/** W1-T9578: git's blob id for `bytes`, in the object format `oid` is written in. */
+function gitBlobId(bytes: Buffer, oid: string): string {
+  return createHash(oid.length === 64 ? "sha256" : "sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+}
+
+/** W1-T9578: after the sandboxed generators exit, compare their disposable copy with the merged tree the
+ *  parent cut it from, by lstat and blob id, with NO Git in the copy (its repository is the generator's to
+ *  rewrite). Its `.git` and the dependency links provisioned beside tracked paths are not compared. Returns
+ *  each permitted path's bytes, a regular file reached only through real directories; throws, naming every
+ *  path, when anything else changed, appeared or vanished, or a permitted path is missing or not a file. */
+export function conflictGeneratorOutputs(copy: string, manifest: ReadonlyMap<string, { mode: string; oid: string }>,
+  permitted: ReadonlySet<string>): Map<string, Buffer> {
+  const trackedDirs = new Set<string>();
+  for (const path of manifest.keys()) {
+    for (let at = path.indexOf("/"); at >= 0; at = path.indexOf("/", at + 1)) trackedDirs.add(path.slice(0, at));
+  }
+  const outputs = new Map<string, Buffer>(), refused = new Set<string>(), seen = new Set<string>();
+  const walk = (dir: string, prefix: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const rel = `${prefix}${entry.name}`, abs = join(dir, entry.name), tracked = manifest.get(rel);
+      if (rel === ".git" || (entry.name === "node_modules" && !trackedDirs.has(rel) && tracked === undefined)) continue;
+      if (entry.isDirectory()) {
+        if (tracked !== undefined && tracked.mode !== "160000") refused.add(rel);
+        if (tracked?.mode !== "160000") walk(abs, `${rel}/`);
+        continue;
+      }
+      seen.add(rel);
+      if (permitted.has(rel)) {
+        if (!entry.isFile()) { refused.add(rel); continue; }
+        const fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+        try { outputs.set(rel, readFileSync(fd)); } finally { fs.closeSync(fd); }
+        continue;
+      }
+      const same = tracked !== undefined && (entry.isSymbolicLink() ? tracked.mode === "120000" &&
+          gitBlobId(Buffer.from(fs.readlinkSync(abs, { encoding: "buffer" })), tracked.oid) === tracked.oid
+        : entry.isFile() && (tracked.mode === "100755") === ((fs.lstatSync(abs).mode & 0o100) !== 0) &&
+          tracked.mode !== "120000" && gitBlobId(readFileSync(abs), tracked.oid) === tracked.oid);
+      if (!same) refused.add(rel);
+    }
+  };
+  walk(copy, "");
+  for (const [path, { mode }] of manifest) if (mode !== "160000" && !seen.has(path)) refused.add(path);
+  for (const path of permitted) if (!outputs.has(path)) refused.add(path);
+  if (refused.size > 0) {
+    throw new Error(`conflict generator changed paths outside its registered outputs: ${[...refused].sort().join(", ")}`);
+  }
+  return outputs;
+}
+
+/** W1-T9578: write a copied-back artifact over its tracked path, never through a link. */
+function writeRegisteredArtifact(worktree: string, path: string, bytes: Buffer): void {
+  let dir = worktree;
+  for (const part of path.split("/").slice(0, -1)) {
+    dir = join(dir, part);
+    if (!fs.lstatSync(dir).isDirectory()) throw new Error(`refusing to write ${path}: ${part} is not a directory`);
+  }
+  const fd = fs.openSync(join(worktree, path), fs.constants.O_WRONLY | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW);
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw new Error(`refusing to write ${path}: not a regular file`);
+    writeFileSync(fd, bytes);
+  } finally { fs.closeSync(fd); }
+}
+
+export async function regenerateConflictViaGit(
+  repoDir: string,
+  worktreePath: string,
+  pr: Pick<OpenPrView, "prNumber" | "headRefName" | "headSha" | "taskId">,
+  mainSha: string,
+  deps: Pick<BuildSweepEffectsDeps, "worktreeRemoveImpl"> & {
+    git?: (cwd: string, args: readonly string[]) => string | Promise<string>;
+  } = {},
+): Promise<ConflictRegenerationOutcome> {
+  const run = async (cwd: string, args: readonly string[]) => {
+    if (deps.git) return deps.git(cwd, args);
+    return hostWorktreeGitAsync(cwd, args, { maxBuffer: 1 << 24 });
+  };
+  const paths: ConflictRegenerationOutcome["paths"] = [];
+  let created = false;
+  const result = await (async (): Promise<ConflictRegenerationOutcome> => {
+    try {
+      if (!pr.taskId || !fixHeadAcceptable(pr.headRefName, pr.taskId, false)) {
+        return { outcome: "fell-through", paths, reason: "head is not this task's run branch" };
+      }
+      const ref = `refs/heads/${pr.headRefName}`;
+      const remoteRef = `refs/remotes/origin/${pr.headRefName}`;
+      await run(repoDir, ["fetch", "--no-tags", "--quiet", "origin",
+        "+refs/heads/main:refs/remotes/origin/main", `+${ref}:${remoteRef}`]);
+      if ((await run(repoDir, ["rev-parse", remoteRef])).trim() !== pr.headSha ||
+          (await run(repoDir, ["rev-parse", "origin/main"])).trim() !== mainSha) {
+        return { outcome: "lease-mismatch", paths, reason: "head or main moved before conflict regeneration" };
+      }
+      mkdirSync(dirname(worktreePath), { recursive: true });
+      await run(repoDir, ["worktree", "add", "--detach", worktreePath, pr.headSha]);
+      created = true;
+      let mergeError: string | undefined;
+      try { await run(worktreePath, ["merge", "--no-edit", "--no-commit", mainSha]); }
+      catch (error) {
+        const reason = spawnFailureText(error);
+        mergeError = reason;
+      }
+      const unmerged = [...new Set((await run(worktreePath, ["ls-files", "-u", "-z"])).split("\0")
+        .filter(Boolean).map(entry => entry.slice(entry.indexOf("\t") + 1)))];
+      if (unmerged.length === 0) {
+        return { outcome: "error", paths, reason: mergeError === undefined
+          ? "probe conflict no longer has unmerged paths" : mergeError };
+      }
+      const outside = unmerged.filter(path => !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path));
+      if (outside.length > 0) {
+        await run(worktreePath, ["merge", "--abort"]);
+        return { outcome: "fell-through", paths, reason: `unmerged paths outside the registry: ${outside.join(", ")}` };
+      }
+      for (const path of unmerged) {
+        const present = (await run(worktreePath, ["ls-tree", "-r", "--name-only", "-z", mainSha, "--", path])).length > 0;
+        if (!present) {
+          await run(worktreePath, ["rm", "--", path]);
+          paths.push({ path, action: "deleted-on-main" });
+        } else {
+          await run(worktreePath, ["checkout", mainSha, "--", path]);
+          paths.push({ path, action: REGENERABLE_ARTIFACT_GENERATORS[path]! });
+        }
+      }
+      const generated = paths.filter(({ action }) => action !== "deleted-on-main");
+      if (generated.length > 0) {
+        // The generator never touches this worktree or its Git dirs: it runs in a disposable copy with a
+        // private repository, and only the registered paths' bytes come back, read here by the parent.
+        // Main's tree as a parentless root, then the merged tree on it, give that repository an origin/main
+        // and a HEAD whose fetch carries two trees, never main's history.
+        const tree = (await run(worktreePath, ["write-tree"])).trim();
+        const base = (await run(worktreePath, ["commit-tree", `${mainSha}^{tree}`, "-m", "conflict generator base"])).trim();
+        const input = (await run(worktreePath, ["commit-tree", tree, "-p", base, "-m", "conflict generator input"])).trim();
+        const manifest = new Map((await run(worktreePath, ["ls-tree", "-r", "-z", "--full-tree", tree])).split("\0")
+          .filter(Boolean).map(record => {
+            const tab = record.indexOf("\t"), [mode, , oid] = record.slice(0, tab).split(" ");
+            return [record.slice(tab + 1), { mode: mode!, oid: oid! }] as const;
+          }));
+        const outputs = await withTempDir("conflict-generator", async (scratch) => {
+          const copy = join(scratch, "tree"), home = join(scratch, "home");
+          mkdirSync(join(copy, ".git"), { recursive: true });
+          mkdirSync(home);
+          await run(copy, ["init", "--quiet"]);
+          await run(copy, ["fetch", "--quiet", "--no-tags", pathToFileURL(realpathSync(repoDir)).href, input]);
+          await run(copy, ["update-ref", "refs/remotes/origin/main", base]);
+          await run(copy, ["checkout", "--quiet", "--detach", input]);
+          const commonDir = (await run(copy, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+          excludeNodeModulesFromGit(copy, { commonDir: () => commonDir });
+          await provisionWorktreeNodeModules(repoDir, copy);
+          const status = proofSandboxStatus();
+          if (status.mode !== "bwrap") throw new Error(`conflict generator sandbox unavailable: ${status.reason}`);
+          const sandbox = proofSandboxArgv({ cwd: copy, home });
+          for (const { action } of generated) {
+            await execFileLoopBounded(status.binary, [...sandbox, "npm", "run", "--silent", action], {
+              cwd: copy, env: { ...proofChildEnv(home), TMPDIR: "/tmp" }, encoding: "utf8",
+            });
+          }
+          return conflictGeneratorOutputs(copy, manifest, new Set(generated.map(({ path }) => path)));
+        });
+        for (const [path, bytes] of outputs) {
+          writeRegisteredArtifact(worktreePath, path, bytes);
+          await run(worktreePath, ["add", "--", path]);
+        }
+        const staged = (await run(worktreePath, ["diff-index", "--cached", "--name-only", "-z", tree, "--"]))
+          .split("\0").filter(Boolean).filter(path => !outputs.has(path));
+        if (staged.length > 0) {
+          return { outcome: "error", paths, reason: `generator copy-back staged unregistered paths: ${staged.join(", ")}` };
+        }
+      }
+      const unexpected = (await run(worktreePath, ["diff", "--name-only", "-z"])).split("\0").filter(Boolean);
+      if (unexpected.length > 0) {
+        return { outcome: "error", paths, reason: `generator left unstaged edits: ${unexpected.join(", ")}` };
+      }
+      await run(worktreePath, ["commit", "-m", "fix(sweep): regenerate merge-conflicted artifacts",
+        "-m", `Remudero-Task: ${pr.taskId}`]);
+      const newHeadSha = (await run(worktreePath, ["rev-parse", "HEAD"])).trim();
+      const observed = new Map((await run(worktreePath, ["ls-remote", "origin", ref, "refs/heads/main"]))
+        .trim().split("\n").map(line => { const [sha, name] = line.split(/\s+/); return [name, sha]; }));
+      if (observed.get(ref) !== pr.headSha || observed.get("refs/heads/main") !== mainSha) {
+        return { outcome: "lease-mismatch", paths, reason: "head or main moved during conflict regeneration" };
+      }
+      await run(worktreePath, ["merge-base", "--is-ancestor", pr.headSha, newHeadSha]);
+      assertLiveWriteAllowed("git-push", `regenerating conflicts on ${pr.headRefName}`);
+      try {
+        const lease = `--force-with-lease=${ref}:${pr.headSha}`;
+        if (deps.git) await run(worktreePath, ["push", lease, "origin", `HEAD:${ref}`]);
+        else await gitPushRunBranchAsync(worktreePath, {
+          destination: pr.headRefName, expectedHeadSha: newHeadSha,
+          exec: (file, args, opts) => worktreePushExecAsync(worktreePath)(file,
+            [...args.slice(0, 3), lease, ...args.slice(3)], opts),
+        });
+      }
+      catch (error) { return { outcome: "lease-mismatch", paths, reason: spawnFailureText(error) }; }
+      const pushed = (await run(worktreePath, ["ls-remote", "origin", ref])).trim().split(/\s+/)[0];
+      return pushed === newHeadSha ? { outcome: "pushed", paths, newHeadSha }
+        : { outcome: "lease-mismatch", paths, reason: `remote head after push is ${pushed}, expected ${newHeadSha}` };
+    } catch (error) {
+      return { outcome: "error", paths, reason: capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP) };
+    }
+  })();
+  if (created) {
+    try {
+      if (deps.worktreeRemoveImpl) deps.worktreeRemoveImpl(repoDir, worktreePath);
+      else await worktreeRemoveAsync(repoDir, worktreePath);
+    }
+    catch (error) {
+      const reason = spawnFailureText(error);
+      result.cleanupError = reason;
+    }
+  }
+  return result;
+}
+
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
 const settledMutationVerdictArtifacts = new Set<number>();
 const settledFoldDebtArtifacts = new Set<number>(); // W1-T7853, the same per-process settle
@@ -1985,6 +2214,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "repairMissingTaskTrailer",
   "repairMetadata",
   "rebaseDirtyFleetBranch",
+  "regenerateConflict",
   // W1-T3618: the reviewer-code freshness reading, hoisted in FRONT of reviewCommand so a stale
   // daemon never pays for a review it cannot publish. It is an effect, not a plain value, because
   // buildSweepEffects caches the read once per sweep cycle rather than once per PR.
@@ -2142,6 +2372,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "releaseStaleRed"
   | "releaseBaseCausedStandDown"
   | "rebaseDirtyFleetBranch"
+  | "regenerateConflict"
   | "selectAdaptiveReviewWidth"
   | "repairRecordableRatchet"
   | "repairMissingTaskTrailer"
@@ -4545,6 +4776,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             pr,
             { worktreeRemoveImpl: worktreeRemoveForBuild },
           ),
+
+    regenerateConflict: (pr, mainSha) => regenerateConflictViaGit(repoDir,
+      join(worktreesDir(config), `conflict-regenerate-${pr.prNumber}-${nowMsImpl()}`), pr, mainSha,
+      { worktreeRemoveImpl: worktreeRemoveForBuild }),
 
     // W1-T905 — "repair the instance, FILE THE CLASS". `runSweep` calls this AT MOST ONCE per
     // due surface, best-effort — see `SweepDeps.captureRepairFeedback`'s own doc.
@@ -13804,6 +14039,7 @@ export interface SweepDeps {
    *  through to the existing escalation, preserving human visibility and never clobbering a
    *  branch another writer advanced. */
   rebaseDirtyFleetBranch?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
+  regenerateConflict?: (pr: OpenPrView, mainSha: string) => ConflictRegenerationOutcome | Promise<ConflictRegenerationOutcome>;
   /** W1-T528: task ids with a LIVE in-flight run right now, consulted by
    *  {@link selectUpdateBranchTarget} to skip a head a live worker is still pushing to. Omitted
    *  means an empty set, exactly as if every PR's worker had already finished. */
@@ -20940,6 +21176,49 @@ export async function runSweep(
                 acted = false;
                 standDownReason = terminal;
                 break;
+              }
+              if (mainTipSha !== undefined && deps.regenerateConflict && pr.taskId !== undefined &&
+                  fixHeadAcceptable(pr.headRefName, pr.taskId, false)) {
+                const probe = ledgerLines.findLast(row => row.step === "sweep.merge_probe" &&
+                  row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.main_sha === mainTipSha);
+                const conflictPaths = probe?.conflict_paths;
+                if (probe?.verdict === "conflict" && Array.isArray(conflictPaths) && conflictPaths.length > 0 &&
+                    conflictPaths.every(path => typeof path === "string" && Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path))) {
+                  const regenerationKey = `${deps.ledgerPath}:${pr.prNumber}:${pr.headSha}:${mainTipSha}`;
+                  if (inFlightConflictRegenerations.has(regenerationKey)) {
+                    acted = false;
+                    standDownReason = "conflict regeneration already in flight for this head and main";
+                    break;
+                  }
+                  let receipt = readLedger(deps.ledgerPath).findLast(row => row.step === "sweep.conflict_regenerated" &&
+                    row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.main_sha === mainTipSha);
+                  const alreadyAttempted = receipt !== undefined;
+                  if (receipt === undefined) {
+                    inFlightConflictRegenerations.add(regenerationKey);
+                    try {
+                      let result: ConflictRegenerationOutcome;
+                      try { result = await deps.regenerateConflict(pr, mainTipSha); }
+                      catch (error) { result = { outcome: "error", paths: [], reason: spawnFailureText(error) }; }
+                      const written: LedgerLine = { run_id: deps.runId, task_id: pr.taskId, step: "sweep.conflict_regenerated",
+                        pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha,
+                        new_head_sha: result.newHeadSha ?? null, paths: result.paths, outcome: result.outcome,
+                        ...(result.reason ? { reason: result.reason } : {}),
+                        ...(result.cleanupError ? { cleanup_error: result.cleanupError } : {}) };
+                      appendLine(deps.ledgerPath, written);
+                      receipt = written;
+                    } finally {
+                      inFlightConflictRegenerations.delete(regenerationKey);
+                    }
+                  }
+                  if (receipt.outcome === "pushed" || receipt.outcome === "lease-mismatch") {
+                    acted = !alreadyAttempted && receipt.outcome === "pushed";
+                    spent = false;
+                    standDownReason = receipt.outcome === "pushed"
+                      ? `regenerated conflict at ${receipt.new_head_sha}; awaiting fresh review and CI`
+                      : `conflict regeneration lease mismatch: ${receipt.reason}; awaiting a fresh snapshot`;
+                    break;
+                  }
+                }
               }
               // The "conflicted" row already gated this on the admission predicates, so the
               // dispatch carries merge-conflict evidence and never a mix. W1-T2231: the
