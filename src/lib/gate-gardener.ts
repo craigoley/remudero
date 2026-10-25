@@ -72,33 +72,82 @@ function rebuiltTokens(line: string): Array<{ expression: string; value: string 
   });
 }
 
+const SOURCE_TOKEN = new RegExp(`${STRING_LITERAL.source}|//[^\\n]*|/\\*[\\s\\S]*?\\*/|[A-Za-z_$][\\w$]*|\\s+|[^\\w\\s]`, "g");
+const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+
+/** A diff line's code: a comment line is empty, and a trailing comment or a whitespace run is not the edit. */
+function codeOf(line: string): string {
+  if (/^\s*(?:\/\/|\/\*|\*)/.test(line)) return "";
+  return (line.match(SOURCE_TOKEN) ?? []).filter((token) => !token.startsWith("//") && !token.startsWith("/*"))
+    .map((token) => /^\s+$/.test(token) ? " " : token).join("").trim();
+}
+
+/** Each hunk's removed and added code lines, with the file its `diff --git` header names. */
+function repairHunks(repairDiff: string): Array<{ file?: string; removed: string[]; added: string[] }> {
+  const hunks: Array<{ file?: string; removed: string[]; added: string[] }> = [];
+  let file: string | undefined, hunk: (typeof hunks)[number] | undefined;
+  for (const line of repairDiff.split("\n")) {
+    const header = /^diff --git a\/\S+ b\/(\S+)/.exec(line);
+    if (header || line.startsWith("@@")) {
+      if (header) file = header[1];
+      hunk = undefined;
+      continue;
+    }
+    if (line.startsWith("---") || line.startsWith("+++") || !/^[-+]/.test(line)) continue;
+    const code = codeOf(line.slice(1));
+    if (!code) continue;
+    if (!hunk) hunks.push(hunk = { file, removed: [], added: [] });
+    (line.startsWith("-") ? hunk.removed : hunk.added).push(code);
+  }
+  return hunks;
+}
+
+/** How one added line dodges the gate that matched one removed line, if it does. */
+function lineDodge(before: string, after: string, gateRegex: RegExp): "token-dodge" | "rename-dodge" | undefined {
+  for (const rebuilt of rebuiltTokens(after)) {
+    for (const [literal] of before.matchAll(STRING_LITERAL)) {
+      if (stringValue(literal) === rebuilt.value && before.replace(literal, "<token>") === after.replace(rebuilt.expression, "<token>")) return "token-dodge";
+    }
+  }
+  const oldTokens = before.match(SOURCE_TOKEN) ?? [], newTokens = after.match(SOURCE_TOKEN) ?? [];
+  if (oldTokens.length !== newTokens.length) return undefined;
+  const changed = oldTokens.flatMap((old, i) => old === newTokens[i] ? [] : [{ old, next: newTokens[i]! }]);
+  const first = changed[0];
+  if (first && changed.every(({ old, next }) => old === first.old && next === first.next && IDENTIFIER.test(old) && IDENTIFIER.test(next)) &&
+      matchesGate(gateRegex, first.old) && !matchesGate(gateRegex, first.next)) return "rename-dodge";
+  return undefined;
+}
+
+/**
+ * A repair is a dodge only when EVERY gated line it removes outside the gate's own files comes back as a token
+ * rebuilt from literals or a pure rename. One gated line changed any other way is a genuine repair, whatever the
+ * other hunks do; a comment or an unrelated line beside the dodge changes nothing.
+ */
 export function classifyGateRepair(pair: GateRepairPair, repairDiff: string, ownFiles: readonly string[], gateRegex: RegExp | null): GateRepairClass {
   const repairFiles = pair.repairFiles ?? [];
   if (pair.state !== "repaired" || !pair.greenSha || repairFiles.length === 0) return "genuine";
   if (repairFiles.every((file) => ownFiles.includes(file))) return "baseline-only";
   if (pair.triggered === false) return "off-subject";
   if (gateRegex === null) return "genuine";
-  const chunks = repairDiff.split(/^(?:diff --git .*|@@.*)$/m);
-  for (const chunk of chunks) {
-    const removed = chunk.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---")).map((line) => line.slice(1));
-    const added = chunk.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).map((line) => line.slice(1));
-    if (!removed.length || removed.length !== added.length) continue;
-    const before = removed.join("\n"), after = added.join("\n");
-    if (!matchesGate(gateRegex, before) || matchesGate(gateRegex, after)) continue;
-    for (const rebuilt of rebuiltTokens(after)) {
-      for (const [literal] of before.matchAll(STRING_LITERAL)) {
-        if (stringValue(literal) === rebuilt.value && before.replace(literal, "<token>") === after.replace(rebuilt.expression, "<token>")) return "token-dodge";
+  let dodge: "token-dodge" | "rename-dodge" | undefined;
+  for (const hunk of repairHunks(repairDiff)) {
+    if (hunk.file !== undefined && ownFiles.includes(hunk.file)) continue;
+    const added = [...hunk.added];
+    for (const before of hunk.removed) {
+      if (!matchesGate(gateRegex, before)) continue;
+      const kept = added.indexOf(before);
+      if (kept >= 0) {
+        added.splice(kept, 1);
+        continue;
       }
+      const at = added.findIndex((after) => !matchesGate(gateRegex, after) && lineDodge(before, after, gateRegex) !== undefined);
+      if (at < 0) return "genuine";
+      const kind = lineDodge(before, added[at]!, gateRegex)!;
+      if (dodge !== "token-dodge") dodge = kind;
+      added.splice(at, 1);
     }
-    const tokens = (text: string) => text.match(new RegExp(`${STRING_LITERAL.source}|//[^\\n]*|/\\*[\\s\\S]*?\\*/|[A-Za-z_$][\\w$]*|\\s+|[^\\w\\s]`, "g")) ?? [];
-    const oldTokens = tokens(before), newTokens = tokens(after);
-    if (oldTokens.length !== newTokens.length) continue;
-    const changed = oldTokens.flatMap((old, i) => old === newTokens[i] ? [] : [{ old, next: newTokens[i]! }]);
-    const first = changed[0];
-    if (first && changed.every(({ old, next }) => old === first.old && next === first.next && /^[A-Za-z_$][\w$]*$/.test(old) && /^[A-Za-z_$][\w$]*$/.test(next)) &&
-        matchesGate(gateRegex, first.old) && !matchesGate(gateRegex, first.next)) return "rename-dodge";
   }
-  return "genuine";
+  return dodge ?? "genuine";
 }
 
 export function gateRepairCandidates(observations: readonly GateRepairObservation[], rules: readonly GateRepairRule[], coveredOrigins: readonly string[], log: GardenerDeps["log"]): GateGardenAction[] {

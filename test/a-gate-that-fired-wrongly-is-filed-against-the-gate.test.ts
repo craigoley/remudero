@@ -129,6 +129,12 @@ test("W1-T9049: a token rebuilt at runtime to dodge a gate's regex is a suspecte
     const task = loadPlanFromYaml(rendered.text, "production-token").tasks[0]!;
     assert.deepEqual(task.files, [production.recognizer]);
     assert.equal(task.origin, `gate-false-positive:${production.gate}`);
+    // A comment or an unrelated line beside the reconstruction does not make the dodge a repair.
+    for (const patch of [`@@\n-${before}\n+// rebuilt so the registry census no longer sees it\n+${after}`,
+      `@@\n-${before}\n-const unrelated = 1;\n+${after}`, `@@\n-${before} // old note\n+${after} // new note`]) {
+      const beside = await productionRepair(production.gate, "src/lib/example.ts", patch, before);
+      assert.equal(classifyGateRepair(beside.pair, beside.repairDiff, production.ownFiles, production.gateRegex), "token-dodge", patch);
+    }
   }
 });
 
@@ -143,6 +149,15 @@ test("W1-T9049: a repair that changes the gated code is genuine", () => {
     repairDiff: '-const token = "RMD_EXAMPLE";\n+const token = "RMD_OTHER";' }], GATE_REPAIR_RULES, [],
   step => events.push(step)), []);
   assert.deepEqual(events, []);
+  // A dodge in one hunk does not hide a gated line another hunk really changed, nor does a comment beside it.
+  const dodged = '@@\n-const token = "RMD_EXAMPLE";\n+const token = "RMD_" + "EXAMPLE";';
+  const renamed = "@@\n-const RMD_EXAMPLE_FLAG = read();\n+const exampleFlag = read();";
+  const repaired = '@@\n-const other = process.env.RMD_UNREGISTERED;\n+// registered below\n+const other = registered("example");';
+  for (const diff of [`${dodged}\n${repaired}`, `${renamed}\n${repaired}`, `${repaired}\n${renamed}`,
+    `diff --git a/src/lib/one.ts b/src/lib/one.ts\n${renamed}\ndiff --git a/src/lib/two.ts b/src/lib/two.ts\n${repaired}`]) {
+    assert.equal(classifyGateRepair({ ...pair, gate: production.gate }, diff, production.ownFiles, production.gateRegex), "genuine", diff);
+  }
+  assert.equal(classifyGateRepair({ ...pair, gate: production.gate }, renamed, production.ownFiles, production.gateRegex), "rename-dodge");
 });
 
 test("W1-T9049: production regexes recognize token reconstruction in its source context", () => {
