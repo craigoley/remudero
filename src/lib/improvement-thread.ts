@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { closeSync, constants, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync, readSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { CODE_HEALTH_POLICY_VERSION } from "./code-health-collector.js";
 import { codeHealthRepositoryStateDir, readCodeHealthArtifactJson, readCodeHealthCollectionFailure, readCodeHealthSnapshot } from "./code-health-store.js";
@@ -9,7 +9,9 @@ import { buildCodeHealthOpportunities } from "./codeql-quality-intake.js";
 import { acquireInflightLock, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
-import { invalidateDraft, parseProposalRegistryResult, updateProposalRegistry, type DraftCache, type Proposal } from "./inbox.js";
+import { inboxDraftGeneration, invalidateDraft, parseProposalRegistryResult, updateProposalRegistry, type DraftCache, type Proposal } from "./inbox.js";
+import { bearerTokenId, jsonAction, sendJson } from "./panel-actions.js";
+import type { Route } from "./service.js";
 import { appendThreadMessageOnce, inboxThreadId, inboxThreadIdentity, readThread, type ThreadMessageExtra } from "./inbox-thread.js";
 
 export const IMPROVEMENT_THREAD_VERSION = "improvement-thread-v1" as const;
@@ -64,10 +66,12 @@ function readInboxJson(path: string): unknown {
   try {
     const before = fstatSync(fd);
     if (!before.isFile() || before.size > 16 * 1024 * 1024) throw new Error("The native Inbox file is not a bounded regular file.");
-    const bytes = readFileSync(fd), after = fstatSync(fd);
-    if (bytes.length !== before.size || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs)
+    const bytes = Buffer.alloc(16 * 1024 * 1024 + 1); let length = 0, count: number;
+    while (length < bytes.length && (count = readSync(fd, bytes, length, bytes.length - length, null)) > 0) length += count;
+    const after = fstatSync(fd);
+    if (length > 16 * 1024 * 1024 || length !== before.size || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs)
       throw new Error("The native Inbox file changed during its read.");
-    return JSON.parse(bytes.toString("utf8"));
+    return JSON.parse(bytes.toString("utf8", 0, length));
   } finally { closeSync(fd); }
 }
 function strictRegistry(path: string): Proposal[] {
@@ -269,4 +273,262 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
     if (lock && owns?.()) lock.release();
     if (requestOwner && ownsRequest?.()) requestOwner.release();
   }
+}
+
+
+export type ImprovementThreadView = Failure | {
+  state: "saved"; version: typeof IMPROVEMENT_THREAD_VERSION; requestId: string; currentRequestId: string; proposalId: string; threadId: string;
+  repository: string; instance: string; snapshotId: string; opportunityId: string; goal: string; constraints: string[]; goalDigest: string;
+  source: { state: "current" | "stale" | "unavailable"; reason: string | null };
+  messages: import("./inbox-thread.js").ThreadMessage[]; messageCount: number; messagesPartial: boolean;
+  drafting: { state: "not_requested" | "requested" | "ready" | "unavailable"; digest: string | null; fragmentYaml: string | null; reason: string | null };
+  filing: { state: "not_requested" }; execution: { state: "not_requested" };
+};
+
+/** A saved chat remains readable when its source ages; new actions still require current evidence. */
+export function readImprovementThread(requestId: string, deps: ImprovementThreadDeps): ImprovementThreadView {
+  if (!/^[a-f0-9]{64}$/.test(requestId)) return fail("invalid_request", "Use the saved conversation's request identity.");
+  try {
+    const root = join(deps.stateDir, "improvement-threads"), savedRequest = readIntent(join(root, `${requestId}.json`));
+    if (!savedRequest) return fail("source_unavailable", "This saved conversation is unavailable.", requestId);
+    const scope = scopeFor(savedRequest.request, deps.stateDir); if ("state" in scope) return { ...scope, requestId };
+    if (hash(scope) !== hash(savedRequest.scope) || !messagesMatch(savedRequest)) return fail("uncertain", "This conversation's saved messages or fleet binding cannot be verified.", requestId);
+    const proposal = strictRegistry(join(scope.inboxStateDir, "inbox-proposals.json")).find(row => row.id === savedRequest.proposalId);
+    if (!proposal || !proposal.improvement || !proposal.improvement.conversationReady) return fail("uncertain", "This conversation's planning record cannot yet be verified. Retry its save request.", requestId);
+    const current = readIntent(join(root, `${proposal.improvement.requestId}.json`));
+    if (!current || current.stage !== "saved" || current.proposalId !== savedRequest.proposalId || hash(current.scope) !== hash(scope) || !messagesMatch(current))
+      return fail("uncertain", "The conversation's latest goal cannot be verified.", requestId);
+    const source = sourceFor(current.request, scope, deps);
+    const sourceState: Extract<ImprovementThreadView, { state: "saved" }>["source"] = "state" in source
+      ? { state: source.state === "source_stale" ? "stale" : "unavailable", reason: source.reason } : { state: "current", reason: null };
+    let drafting: Extract<ImprovementThreadView, { state: "saved" }>["drafting"] = { state: proposal.trigger?.fired ? "requested" : "not_requested", digest: null, fragmentYaml: null, reason: null };
+    try {
+      const cache = readInboxJson(join(scope.inboxStateDir, "inbox-drafts.json")) as DraftCache;
+      if (!cache || typeof cache !== "object" || Array.isArray(cache)) throw new Error("Invalid draft cache.");
+      const draft = cache[proposal.id];
+      if (draft) {
+        if (draft.proposalId !== proposal.id || !text(draft.fragmentYaml, 512 * 1024) || !draft.completion || !draft.completion.lintClean ||
+            draft.completion.violations.length !== 0 || draft.completion.snapshot.repository !== current.request.repository ||
+            draft.completion.snapshot.generation !== inboxDraftGeneration(proposal))
+          drafting = { state: "unavailable", digest: null, fragmentYaml: null, reason: "This draft is incomplete or belongs to an earlier goal. Request a new draft." };
+        else drafting = { state: "ready", digest: hash(draft), fragmentYaml: draft.fragmentYaml, reason: null };
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") drafting = { state: "unavailable", digest: null, fragmentYaml: null, reason: "The saved draft cache cannot be read." };
+    }
+    const read = readThread(current.threadId, { threadStorePath: join(scope.inboxStateDir, "inbox-threads.jsonl") });
+    if (read.status !== "ok") return fail("uncertain", "The saved messages cannot currently be read.", requestId);
+    return { state: "saved", version: IMPROVEMENT_THREAD_VERSION, requestId, currentRequestId: current.requestId, proposalId: proposal.id, threadId: current.threadId,
+      repository: current.request.repository, instance: scope.instance, snapshotId: current.request.snapshotId, opportunityId: current.request.opportunityId,
+      goal: current.request.goal, constraints: current.request.constraints ?? [], goalDigest: proposal.improvement.goalDigest, source: sourceState,
+      messages: read.messages.slice(-100), messageCount: read.messages.length, messagesPartial: read.messages.length > 100, drafting,
+      filing: { state: "not_requested" }, execution: { state: "not_requested" } };
+  } catch {
+    // A store read failed; no empty chat, missing draft, or current-source authority can be inferred.
+    return fail("source_unavailable", "This saved conversation cannot currently be read.", requestId);
+  }
+}
+
+function resultStatus(result: { state: string }): number {
+  return result.state === "saved" ? 200 : result.state === "invalid_request" ? 400 : ["source_stale", "conflict", "busy"].includes(result.state) ? 409 : 503;
+}
+
+/** Every write uses the service's existing authentication and tier admission. No client supplies a store path. */
+export function buildImprovementThreadRoutes(options: { stateDir: string; clock?: Clock; launchAction?: ImprovementActionDeps["launchAction"] }): Route[] {
+  return [
+    { method: "POST", path: "/v1/improvements/threads", scope: "write", tier: "low", handler: jsonAction(
+      body => { const request = requestInput(body); return request ?? { error: "Choose a saved repository finding, a goal, constraints, and a request identity." }; },
+      async (request, req, res) => {
+        const result = await createImprovementThread(request, { ...options, actorId: bearerTokenId(req) });
+        sendJson(res, resultStatus(result), result);
+      }) },
+    ...(["draft", "file"] as const).map((kind): Route => ({ method: "POST", path: `/v1/improvements/threads/${kind}`, scope: "write", tier: kind === "file" ? "high" : "middle",
+      handler: jsonAction(body => actionInput(body, kind) ?? { error: "Review the current saved goal and draft, then provide an explicit request identity." }, async (input, req, res) => {
+        const result = await requestImprovementAction(kind, input, { ...options, actorId: bearerTokenId(req) });
+        sendJson(res, result.state === "requested" ? 202 : resultStatus(result), result);
+      }) })),
+    { method: "GET", path: "/v1/improvements/action", scope: "read", handler: (req, res) => {
+      const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+      if ([...params.keys()].some(key => key !== "operationId") || params.getAll("operationId").length !== 1 || !/^[a-f0-9]{64}$/.test(params.get("operationId")!)) { sendJson(res, 400, { error: "invalid_request", detail: "Use one saved action identity." }); return; }
+      try {
+        const operation = readAction(options.stateDir, params.get("operationId")!);
+        if (!operation) { sendJson(res, 503, { state: "source_unavailable", reason: "The saved action is unavailable." }); return; }
+        const view = readImprovementThread(operation.requestId, { ...options, actorId: bearerTokenId(req) });
+        if (view.state !== "saved") { sendJson(res, resultStatus(view), view); return; }
+        sendJson(res, 200, { state: "observed", operation, execution: { state: "not_requested" } });
+      } catch {
+        // Missing or unreadable operation data cannot establish that no action occurred.
+        sendJson(res, 503, { state: "uncertain", reason: "The saved action cannot currently be verified." });
+      }
+    } },
+    { method: "GET", path: "/v1/improvements/thread", scope: "read", handler: (req, res) => {
+      const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+      if ([...params.keys()].some(key => key !== "requestId") || params.getAll("requestId").length !== 1) { sendJson(res, 400, { error: "invalid_request", detail: "Use one saved conversation request identity." }); return; }
+      const result = readImprovementThread(params.get("requestId")!, { ...options, actorId: bearerTokenId(req) });
+      sendJson(res, resultStatus(result), result);
+    } },
+  ];
+}
+
+export interface ImprovementActionRequest { requestId: string; goalDigest: string; idempotencyKey: string; draftDigest?: string }
+export interface ImprovementPlanReceipt {
+  state: "plan_pr_opened"; prUrl: string; branch: string; taskIds: string[]; nativeReceiptId: string;
+}
+export interface ImprovementAction {
+  version: "improvement-action-v1"; operationId: string; kind: "draft" | "file"; requestId: string; proposalId: string;
+  actorId: string; payloadHash: string; goalDigest: string; draftDigest: string | null; requestedAt: string;
+  state: "requested" | "waiting" | "completed" | "refused" | "uncertain"; reason: string | null;
+  receipt: ImprovementPlanReceipt | null;
+}
+export interface ImprovementActionDeps extends ImprovementThreadDeps {
+  /** Starts only the owned fresh-source CLI handoff. A request receipt is not a completed action. */
+  launchAction?: (target: { operationId: string; stateDir: string; repoRoot: string }) => void;
+}
+export type ImprovementActionResult = Failure | { state: "requested"; operation: ImprovementAction; execution: { state: "not_requested" } };
+function actionInput(value: unknown, kind: ImprovementAction["kind"]): ImprovementActionRequest | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const b = value as Record<string, unknown>;
+  if (Object.keys(b).some(key => !["requestId", "goalDigest", "idempotencyKey", ...(kind === "file" ? ["draftDigest"] : [])].includes(key)) ||
+      ![b.requestId, b.goalDigest, ...(kind === "file" ? [b.draftDigest] : [])].every(value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)) ||
+      typeof b.idempotencyKey !== "string" || !/^[A-Za-z0-9._:-]{16,128}$/.test(b.idempotencyKey)) return undefined;
+  return b as unknown as ImprovementActionRequest;
+}
+function actionPath(stateDir: string, operationId: string): string { return join(stateDir, "improvement-threads", "actions", `${operationId}.json`); }
+function readAction(stateDir: string, operationId: string): ImprovementAction | undefined {
+  if (!/^[a-f0-9]{64}$/.test(operationId)) throw new Error("Invalid improvement action identity.");
+  let raw: unknown;
+  try { raw = readCodeHealthArtifactJson(actionPath(stateDir, operationId), 32 * 1024); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  const { contentHash, ...action } = raw as ImprovementAction & { contentHash: string };
+  if (contentHash !== hash(action) || action.version !== "improvement-action-v1" || action.operationId !== operationId ||
+      !["draft", "file"].includes(action.kind) || !["requested", "waiting", "completed", "refused", "uncertain"].includes(action.state) ||
+      ![action.requestId, action.goalDigest, action.payloadHash].every(value => /^[a-f0-9]{64}$/.test(value))) throw new Error("Invalid saved improvement action.");
+  return action;
+}
+function writeAction(stateDir: string, action: ImprovementAction, owns: () => boolean): void {
+  const path = actionPath(stateDir, action.operationId);
+  if (!writeAtomic(path, JSON.stringify({ ...action, contentHash: hash(action) }), { mode: 0o600, beforeRename: owns })) throw new Error("Improvement action ownership changed.");
+  syncPath(dirname(path), true);
+}
+function actionTarget(intent: Intent): { operationId: string; stateDir: string; repoRoot: string } {
+  // The plan path is published by the server-owned instance registry, never supplied in the request.
+  if (!intent.scope.planPath.endsWith("/plan/tasks.yaml")) throw new Error("The instance does not provide a supported repository plan path.");
+  return { operationId: "", stateDir: "", repoRoot: dirname(dirname(intent.scope.planPath)) };
+}
+
+/** Save the explicit decision before requesting an owned CLI handoff. Filing binds the exact reviewed draft. */
+export async function requestImprovementAction(kind: ImprovementAction["kind"], value: unknown, deps: ImprovementActionDeps): Promise<ImprovementActionResult> {
+  const input = actionInput(value, kind);
+  if (!input || !text(deps.actorId, 256)) return fail("invalid_request", "Use this conversation's current goal and an explicit request identity.");
+  const operationId = hash([deps.actorId, "improvement-action", input.idempotencyKey]);
+  let lock: InflightLockHandle | undefined, owns: (() => boolean) | undefined;
+  let requestOwner: InflightLockHandle | undefined, ownsRequest: (() => boolean) | undefined;
+  let wrote = false;
+  try {
+    requestOwner = requestLock(join(deps.stateDir, "improvement-threads"), `action-${operationId}`);
+    if (!requestOwner) return fail("busy", "This action request is being saved, or its ownership is not yet known.");
+    ownsRequest = lockOwnership(requestOwner);
+    const intent = readIntent(join(deps.stateDir, "improvement-threads", `${input.requestId}.json`));
+    if (!intent || intent.stage !== "saved") return fail("source_unavailable", "Save this conversation before requesting an action.");
+    const currentScope = scopeFor(intent.request, deps.stateDir);
+    if ("state" in currentScope || hash(currentScope) !== hash(intent.scope)) return fail("source_unavailable", "The conversation's fleet binding cannot be verified.");
+    lock = requestLock(join(deps.stateDir, "improvement-threads"), hash([intent.request.repository, intent.scope.instance, intent.request.opportunityId]));
+    if (!lock) return fail("busy", "This conversation is being updated, or its writer's ownership is not yet known.");
+    const ownsConversation = lockOwnership(lock);
+    owns = () => ownsConversation() && ownsRequest!();
+    const previous = readAction(deps.stateDir, operationId), payloadHash = hash([kind, input]);
+    if (previous && (previous.payloadHash !== payloadHash || previous.actorId !== deps.actorId)) return fail("conflict", "This action identity was already used for a different decision.");
+    const view = readImprovementThread(input.requestId, deps);
+    if (view.state !== "saved") return view;
+    if (view.currentRequestId !== input.requestId || view.goalDigest !== input.goalDigest) return fail("conflict", "The goal changed. Review the latest conversation before continuing.");
+    const source = sourceFor(intent.request, intent.scope, deps); if ("state" in source) return source;
+    if (kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== input.draftDigest)) return fail("conflict", "Review the current completed draft before requesting filing.");
+    if (deps.launchAction === undefined) return fail("source_unavailable", "This repository's governed action handoff is unavailable. No action was requested.");
+    const action: ImprovementAction = previous ?? { version: "improvement-action-v1", operationId, kind, requestId: input.requestId, proposalId: intent.proposalId,
+      actorId: deps.actorId, payloadHash, goalDigest: input.goalDigest, draftDigest: input.draftDigest ?? null, requestedAt: (deps.clock ?? systemClock).iso(), state: "requested", reason: null, receipt: null };
+    if (!previous) { writeAction(deps.stateDir, action, owns); wrote = true; }
+    if (kind === "draft" && !previous) {
+      const registryPath = join(intent.scope.inboxStateDir, "inbox-proposals.json");
+      strictRegistry(registryPath);
+      updateProposalRegistry(registryPath, current => {
+        strictRegistry(registryPath); if (!owns!()) throw new Error("Improvement action ownership changed.");
+        const proposal = current.find(row => row.id === intent.proposalId);
+        if (!proposal || !proposal.improvement || proposal.improvement.goalDigest !== input.goalDigest || !proposal.improvement.conversationReady) throw new Error("The conversation changed before drafting was requested.");
+        return current.map(row => row.id === intent.proposalId ? { ...row, trigger: { fired: true, description: "Plan drafting explicitly requested for this saved goal." } } : row);
+      }, { maxWaitMs: 0 });
+      syncPath(registryPath); syncPath(intent.scope.inboxStateDir, true);
+    }
+    if (!owns()) return fail("uncertain", "The decision was saved, but its writer changed before handoff.");
+    // The worker independently takes the same conversation lock and revalidates source, goal and draft.
+    // Only pending work is re-handed off; completed or ambiguous filing is never blindly repeated.
+    if (["requested", "waiting"].includes(action.state)) deps.launchAction({ ...actionTarget(intent), operationId, stateDir: deps.stateDir });
+    return { state: "requested", operation: action, execution: { state: "not_requested" } };
+  } catch {
+    // A saved decision can precede a failed handoff. Recovery must inspect the operation, not invent success.
+    return fail(wrote ? "uncertain" : "source_unavailable", "The action could not be confirmed. Reuse the same request identity to inspect or recover it.");
+  } finally {
+    if (lock && owns?.()) lock.release();
+    if (requestOwner && ownsRequest?.()) requestOwner.release();
+  }
+}
+
+export interface ImprovementActionRunnerDeps extends ImprovementThreadDeps {
+  draft: (target: { proposalId: string; repository: string; controlRoot: string; repoRoot: string; planPath: string }) => Promise<void>;
+  file: (target: { proposalId: string; repository: string; controlRoot: string; repoRoot: string; planPath: string; goalDigest: string; draftDigest: string }) => Promise<ImprovementPlanReceipt | undefined>;
+  recoverFiling: (target: { proposalId: string; ledgerPath: string }) => ImprovementPlanReceipt | undefined;
+}
+
+/** Owned CLI worker: no caller-provided paths, commands, routing changes, force-draft, or admission exemptions. */
+export async function runImprovementAction(operationId: string, deps: ImprovementActionRunnerDeps): Promise<ImprovementAction | Failure> {
+  let lock: InflightLockHandle | undefined, owns: (() => boolean) | undefined;
+  let action: ImprovementAction | undefined;
+  try {
+    action = readAction(deps.stateDir, operationId);
+    if (!action) return fail("source_unavailable", "This saved action request is unavailable.");
+    if (["completed", "refused"].includes(action.state)) return action;
+    const intent = readIntent(join(deps.stateDir, "improvement-threads", `${action.requestId}.json`));
+    if (!intent || intent.stage !== "saved" || intent.proposalId !== action.proposalId) return fail("source_unavailable", "This action's saved conversation cannot be verified.");
+    const scope = scopeFor(intent.request, deps.stateDir);
+    if ("state" in scope || hash(scope) !== hash(intent.scope)) return fail("source_unavailable", "This action's fleet store has changed.");
+    lock = requestLock(join(deps.stateDir, "improvement-threads"), hash([intent.request.repository, scope.instance, intent.request.opportunityId]));
+    if (!lock) return fail("busy", "A conversation writer or action still owns this improvement.");
+    owns = lockOwnership(lock);
+    action = readAction(deps.stateDir, operationId);
+    if (!action || action.proposalId !== intent.proposalId || action.requestId !== intent.requestId) return fail("uncertain", "The action changed during admission.");
+    if (["completed", "refused"].includes(action.state)) return action;
+    // The native ratification receipt is the recovery authority, including after source or goal changes.
+    if (action.kind === "file") {
+      const recovered = deps.recoverFiling({ proposalId: intent.proposalId, ledgerPath: scope.ledgerPath });
+      if (recovered) { action.state = "completed"; action.receipt = recovered; action.reason = null; writeAction(deps.stateDir, action, owns); return action; }
+      if (action.state === "uncertain") return action; // Do not repeat ambiguous consequential work without its native receipt.
+    }
+    const view = readImprovementThread(action.requestId, deps);
+    const source = sourceFor(intent.request, scope, deps);
+    if (view.state !== "saved" || view.currentRequestId !== action.requestId || view.goalDigest !== action.goalDigest || "state" in source ||
+        action.kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== action.draftDigest)) {
+      action.state = "refused"; action.reason = "The source, goal, or reviewed draft changed before this action could run."; writeAction(deps.stateDir, action, owns); return action;
+    }
+    const target = { proposalId: intent.proposalId, repository: intent.request.repository, controlRoot: dirname(scope.inboxStateDir),
+      repoRoot: actionTarget(intent).repoRoot, planPath: scope.planPath };
+    // Save uncertainty BEFORE any consequential native filing call. A crash cannot look unattempted on restart.
+    action.state = action.kind === "file" ? "uncertain" : "waiting"; action.reason = "Waiting for a receipt from the governed repository lane.";
+    writeAction(deps.stateDir, action, owns);
+    if (!owns()) return fail("uncertain", "The action writer changed before execution.");
+    if (action.kind === "draft") {
+      await deps.draft(target);
+      if (!owns()) return fail("uncertain", "The draft writer changed before acknowledgement.");
+      const after = readImprovementThread(action.requestId, deps);
+      action.state = after.state === "saved" && after.drafting.state === "ready" ? "completed" : "waiting";
+      action.reason = action.state === "completed" ? null : "The normal drafting lane has not produced a current completed draft. Its admission and retry limits remain in effect.";
+    } else {
+      const receipt = await deps.file({ ...target, goalDigest: action.goalDigest, draftDigest: action.draftDigest! });
+      if (!owns()) return fail("uncertain", "The filing writer changed before acknowledgement. Inspect the native receipt.");
+      action.receipt = receipt ?? null; action.state = receipt ? "completed" : "uncertain";
+      action.reason = receipt ? null : "The native lane returned without a verified plan pull request receipt. Filing remains unconfirmed.";
+    }
+    writeAction(deps.stateDir, action, owns); return action;
+  } catch {
+    // Preserve the pre-call uncertainty journal. The absence of a response never establishes a failed or completed filing.
+    return fail("uncertain", "The action's outcome cannot currently be verified. Check its saved receipt before trying again.");
+  } finally { if (lock && owns?.()) lock.release(); }
 }

@@ -197,3 +197,42 @@ test("improvement planning blocks legacy approval and executable reply shortcuts
     assert.equal(observed?.status, 409); assert.equal((observed!.body as { error: string }).error, "improvement_review_required");
   }
 });
+
+test("improvement planning separates conversation drafting filing and execution", async () => {
+  const { createImprovementThread, readImprovementThread, requestImprovementAction, runImprovementAction } = await planningModule();
+  const { captureInboxDraftSnapshot, commitInboxDraftOutcomes } = await import("#src/lib/inbox.js");
+  await withTempDir("improvement-reviewed-actions", async dir => {
+    const fixture = sourceFixture(dir), { request, inboxRoot } = fixture;
+    const launches: unknown[] = [], deps = { ...fixture.deps, launchAction: (target: unknown) => { launches.push(target); } };
+    const saved = await createImprovementThread(request, deps); assert(saved.state === "saved"); assert.equal(launches.length, 0);
+    let view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
+    assert.equal(view.drafting.state, "not_requested"); assert.equal(view.execution.state, "not_requested");
+    const review = { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: "explicit-draft-request-0001" };
+    assert.equal((await requestImprovementAction("file", { ...review, draftDigest: "f".repeat(64) }, deps)).state, "conflict"); assert.equal(launches.length, 0);
+    const requested = await requestImprovementAction("draft", review, deps); assert(requested.state === "requested"); assert.equal(launches.length, 1);
+    assert.equal(requested.operation.state, "requested");
+    let draftCalls = 0, fileCalls = 0;
+    let nativeReceipt: import("#src/lib/improvement-thread.js").ImprovementPlanReceipt | undefined;
+    const runner = { ...deps,
+      draft: async (target: { proposalId: string }) => {
+        draftCalls++;
+        const stateDir = join(inboxRoot, "state"), proposal = JSON.parse(readFileSync(join(stateDir, "inbox-proposals.json"), "utf8")).proposals.find((p: { id: string }) => p.id === target.proposalId);
+        const snapshot = captureInboxDraftSnapshot(proposal, { repository: request.repository });
+        const candidate = { proposalId: proposal.id, fragmentYaml: "- id: W1-T99999\n  title: Simplify repeated work\n", stampLine: "Saved improvement draft", anchorFingerprint: "",
+          completion: { snapshot, lintClean: true, violations: [] } };
+        commitInboxDraftOutcomes({ stateDir, scope: { repository: request.repository }, snapshots: [snapshot], outcomes: [{ ok: true, proposalId: proposal.id, candidate, snapshot }], log: () => {} });
+      },
+      file: async () => {
+        fileCalls++; nativeReceipt = { state: "plan_pr_opened" as const, prUrl: "https://github.com/acme/atlas/pull/123", branch: "ratify-improvement-123", taskIds: ["W1-T99999"], nativeReceiptId: "native-ratify-receipt-123" }; return nativeReceipt;
+      }, recoverFiling: () => nativeReceipt,
+    };
+    const drafted = await runImprovementAction(requested.operation.operationId, runner); assert("kind" in drafted); assert.equal(drafted.state, "completed"); assert.equal(draftCalls, 1); assert.equal(fileCalls, 0);
+    view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved"); assert.equal(view.drafting.state, "ready"); assert(view.drafting.digest);
+    const filing = await requestImprovementAction("file", { ...review, idempotencyKey: "explicit-reviewed-file-0001", draftDigest: view.drafting.digest }, deps);
+    assert(filing.state === "requested"); assert.equal(fileCalls, 0, "saving the reviewed decision does not claim filing completed");
+    const filed = await runImprovementAction(filing.operation.operationId, runner); assert("kind" in filed); assert.equal(filed.state, "completed"); assert.equal(filed.receipt?.state, "plan_pr_opened"); assert.equal(fileCalls, 1);
+    const replay = await runImprovementAction(filing.operation.operationId, runner); assert("kind" in replay); assert.deepEqual(replay, filed); assert.equal(fileCalls, 1);
+    assert.equal(filing.execution.state, "not_requested");
+    assert.equal(existsSync(join(inboxRoot, "repos", "atlas", "plan", "tasks.yaml")), false, "the test filing callback creates no task, dispatch, merge or deployment");
+  });
+});

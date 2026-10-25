@@ -1,3 +1,4 @@
+import { buildImprovementThreadRoutes } from "./improvement-thread.js";
 import { DEMAND_VIEWS } from "./view-demand.js";
 /**
  * lib/serve.ts — `rmd serve`'s assembler: the FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B).
@@ -2958,6 +2959,7 @@ function assembleServeRoutes(
     legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
+    ...buildImprovementThreadRoutes({ stateDir: dirname(deps.ledgerPath) }),
     withStatusNeedsYou(withFleetRuntimeHealth(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), readRuntimeHealth), needsYouGates),
     ...buildRepoDashboardRoutes({
       selectedRegistryObserver,
