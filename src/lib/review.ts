@@ -2125,12 +2125,13 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
   ];
 }
 
-/** The proof child's env: {@link buildProofEnv}'s allowlist with HOME replaced by a throwaway one, and the browser
- *  cache pinned to where the reviewer installed it (that path used to be derived from the real HOME). */
+/** The proof child's env uses its owned HOME for temporary writes, never a parent's TMPDIR.
+ *  The browser cache remains pinned to the reviewer's installation. */
 export function proofChildEnv(home: string, parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   return {
     ...buildProofEnv(parent),
     HOME: home,
+    TMPDIR: home,
     PLAYWRIGHT_BROWSERS_PATH: playwrightCacheRoot(parent, process.platform, parent.HOME ?? homedir()),
   };
 }
@@ -8942,6 +8943,7 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * {@link INSTRUMENT_SURFACE_EXCLUSIONS} plus
  * test/instrument-surface-completeness.test.ts derive candidates from the live tree on every run. */
 export const INSTRUMENT_SURFACE: readonly string[] = [
+  "^scripts/code-health-provenance\\.mjs$",
   "^plan/credit-overrides\\.yaml$",
   "^scripts/lib/ci-dependency-evidence\\.mjs$",
   "^scripts/preflight-author\\.mjs$",
