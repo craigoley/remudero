@@ -2838,7 +2838,7 @@ function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan
       ...(isAgeOnlyInboxInformation(proposal) && classifiedInboxOwner(proposal, c) === "fleet" ? { informational: true } : {}),
       ...((deps.inboxSourceIdentity ?? deps.inboxAuditScope) ? { causalScope: deps.inboxSourceIdentity ?? deps.inboxAuditScope } : {}),
       ...(proposal.reframeHistory ? { reframeHistory: proposal.reframeHistory } : {}),
-      ...(c.retirement?.state === "restored_for_review" ? { requiresReview: true } : {}) });
+      ...(c.requiresReview || c.retirement?.state === "restored_for_review" ? { requiresReview: true } : {}) });
   }
   return items;
 }
@@ -3036,7 +3036,7 @@ const INBOX_THREAD_LIST_WARM_MS = 60_000;
 
 export interface ThreadListInbox {
   proposals: readonly Proposal[];
-  classifications: ReadonlyArray<Pick<InboxClassification, "proposalId" | "state" | "retirement" | "displayOwner">>;
+  classifications: ReadonlyArray<Pick<InboxClassification, "proposalId" | "state" | "retirement" | "displayOwner"> & { requiresReview?: true }>;
 }
 
 export function inboxClassificationEvidence(classified: Pick<ClassifiedInbox, "projection" | "classifications">): ClassificationEvidence {
@@ -3066,7 +3066,8 @@ function readSlowLaneClassification(stateDir: string, registryPath: string): Thr
   const classifications = proposals.flatMap((p) => {
     const state = snapshot.states[p.id];
     return state === undefined ? [] : [{ proposalId: p.id, state: state as InboxClassification["state"],
-      ...(snapshot.displayOwners?.[p.id] ? { displayOwner: snapshot.displayOwners[p.id] } : {}) }];
+      ...(snapshot.displayOwners?.[p.id] ? { displayOwner: snapshot.displayOwners[p.id] } : {}),
+      ...(snapshot.restoredForReview?.includes(p.id) ? { requiresReview: true as const } : {}) }];
   });
   const complete = snapshot.complete === true;
   const incompleteReason = complete ? undefined
