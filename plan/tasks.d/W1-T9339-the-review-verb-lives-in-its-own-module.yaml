@@ -92,7 +92,11 @@
        conserving 14750 rather than the native proposal's 15000; withMaterializedWorktree's 15 comment
        lines move with it. If an earlier extraction already lowered run-task.ts's row, lower that row
        by the same 693 instead. Where comment volume no longer blocks on the adopted base (#14087),
-       leaving the baseline untouched also satisfies this step. Every other entry, exclusion, population,
+       leaving the baseline untouched also satisfies this step.
+       The clock-signature baseline may relocate only reviewCommand's two original Date.now() run-id calls:
+       src/run-task.ts dateNow 48 -> 46 (or 2 below whatever row an earlier extraction left) and
+       src/cli/commands/review.ts dateNow 0 -> 2, legacy and newDate unchanged, so the aggregate holds.
+       This permits restoring both original expressions in place of systemClock.now(). Every other entry, exclusion, population,
        threshold, acceptance criterion and falsifier stays unchanged. Restore the original literal
        origin/main:plan/tasks.d read in the host; layout overrides must not change this extraction's behavior.
     5. The PR body reports the moved symbol count and line count, and the host's member count. A large host is
