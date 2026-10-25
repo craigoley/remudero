@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
+import { query, type SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
 import { fileURLToPath } from "node:url";
 import * as runtimeRegistry from "#src/lib/instance-registry-selection.js";
 import { observeSelectedMode } from "#src/lib/instance-mode.js";
@@ -521,6 +522,44 @@ function privateClaudeArgs(fixture: ReturnType<typeof runtimeRegistryFixture>, s
         result: "done", session_id: "selected-fixture", total_cost_usd: 0, num_turns: 1 }; })();
     }) as SpawnWorkerArgs["queryFn"] };
 }
+
+test("selected Claude actual SDK transport keeps private registry paths out of child arguments", async () => {
+  const fixture = runtimeRegistryFixture();
+  let argv: string[] | undefined, input = "", policyPath: string | undefined, policy: Record<string, unknown> | undefined;
+  try {
+    const args = privateClaudeArgs(fixture, { calls: 0 });
+    args.queryFn = params => query({ ...params, options: { ...params.options,
+      pathToClaudeCodeExecutable: "/nonexistent/claude",
+      spawnClaudeCodeProcess: spawned => {
+        argv = spawned.args;
+        const settings = argv[argv.indexOf("--settings") + 1];
+        if (settings && existsSync(settings)) { policyPath = settings; policy = JSON.parse(readFileSync(settings, "utf8")); }
+        const child = new EventEmitter() as EventEmitter & {
+          stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; killed: boolean; exitCode: number | null; kill(): boolean;
+        };
+        child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+        child.stdin.on("data", chunk => { input += String(chunk); }); child.killed = false; child.exitCode = null;
+        child.kill = () => {
+          if (child.killed) return true;
+          child.killed = true; child.exitCode = 0; child.stdout.end();
+          setImmediate(() => child.emit("exit", 0, null)); return true;
+        };
+        setTimeout(() => child.kill(), 20);
+        return child as unknown as SpawnedProcess;
+      } } });
+    await runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected });
+    assert.ok(argv?.length, "the real SDK must reach its bounded synthetic transport, not a supplied argv fixture");
+    assert.ok(input.includes("initialize"), "actual SDK protocol is the positive control; no native child or model runs");
+    assert.equal(JSON.stringify(argv).includes(fixture.selected), false, "inline policy JSON is a private-path disclosure");
+    assert.equal(JSON.stringify(argv).includes(args.settingsFile), false);
+    assert.ok(policyPath && policy, "the child receives one opaque invocation policy path, not private policy bytes");
+    const filesystem = (policy.sandbox as { filesystem: { denyRead: string[]; denyWrite: string[] } }).filesystem;
+    for (const target of [fixture.selected, args.settingsFile, policyPath]) {
+      assert.ok(filesystem.denyRead.includes(target)); assert.ok(filesystem.denyWrite.includes(target));
+    }
+    assert.equal(existsSync(policyPath), false, "the owned invocation policy is gone after its SDK stream closes");
+  } finally { fixture.cleanup(); }
+});
 
 test("selected Claude SDK boundary snapshots private denials across queued arguments and egress replacement", async () => {
   for (const proxy of [false, true]) {
