@@ -159,3 +159,15 @@ test("code health keeps known partial findings when the next source read fails",
   assert.equal(missing.findings.length, 1, "absence in a clean read still does not prove the known finding was fixed");
   assert.notEqual(missing.checks[0]!.state, "met");
 });
+
+test("code health requires independent source parts when an analysis matrix is partly rerun", () => {
+  const value = input();
+  const current = value.scans.map(scan => ({ ...scan, componentIds: [`${scan.kind}:new`, ...(scan.kind === "quality" ? ["quality:reused-language"] : [])] }));
+  const previous = value.baseline!.scans.map(scan => ({ ...scan, componentIds: [`${scan.kind}:old`, ...(scan.kind === "quality" ? ["quality:reused-language"] : [])] }));
+  const shared = { ...value, scans: current, baseline: { ...value.baseline!, scans: previous } };
+  assert.equal(compareCodeHealthEvidence(shared).state, "insufficient_evidence", "a changed aggregate ID cannot turn reused matrix jobs into an independent scan");
+  assert.equal(projectCodeHealth(shared).summary.healthy, null);
+  current[0]!.componentIds = ["quality:entirely-new-language-1", "quality:entirely-new-language-2"];
+  assert.equal(compareCodeHealthEvidence(shared).state, "comparable");
+  assert.equal(projectCodeHealth(shared).summary.healthy, true, "wholly independent complete measurements remain assessable");
+});
