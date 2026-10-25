@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { CODE_HEALTH_POLICY_VERSION } from "./code-health-collector.js";
 import { codeHealthRepositoryStateDir, readCodeHealthArtifactJson, readCodeHealthCollectionFailure, readCodeHealthSnapshot } from "./code-health-store.js";
-import { readCodeHealthInventory, readCodeHealthRelatedWork } from "./code-health-view.js";
+import { readCodeHealthInventory, readCodeHealthRelatedWork } from "./code-health-store.js";
 import { buildCodeHealthOpportunities, qualifiedCodeHealthPlanningSource } from "./codeql-quality-intake.js";
 import { acquireInflightLock, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
