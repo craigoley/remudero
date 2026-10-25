@@ -413,3 +413,12 @@ export function parseAllThreads(raw: string, sourcePath: string): ReturnType<typ
   for (const list of threads.values()) list.sort((a, b) => a.seq - b.seq);
   return { status: "ok", threads };
 }
+
+
+export type ThreadAppendOnceResult = { kind: "appended" | "existing"; threadId: string; seq: number; ts: number }
+  | { kind: "conflict" | "busy" | "unresolved"; reason: string };
+/** Durably append one source-bound message, or report that its delivery is not confirmed. */
+export function appendThreadMessageOnce(_identity: ThreadIdentity, _role: ThreadMessageRole, _body: string, _messageId: string,
+  _deps: ThreadStoreDeps, _extra: ThreadMessageExtra = {}): ThreadAppendOnceResult {
+  return { kind: "unresolved", reason: "Durable thread append is not implemented." };
+}
