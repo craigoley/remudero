@@ -44,22 +44,26 @@ export function releaseContractPins(tasks: readonly ReleaseContract[]): (id: str
  *  Only a matching operator receipt clears a human hold; a machine cannot reapprove it. */
 export function qualifyReleaseEvidence(
   lines: readonly string[], durable: ReleaseEvidence = new Map(), pins: ReadonlyMap<string, string> | ((id: string) => string | undefined) = new Map(),
-): { authors: Map<string, ReleaseAuthor>; reapproval: Set<string> } {
+): { authors: Map<string, ReleaseAuthor>; reapproval: Set<string>; unknownHistory: boolean } {
   const operators = new Set<string>();
   const machines = new Set<string>();
   const reapproval = new Set<string>();
+  let unknownHistory = false;
   const observe = (id: string, pin: unknown, author: ReleaseAuthor): void => {
     if (typeof pin === "string" && (typeof pins === "function" ? pins(id) : pins.get(id)) === pin) (author === "operator" ? operators : machines).add(id);
     else if (author === "operator") reapproval.add(id);
   };
   for (const line of lines) {
-    if (!line.includes("ratify.approved")) continue;
+    if (line.trim() === "") continue;
     let row: Record<string, unknown>;
     try { row = JSON.parse(line); } catch {
-      // An unparseable row identifies and releases no task; other receipts still require their exact contract pin.
+      // It may conceal a human hold; a machine cannot turn unread history into absence.
+      unknownHistory = true;
       continue;
     }
-    if (row === null || typeof row !== "object" || row.step !== "ratify.approved" || typeof row.task_id !== "string" || !row.task_id) continue;
+    if (row === null || typeof row !== "object" || Array.isArray(row)) { unknownHistory = true; continue; }
+    if (row.step !== "ratify.approved") continue;
+    if (typeof row.task_id !== "string" || !row.task_id) { unknownHistory = true; continue; }
     observe(row.task_id, row.release_pin, row.author_class === "machine" ? "machine" : "operator");
   }
   for (const entry of durable) {
@@ -72,7 +76,7 @@ export function qualifyReleaseEvidence(
   const authors = new Map<string, ReleaseAuthor>();
   for (const id of machines) if (!reapproval.has(id)) authors.set(id, "machine");
   for (const id of operators) { authors.set(id, "operator"); reapproval.delete(id); }
-  return { authors, reapproval };
+  return { authors, reapproval, unknownHistory };
 }
 
 /** A newly pinned operator ruling must keep the same approval contract after landing. */

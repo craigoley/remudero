@@ -1147,6 +1147,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   const isMerged = ports.isMerged ?? ((id: string) => merged?.has(id) === true);
   const excluded = new Set(ports.excludeFamilies ?? []);
   const releaseEvidence = qualifyReleaseEvidence(ports.releaseLedgerLines?.() ?? [], ports.operatorReleases?.() ?? readOperatorReleaseRecords(ports.stateDir), releaseContractPins(plan.tasks));
+  if (releaseEvidence.unknownHistory) throw new Error("operator release history is unreadable: malformed ledger record");
   for (const task of plan.tasks) if (operatorReleaseContractChanged(task) && releaseEvidence.authors.get(task.id) !== "operator") releaseEvidence.reapproval.add(task.id);
   const priorReapproval = new Set(state.operatorReapprovalRequired ?? []);
   state.operatorReapprovalRequired = [...releaseEvidence.reapproval].sort();

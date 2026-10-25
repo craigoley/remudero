@@ -1,0 +1,92 @@
+- id: W1-T10595
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/a-test-imports-through-the-subpath-alias.test.ts:flaky cost 32.4 PR minute(s) across 14 round(s) on 13 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.17
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/a-test-imports-through-the-subpath-alias.test.ts:flaky"
+  files:
+    - scripts/test-location-codemod.mjs
+    - test/ci/suites/check-test-test-a-test-imports-through-the-subpath-alias-test-ts-flaky.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/a-test-imports-through-the-subpath-alias.test.ts:flaky"
+      proof: "grep: test(\"W1-T10595: check:test:test/a-test-imports-through-the-subpath-alias.test.ts:flaky is prevented, not retried\" in test/ci/suites/check-test-test-a-test-imports-through-the-subpath-alias-test-ts-flaky.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/a-test-imports-through-the-subpath-alias.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/a-test-imports-through-the-subpath-alias.test.ts:flaky cost 32.4 PR minute(s) (seven-day half-life) across 14 fix round(s) on 13 pull request(s).
+
+    WHERE IT COMES FROM:
+    - scripts/test-location-codemod.mjs: test/a-test-imports-through-the-subpath-alias.test.ts imports it
+    - test/a-test-imports-through-the-subpath-alias.test.ts: named by the failing check
+    - the rounds name a failing test: test/a-test-imports-through-the-subpath-alias.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12865 (https://github.com/craigoley/remudero/pull/12865) at 2026-10-19T01:34:42.283Z: ci-log round — ci-shard (6/8): test/a-test-imports-through-the-subpath-alias.test.ts
+        failing tests: W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier
+          | not ok 3 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 176.189479
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-test-imports-through-the-subpath-alias.test.ts:3:187'
+          |   failureType: 'testCodeFailure'
+          |   error: '3551 test files carry a location-relative specifier at HEAD, 3550 at merge base ae7cfba1d — import through #src/*, #scripts/* and #test/* (script
+    - PR #12861 (https://github.com/craigoley/remudero/pull/12861) at 2026-10-19T01:29:23.777Z: ci-log round — ci-shard (6/8): test/a-test-imports-through-the-subpath-alias.test.ts
+        failing tests: W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier
+          | not ok 3 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 263.728618
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-test-imports-through-the-subpath-alias.test.ts:3:187'
+          |   failureType: 'testCodeFailure'
+          |   error: '3551 test files carry a location-relative specifier at HEAD, 3550 at merge base a1e7ca374 — import through #src/*, #scripts/* and #test/* (script
+    - PR #12841 (https://github.com/craigoley/remudero/pull/12841) at 2026-10-18T22:54:55.022Z: ci-log round — coverage-shard (6/8): test/a-test-imports-through-the-subpath-alias.test.ts
+        failing tests: W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier
+          | not ok 3 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 287.959063
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-test-imports-through-the-subpath-alias.test.ts:87:1'
+          |   failureType: 'testCodeFailure'
+          |   error: '3551 test files carry a location-relative specifier at HEAD, 3550 at merge base efd946a50 — import through #src/*, #scripts/* and #test/* (scripts
+    - PR #12829 (https://github.com/craigoley/remudero/pull/12829) at 2026-10-18T21:07:44.250Z: ci-log round — coverage-shard (6/8): test/a-test-imports-through-the-subpath-alias.test.ts; coverage-shard (8/8): test/sweep.test.ts
+        failing tests: W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier, leaf, R-50: setup caches npm unless it only bootstraps guarded dependency-free admission, R-50: every job in every PR-firing workflow declares a positive timeout-minutes, W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; a red required check (CodeQL) with a PASSING review verdict on the same head ALSO routes to ci-log fixable, never straight to escalate (the \\#292/\\#315 fix)"]
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier, leaf, R-50: setup caches npm unless it only bootstraps guarded dependency-free admission, R-50: every job in every PR-firing workflow declares a positive timeout-minutes, W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame
+          | not ok 3 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 331.100946
+          |   type: 'test'
+          |   location: '/home/runner
+    - PR #12776 (https://github.com/craigoley/remudero/pull/12776) at 2026-10-18T20:01:37.746Z: ci-log round — rule-checks: test/ci-friction-remedy-8cfe5bc13ae74a09.test.ts; coverage-shard (5/8): test/a-test-imports-through-the-subpath-alias.test.ts; coverage-shard (4/8); mutation-ratchet: timed
+        failing tests: the REAL PR gate config's commandRunner is scoped to exactly the test files that import src/lib/classify.ts -- not the full suite (W1-T133 latency fix); W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/mutation-ratchet.test.ts:3:2331
+          | ✖ the REAL PR gate config's commandRunner is scoped to exactly the test files that import src/lib/classify.ts -- not the full suite (W1-T133 latency fix) (271.432913ms)
+          |   AssertionError [ERR_ASSERTION]: test/ci-friction-remedy-8cfe5bc13ae74a09.test.ts imports src/lib/classify.ts but is NOT in stryker's commandRunner, so its assertions kill no mutants and the score silently drops -- add it to stryker.conf.json (an instrument-only PR; Standing rule 25 forbids shipping that edit beside a src/ change). Command is: node --test --import
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.76
+    reasons:
+      - "The declared files are a test-location codemod script and a CI test suite, and the plan frames the change as preventing a named flaky check from consuming a fix round."
+      - "The plan cites repeated CI failures and a measured cost for the target check; the evidence also notes a mismatch between the PR-reference counts, which limits confidence but does not by itself show a risky action."
+      - "The gates state filingTime is true and the author is machine; no concerning gate state is shown."
+    judged_at: "2026-10-25T03:34:44.111Z"
+    pin: "367ea57143b0758fedf4ac4d2f86374780b76ad93a9acd54372100510bc3eed4"
