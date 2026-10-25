@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { pathToFileURL } from "node:url";
 import { execWhitelistedProof, parseWhitelistedProof, pinnedVitestCli } from "#src/lib/review.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -19,7 +20,7 @@ function runnerFixture(t: TestContext, fail = false) {
   // Actual Vitest engine qualification belongs to the live Wreckterra checkout receipt.
   writeFileSync(join(dir, "node_modules/vitest/vitest.mjs"), `
 import {writeFileSync} from "node:fs";
-import check, {title} from "../../tests/unit/sample.test.mjs";
+import check, {title} from ${JSON.stringify(pathToFileURL(join(dir, "tests/unit/sample.test.mjs")).href)};
 writeFileSync("argv.json", JSON.stringify(process.argv.slice(2)));
 const filter = process.argv.indexOf("-t");
 const selected = filter < 0 || process.argv[filter + 1] === title;
