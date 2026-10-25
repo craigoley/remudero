@@ -204,12 +204,12 @@ test("code health cached view preserves scope, pinned pages and saved source clo
     assert("snapshotId" in published);
     const params = new URLSearchParams({ repository: "acme/atlas" });
     const first = readCodeHealthReport({ stateDir, params, now });
-    assert.equal(first.data.repository, "acme/atlas");
+    assert.equal(first.data.repository, "acme/atlas"); assert(first.data.assessment);
     assert.equal(first.data.assessment.observedAt, value.observedAt);
     assert.equal(first.data.findingCount, 205); assert.equal(first.data.urgentFindings.value, 1);
     assert.equal(first.data.assessment.findings.length, 100); assert(first.data.page.nextCursor);
     const next = readCodeHealthReport({ stateDir, params: new URLSearchParams({ repository: "acme/atlas", snapshot: published.snapshotId, page: first.data.page.nextCursor }), now });
-    assert.equal(next.data.assessment.findings.length, 100); assert.equal(next.data.findingCount, 205);
+    assert(next.data.assessment); assert.equal(next.data.assessment.findings.length, 100); assert.equal(next.data.findingCount, 205);
     assert.equal(new Set([...first.data.assessment.findings, ...next.data.assessment.findings].map((f: { fingerprint: string }) => f.fingerprint)).size, 200);
     const portfolio = readCodeHealthReport({ stateDir, params: new URLSearchParams(), now });
     assert.deepEqual(portfolio.data.expectedRepositories, ["acme/atlas", "acme/missing"]);
@@ -219,7 +219,7 @@ test("code health cached view preserves scope, pinned pages and saved source clo
     assert.throws(() => readCodeHealthReport({ stateDir, params: new URLSearchParams("repository=acme%2Fatlas&repository=acme%2Fmissing"), now }), /repeated/i);
     assert.throws(() => readCodeHealthReport({ stateDir, params: new URLSearchParams({ repository: "acme/foreign" }), now }), /repository/i);
     const older = readCodeHealthReport({ stateDir, params, now: now + 2 * 86_400_000 });
-    assert.equal(older.data.assessment.observedAt, value.observedAt); assert.equal(older.data.freshness, "stale");
+    assert(older.data.assessment); assert.equal(older.data.assessment.observedAt, value.observedAt); assert.equal(older.data.freshness, "stale");
     assert.equal(older.data.planningAvailable, false);
   });
 });
