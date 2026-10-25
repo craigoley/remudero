@@ -29,6 +29,10 @@ class CodeHealthNotReady extends RmdError {
 interface Page { s: string; o: number; k: string }
 interface Request { repository: string; snapshot?: string; page?: Page }
 const qualifiedRepo = (value: string): boolean => /^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/.test(value) && ![".", ".."].includes(value.split("/")[1]!);
+function repositoryPullRequestUrl(value: unknown, repository: string): value is string {
+  const prefix = `https://github.com/${repository}/pull/`;
+  return typeof value === "string" && value.slice(0, prefix.length).toLowerCase() === prefix && /^[1-9][0-9]*$/.test(value.slice(prefix.length));
+}
 function request(params: URLSearchParams): Request {
   for (const name of params.keys()) if (!["repository", "snapshot", "page"].includes(name) || params.getAll(name).length !== 1) throw new RangeError("Unknown or repeated Code health parameter.");
   const repository = (params.get("repository") ?? "all").toLowerCase(), snapshot = params.get("snapshot") ?? undefined;
@@ -219,12 +223,12 @@ export function readCodeHealthRelatedWork(stateDir: string, inventory: Repositor
               Array.isArray(source.taskIds) && source.taskIds.length <= 64 && source.taskIds.every(id => /^[A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?$/.test(id))) {
             const proposalId = source.opportunityId.slice(repository.length + 1), tasks = source.taskIds.length ? source.taskIds : [undefined];
             for (const taskId of tasks) work.push({ repository, proposalId, threadId: source.threadId, ...(taskId ? { taskId } : {}),
-              ...(row.pr?.repo?.toLowerCase() === repository && row.pr.taskId === taskId && typeof row.pr.url === "string" ? { prUrl: row.pr.url } : {}) });
+              ...(row.pr?.repo?.toLowerCase() === repository && row.pr.taskId === taskId && repositoryPullRequestUrl(row.pr.url, repository) ? { prUrl: row.pr.url } : {}) });
             continue;
           }
           if (!row.task || row.task.repo?.toLowerCase() !== repository || row.task.key !== row.candidate.key || typeof row.task.id !== "string") continue;
           work.push({ repository, proposalId: row.proposalId, taskId: row.task.id,
-            ...(row.pr?.repo?.toLowerCase() === repository && row.pr.taskId === row.task.id && typeof row.pr.url === "string" ? { prUrl: row.pr.url } : {}) });
+            ...(row.pr?.repo?.toLowerCase() === repository && row.pr.taskId === row.task.id && repositoryPullRequestUrl(row.pr.url, repository) ? { prUrl: row.pr.url } : {}) });
         }
       } catch (error) {
         // Older publishers do not have the derived projection yet. Its absence does not erase native links.
