@@ -48,7 +48,7 @@ export type CodeHealthSnapshotRead = { state: "observed"; snapshot: CodeHealthSt
 const CODE_HEALTH_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024;
 const evidenceDigest = (value: unknown): string => createHash("sha256").update(canonicalCodeHealthJson(value)).digest("hex");
 function boundedEvidenceJson(path: string, maxBytes: number): unknown {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = fstatSync(fd);
     if (!before.isFile() || before.size > maxBytes) throw new Error("Invalid code health evidence file.");

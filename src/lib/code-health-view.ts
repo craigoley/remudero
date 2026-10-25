@@ -72,7 +72,7 @@ export interface CodeHealthViewData {
   relatedWorkState: "reported" | "partial" | "stale" | "unavailable" | "not_collected"; relatedWorkAsOf: string | null; relatedWorkReason: string | null; planningAvailable: boolean; freshness: "fresh" | "stale" | "unavailable";
   page: { nextCursor: string | null };
 }
-const unknownUrgent = (): UrgentCount => ({ value: null, precision: "unavailable", scope: "Findings in the measured quality scope; this is not a complete security assessment." });
+const unknownUrgent = (): UrgentCount => ({ value: null, precision: "unavailable", scope: "Known urgent findings, including earlier findings whose current status is unknown. This is not a complete security assessment." });
 function repositoryReport(stateDir: string, repository: string, now: number, snapshotId?: string, summaryOnly = false): { summary: RepositorySummary; input: CodeHealthProjectionInput | null; isCurrentSnapshot: boolean; assessment: CodeHealthAssessment | null; opportunities: CodeHealthImprovementOpportunity[]; sources: ViewSource[] } {
   const repoState = codeHealthRepositoryStateDir(stateDir, repository), latest = readCodeHealthSnapshot(repoState, repository);
   const read = snapshotId ? readCodeHealthSnapshot(repoState, repository, snapshotId) : latest;
@@ -91,8 +91,11 @@ function repositoryReport(stateDir: string, repository: string, now: number, sna
   if (collection.state === "none" && sourceFailure) sources.push({ name: `repositories:code-health-read:${repository}`, kind: "repositories", asOf: latest.state === "observed" ? latest.latestAttemptAt : null, state: "unavailable", reason: sourceFailure.reason ?? "Some code-check results could not be read." });
   const freshness = sources.some(source => source.state === "unavailable") ? "unavailable" : sources.some(source => source.state === "stale") ? "stale" : "fresh";
   const qualityComplete = assessment.sources.some(source => source.kind === "quality" && source.required && source.state === "complete" && source.analyzedSha === assessment.currentSha);
-  const urgent = assessment.findings.filter(finding => finding.severity === "high" || finding.severity === "critical").length;
-  const urgentFindings: UrgentCount = { value: qualityComplete || urgent > 0 ? urgent : null, precision: qualityComplete ? "exact" : urgent > 0 ? "at_least" : "unavailable", scope: unknownUrgent().scope };
+  const urgentEvidence = assessment.findings.filter(finding => finding.severity === "high" || finding.severity === "critical");
+  const currentQualitySources = new Set(assessment.sources.filter(source => source.required && source.kind === "quality" && source.analyzedSha === assessment.currentSha).map(source => source.id));
+  const exactUrgent = qualityComplete && urgentEvidence.every(finding => currentQualitySources.has(finding.sourceId));
+  const urgent = urgentEvidence.length;
+  const urgentFindings: UrgentCount = { value: exactUrgent || urgent > 0 ? urgent : null, precision: exactUrgent ? "exact" : urgent > 0 ? "at_least" : "unavailable", scope: unknownUrgent().scope };
   const lastAttemptAt = collection.state === "failed" ? collection.startedAt : latest.state === "observed" ? latest.latestAttemptAt : null;
   return { input: summaryOnly ? null : read.snapshot.input, isCurrentSnapshot: latest.state === "observed" && latest.snapshot.snapshotId === read.snapshot.snapshotId, assessment: summaryOnly ? null : assessment, opportunities: summaryOnly ? [] : buildCodeHealthOpportunities(read.snapshot.input), sources, summary: { repository, snapshotId: read.snapshot.snapshotId, state: access === "unauthorized" || access === "rate_limited" ? access : assessment.state,
     summary: assessment.summary, sourceClocks: assessment.sources.filter(source => source.required).map(source => ({ kind: source.kind, state: source.state, measuredAt: source.observedAt, analyzedSha: source.analyzedSha })), urgentFindings, measuredAt: assessment.observedAt, analyzedSha: assessment.analyzedSha, currentSha: assessment.currentSha, freshness,
