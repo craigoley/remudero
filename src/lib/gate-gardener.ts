@@ -17,7 +17,9 @@ import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations, retiremen
 import { hostWorktreeGit } from "./worktree-git.js";
 import { loadPolicy } from "./policy.js";
 import { sameTestFile } from "./test-path-resolver.js";
-import { collectCiFailureCorpus, rollupAtSha, type CiFailurePair } from "./ci-failure-corpus.js";
+import { collectCiFailureCorpus, rollupAtSha, type CiFailurePair, type CorpusCommit } from "./ci-failure-corpus.js";
+import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
+import { checkRunsRestArgs, combinedStatusRestArgs } from "./open-prs-rest.js";
 
 /**
  * lib/gate-gardener.ts (W1-T4116) — the gates tend themselves.
@@ -68,8 +70,9 @@ function rebuiltTokens(line: string): Array<{ expression: string; value: string 
 }
 
 export function classifyGateRepair(pair: GateRepairPair, repairDiff: string, ownFiles: readonly string[], gateRegex: RegExp): GateRepairClass {
-  if (pair.state !== "repaired" || !pair.greenSha || !pair.repairFiles?.length) return "genuine";
-  if (pair.repairFiles.every((file) => ownFiles.includes(file))) return "baseline-only";
+  const repairFiles = pair.repairFiles ?? [];
+  if (pair.state !== "repaired" || !pair.greenSha || repairFiles.length === 0) return "genuine";
+  if (repairFiles.every((file) => ownFiles.includes(file))) return "baseline-only";
   if (pair.triggered === false) return "off-subject";
   const chunks = repairDiff.split(/^(?:diff --git .*|@@.*)$/m);
   for (const chunk of chunks) {
@@ -128,56 +131,109 @@ export function renderFalsePositiveShard(action: GateGardenAction, taskId: strin
   });
 }
 
-export function loadGateRepairObservations(deps: GardenerDeps, rules: readonly GateRepairRule[], sources: GateDefuseSources): GateRepairObservation[] {
-  const run = (args: string[]): string => sources.execFile
-    ? sources.execFile("gh", args, { cwd: deps.repoRoot, encoding: "utf8" })
-    : execFileSync("gh", args, { cwd: deps.repoRoot, encoding: "utf8" });
-  const read = (args: string[]): unknown => JSON.parse(run(args));
-  const repo = read(["repo", "view", "--json", "nameWithOwner"]) as { nameWithOwner: string };
+/**
+ * Evaluates a rule's SYNCHRONOUS trigger over files read from GitHub without blocking the loop: each pass
+ * records the paths the trigger asked for and could not yet see, fetches them, and runs again, until a pass
+ * asks for nothing new. A file absent at a sha (HTTP 404) is `null`, as the trigger's own readers return.
+ */
+async function evaluateTriggerAsync(rule: GateRepairRule, changed: string[], shas: { head: string; base: string },
+  readAt: (sha: string, path: string) => Promise<string | null>): Promise<boolean | undefined> {
+  if (!rule.trigger) return undefined;
+  const seen = new Map<string, string | null>();
+  for (let round = 0; round < 8; round++) {
+    const missing = new Map<string, { sha: string; path: string }>();
+    const reader = (sha: string) => (path: string): string | null => {
+      const key = `${sha}:${path}`;
+      if (seen.has(key)) return seen.get(key)!;
+      missing.set(key, { sha, path });
+      return null;
+    };
+    let verdict: boolean | undefined, failure: unknown;
+    try {
+      verdict = rule.trigger({ changed, readHead: reader(shas.head), readBase: reader(shas.base) });
+    } catch (error) {
+      failure = error;
+    }
+    if (!missing.size) {
+      if (failure !== undefined) throw failure;
+      return verdict;
+    }
+    for (const [key, { sha, path }] of missing) seen.set(key, await readAt(sha, path));
+  }
+  throw new Error(`gate trigger never settled: ${rule.gate}`);
+}
+
+export async function loadGateRepairObservations(rules: readonly GateRepairRule[], sources: GateDefuseSources = {}): Promise<GateRepairObservation[]> {
+  const readJsonAsync = sources.ghJson ?? ((args: string[]) => ghJsonAsync(args));
+  const readTextAsync = sources.ghText ?? ((args: string[]) => ghTextAsync(args));
+  const repo = await readJsonAsync(["repo", "view", "--json", "nameWithOwner"]) as { nameWithOwner: string };
+  const [owner, name] = repo.nameWithOwner.split("/") as [string, string];
   const api = `repos/${repo.nameWithOwner}`;
-  const prs = read(["api", `${api}/pulls?state=all&sort=updated&direction=desc&per_page=100`]) as Array<{ number: number; base: { sha: string } }>;
+  const prs = await readJsonAsync(["api", `${api}/pulls?state=all&sort=updated&direction=desc&per_page=100`]) as Array<{ number: number; base: { sha: string } }>;
   const observations: GateRepairObservation[] = [];
   for (const pr of prs) {
-    const commits = read(["api", `${api}/pulls/${pr.number}/commits?per_page=100`]) as Array<{ sha: string }>;
+    const commits = await readJsonAsync(["api", `${api}/pulls/${pr.number}/commits?per_page=100`]) as Array<{ sha: string }>;
     const runs = new Map<string, { check_runs: Array<{ id: number; name: string; conclusion: string }> }>();
-    const corpus = collectCiFailureCorpus({ prs: [{ number: pr.number, commits: commits.map(({ sha }) => ({ sha,
-      rollup: rollupAtSha(...repo.nameWithOwner.split("/") as [string, string], sha, (args) => {
-        const value = read(args);
-        if (args[1]?.includes("/check-runs")) runs.set(sha, value as ReturnType<typeof runs.get> & {});
-        return value;
-      }) })) }] });
+    const corpusCommits: CorpusCommit[] = [];
+    for (const { sha } of commits) {
+      const [checkRuns, statuses] = await Promise.allSettled([
+        readJsonAsync(checkRunsRestArgs(owner, name, sha)), readJsonAsync(combinedStatusRestArgs(owner, name, sha))]);
+      // An unreadable rollup stays `undefined`, never green: collectCiFailureCorpus names the sha.
+      let rollup: CorpusCommit["rollup"];
+      if (checkRuns.status === "fulfilled" && statuses.status === "fulfilled") {
+        runs.set(sha, checkRuns.value as { check_runs: Array<{ id: number; name: string; conclusion: string }> });
+        rollup = rollupAtSha(owner, name, sha, (args) => args[1]?.includes("/check-runs") ? checkRuns.value : statuses.value);
+      }
+      corpusCommits.push({ sha, rollup });
+    }
+    const corpus = collectCiFailureCorpus({ prs: [{ number: pr.number, commits: corpusCommits }] });
     for (const pair of corpus.pairs.filter((pair) => pair.state === "repaired")) {
-      const diff = read(["api", `${api}/compare/${pair.redSha}...${pair.greenSha}`]) as { files: Array<{ filename: string; patch?: string }> };
-      if (!diff.files?.length || diff.files.some((file) => file.patch === undefined)) throw new Error(`gate repair diff unreadable for PR #${pr.number}`);
-      const repairDiff = diff.files.map((file) => `diff --git a/${file.filename} b/${file.filename}\n${file.patch}`).join("\n");
+      const diff = await readJsonAsync(["api", `${api}/compare/${pair.redSha}...${pair.greenSha}`]) as { files: Array<{ filename: string; patch?: string }> };
+      const files = diff.files ?? [];
+      if (files.length === 0 || files.some((file) => file.patch === undefined)) throw new Error(`gate repair diff unreadable for PR #${pr.number}`);
+      const repairDiff = files.map((file) => `diff --git a/${file.filename} b/${file.filename}\n${file.patch}`).join("\n");
       const direct = rules.filter((rule) => rule.gate === pair.gate);
       const failed = runs.get(pair.redSha)?.check_runs.find((check) => check.name === pair.gate && check.conclusion === "failure");
-      const log = direct.length || !failed ? "" : run(["run", "view", "--job", String(failed.id), "--log-failed"]);
+      const log = direct.length || !failed ? "" : await readTextAsync(["run", "view", "--job", String(failed.id), "--log-failed"]);
       const implicated = direct.length ? direct : rules.filter((rule) => log.includes(rule.gate));
       for (const rule of implicated) {
-        const before = read(["api", `${api}/compare/${pr.base.sha}...${pair.redSha}`]) as { merge_base_commit: { sha: string }; files: Array<{ filename: string }> };
-        const readAt = (sha: string, path: string): string | null => {
-          const value = read(["api", `${api}/contents/${path}?ref=${sha}`]) as { content?: string; encoding?: string };
+        const before = await readJsonAsync(["api", `${api}/compare/${pr.base.sha}...${pair.redSha}`]) as { merge_base_commit: { sha: string }; files: Array<{ filename: string }> };
+        const readAt = async (sha: string, path: string): Promise<string | null> => {
+          let value: { content?: string; encoding?: string };
+          try {
+            value = await readJsonAsync(["api", `${api}/contents/${path}?ref=${sha}`]) as { content?: string; encoding?: string };
+          } catch (error) {
+            if (/\b404\b|Not Found/.test(String((error as Error)?.message ?? error))) return null;
+            throw error;
+          }
           if (value.encoding !== "base64" || typeof value.content !== "string") throw new Error(`gate trigger content unreadable: ${path}@${sha}`);
           return Buffer.from(value.content, "base64").toString("utf8");
         };
-        const triggered = rule.trigger?.({ changed: before.files.map((file) => file.filename),
-          readHead: (path) => readAt(pair.redSha, path), readBase: (path) => readAt(before.merge_base_commit.sha, path) });
-        observations.push({ pair: { ...pair, gate: rule.gate, repairFiles: diff.files.map((file) => file.filename), triggered }, repairDiff });
+        const triggered = await evaluateTriggerAsync(rule, before.files.map((file) => file.filename),
+          { head: pair.redSha, base: before.merge_base_commit.sha }, readAt);
+        observations.push({ pair: { ...pair, gate: rule.gate, repairFiles: files.map((file) => file.filename), triggered }, repairDiff });
       }
     }
   }
   return observations;
 }
 
-function falsePositiveInventory(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources): { actions: GateGardenAction[]; tally: Outcome } {
+const NO_REPAIRS = (): { actions: GateGardenAction[]; tally: Outcome } => ({ actions: [], tally: { trials: 0, successes: 0 } });
+
+/** True when there is anything to read: injected observations, or a fire-rate report that saw a repaired refusal. */
+function repairsAreWorthReading(deps: GardenerDeps, sources: GateDefuseSources): boolean {
+  if (sources.repairObservations) return true;
   const reportPath = gateFireRatesPath(deps.stateDir);
-  if (!sources.repairObservations && (!existsSync(reportPath) || !(readJson(reportPath).gates as GateFireRate[] | undefined)?.some((gate) => gate.repaired > 0))) {
-    return { actions: [], tally: { trials: 0, successes: 0 } };
-  }
+  return existsSync(reportPath) && !!(readJson(reportPath).gates as GateFireRate[] | undefined)?.some((gate) => gate.repaired > 0);
+}
+
+function falsePositiveRules(probes: GateProbes, sources: GateDefuseSources): readonly GateRepairRule[] {
   const rules = sources.repairRules ?? probes.fp?.GATE_REPAIR_RULES;
   if (!rules) throw new Error("gate gardener: false-positive rule metadata is missing");
-  const observations = sources.repairObservations?.() ?? loadGateRepairObservations(deps, rules, sources);
+  return rules;
+}
+
+function falsePositiveActions(deps: GardenerDeps, rules: readonly GateRepairRule[], observations: readonly GateRepairObservation[], open: readonly string[]): { actions: GateGardenAction[]; tally: Outcome } {
   const tally: Outcome = { trials: observations.length, successes: 0 };
   for (const observation of observations) {
     const rule = rules.find((rule) => rule.gate === observation.pair.gate);
@@ -187,11 +243,25 @@ function falsePositiveInventory(deps: GardenerDeps, probes: GateProbes, sources:
   const layout = resolveRepoLayout(deps.repoRoot);
   const queued = existsSync(layout.planMonolith) ? loadPlan(layout.planMonolith).tasks.filter((task) =>
     task.status === "queued" && !task.retirement).flatMap((task) => task.origin ? [task.origin] : []) : [];
-  const open = sources.openOrigins?.() ?? (JSON.parse(sources.execFile
-    ? sources.execFile("gh", ["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"], { cwd: deps.repoRoot, encoding: "utf8" })
-    : execFileSync("gh", ["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"], { cwd: deps.repoRoot, encoding: "utf8" })) as Array<{ body: string }> )
-    .flatMap((pr) => [...pr.body.matchAll(/gate-false-positive:[^\s"'`]+/g)].map(([origin]) => origin));
   return { actions: gateRepairCandidates(observations, rules, [...queued, ...open], deps.log), tally };
+}
+
+/** The synchronous pass reads only what is injected: GitHub is read by {@link falsePositiveInventoryAsync}. */
+function falsePositiveInventory(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources): { actions: GateGardenAction[]; tally: Outcome } {
+  if (!sources.repairObservations) return NO_REPAIRS();
+  const rules = falsePositiveRules(probes, sources);
+  return falsePositiveActions(deps, rules, sources.repairObservations(), sources.openOrigins?.() ?? []);
+}
+
+async function falsePositiveInventoryAsync(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources): Promise<{ actions: GateGardenAction[]; tally: Outcome }> {
+  if (!repairsAreWorthReading(deps, sources)) return NO_REPAIRS();
+  const rules = falsePositiveRules(probes, sources);
+  const observations = sources.repairObservations?.() ?? await loadGateRepairObservations(rules, sources);
+  if (!observations.length) return falsePositiveActions(deps, rules, observations, []);
+  const open = sources.openOrigins?.() ??
+    ((await (sources.ghJson ?? ((args: string[]) => ghJsonAsync(args)))(["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"])) as Array<{ body: string }>)
+      .flatMap((pr) => [...pr.body.matchAll(/gate-false-positive:[^\s"'`]+/g)].map(([origin]) => origin));
+  return falsePositiveActions(deps, rules, observations, open);
 }
 
 interface ExpiringFixture {
@@ -208,6 +278,9 @@ export interface GateDefuseSources {
   mintTaskId?: GardenTaskIdMinter;
   admissionViolations?: typeof machineFilingAdmissionViolations;
   execFile?: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string;
+  /** W1-T9049: the awaited `gh` JSON/text reads of the false-positive pass; default the paced transport. */
+  ghJson?: (args: string[]) => Promise<unknown>;
+  ghText?: (args: string[]) => Promise<string>;
   /** Runs one test file with the clock shifted `shiftDays` ahead: true when it passes. Throws when
    *  the run reaches no verdict. Default {@link runSuiteShifted} in the repo checkout. */
   runSuite?: (file: string, shiftDays: number) => boolean;
@@ -664,6 +737,12 @@ function prBody(actions: GateGardenAction[], heading: string): string {
 /** The repo's gates as a gardener spec, over probes loaded by {@link loadGateProbes}. */
 export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources = {}): GardenSpec<GateGardenClass, GateInventory, GateGardenAction, GardenCheckout> {
   const clock = deps.clock ?? systemClock;
+  const localInventory = (): GateInventory => {
+    const inv = gateInventory(deps.repoRoot, deps.stateDir, probes);
+    if (!existsSync(join(deps.stateDir, "GATE_OFF-defuse"))) inv.candidates.push(...defuseCandidates(deps, probes, sources));
+    return inv;
+  };
+  const falsePositiveOff = (): boolean => existsSync(join(deps.stateDir, "GATE_OFF-false-positive"));
   return {
     name: "gate",
     landingRefusal: machineShardLandingGuard({ ...deps, admissionViolations: sources.admissionViolations }),
@@ -676,10 +755,19 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
       return `${head}:${existsSync(report) ? readFileSync(report, "utf8").length : 0}:${clock.iso().slice(0, 10)}`;
     },
     inventory: () => {
-      const inv = gateInventory(deps.repoRoot, deps.stateDir, probes);
-      if (!existsSync(join(deps.stateDir, "GATE_OFF-defuse"))) inv.candidates.push(...defuseCandidates(deps, probes, sources));
-      if (!existsSync(join(deps.stateDir, "GATE_OFF-false-positive"))) {
+      const inv = localInventory();
+      if (!falsePositiveOff()) {
         const repairs = falsePositiveInventory(deps, probes, sources);
+        inv.candidates.push(...repairs.actions);
+        inv.repairTally = repairs.tally;
+      }
+      return inv;
+    },
+    // W1-T9049: the daemon's pass reads GitHub for repair evidence awaited, never as a blocking spawn.
+    inventoryAsync: async () => {
+      const inv = localInventory();
+      if (!falsePositiveOff()) {
+        const repairs = await falsePositiveInventoryAsync(deps, probes, sources);
         inv.candidates.push(...repairs.actions);
         inv.repairTally = repairs.tally;
       }
