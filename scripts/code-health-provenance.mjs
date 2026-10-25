@@ -3,7 +3,7 @@
 import { parseLcovRecords } from "./lib/lcov.mjs";
 import { parseLcovTotals, classifyCoverageTier } from "./coverage-ratchet.mjs";
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -101,8 +101,16 @@ export function coverageProvenance(summary, lcov, baseline, workflow, repository
 }
 
 function boundedRead(path, limit) {
-  if (!path || !statSync(path).isFile() || statSync(path).size > limit) throw new Error("Unbounded or unavailable analysis input.");
-  return readFileSync(path, "utf8");
+  if (!path) throw new Error("Unbounded or unavailable analysis input.");
+  // Check and read through one open handle so the file cannot change between the two.
+  const fd = openSync(path, "r");
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > limit) throw new Error("Unbounded or unavailable analysis input.");
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 // Recognize the repository's simple YAML block list; unsupported YAML stays explicitly unknown.
