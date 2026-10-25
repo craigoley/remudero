@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import { query, type SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
@@ -16,8 +16,6 @@ import { main } from "#src/run-task.js";
 import { spawnCodexWorker } from "#src/lib/worker-provider.js";
 import { realDeployDeps } from "#src/lib/deployer.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import { workerHomeDir } from "#src/lib/config.js";
-import { perRunWorkerHomeDir } from "#src/lib/worker-home.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, renderWorkerSettings, spawnWorker,
   startWorkerEgressProxy, type SpawnWorkerArgs } from "#src/lib/worker.js";
 
@@ -479,31 +477,31 @@ test("selected runtime worker unknown and cleanup outcomes stay explicit", async
   }
 });
 
-test("selected private file denial follows actual scratch-backed Claude worker homes", async () => {
+test("selected private denials follow scratch-backed Claude invocations without polluting the rendered template", async () => {
   const fixture = runtimeRegistryFixture(), operator = join(fixture.root, "operator");
   const selected = join(operator, ".config", "remudero", "selected-registry.yaml");
   mkdirSync(join(operator, ".config", "remudero"), { recursive: true, mode: 0o700 });
   writeFileSync(selected, registry("shadow"), { mode: 0o600 });
   const config: Config = { root: join(operator, "Remudero"), claudeBin: "/unused", installRoot: REPO_ROOT };
-  const home = (env: NodeJS.ProcessEnv) => perRunWorkerHomeDir(workerHomeDir(config, env), "fixture", { perSpawn: true });
   const rendered = join(fixture.root, "worker-settings.json");
-  // This oracle tests the paths named by the actual rendered policy, not a claim about SDK/OS enforcement.
-  const namesSelectedFile = (rules: string[], workerHome: string) => rules.some(rule => {
-    const absolute = rule.startsWith("~/") ? resolve(workerHome, rule.slice(2)) : rule;
-    return absolute.endsWith("/**")
-      ? selected === absolute.slice(0, -3) || selected.startsWith(absolute.slice(0, -3) + "/")
-      : selected === absolute;
-  });
+  const prior = process.env.RMD_WORKER_HOME_DIR;
   try {
-    await runtimeRegistryRunner()(() => {
+    await runtimeRegistryRunner()(async () => {
       renderWorkerSettings({ templatePath: join(REPO_ROOT, "settings", "worker.json"), hooksDir: join(REPO_ROOT, "hooks"), outPath: rendered });
-      const rules = JSON.parse(readFileSync(rendered, "utf8")).sandbox.filesystem.denyRead as string[];
-      assert.equal(namesSelectedFile(rules, home({})), true, "healthy default-home positive control sees the maintained private-config denial");
-      const scratch = home({ RMD_WORKER_HOME_DIR: `${config.root}:${join(fixture.root, "scratch", "worker-homes")}` });
-      assert.equal(namesSelectedFile(rules, scratch), true,
-        "the actual per-spawn policy must name the selected physical file even when HOME moves to scratch");
+      assert.equal(readFileSync(rendered, "utf8").includes(selected), false, "the shared rendered template never stores the selected source");
+      const sink = { calls: 0 } as { calls: number; options?: Record<string, unknown> };
+      const args = privateClaudeArgs(fixture, sink); args.settingsFile = rendered; args.config = config;
+      for (const scratch of [false, true]) {
+        if (scratch) process.env.RMD_WORKER_HOME_DIR = `${config.root}:${join(fixture.root, "scratch", "worker-homes")}`;
+        else delete process.env.RMD_WORKER_HOME_DIR;
+        await spawnWorker(args);
+        const policy = sink.options!.settings as { sandbox: { filesystem: { denyRead: string[] } } };
+        assert.ok(policy.sandbox.filesystem.denyRead.includes(selected), "actual SDK policy still protects the physical input under either home");
+        assert.equal(readFileSync(rendered, "utf8").includes(selected), false);
+      }
+      assert.equal(sink.calls, 2);
     }, { envPath: selected });
-  } finally { fixture.cleanup(); }
+  } finally { if (prior === undefined) delete process.env.RMD_WORKER_HOME_DIR; else process.env.RMD_WORKER_HOME_DIR = prior; fixture.cleanup(); }
 });
 
 function privateClaudeArgs(fixture: ReturnType<typeof runtimeRegistryFixture>, sink: { options?: Record<string, unknown>; prompt?: unknown; calls: number }): SpawnWorkerArgs {
@@ -517,7 +515,9 @@ function privateClaudeArgs(fixture: ReturnType<typeof runtimeRegistryFixture>, s
       env: { [CLAUDE_BIN_ENV_OVERRIDE]: "/fake/claude" }, home: fixture.root, exists: () => true, canExecute: () => true, locations: [] } },
     keychain: { platform: "linux", readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "fixture", expiresAt: 4102444800000 } }) },
     queryFn: ((params: { options: Record<string, unknown>; prompt: unknown }) => {
-      sink.calls++; sink.options = params.options; sink.prompt = params.prompt;
+      sink.calls++; sink.options = { ...params.options,
+        settings: typeof params.options.settings === "string" ? JSON.parse(readFileSync(params.options.settings, "utf8")) : params.options.settings };
+      sink.prompt = params.prompt;
       return (async function* () { yield { type: "result", subtype: "success", is_error: false,
         result: "done", session_id: "selected-fixture", total_cost_usd: 0, num_turns: 1 }; })();
     }) as SpawnWorkerArgs["queryFn"] };
@@ -577,7 +577,7 @@ test("selected Claude SDK boundary snapshots private denials across queued argum
         assert.ok(settings.sandbox.filesystem.denyWrite.includes(target));
         assert.ok(settings.permissions.deny.includes(`Read(/${target})`));
       }
-      assert.equal(Object.isFrozen(settings.sandbox.filesystem.denyRead), true);
+      assert.equal(settings.sandbox.filesystem.denyRead.includes(args.settingsFile), false, "queued caller mutation never retargets the invocation policy file");
       assert.equal(String(sink.prompt).includes("retargeted"), false, "queued caller mutation cannot replace the captured dispatch");
       assert.equal(JSON.stringify(sink.options!.env).includes(fixture.selected), false, "private file is not an untrusted child environment grant");
       assert.equal(String(sink.prompt).includes(fixture.selected), false);

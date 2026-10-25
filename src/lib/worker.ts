@@ -3411,6 +3411,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     let unregisterRunningWorker: (() => void) | undefined;
     let egressProxy: Awaited<ReturnType<NonNullable<NonNullable<SpawnWorkerArgs["egress"]>["startProxy"]>>> | undefined;
     let egressUnenforced: string | undefined;
+    let privatePolicyArtifact: PrivateRegistryWorkerPolicyArtifact | undefined, queryFailure: unknown;
     try {
       // W1-T1289: a private broker per spawn, started and verified BEFORE the query and closed on every exit path.
       const egressMode = args.egress?.mode ?? workerEgressMode(process.env.RMD_WORKER_EGRESS);
@@ -3438,7 +3439,13 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // W1-T9489: EVERY Claude spawn is strict with an explicit server map (knowledge-only with ruleLookup, else none), so
       // the shared config dir's claude.ai connectors can never attach to a worker running under bypassPermissions.
       const boundaryServers = applyWorkerMcpBoundary(options);
-      if (selectedPolicy) await selectedPolicy.recheck();
+      if (selectedPolicy) {
+        await selectedPolicy.recheck();
+        // The real SDK serializes inline settings into child argv. Hand it only an opaque,
+        // invocation-owned file; the policy denies reads/writes of itself and the private inputs.
+        privatePolicyArtifact = createPrivateRegistryWorkerPolicy(options.settings, privateRegistry!, workerHome);
+        options.settings = privatePolicyArtifact.path;
+      }
       const liveQuery = runQuery({ prompt: execution.prompt, options });
       unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
@@ -3500,6 +3507,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         : undefined;
       return result;
     } catch (err) {
+      queryFailure = err;
       if (measurement) abandonProviderWindowMeasurement(measurement);
       // Runs on EVERY thrown error but only REPLACES it when the watchdog tripped; any other transport failure passes through
       // unchanged. Replacing rather than adding a second reject means run-task.ts checks ONE type instead of re-deriving "was
@@ -3511,7 +3519,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       unchainSignal?.();
       // Unconditional: no exit path may leave a handle for a later answer to steer into a dead session (W1-T4673).
       unregisterRunningWorker?.();
-      await egressProxy?.close();
+      try { await egressProxy?.close(); }
+      finally { if (privatePolicyArtifact) retirePrivateRegistryWorkerPolicy(privatePolicyArtifact, queryFailure); }
     }
   } finally {
     // Reap THIS spawn's per-spawn home on every exit path, including a thrown error or a transport failure — the withTempDir
@@ -4239,16 +4248,48 @@ export function renderWorkerSettings(opts: {
   outPath: string;
 }): string {
   const template = readFileSync(opts.templatePath, "utf8");
-  let rendered = template.split("${HOOKS_DIR}").join(opts.hooksDir);
+  const rendered = template.split("${HOOKS_DIR}").join(opts.hooksDir);
   // Validate JSON before writing so a bad substitution fails loud. TRAP: a settings file that fails validation is SILENTLY
   // ignored by `claude -p`.
-  const selected = runtimeInstanceRegistryPrivateFile();
-  if (selected === undefined) JSON.parse(rendered);
+  try {
+    const parsed: unknown = JSON.parse(rendered);
+    if (runtimeInstanceRegistryPrivateFile() !== undefined) validateWorkerSettings(parsed);
+  } catch (error) {
+    if (runtimeInstanceRegistryPrivateFile() !== undefined) throw new InstanceRegistryRuntimeError("worker_policy_unqualified");
+    throw error;
+  }
   mkdirSync(join(opts.outPath, ".."), { recursive: true });
-  if (selected !== undefined) rendered = JSON.stringify(privateRegistryWorkerSettings(rendered, selected,
-    join(realpathSync(dirname(opts.outPath)), basename(opts.outPath))));
   writeFileSync(opts.outPath, rendered, { mode: 0o600 });
   return opts.outPath;
+}
+
+interface PrivateRegistryWorkerPolicyArtifact { path: string; text: string; dev: number; ino: number }
+function createPrivateRegistryWorkerPolicy(input: unknown, selected: string, workerHome: string): PrivateRegistryWorkerPolicyArtifact {
+  try {
+    const path = join(realpathSync(workerHome), `.rmd-policy-${randomUUID()}.json`);
+    const text = JSON.stringify(privateRegistryWorkerSettings(input, selected, path));
+    if (Buffer.byteLength(text) > 65536) throw new InstanceRegistryRuntimeError("worker_policy_unqualified");
+    writeFileSync(path, text, { flag: "wx", mode: 0o600 });
+    const identity = lstatSync(path);
+    return { path, text, dev: identity.dev, ino: identity.ino };
+  } catch (error) {
+    // No broad/inline fallback: unavailable private policy has unknown containment and diagnostics stay redacted.
+    if (error instanceof InstanceRegistryRuntimeError) throw error;
+    throw new InstanceRegistryRuntimeError("worker_policy_unavailable");
+  }
+}
+function retirePrivateRegistryWorkerPolicy(artifact: PrivateRegistryWorkerPolicyArtifact, cause: unknown): void {
+  try {
+    const current = lstatSync(artifact.path);
+    if (!current.isFile() || current.nlink !== 1 || current.dev !== artifact.dev || current.ino !== artifact.ino
+      || readFileSync(artifact.path, "utf8") !== artifact.text) throw new Error("invocation policy identity changed");
+    rmSync(artifact.path);
+  } catch {
+    // An absent/replaced/unreadable policy is not falsely certified as cleaned up. Preserve the original failure.
+    const error = new InstanceRegistryRuntimeError("worker_policy_cleanup_unknown");
+    if (cause !== undefined) error.cause = cause;
+    throw error;
+  }
 }
 
 function privateRegistryWorkerSettings(input: unknown, selected: string, policyPath: string): Record<string, unknown> {
