@@ -1,0 +1,43 @@
+- id: W1-T10572
+  title: "Reconcile the declared independent gardener source with the existing producer"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "console-followup:approved-gardener-producer-contract-20261024"
+  files:
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+  acceptance:
+    - claim: "The authoritative Analytics declaration identifies the actual independent gardener source and wire kind"
+      proof: "grep: The independent gardener source is named `gardener-spend:<instance>` with kind `analytics` in openapi/daemon.yaml"
+    - claim: "The contract preserves independent observation clocks without claiming historical or benchmark completeness"
+      proof: "grep: Its own persisted asOf qualifies gardenerSpend without promoting historical Analytics or benchmark completeness in openapi/daemon.yaml"
+    - claim: "The declaration preserves failed-source refusal and the boundary for old embedded evidence"
+      proof: "grep: Once an independent row exists even a failed first capture old embedded success cannot substitute for it in openapi/daemon.yaml"
+    - claim: "The mechanically generated client carries the same independently qualified source declaration"
+      proof: "grep: The independent gardener source is named `gardener-spend:<instance>` with kind `analytics` in packages/api-client/src/schema.d.ts"
+  rationale: |
+    Operator response call_4bee2fd2982f4f658034e4cacae10a16 item0 approved this exact bounded two-repository reconciliation. This Core task changes only the existing AnalyticsView description in openapi/daemon.yaml and its mechanically generated API client comments in packages/api-client/src/schema.d.ts. High/span conservatively records declaration and generated-client breadth, not extra operational authority.
+    Core c8b43c9fff993c98dff0971e5b83ddb0a4057af9 already emits gardener-spend:<instance> with kind analytics and the persisted independent row.asOf in src/lib/analytics-view.ts. docs/views.md already documents the independent capture and legacy boundary. The current OpenAPI AnalyticsView description still names only historical analytics:<instance>, and the Console committed pin predates the independent stream. Console PR2251 native semantic review rejects this unreconciled producer contract even though hosted tests pass. Consumer-only constants and mocks do not reconcile the external declaration.
+    Extend only AnalyticsView.description to describe the existing independent source identity, kind, own persisted clock, unavailable-before-first-capture and failed/behind evidence states. Before an independent row exists retain the old embedded historical clock. Once an independent row exists including a failed first capture, old embedded success cannot replace it; later failure retains last committed evidence with an explicitly failed source. Historical clocks, global stale state, benchmark incompleteness, unknown prices and the existing monetary-first 64-KiB fleet budget remain unchanged. Cold history may carry independently qualified recent gardener evidence without becoming complete history. Do not add a new schema property, required field, route, enum restriction or runtime rule.
+    Regenerate the committed client using scripts/generate-api-client.mjs; never hand-edit the generated declaration. On the exact committed source compare parsed OpenAPI to the merge base after removing only AnalyticsView.description and require deep equality, including routes and security. Compare generated client tokens with comments removed and require equality. Run the existing generator --check plus physical existing API generator and analytics-view suites under normal author, resource, review and hosted CI gates; retain real summaries and selection receipts. Preserve the original native review failure.
+    Every grep proof must resolve on one physical line in its named file, execute through the native proof checker, and fail against the unchanged merge base. The description is the intended artifact, so these proofs do not claim a runtime repair. In the filing body prove only the plan record; implementation and task credit require their separate source PR.
+    The Console follow-up adds only fixtures/core-read-schemas.json to CONSOLE-T140, regenerates it against this actual reviewed merged Core contract revision and audits the whole selected schema closure. Keep its existing source PR with its fix owner; do not race its pushes. Core filing, implementation, merge, consumer pin, Console qualification, deployment and signed-in acceptance remain separate receipts.
+    No routes, runtime behavior, authentication, permissions, prices, services, deployment settings, providers, spending, CI infrastructure or Azure memory policy changes are authorized. No model call is needed to record this actual operator approval; it is not a model verdict. Field Trials and the canceled heartbeat remain out of scope.
+    Research: https://spec.openapis.org/oas/v3.1.1.html#schema-object treats descriptions as part of the interface declaration; applying it here documents already-published semantics rather than changing the wire shape. Existing producer and docs are the behavior evidence, while parsed semantic equality and generated-token equality falsify accidental expansion.
+  note: "Native operator checkout reserved W1-T10572 on origin for codex/file-gardener-source-contract-20261024. Complete open-PR head subject sweep against main found no equivalent declaration change; refresh it, exact API task credit and dispatch/run claims before implementation. Never treat decorative plan status as credit. Filing is not implementation, deployment or live acceptance."
+  risk_ruling:
+    verdict: operator
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Actual direct operator response call_4bee2fd2982f4f658034e4cacae10a16 item0: Approve the bounded contract reconciliation. Core scope is openapi/daemon.yaml plus mechanically generated API types, with normal filing, tests, review and CI. No routes, runtime behavior, authentication, permissions, prices, services or deployment settings changes. Record as operator approval, not a model verdict."
+    judged_at: "2026-10-24T17:55:36.000Z"
+    pin: "0efd3afdc80c04bb67c67e229d95e9fbd7ff934bb3cc7a5bdc9b9bb29a223a48"

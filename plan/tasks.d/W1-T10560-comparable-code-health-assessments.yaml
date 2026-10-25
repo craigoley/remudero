@@ -29,6 +29,7 @@
     - .github/workflows/codeql.yml
     - scripts/code-health-provenance.mjs
     - src/lib/read-model-worker.ts
+    - src/lib/read-model-slow-lane.ts
     - src/lib/views.ts
     - src/lib/serve.ts
     - openapi/daemon.yaml
