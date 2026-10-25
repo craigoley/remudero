@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildCodeHealthOpportunities, codeqlQualityProposalId } from "#src/lib/codeql-quality-intake.js";
 import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
+import { readCodeScanningAlerts } from "#src/lib/ops.js";
+import { ghStubPath, pathWith } from "#test/helpers/gh-stub.js";
 
 function input(): CodeHealthProjectionInput {
   const findings: CodeHealthScanFinding[] = [
@@ -51,4 +53,33 @@ test("code health deduplicates opportunities and preserves urgent findings", () 
   assert.equal(held.evidence.length, 2, "stale evidence does not hide known urgent findings");
   assert.equal(held.mayPlan, false, "an old reading does not authorize a new actionable conversation");
   assert(held.uncertainty.length > 0);
+});
+
+test("code health retains analysis identity through the real alert reader", () => {
+  const payload = [{ number: 41, state: "open", created_at: "2026-11-01T05:00:00Z",
+    html_url: "https://github.com/acme/atlas/security/code-scanning/41",
+    tool: { name: "CodeQL", version: "2.25.0" },
+    rule: { id: "js/repeated-work", severity: "warning", tags: ["quality", "maintainability"] },
+    most_recent_instance: { ref: "refs/heads/main", commit_sha: "a".repeat(40), analysis_key: ".github/workflows/codeql.yml:analyze",
+      category: "/language:javascript-typescript", environment: '{"language":"javascript-typescript","private":"do-not-copy"}', state: "open",
+      location: { path: "src/first.ts", start_line: 5 } } }];
+  const bin = ghStubPath(`#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(JSON.stringify(payload))});\n`);
+  const saved = process.env.PATH; process.env.PATH = pathWith(bin);
+  try {
+    const read = readCodeScanningAlerts("acme", "atlas", { includeAnalysisInstances: true });
+    assert.equal(read.ok, true, "the default reader executes the real fixture process and decodes its response");
+    if (!read.ok) throw new Error(read.error);
+    assert.equal(read.alerts.length, 1);
+    assert.equal(read.analysisInstances?.length, 1);
+    const source = read.analysisInstances![0]!;
+    assert.equal(source.alertId, "41");
+    assert.equal(source.analyzedSha, "a".repeat(40));
+    assert.equal(source.toolVersion, "2.25.0");
+    assert.equal(source.ref, "refs/heads/main");
+    assert.equal(source.category, "/language:javascript-typescript");
+    assert.equal(source.analysisKey, ".github/workflows/codeql.yml:analyze");
+    assert.equal(source.instanceState, "open");
+    assert.match(source.environmentHash!, /^[a-f0-9]{64}$/);
+    assert(!JSON.stringify(source).includes("do-not-copy"), "retain a stable environment identity without copying its private values");
+  } finally { process.env.PATH = saved; }
 });
