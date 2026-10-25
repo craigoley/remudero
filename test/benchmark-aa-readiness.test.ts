@@ -531,7 +531,9 @@ test("pre-registration pin validation preserves valid registration and registere
   await runBenchmarkAaReadiness(input(stateDir, calls, { manifest: different, maxPairs: 1 }));
   assert.equal(readFileSync(protocolPath, "utf8"), before, "a supplied manifest never overwrites the registered owner's protocol");
   const otherRoot = root();
-  await register(otherRoot);
+  const sameProtocol = await runProspectiveAa({ action: "register", stateDir: otherRoot, manifest: manifest(),
+    clock: fixedClock(Date.parse((JSON.parse(before) as { registeredAt: string }).registeredAt)) });
+  assert.ok(sameProtocol.ok, sameProtocol.ok ? "" : sameProtocol.reason);
   const duplicates = await runBenchmarkAaReadiness(input(stateDir, calls, { manifest: manifest(), instanceRoots: [
     { instance: "first", stateDir }, { instance: "other", stateDir: otherRoot },
   ] }));
