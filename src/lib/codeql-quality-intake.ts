@@ -124,6 +124,7 @@ export interface CodeHealthStoredSnapshot {
   version: "code-health-snapshot-v1";
   snapshotId: string;
   contentHash: string;
+  previousSnapshotId: string | null;
   input: CodeHealthProjectionInput;
 }
 export type CodeHealthSnapshotRead = { state: "observed"; snapshot: CodeHealthStoredSnapshot } | { state: "not_collected" | "unavailable"; reason: string };
@@ -162,8 +163,8 @@ export function readCodeHealthSnapshot(stateDir: string, repository: string, sna
     if (pointer && pointer.repository !== repository.toLowerCase()) throw new Error("Code health repository does not match.");
     const id = snapshotId ?? pointer!.snapshotId;
     const snapshot = boundedEvidenceJson(join(stateDir, "code-health", "snapshots", `${id}.json`), CODE_HEALTH_SNAPSHOT_MAX_BYTES) as CodeHealthStoredSnapshot;
-    if (!snapshot || Object.keys(snapshot).sort().join(",") !== "contentHash,input,snapshotId,version" || snapshot.version !== "code-health-snapshot-v1" ||
-        snapshot.snapshotId !== id || snapshot.input?.repository.toLowerCase() !== repository.toLowerCase() ||
+    if (!snapshot || Object.keys(snapshot).sort().join(",") !== "contentHash,input,previousSnapshotId,snapshotId,version" || snapshot.version !== "code-health-snapshot-v1" ||
+        snapshot.snapshotId !== id || !(snapshot.previousSnapshotId === null || /^[a-f0-9]{64}$/.test(snapshot.previousSnapshotId) && snapshot.previousSnapshotId !== id) || snapshot.input?.repository.toLowerCase() !== repository.toLowerCase() ||
         snapshot.contentHash !== evidenceDigest(snapshot.input) || codeHealthEvidenceSnapshotId(snapshot.input) !== id) throw new Error("Code health evidence identity or integrity does not match.");
     return { state: "observed", snapshot };
   } catch { return { state: "unavailable", reason: "Saved code health evidence is unavailable, invalid, or belongs to another repository." }; }
@@ -196,7 +197,7 @@ export function publishCodeHealthSnapshot(opts: { stateDir: string; input: CodeH
   try {
     const snapshotId = codeHealthEvidenceSnapshotId(opts.input), repository = opts.input.repository.toLowerCase();
     if (opts.expectedSnapshotId !== null && !/^[a-f0-9]{64}$/.test(opts.expectedSnapshotId)) throw new Error("Invalid expected code health snapshot.");
-    const snapshot: CodeHealthStoredSnapshot = { version: "code-health-snapshot-v1", snapshotId, contentHash: evidenceDigest(opts.input), input: opts.input };
+    const snapshot: CodeHealthStoredSnapshot = { version: "code-health-snapshot-v1", snapshotId, contentHash: evidenceDigest(opts.input), previousSnapshotId: opts.expectedSnapshotId, input: opts.input };
     const serialized = JSON.stringify(snapshot);
     if (Buffer.byteLength(serialized) > CODE_HEALTH_SNAPSHOT_MAX_BYTES) throw new Error("Code health snapshot exceeds its bound.");
     lock = codeHealthPublicationLock(opts.stateDir);
@@ -211,6 +212,13 @@ export function publishCodeHealthSnapshot(opts: { stateDir: string; input: CodeH
     const prior = evidencePointer(opts.stateDir);
     if (prior && prior.repository !== repository) throw new Error("The publication belongs to another repository.");
     if ((prior?.snapshotId ?? null) !== opts.expectedSnapshotId) return { state: "superseded", reason: "A newer code health result was saved while this run was collecting evidence." };
+    if (prior) {
+      const saved = readCodeHealthSnapshot(opts.stateDir, repository, prior.snapshotId);
+      if (saved.state !== "observed") throw new Error("The saved baseline is unavailable.");
+      const known = [...saved.snapshot.input.scans, ...(saved.snapshot.input.baseline?.scans ?? [])];
+      if (opts.input.scans.some(scan => scan.state === "complete" && known.some(previous => previous.kind === scan.kind && previous.state === "complete" &&
+          Date.parse(previous.observedAt) > Date.parse(scan.observedAt)))) return { state: "superseded", reason: "Saved evidence includes a newer analysis than this collection returned." };
+    }
     const attemptAt = (opts.clock ?? systemClock).iso();
     if (prior && Date.parse(prior.attemptAt) > Date.parse(attemptAt)) return { state: "superseded", reason: "A later code health collection attempt has already been saved." };
     const root = join(opts.stateDir, "code-health"), dir = join(root, "snapshots"), path = join(dir, `${snapshotId}.json`);
@@ -229,6 +237,7 @@ export function publishCodeHealthSnapshot(opts: { stateDir: string; input: CodeH
     if (!writeAtomic(join(root, "latest.json"), JSON.stringify(pointer), { mode: 0o600, beforeRename: () => owns!() &&
         (evidencePointer(opts.stateDir)?.snapshotId ?? null) === opts.expectedSnapshotId })) throw new Error("Code health publication was superseded.");
     syncEvidenceDirectory(root);
+    syncEvidenceDirectory(opts.stateDir);
     return { state: duplicate ? "duplicate" : "published", snapshotId };
   } catch { return { state: "unavailable", reason: "Code health evidence could not be saved safely; prior snapshots were retained." }; }
   finally { if (lock && owns?.()) lock.release(); }

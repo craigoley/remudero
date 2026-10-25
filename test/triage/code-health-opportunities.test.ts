@@ -294,6 +294,7 @@ test("code health publishes immutable evidence and refuses stale or occupied pub
       "even a successful CAS cannot replace a newer measured source with an older one");
     const current = readCodeHealthSnapshot(stateDir, "acme/atlas"); assert.equal(current.state, "observed"); assert("snapshot" in current);
     assert.equal(current.snapshot.snapshotId, published.snapshotId);
+    assert.equal(current.snapshot.previousSnapshotId, first.snapshotId, "retain an explicit immutable history link");
     const historical = readCodeHealthSnapshot(stateDir, "acme/atlas", first.snapshotId);
     assert.equal(historical.state, "observed"); assert("snapshot" in historical); assert.deepEqual(historical.snapshot.input, input());
     assert.equal(readCodeHealthSnapshot(stateDir, "acme/foreign").state, "unavailable");
