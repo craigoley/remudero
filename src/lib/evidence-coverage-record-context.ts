@@ -65,13 +65,7 @@ export function prepareEvidenceRecordContext(root: string, ports: EvidenceContex
   const git = ports.git ?? ((args: string[]) => hostWorktreeGit(root, args, { maxBuffer: 1 << 26 }));
   git(["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main", "--quiet"]);
   const mainSha = git(["rev-parse", "origin/main"]).trim();
-  const layoutPath = relative(root, join(resolveRepoLayout(root, () => undefined).stateDir, "layout.json"));
-  const layoutEntry = git(["ls-tree", mainSha, "--", layoutPath]).trim();
-  if (layoutEntry !== "" && !/^100(?:644|755) blob /.test(layoutEntry)) {
-    throw new Error("complete evidence layout unavailable: canonical plan-source layout is not a regular file");
-  }
-  const layoutBytes = layoutEntry === "" ? undefined : git(["show", `${mainSha}:${layoutPath}`]);
-  const layout = resolveRepoLayout(root, () => layoutBytes);
+  const layout = resolveRepoLayout(root);
   const monolith = relative(root, layout.planMonolith), shards = relative(root, join(layout.planDir, "tasks.d"));
   const monolithEntry = git(["ls-tree", mainSha, "--", monolith]).trim();
   const shardsEntry = git(["ls-tree", mainSha, "--", shards]).trim();

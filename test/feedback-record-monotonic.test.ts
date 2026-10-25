@@ -555,29 +555,27 @@ test("coverage revisions cannot replace canonical plan pins with lookalike paths
   }
 });
 
-function publishAlternateEvidenceLayout(f: ReturnType<typeof coverageSource>, shape = "valid") {
+function configurePrivateEvidenceMonolith(f: ReturnType<typeof coverageSource>) {
+  for (const dir of ["elsewhere", "remote"]) {
+    mkdirSync(join(f.seed.dir, dir), { recursive: true });
+    writeFileSync(join(f.seed.dir, dir, "tasks.yaml"), "[]\n");
+  }
   mkdirSync(join(f.seed.dir, ".remudero"), { recursive: true });
-  const path = join(f.seed.dir, ".remudero", "layout.json");
-  if (shape === "tree") {
-    mkdirSync(path);
-    writeFileSync(join(path, "entry"), "not a regular layout blob\n");
-  } else writeFileSync(path, shape === "valid"
-    ? JSON.stringify({ planDir: "elsewhere", planMonolith: "elsewhere/tasks.yaml" })
-    : shape === "array" ? "[]" : "{");
-  mkdirSync(join(f.seed.dir, "elsewhere", "tasks.d"), { recursive: true });
-  writeFileSync(join(f.seed.dir, "elsewhere", "tasks.yaml"), "[]\n");
-  writeFileSync(join(f.seed.dir, "elsewhere", "tasks.d", ".gitkeep"), "");
+  writeFileSync(join(f.seed.dir, ".remudero", "layout.json"), JSON.stringify({ planMonolith: "remote/tasks.yaml" }));
   f.seed.git("add", ".");
   f.publish();
-  assert.equal(existsSync(join(f.root.dir, ".remudero", "layout.json")), false, "the checkout intentionally retains its old layout");
+  mkdirSync(join(f.root.dir, ".remudero"), { recursive: true });
+  writeFileSync(join(f.root.dir, ".remudero", "layout.json"), JSON.stringify({ planMonolith: "elsewhere/tasks.yaml" }));
+  assert.equal(f.root.git("ls-tree", "HEAD", "--", ".remudero/layout.json"), "",
+    "the operator's private layout is not tracked in this checkout");
 }
 
-test("coverage context and landing follow fetched layout instead of a stale checkout", t => {
+test("evidence context and both writers preserve private local layout authority", t => {
   for (const writer of ["disk", "content"] as const) {
     const f = coverageSource(t);
-    publishAlternateEvidenceLayout(f);
+    configurePrivateEvidenceMonolith(f);
     const ctx = prepareEvidenceRecordContext(f.root.dir);
-    assert.deepEqual(Object.keys(ctx.expectedPlan).sort(), ["elsewhere/tasks.d", "elsewhere/tasks.yaml"]);
+    assert.deepEqual(Object.keys(ctx.expectedPlan).sort(), ["elsewhere/tasks.yaml", "plan/tasks.d"]);
     const revision = buildEvidenceRevision({ ...parseYaml(f.revision).evidence_coverage_revision,
       mainSha: ctx.mainSha, expectedPlan: ctx.expectedPlan });
     const api = fakeGh("https://github.com/o/r/pull/6092");
@@ -589,31 +587,21 @@ test("coverage context and landing follow fetched layout instead of a stale chec
   }
 });
 
-test("a fetched layout change cannot preserve obsolete plan pins in either evidence writer", t => {
+test("a local layout change refuses obsolete plan pins even when plan blobs are identical", t => {
   for (const writer of ["disk", "content"] as const) {
     const f = coverageSource(t);
-    publishAlternateEvidenceLayout(f);
+    configurePrivateEvidenceMonolith(f);
+    const ctx = prepareEvidenceRecordContext(f.root.dir);
+    const revision = buildEvidenceRevision({ ...parseYaml(f.revision).evidence_coverage_revision,
+      mainSha: ctx.mainSha, expectedPlan: ctx.expectedPlan });
+    writeFileSync(join(f.root.dir, ".remudero", "layout.json"), JSON.stringify({ planMonolith: "remote/tasks.yaml" }));
+    assert.equal(f.seed.git("rev-parse", "HEAD:elsewhere/tasks.yaml"), f.seed.git("rev-parse", "HEAD:remote/tasks.yaml"));
     const api = fakeGh("https://github.com/o/r/pull/6093");
-    if (writer === "disk") writeFileSync(join(f.root.dir, f.rel), f.revision);
+    if (writer === "disk") writeFileSync(join(f.root.dir, f.rel), revision);
     const result = withLiveWritesAllowed(() => writer === "disk" ? landFeedback(f.root.dir, { gh: api.gh })
-      : landFeedbackStatusContent(f.root.dir, f.rel, f.revision, { gh: api.gh }));
-    assert.equal(result.landed, false, "unchanged old plan blobs cannot stand for newly selected canonical sources");
+      : landFeedbackStatusContent(f.root.dir, f.rel, revision, { gh: api.gh }));
+    assert.equal(result.landed, false, "identical obsolete blobs do not authorize the newly configured sources");
     assert.match(result.refused![0].reason, /canonical plan-source/);
-    assert.equal(api.calls.length, 0);
-  }
-});
-
-test("unreadable fetched layouts refuse evidence context and both landing writers", t => {
-  for (const shape of ["malformed", "array", "tree"] as const) for (const writer of ["disk", "content"] as const) {
-    const f = coverageSource(t);
-    publishAlternateEvidenceLayout(f, shape);
-    assert.throws(() => prepareEvidenceRecordContext(f.root.dir), /layout|JSON|overrides/);
-    const api = fakeGh("https://github.com/o/r/pull/6094");
-    if (writer === "disk") writeFileSync(join(f.root.dir, f.rel), f.revision);
-    const result = withLiveWritesAllowed(() => writer === "disk" ? landFeedback(f.root.dir, { gh: api.gh })
-      : landFeedbackStatusContent(f.root.dir, f.rel, f.revision, { gh: api.gh }));
-    assert.equal(result.landed, false, `${shape}/${writer}: unavailable layout is UNKNOWN`);
-    assert.match(result.refused![0].reason, /canonical plan-source|expectation unreadable/);
     assert.equal(api.calls.length, 0);
   }
 });

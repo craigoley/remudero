@@ -848,13 +848,7 @@ function* validateEvidenceStage(net: LandingNet, root: string, path: string, byt
     if (isDeepStrictEqual(evidenceRevisionOf(upstream), revision)) return undefined;
     const invalid = validateEvidenceRevision(upstream, bytes);
     if (invalid) return invalid;
-    const layoutPath = relative(root, join(resolveRepoLayout(root, () => undefined).stateDir, "layout.json"));
-    const layoutEntry = (yield* net.git(["ls-tree", mainSha, "--", layoutPath])).trim();
-    if (layoutEntry !== "" && !/^100(?:644|755) blob /.test(layoutEntry)) {
-      return "evidence revision refuses unreadable canonical plan-source layout";
-    }
-    const layoutBytes = layoutEntry === "" ? undefined : yield* net.git(["show", `${mainSha}:${layoutPath}`]);
-    const layout = resolveRepoLayout(root, () => layoutBytes);
+    const layout = resolveRepoLayout(root);
     const canonicalSources = [relative(root, layout.planMonolith),
       relative(root, join(layout.planDir, "tasks.d"))].sort();
     if (!isDeepStrictEqual(Object.keys(revision.expectedPlan).sort(), canonicalSources)) {
