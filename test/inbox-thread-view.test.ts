@@ -251,11 +251,14 @@ test("W1-T10431: reclassified age history remains readable without action author
   const originalMessages=readFileSync(store,"utf8"),originalLedger=readFileSync(f.deps.ledgerPath,"utf8");
   const result=await f.refresh();f.seed(result.bodies,true);
   const deps={...f.deps,inboxFromSlowLane:true};
-  const server=createService({tokens:{read:"read"},routes:[buildInboxThreadRoute(deps)]});
+  const serviceErrors:unknown[]=[];
+  const server=createService({tokens:{read:"read"},routes:[buildInboxThreadRoute(deps)],
+    log:(step,fields)=>{if(step==="service.error")serviceErrors.push(fields);}});
   await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
   try {
     const res=await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/inbox/thread?id=${encodeURIComponent(threadId)}`,{headers:{authorization:"Bearer read"}});
-    assert.equal(res.status,200,"legacy detail retains the source-qualified informational thread");
+    assert.equal(res.status,200,`legacy detail retains the source-qualified informational thread: ${JSON.stringify(serviceErrors)}`);
+    assert.deepEqual(serviceErrors,[]);
     const legacy=await res.json() as {attention:string;messages:Array<{text:string;actions?:string[]}>};
     assert.equal(legacy.attention,"history");assert.deepEqual(legacy.messages[0]!.actions,[]);
     assert.equal(legacy.messages.at(-1)!.text,"The earlier age observation is retained.");
