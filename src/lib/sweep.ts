@@ -24744,9 +24744,13 @@ export function createEscalationTriageHistoryReader(
   let lastLoad: EscalationTriageHistoryLoad = { rotations: 0, digestHits: 0, digestMisses: 0 };
   const strictUnread = new Set<string>();
   const current = (stateDir: string): LedgerUnionRecordRead => {
-    const read = union(stateDir, { step: steps, refuseIncomplete: true });
-    if (strictUnread.size === 0) return read;
-    return { ...read, ok: false, rows: [], unread: [...new Set([...read.unread, ...strictUnread])] };
+    if (strictUnread.size > 0) {
+      // Do not let the permissive sync fallback write a clean digest under the strict identity.
+      const archiveFiles = [...new Set([...loaded.keys(), ...strictUnread])];
+      return { stateDir, archiveFiles, archiveCount: archiveFiles.length, liveFileRead: false,
+        unread: [...strictUnread], unclassified: [], ok: false, rows: [], torn: 0, filesRead: 0 };
+    }
+    return union(stateDir, { step: steps, refuseIncomplete: true });
   };
   return Object.assign(async (stateDir: string): Promise<LedgerUnionRecordRead> => {
     lastLoad = { rotations: 0, digestHits: 0, digestMisses: 0 };
