@@ -208,6 +208,29 @@ test("selected runtime trusted launcher packet uses the real bounded child and i
   } finally { fixture.cleanup(); }
 });
 
+test("selected recycler default child checks the original parent digest and physical binding", async () => {
+  const fixture = runtimeRegistryFixture();
+  try {
+    const packet = await runtimeRegistryRunner()(() => runtimeRegistry.trustedInstanceRegistryLaunchPacket(),
+      { envPath: fixture.selected, instanceName: "worker" });
+    const fields = packet.split("\n");
+    const invoke = (digest = fields[2]!, binding = fields[3]!) => spawnSync("bash", ["-c",
+      'source "$1"; selected_registry_init "$2" "$3" fixture', "selected-child-fixture",
+      join(REPO_ROOT, "deploy/recycle-container.sh"), REPO_ROOT, "worker"],
+      { cwd: REPO_ROOT, env: { ...process.env, RMD_INSTANCE_REGISTRY: fixture.selected,
+        RMD_INSTANCE_REGISTRY_DIGEST: digest, RMD_INSTANCE_REGISTRY_LAUNCH_BINDING: binding }, encoding: "utf8", timeout: 10000 });
+    const healthy = invoke(); assert.equal(healthy.status, 0, healthy.stderr);
+    for (const [digest, binding] of [["", fields[3]!], ["0".repeat(64), fields[3]!], [fields[2]!, "0".repeat(64)]]) {
+      const refused = invoke(digest, binding);
+      assert.equal(refused.status, 2); assert.match(refused.stderr, /selected registry unavailable/);
+      assert.equal(refused.stdout, ""); assert.equal(refused.stderr.includes(fixture.root), false);
+    }
+    const replacement = join(fixture.root, "replacement");
+    writeFileSync(replacement, readFileSync(fixture.selected)); renameSync(replacement, fixture.selected);
+    const replaced = invoke(); assert.equal(replaced.status, 2); assert.match(replaced.stderr, /revision_changed/);
+  } finally { fixture.cleanup(); }
+});
+
 test("selected supervisor hands immutable private identity only to its trusted recycler and redacts failures", async () => {
   const fixture = runtimeRegistryFixture(), calls: string[][] = [];
   const stateRoot = join(fixture.root, "selected-state");
