@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createGhCallPacer, ghExec, paceGhEntry } from "./github-transport.js";
 import { join } from "node:path";
 import { appendLedger } from "./ledger.js";
@@ -132,8 +133,14 @@ export interface GhCodeScanningAlertJson {
   created_at?: string;
   html_url?: string;
   rule?: { id?: string; description?: string; security_severity_level?: string; severity?: string; tags?: string[] };
-  tool?: { name?: string };
+  tool?: { name?: string; version?: string };
   most_recent_instance?: {
+    commit_sha?: string;
+    ref?: string;
+    analysis_key?: string;
+    category?: string;
+    environment?: string;
+    state?: string;
     location?: { path?: string; start_line?: number; end_line?: number };
     message?: { text?: string };
   };
@@ -246,8 +253,28 @@ export interface AlertGateway {
 }
 
 export type CodeScanningAlertsRead =
-  | { ok: true; alerts: RawAlert[] }
+  | { ok: true; alerts: RawAlert[]; analysisInstances?: CodeScanningAnalysisInstance[] }
   | { ok: false; error: string };
+
+/** Retained only for the evidence collector; normal alert reads keep their existing shape. */
+export interface CodeScanningAnalysisInstance {
+  alertId: string;
+  analyzedSha: string | null;
+  toolVersion: string | null;
+  ref: string | null;
+  analysisKey: string | null;
+  category: string | null;
+  environmentHash: string | null;
+  instanceState: string | null;
+}
+
+function analysisInstance(raw: GhCodeScanningAlertJson): CodeScanningAnalysisInstance {
+  const bounded = (value: unknown, max = 256): string | null => typeof value === "string" && value.length > 0 && value.length <= max && !value.includes("\0") ? value : null;
+  const instance = raw.most_recent_instance, sha = bounded(instance?.commit_sha), environment = bounded(instance?.environment, 4096);
+  return { alertId: String(raw.number ?? "?"), analyzedSha: sha !== null && /^[a-f0-9]{40}$/i.test(sha) ? sha.toLowerCase() : null,
+    toolVersion: bounded(raw.tool?.version), ref: bounded(instance?.ref), analysisKey: bounded(instance?.analysis_key), category: bounded(instance?.category),
+    environmentHash: environment === null ? null : createHash("sha256").update(environment).digest("hex"), instanceState: bounded(instance?.state) };
+}
 
 const codeScanningReadPacer = createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {});
 
@@ -260,7 +287,7 @@ function codeScanningReadError(error: unknown): string {
   return stderr ? `${message}: ${stderr}` : message;
 }
 
-export function readCodeScanningAlerts(owner: string, repo: string): CodeScanningAlertsRead {
+export function readCodeScanningAlerts(owner: string, repo: string, options: { includeAnalysisInstances?: boolean } = {}): CodeScanningAlertsRead {
   try {
     const raw = paceGhEntry(
       codeScanningReadPacer,
@@ -276,7 +303,8 @@ export function readCodeScanningAlerts(owner: string, repo: string): CodeScannin
       if (!Array.isArray(parsed)) throw new Error("GitHub returned a non-array code-scanning response");
       return parsed as GhCodeScanningAlertJson[];
     });
-    return { ok: true, alerts: pages.flat().map(normalizeCodeScanningAlert) };
+    const alerts = pages.flat();
+    return { ok: true, alerts: alerts.map(normalizeCodeScanningAlert), ...(options.includeAnalysisInstances ? { analysisInstances: alerts.map(analysisInstance) } : {}) };
   } catch (error) {
     return { ok: false, error: codeScanningReadError(error) };
   }

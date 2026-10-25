@@ -62,15 +62,17 @@ test("code health retains analysis identity through the real alert reader", () =
     rule: { id: "js/repeated-work", severity: "warning", tags: ["quality", "maintainability"] },
     most_recent_instance: { ref: "refs/heads/main", commit_sha: "a".repeat(40), analysis_key: ".github/workflows/codeql.yml:analyze",
       category: "/language:javascript-typescript", environment: '{"language":"javascript-typescript","private":"do-not-copy"}', state: "open",
-      location: { path: "src/first.ts", start_line: 5 } } }];
+      location: { path: "src/first.ts", start_line: 5 } } },
+    { number: 42, state: "open", created_at: "2026-11-01T05:00:00Z", html_url: "https://github.com/acme/atlas/security/code-scanning/42",
+      tool: { name: "CodeQL" }, rule: { id: "js/repeated-work", severity: "warning", tags: ["quality", "maintainability"] } }];
   const bin = ghStubPath(`#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(JSON.stringify(payload))});\n`);
   const saved = process.env.PATH; process.env.PATH = pathWith(bin);
   try {
     const read = readCodeScanningAlerts("acme", "atlas", { includeAnalysisInstances: true });
     assert.equal(read.ok, true, "the default reader executes the real fixture process and decodes its response");
     if (!read.ok) throw new Error(read.error);
-    assert.equal(read.alerts.length, 1);
-    assert.equal(read.analysisInstances?.length, 1);
+    assert.equal(read.alerts.length, 2);
+    assert.equal(read.analysisInstances?.length, 2);
     const source = read.analysisInstances![0]!;
     assert.equal(source.alertId, "41");
     assert.equal(source.analyzedSha, "a".repeat(40));
@@ -81,5 +83,10 @@ test("code health retains analysis identity through the real alert reader", () =
     assert.equal(source.instanceState, "open");
     assert.match(source.environmentHash!, /^[a-f0-9]{64}$/);
     assert(!JSON.stringify(source).includes("do-not-copy"), "retain a stable environment identity without copying its private values");
+    assert.deepEqual(read.analysisInstances![1], { alertId: "42", analyzedSha: null, toolVersion: null, ref: null, analysisKey: null,
+      category: null, environmentHash: null, instanceState: null }, "missing source metadata stays unknown");
+    const ordinary = readCodeScanningAlerts("acme", "atlas");
+    assert.equal(ordinary.ok, true);
+    assert.equal(Object.hasOwn(ordinary, "analysisInstances"), false, "ordinary alert callers keep their existing bounded response");
   } finally { process.env.PATH = saved; }
 });
