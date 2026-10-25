@@ -1,7 +1,7 @@
 /** The fix verb and its exclusive helpers, moved from the entrypoint (W1-T9337). */
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
-import { judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "../../lib/fix-progress-judge.js";
+import { judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures, unfiledScopeGrant } from "../../lib/fix-progress-judge.js";
 import { BASE_REPRODUCTION_MAX_FILES, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, type BaseProbeResult } from "../../lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger } from "../../lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
@@ -2266,6 +2266,12 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   // does not parse, in which case the pre-strike merge-conflict check below is skipped every
   // round (never a guessed number).
   const prNumber = host.prNumberFromRef(opts.prUrl);
+  // W1-T5866/W1-T8043: a run-unfiled PR's scope is its own diff, widened only by exactly the paths its owner granted
+  // for this PR by answering its scope question (unfiledScopeGrant, #14217). Read per round: an answer can land mid-rung.
+  const branchTaskId = taskIdFromRunBranch(opts.branch);
+  const unfiledScope = opts.taskId === `PR-${prNumber}` && (branchTaskId === undefined || branchTaskId === UNFILED_RUN_SENTINEL);
+  const unfiledGrantNow = () => unfiledScope && prNumber !== undefined
+    ? unfiledScopeGrant((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), { prNumber }) : undefined;
   const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false): Promise<ScopeAmendmentOutcome> => {
     let outcome: ScopeAmendmentOutcome;
     try {
@@ -3107,6 +3113,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       ...offeredCensusBaselines().map((path) => ({ path, job: "census-precheck" })),
       ...namedReachablePaths,
     ];
+    const unfiledGrant = unfiledGrantNow();
     if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
       let currentDiffFiles: string[] | undefined;
       try {
@@ -3123,7 +3130,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
               currentDiffFiles,
               baselineDiffFiles,
               admitFixTests && opts.task.files
-                ? [...opts.task.files, "test/", ...admittedFixTestPaths(currentDiffFiles, opts.task.files.length > 0)]
+                ? [...opts.task.files, ...(unfiledGrant?.paths ?? []), "test/", ...admittedFixTestPaths(currentDiffFiles, opts.task.files.length > 0)]
                 : opts.task.files,
               reachableRemedyFiles,
               currentCiFailures ?? [],
@@ -3760,6 +3767,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       ? proofRepairStageable
       : [...new Set([
           ...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...reachableRemedyFiles.map((file) => file.path),
+          ...(unfiledGrant?.paths ?? []),
         ])];
     // A proof-repair round with no test path to stage still runs: it may end in a PROOF_AMENDMENT instead of an edit.
     if (fixHarnessOwnsGit && fixDeclaredPaths.length === 0 && !proofRepairRound) {
@@ -4052,12 +4060,13 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       namedInClosure: async (head, files, needles) => new Set((await hostWorktreeGitAsync(opts.worktreePath, ["grep", "-ohF", ...needles.flatMap((n) => ["-e", n]), head, "--", ...files])
         .catch((error: { code?: unknown }) => { if (error.code === 1) return ""; throw error; })).split("\n").filter(Boolean)),
     });
-    const branchTaskId = taskIdFromRunBranch(opts.branch);
-    const unfiledScope = opts.taskId === `PR-${prNumber}` && (branchTaskId === undefined || branchTaskId === UNFILED_RUN_SENTINEL);
     const admitUnfiledOwnDiff = (action: ReturnType<typeof decideFixOutcomeAction>): ReturnType<typeof decideFixOutcomeAction> => {
-      if (unfiledScope && action.kind === "scope-needed" && action.paths.every((path) => baselineDiffFiles?.includes(path))) {
-        deps.log("fix.scope_amendment", { outcome: "unfiled-own-diff", paths: action.paths,
-          head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId });
+      if (unfiledScope && action.kind === "scope-needed" &&
+          action.paths.every((path) => baselineDiffFiles?.includes(path) || unfiledGrant?.paths.includes(path))) {
+        const granted = action.paths.filter((path) => !baselineDiffFiles?.includes(path));
+        deps.log("fix.scope_amendment", { outcome: granted.length > 0 ? "unfiled-granted" : "unfiled-own-diff", paths: action.paths,
+          head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId,
+          ...(granted.length > 0 ? { granted_paths: granted, issue_url: unfiledGrant!.issueUrl, grant_origin: unfiledGrant!.origin } : {}) });
         return { kind: "commit" };
       }
       return action;
@@ -4473,14 +4482,19 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       if (workflowPaths.length > 0 || instrumentPaths.length > 0 || unfiledScope) {
         const scopeKind = workflowPaths.length > 0 ? "workflow" : instrumentPaths.length > 0 ? "instrument" : "unfiled";
         const paths = [...new Set(fixAction.paths)].sort();
-        const identityKey = createHash("sha256").update(JSON.stringify([prNumber, priorHeadSha, paths])).digest("hex");
+        // #14217: an unfiled question is the same question at every head that still lacks these paths, so its identity
+        // (the issue's Contract line) and its issue dedup omit the head; a closed issue still gets a fresh one.
+        const headIndependent = scopeKind === "unfiled";
+        const identityKey = createHash("sha256")
+          .update(JSON.stringify(headIndependent ? [prNumber, paths] : [prNumber, priorHeadSha, paths])).digest("hex");
         const prior = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
-          row.outcome === `${scopeKind}-escalated` && row.identity_key === identityKey);
+          row.outcome === `${scopeKind}-escalated` && row.identity_key === identityKey && row.head_sha === priorHeadSha);
         let issueUrl = typeof prior?.issue_url === "string" ? prior.issue_url : undefined;
         let deliveryError: { error: string } | undefined;
         if (!issueUrl) try {
           issueUrl = await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
             headSha: priorHeadSha, cause: "ci", contractRevision: identityKey,
+            ...(headIndependent ? { headDedup: "independent" as const } : {}),
             summary: scopeKind === "workflow"
               ? `PR #${prNumber} needs a workflow repair outside the fix lane — ${opts.prUrl}`
               : scopeKind === "instrument" ? `PR #${prNumber} needs an instrument edit only the operator can grant — ${opts.prUrl}`
@@ -4494,7 +4508,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
               `Failing check signature:\n${(priorCiFailures ?? []).map((failure) => `- ${summarizeCiFailure(failure)}`).join("\n")}` +
               (scopeKind === "workflow" ? `\n\nBaked-closure catalog:\n${bakedClosureCatalogDetails((priorCiFailures ?? []).map((failure) => failure.logTail ?? "").join("\n"))}` : ""),
             options: [{ label: "route-repair", detail: "route the named paths to their owner or a filed repair task" },
-              { label: "revise-pr", detail: "revise this PR's scope explicitly, then resume its fix lane" }],
+              { label: "revise-pr", detail: headIndependent
+                ? "grant exactly these paths to this PR's fix lane: the repository owner replies revise-pr on this issue"
+                : "revise this PR's scope explicitly, then resume its fix lane" }],
             recommendation: "route-repair", consequence: "this fix lane stays down at this head until its scope is resolved" },
           { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge });
         } catch (error) {
@@ -4503,7 +4519,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         const reason = issueUrl ? `${scopeKind} scope need escalated` : `${scopeKind} scope escalation undelivered`;
         deps.log("fix.scope_amendment", { outcome: issueUrl ? `${scopeKind}-escalated` : `${scopeKind}-escalation-failed`,
           identity_key: identityKey, paths, head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId,
-          issue_url: issueUrl, reason, contract_revision: currentContractRevision, ...deliveryError });
+          issue_url: issueUrl, reason, contract_revision: currentContractRevision, ...deliveryError,
+          ...(headIndependent ? { red_test_files: baseReproductionFiles(priorCiFailures ?? []) } : {}) });
         deps.log("fix.stood_down", { site: `rung.${scopeKind}_scope`, head_sha: priorHeadSha, reason, paths, issue_url: issueUrl });
         logFixDone();
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl };

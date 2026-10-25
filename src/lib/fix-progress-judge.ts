@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { baseReproductionFiles } from "./base-reproduction.js";
 import { PR_TERMINAL_STEP } from "./ledger-carry.js";
 
 export const FIX_BUDGET_JUDGE_SITES = [
@@ -228,24 +229,73 @@ export function rowPrNumber(row: Record<string, unknown>): number | undefined {
 }
 
 /** A delivered unfiled-, instrument- or workflow-scope question is an authority wait, not another paid repair attempt.
- * Only this PR/head is held; a new head or a genuine filed identity is re-derived normally.
- * An answer alone does not expand the PR's diff or grant paths to its worker. A workflow need holds a filed task
- * too: the fix lane never edits a workflow (W1-T9851), so each round at the head re-asked it (#13317, five rounds).
- * The sweep releases an instrument or workflow hold through an amended task contract (`contractRevision`, the
- * revision the escalation stood on), since only the operator can grant those paths. */
+ * Only this PR/head is held; a new head or a genuine filed identity is re-derived normally, except that an unfiled hold
+ * carries to a new head that still lacks every held path and whose red names only test files the question already saw
+ * (#14217: two fleet refreshes each re-paid a round to re-ask it). An unfiled PR has no task contract to amend, so its
+ * owner grants the held paths by answering `revise-pr` ({@link unfiledScopeGrant}); that answer releases the hold.
+ * A workflow need holds a filed task too: the fix lane never edits a workflow (W1-T9851), so each round at the head
+ * re-asked it (#13317, five rounds). The sweep releases an instrument or workflow hold through an amended task contract
+ * (`contractRevision`, the revision the escalation stood on), since only the operator can grant those paths. */
 export interface ScopeEscalationHold { kind: "unfiled" | "instrument" | "workflow"; reason: string; contractRevision?: string }
-export function scopeEscalationStandDown(ledger: readonly Record<string, unknown>[],
-  pr: { taskId?: string; prNumber: number; headSha: string }): ScopeEscalationHold | undefined {
+export interface ScopeHoldPr {
+  taskId?: string; prNumber: number; headSha: string;
+  /** The PR's observed changed paths at this head; unread leaves an unfiled hold at its own head only. */
+  changedFiles?: readonly string[];
+  ciFailures?: readonly { name: string; logTail: string }[];
+}
+/** The option label an unfiled scope escalation offers for widening the PR itself (fix.ts `escalateWithJudge`). */
+export const UNFILED_SCOPE_GRANT_ANSWER = "revise-pr";
+const wellFormedScopeHold = (row: Record<string, unknown>): boolean =>
+  typeof row.issue_url === "string" && row.issue_url.length > 0 &&
+  Array.isArray(row.paths) && row.paths.length > 0 && row.paths.every(p => typeof p === "string" && p.length > 0);
+const unfiledHoldRow = (row: Record<string, unknown>, prNumber: number): boolean =>
+  row.step === "fix.scope_amendment" && rowPrNumber(row) === prNumber && row.outcome === "unfiled-escalated" && wellFormedScopeHold(row);
+export interface UnfiledScopeGrant { paths: string[]; issueUrl: string; origin: string; heldHead?: string }
+/** The repository owner's grant of an unfiled PR's held scope: an accepted `revise-pr` answer (an owner reply on the
+ * escalation issue, which lib/escalation-answers.ts ledgers as `panel.question_answered`, or the console's answer
+ * route) for this PR's own `PR-<n>` key, newer than its newest well-formed unfiled hold. It grants exactly that hold's
+ * paths. A reply on another issue, an answer older than the hold, or any other answer grants nothing. */
+export function unfiledScopeGrant(ledger: readonly Record<string, unknown>[], pr: { prNumber: number }): UnfiledScopeGrant | undefined {
+  const at = ledger.findLastIndex(row => unfiledHoldRow(row, pr.prNumber));
+  if (at < 0) return undefined;
+  const held = ledger[at]!;
+  const issueUrl = held.issue_url as string;
+  const issue = /\/issues\/(\d+)$/.exec(issueUrl)?.[1];
+  const answer = ledger.slice(at + 1).findLast(row => row.step === "panel.question_answered" && row.task_id === `PR-${pr.prNumber}` &&
+    typeof row.answer === "string" && row.answer.trim().toLowerCase() === UNFILED_SCOPE_GRANT_ANSWER &&
+    typeof row.origin === "string" && (!row.origin.startsWith("issue#") || (issue !== undefined && row.origin.startsWith(`issue#${issue}:`))));
+  if (!answer) return undefined;
+  return { paths: [...new Set(held.paths as string[])].sort(), issueUrl, origin: answer.origin as string,
+    ...(typeof held.head_sha === "string" ? { heldHead: held.head_sha } : {}) };
+}
+const grantHint = (paths: readonly unknown[]): string =>
+  `; the repository owner grants exactly ${paths.join(", ")} to this PR by answering ${UNFILED_SCOPE_GRANT_ANSWER} on that issue`;
+/** An unfiled hold reaches a newer head only on evidence the question is unchanged: every held path is still outside
+ * the PR's observed diff, and the red names test files, all of which the escalated round already failed on. */
+function unfiledHoldCarries(held: Record<string, unknown>, pr: ScopeHoldPr): boolean {
+  if (pr.changedFiles === undefined || (held.paths as string[]).some(path => pr.changedFiles!.includes(path))) return false;
+  const seen = Array.isArray(held.red_test_files) ? held.red_test_files.filter((f): f is string => typeof f === "string") : [];
+  const red = baseReproductionFiles(pr.ciFailures ?? []);
+  return seen.length > 0 && red.length > 0 && red.every(file => seen.includes(file));
+}
+export function scopeEscalationStandDown(ledger: readonly Record<string, unknown>[], pr: ScopeHoldPr): ScopeEscalationHold | undefined {
   const unfiled = !pr.taskId || pr.taskId === "unfiled" || pr.taskId === `PR-${pr.prNumber}`;
   const held = ledger.findLast(row => row.step === "fix.scope_amendment" && rowPrNumber(row) === pr.prNumber &&
     row.head_sha === pr.headSha && (row.outcome === "instrument-escalated" || row.outcome === "workflow-escalated" ||
-      (unfiled && row.outcome === "unfiled-escalated")) &&
-    typeof row.issue_url === "string" && row.issue_url.length > 0 &&
-    Array.isArray(row.paths) && row.paths.length > 0 && row.paths.every(p => typeof p === "string" && p.length > 0));
-  if (!held) return undefined;
-  const kind = held.outcome === "instrument-escalated" ? "instrument" : held.outcome === "workflow-escalated" ? "workflow" : "unfiled";
-  return { kind, reason: `${kind} scope decision awaits resolution at this head — ${held.issue_url}; no automatic judge or fix round spent`,
-    ...(typeof held.contract_revision === "string" ? { contractRevision: held.contract_revision } : {}) };
+      (unfiled && row.outcome === "unfiled-escalated")) && wellFormedScopeHold(row));
+  if (held) {
+    const kind = held.outcome === "instrument-escalated" ? "instrument" : held.outcome === "workflow-escalated" ? "workflow" : "unfiled";
+    if (kind === "unfiled" && unfiledScopeGrant(ledger, pr) !== undefined) return undefined;
+    return { kind, reason: `${kind} scope decision awaits resolution at this head — ${held.issue_url}; no automatic judge or fix round spent` +
+      (kind === "unfiled" ? grantHint(held.paths as unknown[]) : ""),
+      ...(typeof held.contract_revision === "string" ? { contractRevision: held.contract_revision } : {}) };
+  }
+  if (!unfiled) return undefined;
+  const carried = ledger.findLast(row => unfiledHoldRow(row, pr.prNumber));
+  if (!carried || unfiledScopeGrant(ledger, pr) !== undefined || !unfiledHoldCarries(carried, pr)) return undefined;
+  return { kind: "unfiled", reason: `unfiled scope decision still awaits resolution — ${carried.issue_url}; held since head ` +
+    `${String(carried.head_sha)}: this head still lacks the held paths and its red is one the question already saw; ` +
+    `no automatic judge or fix round spent${grantHint(carried.paths as unknown[])}` };
 }
 
 export function buildFixProgressInput(facts: {
