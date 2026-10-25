@@ -382,7 +382,7 @@ test("selected Codex dispatch snapshots caller-owned arguments before its first 
 });
 
 test("selected runtime worker unknown and cleanup outcomes stay explicit", async () => {
-  for (const mode of ["resume", "home-missing", "scope-overlap", "scope-relative", "config-uncopyable", "spawn-error", "profile-replaced", "profile-unlinked"] as const) {
+  for (const mode of ["resume", "home-missing", "scope-overlap", "scope-relative", "scope-file", "scope-absent", "config-uncopyable", "spawn-error", "profile-replaced", "profile-unlinked"] as const) {
     const fixture = runtimeRegistryFixture(), codexHome = join(fixture.root, "codex-home");
     const cwd = join(fixture.root, "checkout"); mkdirSync(cwd);
     const original = new Error("contained spawn failure");
@@ -396,8 +396,9 @@ test("selected runtime worker unknown and cleanup outcomes stay explicit", async
         cwd, workerHome: fixture.root, prompt: "no model call",
         settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: ["Read", "Bash"],
         ...(mode === "resume" ? { resumeSessionId: "old-permissions" } : {}),
-        ...(mode === "scope-overlap" || mode === "scope-relative" ? { sandboxIntent: "disposable-review" as const,
-          sandboxReadRoots: [mode === "scope-overlap" ? fixture.root : "relative"] } : {}),
+        ...(mode.startsWith("scope-") ? { sandboxIntent: "disposable-review" as const,
+          sandboxReadRoots: [mode === "scope-overlap" ? fixture.root : mode === "scope-relative" ? "relative"
+            : mode === "scope-file" ? fixture.selected : join(fixture.root, "absent")] } : {}),
         containment: { spawn: options => {
           spawns++;
           const index = options.args.indexOf("--profile"); assert.ok(index >= 0);
@@ -417,10 +418,10 @@ test("selected runtime worker unknown and cleanup outcomes stay explicit", async
         } else assert.match(error.message, mode === "resume" ? /worker_resume_not_qualified/
           : mode === "config-uncopyable" ? /worker_arguments_unqualified/
           : mode === "scope-overlap" ? /worker_scope_contains_private_file/
-          : mode === "scope-relative" ? /worker_scope_unqualified/ : /worker_profile_unavailable/);
+          : mode === "scope-relative" || mode === "scope-file" ? /worker_scope_unqualified/ : /worker_profile_unavailable/);
         return true;
       });
-      if (["resume", "home-missing", "config-uncopyable", "scope-overlap", "scope-relative"].includes(mode)) assert.equal(spawns, 0);
+      if (["resume", "home-missing", "config-uncopyable", "scope-overlap", "scope-relative", "scope-file", "scope-absent"].includes(mode)) assert.equal(spawns, 0);
       if (mode === "spawn-error") assert.equal(existsSync(profileFile), false);
       if (mode === "profile-replaced") assert.equal(readFileSync(profileFile, "utf8"), "replacement", "never delete a replacement as if it were our artifact");
       if (mode === "profile-unlinked") assert.equal(existsSync(profileFile), false, "absence is not falsely certified retained evidence");

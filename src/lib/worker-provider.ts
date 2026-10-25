@@ -2819,6 +2819,10 @@ async function withPrivateRegistryCodexProfile<T>(
       return canonical;
     };
     const cwd = directory(args.cwd), roots = new Set<string>([cwd]);
+    if (process.platform === "darwin") roots.add(directory("/System/Library"));
+    const slotPath = !readOnly && !review && !process.env.NODE_TEST_CONTEXT ? process.env[TEST_SLOT_DIR_ENV] : undefined;
+    const slotRoot = slotPath === undefined || slotPath === "" ? undefined : directory(slotPath);
+    if (slotRoot !== undefined) roots.add(slotRoot);
     if (review) for (const root of args.sandboxReadRoots ?? []) roots.add(directory(root));
     if (existsSync(join(cwd, "node_modules"))) roots.add(directory(join(cwd, "node_modules")));
     const recordedGit = recordedWorktreeGitDir(cwd);
@@ -2840,9 +2844,8 @@ async function withPrivateRegistryCodexProfile<T>(
       throw new InstanceRegistryRuntimeError("worker_scope_contains_private_file");
     }
     const filesystem = new Map<string, string>([[":root", "deny"], [":minimal", "read"],
-      ...(process.platform === "darwin" ? [["/System/Library", "read"] as [string, string]] : []),
       [":workspace_roots", readOnly ? "read" : "write"], [":slash_tmp", "deny"], [":tmpdir", readOnly ? "read" : "write"],
-      ...[...roots].filter(root => root !== cwd).map(root => [root, "read"] as [string, string])]);
+      ...[...roots].filter(root => root !== cwd && root !== slotRoot).map(root => [root, "read"] as [string, string])]);
     text = `default_permissions=${JSON.stringify(name)}\n[permissions.${name}]\nextends="${readOnly ? ":read-only" : ":workspace"}"\n`
       + `[permissions.${name}.network]\nenabled=${review || !readOnly}\n[permissions.${name}.filesystem]\n`
       + [...filesystem].map(([target, access]) => `${JSON.stringify(target)}=${JSON.stringify(access)}`).join("\n") + "\n";
