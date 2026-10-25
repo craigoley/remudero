@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
 import { fixedClock } from "./clock.js";
 import { CODE_HEALTH_SOURCE_KINDS } from "./code-health-contract.js";
 import { projectCodeHealth, type CodeHealthProjectionInput, type CodeHealthScan } from "./code-health-projection.js";
@@ -22,8 +21,6 @@ const registry: CodeHealthProjectionInput["registry"] = {
 
 /** Assembly has no network, model, filing, or dispatch effects. */
 export function prepareCodeHealthCollection(input: CodeHealthCollection): CodeHealthProjectionInput {
-  projectCodeHealth({ repository: input.repository, currentSha: input.currentSha, analyzedSha: input.currentSha,
-    observedAt: input.observedAt, nextDueAt: null, registry, scans: input.scans, baseline: null });
   const previous = input.previous;
   if (previous && previous.repository.toLowerCase() !== input.repository.toLowerCase()) throw new Error("The previous code health evidence belongs to another repository.");
   const past = previous ? [...previous.scans, ...(previous.baseline?.scans ?? []), ...(previous.retainedEvidence ?? []).map(entry => entry.scan)] : [];
@@ -36,12 +33,7 @@ export function prepareCodeHealthCollection(input: CodeHealthCollection): CodeHe
       reason: "This required source did not supply a measured result.", checks: [], findings: [] } satisfies CodeHealthScan;
     const original = past.find(prior => prior.kind === kind && prior.scanId === scan.scanId && prior.state === "complete");
     // A workflow rerun or another alert read cannot mint an independent scan or renew its clock.
-    if (original && scan.state === "complete") {
-      if (isDeepStrictEqual({ ...original, observedAt: "" }, { ...scan, observedAt: "" })) return structuredClone(original);
-      return { ...structuredClone(scan), observedAt: original.observedAt, state: "partial",
-        reason: "A saved measurement identity returned different source facts. Its results need verification." } satisfies CodeHealthScan;
-    }
-    return structuredClone(scan);
+    return structuredClone(original && scan.state === "complete" ? original : scan);
   });
   const analyzedSha = scans.find(scan => /^[a-f0-9]{40}$/i.test(scan.analyzedSha))?.analyzedSha ?? input.currentSha;
   const priorAssessment = previous ? projectCodeHealth(previous) : null;

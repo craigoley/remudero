@@ -426,12 +426,16 @@ test("code health collection preserves source clocks and prior partial findings"
 });
 
 
-test("code health collection rejects foreign evidence and flags changed facts under one scan identity", () => {
+test("code health collection rejects foreign evidence under a reused scan identity", () => {
   const previous = input(), scans = structuredClone(previous.scans);
   scans[0]!.repository = "acme/foreign";
   assert.throws(() => prepareCodeHealthCollection({ repository: previous.repository, currentSha: previous.currentSha,
     observedAt: "2026-11-02T06:00:00.000Z", scans, previous }), /repository/i);
-  scans[0]!.repository = previous.repository; scans[0]!.scopeHash = "different-scope";
+});
+
+test("code health collection flags changed facts under one scan identity without losing urgent evidence", () => {
+  const previous = input(), scans = structuredClone(previous.scans);
+  scans[0]!.scopeHash = "different-scope";
   scans[0]!.findings = [{ ...scans[0]!.findings[0]!, id: "99", severity: "critical" }];
   const changed = prepareCodeHealthCollection({ repository: previous.repository, currentSha: previous.currentSha,
     observedAt: "2026-11-02T06:00:00.000Z", scans, previous });
