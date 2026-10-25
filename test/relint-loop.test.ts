@@ -606,3 +606,50 @@ test("TRIAGE LANE: an unconverged filing refuses, ledgers the reason, and opens 
   assert.deepEqual(refused[0].checks, ["proof-dialect"]);
   assert.equal(ledger.filter((l) => l.step === "pr.opened").length, 0, "no PR — this is the $1.48 that is no longer spent on a doomed filing");
 });
+
+
+test("triage relint keeps the original contract for a fresh worker", async () => {
+  const prompts: string[] = [];
+  const ledger = await withLane(seedFeedback, async () => {
+    const { triageCommand } = await import("#src/run-task.js");
+    await triageCommand([FEEDBACK_ID], {
+      spawn: async (args: { cwd: string; prompt: string }) => {
+        prompts.push(args.prompt);
+        const id = reservedFromPrompt(args.prompt);
+        const dir = join(args.cwd, "plan", "tasks.d");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, `${id}-x.yaml`), prompts.length === 1 ? DIRTY_TASK(id) : CLEAN_TASK(id));
+        // A fresh worker can follow only the protocol actually present in this invocation.
+        const text = args.prompt.includes("Exactly one of ALREADY_DECIDED / AMBIGUOUS / PROPOSED must be the LAST line")
+          ? `PROPOSED: file ${id}` : "The YAML is now fixed.";
+        return { ...fakeWorker(text), sessionId: `fresh-relint-${prompts.length}` };
+      },
+    } as never).catch(() => undefined);
+  });
+  assert.equal(prompts.length, 2);
+  assert.ok(prompts[1].startsWith(`${prompts[0]}\n\n`), "the exact original feedback envelope, scope and verdict contract survive");
+  assert.match(prompts[1], /\[proof-dialect\]/, "the current real lint failure is appended");
+  assert.equal(ledger.filter(row => row.step === "triage.relint").length, 1);
+  assert.equal(ledger.filter(row => row.step === "triage.error").length, 0, "a missing protocol is not mistaken for a corrected filing");
+});
+
+test("relint preserves one original contract and only the current findings at every attempt", async () => {
+  const initial = "ORIGINAL_SCOPE: plan/tasks.d/W1-T900-x.yaml only\nNO_NEW_AUTHORITY\nPROPOSED: is the verdict protocol";
+  const prompts: string[] = [];
+  const result = await runRelintLoop({
+    lane: "plan", filedIds: ["W1-T900"], initialPrompt: initial,
+    run: async prompt => { prompts.push(prompt); return true; }, filed: () => true,
+    lint: () => prompts.length === 1 ? [V("proof-dialect", "FIRST_FINDING")]
+      : prompts.length === 2 ? [V("declared-scope", "SECOND_FINDING")] : [],
+    log: () => {},
+  });
+  assert.equal(result.stop, "clean");
+  assert.equal(result.attempts, MAX_RELINT_ATTEMPTS);
+  for (const prompt of prompts.slice(1)) {
+    assert.ok(prompt.startsWith(`${initial}\n\n`));
+    assert.equal(prompt.split(initial).length - 1, 1, "the original contract is not recursively duplicated");
+  }
+  assert.ok(prompts[1].includes("FIRST_FINDING"));
+  assert.ok(prompts[2].includes("SECOND_FINDING"));
+  assert.ok(!prompts[2].includes("FIRST_FINDING"), "superseded findings do not accumulate");
+});
