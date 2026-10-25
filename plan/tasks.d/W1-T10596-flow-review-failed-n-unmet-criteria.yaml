@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.2
   status: queued
@@ -23,3 +23,12 @@
     Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
     - PR #13996: 8.17 PR-hours — 3 unmet criteria — fix round 2 — judge: continue (Round 1 stopped for a scope amendment that has since merged, so its unchanged...) — NOT DISPATCHED this pass: live host capacity exhausted for this light pass (headroom 1908.4375 MiB over the floor; charged 704.57421875 MiB for 1 reviews at 1024 and 0 MiB for 0 admitted fixes; a fix needs 3674 MiB (measured; typical 786); 6 active, 0 fixes admitted) — repair remains queued and will be re-derived next pass
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.87
+    reasons:
+      - "The plan targets the stated flow blocker in `src/lib/sweep.ts` and names a test for the acceptance criterion; the test file is absent at the base, consistent with it being part of the planned change."
+      - "The gates state filingTime is true and author_class is machine; nothing shown indicates a secrets, permissions, deletion, policy, irreversible-action, or operator-decision concern."
+    judged_at: "2026-10-25T03:34:49.322Z"
+    pin: "4f413d4c1f17234e29ea55bf5f4046fea2bbe1c116e37431792dd620e18f444b"
