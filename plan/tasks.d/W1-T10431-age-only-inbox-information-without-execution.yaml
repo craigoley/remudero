@@ -14,6 +14,8 @@
   origin: "console-followup:age-only-inbox-information-20261022"
   files:
     - src/lib/inbox-owner.ts
+    - src/lib/inbox.ts
+    - src/lib/inbox-view.ts
     - src/lib/fleet-lane.ts
     - src/lib/ask-classification.ts
     - src/lib/inbox-plain.ts
@@ -53,6 +55,8 @@
     Retain backward compatibility of existing Inbox/thread contracts. Console currently places drafting/notReady before RECORD when selecting folders; a separately gated Console companion may be required for exact FYI placement. Do not introduce an unknown attention value that an older consumer could misread as a decision, or claim core alone completes the visual rollout.
     Use a real mixed private registry and default classification/fleet pass, with spies only on external action/provider ports. Age-only information must cause zero new action/model/judgment calls, while an existing eligible fleet finding still follows the unchanged path. Cover explicit/unreadable asks, restored review, partial/stale/foreign reads, historical and persisted demand detail/cursors, source badges and recommendations.
     Delete the informational-execution exclusion and require the real mixed-registry assertion to fail, retaining the existing fleet positive control. Delete history membership wiring and require both legacy and persisted detail tests to fail. Restore source and retain literal canonical proofs, caller/census, exact-tree source-positive coverage, native author, stored body, review and hosted gates.
+    October 25 narrow scope amendment: the operator explicitly approved adding only src/lib/inbox.ts (reply call_8bb7e43b7ad64187bc6aa8a262d18ea1, item 0). Its default proposalsNeedingDraft/draftsDueOnDaemon selectors independently admit Architect drafting, so fleet-lane exclusion alone cannot satisfy the existing no-new-drafting acceptance. Exclude only source-verified informational findings from that selector, preserving genuine, unknown and restored-for-review asks and all existing eligible fleet work. Retain the four executable acceptance proofs, the dependency, history, and every review/CI gate. This amendment grants no model call, new action, deployment, provider, budget, permission, service or safety-setting change.
+    October 25 snapshot-producer scope addition: the operator explicitly approved adding only src/lib/inbox-view.ts (reply call_d4d690dffd94432c86e6a277e292d76b, item 0) to the same amendment. This existing producer already captures thread evidence and publishes the shared snapshot. Use one captured ownership decision, including genuine unanswered questions, for lanes, badges and retained history instead of separate reads that could disagree. Preserve unknown-source refusal, all history, existing action permissions and every test/review/CI gate. This adds no model call, deployment, service change or CI/memory-policy change.
     GitHub distinguishes review-requested notification reasons from ordinary subscribed activity: https://docs.github.com/en/subscriptions-and-notifications/concepts/about-notifications . Google SRE monitoring likewise distinguishes actionable alerts from general signals: https://sre.google/sre-book/monitoring-distributed-systems/ . These are design analogies, not evidence that any particular Remudero item is settled.
   risk_ruling:
     verdict: "operator"
@@ -61,5 +65,7 @@
     reasons:
       - "Explicit operator reply on October 22: \"Approve this exact operator release\" for the preservation-only age-information scope, after disclosure that the deterministic backstop matched \"without deleting history\". This is an operator ruling, not a model verdict."
       - "Preserve all history and the W1-T10283 dependency; grant no new automatic action, deployment or spending. All native tests, review and CI remain required."
-    judged_at: "2026-10-22T19:38:26.983Z"
-    pin: "9dfee76ea3d053f64f2abe1d072f08950691937d22e6e21866bd5d322ddca070"
+      - "Explicit operator reply on October 25, call_8bb7e43b7ad64187bc6aa8a262d18ea1 item 0: approve only the src/lib/inbox.ts draft-selector scope addition, preserving genuine, unknown and restored-for-review asks, existing eligible fleet work, all tests/review/CI, and all operational boundaries. This records operator approval, not a model verdict."
+      - "Explicit operator reply on October 25, call_d4d690dffd94432c86e6a277e292d76b item 0: approve only the src/lib/inbox-view.ts snapshot-producer scope addition through the same normal amendment, preserving genuine unanswered questions, unknown-source refusal, all history, action permissions and every test/review/CI gate. No model call, deployment, service or CI/memory-policy change; operator approval, not a model verdict."
+    judged_at: "2026-10-25T14:49:23.768Z"
+    pin: "88c0f6fb7e8b4105620d9aeba74b80d0964636a3536d0bb128489644b2bd44b5"

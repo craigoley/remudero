@@ -836,19 +836,30 @@ function isFeedbackRecordPath(kind: LandingKind, relPath: string): boolean {
  * sites). Never throws: an unreadable upstream blob refuses rather than guesses a winner, the
  * same posture {@link mergeFeedbackRecord} itself takes on unparseable YAML.
  */
-function* validateEvidenceStage(net: LandingNet, path: string, bytes: string): Generator<LandingAsk, string | undefined, AskReply> {
+function* validateEvidenceStage(net: LandingNet, root: string, path: string, bytes: string): Generator<LandingAsk, string | undefined, AskReply> {
   let parsed = false;
   try {
     const revision = evidenceRevisionOf(bytes);
     parsed = true;
     if (!revision) return undefined;
-    const upstream = yield* net.git(["show", `origin/main:${path}`]);
+    const mainSha = (yield* net.git(["rev-parse", "origin/main"])).trim();
+    const upstream = yield* net.git(["show", `${mainSha}:${path}`]);
     if (upstream === bytes) return undefined;
     if (isDeepStrictEqual(evidenceRevisionOf(upstream), revision)) return undefined;
     const invalid = validateEvidenceRevision(upstream, bytes);
     if (invalid) return invalid;
+    const layout = resolveRepoLayout(root);
+    const canonicalSources = [relative(root, layout.planMonolith),
+      relative(root, join(layout.planDir, "tasks.d"))].sort();
+    if (!isDeepStrictEqual(Object.keys(revision.expectedPlan).sort(), canonicalSources)) {
+      return "evidence revision refuses noncanonical plan-source binding";
+    }
     for (const [source, expected] of Object.entries(revision.expectedPlan)) {
-      const listing = (yield* net.git(["ls-tree", "origin/main", "--", source])).trim();
+      const listing = (yield* net.git(["ls-tree", mainSha, "--", source])).trim();
+      const readableSource = source === relative(root, layout.planMonolith)
+        ? /^100(?:644|755) blob /.test(listing)
+        : listing === "" || /^040000 tree /.test(listing);
+      if (!readableSource) return `evidence revision refuses unreadable canonical plan-source: ${source}`;
       const actual = listing === "" ? "absent" : listing.split(/[ \t]/)[2];
       if (actual !== expected) return `evidence revision refuses plan-source drift: ${source}`;
     }
@@ -958,6 +969,7 @@ function* readBranchPending(
  *  by {@link decideFeedbackStage} for a feedback record, else refused by name; main's copy stands. */
 function* stageBranchPending(
   net: LandingNet,
+  root: string,
   kind: LandingKind,
   pending: BranchPending,
   env: NodeJS.ProcessEnv,
@@ -975,7 +987,7 @@ function* stageBranchPending(
     const mainBlob = mainBlobs.get(f) ?? null;
     if (pendingBlob === undefined || pendingBlob === mainBlob) continue; // deleted by the branch, or already merged into main for real
     if (isFeedbackRecordPath(kind, f)) {
-      const invalid = yield* validateEvidenceStage(net, f, yield* net.git(["cat-file", "-p", pendingBlob]));
+      const invalid = yield* validateEvidenceStage(net, root, f, yield* net.git(["cat-file", "-p", pendingBlob]));
       if (invalid) { refused.push({ path: f, reason: invalid }); continue; }
     }
     const mainMoved = mainBlob !== baseBlob;
@@ -1418,7 +1430,7 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
           remoteSha = null; // not on origin/main at all yet
         }
         if (isFeedbackRecordPath(kind, rel)) {
-          const invalid = yield* validateEvidenceStage(net, rel, readFileSync(abs, "utf8"));
+          const invalid = yield* validateEvidenceStage(net, root, rel, readFileSync(abs, "utf8"));
           if (invalid) { refused.push({ path: rel, reason: invalid }); continue; }
         }
         if (remoteSha === localSha) {
@@ -1460,7 +1472,7 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
       const pending = yield* readBranchPending(net, kind);
       if (!pending.ok) throw new Error(pending.reason);
       yield* net.git(["read-tree", "origin/main"], { env });
-      const carried = pending.tipSha ? yield* stageBranchPending(net, kind, pending, env, scratchDir as string) : undefined;
+      const carried = pending.tipSha ? yield* stageBranchPending(net, root, kind, pending, env, scratchDir as string) : undefined;
       const { files: unlanded, sources, contents, refused } = yield* scanLocalUnlanded(env);
       refused.push(...(carried?.refused ?? []));
       for (const rel of unlanded) {
@@ -1694,7 +1706,7 @@ function* landContentSteps(
       // criterion 2, extended by W1-T3560 to the disk-scanning sibling too): this content-only
       // path has no disk to re-scan the way {@link landPending} does, so without this a second
       // call would drop the first call's content entirely.
-      const carried = pending.tipSha ? yield* stageBranchPending(net, kind, pending, env, scratchDir as string) : undefined;
+      const carried = pending.tipSha ? yield* stageBranchPending(net, root, kind, pending, env, scratchDir as string) : undefined;
 
       const unlanded: string[] = [];
       // W1-T3561: `landFeedbackStatusContent` (the console's `POST /v1/feedback/decision` write
@@ -1721,7 +1733,7 @@ function* landContentSteps(
           remoteSha = null; // not on origin/main at all yet
         }
         if (isFeedbackRecordPath(kind, relPath)) {
-          const invalid = yield* validateEvidenceStage(net, relPath, content);
+          const invalid = yield* validateEvidenceStage(net, root, relPath, content);
           if (invalid) { refused.push({ path: relPath, reason: invalid }); continue; }
         }
         if (remoteSha === blobSha) {
