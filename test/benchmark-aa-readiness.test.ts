@@ -485,3 +485,109 @@ test("rmd benchmark-aa readiness reaches the readiness driver", async () => {
     else process.env.HOME = savedHome;
   }
 });
+
+test("runtime pin refusals leave prospective registration untouched", async () => {
+  for (const field of Object.keys(REVISIONS) as Array<keyof typeof REVISIONS>) {
+    for (const bad of [undefined, null, false, [], { revision: "not-immutable" },
+      { source: "resolved-artifact", revision: OTHER_SHA }, { state: "unavailable", reason: "fixture-pin-unavailable" }]) {
+      const stateDir = root();
+      const calls: PairedAttemptRequest<string>[] = [];
+      const runtime = pins();
+      if (field === "harnessRevision") runtime.harnessRevision = bad as never;
+      else runtime.revisions[field] = bad as never;
+      const result = await runBenchmarkAaReadiness(input(stateDir, calls, { manifest: manifest(), runtimePins: () => runtime }));
+      assert.equal(result.state, "refused", `${field}: ${JSON.stringify(bad)}`);
+      assert.ok(result.refusals.some(reason => reason.startsWith(`runtime-pin-unknown:${field}:`)
+        || reason === `runtime-pin-drift:${field}`), result.refusals.join(","));
+      assert.equal(existsSync(join(stateDir, "benchmark-aa-prospective")), false, "a pin refusal must precede the real registration writer");
+      assert.equal(calls.length, 0);
+      assert.deepEqual(prospectiveAaLedgerRows(stateDir, TRIAL), []);
+      assert.deepEqual(listProspectiveAaRegistrations(stateDir), { state: "read", registrations: [] });
+    }
+  }
+  for (const malformed of [undefined, null, {}, { revisions: null }]) {
+    const stateDir = root();
+    const calls: PairedAttemptRequest<string>[] = [];
+    const result = await runBenchmarkAaReadiness(input(stateDir, calls, {
+      manifest: manifest(), runtimePins: () => malformed as unknown as RuntimePins,
+    }));
+    assert.equal(result.state, "refused");
+    assert.ok(result.refusals.some(reason => reason.startsWith("runtime-pin-unknown:")));
+    assert.equal(existsSync(join(stateDir, "benchmark-aa-prospective")), false);
+    assert.equal(calls.length, 0);
+  }
+});
+
+test("pre-registration pin validation preserves valid registration and registered-owner controls", async () => {
+  const stateDir = root();
+  const calls: PairedAttemptRequest<string>[] = [];
+  const first = await runBenchmarkAaReadiness(input(stateDir, calls, { manifest: manifest(), maxPairs: 1 }));
+  assert.equal(first.run.dispatchedPairs, 1);
+  assert.equal(calls.length, 2, "the positive control reaches the actual writer and one fake pair");
+  const protocolPath = join(prospectiveAaDir(stateDir, TRIAL), "protocol.json");
+  const before = readFileSync(protocolPath, "utf8");
+  const different = manifest();
+  different.stack = { ...STACK, ...REVISIONS, promptRevision: OTHER_SHA };
+  await runBenchmarkAaReadiness(input(stateDir, calls, { manifest: different, maxPairs: 1 }));
+  assert.equal(readFileSync(protocolPath, "utf8"), before, "a supplied manifest never overwrites the registered owner's protocol");
+  const otherRoot = root();
+  await register(otherRoot);
+  const duplicates = await runBenchmarkAaReadiness(input(stateDir, calls, { manifest: manifest(), instanceRoots: [
+    { instance: "first", stateDir }, { instance: "other", stateDir: otherRoot },
+  ] }));
+  assert.ok(duplicates.refusals.includes("trial-registered-in-multiple-roots"));
+  assert.equal(readFileSync(protocolPath, "utf8"), before);
+});
+
+test("runtime drift after registration still withholds pair dispatch", async () => {
+  const stateDir = root();
+  const calls: PairedAttemptRequest<string>[] = [];
+  let reads = 0;
+  const result = await runBenchmarkAaReadiness(input(stateDir, calls, { manifest: manifest(),
+    runtimePins: () => ++reads <= 2 ? pins() : pins({ toolRevision: { source: "resolved-artifact", revision: OTHER_SHA } }),
+  }));
+  assert.equal(existsSync(join(prospectiveAaDir(stateDir, TRIAL), "protocol.json")), true, "registration's valid-pin positive control ran");
+  assert.match(result.run.stoppedBy ?? "", /^runtime-pins-drifted-mid-run:runtime-pin-drift:toolRevision/);
+  assert.equal(calls.length, 0, "the independently maintained pre-dispatch check still fires after registration");
+  assert.equal(result.paidPilot, "not-activated");
+  assert.deepEqual(result.holds, { dispatch: false, pr: false, daemon: false });
+});
+
+test("registration ordering fails without the pre-registration pin guard", async () => {
+  const stateDir = root();
+  const calls: PairedAttemptRequest<string>[] = [];
+  const refused = await runBenchmarkAaReadiness(input(stateDir, calls, { manifest: manifest(),
+    runtimePins: () => pins({ environmentRevision: { source: "resolved-artifact", revision: OTHER_SHA } }),
+  }));
+  assert.ok(refused.refusals.includes("runtime-pin-drift:environmentRevision"));
+  assert.equal(existsSync(join(stateDir, "benchmark-aa-prospective")), false, "removing just the pre-registration guard writes an orphan protocol here");
+  const restored = await runBenchmarkAaReadiness(input(stateDir, calls, { manifest: manifest(), maxPairs: 1 }));
+  assert.equal(restored.run.dispatchedPairs, 1, "a later qualified call can use the same pristine private root");
+  assert.equal(calls.length, 2);
+  assert.equal(existsSync(join(prospectiveAaDir(stateDir, TRIAL), "protocol.json")), true);
+});
+
+test("registration pin refusals preserve truthful idempotent readiness gaps", async () => {
+  const stateDir = root();
+  const calls: PairedAttemptRequest<string>[] = [];
+  const request = () => input(stateDir, calls, { manifest: manifest(), runtimePins: () => pins({
+    scorerRevision: { state: "unavailable", reason: "fixture-runtime-unknown" },
+  }) });
+  const first = await runBenchmarkAaReadiness(request());
+  const second = await runBenchmarkAaReadiness(request());
+  assert.equal(first.followUp?.state, "recorded");
+  assert.equal(second.followUp?.state, "already-recorded");
+  assert.equal(first.nextGap?.kind, "runtime-pin-unknown");
+  assert.equal(first.report, null);
+  assert.equal(first.receipt.state, "withheld");
+  assert.equal(first.paidPilot, "not-activated");
+  assert.equal(existsSync(join(stateDir, "benchmark-aa-prospective")), false);
+  assert.equal(readFileSync(join(stateDir, READINESS_FOLLOW_UPS_FILE), "utf8").trim().split("\n").length, 1);
+  assert.equal(calls.length, 0);
+  const invalidRoot = root();
+  let pinReads = 0;
+  const invalid = await runBenchmarkAaReadiness(input(invalidRoot, calls, { manifest: {}, runtimePins: () => { pinReads++; return pins(); } }));
+  assert.ok(invalid.refusals.includes("registration-refused:manifest-version-unsupported"));
+  assert.equal(pinReads, 0, "malformed manifests reach the existing parser before their stack is inspected");
+  assert.equal(existsSync(join(invalidRoot, "benchmark-aa-prospective")), false);
+});
