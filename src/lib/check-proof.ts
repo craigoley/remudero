@@ -13,7 +13,7 @@ import { hostWorktreeGit, WorktreePointerRefusedError, type HostWorktreeGitOptio
 import { resolveTestPath } from "./test-path-resolver.js";
 import {
   explainGrepProofRefusal, explainUnitTestProofRefusal, materialiseBaseProofBlobs,
-  parseWhitelistedProof, resolveNameFilteredCandidates, narrowNameFilteredArgs, resolveProofTestPath,
+  parseWhitelistedProof, resolveNameFilteredCandidates, narrowNameFilteredArgs, resolveProofTestPath, wrappedGrepPattern,
   execWhitelistedProof, defaultProofSpawner, proofFailureTail, registerReviewerCheckout, type ProofSpawner,
 } from "./review.js";
 
@@ -488,9 +488,10 @@ export function checkProofCommand(
   /**
    * W1-T1224 — WHY a zero-hit `grep:` proof read zero, as a `cause:` line alongside the unchanged
    * `verdict:`/exit code (design (iii): report, do not re-rank). Calls {@link classifyGrepZeroHit}
-   * (src/lib/grep-zero-cause.ts) — this file derives NO cause of its own, only reads the file and
-   * formats what the classifier returns. `undefined` when there is nothing to say: a non-grep
-   * proof, or a target path/pattern argv could not resolve.
+   * (src/lib/grep-zero-cause.ts) and formats its result. For an absent pattern, the existing
+   * wrapper detector can explain that its bare literal identifier is already present. This
+   * diagnostic leaves the shared filing classifier and real executor unchanged. `undefined`
+   * when there is nothing to say: a non-grep proof, or unresolved target path/pattern argv.
    */
   function grepZeroHitCauseLine(): string | undefined {
     // grepTargetPath/grepPattern are only ever set (above) when w.kind === "grep" — reading them
@@ -518,12 +519,23 @@ export function checkProofCommand(
           "            file's actual case, or write a separate case-insensitive proof if that is truly\n" +
           "            the intent."
         );
-      case "absent":
+      case "absent": {
+        const wrapped = wrappedGrepPattern(proof);
+        // A literal identifier needs no second regex dialect to establish its presence.
+        if (wrapped && /^[A-Za-z0-9_-]+$/.test(wrapped.bare) && fileText.includes(wrapped.bare)) {
+          return (
+            "cause:      literal-wrapper — the unquoted identifier IS present on a physical line,\n" +
+            "            but the proof also requires its literal surrounding delimiters. The executor\n" +
+            "            passes argv directly: quotes/backticks inside the pattern are data, not shell\n" +
+            "            quoting. The original proof still fails; this is not unwritten future work."
+          );
+        }
         return (
           "cause:      absent — the pattern's text is not in the file in any form (line-wrap and case\n" +
           "            both probed). This reads as a legitimate FORWARD REFERENCE to work not yet\n" +
           "            written, not as a broken proof."
         );
+      }
       case "matched":
         return (
           "cause:      matched — this classifier's own probe found a line match despite the real grep\n" +
