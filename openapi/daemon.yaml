@@ -8693,6 +8693,7 @@ components:
         - unresolvedInstances
         - repositories
         - snapshotId
+        - isCurrentSnapshot
         - assessment
         - findingCount
         - urgentFindings
@@ -8743,7 +8744,10 @@ components:
             properties:
               repository:
                 type: string
-              snapshotId:
+              isCurrentSnapshot:
+          type: [boolean, "null"]
+          description: Whether these are the latest saved results. Historical evidence never enables current planning.
+        snapshotId:
                 anyOf:
                   - type: string
                     pattern: ^[a-f0-9]{64}$

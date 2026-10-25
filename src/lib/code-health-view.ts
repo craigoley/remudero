@@ -2,7 +2,7 @@ import { fixedClock } from "./clock.js";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { projectCodeHealth } from "./code-health-projection.js";
+import { projectCodeHealth, type CodeHealthProjectionInput } from "./code-health-projection.js";
 import type { CodeHealthAssessment } from "./code-health-contract.js";
 import { buildCodeHealthOpportunities, type CodeHealthImprovementOpportunity, type CodeHealthRelatedWork } from "./codeql-quality-intake.js";
 import { codeHealthRepositoryStateDir, readCodeHealthArtifactJson, readCodeHealthCollectionFailure, readCodeHealthSnapshot, type CodeHealthCollectionFailureRead } from "./code-health-store.js";
@@ -67,33 +67,36 @@ interface RepositorySummary {
 }
 export interface CodeHealthViewData {
   version: "code-health-view-v1"; repository: string; expectedRepositories: string[]; unresolvedInstances: string[];
-  repositories: RepositorySummary[]; snapshotId: string | null; assessment: CodeHealthAssessment | null;
+  repositories: RepositorySummary[]; snapshotId: string | null; isCurrentSnapshot: boolean | null; assessment: CodeHealthAssessment | null;
   findingCount: number | null; urgentFindings: UrgentCount; opportunities: CodeHealthImprovementOpportunity[];
   relatedWorkState: "reported" | "partial" | "stale" | "unavailable" | "not_collected"; relatedWorkAsOf: string | null; planningAvailable: boolean; freshness: "fresh" | "stale" | "unavailable";
   page: { nextCursor: string | null };
 }
 const unknownUrgent = (): UrgentCount => ({ value: null, precision: "unavailable", scope: "Findings in the measured quality scope; this is not a complete security assessment." });
-function repositoryReport(stateDir: string, repository: string, now: number, snapshotId?: string, summaryOnly = false): { summary: RepositorySummary; assessment: CodeHealthAssessment | null; opportunities: CodeHealthImprovementOpportunity[]; sources: ViewSource[] } {
-  const repoState = codeHealthRepositoryStateDir(stateDir, repository), read = readCodeHealthSnapshot(repoState, repository, snapshotId);
+function repositoryReport(stateDir: string, repository: string, now: number, snapshotId?: string, summaryOnly = false): { summary: RepositorySummary; input: CodeHealthProjectionInput | null; isCurrentSnapshot: boolean; assessment: CodeHealthAssessment | null; opportunities: CodeHealthImprovementOpportunity[]; sources: ViewSource[] } {
+  const repoState = codeHealthRepositoryStateDir(stateDir, repository), latest = readCodeHealthSnapshot(repoState, repository);
+  const read = snapshotId ? readCodeHealthSnapshot(repoState, repository, snapshotId) : latest;
+  const sourceFailure = latest.state === "observed" ? latest.snapshot.input.scans.find(scan => scan.failureKind) : undefined;
   const collection = readCodeHealthCollectionFailure(repoState, repository);
-  const access = collection.state === "failed" ? collection.failureKind : undefined;
+  const access = collection.state === "failed" ? collection.failureKind : sourceFailure?.failureKind;
   if (snapshotId && read.state !== "observed") throw new CodeHealthNotReady("The selected repository snapshot is unavailable.");
   if (read.state !== "observed") return { summary: { repository, snapshotId: null, state: access === "unauthorized" || access === "rate_limited" ? access : read.state,
     summary: null, sourceClocks: [], urgentFindings: unknownUrgent(), measuredAt: null, analyzedSha: null, currentSha: null, freshness: "unavailable", lastAttemptAt: collection.state === "failed" ? collection.startedAt : null,
-    nextCheckDueAt: null, collection, reason: read.reason }, assessment: null, opportunities: [], sources: [{ name: `repositories:code-health:${repository}`, kind: "repositories", asOf: null, state: "unavailable", reason: read.reason, budgetMs: CODE_HEALTH_INTERVAL_MS }] };
+    nextCheckDueAt: null, collection, reason: read.reason }, input: null, isCurrentSnapshot: false, assessment: null, opportunities: [], sources: [{ name: `repositories:code-health:${repository}`, kind: "repositories", asOf: null, state: "unavailable", reason: read.reason, budgetMs: CODE_HEALTH_INTERVAL_MS }] };
   const assessment = projectCodeHealth(read.snapshot.input);
   const sources = assessment.sources.filter(source => source.required).map((source): ViewSource => judgeSource({ name: `repositories:code-health:${repository}:${source.id}`, kind: "repositories", asOf: source.observedAt,
     state: source.state === "complete" ? "fresh" : source.state === "stale" ? "stale" : "unavailable", budgetMs: CODE_HEALTH_INTERVAL_MS,
     ...(source.reason ? { reason: source.reason } : {}) }, now));
   if (collection.state !== "none") sources.push({ name: `repositories:code-health-refresh:${repository}`, kind: "repositories", asOf: collection.state === "failed" ? collection.finishedAt : null, state: "unavailable", reason: collection.reason });
+  if (collection.state === "none" && sourceFailure) sources.push({ name: `repositories:code-health-read:${repository}`, kind: "repositories", asOf: latest.state === "observed" ? latest.latestAttemptAt : null, state: "unavailable", reason: sourceFailure.reason ?? "Some code-check results could not be read." });
   const freshness = sources.some(source => source.state === "unavailable") ? "unavailable" : sources.some(source => source.state === "stale") ? "stale" : "fresh";
   const qualityComplete = assessment.sources.some(source => source.kind === "quality" && source.required && source.state === "complete" && source.analyzedSha === assessment.currentSha);
   const urgent = assessment.findings.filter(finding => finding.severity === "high" || finding.severity === "critical").length;
   const urgentFindings: UrgentCount = { value: qualityComplete || urgent > 0 ? urgent : null, precision: qualityComplete ? "exact" : urgent > 0 ? "at_least" : "unavailable", scope: unknownUrgent().scope };
-  const lastAttemptAt = collection.state === "failed" ? collection.startedAt : read.latestAttemptAt;
-  return { assessment: summaryOnly ? null : assessment, opportunities: summaryOnly ? [] : buildCodeHealthOpportunities(read.snapshot.input), sources, summary: { repository, snapshotId: read.snapshot.snapshotId, state: access === "unauthorized" || access === "rate_limited" ? access : assessment.state,
+  const lastAttemptAt = collection.state === "failed" ? collection.startedAt : latest.state === "observed" ? latest.latestAttemptAt : null;
+  return { input: summaryOnly ? null : read.snapshot.input, isCurrentSnapshot: latest.state === "observed" && latest.snapshot.snapshotId === read.snapshot.snapshotId, assessment: summaryOnly ? null : assessment, opportunities: summaryOnly ? [] : buildCodeHealthOpportunities(read.snapshot.input), sources, summary: { repository, snapshotId: read.snapshot.snapshotId, state: access === "unauthorized" || access === "rate_limited" ? access : assessment.state,
     summary: assessment.summary, sourceClocks: assessment.sources.filter(source => source.required).map(source => ({ kind: source.kind, state: source.state, measuredAt: source.observedAt, analyzedSha: source.analyzedSha })), urgentFindings, measuredAt: assessment.observedAt, analyzedSha: assessment.analyzedSha, currentSha: assessment.currentSha, freshness,
-    lastAttemptAt, nextCheckDueAt: lastAttemptAt ? fixedClock(Date.parse(lastAttemptAt) + CODE_HEALTH_INTERVAL_MS).iso() : null, collection, reason: collection.state === "none" ? null : collection.reason } };
+    lastAttemptAt, nextCheckDueAt: lastAttemptAt ? fixedClock(Date.parse(lastAttemptAt) + CODE_HEALTH_INTERVAL_MS).iso() : null, collection, reason: collection.state === "none" ? sourceFailure?.reason ?? null : collection.reason } };
 }
 
 /** Worker-only cached reads. No network, scanner, model, ranking or filing runs here. */
@@ -105,17 +108,17 @@ export function readCodeHealthReport(opts: { stateDir: string; params: URLSearch
   const reports = selected.map(repo => repositoryReport(opts.stateDir, repo, opts.now, input.snapshot, input.repository === "all"));
   const report = input.repository === "all" ? null : reports[0]!;
   const data: CodeHealthViewData = { version: "code-health-view-v1", repository: input.repository, expectedRepositories: expected, unresolvedInstances: inventory.unresolvedInstances,
-    repositories: reports.map(value => value.summary), snapshotId: report?.summary.snapshotId ?? null, assessment: report?.assessment ? { ...report.assessment, findings: [] } : null,
+    repositories: reports.map(value => value.summary), snapshotId: report?.summary.snapshotId ?? null, isCurrentSnapshot: report?.isCurrentSnapshot ?? null, assessment: report?.assessment ? { ...report.assessment, findings: [] } : null,
     findingCount: report?.assessment?.findings.length ?? null, urgentFindings: report?.summary.urgentFindings ?? unknownUrgent(), opportunities: [], relatedWorkState: "not_collected", relatedWorkAsOf: null,
     planningAvailable: false, freshness: report?.summary.freshness ?? (reports.every(value => value.summary.freshness === "fresh") && !inventory.unresolvedInstances.length ? "fresh" : "unavailable"), page: { nextCursor: null } };
   if (report?.assessment && data.assessment) {
     const related = readRelatedWork(opts.stateDir, inventory, input.repository, opts.now);
     data.relatedWorkState = related.state; data.relatedWorkAsOf = related.asOf;
     // These are saved work links, not newly verified delivery or benefit receipts.
-    report.opportunities = buildCodeHealthOpportunities(readCodeHealthSnapshotInput(opts.stateDir, input.repository, data.snapshotId!), related.work);
+    report.opportunities = buildCodeHealthOpportunities(report.input!, related.work);
     const offset = input.page?.o ?? 0, findings = report.assessment.findings;
     if (offset >= findings.length && offset !== 0) throw new RangeError("Code health page is outside its saved evidence.");
-    data.planningAvailable = report.summary.freshness === "fresh" && report.summary.collection.state === "none" && report.opportunities.some(opportunity => opportunity.mayPlan);
+    data.planningAvailable = report.isCurrentSnapshot && report.summary.freshness === "fresh" && report.summary.collection.state === "none" && report.opportunities.some(opportunity => opportunity.mayPlan);
     if (Buffer.byteLength(JSON.stringify(data)) + 1024 > CODE_HEALTH_PAGE_BYTES) throw new CodeHealthNotReady("Code health source details exceed the response bound.");
     for (const finding of findings.slice(offset, offset + PAGE_FINDINGS)) {
       const next = [...data.assessment.findings, finding], fingerprints = new Set(next.map(value => value.fingerprint));
@@ -169,11 +172,6 @@ export function createCodeHealthView(opts: { stateDir?: string; keys?: () => str
 }
 
 
-function readCodeHealthSnapshotInput(stateDir: string, repository: string, snapshotId: string): import("./code-health-projection.js").CodeHealthProjectionInput {
-  const saved = readCodeHealthSnapshot(codeHealthRepositoryStateDir(stateDir, repository), repository, snapshotId);
-  if (saved.state !== "observed") throw new CodeHealthNotReady("The saved opportunity evidence is unavailable.");
-  return saved.snapshot.input;
-}
 function readRelatedWork(stateDir: string, inventory: RepositoryEvidenceInventory, repository: string, now: number): {
   state: CodeHealthViewData["relatedWorkState"]; asOf: string | null; work: CodeHealthRelatedWork[];
 } {
