@@ -3117,9 +3117,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
               }
             }
             draftContractFailed = outcome.contractFailed;
+            // A denied first reservation is operational evidence, not a model-quality sample.
+            // budgetRefused alone also covers later paid turns: require the complete zero-work receipt.
+            const notInvokedBudgetRefusal = rung.isError && rung.budgetRefused === true &&
+              rung.budgetReservedUsd === 0 && rung.budgetSettledUsd === 0 && rung.costUsd === 0 &&
+              rung.tokens.input === 0 && rung.tokens.output === 0 && rung.tokens.cacheRead === 0 && rung.tokens.cacheCreation === 0 &&
+              rung.servedModel === null && rung.sessionId === "" && rung.text === "" && rung.blocks.length === 0;
             recordDraftRouting(args.draftRouting.log, "draft.routing.outcome", { lane: args.draftRouting.lane,
               proposal_id: args.draftRouting.proposalId, deployment: selection.model, session_id: rung.sessionId,
               selection_assignment_id: selectionAssignmentId,
+              ...(notInvokedBudgetRefusal ? { quality_sample: "not-invoked-budget-refusal" } : {}),
               draft_cost_usd: rung.costUsd, clean: outcome.clean, contract_failed: outcome.contractFailed });
           }
           return rung;
