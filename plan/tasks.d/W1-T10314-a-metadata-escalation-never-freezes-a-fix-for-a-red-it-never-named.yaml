@@ -13,7 +13,7 @@
   files:
     - src/run-task.ts
     - test/inbox/a-metadata-escalation-never-freezes-a-fix-for-a-red-it-never-named.test.ts
-  status: queued
+  status: merged
   priority: 1  # a code red behind a body question waits for a human who was never asked about it
   attempts: 0
   rationale: |

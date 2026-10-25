@@ -46,7 +46,7 @@ function runInProcess(repo: GitRepo): { code: number; err: string } {
   console.log = () => undefined;
   console.error = (...a: unknown[]) => void err.push(a.join(" "));
   try {
-    return { code: main(["--root", repo.dir, "--base", "main"]), err: err.join("\n") };
+    return { code: main(["--root", repo.dir, "--base", "main", "--baseline", join(repo.dir, "scripts/comment-load-baseline.json")]), err: err.join("\n") };
   } finally {
     console.log = realLog;
     console.error = realError;

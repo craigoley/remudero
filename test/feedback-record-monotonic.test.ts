@@ -17,10 +17,15 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
-import { stringify as stringifyYaml } from "yaml";
+import { test, type TestContext } from "node:test";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { pathToFileURL } from "node:url";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { queuedFeedbackDir } from "#src/lib/feedback-landing.js";
+import { prepareEvidenceRecordContext } from "#src/lib/evidence-coverage-record-context.js";
+import { buildEvidenceRevision } from "#src/lib/feedback-evidence-revision.js";
 import { FEEDBACK_STATUSES, type FeedbackStatus } from "../src/lib/feedback.js";
 import { mergeFeedbackRecord } from "../src/lib/feedback-record-merge.js";
 import { LANDING_BRANCH, landFeedback, landFeedbackStatusContent, sweepFeedbackLanding } from "../src/lib/feedback-landing.js";
@@ -394,4 +399,109 @@ test("W1-T3561: an upstream blob that fails to read (not merely absent) refuses 
   assert.match(result.refused![0].reason, /unreadable/i);
   assert.equal(calls.length, 0, "a read failure must never reach gh either");
   assert.match(readOnBranch(bareOrigin.dir, "main", `plan/feedback/${id}.yaml`), /status: proposed/, "origin/main is untouched");
+});
+
+function coverageSource(t: TestContext) {
+  const origin = gitRepo({ bare: true, scope: t });
+  const seed = gitRepo({ scope: t });
+  const id = "evidence-coverage-containment-served-model", rel = `plan/feedback/${id}.yaml`;
+  mkdirSync(join(seed.dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(seed.dir, "plan", "tasks.d", ".gitkeep"), "");
+  writeEntry(seed.dir, id, { status: "rejected", raw: "human context\nCoverage: 49/61 joined worker calls (80.3%)\nhuman closing rationale",
+    proposal_pr: "https://github.com/o/r/pull/10976", summary: { decision: "preserve" } });
+  seed.git("add", "plan");
+  seed.git("commit", "-qm", "chore: seed complete coverage source");
+  seed.addRemote("origin", origin.dir);
+  seed.git("push", "-q", "origin", "main");
+  const root = gitRepo({ cloneFrom: origin.dir, scope: t });
+  const ctx = prepareEvidenceRecordContext(root.dir);
+  const now = Date.now(), at = new Date(now).toISOString(), since = new Date(now - 7 * 86_400_000).toISOString();
+  const revision = buildEvidenceRevision({ version: 1, mainSha: ctx.mainSha, expectedPlan: ctx.expectedPlan,
+    expectedRecord: ctx.records.get(rel)!, closure: ctx.closure(id, "rejected", "https://github.com/o/r/pull/10976"),
+    measurement: { lane: "containment", field: "servedModel", observed: 51, denominator: 100, floor: 0.9,
+      at, since, line: "Coverage: 51/100 joined worker calls (51.0%) in the trailing 7-day window; below floor." } });
+  const publish = () => { seed.git("add", "plan"); seed.git("commit", "-qm", "chore: concurrent source change"); seed.git("push", "-q", "origin", "main"); };
+  return { origin, seed, root, id, rel, revision, publish, at };
+}
+
+test("private coverage production: the registered pass joins the real ledger to exact-main reopening and queues its evidence", async (t) => {
+  const f = coverageSource(t);
+  const inbox = join(f.root.dir, "inbox"), state = join(inbox, "state");
+  mkdirSync(state, { recursive: true });
+  const rows = Array.from({ length: 100 }, (_, i) => [
+    { ts: f.at, step: "worker.assignment", lane: "containment", worker_assignment: { id: `call-${i}`, selected: { provider: "anthropic", model: "claude" } } },
+    { ts: f.at, step: "worker.attempt", selection_assignment_id: `call-${i}`, success: true, served_model: i < 51 ? "claude" : null,
+      tokens: { input: 1, output: 1 }, billing_mode: "api", total_cost_usd: 0.01 },
+  ]).flat();
+  writeFileSync(join(state, "ledger.ndjson"), rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+  writeEntry(f.root.dir, f.id, { status: "grilling", raw: "stale served checkout" });
+  const ctx = { config: { root: inbox, claudeBin: "/bin/true" }, repoRoot: f.root.dir, owner: "o", repo: "r" };
+  const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+    `const { buildRegisteredGarden } = await import(process.argv[1]);
+     const ctx = JSON.parse(process.argv[2]);
+     ctx.log = (step, extra) => console.log(JSON.stringify({step, extra}));
+     ctx.raiseDuplicate = () => "";
+     const pass = await buildRegisteredGarden("evidence-coverage", ctx);
+     await pass();`, pathToFileURL(join(REPO_ROOT, "src", "run-task.ts")).href, JSON.stringify(ctx)],
+    { cwd: REPO_ROOT, encoding: "utf8" });
+  const pending = join(queuedFeedbackDir(inbox), `${f.id}.yaml`);
+  const queued = parseYaml(readFileSync(pending, "utf8"));
+  assert.equal(queued.status, "new", output);
+  assert.match(queued.raw, /Coverage: 51\/100 joined worker calls \(51.0%\)/);
+  assert.match(queued.raw, /overrides rejected closed by .*10976/);
+  assert.match(queued.raw, /human closing rationale/);
+  assert.deepEqual(queued.summary, { decision: "preserve" });
+  assert.equal(queued.evidence_coverage_revision.mainSha, f.root.git("rev-parse", "origin/main"));
+  assert.equal(parseYaml(readFileSync(join(f.root.dir, f.rel), "utf8")).raw, "stale served checkout");
+  const { gh: api, calls } = fakeGh("https://github.com/o/r/pull/6080");
+  const landed = withLiveWritesAllowed(() => sweepFeedbackLanding(f.root.dir, { stateRoot: inbox, gh: api }));
+  assert.equal(landed.landed, true, JSON.stringify(landed));
+  assert.ok(calls.some((args) => args[1] === "create"));
+  assert.ok(!calls.some((args) => args[1] === "merge"));
+  const record = parseYaml(readOnBranch(f.origin.dir, LANDING_BRANCH, f.rel));
+  assert.equal(record.status, "new");
+  assert.match(record.raw, /51.0%/);
+  assert.equal(record.evidence_coverage_last_reopened, "51.0");
+});
+
+test("private coverage landing: either plan source moving or concurrent record edits refuses both actual writers", (t) => {
+  for (const change of ["monolith", "shards", "human", "deletion"] as const) {
+    for (const writer of ["disk", "content"] as const) {
+      const f = coverageSource(t);
+      if (change === "monolith") writeFileSync(join(f.seed.dir, "plan", "tasks.yaml"), "# concurrent plan change\n[]\n");
+      if (change === "shards") writeFileSync(join(f.seed.dir, "plan", "tasks.d", "new.yaml"), "[]\n");
+      if (change === "human") writeEntry(f.seed.dir, f.id, { status: "rejected", raw: "concurrent human evidence" });
+      if (change === "deletion") rmSync(join(f.seed.dir, f.rel));
+      f.publish();
+      const { gh: api, calls } = fakeGh("https://github.com/o/r/pull/6081");
+      if (writer === "disk") writeFileSync(join(f.root.dir, f.rel), f.revision);
+      const result = withLiveWritesAllowed(() => writer === "disk" ? landFeedback(f.root.dir, { gh: api })
+        : landFeedbackStatusContent(f.root.dir, f.rel, f.revision, { gh: api }));
+      assert.equal(result.landed, false, `${change}/${writer}: ${JSON.stringify(result)}`);
+      assert.ok(result.refused?.some((row) => row.path === f.rel), `${change}/${writer}: ${JSON.stringify(result)}`);
+      assert.match(result.refused![0].reason, /plan-source drift|concurrent record edits|record deleted/);
+      assert.equal(calls.length, 0, `${change}/${writer} never reaches PR creation`);
+    }
+  }
+});
+
+test("private coverage carry: a pending revision is revalidated even when only the plan moved", (t) => {
+  for (const change of ["monolith", "shards", "human", "deletion"] as const) {
+    const f = coverageSource(t);
+    const { gh: api } = fakeGh("https://github.com/o/r/pull/6082");
+    const first = withLiveWritesAllowed(() => landFeedbackStatusContent(f.root.dir, f.rel, f.revision, { gh: api }));
+    assert.equal(first.landed, true, JSON.stringify(first));
+    if (change === "monolith") writeFileSync(join(f.seed.dir, "plan", "tasks.yaml"), "# changed\n[]\n");
+    if (change === "shards") writeFileSync(join(f.seed.dir, "plan", "tasks.d", "new.yaml"), "[]\n");
+    if (change === "human") writeEntry(f.seed.dir, f.id, { status: "rejected", raw: "concurrent history" });
+    if (change === "deletion") rmSync(join(f.seed.dir, f.rel));
+    f.publish();
+    const sibling = "plan/feedback/fb-sibling.yaml";
+    const result = withLiveWritesAllowed(() => landFeedbackStatusContent(f.root.dir, sibling, entryYaml({ id: "fb-sibling", status: "new" }), { gh: api }));
+    assert.ok(result.refused?.some((row) => row.path === f.rel), JSON.stringify(result));
+    const tree = f.origin.git("ls-tree", "-r", LANDING_BRANCH, "--", f.rel);
+    if (change === "deletion") assert.equal(tree, "");
+    else assert.equal(parseYaml(readOnBranch(f.origin.dir, LANDING_BRANCH, f.rel)).status, "rejected");
+  }
 });

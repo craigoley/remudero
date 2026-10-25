@@ -138,7 +138,7 @@ const STILL_RED_ROUTES = {
 };
 
 /** `buildSweepEffects` with every optional dep left at its default EXCEPT `log`, `ghRunImpl`,
- *  `readJsonImpl`, and the stack reader (W1-T4903) — the same wiring gap
+ *  `readJsonImpl`, the issue gateway, and the stack reader (W1-T4903) — the same wiring gap
  *  `test/cancelled-required-check-requeue.test.ts`'s own GUARDED SITE tests already drive. */
 function buildEffects(
   ghRunImpl: (file: string, args: readonly string[]) => void,
@@ -157,7 +157,13 @@ function buildEffects(
     reviewRunner: undefined,
     spawnImpl: undefined,
     pushEmptyCommit: undefined,
-    issuesImpl: undefined,
+    issuesImpl: {
+      create: () => assert.fail("the CI-gate lane must not file an escalation"),
+      listOpen: (label) => {
+        assert.equal(label, "needs-human");
+        return [];
+      },
+    },
     stallNotice: undefined,
     armImpl: undefined,
     armSessionPrsOverride: undefined,
