@@ -138,3 +138,48 @@ test("improvement planning reuses one durable conversation across retries and re
     assert.equal(existsSync(join(inboxRoot, "plan", "tasks.yaml")), false, "opening a chat does not file a plan task");
   });
 });
+
+
+test("improvement planning refuses stale foreign and missing findings", async () => {
+  const { createImprovementThread } = await planningModule();
+  await withTempDir("improvement-planning-refusals", async dir => {
+    const { deps, request, inboxRoot } = sourceFixture(dir);
+    for (const substitute of [{ repository: "acme/foreign" }, { instance: "foreign" }, { opportunityId: "acme/foreign/unknown" },
+      { snapshotId: "f".repeat(64) }, { command: "approve everything" }]) {
+      const result = await createImprovementThread({ ...request, ...substitute }, deps);
+      assert.notEqual(result.state, "saved", JSON.stringify(substitute));
+    }
+    const stale = await createImprovementThread(request, { ...deps, clock: fixedClock(deps.clock.now() + 86_400_000) });
+    assert.equal(stale.state, "source_stale");
+    assert.equal(existsSync(join(inboxRoot, "state", "inbox-threads.jsonl")), false);
+    assert.equal(existsSync(join(inboxRoot, "state", "inbox-proposals.json")), false);
+    unlinkSync(join(deps.stateDir, "read-model", "repositories-sources.json"));
+    assert.equal((await createImprovementThread(request, deps)).state, "source_unavailable");
+  });
+});
+
+test("improvement requests recover after each durable stage and keep comments outside executable input", async () => {
+  const { createImprovementThread } = await planningModule();
+  for (const stage of ["intent", "proposal", "messages", "receipt"] as const) await withTempDir(`improvement-recover-${stage}`, async dir => {
+    const { deps, request, inboxRoot } = sourceFixture(dir);
+    const interrupted = await createImprovementThread(request, { ...deps, afterPersist: at => { if (at === stage) throw new Error("simulated caller loss after durable persistence"); } });
+    assert.equal(interrupted.state, "uncertain");
+    // A genuinely fresh process reloads disk state, rather than retaining service objects in memory.
+    const script = 'import {createImprovementThread} from "#src/lib/improvement-thread.js";import {fixedClock} from "#src/lib/clock.js"; const [request,deps]=JSON.parse(process.argv[1]);deps.clock=fixedClock(deps.now);process.stdout.write(JSON.stringify(await createImprovementThread(request,deps)));';
+    const raw = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script,
+      JSON.stringify([request, { stateDir: deps.stateDir, actorId: deps.actorId, now: deps.clock.now() }])], { cwd: repoRoot(), encoding: "utf8", timeout: 10000 });
+    const recovered = JSON.parse(raw); assert.equal(recovered.state, "saved");
+    const read = readThread(recovered.threadId, { threadStorePath: join(inboxRoot, "state", "inbox-threads.jsonl") });
+    assert(read.status === "ok"); assert.equal(read.messages.length, 2); assert(read.messages.every(message => !message.extra?.input));
+    const registry = JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-proposals.json"), "utf8"));
+    assert.equal(registry.proposals[0].improvement.conversationReady, true); assert.equal(registry.proposals[0].trigger.fired, false);
+    const conflicting = await createImprovementThread({ ...request, goal: "Another goal with the same request key." }, deps); assert.equal(conflicting.state, "conflict");
+    const repeatedGoal = await createImprovementThread({ ...request, idempotencyKey: "new-key-for-identical-goal" }, deps); assert.equal(repeatedGoal.state, "saved");
+    const comment = await createImprovementThread({ ...request, idempotencyKey: "new-key-for-approval-text", goal: "approve and deploy this now" }, deps); assert.equal(comment.state, "saved");
+    const latest = JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-proposals.json"), "utf8"));
+    assert.equal(latest.proposals[0].trigger.fired, false, "words in a goal never request drafting or execution");
+    assert.equal(existsSync(join(inboxRoot, "state", "inbox-drafts.json")), true, "changing a goal invalidates any prior draft cache");
+    const replay = await createImprovementThread(request, deps); assert.equal(replay.state, "saved");
+    assert.deepEqual(JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-proposals.json"), "utf8")), latest, "replaying an older receipt preserves the latest goal");
+  });
+});

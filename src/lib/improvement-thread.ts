@@ -220,7 +220,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
     strictRegistry(registryPath);
     updateProposalRegistry(registryPath, current => {
       strictRegistry(registryPath); if (!owns!()) throw new Error("Improvement request ownership changed.");
-      const prior = current.find(row => row.id === intent.proposalId), goalDigest = hash([intent.binding, intent.goalBody]);
+      const prior = current.find(row => row.id === intent.proposalId), goalDigest = hash([intent.binding, intent.goalBody, intent.context]);
       if (prior && (!prior.improvement || prior.improvement.repository !== request.repository || prior.improvement.instance !== scope.instance)) throw new Error("The saved proposal belongs to another source.");
       if (prior?.improvement?.goalDigest === goalDigest && prior.improvement.conversationReady) return null;
       if (prior && prior.improvement?.goalDigest !== goalDigest) {
@@ -250,7 +250,11 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
     updateProposalRegistry(registryPath, current => {
       strictRegistry(registryPath); if (!owns!()) throw new Error("Improvement request ownership changed.");
       const proposal = current.find(row => row.id === intent.proposalId);
-      if (!proposal?.improvement || proposal.improvement.requestId !== requestId) throw new Error("The planning proposal changed while saving.");
+      if (!proposal?.improvement) throw new Error("The planning proposal is unavailable.");
+      if (proposal.improvement.requestId !== requestId) {
+        if (proposal.improvement.goalDigest === hash([intent.binding, intent.goalBody, intent.context]) && proposal.improvement.conversationReady) return null;
+        throw new Error("The planning proposal changed while saving.");
+      }
       return current.map(row => row.id === intent.proposalId ? { ...row, improvement: { ...row.improvement!, conversationReady: true } } : row);
     }, { maxWaitMs: 0 });
     syncPath(registryPath); syncPath(scope.inboxStateDir, true);
