@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { execFileSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { repoRoot } from "#test/helpers/repo-root.js";
+import { withTempDir } from "#src/lib/tmp.js";
 import { buildCodeHealthOpportunities, codeqlQualityProposalId } from "#src/lib/codeql-quality-intake.js";
 import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
 import { readCodeScanningAlerts } from "#src/lib/ops.js";
@@ -90,4 +95,45 @@ test("code health retains analysis identity through the real alert reader", () =
     assert.equal(ordinary.ok, true);
     assert.equal(Object.hasOwn(ordinary, "analysisInstances"), false, "ordinary alert callers keep their existing bounded response");
   } finally { process.env.PATH = saved; }
+});
+
+
+test("code health exports bounded provenance without publishing security results", async () => {
+  await withTempDir("code-health-provenance", async dir => {
+    const raw = { repository: "acme/atlas", analyzedSha: "a".repeat(40), ref: "refs/heads/main", runId: "123", runAttempt: "1",
+      observedAt: "2026-11-02T05:00:00.000Z", language: "javascript-typescript", sarifId: "12345678-1234-1234-1234-123456789012",
+      config: "paths-ignore: [test/**]", exclusions: ["test/**"],
+      sarif: { version: "2.1.0", runs: [{ tool: { driver: { name: "CodeQL", version: "2.23.0", rules: [{ id: "js/example", defaultConfiguration: { enabled: true } }] }, extensions: [] },
+        artifacts: [{ location: { uri: "src/example.ts" }, roles: ["analysisTarget"] }],
+        invocations: [{ executionSuccessful: true, endTimeUtc: "2026-11-02T04:59:00.000Z" }],
+        results: [{ ruleId: "js/example", message: { text: "private security detail must not escape" }, codeFlows: [{ private: "secret source code" }] }] }] } };
+    const inputPath = join(dir, "input.json"), output = join(dir, "provenance.json");
+    const run = (value: unknown) => {
+      writeFileSync(inputPath, JSON.stringify(value));
+      const outputPath = join(dir, `output-${Math.random()}.json`);
+      execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--input", inputPath, "--output", outputPath], { encoding: "utf8" });
+      return JSON.parse(readFileSync(outputPath, "utf8"));
+    };
+    const manifest = run(raw);
+    assert.equal(manifest.version, "code-health-source-v1");
+    assert.equal(manifest.repository, "acme/atlas");
+    assert.equal(manifest.analyzedSha, raw.analyzedSha);
+    assert.equal(manifest.scope.fileCount, 1);
+    assert.match(manifest.scope.hash, /^[a-f0-9]{64}$/);
+    assert.equal(manifest.state, "complete");
+    assert.equal(manifest.toolVersion, "2.23.0");
+    assert(!JSON.stringify(manifest).includes("private security"));
+    assert(!JSON.stringify(manifest).includes("secret source code"));
+    assert(!JSON.stringify(manifest).includes("src/example.ts"), "publish the measured inventory hash, not source locations");
+    const resultOnly = structuredClone(raw); delete (resultOnly.sarif.runs[0]!.artifacts[0] as { roles?: string[] }).roles;
+    const incomplete = run(resultOnly);
+    assert.equal(incomplete.state, "partial", "result locations are not proof of measured files");
+    assert.equal(incomplete.scope.hash, null);
+    const failed = structuredClone(raw); failed.sarif.runs[0]!.invocations[0]!.executionSuccessful = false;
+    assert.equal(run(failed).state, "partial");
+    const narrowed = structuredClone(raw); narrowed.exclusions.push("src/private/**");
+    assert.notEqual(run(narrowed).configHash, manifest.configHash);
+    writeFileSync(inputPath, JSON.stringify({ ...raw, analyzedSha: "wrong" }));
+    assert.throws(() => execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--input", inputPath, "--output", output], { stdio: "pipe" }), /failed/i);
+  });
 });
