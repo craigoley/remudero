@@ -347,7 +347,7 @@ test("selected Claude SDK boundary snapshots private denials across queued argum
     try {
       const args = privateClaudeArgs(fixture, sink), originalPolicy = args.settingsFile;
       args.onMemoryAdmissionEnd = () => { args.settingsFile = join(fixture.root, "other-settings.json"); args.prompt = "retargeted"; };
-      if (proxy) args.egress = { mode: "enforce", checkVersion: () => {}, startProxy: settings => startWorkerEgressProxy(settings,
+      if (proxy) args.egress = { mode: "enforce", checkVersion: () => "fixture-verified-version", startProxy: settings => startWorkerEgressProxy(settings,
         () => { throw new Error("forbidden external egress in private-policy fixture"); }) };
       await runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected });
       assert.equal(sink.calls, 1);
