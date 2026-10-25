@@ -176,7 +176,10 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
   const repository = input.repository.toLowerCase();
   const pairs = CODE_HEALTH_SOURCE_KINDS.map(kind => {
     const scan = input.scans.find(source => source.kind === kind), prior = input.baseline?.scans.find(source => source.kind === kind);
-    return { kind, scan, prior, problem: scanProblem(scan, input.analyzedSha, input.observedAt), pair: pairState(input, scan, prior) };
+    const current = new Map((scan?.findings ?? []).map(finding => [codeHealthFindingFingerprint(repository, kind, finding), finding.status]));
+    const unconfirmedMissing = (prior?.findings ?? []).some(finding => finding.status !== "fixed" &&
+      !["open", "fixed"].includes(current.get(codeHealthFindingFingerprint(repository, kind, finding)) ?? "absent"));
+    return { kind, scan, prior, current, unconfirmedMissing, problem: scanProblem(scan, input.analyzedSha, input.observedAt), pair: pairState(input, scan, prior) };
   });
   const sources: CodeHealthAssessment["sources"] = pairs.map(({ kind, scan, prior, problem }) => ({
     id: sourceId(repository, kind), kind, required: true,
@@ -191,7 +194,8 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
   }));
   const checks: CodeHealthAssessment["checks"] = input.registry.checks.map(definition => {
     const pair = pairs.find(source => source.kind === definition.sourceKind)!, check = pair.scan?.checks.find(value => value.id === definition.id);
-    const unavailable = pair.problem ?? (!check ? "This declared check was not measured." : check.met && pair.pair !== "comparable" ? "A passing comparison needs an independent scan with the same scope and policy." : undefined);
+    const unavailable = pair.problem ?? (!check ? "This declared check was not measured." : check.met && pair.pair !== "comparable" ? "A passing comparison needs an independent scan with the same scope and policy." :
+      check.met && pair.unconfirmedMissing ? "A previously known finding is missing or dismissed without a verified fix." : undefined);
     return { id: definition.id, category: definition.category, state: unavailable ? "not_measured" : check!.met ? "met" : "not_met",
       sourceIds: [sourceId(repository, definition.sourceKind)], reason: unavailable ?? check!.reason };
   });
@@ -202,6 +206,12 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
     findings.set(fingerprint, { fingerprint, sourceId: sourceId(repository, pair.kind), severity: finding.severity, category: finding.category,
       status: pair.pair !== "comparable" ? "unknown" : pair.prior!.findings.some(old => old.status !== "fixed" && codeHealthFindingFingerprint(repository, pair.kind, old) === fingerprint) ? "existing" : "new",
       path: finding.path, title: finding.title, effortMinutes: finding.effortMinutes, estimateKind: finding.effortMinutes === null ? null : "modeled" });
+  }
+  for (const pair of pairs) for (const prior of pair.prior?.findings ?? []) {
+    const fingerprint = codeHealthFindingFingerprint(repository, pair.kind, prior);
+    if (prior.status === "fixed" || findings.has(fingerprint) || pair.pair === "comparable" && pair.current.get(fingerprint) === "fixed") continue;
+    findings.set(fingerprint, { fingerprint, sourceId: sourceId(repository, pair.kind), severity: prior.severity, category: prior.category, status: "unknown",
+      path: prior.path, title: prior.title, effortMinutes: prior.effortMinutes, estimateKind: prior.effortMinutes === null ? null : "modeled" });
   }
   if (findings.size > 1000) throw new Error("Code health findings exceed the public contract bound; prior evidence must remain available.");
   const met = checks.filter(check => check.state === "met").length, assessed = checks.filter(check => check.state !== "not_measured").length;
