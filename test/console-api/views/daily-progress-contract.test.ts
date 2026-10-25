@@ -63,6 +63,18 @@ test("daily contracts preserve coverage and reject contradictory day identity", 
   assert.equal(validateDailyProgressReport(complete).ok, true);
   complete.coverage.sources[1]!.coverageThrough = "2026-11-02T04:59:59.999Z";
   assert.equal(validateDailyProgressReport(complete).ok, false, "complete coverage includes optional sources through the cutoff too");
+  const ongoing = report(); ongoing.phase = "provisional"; ongoing.generatedAt = "2026-11-01T12:00:00.000Z";
+  Object.assign(ongoing.coverage.sources[0]!, { lastAttemptAt: ongoing.generatedAt, lastSuccessAt: ongoing.generatedAt, coverageThrough: ongoing.generatedAt });
+  ongoing.coverage.sources.push({ ...ongoing.coverage.sources[0]!, id: "second-pr-source" });
+  assert.equal(validateDailyProgressReport(ongoing).ok, true, "an in-progress day needs coverage through generation, not a future midnight");
+  for (const patch of [
+    { coverageStart: "2026-11-01T04:00:00.001Z" },
+    { coverageThrough: "2026-11-01T11:59:59.999Z" },
+    { state: "not_collected", lastAttemptAt: null, lastSuccessAt: null, coverageStart: null, coverageThrough: null, reason: "Never collected" },
+  ]) {
+    const r = structuredClone(ongoing); Object.assign(r.coverage.sources.at(-1)!, patch);
+    assert.equal(validateDailyProgressReport(r).ok, false, "every required source must cover the entire elapsed report window");
+  }
 });
 
 test("the repositories publisher exposes expected inventory independently of observed events", async () => {
@@ -114,9 +126,14 @@ test("the repositories publisher rejects invalid inventory before replacing publ
     const publish = createRepositoriesSourcePublisher({ stateDir: root, instances: () => instances });
     assert.equal(publish(), true);
     const before = readFileSync(path, "utf8");
-    instances = [...valid, { instanceId: "one", evidenceRepository: "acme/beacon", options: { root } }];
-    assert.throws(publish, /invalid repository evidence inventory: duplicate instance identity/);
-    assert.equal(readFileSync(path, "utf8"), before, "invalid evidence must not replace the last valid publication");
+    for (const conflicting of [
+      { instanceId: "one", evidenceRepository: "acme/beacon", options: { root } },
+      { instanceId: "one", options: { root } },
+    ]) {
+      instances = [...valid, conflicting];
+      assert.throws(publish, /invalid repository evidence inventory: duplicate instance identity/);
+      assert.equal(readFileSync(path, "utf8"), before, "invalid evidence must not replace the last valid publication");
+    }
     instances = valid;
     assert.equal(publish(), false, "a rejected inventory does not change publication clocks");
   });
