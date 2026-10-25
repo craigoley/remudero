@@ -830,6 +830,7 @@ export function realEscalationJudge(opts: {
   // byte-identical to before: the cheapest routed cell.
   const mount = opts.mounts.escalation_judge ?? resolveRiskJudgeMount(opts.mounts);
   return async (e: Escalation) => {
+    const runId = escalationJudgeRunId(e);
     const result = await spawnEscalationJudgeWorker({
       escalation: e,
       mount,
@@ -840,7 +841,7 @@ export function realEscalationJudge(opts: {
     const parsed = parseEscalationJudgeOutput(result.text);
     const assignmentId = result.selectionAssignmentId;
     escalationJudgeReceipts.set(parsed.verdict, {
-      state: parsed.state, decision: parsed.verdict.decision, runId: escalationJudgeRunId(e),
+      state: parsed.state, decision: parsed.verdict.decision, runId,
       ...(typeof assignmentId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(assignmentId)
         ? { assignmentId } : {}),
     });

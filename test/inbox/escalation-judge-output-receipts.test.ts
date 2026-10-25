@@ -83,6 +83,19 @@ test("escalation output receipts never invent a missing or malformed assignment 
   }
 });
 
+test("escalation output receipts bind identity before an asynchronous caller can mutate its subject", async () => {
+  const input = { ...subject }, expected = escalationJudgeRunId(input);
+  const judge = realEscalationJudge({ mounts, cwd: "/unused", settingsFile: "/unused/settings.json",
+    spawn: (async args => {
+      assert.ok(args.prompt.includes(subject.detail));
+      input.detail = "A later condition, not what this worker judged";
+      return worker(output);
+    }) as typeof spawnWorker });
+  const verdict = await judge(input);
+  assert.notEqual(escalationJudgeRunId(input), expected);
+  assert.equal(escalationJudgeReceiptFields(verdict).judge_run_id, expected);
+});
+
 test("escalation birth ledgers the actual model receipt while preserving shadow delivery", async t => {
   const f = fixture(t), labels: string[][] = [];
   const url = await escalateWithJudge(subject, {
