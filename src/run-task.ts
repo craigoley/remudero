@@ -16285,14 +16285,22 @@ function* fixCensusSnapshotSteps(
   const text = `${precheck.stdout ?? ""}${precheck.stderr ?? ""}`;
   let refusal = censusPushRefusal(text);
   let unmeasured = precheck.status === 2 ? text.trim() : undefined;
+  const unavailable = (subject: string, result: CensusChildResult, output: string) => {
+    unmeasured = `${subject}: ${String(result.error ?? result.signal ?? (output || `exit ${result.status} without a complete test summary`)).slice(-4000)}`;
+    return { text: `census-precheck: NOT MEASURED — ${unmeasured}`, censuses: [], offeredBaselines: [] };
+  };
+  if (!refusal && (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2))) {
+    refusal = unavailable("census precheck child", precheck, text);
+  }
   if (!refusal) {
     const reach = "test/the-affected-suite-reach-ratchet.test.ts";
     const result = yield* step(() => run(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import",
       "./test/setup/tmp-hygiene.ts", reach],
       { cwd: scriptsRoot, env, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 }));
     const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-    if (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2) || result.error || result.signal ||
-        result.status !== 0 || !/^# tests [1-9]\d*$/m.test(output)) {
+    if (result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
+      refusal = unavailable(`census suite ${reach}`, result, output);
+    } else if (result.status !== 0) {
       const reason = String(precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output).slice(-4000);
       refusal = { text: `census-precheck: this branch grows 1 census count(s) CI will refuse:\n  census-suite: ${reach} fails — ${reason}`,
         censuses: ["census-suite"], offeredBaselines: [] };
