@@ -305,7 +305,7 @@ export function codeHealthRepositoryStateDir(fleetStateDir: string, repository: 
 /** The existing outcome lifecycle's derived repository/instance namespace. Native Inbox and
  * gardener files remain at their original instance root and are never written through this path. */
 export function improvementOutcomeStateDir(fleetStateDir: string, repository: string, instance: string): string {
-  if (!/^[A-Za-z0-9._-]{1,128}$/.test(instance)) throw new RangeError("Invalid improvement instance.");
+  if (!/^[A-Za-z0-9._/-]{1,128}$/.test(instance) || instance.split("/").some(part => !part || part === "." || part === "..")) throw new RangeError("Invalid improvement instance.");
   return join(codeHealthRepositoryStateDir(fleetStateDir, repository), "improvement-effects",
     createHash("sha256").update(JSON.stringify([repository.toLowerCase(), instance])).digest("hex"));
 }
