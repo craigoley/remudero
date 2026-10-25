@@ -66,15 +66,18 @@ test("a Darwin CoreFoundation env injection is isolated from the proof allowlist
     `${CANARY_VAR} is on the ALLOWLIST for nothing — a proof's child must never see a var the ` +
       "orchestrator merely happens to carry",
   );
-  // Not a one-var spot check: NOTHING outside the declared allowlist survives, however this
-  // process's own env happens to be shaped when the suite runs.
-  const leaked = Object.keys(childEnv).filter(
+  // The controlled temp root is derived below, never inherited. Every other child key must
+  // still come from the declared allowlist, however this parent environment is shaped.
+  assert.equal(childEnv.TMPDIR, childEnv.HOME, "the temp root is derived only from this owned proof HOME");
+  const inherited = { ...childEnv };
+  delete inherited.TMPDIR;
+  const leaked = Object.keys(inherited).filter(
     (k) => !(PROOF_ENV_ALLOWLIST as readonly string[]).includes(k) && !PLATFORM_INJECTED_ENV.has(k),
   );
   assert.deepEqual(
     leaked,
     [],
-    "every child env key must be allowlisted, except the one measured CoreFoundation injection on macOS",
+    "every inherited child env key must be allowlisted, except the measured CoreFoundation injection",
   );
   if (process.platform === "darwin") {
     assert.equal(
@@ -136,8 +139,10 @@ test("the same sha reviewed under two different orchestrator environments reache
       delete process.env.CI;
     }
   });
-  // Each spawn gets its OWN throwaway HOME (W1-T6124), so compare everything else byte-for-byte.
-  const withoutHome = ({ HOME: _home, ...rest }: Record<string, string | undefined>) => rest;
+  // Each spawn gets its OWN HOME and derived temp root; validate their relationship before comparing.
+  assert.equal(observedA.TMPDIR, observedA.HOME);
+  assert.equal(observedB.TMPDIR, observedB.HOME);
+  const withoutHome = ({ HOME: _home, TMPDIR: _tmp, ...rest }: Record<string, string | undefined>) => rest;
   assert.deepEqual(withoutHome(observedA), withoutHome(observedB),
     "a proof's child process must observe the identical declared env either way");
 });
