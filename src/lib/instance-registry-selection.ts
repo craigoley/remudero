@@ -5,7 +5,7 @@
  * wait, not every OS request. Late operations still close their own handle.
  */
 import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAbsolute } from "node:path";
@@ -33,6 +33,7 @@ export interface RegistryFileStamp {
   ino: number;
   mtimeMs: number;
   ctimeMs: number;
+  nlink?: number;
 }
 export interface RegistryFileHandle {
   stat(): Promise<RegistryFileStamp>;
@@ -43,6 +44,7 @@ export interface RegistryFileHandle {
 export interface RegistryFileIO {
   lstat(path: string): Promise<RegistryFileStamp>;
   open(path: string): Promise<RegistryFileHandle>;
+  canonicalPath?(path: string): Promise<string>;
 }
 interface RegistryBytes {
   kind: "bytes";
@@ -51,9 +53,10 @@ interface RegistryBytes {
 }
 const stamp = (s: Awaited<ReturnType<typeof lstat>>): RegistryFileStamp => ({
   regular: s.isFile(), size: Number(s.size), dev: Number(s.dev), ino: Number(s.ino),
-  mtimeMs: Number(s.mtimeMs), ctimeMs: Number(s.ctimeMs),
+  mtimeMs: Number(s.mtimeMs), ctimeMs: Number(s.ctimeMs), nlink: Number(s.nlink),
 });
 export const registryFileIO: RegistryFileIO = {
+  canonicalPath: realpath,
   lstat: async (path) => stamp(await lstat(path)),
   open: async (path) => {
     // NONBLOCK keeps an intervening FIFO from blocking open; NOFOLLOW refuses a symlink race.
@@ -95,7 +98,7 @@ class ReadRefusal extends RmdError {
 }
 function sameStamp(a: RegistryFileStamp, b: RegistryFileStamp): boolean {
   return a.dev === b.dev && a.ino === b.ino && a.size === b.size
-    && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
+    && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs && a.nlink === b.nlink;
 }
 function requireFile(s: RegistryFileStamp, maxBytes: number): void {
   if (!s.regular) throw new ReadRefusal("not_regular");
@@ -240,6 +243,7 @@ export interface InstanceRegistryRuntimeInput extends RegistrySelectionInput { i
 interface InstanceRegistryRuntime {
   readonly binding?: SelectedRegistryBinding;
   readonly instanceName?: string;
+  readonly canonicalPath?: string;
   active: boolean;
 }
 const runtimeRegistry = new AsyncLocalStorage<InstanceRegistryRuntime>();
@@ -265,7 +269,7 @@ export async function withInstanceRegistryRuntime<T>(
   try {
     snapshot = { ...input, ...(input.requiredCapabilities === undefined ? {} : { requiredCapabilities: [...input.requiredCapabilities] }) };
     const lstat = io.lstat.bind(io), open = io.open.bind(io);
-    stableIO = Object.freeze({ lstat, open: async (path: string) => {
+    stableIO = Object.freeze({ lstat, canonicalPath: io.canonicalPath?.bind(io), open: async (path: string) => {
       const handle = await open(path);
       return Object.freeze({ stat: handle.stat.bind(handle), read: handle.read.bind(handle), close: handle.close.bind(handle) });
     } });
@@ -273,18 +277,35 @@ export async function withInstanceRegistryRuntime<T>(
     // Unreadable input or transport cannot establish a selected runtime, never a legacy fallback.
     throw new InstanceRegistryRuntimeError("input_unreadable");
   }
-  if (snapshot.instanceName !== undefined && (typeof snapshot.instanceName !== "string" || !/^[A-Za-z0-9_-]+$/.test(snapshot.instanceName))) {
-    throw new InstanceRegistryRuntimeError("invalid_instance");
-  }
   const read = await readSelectedInstanceRegistry(snapshot, stableIO);
   if (read.kind !== "ready" && read.kind !== "legacy") throw new InstanceRegistryRuntimeError(read.reason);
+  if (read.kind === "ready" && snapshot.instanceName !== undefined && (typeof snapshot.instanceName !== "string" || !/^[A-Za-z0-9_-]+$/.test(snapshot.instanceName))) {
+    throw new InstanceRegistryRuntimeError("invalid_instance");
+  }
+  let canonicalPath: string | undefined;
+  if (read.kind === "ready") {
+    const original = trustedRegistryBytes.get(read.binding)!;
+    try {
+      canonicalPath = await stableIO.canonicalPath?.(original.path);
+      if (!canonicalPath || !isAbsolute(canonicalPath) || original.identity.nlink !== 1
+        || !sameStamp(original.identity, await stableIO.lstat(canonicalPath))) {
+        throw new InstanceRegistryRuntimeError("file_identity_unqualified");
+      }
+    } catch {
+      // A pathname-only denial cannot protect pre-existing hardlink aliases or unknown physical identity.
+      throw new InstanceRegistryRuntimeError("file_identity_unqualified");
+    }
+  }
   const scope: InstanceRegistryRuntime = { active: true,
-    ...(read.kind === "ready" ? { binding: read.binding, instanceName: snapshot.instanceName } : {}) };
+    ...(read.kind === "ready" ? { binding: read.binding, instanceName: snapshot.instanceName, canonicalPath } : {}) };
   try { return await runtimeRegistry.run(scope, operation); }
   finally { scope.active = false; }
 }
 
 export function instanceRegistryRuntimePresent(): boolean { return runtimeRegistry.getStore() !== undefined; }
+
+/** Trusted harness input only: never forward this value to worker env, prompt, argv or diagnostics. */
+export function runtimeInstanceRegistryPrivateFile(): string | undefined { return selectedRuntime()?.canonicalPath; }
 
 export function runtimeInstanceRegistryText(): string | undefined {
   const scope = selectedRuntime();
@@ -294,6 +315,9 @@ export function runtimeInstanceRegistryText(): string | undefined {
 export function runtimeInstanceRegistryMode(ownerRepo: string): "shadow" | "live" | undefined {
   const scope = selectedRuntime();
   if (scope?.binding === undefined) return undefined;
+  if (typeof ownerRepo !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(ownerRepo)) {
+    throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
+  }
   const matches = scope.binding.instances.filter(row => row.repo.toLowerCase() === ownerRepo.toLowerCase()
     && (scope.instanceName === undefined || row.name === scope.instanceName));
   if (matches.length !== 1 || !matches[0]!.live) throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
@@ -310,5 +334,13 @@ export async function assertInstanceRegistryRuntimeCurrent(): Promise<void> {
   if (read.kind !== "ready") throw new InstanceRegistryRuntimeError(read.kind === "legacy" ? "selection_missing" : read.reason);
   const current = trustedRegistryBytes.get(read.binding)!;
   if (!sameStamp(original.identity, current.identity)) throw new InstanceRegistryRuntimeError("revision_changed");
+  try {
+    if (await original.io.canonicalPath?.(original.path) !== scope.canonicalPath || current.identity.nlink !== 1) {
+      throw new InstanceRegistryRuntimeError("revision_changed");
+    }
+  } catch {
+    // Revised/unknown alias evidence never becomes permission for the selected target.
+    throw new InstanceRegistryRuntimeError("revision_changed");
+  }
   if (!scope.active) throw new InstanceRegistryRuntimeError("invocation_closed");
 }
