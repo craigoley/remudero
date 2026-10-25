@@ -600,16 +600,21 @@ def save_git_copy(repo, snapshot, work, cfg):
     oids = objects.stdout.splitlines()
     if not oids or any(not re.fullmatch(b"[0-9a-f]{40}", oid) for oid in oids):
         raise Hold("git-copy-closure-unreadable")
-    sizes = copy_git(repo, "cat-file", "--batch-check=%(objectname) %(objectsize)", inp=objects.stdout)
+    sizes = copy_git(repo, "cat-file", "--batch-check=%(objectname) %(objectsize) %(objectsize:disk) %(deltabase)",
+                     inp=objects.stdout)
     total = 0
     try:
         rows = [line.split() for line in sizes.stdout.splitlines()]
-        if sizes.returncode or len(rows) != len(oids) or any(len(row) != 2 or row[0] != oid for row, oid in zip(rows, oids)):
+        if sizes.returncode or len(rows) != len(oids) or any(len(row) != 4 or row[0] != oid for row, oid in zip(rows, oids)):
             raise ValueError()
-        total = sum(int(row[1]) for row in rows)
+        closure = set(oids)
+        # A stored form whose delta base is in the closure is reused as is; any other object
+        # is recompressed whole, which zlib can grow by at most a sliver.
+        total = sum(int(disk) if base.strip(b"0") == b"" or base in closure else int(size) + int(size) // 100 + 64
+                    for _, size, disk, base in rows)
     except ValueError:
         raise Hold("git-copy-size-unreadable")
-    # Uncompressed, un-deltified pack plus index overhead, twice: bundle and verifier store.
+    # Bundle plus index overhead, twice: bundle and verifier store.
     bound = total + total // 100 + len(oids) * 256 + 65536
     if free_bytes(cfg["preserve_root"]) < MIN_FREE_BYTES + 2 * bound:
         raise Hold("git-copy-disk-floor (complete independent copy would not fit)")
@@ -624,12 +629,14 @@ def save_git_copy(repo, snapshot, work, cfg):
         prefix = ["git", "--git-dir", repo.path] if repo.kind == "bare" else ["git", "-C", repo.path]
         try:
             made = subprocess.run(prefix + ["pack-objects", "--stdout", "--revs", "--no-use-bitmap-index",
-                "--no-reuse-object", "--no-reuse-delta", "--window=0", "--threads=1"], input=root_input,
+                "--depth=4095", "--threads=1"], input=root_input,
                 stdout=output, stderr=subprocess.PIPE, env=copy_git_env(), timeout=600)
         except (OSError, subprocess.TimeoutExpired):
             raise Hold("git-copy-pack-failed")
         if made.returncode:
             raise Hold(f"git-copy-pack-failed ({git_reason(made)})")
+    if free_bytes(cfg["preserve_root"]) < MIN_FREE_BYTES + os.path.getsize(bundle) + len(oids) * 256 + 65536:
+        raise Hold("git-copy-disk-floor (verifier store would not fit)")
     verify_git_copy(bundle, snapshot, oids, work)
     return len(set(oids))
 

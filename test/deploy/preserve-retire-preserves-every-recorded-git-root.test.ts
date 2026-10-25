@@ -63,6 +63,32 @@ except m.Hold as e:assert 'git-copy-disk-floor' in str(e),str(e)
 else:raise AssertionError('insufficient complete-copy space was accepted')
 `));
 
+test("complete Git copy sizes its bound from reused stored deltas, so a history far larger uncompressed than free space is saved compactly", () => probe(`
+def git(*a):
+ x=m.copy_git(r,'-c','user.name=fixture','-c','user.email=fixture@example.invalid',*a);assert x.returncode==0,x.stderr;return x
+base=os.urandom(1<<20)
+for i in range(24):
+ (root/'big.bin').write_bytes(base+f'version {i}\\n'.encode());git('add','big.bin');git('commit','-q','-m',f'v{i}')
+git('repack','-adq');snap=m.git_snapshot(r)
+oids=m.copy_git(r,'rev-list','--objects','--no-object-names','--all').stdout
+raw=sum(int(l.split()[1]) for l in m.copy_git(r,'cat-file','--batch-check=%(objectname) %(objectsize)',inp=oids).stdout.splitlines())
+assert raw>20<<20,raw
+m.free_bytes=lambda _:m.MIN_FREE_BYTES+(8<<20)
+m.save_git_copy(r,snap,str(work),cfg)
+size=(work/'unpublished.bundle').stat().st_size;assert size<(4<<20),size
+`));
+
+test("complete Git copy holds before verification when the written bundle leaves no room for the verifier store", () => probe(`
+calls=[]
+def free(_):
+ calls.append(1);return 1<<50 if len(calls)==1 else m.MIN_FREE_BYTES+1
+m.free_bytes=free
+try:m.save_git_copy(r,snap,str(work),cfg)
+except m.Hold as e:assert 'verifier store would not fit' in str(e),str(e)
+else:raise AssertionError('verification ran without room for its store')
+assert len(calls)==2 and not list(work.glob('.verify-*'))
+`));
+
 test("Git snapshot notices private ref and symbolic HEAD transitions even with unchanged commit HEAD", () => probe(`
 assert m.git_snapshot(r)==snap
 assert m.copy_git(r,'update-ref','refs/checkpoints/new',snap['head']).returncode==0
