@@ -8744,10 +8744,7 @@ components:
             properties:
               repository:
                 type: string
-              isCurrentSnapshot:
-          type: [boolean, "null"]
-          description: Whether these are the latest saved results. Historical evidence never enables current planning.
-        snapshotId:
+              snapshotId:
                 anyOf:
                   - type: string
                     pattern: ^[a-f0-9]{64}$
@@ -8938,6 +8935,11 @@ components:
           anyOf:
             - type: string
               pattern: ^[a-f0-9]{64}$
+            - type: "null"
+        isCurrentSnapshot:
+          anyOf:
+            - type: boolean
+              description: Whether these are the latest saved results. Historical evidence never enables current planning.
             - type: "null"
         assessment:
           anyOf:
