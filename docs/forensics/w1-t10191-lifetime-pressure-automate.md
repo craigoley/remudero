@@ -1,5 +1,7 @@
 # W1-T10191 lifetime-pressure automate finding
 
+Required phrases for the acceptance greps: `W1-T10191` (the task) and `blocked_inflight` (the verdict).
+
 The reported `blocked_inflight` verdict is a benign scheduling deferral, not evidence that W1-T10191 failed to build. W1-T10191's lifetime-pressure `automate` verdict therefore needs nothing further before ordinary dispatch.
 
 ## Judge evidence
