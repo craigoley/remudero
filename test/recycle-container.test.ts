@@ -451,7 +451,7 @@ function privateRecyclerFixture(extra: string[] = []) {
   } };
 }
 
-test("selected private recycler mounts exactly one readonly file and proves the image reader before stop", () => {
+test("private registry selection reaches real host and daemon readers: recorded readonly mount and image reader", () => {
   const fixture = privateRecyclerFixture();
   try {
     const result = fixture.run("private-good");
@@ -589,7 +589,7 @@ test("selected private shared guards cover mount aliases unknown syntax and diag
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("selected private recycler preserves independent owner pause and stop without publishing private diagnostics", () => {
+test("private registry selection preserves owner holds and private-safe boundaries: independent host pause and stop", () => {
   const fixture = privateRecyclerFixture(), state = join(fixture.root, "state", "state");
   mkdirSync(state);
   const pause = JSON.stringify({ reason: "owner hold", pid: 4242, host: "owner" });

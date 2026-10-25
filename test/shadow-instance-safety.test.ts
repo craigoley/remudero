@@ -16,6 +16,8 @@ import { main } from "#src/run-task.js";
 import { spawnCodexWorker, spawnFoundryClaudeWorker, spawnOpenWeightWorker, type OpenWeightSpawnArgs } from "#src/lib/worker-provider.js";
 import { realDeployDeps } from "#src/lib/deployer.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { writeMutantModule } from "#test/helpers/mutant-module.js";
+import * as modeRuntime from "#src/lib/instance-mode.js";
 import * as workerRuntime from "#src/lib/worker.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, renderWorkerSettings, spawnWorker,
   startWorkerEgressProxy, type SpawnWorkerArgs } from "#src/lib/worker.js";
@@ -39,7 +41,7 @@ import {
   shadowLiveWouldHaveDone,
 } from "../src/run-task.js";
 
-const SELECTED_INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const SELECTED_INSTALL_ROOT = REPO_ROOT;
 
 const registry = (mode?: string) => [
   "instances:",
@@ -65,7 +67,7 @@ function runtimeRegistryFixture(mode = "shadow") {
   return { root, selected, legacy, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
-test("selected runtime entry points qualify before daemon and direct task host effects", async () => {
+test("private registry selection reaches real host and daemon readers: actual entry points", async () => {
   const fixture = runtimeRegistryFixture(), prior = process.env.RMD_INSTANCE_REGISTRY;
   const reachedHost = new Error("contained host boundary reached");
   let reads = 0, observed: string | undefined;
@@ -598,21 +600,22 @@ test("selected private deny regions are public ancestors or fixed standard roots
 
 for (const adapter of ["foundry-direct", "cash-foundry", "cash-chat"] as const) {
   test(`selected ${adapter} refuses private scope and revised binding before model transport`, async () => {
-    for (const mode of ["healthy", "cwd-overlap", "home-overlap", "child-env", "revised"] as const) {
+    for (const mode of ["healthy", "cwd-overlap", "home-overlap", "child-env", "revised", "scope-relative", "scope-file", "home-absent", "config-uncopyable"] as const) {
       const fixture = runtimeRegistryFixture(), cwd = join(fixture.root, "cash-checkout"), home = join(fixture.root, "cash-home");
       mkdirSync(cwd); mkdirSync(home);
       const model = adapter === "cash-chat" ? "gpt-oss-120b" : "claude-haiku-5-5";
       let sent = 0;
-      const args: OpenWeightSpawnArgs = { cwd: mode === "cwd-overlap" ? fixture.root : cwd,
-        workerHome: mode === "home-overlap" ? fixture.root : home, prompt: "public synthetic provider control", tools: ["Read"],
+      const args: OpenWeightSpawnArgs = { cwd: mode === "cwd-overlap" ? fixture.root : mode === "scope-relative" ? "relative" : mode === "scope-file" ? fixture.selected : cwd,
+        workerHome: mode === "home-overlap" ? fixture.root : mode === "home-absent" ? join(fixture.root, "absent") : home, prompt: "public synthetic provider control", tools: ["Read"],
         env: { RMD_OPENWEIGHT_API_KEY: "synthetic", RMD_FOUNDRY_CLAUDE_API_KEY: "synthetic",
           RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.invalid/anthropic" },
         ...(mode === "child-env" ? { workerEnv: { PRIVATE_CANARY: fixture.selected } } : {}),
         fetchImpl: async () => { sent++; return new Response(JSON.stringify(adapter === "cash-chat"
           ? { id: "fixture", model, choices: [{ index: 0, message: { role: "assistant", content: "synthetic complete" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
           : { id: "fixture", model, stop_reason: "end_turn", content: [{ type: "text", text: "synthetic complete" }], usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200 }); } };
-      const config: Config = { root: fixture.root, claudeBin: "/unused", dailyCapUsd: 25,
+      const configured: Config = { root: fixture.root, claudeBin: "/unused", dailyCapUsd: 25,
         workerProviders: { cashEndpoint: "https://cash.example.invalid" } };
+      const config = mode === "config-uncopyable" ? new Proxy(configured, {}) : configured;
       let result: Awaited<ReturnType<typeof spawnOpenWeightWorker>> | undefined, failure: unknown;
       try {
         try { result = await runtimeRegistryRunner()(() => {
@@ -627,6 +630,42 @@ for (const adapter of ["foundry-direct", "cash-foundry", "cash-chat"] as const) 
           assert.ok(failure instanceof runtimeRegistry.InstanceRegistryRuntimeError);
           assert.equal(failure.message.includes(fixture.root), false);
         }
+      } finally { fixture.cleanup(); }
+    }
+  });
+}
+
+for (const adapter of ["foundry-direct", "cash-foundry", "cash-chat"] as const) {
+  test(`selected ${adapter} rechecks before real tool effects and snapshots queued arguments`, async () => {
+    for (const revised of [false, true]) {
+      const fixture = runtimeRegistryFixture(), cwd = join(fixture.root, "cash-checkout"), home = join(fixture.root, "cash-home"), marker = join(cwd, "public-marker.txt");
+      mkdirSync(cwd); mkdirSync(home);
+      const model = adapter === "cash-chat" ? "gpt-oss-120b" : "claude-haiku-5-5";
+      let sent = 0;
+      const args: OpenWeightSpawnArgs = { cwd, workerHome: home, prompt: "public immutable prompt", tools: ["Write"], maxTurns: 2,
+        env: { RMD_OPENWEIGHT_API_KEY: "synthetic", RMD_FOUNDRY_CLAUDE_API_KEY: "synthetic", RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.invalid/anthropic" },
+        fetchImpl: async (_url, init) => {
+          sent++; assert.equal(String(init?.body).includes(fixture.selected), false);
+          if (sent === 1 && revised) writeFileSync(fixture.selected, registry("live"));
+          const write = { path: "public-marker.txt", content: "synthetic public write" };
+          return new Response(JSON.stringify(adapter === "cash-chat"
+            ? { id: "fixture", model, choices: [{ index: 0, message: { role: "assistant", content: sent === 1 ? null : "complete",
+              ...(sent === 1 ? { tool_calls: [{ id: "fixture-write", type: "function", function: { name: "write_file", arguments: JSON.stringify(write) } }] } : {}) }, finish_reason: sent === 1 ? "tool_calls" : "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
+            : { id: "fixture", model, stop_reason: sent === 1 ? "tool_use" : "end_turn", content: sent === 1 ? [{ type: "tool_use", id: "fixture-write", name: "write_file", input: write }] : [{ type: "text", text: "complete" }], usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200 }); } };
+      const config: Config = { root: fixture.root, claudeBin: "/unused", dailyCapUsd: 25, workerProviders: { cashEndpoint: "https://cash.example.invalid" } };
+      try {
+        const result = await runtimeRegistryRunner()(() => {
+          const pending = adapter === "foundry-direct" ? spawnFoundryClaudeWorker(args, config, { model, effort: "low" })
+            : spawnOpenWeightWorker(args, config, { model, effort: "low" });
+          args.cwd = fixture.root; args.prompt = fixture.selected; args.tools!.push("Read");
+          config.workerProviders!.cashEndpoint = "https://must-not-use.example.invalid";
+          return pending;
+        }, { envPath: fixture.selected });
+        assert.equal(result.isError, revised, result.stderr);
+        assert.equal(sent, revised ? 1 : 2, "a revised binding never authorizes the next tool or request");
+        assert.equal(existsSync(marker), !revised);
+        if (!revised) assert.equal(readFileSync(marker, "utf8"), "synthetic public write");
+        else { assert.match(result.stderr, /selected instance registry unavailable/); assert.equal(result.stderr.includes(fixture.root), false); }
       } finally { fixture.cleanup(); }
     }
   });
@@ -837,7 +876,7 @@ test("unconfigured worker policy rendering remains byte identical", () => {
   } finally { fixture.cleanup(); }
 });
 
-test("selected runtime invalid evidence refuses before the unchanged legacy effect", async () => {
+test("private registry selection preserves legacy and refuses unknown selected inputs", async () => {
   const fixture = runtimeRegistryFixture();
   try {
     const run = runtimeRegistryRunner();
@@ -849,6 +888,29 @@ test("selected runtime invalid evidence refuses before the unchanged legacy effe
     await assert.rejects(run(() => { effects++; }, { envPath: fixture.selected }), /selected instance registry unavailable/);
     assert.equal(effects, 0, "healthy public bytes never rescue an explicitly invalid selection");
     assert.equal(await run(() => readInstanceRegistryText(fixture.root), {}), fixture.legacy);
+  } finally { fixture.cleanup(); }
+});
+
+test("private registry selection defaults and falsifiers forbid live effects", async () => {
+  const fixture = runtimeRegistryFixture(), source = readFileSync(join(REPO_ROOT, "src/lib/instance-mode.ts"), "utf8");
+  const verify = async (reader: typeof modeRuntime) => {
+    assert.equal(reader.readInstanceRegistryText(fixture.root), fixture.legacy, "healthy legacy default is the positive control");
+    assert.equal(reader.instanceMode("owner/repo", fixture.legacy), "live");
+    await runtimeRegistryRunner()(() => {
+      assert.equal(reader.readInstanceRegistryText(fixture.root), registry("shadow"), "the actual default reads selected bytes");
+      assert.equal(reader.instanceMode("owner/repo", fixture.legacy), "shadow", "selected mode overrides contradictory public bytes");
+    }, { envPath: fixture.selected });
+  };
+  try {
+    await verify(modeRuntime);
+    for (const seam of ["runtimeInstanceRegistryText", "runtimeInstanceRegistryMode"] as const) {
+      const needle = seam === "runtimeInstanceRegistryText" ? "const selected = runtimeInstanceRegistryText();" : "const selected = runtimeInstanceRegistryMode(ownerRepo);";
+      assert.equal(source.split(needle).length, 2, "delete exactly one actual production default seam");
+      const mutant = await import(writeMutantModule("instance-mode.ts", source.replace(needle, "const selected = undefined;"))) as typeof modeRuntime;
+      await assert.rejects(verify(mutant), error => error instanceof assert.AssertionError, "loaded real-module deletion must break the same behavioral assertions, not fail to load");
+    }
+    await verify(modeRuntime);
+    assert.equal(readFileSync(join(REPO_ROOT, "src/lib/instance-mode.ts"), "utf8"), source, "production bytes remain exactly restored");
   } finally { fixture.cleanup(); }
 });
 
@@ -958,7 +1020,7 @@ test("the independent sweep path cannot arm a shadow instance", async () => {
   assert.equal(sweepArmCalls, 0);
 });
 
-test("selected mode shadow evidence reaches actual run and sweep consumers", async (t) => {
+test("private registry selection preserves owner holds and private-safe boundaries: real run and sweep", async (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-mode-run-`));
   const origin = gitRepo({ bare: true }), seed = gitRepo({ cloneFrom: origin.dir });
   const repoDir = join(root, "repos", "remudero");
