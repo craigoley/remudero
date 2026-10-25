@@ -433,9 +433,9 @@ function privateRecyclerFixture() {
     `    state_dir: ${join(root, "state")}`, "    container_name: remudero-private-fixture", "    image: test-registry.azurecr.io/remudero:latest",
     `    claude_dir: ${join(root, "claude")}`, `    codex_dir: ${join(root, "codex")}`, `    container_config_dir: ${join(root, "config")}`, ""].join("\n"), { mode: 0o600 });
   const runs: Run[] = [];
-  return { root, selected, run(mode: string, serve = false, extraEnv: Record<string, string> = {}) {
+  return { root, selected, run(mode: string, serve = false, extraEnv: Record<string, string> = {}, dryRun = false) {
     const result = runRecycle(mode, { ...(serve ? { scriptPath: join(REPO_ROOT, "deploy/serve-container.sh") } : {}),
-      args: ["--instance", "fixture", ...(serve ? ["--replace"] : [])], stateDir: join(root, "state"), unsetDockerHost: true,
+      args: ["--instance", "fixture", ...(serve ? ["--replace"] : []), ...(dryRun ? ["--dry-run"] : [])], stateDir: join(root, "state"), unsetDockerHost: true,
       extraEnv: { RMD_INSTANCE_REGISTRY: selected, RMD_RECYCLE_HOST_LOCK: join(root, "own-recycle.lock"),
         ...(serve ? { RMD_SERVE_DOCKERENV_PATH: join(root, "no-container-marker"), RMD_SERVE_PORT: "4317",
           RMD_SERVE_REPO_DIR: join(root, "serve-repo"), RMD_SERVE_BANNER_WAIT_S: "1", RMD_SERVE_BANNER_POLL_S: "1",
@@ -504,6 +504,22 @@ test("selected private serve refuses missing capability namespace or explicit se
       if (mode === "private-empty") {
         assert.deepEqual(result.calls, []); assert.match(result.stderr, /selected registry unavailable/);
       }
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("selected private launcher diagnostics hide operational values including dry-run arguments", () => {
+  for (const [serve, dryRun] of [[false, false], [true, false], [true, true]]) {
+    const fixture = privateRecyclerFixture();
+    try {
+      const result = fixture.run("private-good", serve, {}, dryRun);
+      assert.equal(result.status, 0, result.stderr);
+      const publicOutput = result.stdout + result.stderr;
+      for (const privateValue of [fixture.root, "remudero-private-fixture", "test-registry.azurecr.io/remudero:latest"]) {
+        assert.equal(publicOutput.includes(privateValue), false, "public diagnostics are not a private-file disclosure channel");
+      }
+      assert.match(publicOutput, /selected.*(lifecycle|registry)/);
+      if (dryRun) assert.equal(result.calls.some(c => isStop(c) || (isRun(c) && c.argv.includes("-d"))), false);
     } finally { fixture.cleanup(); }
   }
 });
