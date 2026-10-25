@@ -40,7 +40,7 @@ test("W1-T9050: executable walks use their own repository scope across lines", (
   for (const text of [
     'execFileSync(\n "git",\n ["ls-files", "--", "test/"],\n { cwd: REPO_ROOT }\n); import "#src/lib/x.js";',
     'readdirSync(\n join(REPO_ROOT, "test")\n); import "#src/lib/x.js";',
-    'const area = join(REPO_ROOT, "test"); readdirSync(area); import "#src/lib/x.js";',
+    'const area = join(REPO_ROOT, "test"); readdirSync(area, { recursive: true }); import "#src/lib/x.js";',
     'const argv = ["ls-files", "--", "test/"]; execFileSync("git", argv);',
   ]) assert.deepEqual(censusCandidateWalks(text), ["test/"], text);
   assert.deepEqual(censusCandidateWalks('globSync("test/**/*.ts", { cwd: REPO_ROOT })'), ["test/**/*.ts"]);

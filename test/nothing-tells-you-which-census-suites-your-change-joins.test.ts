@@ -133,12 +133,10 @@ test("censusSuiteMembershipFor drives 'git grep -l ls-files -- test/*.test.ts' v
     "",
   ].join("\n");
   const files: Record<string, string> = {
-    "test/bound-kind-declared.test.ts": "walks git ls-files scoped to src/ ...",
-    "test/negative-reachability-ratchet.test.ts": "walks git ls-files scoped to src/ and test/ ...",
-    // Filters on something else entirely, never mentions the src population — must NOT be
-    // treated as a src-population walker even though it called `ls-files` (the "intersected
-    // with suites that filter on src/" half of the approximation the task record itself names).
-    "test/some-future-census-suite.test.ts": "git ls-files -- deploy/ scripts/",
+    "test/bound-kind-declared.test.ts": 'execFileSync("git", ["ls-files", "--", "src/"])',
+    "test/negative-reachability-ratchet.test.ts": 'execFileSync("git", ["ls-files", "--", "src/", "test/"])',
+    // A real scripts/ walk is still an unknown census candidate after the src/ clause is dropped.
+    "test/some-future-census-suite.test.ts": 'execFileSync("git", ["ls-files", "--", "deploy/", "scripts/"])',
   };
   const report = censusSuiteMembershipFor(
     ["src/lib/classify.ts"],
@@ -148,14 +146,15 @@ test("censusSuiteMembershipFor drives 'git grep -l ls-files -- test/*.test.ts' v
   );
   assert.ok(report.entries[0]!.suites.includes("bound-kind-census"));
   assert.ok(report.entries[0]!.suites.includes("negative-reachability-census"));
-  assert.deepEqual(report.unknownCoverage, [], "the non-src-filtering caller must not be treated as one");
+  assert.deepEqual(report.unknownCoverage, ["test/some-future-census-suite.test.ts"],
+    "the non-src walker remains visible to the census report");
 });
 
 test("censusSuiteMembershipFor names an unrecognised src/-filtering caller as unknownCoverage, never omits it", () => {
   const stdout = ["test/bound-kind-declared.test.ts", "test/a-brand-new-census-suite.test.ts", ""].join("\n");
   const files: Record<string, string> = {
-    "test/bound-kind-declared.test.ts": "git ls-files -- src/",
-    "test/a-brand-new-census-suite.test.ts": "git ls-files scoped to src/ walks the whole tree",
+    "test/bound-kind-declared.test.ts": 'execFileSync("git", ["ls-files", "--", "src/"])',
+    "test/a-brand-new-census-suite.test.ts": 'execFileSync("git", ["ls-files", "--", "src/"])',
   };
   const report = censusSuiteMembershipFor([], "/fake/repo", grepSpawn(stdout), (path) => files[path] ?? "");
   assert.deepEqual(report.unknownCoverage, ["test/a-brand-new-census-suite.test.ts"]);

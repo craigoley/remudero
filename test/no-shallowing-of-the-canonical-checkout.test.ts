@@ -352,6 +352,10 @@ test("FORBIDDEN_FLAGS is a plain data array (a table, not a branch) naming exact
 
 test("no-shallowing-of-the-canonical-checkout: src/, scripts/, deploy/ and .github/workflows/ carry no unexempted depth-limiting git invocation", () => {
   validateExemptions(EXEMPTIONS);
+  const listed = execFileSync("git", ["-C", REPO_ROOT, "ls-files", "-z", "--", ...SCOPE_A_DIRS], {
+    encoding: "utf8",
+  }).split("\0").filter(Boolean);
+  assert.deepEqual(trackedFiles(REPO_ROOT, SCOPE_A_DIRS), listed, "the scan must cover the declared roots");
   const hits = scanForForbiddenFlagHits(REPO_ROOT, SCOPE_A_DIRS);
 
   // Positive control (design (iv) / rationale (3)): the scan must prove it actually READ real

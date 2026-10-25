@@ -2629,6 +2629,22 @@ function censusExecutableWalks(source: string): { idiom: CensusEnumerationIdiom;
     const dirWalk = match[1] === "readdirSync" || match[1] === "globSync";
     const shell = match[1] === "execSync" || match[1] === "exec";
     const argv = (match[1] === "git" ? args[0] : args[1]) ?? "";
+    const spread = /\.\.\.([A-Za-z_$][\w$]*)/.exec(argv);
+    if (!dirWalk && spread && !/['"`]ls-files['"`]/.test(argv)) {
+      const helper = [...code.matchAll(new RegExp(`\\b(?:const|let)\\s+(\\w+)\\s*=\\s*\\(\\s*${spread[1]}\\b`, "g"))]
+        .findLast((declaration) => declaration.index < match.index);
+      if (helper) {
+        for (const call of code.matchAll(new RegExp(`\\b${helper[1]}\\s*\\(`, "g"))) {
+          if (call.index === helper.index + helper[0].indexOf(helper[1])) continue;
+          const supplied = censusCallArgs(text, code, call.index + call[0].length)[0] ?? "";
+          if (/^\[/.test(supplied) && /['"`]ls-files['"`]/.test(supplied)) {
+            const walks = censusWalksFromText(supplied);
+            if (walks.length > 0) out.push({ idiom: "ls-files", walks });
+          }
+        }
+      }
+      continue;
+    }
     const elements = censusCallArgs(argv, maskLiterals(argv), 1, "]");
     const value = (element: string) => /^(['"`])([^'"`]*)\1$/.exec(element)?.[2];
     let command = 0;
@@ -2657,7 +2673,12 @@ function censusExecutableWalks(source: string): { idiom: CensusEnumerationIdiom;
       : dirWalk ? args[0] ?? "" : pathspecs.join(",");
     const walks = censusWalksFromText(target);
     if (dirWalk && walks.length === 0 && /^[A-Za-z_$][\w$]*$/.test(args[0] ?? "")) {
-      const helper = new RegExp(`\\bfunction\\s+(\\w+)\\s*\\(\\s*${args[0]}\\b`).exec(code);
+      const argument = args[0];
+      const named = new RegExp(`\\bfunction\\s+(\\w+)\\s*\\(\\s*${argument}\\b`).exec(code);
+      const arrow = [...code.matchAll(new RegExp(`\\b(?:const|let)\\s+(\\w+)\\s*=\\s*\\(\\s*${argument}\\b[^)]*\\)\\s*(?::[^=]+)?=>`, "g"))]
+        .find((declaration) => declaration.index < match.index &&
+          !/[{}]/.test(code.slice(declaration.index + declaration[0].length, match.index)));
+      const helper = named ?? arrow;
       if (helper) {
         for (const call of code.matchAll(new RegExp(`\\b${helper[1]}\\s*\\(`, "g"))) {
           if (call.index === helper.index + helper[0].indexOf(helper[1])) continue;
@@ -2669,8 +2690,11 @@ function censusExecutableWalks(source: string): { idiom: CensusEnumerationIdiom;
         }
       }
     }
-    if (walks.length === 0 && (dirWalk ? /\bREPO_ROOT\b|\brepoRoot\b|\bprocess\.cwd\s*\(/.test(root)
-      : shell ? /^(['"`])git\s+ls-files\1$/.test(args[0] ?? "") : pathspecs.length === 0)) {
+    const rootOnlyDir = /^(?:REPO_ROOT|repoRoot\(\)|process\.cwd\(\))$/.test((args[0] ?? "").trim());
+    const repoWideGlob = pathspecs.length > 0 && pathspecs.every((spec) =>
+      /^(?:\*|\*\*\/\*)\.[\w*?]+$/.test(value(spec) ?? ""));
+    if (walks.length === 0 && (dirWalk ? rootOnlyDir
+      : shell ? /^(['"`])git\s+ls-files\1$/.test(args[0] ?? "") : pathspecs.length === 0 || repoWideGlob)) {
       // An unfiltered tracked-file listing walks all corpora; an unrelated import adds none.
       walks.push("src/", "test/", "scripts/", "plan/tasks.d/");
     }
@@ -2762,13 +2786,13 @@ export function discoverCensusCandidates(
  *  {@link censusPopulationDrift} gates on. INVARIANT: the GATE is not widened with the REPORT.
  *  The guard requires every discovered file to carry an entry, and MEASURED the dir-walk idiom
  *  adds 83 with none. Why: docs/forensics/ci-parity.md (W1-T2809). */
-function discoverSrcFilteredLsFilesCallers(
+function discoverLsFilesCallers(
   repoRoot: string,
   spawn: PreflightSpawn,
   readFile: (path: string) => string,
 ): string[] {
   return discoverCensusCandidates(repoRoot, spawn, readFile)
-    .filter((c) => c.idiom === "ls-files" && c.walks.some((walk) => walk.startsWith("src/") || walk === "src/"))
+    .filter((c) => c.idiom === "ls-files")
     .map((c) => c.testFile);
 }
 
@@ -2788,7 +2812,7 @@ export function censusPopulationDrift(
   readFile: (path: string) => string = (path) => readFileSync(join(repoRoot, path), "utf8"),
   resolvePath: typeof resolveTestPath = resolveTestPath,
 ): CensusPopulationDriftReport {
-  const discovered = new Set(discoverSrcFilteredLsFilesCallers(repoRoot, spawn, readFile));
+  const discovered = new Set(discoverLsFilesCallers(repoRoot, spawn, readFile));
   const known = new Set(CENSUS_POPULATION.map((m) => {
     const resolved = resolvePath(m.testFile, { root: repoRoot });
     return "path" in resolved ? resolved.path : m.testFile;
