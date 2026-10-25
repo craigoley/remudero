@@ -17,6 +17,9 @@ import { persistedInboxPath, readPersistedInbox } from "../src/lib/fleet-lane.js
 import type { PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import type { Proposal } from "../src/lib/inbox.js";
+import type { AddressInfo } from "node:net";
+import { createService } from "#src/lib/service.js";
+import { buildInboxThreadRoute, buildInboxVerbActions } from "#src/lib/panel-graph.js";
 
 const T0 = Date.parse("2026-10-02T12:00:00.000Z");
 const PROPOSAL = "ruling-w1-t1";
@@ -229,15 +232,53 @@ async function classifiedFixture(t: TestCtx, count = 80) {
     generation INTEGER NOT NULL,etag TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(view,key)) WITHOUT ROWID;`);
   const demand=createDemandBook({clock:fixedClock(T0)});demand.want(INBOX_THREAD_VIEW_NAME,KEY);
   const view=createInboxThreadView({inboxRoot:root,demand,clock:fixedClock(T0)});
-  const seed=(bodies: InboxViewBody[])=>{
+  const seed=(bodies: InboxViewBody[], includeFleet = false)=>{
     db.prepare("DELETE FROM view_body WHERE view='inbox'").run();
-    for(const [index,body]of bodies.filter(b=>b.data.section==="needsYou").entries())
+    for(const [index,body]of bodies.filter(b=>b.data.section==="needsYou" || includeFleet && b.data.section==="fleet").entries())
       db.prepare("INSERT INTO view_body(view,key,version,generation,etag,body) VALUES('inbox',?,1,1,?,?)").run(body.key,JSON.stringify(body)+index,JSON.stringify(body));
   };
   const refresh=async()=>{write();const result=await refreshInboxClassification(deps,{},fixedClock(T0));seed(result.bodies);return result;};
-  const build=()=>view.materialize({now:T0,instances:[{db}]})[0]!;
+  const build=(key = KEY)=>{demand.want(INBOX_THREAD_VIEW_NAME,key);return view.materialize({now:T0,instances:[{db}]}).find(entry=>entry.key===key)!;};
   return{root,db,deps,proposals,refresh,seed,build,write};
 }
+
+test("W1-T10431: reclassified age history remains readable without action authority", async t => {
+  const f=await classifiedFixture(t,2),id="board-review:stale:PR-41",threadId=inboxThreadId(id),key=inboxThreadViewKey(threadId);
+  f.proposals[0]={id,originatingItemId:"PR-41",summary:"board-review: PR-41 has sat open 72.0h, past the 48h depth threshold",evidenceAnchors:[]};
+  f.proposals[1]={id:"proof-debt:W1-T2",summary:"The fleet has proof work to do.",evidenceAnchors:[]};
+  const store=inboxThreadStoreFile(f.root);
+  appendThreadMessage(inboxThreadIdentity(id),"escalation","The earlier age observation is retained.",{threadStorePath:store,now:()=>T0-1000});
+  const originalMessages=readFileSync(store,"utf8"),originalLedger=readFileSync(f.deps.ledgerPath,"utf8");
+  const result=await f.refresh();f.seed(result.bodies,true);
+  const deps={...f.deps,inboxFromSlowLane:true};
+  const server=createService({tokens:{read:"read"},routes:[buildInboxThreadRoute(deps)]});
+  await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
+  try {
+    const res=await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/inbox/thread?id=${encodeURIComponent(threadId)}`,{headers:{authorization:"Bearer read"}});
+    assert.equal(res.status,200,"legacy detail retains the source-qualified informational thread");
+    const legacy=await res.json() as {attention:string;messages:Array<{text:string;actions?:string[]}>};
+    assert.equal(legacy.attention,"history");assert.deepEqual(legacy.messages[0]!.actions,[]);
+    assert.equal(legacy.messages.at(-1)!.text,"The earlier age observation is retained.");
+    const cached=f.build(key);assert.equal(cached.data.found,true,cached.data.reason);
+    assert.equal(cached.data.thread?.attention,"history");assert.deepEqual(cached.data.thread?.messages[0]?.actions,[]);
+    assert.equal(cached.data.thread?.messages.at(-1)?.text,legacy.messages.at(-1)?.text);
+    assert.equal(cached.sources[0]?.asOf,new Date(T0).toISOString(),"history retains the producer clock");
+    const actions=buildInboxVerbActions(deps,{repository:"owner/core"});
+    const requests={reframe:{proposalId:id,feedback:"old option"},decline:{proposalId:id,reason:"old option"},
+      restore:{proposalId:id,reason:"old option"},reply:{threadId,text:"old option",intentId:"stale-age-option"}};
+    for(const verb of ["reframe","decline","restore","reply"] as const){
+      const responses:Array<{status:number;body:unknown}>=[];
+      await actions[verb](requests[verb],{origin:"test"},(status,body)=>{responses.push({status,body});});
+      assert.equal(responses.length,1,verb);assert.equal(responses[0]!.status,409,verb);
+      assert.equal((responses[0]!.body as {error:string}).error,"informational_only",verb);
+    }
+    assert.equal(readFileSync(store,"utf8"),originalMessages,"readability cannot write a synthetic reply");
+    assert.equal(readFileSync(f.deps.ledgerPath,"utf8"),originalLedger,"no decision or work receipt was invented");
+    // An ordinary fleet finding cannot enter the history read merely by sharing the fleet page.
+    const nonInformation=f.build(inboxThreadViewKey(inboxThreadId(f.proposals[1]!.id)));
+    assert.equal(nonInformation.data.found,false);
+  }finally{await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
 
 test("cached thread reads accept the actual producer's complete snapshot-bound page chain", async t=>{
   const f=await classifiedFixture(t),result=await f.refresh();
