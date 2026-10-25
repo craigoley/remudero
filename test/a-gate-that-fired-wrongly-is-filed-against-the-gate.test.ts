@@ -211,20 +211,32 @@ test("W1-T9049: empty async repair inventory has a zero tally and never reads op
 test("W1-T9049: async inventory parses open PR origins and preserves baseline-only evidence", async t => {
   const f = await inventoryFixture(t);
   const calls: string[][] = [];
-  const spec = gateGardenSpec(f.deps, f.probes, { repairRules: [rule, { ...rule, gate: "other" }],
+  f.put("plan/tasks.yaml", JSON.stringify([{
+    id: "W1-T990005", title: "repair the census recognizer", repo: "remudero", depends_on: [],
+    type: "implement", verify: "human", risk: "low", status: "queued", attempts: 0,
+    origin: "gate-false-positive:census",
+  }]));
+  const spec = gateGardenSpec(f.deps, f.probes, { repairRules: [rule, { ...rule, gate: "open" }, { ...rule, gate: "other" }],
     repairObservations: () => [
       { pair: { ...pair, repairFiles: [baseline] }, repairDiff: "-1\n+2" },
+      { pair: { ...pair, gate: "open" }, repairDiff: dodge },
       { pair: { ...pair, gate: "other" }, repairDiff: dodge },
+      { pair: { ...pair, pr: 10789 }, repairDiff: '-const token = "tree-walk";\n+const token = "other";' },
     ],
     ghJson: async args => {
       calls.push(args);
-      return [{ body: 'Remedies: "gate-false-positive:census"\n`gate-false-positive:unrelated`' }, { body: "ordinary PR" }];
+      return [{ body: 'Remedies: "gate-false-positive:open"\n`gate-false-positive:unrelated`' }, { body: "ordinary PR" }];
     } });
   const inv = await spec.inventoryAsync!();
   assert.deepEqual(calls, [["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"]]);
-  assert.deepEqual(inv.candidates.map(action => action.target), ["gate-false-positive:other"]);
-  assert.deepEqual(spec.metric!(inv, "false-positive"), { trials: 2, successes: 0 });
-  assert.deepEqual(f.rows.map(row => row.extra?.classification), ["baseline-only", "token-dodge"]);
+  assert.deepEqual(inv.candidates.map(({ class: actionClass, target, file }) => ({ actionClass, target, file })),
+    [{ actionClass: "false-positive", target: "gate-false-positive:other", file: rule.recognizer }]);
+  assert.deepEqual(spec.metric!(inv, "false-positive"), { trials: 4, successes: 1 });
+  assert.deepEqual(f.rows.map(({ step, extra }) => ({ step, gate: extra?.gate, classification: extra?.classification,
+    recognizer: extra?.recognizer, symbol: extra?.symbol })),
+    [["census", "baseline-only"], ["open", "token-dodge"], ["other", "token-dodge"]].map(([gate, classification]) => ({
+      step: "gate.false_positive_suspected", gate, classification, recognizer: rule.recognizer, symbol: rule.symbol,
+    })));
 });
 
 test("W1-T9049: async inventory propagates open PR read failures", async t => {
