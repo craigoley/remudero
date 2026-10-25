@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { withTempDir } from "#src/lib/tmp.js";
@@ -108,13 +108,30 @@ test("code health exports bounded provenance without publishing security results
         invocations: [{ executionSuccessful: true, endTimeUtc: "2026-11-02T04:59:00.000Z" }],
         results: [{ ruleId: "js/example", message: { text: "private security detail must not escape" }, codeFlows: [{ private: "secret source code" }] }] }] } };
     const inputPath = join(dir, "input.json"), output = join(dir, "provenance.json");
+    let outputIndex = 0;
     const run = (value: unknown) => {
       writeFileSync(inputPath, JSON.stringify(value));
-      const outputPath = join(dir, `output-${Math.random()}.json`);
+      const outputPath = join(dir, `output-${outputIndex++}.json`);
       execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--input", inputPath, "--output", outputPath], { encoding: "utf8" });
       return JSON.parse(readFileSync(outputPath, "utf8"));
     };
     const manifest = run(raw);
+    const original = structuredClone(raw.sarif);
+    original.runs[0]!.invocations[0]!.endTimeUtc = new Date(Date.now() - 1000).toISOString();
+    const sarifDir = join(dir, "original"); mkdirSync(sarifDir);
+    writeFileSync(join(sarifDir, "javascript.sarif"), JSON.stringify(original));
+    const config = join(dir, "codeql.yml"), workflow = join(dir, "workflow.yml"), productionOutput = join(dir, "production.json");
+    writeFileSync(config, '# Existing configuration\npaths-ignore:\n  - "test/**"\n');
+    writeFileSync(workflow, 'queries: security-and-quality\n');
+    execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--sarif-dir", sarifDir,
+      "--config", config, "--workflow", workflow, "--output", productionOutput], { encoding: "utf8", env: { ...process.env,
+        GITHUB_REPOSITORY: raw.repository, GITHUB_SHA: raw.analyzedSha, GITHUB_REF: raw.ref, GITHUB_RUN_ID: raw.runId,
+        GITHUB_RUN_ATTEMPT: raw.runAttempt, CODE_HEALTH_LANGUAGE: raw.language, CODE_HEALTH_SARIF_ID: raw.sarifId } });
+    const produced = JSON.parse(readFileSync(productionOutput, "utf8"));
+    assert.equal(produced.state, "complete", "the real workflow-facing CLI reads original output without installing dependencies");
+    assert.deepEqual(produced.exclusions, ["test/**"]);
+    assert.equal(produced.scope.hash, manifest.scope.hash);
+
     assert.equal(manifest.version, "code-health-source-v1");
     assert.equal(manifest.repository, "acme/atlas");
     assert.equal(manifest.analyzedSha, raw.analyzedSha);
