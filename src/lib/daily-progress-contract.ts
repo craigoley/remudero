@@ -38,12 +38,13 @@ export interface RepositoryEvidenceInventory {
 }
 
 /** Expected sources are configuration, not evidence that a collector has run. */
-export function buildRepositoryEvidenceInventory(instances: ReadonlyArray<{ instanceId: string; options: { instanceRepository?: ManagedRepo } }>): RepositoryEvidenceInventory {
+export function buildRepositoryEvidenceInventory(instances: ReadonlyArray<{ instanceId: string; evidenceRepository?: string; options: { instanceRepository?: ManagedRepo } }>): RepositoryEvidenceInventory {
   const repos = new Map<string, Set<string>>(), unresolved = new Set<string>();
   for (const instance of instances) {
     if (!text(instance.instanceId, 128)) throw new TypeError("invalid configured instance identity");
     const r = instance.options.instanceRepository;
-    const id = r && typeof r.owner === "string" && typeof r.repo === "string" ? `${r.owner}/${r.repo}`.toLowerCase() : undefined;
+    const configured = instance.evidenceRepository ?? (r && typeof r.owner === "string" && typeof r.repo === "string" ? `${r.owner}/${r.repo}` : undefined);
+    const id = typeof configured === "string" ? configured.toLowerCase() : undefined;
     if (!repository(id)) { unresolved.add(instance.instanceId); continue; }
     const members = repos.get(id) ?? new Set<string>(); members.add(instance.instanceId); repos.set(id, members);
   }

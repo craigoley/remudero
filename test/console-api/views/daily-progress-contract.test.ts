@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { test } from "node:test";
 import { buildRepositoryEvidenceInventory, validateDailyProgressReport, type DailyProgressReport } from "#src/lib/daily-progress-contract.js";
-import { createRepositoriesSourcePublisher, repositoriesSourcesPath } from "#src/lib/repositories-view.js";
+import { createRepositoriesSourcePublisher, repositoriesSourcesPath, type RepositoriesSources } from "#src/lib/repositories-view.js";
 import { withTempDir } from "#src/lib/tmp.js";
 
 function report(): DailyProgressReport {
@@ -48,15 +48,16 @@ test("daily contracts preserve coverage and reject contradictory day identity", 
 
 test("the repositories publisher exposes expected inventory independently of observed events", async () => {
   await withTempDir("daily-contract", async (root) => {
-    const instances = [{ instanceId: "one", options: { root, instanceRepository: { owner: "Acme", repo: "Atlas" } } }, { instanceId: "two", options: { root, instanceRepository: { owner: "acme", repo: "atlas" } } }, { instanceId: "unknown", options: { root } }];
+    const instances: RepositoriesSources["instances"] = [{ instanceId: "core", evidenceRepository: "Acme/Core", options: { root } }, { instanceId: "one", options: { root, instanceRepository: { owner: "Acme", repo: "Atlas" } } }, { instanceId: "two", options: { root, instanceRepository: { owner: "acme", repo: "atlas" } } }, { instanceId: "unknown", options: { root } }];
     const path = repositoriesSourcesPath(root); mkdirSync(dirname(path), { recursive: true });
     const publish = createRepositoriesSourcePublisher({ stateDir: root, instances: () => instances });
     assert.equal(publish(), true); assert.equal(publish(), false, "unchanged scope must not rewrite source clocks");
     const value = JSON.parse(readFileSync(path, "utf8"));
     assert.deepEqual(value.instances, instances, "existing source configuration is preserved");
     assert.deepEqual(value.improvementEvidence, buildRepositoryEvidenceInventory(instances));
-    assert.deepEqual(value.improvementEvidence.repositories.map((r: { repository: string }) => r.repository), ["acme/atlas"]);
+    assert.deepEqual(value.improvementEvidence.repositories.map((r: { repository: string }) => r.repository), ["acme/atlas", "acme/core"]);
     assert.deepEqual(value.improvementEvidence.repositories[0].instanceIds, ["one", "two"]);
+    assert.deepEqual(value.improvementEvidence.repositories[1].instanceIds, ["core"]);
     assert.deepEqual(value.improvementEvidence.unresolvedInstances, ["unknown"]);
     assert.equal(value.improvementEvidence.measurementState, "not_collected");
   });

@@ -49,7 +49,7 @@ export type RepositoriesInstanceOptions = Pick<
 >;
 
 export interface RepositoriesSources {
-  instances: Array<{ instanceId: string; options: RepositoriesInstanceOptions }>;
+  instances: Array<{ instanceId: string; evidenceRepository?: string; options: RepositoriesInstanceOptions }>;
   /** Optional on older publishers; missing means inventory has not been collected, never an empty measured set. */
   improvementEvidence?: RepositoryEvidenceInventory;
 }
