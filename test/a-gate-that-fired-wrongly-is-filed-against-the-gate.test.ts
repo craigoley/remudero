@@ -32,7 +32,7 @@ function productionRule(testFile: string): GateRepairRule {
   return found;
 }
 
-async function productionRepair(gate: string, repairFile: string, patch: string, redSource: string) {
+async function productionRepair(gate: string, repairFile: string, patch: string, redSource: string, failedLog?: string) {
   const source = "src/lib/example.ts";
   const ghJson = async (args: string[]): Promise<unknown> => {
     const path = args[1] ?? "";
@@ -48,8 +48,10 @@ async function productionRepair(gate: string, repairFile: string, patch: string,
       content: Buffer.from(path.endsWith("ref=red") ? redSource : "").toString("base64") };
     throw new Error(`unexpected production evidence read: ${args.join(" ")}`);
   };
-  const observations = await loadGateRepairObservations(GATE_REPAIR_RULES, { ghJson,
-    ghText: async args => { throw new Error(`unexpected production log read: ${args.join(" ")}`); } });
+  const observations = await loadGateRepairObservations(GATE_REPAIR_RULES, { ghJson, ghText: async args => {
+    if (failedLog === undefined || args.join(" ") !== "run view --job 7 --log-failed") throw new Error(`unexpected production log read: ${args.join(" ")}`);
+    return failedLog;
+  } });
   assert.equal(observations.length, 1);
   assert.equal(observations[0]!.pair.triggered, true, `${gate}: the original PR must trigger the production rule`);
   return observations[0]!;
@@ -138,7 +140,7 @@ test("W1-T9049: a token rebuilt at runtime to dodge a gate's regex is a suspecte
   }
 });
 
-test("W1-T9049: a repair that changes the gated code is genuine", () => {
+test("W1-T9049: a repair that changes the gated code is genuine", async () => {
   assert.equal(classifyGateRepair(pair, '-const token = "tree-walk";\n+const token = "other";', rule.ownFiles, rule.gateRegex), "genuine");
   const { result, rows } = candidates('-const count = 0;\n+const count = 1;');
   assert.deepEqual(result, []);
@@ -158,6 +160,20 @@ test("W1-T9049: a repair that changes the gated code is genuine", () => {
     assert.equal(classifyGateRepair({ ...pair, gate: production.gate }, diff, production.ownFiles, production.gateRegex), "genuine", diff);
   }
   assert.equal(classifyGateRepair({ ...pair, gate: production.gate }, renamed, production.ownFiles, production.gateRegex), "rename-dodge");
+  // An aggregate rule-checks log names every suite it ran; only the suite it names as failed owns the repair.
+  const ran = (suite: string) => `rule-checks: ${suite}\nok 1 - ${suite.replace("test/", "")} holds`;
+  const subclass = "test/error-subclass-census.test.ts";
+  for (const failedLine of [`rule-checks: ${subclass}: failed (1)\nrule-checks: failed suites: ${subclass}`,
+    `not ok 4 - /home/runner/work/remudero/remudero/${subclass}`]) {
+    const log = [ran("test/env-var-registry.test.ts"), `rule-checks: ${subclass}`, "not ok 1 - census", failedLine].join("\n");
+    const evidence = await productionRepair("rule-checks", "src/lib/example.ts",
+      "@@\n-class ExampleError extends Error {}\n+class ExampleError extends RmdError {}",
+      'const token = "RMD_EXAMPLE"; class ExampleError extends Error {}', log);
+    assert.equal(evidence.pair.gate, subclass, failedLine);
+    const filed: string[] = [];
+    assert.deepEqual(gateRepairCandidates([evidence], GATE_REPAIR_RULES, [], step => filed.push(step)), []);
+    assert.deepEqual(filed, []);
+  }
 });
 
 test("W1-T9049: production regexes recognize token reconstruction in its source context", () => {

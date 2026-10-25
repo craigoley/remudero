@@ -20,6 +20,7 @@ import { sameTestFile } from "./test-path-resolver.js";
 import { collectCiFailureCorpus, rollupAtSha, type CiFailurePair, type CorpusCommit } from "./ci-failure-corpus.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { checkRunsRestArgs, combinedStatusRestArgs } from "./open-prs-rest.js";
+import { failingRuleSuitesFromCiFailures, RULE_CHECKS_CHECK } from "./base-reproduction.js";
 import { commentCompressionOrigin, nextCommentCompression, readGateFollowupOrigins, type CommentCompressionFinding } from "./comment-compression.js";
 
 /**
@@ -215,6 +216,22 @@ async function evaluateTriggerAsync(rule: GateRepairRule, changed: string[], sha
   throw new Error(`gate trigger never settled: ${rule.gate}`);
 }
 
+/**
+ * The suites an aggregate check's log names as FAILED: rule-checks' closing `failed suites:` line and its
+ * per-suite `failed (` line, and a TAP `not ok` line naming a test file. An aggregate log also names every
+ * suite that PASSED (`rule-checks: <suite>`, `ok N - <suite>`); those are not this red's.
+ */
+export function failedSuitesInLog(log: string): Set<string> {
+  const failed = new Set(failingRuleSuitesFromCiFailures([{ name: RULE_CHECKS_CHECK, logTail: log }]));
+  const named = [...log.matchAll(/rule-checks: (\S+): failed \(/g), ...log.matchAll(/\bnot ok \d+ - (\S+)/g)].map(([, path]) => path!);
+  for (const path of named) {
+    // A runner may print the suite's absolute checkout path: keep it from its repo-relative `test/`.
+    const suite = path.startsWith("test/") ? path : path.includes("/test/") ? path.slice(path.indexOf("/test/") + 1) : "";
+    if (suite.endsWith(".test.ts")) failed.add(suite);
+  }
+  return failed;
+}
+
 export async function loadGateRepairObservations(rules: readonly GateRepairRule[], sources: GateDefuseSources = {}): Promise<GateRepairObservation[]> {
   const readJsonAsync = sources.ghJson ?? ((args: string[]) => ghJsonAsync(args));
   const readTextAsync = sources.ghText ?? ((args: string[]) => ghTextAsync(args));
@@ -247,7 +264,8 @@ export async function loadGateRepairObservations(rules: readonly GateRepairRule[
       const direct = rules.filter((rule) => rule.gate === pair.gate);
       const failed = runs.get(pair.redSha)?.check_runs.find((check) => check.name === pair.gate && check.conclusion === "failure");
       const log = direct.length || !failed ? "" : await readTextAsync(["run", "view", "--job", String(failed.id), "--log-failed"]);
-      const implicated = direct.length ? direct : rules.filter((rule) => log.includes(rule.gate));
+      const failedSuites = failedSuitesInLog(log);
+      const implicated = direct.length ? direct : rules.filter((rule) => failedSuites.has(rule.gate));
       for (const rule of implicated) {
         const before = await readJsonAsync(["api", `${api}/compare/${pr.base.sha}...${pair.redSha}`]) as { merge_base_commit: { sha: string }; files: Array<{ filename: string }> };
         const readAt = async (sha: string, path: string): Promise<string | null> => {
