@@ -1,0 +1,61 @@
+- id: W1-T10650
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts:flaky cost 23.5 PR minute(s) across 12 round(s) on 12 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.24
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts:flaky"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/check-test-test-run-task-git-calls-into-a-worker-worktree-go-through-the.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts:flaky"
+      proof: "unit test: W1-T10650: check:test:test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts:flaky is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts:flaky cost 23.5 PR minute(s) (seven-day half-life) across 12 fix round(s) on 12 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/sweep.ts: test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts imports it
+    - test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts: named by the failing check
+    - the rounds name a failing test: test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13895 (https://github.com/craigoley/remudero/pull/13895) at 2026-10-24T09:09:14.466Z: ci-log round — coverage-shard (4/8): test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts; coverage-shard (8/8): test/run-review-evidence-target.test.ts; coverage-shard (6/8): un
+        failing tests: every function that addresses a worker or reviewer tree calls the leaf and spawns no raw git; W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS site; a sync primitive handed over as a seam default counts, W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const, W1-T9660: the daemon-wide census ignores an identifier that appears only in a string or a comment, W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS site; W1-T3529: runReview does not re-derive the target from a bare repo name; W1-T3529: every pre-existing judgeReview evidence field remains in the runReview call
+        log excerpt:
+          | ...
+          |     not ok 3 - every function that addresses a worker or reviewer tree calls the leaf and spawns no raw git
+          |       ---
+          |       duration_ms: 756.782278
+          |       type: 'test'
+          |       location: '/home/runner/work/remudero/remudero/test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts:182:3'
+          |       failureType: 'testCodeFailure'
+          |       error: |-
+          |         Expected values to be strictly deep-equal:
+          |         + actual - expected
+          | 
+          |         + [
+          |         +   'assertReviewerSnapshotIntegrity: not found'
+          |         + ]
+    - PR #12936 at 2026-10-19T16:00:49Z: hand fix PR #12936: src/lib/sweep.ts; minutes are the pass median proxy (5.899016666666666), not measured repair time
+    - PR #12913 at 2026-10-19T10:14:13Z: hand fix PR #12913: src/lib/ledger.ts, src/lib/sweep.ts; minutes are the pass median proxy (5.899016666666666), not measured repair time
+    - PR #12824 at 2026-10-18T19:44:42Z: hand fix PR #12824: src/lib/sweep.ts; minutes are the pass median proxy (5.899016666666666), not measured repair time
+    - PR #12807 at 2026-10-18T17:58:41Z: hand fix PR #12807: src/lib/fix-progress-judge.ts, src/lib/sweep.ts; minutes are the pass median proxy (5.899016666666666), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The filing labels the cause flaky, but its supplied failure excerpt reports a missing function; no evidence shown establishes intermittent behavior or its root cause.; on the change's description/files alone, no diff was read — The proposed remedy permits preventing fix-round dispatch or self-healing through src/lib/sweep.ts, without specifying how the underlying failure is corrected. The supplied evidence cannot verify that this prevents the defect rather than suppressing its repair.; on the change's description/files alone, no diff was read — The historical references include changes to sweep.ts and estimated repair costs, but do not establish a causal remedy for this named test failure."
+    judged_at: "2026-10-25T20:51:48.536Z"
+    pin: "20a828a62f63e25be9e431e0b6806a0accaa82863c1250ffe0f2ef09e46c7cc0"

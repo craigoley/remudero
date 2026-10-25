@@ -70,3 +70,26 @@ test("a concrete review-step failure remains owned and its remedy requires an ex
   assert.equal(task.verify, "human");
   assert.equal(result.next.price.minutes, 27);
 });
+
+test("a source coverage refusal preserves observations without inventing a workflow defect", t => {
+  const f = fixture(t);
+  const workflow = ".github/workflows/ci.yml";
+  writeFileSync(join(f.repo.dir, workflow), "jobs:\n  coverage-ratchet-required:\n    name: coverage-ratchet\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo coverage\n");
+  f.repo.git("add", "."); f.repo.git("commit", "-qm", "declare the coverage verdict producer");
+  f.repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const search = f.search();
+  assert.deepEqual(search.workflowOwner!("coverage-ratchet")?.files, [workflow], "the producer was actually resolved");
+  const key = "check:ci-log:coverage-ratchet:error-diff-coverage-blocked-this-diff-adds-source-line-s-wit";
+  const details = [
+    "coverage-ratchet: ##[error]diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; src/lib/gate-gardener.ts:242",
+    "coverage-ratchet: ##[error]diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; src/lib/commit-message.ts:46",
+  ];
+  assert.equal(locateCiFrictionOwner(key, details, search), undefined, "a healthy predicate refusal does not establish a producer defect");
+  const result = ladder(key, details, search);
+  assert.equal(result.next?.decision.kind, "escalate");
+  assert.equal(result.next?.price.minutes, 27);
+  assert.equal(result.next?.price.rounds, 2);
+  assert.match(result.next?.decision.kind === "escalate" ? result.next.decision.why : "", /coverage.*mechanism.*UNKNOWN/i);
+  assert.deepEqual(locateCiFrictionOwner("check:ci-log:coverage-ratchet:coverage-report-failed", ["coverage-ratchet: COVERAGE-REPORT-FAILED artifact upload failed"], f.search())?.files,
+    [workflow], "actual infrastructure evidence keeps its original workflow route");
+});

@@ -39,3 +39,11 @@
     The existing real fix prompt consumes SKILL_FIX_TASK_TYPE even though fix is not a plan TASK_TYPES member. Preserve that domain distinction and coordinate with W10576; do not silently weaken or rewrite W10135 to make a green test. No selection-budget, withholding, task registry, cash, consent, ratification or evaluation activation change is proposed.
     Craig approved publication of this parked plan-only proposal only. Normal reservation, machine judgment, plan lint, hooks, full hosted CI/coverage/security and semantic review retain their authority; no new hosted-author attempt, paid runner, manual merge/arm/review, production Inbox reply/readmark, forced gardener, permission change or production lifecycle action. Foundation and Janitor retain their existing owners; W7740 remains USER_HELD90 and SHADOW/independent overrides remain unchanged.
     The initial maintained renderer defaulted these three non-sensitive paths to risk:low; the actual sizing check refused three concerns at that band. This unjudged parked proposal declares risk:high with band_meaning:blast-radius to retain all three necessary files under Rule 19, not to narrow scope, invent a ruling or alter any worker permission. The normal machine judge and independent dispatch hold remain authoritative.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it touches secrets, auth, tokens or permissions (\"permissions\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-25T18:50:06.720Z"
+    pin: "895f329d885b8bf5f6c47f653a2d0c1a41e7c38fcfa4877a07b27db0f9a8c4b6"

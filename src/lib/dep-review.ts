@@ -1699,13 +1699,28 @@ export async function prioritizeDepReviewRepairs(
   const recordEvent = (step: string, extra: Record<string, unknown>) => {
     try { log(step, extra); } catch { /* Priority telemetry cannot change the eligible queue or admit a run. */ }
   };
-  if (!snapshot || !Number.isFinite(nowMs) || !Number.isFinite(snapshot.asOfMs) ||
+  if (!snapshot) {
+    recordEvent("auto_triage.repair_priority_unavailable", { reasonCode: "snapshot-missing", candidate_count: candidates.length });
+    return ordinary;
+  }
+  if (!Number.isFinite(nowMs) || !Number.isFinite(snapshot.asOfMs) ||
       nowMs < snapshot.asOfMs || nowMs - snapshot.asOfMs > TICK_READ_MAX_AGE_MS ||
-      !/^[\w.-]+$/.test(snapshot.owner) || !/^[\w.-]+$/.test(snapshot.repo)) return ordinary;
+      !/^[\w.-]+$/.test(snapshot.owner) || !/^[\w.-]+$/.test(snapshot.repo)) {
+    const reasonCode = !Number.isFinite(nowMs) || !Number.isFinite(snapshot.asOfMs) ? "clock-unreadable"
+      : nowMs < snapshot.asOfMs ? "snapshot-future"
+      : nowMs - snapshot.asOfMs > TICK_READ_MAX_AGE_MS ? "snapshot-stale" : "repository-unreadable";
+    recordEvent("auto_triage.repair_priority_unavailable", { reasonCode, candidate_count: candidates.length,
+      snapshot_as_of_ms: snapshot.asOfMs, decision_at_ms: nowMs });
+    return ordinary;
+  }
   const oldReds = snapshot.prs.filter(pr => Number.isSafeInteger(pr.prNumber) && pr.prNumber > 0 &&
     pr.headRefName?.startsWith("dependabot/") && pr.checksState === "red" &&
     Number.isFinite(Date.parse(pr.createdAt ?? "")) && nowMs - Date.parse(pr.createdAt!) >= DEPENDABOT_STUCK_PR_AGE_MS);
-  if (oldReds.length === 0) return ordinary;
+  if (oldReds.length === 0) {
+    recordEvent("auto_triage.repair_priority_unavailable", { reasonCode: "no-aged-red-dependency", candidate_count: candidates.length,
+      snapshot_as_of_ms: snapshot.asOfMs, open_pr_count: snapshot.prs.length });
+    return ordinary;
+  }
   const dir = join(stateRoot, "dep-review-holds", snapshot.owner, snapshot.repo);
   try {
     const registry: unknown = JSON.parse(await readFile(join(dir, OWN_RED_PROPOSALS_FILE), "utf8"));
@@ -1731,9 +1746,11 @@ export async function prioritizeDepReviewRepairs(
     }
     const ranked = ordinary.filter(id => priority.has(id)).sort((a, b) => priority.get(a)! - priority.get(b)!);
     if (ranked.length > 0) recordEvent("auto_triage.repair_priority", { feedback_ids: ranked, snapshot_as_of_ms: snapshot.asOfMs });
+    else recordEvent("auto_triage.repair_priority_unavailable", { reasonCode: "no-matching-repair-binding", candidate_count: candidates.length,
+      snapshot_as_of_ms: snapshot.asOfMs, aged_red_pr_numbers: oldReds.map(pr => pr.prNumber) });
     return [...ranked, ...ordinary.filter(id => !priority.has(id))];
   } catch (error) {
-    recordEvent("auto_triage.repair_priority_unavailable", { reason: String(error) });
+    recordEvent("auto_triage.repair_priority_unavailable", { reason: String(error), reasonCode: "binding-unreadable", candidate_count: candidates.length });
     return ordinary;
   }
 }
