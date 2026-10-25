@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "#src/lib/learnings.js";
-import { loadInjectableSkills, selectSkillsForTask, renderSkillsPart } from "#src/lib/skill-workshop.js";
+import { loadInjectableSkills, observeSkillSelection, selectSkillsForTask, renderSkillsPart, SKILL_FIX_TASK_TYPE } from "#src/lib/skill-workshop.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
 
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const SCRIPT = join(REPO_ROOT, "scripts", "prompt-surface-gate.mjs");
 
@@ -385,6 +386,18 @@ function effectFixture(before: string, after: string, extra: Record<string, unkn
 }
 
 test("an approved injected skill edit without prompt-effect evidence is refused", () => {
+  for (const name of ["two\tparts", 'two"parts', "two\\parts", "procédure", "two parts"]) withFixture(root => {
+    const path = `.claude/skills/${name}/SKILL.md`;
+    write(root, path, skillSource("Original invariant."));
+    assert.deepEqual(loadInjectableSkills(join(root, ".claude/skills")).map(skill => skill.name), [name]);
+    assert.match(renderedSkillPrompt(root), /Original invariant/);
+    commit(root, "approved unusual skill name");
+    write(root, path, skillSource("Changed invariant."));
+    commit(root, "sole skill body edit");
+    const result = mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
+    assert.equal(result.ok, false, `no evidence for ${JSON.stringify(name)}`);
+    assert.deepEqual(result.surfaces, [path]);
+  });
   withFixture(root => {
     write(root, INJECTED_PATH, skillSource("Check the original invariant."));
     commit(root, "approved base skill");
@@ -400,21 +413,40 @@ test("an approved injected skill edit without prompt-effect evidence is refused"
 });
 
 test("deleting or opting out a formerly injected skill retains its base-side prompt evidence obligation", () => {
+  for (const header of [
+    'diff --git "a/.claude/skills/procedure/SKILL.md" "b/.claude/skills/unterminated',
+    'diff --git "a/.claude/skills/procedure/SKILL.md" "b/.claude/skills/invalid\\q/SKILL.md"',
+    'diff --git "a/.claude/skills/procedure/SKILL.md" "b/.claude/skills/invalid\\377/SKILL.md"',
+  ]) assert.throws(() => mod.evaluatePromptSurfaceDiff(header, { root: REPO_ROOT, base: "unused" }),
+    /unparsed Git file header|invalid Git-quoted path|encoded data/, "unreadable paths never become an empty diff");
+  for (const path of [".claude", ".claude/skills", ".claude/skills/procedure"]) withFixture(root => {
+    const source = path === ".claude" ? "target/skills/procedure/SKILL.md" :
+      path === ".claude/skills" ? "target/procedure/SKILL.md" : "target/SKILL.md";
+    write(root, source, skillSource("Reachable through a symbolic ancestor."));
+    commit(root, "source outside the approved tree");
+    assert.equal(renderedSkillPrompt(root), "");
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    symlinkSync(join(root, "target"), join(root, path));
+    assert.match(renderedSkillPrompt(root), /Reachable through a symbolic ancestor/);
+    commit(root, "sole symbolic ancestor change");
+    assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }), /skill reachability/);
+  });
+  for (const path of [INJECTED_PATH, ".claude/skills/two\tparts/SKILL.md"])
   for (const change of ["delete", "rename", "opt-out", "selector"] as const) withFixture(root => {
-    write(root, INJECTED_PATH, skillSource("Check the invariant."));
+    write(root, path, skillSource("Check the invariant."));
     commit(root, "approved skill");
-    if (change === "delete") rmSync(join(root, INJECTED_PATH));
+    if (change === "delete") rmSync(join(root, path));
     if (change === "rename") {
-      const renamed = ".claude/skills/renamed/SKILL.md";
+      const renamed = '.claude/skills/renamed"skill/SKILL.md';
       mkdirSync(dirname(join(root, renamed)), { recursive: true });
-      renameSync(join(root, INJECTED_PATH), join(root, renamed));
+      renameSync(join(root, path), join(root, renamed));
     }
-    if (change === "opt-out") write(root, INJECTED_PATH, skillSource("Check the invariant.", "disable-model-invocation: true"));
-    if (change === "selector") write(root, INJECTED_PATH, skillSource("Check the invariant.", "applies-to: implement\nwhen-paths: docs/**"));
+    if (change === "opt-out") write(root, path, skillSource("Check the invariant.", "disable-model-invocation: true"));
+    if (change === "selector") write(root, path, skillSource("Check the invariant.", "applies-to: implement\nwhen-paths: docs/**"));
     commit(root, change);
     const result = mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
     assert.equal(result.ok, false, change);
-    assert.ok(result.surfaces.includes(INJECTED_PATH), change);
+    assert.ok(result.surfaces.includes(path), change);
     assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "a-missing-base" }), /git (cat-file|merge-base)/);
   });
   withFixture(root => {
@@ -435,8 +467,7 @@ test("deleting or opting out a formerly injected skill retains its base-side pro
       rmSync(join(root, INJECTED_PATH));
       symlinkSync("unresolved-target", join(root, INJECTED_PATH));
     } else {
-      write(root, INJECTED_PATH, skillSource("New invariant."));
-      write(root, ".claude/skills/two\tparts/SKILL.md", skillSource("Ambiguous name."));
+      write(root, ".claude/skills/two\nparts/SKILL.md", skillSource("Ambiguous name."));
     }
     commit(root, change);
     assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }), /skill reachability/);
@@ -444,6 +475,33 @@ test("deleting or opting out a formerly injected skill retains its base-side pro
 });
 
 test("injected skill evidence qualifies only the actual maintained prompt effect", () => {
+  for (const name of ["procedure", "fix\tprocedure"]) withFixture(root => {
+    const path = `.claude/skills/${name}/SKILL.md`;
+    const effectPath = 'test/fixtures/golden-verdicts/fix"effect.yaml';
+    const front = `applies-to: ${SKILL_FIX_TASK_TYPE}\nwhen-paths: src/**`;
+    const fixPrompt = (skillsPart: string) => renderFixPrompt({
+      task: { id: "W1-T10576", title: "fix the gate", files: ["src/lib/example.ts"] },
+      branch: "run-W1-T10576-1", round: 1,
+      evidence: { ciFailures: [{ name: "prompt-surface-gate", logTail: "refused" }] }, skillsPart,
+    });
+    write(root, path, skillSource("Check the old fix invariant.", front));
+    const before = renderedSkillPrompt(root, SKILL_FIX_TASK_TYPE);
+    assert.match(fixPrompt(before), /Check the old fix invariant/);
+    assert.equal(renderedSkillPrompt(root, "implement"), "", "this skill is fix-only");
+    commit(root, "approved fix-only skill");
+    const base = git(root, ["rev-parse", "HEAD"]).trim();
+    write(root, path, skillSource("Check the new fix invariant.", front));
+    const after = renderedSkillPrompt(root, SKILL_FIX_TASK_TYPE);
+    assert.match(fixPrompt(after), /Check the new fix invariant/);
+    assert.notEqual(before, after);
+    for (const taskType of ["implement", "implemnt", SKILL_FIX_TASK_TYPE]) {
+      write(root, effectPath, effectFixture(before, after, { skill: name, task_type: taskType }));
+      commit(root, "fix-only prompt-effect evidence");
+      const result = mod.evaluatePromptSurfaceGate({ root, base });
+      assert.equal(result.ok, taskType === SKILL_FIX_TASK_TYPE, taskType);
+      assert.deepEqual(result.evidence, taskType === SKILL_FIX_TASK_TYPE ? [effectPath] : []);
+    }
+  });
   withFixture(root => {
     write(root, INJECTED_PATH, skillSource("Same body, but a new invalid selector must not invent a worker context."));
     const before = renderedSkillPrompt(root, "implemnt");
@@ -483,7 +541,42 @@ test("injected skill evidence qualifies only the actual maintained prompt effect
   });
 });
 
-test("injected skill surface regressions preserve selection and operator-only macro behavior", () => {
+test("injected skill surface regressions preserve selection and operator-only macro behavior", async () => {
+  const root = fixtureRepo();
+  try {
+    write(root, INJECTED_PATH, skillSource("Original procedure."));
+    commit(root, "source-deletion base");
+    write(root, INJECTED_PATH, skillSource("Changed procedure."));
+    commit(root, "source-deletion head");
+    // Execute the maintained gate with its skill check deleted, then restore that exact source.
+    // Absolute imports let the disposable modules use the real maintained dependencies.
+    const source = readFileSync(SCRIPT, "utf8").replace(/\bfrom "([^"]+)"/g, (_match, specifier: string) =>
+      `from ${JSON.stringify(specifier.startsWith(".") ? new URL(specifier, pathToFileURL(SCRIPT)).href : import.meta.resolve(specifier))}`);
+    const deleted = source.replace("const skillContext = skillSurfaceContext(root, base, head, files);",
+      "const skillContext = { surfaces: [], before: [], after: [] };");
+    const load = (text: string) => import(`data:text/javascript;base64,${Buffer.from(text).toString("base64")}`) as Promise<typeof mod>;
+    const removedGate = await load(deleted), restoredGate = await load(source);
+    const refuses = (gate: typeof mod) => assert.equal(gate.evaluatePromptSurfaceGate({ root, base: "HEAD^" }).ok, false,
+      "the changed approved skill must be refused");
+    assert.throws(() => refuses(removedGate), /the changed approved skill must be refused/);
+    refuses(restoredGate);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  withFixture(root => {
+    const path = '.claude/skills/operator"macro/SKILL.md';
+    write(root, path, skillSource("Old macro.", "disable-model-invocation: true"));
+    commit(root, "quoted operator-only macro");
+    write(root, path, skillSource("New macro.", "disable-model-invocation: true"));
+    commit(root, "sole quoted macro edit");
+    assert.equal(mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }).ok, true);
+    assert.equal(renderedSkillPrompt(root), "");
+    const skills = [{ name: "procedure", body: "procedure", appliesTo: ["implement"] }];
+    const withheld = observeSkillSelection(skills, "implement", DEFAULT_KNOWLEDGE_BUDGET_CHARS, [], () => true);
+    assert.deepEqual(withheld.selected, []);
+    assert.deepEqual(withheld.observation.withheld_names, ["procedure"]);
+    assert.deepEqual(selectSkillsForTask(skills, "implement", DEFAULT_KNOWLEDGE_BUDGET_CHARS), skills);
+  });
   withFixture(root => {
     write(root, INJECTED_PATH, skillSource("Old operator-only macro.", "disable-model-invocation: true"));
     write(root, ".claude/skills/README.md", "Not a skill directory.\n");

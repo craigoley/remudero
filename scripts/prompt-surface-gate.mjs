@@ -9,7 +9,7 @@ import { renderMacroSkill } from "./generate-macro-skills.mjs";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
-import { loadInjectableSkills, selectSkillsForTask, renderSkillsPart } from "../src/lib/skill-workshop.js";
+import { loadInjectableSkills, selectSkillsForTask, renderSkillsPart, SKILL_FIX_TASK_TYPE } from "../src/lib/skill-workshop.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../src/lib/learnings.js";
 import { TASK_TYPES } from "../src/lib/plan.js";
 
@@ -58,13 +58,28 @@ function overlaps(a, b) {
   return a.start <= b.end && b.start <= a.end;
 }
 
+// Git's octal escapes encode UTF-8 bytes, not individual Unicode characters.
+function decodeGitPath(path) {
+  if (!path.startsWith('"')) return path;
+  if (!/^"(?:[^"\\]|\\(?:[abfnrtv\\"]|[0-3][0-7]{2}))*"$/.test(path)) {
+    throw new Error("prompt surface diff: invalid Git-quoted path");
+  }
+  const escapes = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, "\\": 92, '"': 34 };
+  const parts = path.slice(1, -1).match(/[^\\]+|\\(?:[abfnrtv\\"]|[0-3][0-7]{2})/g) ?? [];
+  const bytes = parts.map(part => part[0] !== "\\" ? Buffer.from(part) :
+    Buffer.from([part.length === 4 ? parseInt(part.slice(1), 8) : escapes[part[1]]]));
+  return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(bytes));
+}
+
 export function parseUnifiedDiff(diffText) {
   const files = [];
   let current;
   for (const line of diffText.split("\n")) {
-    const fileMatch = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
-    if (fileMatch) {
-      current = { oldPath: fileMatch[1], newPath: fileMatch[2], hunks: [], changedLines: [] };
+    if (line.startsWith("diff --git ")) {
+      const fileMatch = /^diff --git ("(?:[^"\\]|\\.)*"|a\/.+) ("(?:[^"\\]|\\.)*"|b\/.+)$/.exec(line);
+      if (!fileMatch) throw new Error("prompt surface diff: unparsed Git file header");
+      current = { oldPath: decodeGitPath(fileMatch[1]).replace(/^a\//, ""),
+        newPath: decodeGitPath(fileMatch[2]).replace(/^b\//, ""), hunks: [], changedLines: [] };
       files.push(current);
       continue;
     }
@@ -72,13 +87,13 @@ export function parseUnifiedDiff(diffText) {
     if (line.startsWith("+++ ")) {
       const path = line.slice(4);
       if (path === "/dev/null") continue;
-      current.newPath = path.replace(/^b\//, "");
+      current.newPath = decodeGitPath(path.replace(/\t$/, "")).replace(/^b\//, "");
       continue;
     }
     if (line.startsWith("--- ")) {
       const path = line.slice(4);
       if (path === "/dev/null") continue;
-      current.oldPath = path.replace(/^a\//, "");
+      current.oldPath = decodeGitPath(path.replace(/\t$/, "")).replace(/^a\//, "");
       continue;
     }
     const hunkMatch = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
@@ -278,6 +293,8 @@ function changedPaths(files) {
 // empty; failed Git reads, symlinks and ambiguous tree shapes are never absence.
 function revisionSkills(root, revision) {
   if (runGit(root, ["cat-file", "-t", revision]).trim() !== "commit") throw new Error(`skill reachability: ${revision} is not a commit`);
+  const parent = runGit(root, ["ls-tree", "-z", revision, "--", ".claude"]);
+  if (parent !== "" && !parent.startsWith("040000 tree ")) throw new Error("skill reachability: approved skill parent is not a tree");
   const tree = runGit(root, ["ls-tree", "-z", revision, "--", ".claude/skills"]);
   if (tree === "") return [];
   if (!tree.startsWith("040000 tree ")) throw new Error("skill reachability: approved skill root is not a tree");
@@ -285,8 +302,9 @@ function revisionSkills(root, revision) {
   const names = [];
   const texts = new Map();
   for (const entry of entries) {
-    const fields = entry.split("\t"), [metadata, name] = fields;
-    if (fields.length !== 2 || !name || /[\r\n/]/.test(name)) throw new Error("skill reachability: ambiguous approved skill name");
+    const separator = entry.indexOf("\t");
+    const metadata = entry.slice(0, separator), name = entry.slice(separator + 1);
+    if (separator < 0 || !name || /[\r\n/]/.test(name)) throw new Error("skill reachability: ambiguous approved skill name");
     if (metadata.startsWith("120000 ")) throw new Error("skill reachability: a symbolic skill entry cannot be resolved from Git");
     if (!metadata.startsWith("040000 tree ")) continue;
     const path = `.claude/skills/${name}/SKILL.md`;
@@ -301,8 +319,11 @@ function revisionSkills(root, revision) {
 }
 
 function skillSurfaceContext(root, base, head, files) {
-  const candidates = [...new Set(files.flatMap(file => [file.oldPath, file.newPath]).filter(path => INJECTED_SKILL_PATH_RE.test(path)))];
-  if (!candidates.length) return { surfaces: [], before: [], after: [] };
+  const paths = [...new Set(files.flatMap(file => [file.oldPath, file.newPath]))];
+  if (!paths.some(path => path === ".claude" || path === ".claude/skills" || path.startsWith(".claude/skills/"))) {
+    return { surfaces: [], before: [], after: [] };
+  }
+  const candidates = paths.filter(path => INJECTED_SKILL_PATH_RE.test(path));
   const before = revisionSkills(root, base), after = revisionSkills(root, head);
   const signature = (skills, name) => {
     const skill = skills.find(skill => skill.name === name);
@@ -323,7 +344,7 @@ function skillEvidenceFor(root, head, files, context) {
     try { fixture = parseYaml(readRevisionFile(root, head, path)); }
     catch { continue; }
     if (!fixture || fixture.kind !== "injected-skill-prompt-effect" || typeof fixture.skill !== "string" ||
-        typeof fixture.task_type !== "string" || !TASK_TYPES.includes(fixture.task_type) || !Array.isArray(fixture.task_files) ||
+        typeof fixture.task_type !== "string" || ![...TASK_TYPES, SKILL_FIX_TASK_TYPE].includes(fixture.task_type) || !Array.isArray(fixture.task_files) ||
         !fixture.task_files.every(p => typeof p === "string") || typeof fixture.before !== "string" || typeof fixture.after !== "string") continue;
     const select = skills => selectSkillsForTask(skills, fixture.task_type, DEFAULT_KNOWLEDGE_BUDGET_CHARS, fixture.task_files);
     const before = select(context.before), after = select(context.after);
