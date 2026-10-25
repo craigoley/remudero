@@ -95,7 +95,7 @@ export function coverageProvenance(summary, lcov, baseline, workflow, repository
     rulesVersion: hash(canonical(baseline)), configHash: hash(workflow), exclusions: [...new Set(exclusions)].sort(),
     scope: { kind: "instrumented-source-lines", fileCount: records.length, hash: validScope ? hash(records.map(record =>
       [record.sourceFile, [...new Set(record.da.map(value => value.line))].sort((a, b) => a - b), record.lf, record.brf]).sort(([a], [b]) => a.localeCompare(b))) : null },
-    check: { id: "coverage-existing-tier", met: tier.tier === "healthy", reason: `Instrumented branch coverage is in this repository's existing ${tier.tier} tier.` } };
+    check: { id: "coverage-existing-tier", met: reasons.length === 0 && tier.tier === "healthy", reason: reasons.length ? "Coverage could not be assessed because its source evidence is incomplete." : `Instrumented branch coverage is in this repository's existing ${tier.tier} tier.` } };
 }
 
 function boundedRead(path, limit) {
