@@ -23,6 +23,7 @@ test("the SHIPPED .remudero/managed-repos.json keeps remudero's own public issue
   assert.deepEqual(loadManagedRepos(REPO_ROOT), [
     { owner: "craigoley", repo: "remudero-site" },
     { owner: "craigoley", repo: "remudero-console" },
+    { owner: "craigoley", repo: "wreckterra" },
   ]);
   assert.ok(!loadManagedRepos(REPO_ROOT).some((r) => r.repo === "remudero"), "remudero's own tracker is not polled");
 });
