@@ -8,7 +8,7 @@ import { replaceBodyProofs } from "#src/lib/body-repair.js";
 import { renderFixPrompt } from "#src/lib/prompt-render.js";
 import {
   DEFAULT_SWEEP_POLICY, PLAN_REPAIR_DISPATCH_STEP, fixSeedRead, prBodyDigest, runSweep,
-  type FixDispatchEvidence, type OpenPrView, type ProofDiscriminationEvidence, type SweepDeps,
+  type FixDispatchEvidence, type FixRungInputs, type OpenPrView, type ProofDiscriminationEvidence, type SweepDeps,
 } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -294,7 +294,7 @@ test("W1-T10339: a body edit releases a taskless stand-down at the same head", a
 });
 
 test("W1-T10339: a hold is released by a new head and a changed contract, and legacy or live rows keep their reading", () => {
-  const current = { headSha: HEAD, bodySha256: prBodyDigest(BODY) };
+  const current: FixRungInputs = { headSha: HEAD, bodySha256: prBodyDigest(BODY) };
   const pr = { prNumber: PR_NUMBER, headSha: HEAD };
   const read = (rows: Row[], now = current) => fixSeedRead([seedRow, dispatchRow, ...rows], pr, RUN, now);
   assert.equal(read([standDown()])?.kind, "held");

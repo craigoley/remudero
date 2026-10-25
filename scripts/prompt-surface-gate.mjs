@@ -9,6 +9,9 @@ import { renderMacroSkill } from "./generate-macro-skills.mjs";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
+import { loadInjectableSkills, selectSkillsForTask, renderSkillsPart, SKILL_FIX_TASK_TYPE } from "../src/lib/skill-workshop.js";
+import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../src/lib/learnings.js";
+import { TASK_TYPES } from "../src/lib/plan.js";
 
 export const PROMPT_SURFACE_FUNCTIONS = new Set([
   "implementPromptParts",
@@ -26,6 +29,7 @@ const FUNCTION_SOURCE_RE = /^(?:src\/lib\/prompt-render\.ts|src\/lib\/learnings\
 const LEARNINGS_SHARD_RE = /^learnings\/[^/]+\.ya?ml$/;
 const GOLDEN_FIXTURE_RE = /^test\/fixtures\/golden-verdicts\//;
 const TEST_FILE_RE = /^test\/.*\.test\.ts$/;
+const INJECTED_SKILL_PATH_RE = /^\.claude\/skills\/([^/]+)\/SKILL\.md$/;
 
 function runGit(root, args) {
   const result = git(args, { cwd: root });
@@ -54,27 +58,65 @@ function overlaps(a, b) {
   return a.start <= b.end && b.start <= a.end;
 }
 
+// Git's octal escapes encode UTF-8 bytes, not individual Unicode characters.
+function decodeGitPath(path) {
+  if (!path.startsWith('"')) return path;
+  if (!/^"(?:[^"\\]|\\(?:[abfnrtv\\"]|[0-3][0-7]{2}))*"$/.test(path)) {
+    throw new Error("prompt surface diff: invalid Git-quoted path");
+  }
+  const escapes = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, "\\": 92, '"': 34 };
+  const parts = path.slice(1, -1).match(/[^\\]+|\\(?:[abfnrtv\\"]|[0-3][0-7]{2})/g) ?? [];
+  const bytes = parts.map(part => part[0] !== "\\" ? Buffer.from(part) :
+    Buffer.from([part.length === 4 ? parseInt(part.slice(1), 8) : escapes[part[1]]]));
+  return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(bytes));
+}
+
 export function parseUnifiedDiff(diffText) {
   const files = [];
   let current;
+  let ambiguousHeader = false, oldPathResolved = false, newPathResolved = false;
+  const requireResolvedPaths = () => {
+    if (ambiguousHeader && (!oldPathResolved || !newPathResolved)) {
+      throw new Error("prompt surface diff: ambiguous Git file header without authoritative paths");
+    }
+  };
   for (const line of diffText.split("\n")) {
-    const fileMatch = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
-    if (fileMatch) {
-      current = { oldPath: fileMatch[1], newPath: fileMatch[2], hunks: [], changedLines: [] };
+    if (line.startsWith("diff --git ")) {
+      requireResolvedPaths();
+      const fileMatch = /^diff --git ("(?:[^"\\]|\\.)*"|a\/.+) ("(?:[^"\\]|\\.)*"|b\/.+)$/.exec(line);
+      if (!fileMatch) throw new Error("prompt surface diff: unparsed Git file header");
+      // Unquoted names may themselves contain " b/"; binary diffs have no ---/+++ fallback.
+      ambiguousHeader = fileMatch[1].startsWith("a/") && fileMatch[2].startsWith("b/") && line.split(" b/").length > 2;
+      oldPathResolved = newPathResolved = false;
+      current = { oldPath: decodeGitPath(fileMatch[1]).replace(/^a\//, ""),
+        newPath: decodeGitPath(fileMatch[2]).replace(/^b\//, ""), hunks: [], changedLines: [] };
       files.push(current);
       continue;
     }
     if (!current) continue;
+    // Rename records carry one whole path; an unquoted diff header can contain several " b/"s.
+    if (line.startsWith("rename from ")) {
+      current.oldPath = decodeGitPath(line.slice("rename from ".length));
+      oldPathResolved = true;
+      continue;
+    }
+    if (line.startsWith("rename to ")) {
+      current.newPath = decodeGitPath(line.slice("rename to ".length));
+      newPathResolved = true;
+      continue;
+    }
     if (line.startsWith("+++ ")) {
+      newPathResolved = true;
       const path = line.slice(4);
       if (path === "/dev/null") continue;
-      current.newPath = path.replace(/^b\//, "");
+      current.newPath = decodeGitPath(path.replace(/\t$/, "")).replace(/^b\//, "");
       continue;
     }
     if (line.startsWith("--- ")) {
+      oldPathResolved = true;
       const path = line.slice(4);
       if (path === "/dev/null") continue;
-      current.oldPath = path.replace(/^a\//, "");
+      current.oldPath = decodeGitPath(path.replace(/\t$/, "")).replace(/^a\//, "");
       continue;
     }
     const hunkMatch = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
@@ -95,6 +137,7 @@ export function parseUnifiedDiff(diffText) {
       current.changedLines.push(line);
     }
   }
+  requireResolvedPaths();
   return files;
 }
 
@@ -270,6 +313,77 @@ function changedPaths(files) {
   return [...new Set(files.map((file) => (file.newPath === "/dev/null" ? file.oldPath : file.newPath)))];
 }
 
+// Read one immutable approved tree through the production loader. Known absence is
+// empty; failed Git reads, symlinks and ambiguous tree shapes are never absence.
+function revisionSkills(root, revision) {
+  if (runGit(root, ["cat-file", "-t", revision]).trim() !== "commit") throw new Error(`skill reachability: ${revision} is not a commit`);
+  const parent = runGit(root, ["ls-tree", "-z", revision, "--", ".claude"]);
+  if (parent !== "" && !parent.startsWith("040000 tree ")) throw new Error("skill reachability: approved skill parent is not a tree");
+  const tree = runGit(root, ["ls-tree", "-z", revision, "--", ".claude/skills"]);
+  if (tree === "") return [];
+  if (!tree.startsWith("040000 tree ")) throw new Error("skill reachability: approved skill root is not a tree");
+  const entries = runGit(root, ["ls-tree", "-z", `${revision}:.claude/skills`]).split("\0").filter(Boolean);
+  const names = [];
+  const texts = new Map();
+  for (const entry of entries) {
+    const separator = entry.indexOf("\t");
+    const metadata = entry.slice(0, separator), name = entry.slice(separator + 1);
+    if (separator < 0 || !name || /[\r\n/]/.test(name)) throw new Error("skill reachability: ambiguous approved skill name");
+    if (metadata.startsWith("120000 ")) throw new Error("skill reachability: a symbolic skill entry cannot be resolved from Git");
+    if (metadata.startsWith("160000 ")) throw new Error("skill reachability: a gitlink skill entry cannot be resolved from Git");
+    if (!metadata.startsWith("040000 tree ")) continue;
+    const path = `.claude/skills/${name}/SKILL.md`;
+    const record = runGit(root, ["ls-tree", "-z", revision, "--", path]);
+    if (record === "") continue;
+    if (!/^(100644|100755) blob /.test(record)) throw new Error(`skill reachability: ${path} is not a regular source blob`);
+    names.push(name);
+    texts.set(join("approved-skills", name, "SKILL.md"), runGit(root, ["show", `${revision}:${path}`]));
+  }
+  // Every advertised name has its complete regular blob before the loader runs.
+  return loadInjectableSkills("approved-skills", () => names, path => texts.get(path));
+}
+
+function skillSurfaceContext(root, base, head, files) {
+  const paths = [...new Set(files.flatMap(file => [file.oldPath, file.newPath]))];
+  if (!paths.some(path => path === ".claude" || path === ".claude/skills" || path.startsWith(".claude/skills/"))) {
+    return { surfaces: [], before: [], after: [] };
+  }
+  const candidates = paths.filter(path => INJECTED_SKILL_PATH_RE.test(path));
+  const before = revisionSkills(root, base), after = revisionSkills(root, head);
+  const signature = (skills, name) => {
+    const skill = skills.find(skill => skill.name === name);
+    return skill ? JSON.stringify({ name: skill.name, body: skill.body, appliesTo: [...new Set(skill.appliesTo)].sort(),
+      whenPaths: skill.whenPaths === undefined ? null : [...new Set(skill.whenPaths)].sort() }) : null;
+  };
+  return { before, after, surfaces: candidates.filter(path => {
+    const name = INJECTED_SKILL_PATH_RE.exec(path)[1];
+    return signature(before, name) !== signature(after, name);
+  }) };
+}
+
+function skillEvidenceFor(root, head, files, context) {
+  const candidates = changedPaths(files).filter(path => GOLDEN_FIXTURE_RE.test(path));
+  const qualified = new Map();
+  for (const path of candidates) {
+    let fixture;
+    try { fixture = parseYaml(readRevisionFile(root, head, path)); }
+    catch { continue; }
+    if (!fixture || fixture.kind !== "injected-skill-prompt-effect" || typeof fixture.skill !== "string" ||
+        typeof fixture.task_type !== "string" || ![...TASK_TYPES, SKILL_FIX_TASK_TYPE].includes(fixture.task_type) || !Array.isArray(fixture.task_files) ||
+        !fixture.task_files.every(p => typeof p === "string") || typeof fixture.before !== "string" || typeof fixture.after !== "string") continue;
+    const select = skills => selectSkillsForTask(skills, fixture.task_type, DEFAULT_KNOWLEDGE_BUDGET_CHARS, fixture.task_files);
+    const before = select(context.before), after = select(context.after);
+    if (![...before, ...after].some(skill => skill.name === fixture.skill)) continue;
+    if (renderSkillsPart(before.filter(skill => skill.name === fixture.skill)) ===
+        renderSkillsPart(after.filter(skill => skill.name === fixture.skill))) continue;
+    const beforePrompt = renderSkillsPart(before), afterPrompt = renderSkillsPart(after);
+    if (beforePrompt === afterPrompt || fixture.before !== beforePrompt || fixture.after !== afterPrompt) continue;
+    qualified.set(fixture.skill, path);
+  }
+  return context.surfaces.every(path => qualified.has(INJECTED_SKILL_PATH_RE.exec(path)[1]))
+    ? [...new Set(context.surfaces.map(path => qualified.get(INJECTED_SKILL_PATH_RE.exec(path)[1])))] : [];
+}
+
 function readWorktreeFile(root, path) {
   try {
     return readFileSync(join(root, path), "utf8");
@@ -333,26 +447,31 @@ export function refusalMessage(surfaces) {
 
 export function evaluatePromptSurfaceDiff(diffText, { root = REPO_ROOT, base = "origin/main", head = "HEAD" } = {}) {
   const files = parseUnifiedDiff(diffText);
+  const skillContext = skillSurfaceContext(root, base, head, files);
+  const ordinarySurfaces = [...new Set(files.flatMap(file => [...touchedPathSurfaces(root, head, file), ...touchedSymbolSurfaces(root, base, head, file)]))];
   const surfaces = [
-    ...new Set(files.flatMap((file) => [...touchedPathSurfaces(root, head, file), ...touchedSymbolSurfaces(root, base, head, file)])),
+    ...new Set([...ordinarySurfaces, ...skillContext.surfaces]),
   ];
   if (surfaces.length === 0) {
     return { ok: true, message: "prompt-surface-gate: OK — no prompt surface touched", surfaces, evidence: [] };
   }
-  const evidence = evidenceFor(root, head, files, surfaces);
-  if (evidence.length > 0) {
+  const ordinaryEvidence = ordinarySurfaces.length ? evidenceFor(root, head, files, ordinarySurfaces) : [];
+  const skillEvidence = skillContext.surfaces.length ? skillEvidenceFor(root, head, files, skillContext) : [];
+  const evidence = [...new Set([...ordinaryEvidence, ...skillEvidence])];
+  if ((!ordinarySurfaces.length || ordinaryEvidence.length) && (!skillContext.surfaces.length || skillEvidence.length)) {
     return { ok: true, message: `prompt-surface-gate: OK — evidence: ${evidence.join(", ")}`, surfaces, evidence };
   }
   return {
     ok: false,
     surfaces,
     evidence,
-    message: refusalMessage(surfaces),
+    message: refusalMessage(surfaces) + (skillContext.surfaces.length ? " Injected skills require a changed golden fixture with kind: injected-skill-prompt-effect, skill, task_type, task_files, before and after. Both prompts must match actual maintained loading, default-budget selection and rendering at base and head, and differ for a context that selects that skill." : ""),
   };
 }
 
 export function evaluatePromptSurfaceGate({ root = REPO_ROOT, base = "origin/main", head = "HEAD" } = {}) {
-  return evaluatePromptSurfaceDiff(readGitDiff(root, base, head), { root, base, head });
+  const comparisonBase = runGit(root, ["merge-base", base, head]).trim();
+  return evaluatePromptSurfaceDiff(readGitDiff(root, base, head), { root, base: comparisonBase, head });
 }
 
 export function main(argv = process.argv.slice(2), { log = console.log, error = console.error } = {}) {

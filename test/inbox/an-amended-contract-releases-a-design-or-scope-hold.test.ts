@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { gzipSync } from "node:zlib";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -612,4 +613,76 @@ test("failed refresh evidence is exact task, PR, head, old semantic, new semanti
   await runSweep([pr()], f.deps);
   assert.equal(attempts, 2, "a genuinely different legacy contract earns its normal attempt");
   assert.equal(f.state.dispatched, 0); assert.equal(f.state.admissions, 0);
+});
+
+
+test("a rotated non-object row cannot authorize an amended contract refresh", async t => {
+  for (const form of ["plain", "gzip"] as const) for (const bad of [null, false, 17, "unattributed", []]) {
+    await t.test(`${form} ${JSON.stringify(bad)}`, async t => {
+      const { dir } = ownedFixtureDir(t, "contract-archive-non-object");
+      const ledger = join(dir, "ledger.ndjson");
+      writeFileSync(ledger, JSON.stringify(headContractHold()) + "\n");
+      const f = fixture([headContractHold()]);
+      f.state.revision = "contract-B";
+      const deps = { ...f.deps, ledgerPath: ledger, readHeadContractRefreshHistory: undefined };
+      const healthy = await lightPassHeadContractRefresh([pr()], deps);
+      assert.equal(healthy.headContractRefreshFor?.(pr()), f.deps.updateBranch,
+        "a complete real history grants the positive-control capability");
+      const raw = JSON.stringify(bad) + "\n" + JSON.stringify({ step: "unrelated.completed" }) + "\n";
+      writeFileSync(join(dir, `ledger.2026-10-23.ndjson${form === "gzip" ? ".gz" : ""}`),
+        form === "gzip" ? gzipSync(raw) : raw);
+      await runSweep([pr()], deps);
+      assert.equal(f.state.refreshed, 0, "unattributed archived evidence cannot authorize the external update");
+      assert.equal(f.state.dispatched, 0);
+      assert.equal(f.state.admissions, 0);
+    });
+  }
+});
+
+
+test("strict contract history invalidates a prior clean digest of non-object evidence", async t => {
+  const { createLedgerRotationMemo, ledgerRotationEntries } = await import("#src/lib/ledger-union.js");
+  const { dir } = ownedFixtureDir(t, "contract-non-object-digest");
+  const name = "ledger.2026-10-23.ndjson";
+  writeFileSync(join(dir, "ledger.ndjson"), "");
+  writeFileSync(join(dir, name), "null\n");
+  const step = "sweep.head_contract_refresh.attempted";
+  const holder = "contract-non-object-digest-control";
+  const legacy = createLedgerRotationMemo(() => [], { holder,
+    durableDigest: { reducerVersion: `1-all-lines:${step}` } });
+  await legacy.load(ledgerRotationEntries([name], dir));
+  assert.equal(legacy.retention().archives, 1);
+  assert.equal(legacy.retention().tornRows, 0, "the existing general memo's policy is unchanged");
+  let reads = 0;
+  const opts = { parseAll: true, slice: { holder, version: "1", steps: [step],
+    project: (row: Record<string, unknown>) => ({ step: row.step }) },
+    readFile: async (path: string) => { reads++; return readFile(path); } };
+  const reader = sweepModule.createEscalationTriageHistoryReader(opts);
+  assert.equal((await reader(dir)).torn, 1, "the old clean digest cannot erase unattributed evidence");
+  assert.equal(reads, 1, "strict semantics invalidate the old digest and read the actual archive");
+  assert.equal((await reader(dir)).torn, 1);
+  assert.equal(reads, 1, "the strict digest retains the refusal without repeated decompression");
+  const restarted = sweepModule.createEscalationTriageHistoryReader(opts);
+  assert.equal((await restarted(dir)).torn, 1);
+  assert.equal(reads, 1);
+  assert.equal(restarted.lastLoad().digestHits, 1);
+});
+
+test("an unread strict archive stays unknown instead of falling back to a permissive parse", async t => {
+  const { dir } = ownedFixtureDir(t, "contract-strict-unread");
+  const name = "ledger.2026-10-23.ndjson", path = join(dir, name);
+  writeFileSync(join(dir, "ledger.ndjson"), "");
+  writeFileSync(path, "null\n");
+  let denied = true, reads = 0;
+  const reader = sweepModule.createEscalationTriageHistoryReader({ parseAll: true,
+    slice: { holder: "contract-strict-unread", version: "1", steps: ["sweep.head_contract_refresh.attempted"] },
+    readFile: async path => { reads++; if (denied) throw new Error("fixture archive unavailable"); return readFile(path); } });
+  const refused = await reader(dir);
+  assert.equal(refused.ok, false, "a synchronous best-effort fallback cannot authorize the write");
+  assert.ok(refused.unread.includes(path));
+  assert.deepEqual(refused.rows, []);
+  denied = false;
+  const recovered = await reader(dir);
+  assert.equal(recovered.torn, 1, "a successful strict reread retains the unattributed evidence");
+  assert.equal(reads, 2, "failed strict loads are retried through the same asynchronous reader");
 });

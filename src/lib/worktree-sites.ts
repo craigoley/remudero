@@ -174,6 +174,19 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
     },
   },
   {
+    file: "src/lib/sweep.ts",
+    site: "regenerateConflictViaGit",
+    creates: "a DETACHED worktree at the PR's own head sha, merging main to resolve registered artifact conflicts",
+    disposition: {
+      kind: "exempt",
+      because:
+        "W1-T9578 resolves conflicts on the PR's exact head, so worktreeAdd's fresh branch off origin/main " +
+        "would discard the changes being repaired. The resolver verifies both head and main leases before " +
+        "creation and again before pushing, and refuses either moved ref. Its temporary tree is removed " +
+        "after success or failure, as in rebaseDirtyFleetBranchViaGit above.",
+    },
+  },
+  {
     file: "src/lib/composition-root.ts",
     site: "addWorktree",
     creates:

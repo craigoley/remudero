@@ -67,6 +67,10 @@ function typecheckFixture(tmp: string) {
   );
 }
 
+function mutateDaemonError(schema: string, before: string, after: string): string {
+  return schema.replace(/^    Error: \{\n[\s\S]*?^    \};/m, (errorSchema) => errorSchema.replace(before, after));
+}
+
 test("consumer-breaking-change: the REAL committed schema.d.ts -> packages/daemon-client-smoke compiles GREEN", () => {
   const tmp = buildFixture(readFileSync(REAL_SCHEMA, "utf8"));
   try {
@@ -79,7 +83,7 @@ test("consumer-breaking-change: the REAL committed schema.d.ts -> packages/daemo
 
 test("consumer-breaking-change: renaming components.schemas.Error.error -> consumer typecheck goes RED, then GREEN again once reverted", () => {
   const real = readFileSync(REAL_SCHEMA, "utf8");
-  const mutated = real.replace('error: "unauthorized"', 'errorCode: "unauthorized"');
+  const mutated = mutateDaemonError(real, 'error: "unauthorized"', 'errorCode: "unauthorized"');
   assert.notEqual(mutated, real, "fixture setup: the field-rename mutation must actually change the schema");
 
   const redTmp = buildFixture(mutated);
@@ -88,6 +92,7 @@ test("consumer-breaking-change: renaming components.schemas.Error.error -> consu
     const output = redResult.stdout + redResult.stderr;
     assert.notEqual(redResult.status, 0, output);
     assert.match(output, /consumer\.ts/);
+    assert.match(output, /Property 'error' does not exist/);
   } finally {
     rmSync(redTmp, { recursive: true, force: true });
   }
@@ -105,7 +110,7 @@ test("consumer-breaking-change: renaming components.schemas.Error.error -> consu
 
 test("consumer-breaking-change: renaming an enum member of components.schemas.Error.error -> the exhaustive switch goes RED, then GREEN again once reverted", () => {
   const real = readFileSync(REAL_SCHEMA, "utf8");
-  const mutated = real.replace('"internal_error"', '"server_error"');
+  const mutated = mutateDaemonError(real, '"internal_error"', '"server_error"');
   assert.notEqual(mutated, real, "fixture setup: the enum-rename mutation must actually change the schema");
 
   const redTmp = buildFixture(mutated);
@@ -114,6 +119,7 @@ test("consumer-breaking-change: renaming an enum member of components.schemas.Er
     const output = redResult.stdout + redResult.stderr;
     assert.notEqual(redResult.status, 0, output);
     assert.match(output, /consumer\.ts/);
+    assert.match(output, /not assignable to type 'never'/);
   } finally {
     rmSync(redTmp, { recursive: true, force: true });
   }

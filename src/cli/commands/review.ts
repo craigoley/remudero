@@ -554,9 +554,10 @@ export async function runReview(host: ReviewCommandHost, args: {
     budget_present: task.budget_usd !== undefined, untasked: false, head_task_resolved: true,
     own_task_record_missing: false, reviewer_outcome: "not_attempted", verdict_lines: [],
   };
+  let replayReviewerCodeSha: string | undefined;
   const recordReplay = (decision: ReviewOutcomeDecision): void => {
     if (args.shadow) return;
-    const sha = reviewerHealthRowFields("review.posted", undefined).reviewer_code_sha;
+    const sha = replayReviewerCodeSha ?? reviewerHealthRowFields("review.posted", undefined).reviewer_code_sha;
     log("review.replay_input", reviewReplayLedgerFields(replayInput, decision, {
       pr_url: prUrl, head_sha: headSha, reviewer_code_sha: typeof sha === "string" ? sha : null,
     }));
@@ -1122,6 +1123,10 @@ export async function runReview(host: ReviewCommandHost, args: {
     reviewerCodeFreshness = await args.reviewerCodeFreshness?.();
   } catch (error) {
     reviewerCodeFreshness = { status: "unreadable", reason: `could not assess reviewer code freshness: ${String(error)}` };
+  }
+  // Publication already assessed this loaded reviewer; bundled code need not have a checkout HEAD.
+  if (reviewerCodeFreshness !== undefined && reviewerCodeFreshness.status !== "unreadable") {
+    replayReviewerCodeSha = reviewerCodeFreshness.codeSha;
   }
   const posted = await postReviewStatusGuarded({
     owner,

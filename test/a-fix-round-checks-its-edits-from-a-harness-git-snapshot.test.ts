@@ -62,7 +62,7 @@ test("a CommonJS probe loads the harness snapshot functions without git or async
     `const snapshot = harness.writeFixCensusSnapshot(root, () => {}, (_root, args) => {`,
     `  if (args[0] === "rev-parse") return args[1] === "HEAD" ? "head-sha" : "main-sha";`,
     `  if (args[0] === "merge-base") return "base-sha";`,
-    `  if (args[0] === ${JSON.stringify(["ls", "files"].join("-"))}) return tracked.join("\\n");`,
+    `  if (args[0] === "ls-files") return tracked.join("\\n");`,
     `  if (args[0] === "ls-tree") return "";`,
     `  throw new Error("unexpected snapshot read: " + args.join(" "));`,
     `});`,

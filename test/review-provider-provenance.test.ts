@@ -312,7 +312,9 @@ test("W1-T2594: the production review command resolves and ledgers provenance fo
 
 test("W1-T2594: production ordering records only after ownership/push and before the next gate", () => {
   const source = readFileSync(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url), "utf8");
-  const fixSource = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  // W1-T9337: host qualification preserves the same collaborator and ordering.
+  const fixSource = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8") + "\n" +
+    readFileSync(new URL("../src/cli/commands/fix.ts", import.meta.url), "utf8").replace(/\bhost\./g, "");
 
   const implementStart = source.indexOf('say("implement worker")');
   const implementSnapshot = source.indexOf("const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath)", implementStart);
