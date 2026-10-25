@@ -116,6 +116,13 @@ function sourceFor(request: ImprovementThreadRequest, scope: Scope, deps: Improv
     policyVersion: CODE_HEALTH_POLICY_VERSION, analyzedSha: scan.analyzedSha };
   // Scanner text is quoted evidence. It never becomes a command or a human approval.
   const excerpt = opportunity.evidence.slice(0, 20).map(row => ({ path: row.path, finding: row.title, severity: row.severity, scan: row.scanId, observedAt: row.observedAt }));
+  const ownThreadId = inboxThreadId(`improvement:${hash([request.repository, scope.instance, opportunity.proposalId])}`);
+  const linkedWork = opportunity.relatedWork.flatMap(row => {
+    if (row.threadId !== ownThreadId) return [row];
+    const otherWork = { ...row }; delete otherWork.threadId;
+    return otherWork.taskId || otherWork.prUrl ? [otherWork] : [];
+  });
+  const briefRelated = [...new Map(linkedWork.map(row => [JSON.stringify(row), row])).values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
   const context = [
     `Improvement in ${request.repository} (${scope.instance})`,
     `Observed finding (quoted): ${JSON.stringify(opportunity.title)}`, `What this may affect: ${opportunity.consequence}`,
@@ -128,7 +135,8 @@ function sourceFor(request: ImprovementThreadRequest, scope: Scope, deps: Improv
     "Evidence details", `Source checked: ${scan.observedAt}`, `Source commit: ${scan.analyzedSha}`,
     `Saved snapshot: ${request.snapshotId}`, `Opportunity: ${opportunity.id}`, `Existing policy: ${CODE_HEALTH_POLICY_VERSION}`,
     `Evidence: ${excerpt.length} shown of ${opportunity.evidenceCount} findings.`, JSON.stringify(excerpt),
-    `Related work (${related.state}): ${JSON.stringify(opportunity.relatedWork)}`, related.reason ?? "Review existing work before filing.",
+    `Linked work available from saved records: ${JSON.stringify(briefRelated)}`,
+    "These links may be incomplete. The filing workflow checks current work before opening a plan. This conversation's own link does not change its goal.",
   ].join("\n");
   if (Buffer.byteLength(context) > 64 * 1024) return fail("source_unavailable", "This finding's briefing exceeds the saved conversation limit.");
   return { binding, context, sourceProposalId: opportunity.proposalId };
