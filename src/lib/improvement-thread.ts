@@ -140,7 +140,10 @@ function lockOwnership(lock: InflightLockHandle): () => boolean {
   const stat = lstatSync(lock.path), original = hash(lock.info);
   return () => {
     try { const current = lstatSync(lock.path); return current.isFile() && current.dev === stat.dev && current.ino === stat.ino && hash(readCodeHealthArtifactJson(lock.path, 4096)) === original; }
-    catch { return false; } // Unknown ownership never permits a write or release.
+    catch {
+      // Unreadable or replaced ownership is unknown, so every write and release is refused.
+      return false;
+    }
   };
 }
 function readIntent(path: string): Intent | undefined {
@@ -195,7 +198,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
       updateProposalRegistry(registryPath, current => {
         strictRegistry(registryPath); if (!owns!()) throw new Error("Improvement request ownership changed.");
         const proposal = current.find(row => row.id === previous.proposalId);
-        if (!proposal?.improvement) throw new Error("The saved proposal is unavailable.");
+        if (proposal === undefined || proposal.improvement === undefined) throw new Error("The saved proposal is unavailable.");
         if (proposal.improvement.requestId !== requestId || proposal.improvement.conversationReady) return null;
         return current.map(row => row.id === previous.proposalId ? { ...row, improvement: { ...row.improvement!, conversationReady: true } } : row);
       }, { maxWaitMs: 0 });
@@ -250,7 +253,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
     updateProposalRegistry(registryPath, current => {
       strictRegistry(registryPath); if (!owns!()) throw new Error("Improvement request ownership changed.");
       const proposal = current.find(row => row.id === intent.proposalId);
-      if (!proposal?.improvement) throw new Error("The planning proposal is unavailable.");
+      if (proposal === undefined || proposal.improvement === undefined) throw new Error("The planning proposal is unavailable.");
       if (proposal.improvement.requestId !== requestId) {
         if (proposal.improvement.goalDigest === hash([intent.binding, intent.goalBody, intent.context]) && proposal.improvement.conversationReady) return null;
         throw new Error("The planning proposal changed while saving.");
