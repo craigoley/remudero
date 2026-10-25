@@ -20,6 +20,7 @@
     - test/**/daily-progress-contract.test.ts
     - test/**/code-health-contract.test.ts
     - src/lib/repositories-view.ts
+    - "src/lib/serve.ts"
   rationale: Daily progress and Code health have no source-owned versioned contract. Current UTC 7/30-day flow
     buckets and a 200-entry Recent feed cannot establish a complete local-day report. Code quality must remain
     separate from delivery friction. Establish expected evidence independently of rows observed, so missing

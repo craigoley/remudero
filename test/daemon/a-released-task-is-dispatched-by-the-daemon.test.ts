@@ -1,3 +1,4 @@
+import { operatorReleasePin } from "#src/lib/operator-release.js";
 /**
  * W1-T10348 — A RELEASED verify:human TASK IS DISPATCHED BY THE DAEMON.
  *
@@ -25,7 +26,7 @@ import type { GardenCheckout } from "#src/lib/gardener.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { machineShardHeaderLines } from "#src/lib/machine-filing.js";
 import { recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "#src/lib/machine-filing-judge.js";
-import { loadPlan, RELEASE_LEDGER_STEP, type Plan, type Task } from "#src/lib/plan.js";
+import { loadPlan, parseTasksFromYaml, RELEASE_LEDGER_STEP, type Plan, type Task } from "#src/lib/plan.js";
 import type { RiskJudgeVerdict } from "#src/lib/risk-judge.js";
 import { taskRulingPin } from "#src/lib/task-linter.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -33,11 +34,15 @@ import * as runTask from "#src/run-task.js";
 
 type Row = { step: string; extra: Record<string, unknown> };
 
-const release = (taskId: string, machine = false) =>
+const release = (taskId: string, machine = false, task: Task = parseTasksFromYaml(record(taskId), "release-fixture")[0]!) =>
   JSON.stringify({
-    run_id: `APPROVE-${taskId}`, task_id: taskId, step: RELEASE_LEDGER_STEP, released: "verify-human",
+    run_id: `APPROVE-${taskId}`, task_id: taskId, step: RELEASE_LEDGER_STEP, released: "verify-human", release_pin: operatorReleasePin(task),
     ...(machine ? { released_by: "verify-human-judge", author_class: "machine" } : {}),
   });
+
+function durable(ids: string[], plan?: Plan) {
+  return new Map(ids.map(id => [id, { at: "2026-10-24T10:00:00Z", pin: operatorReleasePin(plan?.byId.get(id) ?? parseTasksFromYaml(record(id), "release-fixture")[0]!) }]));
+}
 
 function record(id: string, over: { verify?: string; files?: string[]; dependsOn?: string[]; status?: string; extra?: string[] } = {}): string {
   return [
@@ -130,7 +135,7 @@ test("W1-T10348: a machine release with no escalate ruling dispatches; one over 
 test("W1-T10348: the console kick keeps admitting an operator release, and the release record is read once per tick", async (t) => {
   let kicks = [{ taskId: "W1-T5", origin: "console-w1t10348" }];
   const kicked = await drive(planOf(t, record("W1-T4", { verify: "auto" }), record("W1-T5")), {
-    readDurableReleases: () => new Set(["W1-T5"]),
+    readDurableReleases: () => durable(["W1-T5"]),
     pendingKicks: () => kicks,
     clearKick: (id) => { kicks = kicks.filter((k) => k.taskId !== id); },
   });
@@ -141,7 +146,7 @@ test("W1-T10348: the console kick keeps admitting an operator release, and the r
   let durableReads = 0;
   const ids = ["W1-T11", "W1-T12", "W1-T13", "W1-T14", "W1-T15", "W1-T16"];
   const many = await drive(planOf(t, ...ids.map((id) => record(id))), {
-    readDurableReleases: () => { durableReads += 1; return new Set(ids); },
+    readDurableReleases: () => { durableReads += 1; return durable(ids); },
   });
   assert.equal(many.spawned.length, 1);
   assert.equal(many.summary.stopReason, "max_reached");
@@ -153,7 +158,7 @@ test("W1-T10348: the console kick keeps admitting an operator release, and the r
 test("W1-T10348: a release that rotation shed is still honoured from operator-releases.json", async (t) => {
   const plan = () => planOf(t, record("W1-T6"));
   // The daemon: the ledger has rotated the row away; only the durable file remembers the release.
-  const daemon = await drive(plan(), { readLedgerLines: () => [], readDurableReleases: () => new Set(["W1-T6"]) });
+  const daemon = await drive(plan(), { readLedgerLines: () => [], readDurableReleases: () => durable(["W1-T6"]) });
   assert.deepEqual(daemon.spawned, ["W1-T6"]);
 
   // The run child and `rmd drain` read the same two records through the production reader pair.
@@ -163,7 +168,7 @@ test("W1-T10348: a release that rotation shed is still honoured from operator-re
   const ledgerPath = ledgerPathFor({ root } as never);
   writeFileSync(ledgerPath, JSON.stringify({ step: "sweep.disposed", task_id: "W1-T9" }) + "\n");
   assert.equal(drainLib.resolveReleasedIds(runTask.releaseReadersFor(ledgerPath), plan()).has("W1-T6"), false, "positive control: nothing released yet");
-  recordOperatorRelease(join(root, "state"), "W1-T6", "2026-10-13T00:00:00.000Z");
+  recordOperatorRelease(join(root, "state"), plan().byId.get("W1-T6")!, "2026-10-13T00:00:00.000Z");
   const resolved = drainLib.resolveReleases(runTask.releaseReadersFor(ledgerPath), plan());
   assert.ok(resolved.ids.has("W1-T6"), "the run child's admission reads operator-releases.json");
   assert.equal(resolved.authors.get("W1-T6"), "operator");
@@ -192,8 +197,8 @@ test("W1-T10348: a release that rotation shed is still honoured from operator-re
   // A throwing ledger reader never throws into selection and does not hide the durable releases.
   const throwing = drainLib.resolveReleases({
     readLedgerLines: () => { throw new Error("EACCES: ledger unreadable"); },
-    readDurableReleases: () => new Set(["W1-T8"]),
-  }, plan());
+    readDurableReleases: () => durable(["W1-T8"]),
+  }, planOf(t, record("W1-T6"), record("W1-T8")));
   assert.deepEqual([...throwing.ids], ["W1-T8"]);
   assert.equal(throwing.ledgerUnreadable, "EACCES: ledger unreadable");
 });
@@ -214,8 +219,8 @@ test("W1-T10348: a released task dispatch filters out is named with its reason",
     "W1-T23",
   );
   const { spawned, named } = await drive(plan, {
-    readLedgerLines: () => [release("W1-T23", true), release("W1-T21"), release("W1-T22")],
-    readDurableReleases: () => new Set(["W1-T20"]),
+    readLedgerLines: () => [release("W1-T23", true, plan.byId.get("W1-T23")!), release("W1-T21", false, plan.byId.get("W1-T21")!), release("W1-T22", false, plan.byId.get("W1-T22")!)],
+    readDurableReleases: () => durable(["W1-T20"], plan),
   }, 4);
   assert.deepEqual(spawned, [], "a release lifts verify:human only: holds, workflow paths, deps and escalations still stand");
   const byTask = (id: string) => named.filter((n) => n.task === id);
@@ -232,7 +237,7 @@ test("W1-T10348: a released task dispatch filters out is named with its reason",
   const rows: Record<string, unknown>[] = [];
   const tallied: string[] = [];
   const named2 = new Set<string>();
-  const resolved = drainLib.resolveReleases({ readLedgerLines: () => [release("W1-T20")] }, plan);
+  const resolved = drainLib.resolveReleases({ readLedgerLines: () => [release("W1-T20", false, plan.byId.get("W1-T20")!)] }, plan);
   const onFiltered = daemonLib.releasedFilteredLogger(resolved, named2, (task) => tallied.push(task.id), (step, extra) => rows.push({ step, ...extra }));
   const task = plan.byId.get("W1-T20")!;
   for (const reason of ["blocked", "blocked", "run-branch-already-pushed", "blocked"] as DispatchFilterReason[]) onFiltered(task, reason);
@@ -326,7 +331,7 @@ test("W1-T10348: the judge pins an operator release over a settled escalation", 
       stageProposal: () => undefined,
       log: (step, extra = {}) => void logs.push({ step, extra }),
       clock,
-      operatorReleases: () => new Set(released),
+      operatorReleases: () => durable(released, loadPlan(join(stale, "plan", "tasks.yaml"))),
     };
     return { report: await runMachineFilingJudge(ports), logs };
   };
