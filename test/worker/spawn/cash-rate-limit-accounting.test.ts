@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { fixedClock } from "#src/lib/clock.js";
-import { OPENWEIGHT_ALLOWANCE_FILENAME, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import { OPENWEIGHT_ALLOWANCE_FILENAME, openWeightReservationUsd, openWeightUsageUsd, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const fixtureSecret = "cash-accounting-fixture-not-a-credential";
@@ -73,6 +73,32 @@ test("cash rate-limit accounting preserves fresh reservations and server cooldow
   assert.equal(rows[0]!.settledUsd, 0);
   assert.equal(rows[1]!.settledUsd, 0.000101);
   assert.equal(result.budgetSettledUsd, rows[1]!.settledUsd);
+});
+
+test("cash rate-limit accounting keeps retry estimates conservative outside verified Azure endpoints", async t => {
+  for (const model of ["gpt-6-luna", "gpt-6.1-sol"]) {
+    const bodies: string[] = [];
+    const { result, rows } = await attempt(t, async (_url, init) => {
+      bodies.push(String(init?.body));
+      if (bodies.length === 1) return new Response(null, { status: 429, headers: { "retry-after-ms": "1" } });
+      return model === "gpt-6.1-sol"
+        ? Response.json({ id: "conservative-response", model, status: "completed",
+          usage: { input_tokens: 10, output_tokens: 2 },
+          output: [{ type: "message", content: [{ type: "output_text", text: "DONE" }] }] })
+        : Response.json({ id: "conservative-chat", model, usage: { prompt_tokens: 10, completion_tokens: 2 },
+          choices: [{ finish_reason: "stop", message: { content: "DONE" } }] });
+    }, { model, endpoint: "https://fixture.invalid/" });
+    assert.equal(result.isError, false, result.stderr);
+    assert.equal(result.text, "DONE");
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[0], bodies[1]);
+    assert.equal(rows.length, 2);
+    const bytes = Buffer.byteLength(bodies[0]!, "utf8");
+    assert.equal(rows[0]!.settledUsd, model === "gpt-6.1-sol"
+      ? openWeightReservationUsd(model, bytes) : openWeightUsageUsd(model, bytes, 0));
+    assert.ok(rows[0]!.settledUsd! > 0);
+    assert.equal(result.budgetSettledUsd, rows[0]!.settledUsd! + rows[1]!.settledUsd!);
+  }
 });
 
 test("cash rate-limit accounting does not remove the request-attempt ceiling", async t => {
