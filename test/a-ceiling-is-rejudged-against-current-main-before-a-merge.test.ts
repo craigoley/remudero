@@ -2,7 +2,8 @@
  * W1-T9962 — A RATCHET IS RE-JUDGED AGAINST CURRENT MAIN BEFORE THE SWEEP ARMS OR MERGES.
  *
  * 2026-10-16: #12428, #12388 (which lowered the src/run-task.ts row on a stale base) and #12437 each
- * passed comment-load on its own base, and together took main over its recorded ceiling. The replay
+ * originally used comment volume. Operator 2026-10-24 routes that to follow-up work; this replay now
+ * uses clock signatures to preserve the remaining landing-tree protection. The replay
  * below rebuilds that shape in a real repository and judges each head on the main it would land on.
  */
 import assert from "node:assert/strict";
@@ -24,7 +25,7 @@ import { runArmedRatchetRejudge, type ArmedStalledPr, type OpenPrView } from "#s
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const FILE = "src/run-task.ts";
-const BASELINE = "scripts/comment-load-baseline.json";
+const BASELINE = "scripts/clock-signature-baseline.json";
 const N = 300;
 const OWNER = "craigoley";
 const REPO = "remudero";
@@ -33,15 +34,15 @@ const url = (n: number) => `https://github.com/${OWNER}/${REPO}/pull/${n}`;
 function commit(repo: GitRepo, lines: string[], row: number, message: string): string {
   mkdirSync(join(repo.dir, "src"), { recursive: true });
   mkdirSync(join(repo.dir, "scripts"), { recursive: true });
-  writeFileSync(join(repo.dir, FILE), `${lines.join("\n")}\nexport const x = 1;\n`);
-  writeFileSync(join(repo.dir, BASELINE), `${JSON.stringify({ [FILE]: row }, null, 2)}\n`);
+  writeFileSync(join(repo.dir, FILE), `${lines.map(line => `Date.now(); ${line}`).join("\n")}\nexport const x = 1;\n`);
+  writeFileSync(join(repo.dir, BASELINE), `${JSON.stringify({ [FILE]: { dateNow: row, legacy: 0, newDate: 0 } }, null, 2)}\n`);
   repo.git("add", "-A");
   repo.git("commit", "-q", "-m", message);
   return repo.git("rev-parse", "HEAD");
 }
 
 function linesAt(repo: GitRepo): string[] {
-  return repo.git("show", `HEAD:${FILE}`).split("\n").filter((l) => l.startsWith("//"));
+  return repo.git("show", `HEAD:${FILE}`).split("\n").filter((l) => l.startsWith("Date.now(); //")).map(l => l.slice("Date.now(); ".length));
 }
 
 /** The incident: main at N comment lines and row N; #12402 adds one on main; A (#12428) adds one on the
@@ -86,8 +87,8 @@ function judgeOwnTree(repo: GitRepo, base: string, head: string): MergedRatchetJ
 }
 
 function memoryInputs(merged: { count: number; row: number }, main: { count: number; row: number }): MergedRatchetInputs {
-  const text = (n: number) => `${Array.from({ length: n }, (_, i) => `// l${i}`).join("\n")}\n`;
-  const tree = (s: { count: number; row: number }) => (p: string) => (p === FILE ? text(s.count) : p === BASELINE ? JSON.stringify({ [FILE]: s.row }) : null);
+  const text = (n: number) => `${Array.from({ length: n }, (_, i) => `Date.now(); // l${i}`).join("\n")}\n`;
+  const tree = (s: { count: number; row: number }) => (p: string) => (p === FILE ? text(s.count) : p === BASELINE ? JSON.stringify({ [FILE]: { dateNow: s.row, legacy: 0, newDate: 0 } }) : null);
   return { mainSha: "main-sha", headSha: "head-sha", changed: [FILE, BASELINE], measuredFiles: [FILE, BASELINE], readMerged: tree(merged), readMain: tree(main) };
 }
 
@@ -110,7 +111,7 @@ function armDeps(over: Partial<ArmDeps> & { calls: string[] }): ArmDeps {
   };
 }
 
-test("W1-T9962: the 2026-10-16 replay refuses each of the three merges against the main it would have landed on", () => {
+test("W1-T9962: the three-merge replay still protects counted clock signatures against the landing tree", () => {
   const fx = incident();
   const a = judgeOnto(fx, 12428, fx.m1);
   assert.equal(a.verdict, "crossing");
@@ -128,7 +129,7 @@ test("W1-T9962: the 2026-10-16 replay refuses each of the three merges against t
     assert.equal(judgeOnto(fx, n, base).verdict, "clean", `#${n} on its own base`);
     const own = judgeOwnTree(fx.origin, base, head);
     assert.equal(own.verdict, "clean", `#${n}'s own tree`);
-    assert.deepEqual(own.counted, ["comment-load", "clock-signature"]);
+    assert.deepEqual(own.counted, ["clock-signature"]);
   }
 });
 
@@ -180,7 +181,7 @@ test("W1-T9962: a ceiling lowered on a stale base is re-derived against current 
   // Above main's own ceiling it is a crossing, re-derived to the value the gate prints to record.
   const over = judgeMergedRatchets(memoryInputs({ count: N + 2, row: N }, { count: N + 1, row: N + 1 }));
   assert.equal(over.verdict, "crossing");
-  assert.equal(over.rows[0]?.rederived, 500);
+  assert.equal(over.rows[0]?.rederived, N + 2);
   // A crossing main already carried, and this merge did not grow, is main's to repair.
   assert.equal(judgeMergedRatchets(memoryInputs({ count: N + 2, row: N + 1 }, { count: N + 2, row: N + 1 })).verdict, "clean");
   // The clock-signature rows follow the same rule, inside CLOCK_SCOPE_RE only: a test file is never counted.

@@ -9,7 +9,7 @@
 // Every test writes only under its own mkdtemp root: no real ledger, no real state dir.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -39,6 +39,7 @@ import { feedbackEntryPath } from "../src/lib/feedback.js";
 import { ledgerLivePath } from "../src/lib/ledger-union.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { daemonCommand } from "../src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const T0 = Date.parse("2026-09-27T00:00:00.000Z");
 
@@ -353,7 +354,7 @@ test("the follow-up id is a stable, path-safe dedup key", () => {
 
 // ── the production seams ────────────────────────────────────────────────────────────────────
 
-test("the feedback filer captures a new follow-up once and lands an update without resetting its status", () => {
+test("the feedback filer captures a follow-up once and reports an update that neither lands nor queues", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-evidence-coverage-root-"));
   const gitCalls: string[][] = [];
   const git = (args: string[]): string => {
@@ -372,7 +373,11 @@ test("the feedback filer captures a new follow-up once and lands an update witho
   assert.equal(entry.status, "new");
 
   gitCalls.length = 0;
-  file({ id: "evidence-coverage-fix-cost", action: "update", lane: "fix", field: "cost", raw: "second body" });
+  assert.throws(
+    () => file({ id: "evidence-coverage-fix-cost", action: "update", lane: "fix", field: "cost", raw: "second body" }),
+    /offline in this fixture/,
+    "an update that neither lands nor queues must reach the gardener's retry path",
+  );
   assert.ok(gitCalls.length > 0, "an update goes through the landing path, never a local rewrite of a tracked entry");
   assert.equal(parseYaml(readFileSync(path, "utf8")).raw, "first body");
 });
@@ -415,6 +420,15 @@ test("the starter runs a pass at once, logs a failed pass, and stops", () => {
 });
 
 test("a self-hosting daemon's eighth garden runs an evidence-coverage pass against its own state dir", async () => {
+  const origin = gitRepo({ bare: true });
+  const source = gitRepo();
+  mkdirSync(join(source.dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(source.dir, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(source.dir, "plan", "tasks.d", ".gitkeep"), "");
+  source.git("add", "plan");
+  source.git("commit", "-qm", "chore: seed complete plan");
+  source.addRemote("origin", origin.dir);
+  source.git("push", "-q", "origin", "main");
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4622-home-`));
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
@@ -427,6 +441,7 @@ test("a self-hosting daemon's eighth garden runs an evidence-coverage pass again
   let captured: DaemonDeps | undefined;
   try {
     await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      repoRoot: source.dir,
       gardenPassesInProcess: true,
       runDaemon: async (_plan, d): Promise<DaemonSummary> => {
         captured = d;
@@ -448,6 +463,9 @@ test("a self-hosting daemon's eighth garden runs an evidence-coverage pass again
     const state = JSON.parse(readFileSync(statePath, "utf8"));
     assert.equal(typeof state.lastPassAt, "string", "the pass ran at once and recorded itself in the daemon's state dir");
   } finally {
+    source.cleanup();
+    origin.cleanup();
+    rmSync(home, { recursive: true, force: true });
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
   }

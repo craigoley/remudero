@@ -60,3 +60,8 @@ test("newestLockfileImageInputSha is not exported from deployer", async () => {
   const module = await import("../src/lib/deployer.js");
   assert.equal(Object.hasOwn(module, "newestLockfileImageInputSha"), false);
 });
+
+test("releaseAuthorsFromLedger is not exported from drain", async () => {
+  const module = await import("../src/lib/drain.js");
+  assert.equal(Object.hasOwn(module, "releaseAuthorsFromLedger"), false);
+});

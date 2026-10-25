@@ -106,7 +106,7 @@ import {
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
-  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries,
+  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
   readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
@@ -248,6 +248,12 @@ import {
   NEEDS_HUMAN_LABEL,
   buildEscalationJudgePrompt,
   escalationCause,
+  fixEscalationDedupKey,
+  matchDuplicateEscalation,
+  openEscalationStandDownReason,
+  clearedConflictEscalationCause,
+  CONFLICT_EVIDENCE_MISSING_REASON_CODE,
+  CONFLICT_NOT_ADMITTED_REASON_CODE,
   escalate,
   ghIssueGateway,
   isEscalationJudgeExempt,
@@ -2002,6 +2008,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readTaskContractRevision",
   "readTaskSemanticRevision",
   "readMergedRatchets", // W1-T9962
+  "readOpenEscalations",
 ] as const;
 
 export function productionFixProgressJudge(opts: {
@@ -2146,6 +2153,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readTaskContractRevision"
   | "readTaskSemanticRevision"
   | "readMergedRatchets"
+  | "readOpenEscalations"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -2582,6 +2590,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
+    readOpenEscalations: () => issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
     readTaskContractRevision,
     readTaskSemanticRevision,
@@ -6141,12 +6150,8 @@ export const MERGEABILITY_UNKNOWN_WAIT_BACKSTOP = 6;
 
 /** W1-T5908 — the reason code a conflict escalation records as its `**Raised-by:**` line: which
  *  disposition raised it. Only the no-evidence code is a question a later capture can answer. */
-export const CONFLICT_EVIDENCE_MISSING_REASON_CODE = "conflict-evidence-missing";
-export const CONFLICT_NOT_ADMITTED_REASON_CODE = "conflict-not-admitted";
-
-/** W1-T5908 — the `**Raised-by:**`/`**Base:**` lines {@link conflictEscalationContext} writes. */
-export const RAISED_BY_LINE_RE = /^\*\*Raised-by:\*\*\s*(\S+)\s*$/m;
-export const BASE_SHA_LINE_RE = /^\*\*Base:\*\*\s*(\S+)\s*$/m;
+export { CONFLICT_EVIDENCE_MISSING_REASON_CODE, CONFLICT_NOT_ADMITTED_REASON_CODE,
+  RAISED_BY_LINE_RE, BASE_SHA_LINE_RE, clearedConflictEscalationCause } from "./escalate.js";
 
 /** W1-T5908 — GitHub's raw `mergeable_state` this pass read `unknown`: the pass cannot tell a
  *  conflict whose evidence is still computing from one whose evidence will never come. */
@@ -6179,22 +6184,6 @@ export function conflictEscalationContext(pr: Pick<OpenPrView, "mergeConflict">,
   return `**Raised-by:** ${code}\n${baseSha ? `**Base:** ${baseSha}\n` : ""}\n`;
 }
 
-/** W1-T5908 — an open conflict escalation's cause when THIS round shows it cleared (evidence now
- *  captured, or the base moved); `undefined` when it still holds or was never recorded. */
-export function clearedConflictEscalationCause(
-  body: string | undefined,
-  current: { conflictEvidenceCaptured: boolean; baseSha?: string },
-): string | undefined {
-  const raisedBy = RAISED_BY_LINE_RE.exec(body ?? "")?.[1];
-  if (raisedBy === CONFLICT_EVIDENCE_MISSING_REASON_CODE && current.conflictEvidenceCaptured) {
-    return `raised by ${raisedBy} — the conflicting-file evidence is now captured and the PR dispositions conflicted`;
-  }
-  const raisedBase = BASE_SHA_LINE_RE.exec(body ?? "")?.[1];
-  if (raisedBase !== undefined && current.baseSha !== undefined && raisedBase !== current.baseSha) {
-    return `raised against base ${raisedBase} — the base has moved to ${current.baseSha}`;
-  }
-  return undefined;
-}
 
 /** W1-T78 policy (rule 2) — how many strikes a fix-rung RE-DISPATCH gets once an operator answers a
  *  clarification question. Nested inside {@link SweepPolicy}, the config object every `runSweep`
@@ -9187,6 +9176,82 @@ export const BASE_FIXED_REFRESH_STEP = "sweep.base_fixed.refresh";
 export const BASE_FIXED_INHERITED_STEP = "sweep.base_fixed.inherited";
 /** remudero-console #2035 — an escalated head whose task contract was amended on main took main once. */
 export const CONTRACT_AMENDED_REFRESH_STEP = "sweep.contract_amended.refresh";
+const HEAD_CONTRACT_REFRESH_ATTEMPT_STEP = "sweep.head_contract_refresh.attempted";
+let headContractRefreshInFlight = false;
+let headContractHistoryReader: EscalationTriageHistoryReader | undefined;
+
+function refusedHeadContract(lines: readonly Record<string, unknown>[], pr: OpenPrView) {
+  return lines.findLast(row => row.step === "fix.contract_hold" && row.kind === "open-escalation" &&
+    row.task_id === fixLedgerTaskIdFor(pr) && row.pr_url === pr.prUrl && row.head_sha === pr.headSha &&
+    typeof row.contract_revision === "string");
+}
+
+async function headContractRefreshHistory(deps: Pick<SweepDeps, "ledgerPath" | "readHeadContractRefreshHistory">) {
+  if (deps.readHeadContractRefreshHistory) return deps.readHeadContractRefreshHistory();
+  headContractHistoryReader ??= createEscalationTriageHistoryReader({ parseAll: true, slice: {
+    holder: "sweep.head-contract-refresh", version: "1",
+    steps: [HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, CONTRACT_AMENDED_REFRESH_STEP],
+    project: row => ({ step: row.step, task_id: row.task_id, pr_number: row.pr_number, head_sha: row.head_sha,
+      contract_revision: row.contract_revision, outcome: row.outcome }),
+  } });
+  const read = await headContractHistoryReader(dirname(deps.ledgerPath));
+  // The incremental step reader only parses live lines that mention a tracked step or have
+  // unfinished braces. An unattributed damaged row framed by braces can therefore disappear
+  // from its torn count. Absence authorizes an external write here, so validate every live row.
+  let liveComplete = false;
+  if (read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0) {
+    try {
+      liveComplete = true;
+      for await (const raw of ndjsonLines(fs.createReadStream(deps.ledgerPath))) {
+        if (!raw.trim()) continue;
+        const row: unknown = JSON.parse(raw);
+        if (row === null || typeof row !== "object" || Array.isArray(row)) {
+          liveComplete = false;
+          break;
+        }
+      }
+    } catch (error) {
+      return { complete: false, lines: read.rows, reason: `live ledger validation failed: ${String(error)}` };
+    }
+  }
+  return { complete: liveComplete, lines: read.rows };
+}
+
+function headContractRefreshAttempted(lines: readonly Record<string, unknown>[], pr: OpenPrView, revision: string) {
+  return lines.some(row => [HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, CONTRACT_AMENDED_REFRESH_STEP].includes(String(row.step)) &&
+    row.pr_number === pr.prNumber && row.task_id === fixLedgerTaskIdFor(pr) &&
+    row.head_sha === pr.headSha && row.contract_revision === revision);
+}
+
+/** One selected capability over the whole light snapshot; the generic fanout update port stays closed. */
+export async function lightPassHeadContractRefresh(
+  prs: readonly OpenPrView[],
+  deps: Pick<SweepDeps, "ledgerPath" | "readLedger" | "readHeadContractRefreshHistory" | "readTaskContractRevision" | "updateBranch" | "log">,
+): Promise<Pick<SweepDeps, "headContractRefreshFor" | "readHeadContractRefreshHistory">> {
+  if (!deps.updateBranch || headContractRefreshInFlight) return {};
+  try {
+    const lines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath); // ledger-read-intent: live — candidate holds; attempts use the strict union below.
+    const candidates = prs.flatMap(pr => {
+      const hold = refusedHeadContract(lines, pr);
+      const revision = hold && pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+      return hold && revision !== undefined && revision !== hold.contract_revision ? [{ pr, revision }] : [];
+    });
+    if (candidates.length === 0) return {};
+    const history = await headContractRefreshHistory(deps);
+    if (!history.complete) return {};
+    const selected = candidates.filter(({ pr, revision }) => !headContractRefreshAttempted(history.lines, pr, revision))
+      .sort((a, b) => a.pr.prNumber - b.pr.prNumber)[0];
+    return selected === undefined ? {} : {
+      readHeadContractRefreshHistory: deps.readHeadContractRefreshHistory,
+      headContractRefreshFor: pr => pr.prNumber === selected.pr.prNumber && pr.headSha === selected.pr.headSha &&
+        pr.taskId !== undefined && deps.readTaskContractRevision?.(pr.taskId) === selected.revision
+        ? deps.updateBranch : undefined,
+    };
+  } catch (error) {
+    deps.log?.("sweep.head_contract_refresh.unreadable", { reason: String(error) });
+    return {};
+  }
+}
 
 /** W1-T6405 — the failing test files of a red head that is BEHIND main and whose every failing test file
  *  a recorded probe found passing at main's CURRENT tip (`clear`, never partial or unrunnable); else `undefined`.
@@ -13359,6 +13424,8 @@ export function reviewOnlyStandDownReason(scope: LightPassScopeName): string {
 }
 
 export interface SweepDeps {
+  /** One shared open needs-human snapshot per pass; missing or unreadable fails toward fixing. */
+  readOpenEscalations?: () => OpenIssue[] | Promise<OpenIssue[]>;
   fixProgressJudge?: FixProgressJudge;
   /** W1-T9970 test seam: the running reviewer image. Default {@link readRuntimeImageSha}. */
   runtimeImageSha?: () => string | undefined;
@@ -13368,6 +13435,8 @@ export interface SweepDeps {
    *  holds on its input key alone, as before. */
   readTaskContractRevision?: (taskId: string) => string | undefined;
   readTaskSemanticRevision?: (taskId: string) => string | undefined;
+  headContractRefreshFor?: (pr: OpenPrView) => SweepDeps["updateBranch"];
+  readHeadContractRefreshHistory?: () => Promise<{ complete: boolean; lines: readonly Record<string, unknown>[] }>;
   headRehome?: HeadRehomePorts;
   /** The already-listed peers retained when the light pass reconciles one PR at a time. */
   stuckStagePeers?: readonly OpenPrView[];
@@ -16668,6 +16737,15 @@ export async function runSweep(
   const now = deps.now ? deps.now() : Date.now();
   const repairDemandMark = repairMemoryDemandMark(); // W1-T9706: what this pass did not refuse again, it clears at its end.
   const log = deps.log ?? (() => {});
+  let openEscalations: Promise<OpenIssue[]> | undefined;
+  const readOpenEscalations = () => openEscalations ??= (async () => {
+    try {
+      return await deps.readOpenEscalations?.() ?? [];
+    } catch (error) {
+      log("sweep.open_escalations.read_error", { reason: String(error) });
+      return []; // The rung retains its live probe when this pass cannot observe open issues.
+    }
+  })();
   // W1-T7736: the sweep never disposes, reviews, fixes or refreshes a merge-queue rehearsal's replay PR.
   for (const pr of openPrs.filter(isMergeQueueReplayPr)) log("sweep.replay_pr_excluded", { pr_number: pr.prNumber, head_ref: pr.headRefName });
   openPrs = openPrs.filter((pr) => !isMergeQueueReplayPr(pr));
@@ -16727,6 +16805,7 @@ export async function runSweep(
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   deps.markPrelude?.("armed_body_guard");
   const ledgerLines = readLedger(deps.ledgerPath);
+  let contractHoldRefreshSpent = false;
   // An unreadable contract is an unreadable witness (undefined → judged afresh, never reused); it must not
   // abort the PR's disposition, which still owes the fix rung its dispatch.
   const readWitnessContractRevision = (taskId: string): string | undefined => {
@@ -19481,6 +19560,7 @@ export async function runSweep(
     const refreshAmendedContract = async (
       latched: readonly Record<string, unknown>[], inputKey?: string, observedRevision?: string,
       semantic?: { standingOn: string; observed: string },
+      updateBranch = deps.updateBranch,
     ): Promise<string | undefined> => {
       const current = pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
       let currentSemantic: string | undefined, semanticReadError: { reason: string } | undefined;
@@ -19514,12 +19594,12 @@ export async function runSweep(
           row.contract_revision === current && row.outcome !== "updated" && row.outcome !== "head-moved")) {
         return "amendment refresh failed; awaiting new evidence/operator answer — no repeat update or fix admitted";
       }
-      if (!deps.updateBranch) {
+      if (!updateBranch) {
         return "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
       }
       let outcome: string;
       recordForcedRefresh(deps, pr, "contract-amended"); // W1-T7735
-      try { outcome = await deps.updateBranch(pr); }
+      try { outcome = await updateBranch(pr); }
       catch (error) { outcome = `error: ${String(error)}`; }
       appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
         step: CONTRACT_AMENDED_REFRESH_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
@@ -19819,10 +19899,52 @@ export async function runSweep(
               break;
             }
             case "blocked-fixable": {
+              const issues = await readOpenEscalations();
+              if (issues.length > 0) {
+                const escalationKey = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha,
+                  pr.mergeConflict !== undefined, isBlockedCi(pr), deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
+                const candidate = matchDuplicateEscalation(escalationKey, issues);
+                const openHold = openEscalationStandDownReason(pr.headSha, candidate, escalationKey.contractRevision,
+                  { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
+                  isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer);
+                if (openHold) { acted = false; spent = false; standDownReason = openHold.reason; break; }
+              }
               if (terminalDesignHold?.amended) {
                 const amended = await refreshAmendedContract([{ progress_contract_revision: terminalDesignHold.revision }], undefined, terminalDesignHold.observedRevision, terminalDesignHold.semantic);
                 if (amended === undefined) acted = false;
                 standDownReason = amended ?? "task contract changed during design-handoff observation — no fix admitted";
+                break;
+              }
+              const headContractHold = refusedHeadContract(ledgerLines, pr);
+              const currentHoldContract = headContractHold && pr.taskId !== undefined
+                ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+              if (headContractHold && currentHoldContract !== undefined && currentHoldContract !== headContractHold.contract_revision) {
+                acted = false;
+                spent = false;
+                if (contractHoldRefreshSpent || headContractRefreshInFlight) {
+                  standDownReason = "another head-contract amendment owns the refresh";
+                  break;
+                }
+                const refresh = deps.updateBranch ?? deps.headContractRefreshFor?.(pr);
+                if (!refresh) {
+                  standDownReason = "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
+                  break;
+                }
+                headContractRefreshInFlight = true;
+                try {
+                  const history = await headContractRefreshHistory(deps);
+                  if (!history.complete || headContractRefreshAttempted([...history.lines, ...ledgerLines], pr, currentHoldContract)) {
+                    standDownReason = history.complete ? "head-contract amendment refresh already attempted — awaiting new evidence"
+                      : "head-contract refresh history unreadable — no refresh or fix admitted";
+                    break;
+                  }
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: fixLedgerTaskIdFor(pr),
+                    step: HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
+                    contract_revision: currentHoldContract });
+                  contractHoldRefreshSpent = true;
+                  standDownReason = await refreshAmendedContract([{ progress_contract_revision: headContractHold.contract_revision }],
+                    undefined, currentHoldContract, undefined, refresh) ?? "head contract changed during amendment observation — no fix admitted";
+                } finally { headContractRefreshInFlight = false; }
                 break;
               }
               const scopeHold = scopeEscalationStandDown(ledgerLines, pr);
@@ -22204,6 +22326,11 @@ export async function runSweepLightPass(
     noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
     return [await runSweep([], deps, policy)];
   }
+  // A light pass fans out into one runSweep per PR; their issue snapshot belongs to this pass.
+  const readOpenEscalations = deps.readOpenEscalations;
+  let openEscalations: Promise<OpenIssue[]> | undefined;
+  if (readOpenEscalations) deps = { ...deps,
+    readOpenEscalations: () => openEscalations ??= Promise.resolve().then(readOpenEscalations) };
   if (!deps.restartAdmission) lightPassRefillsClosed = false;
   // W1-T526/W1-T2792 — THE QUEUE-ADMISSION RULE. The light pass admits at most the existing
   // `reviewLanes` semantic width, never the old hidden hard-coded one. Every other PR's own
@@ -24552,14 +24679,16 @@ export interface EscalationTriageHistoryLoad { rotations: number; digestHits: nu
  * {@link ESCALATION_TRIAGE_HISTORY_SLICE}. Each holder keeps its own durable digest and incremental union.
  */
 export function createEscalationTriageHistoryReader(
-  io: { fs?: LedgerGrepFsDeps; readFile?: (path: string) => Promise<Buffer>; slice?: EscalationTriageSlice } = {},
+  io: { fs?: LedgerGrepFsDeps; readFile?: (path: string) => Promise<Buffer>; slice?: EscalationTriageSlice;
+    /** Preserve unattributed torn rows when absence of an attempt authorizes a write. */
+    parseAll?: boolean } = {},
 ): EscalationTriageHistoryReader {
   const fsDeps = io.fs ?? realLedgerFs;
   const stat = fsDeps.statSync ?? realLedgerFs.statSync;
   const slice = io.slice ?? ESCALATION_TRIAGE_HISTORY_SLICE;
   const steps = [...slice.steps];
   const project = slice.project ?? ((row: Record<string, unknown>) => row);
-  const identity = { holder: slice.holder, reducerVersion: slice.version ?? "1", project };
+  const identity = { holder: slice.holder, reducerVersion: `${slice.version ?? "1"}${io.parseAll ? "-all-lines" : ""}`, project };
   const union = createIncrementalLedgerUnion(identity, fsDeps);
   // The digest version the union's own rotation hook reads (see createIncrementalLedgerUnion).
   const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
@@ -24595,7 +24724,7 @@ export function createEscalationTriageHistoryReader(
     }
     if (fresh.length > 0) {
       const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.includes(row.step)).map(project), {
-        holder: identity.holder, durableDigest, statKey, pattern, ...(io.readFile ? { readFile: io.readFile } : {}),
+        holder: identity.holder, durableDigest, statKey, ...(io.parseAll ? {} : { pattern }), ...(io.readFile ? { readFile: io.readFile } : {}),
       });
       await memo.load(fresh);
       const { digestHits = 0, digestMisses = 0 } = memo.retention();

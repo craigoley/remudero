@@ -11,7 +11,7 @@
   origin: "operator 2026-10-14: GRILL backlog pass (~/Remudero-notes/grill-recommendations-2026-10-14.md, separate items 1 and 2)"
   plan_refs: [W1-T4622, W1-T4640, W1-T5460]
   files: [src/lib/evidence-coverage-gardener.ts, test/evidence-coverage-findings-reach-their-records.test.ts, test/an-evidence-gap-becomes-work.test.ts, src/lib/feedback-evidence-revision.ts, src/lib/evidence-coverage-record-context.ts, src/lib/feedback-record-merge.ts, src/lib/feedback-landing.ts, src/run-task.ts, src/cli/commands/daemon.ts, test/feedback-record-monotonic.test.ts, test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-14: triage and the grill judge these records on numbers two weeks stale, and one live gap (containment/cost, 51%) is closed as already decided
   attempts: 0
   rationale: |

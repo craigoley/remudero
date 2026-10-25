@@ -485,6 +485,15 @@ function isExpiringFixtureDefuseShape(task: Task): boolean {
     files[0] === origin.slice("expiring-fixture:".length);
 }
 
+/** Exact existing comment subject plus one new regression; proposals still wait for the machine judge. */
+function isCommentCompressionShape(task: Task): boolean {
+  const files = task.files ?? [];
+  const subject = task.origin?.startsWith("comment-compression:") ? task.origin.slice("comment-compression:".length) : undefined;
+  return subject !== undefined && files.length === 2 && files[0] === subject &&
+    /^(?:src|scripts|deploy|bin|hooks|\.github\/workflows)\//.test(subject) &&
+    !subject.split("/").some(part => part === ".." || part === "." || part === "") && NEW_TEST_FILE.test(files[1]!);
+}
+
 const SCOUT_TEST_FILE = /^test\/(?:[\w-]+\/){0,2}scout-[\w.-]+\.test\.ts$/;
 
 /** A scout draft (W1-T8523): the symptom's files, then the NEW test/scout-*.test.ts as the LAST declared file. */
@@ -500,7 +509,7 @@ function isCiLearningLessonPath(path: string): boolean {
 function isParkedMachineProposal(task: Task): boolean {
   if (isFlowBlockerRemedyProposal(task)) return true;
   if (task.author_class === "machine" && task.verify === "human" && task.status !== "blocked" &&
-      (task.depends_on ?? []).length === 0 && (isExpiringFixtureDefuseShape(task) || isScoutDraftShape(task))) return true;
+      (task.depends_on ?? []).length === 0 && (isExpiringFixtureDefuseShape(task) || isScoutDraftShape(task) || isCommentCompressionShape(task))) return true;
   if (task.author_class === "machine" && task.verify === "human" && task.status !== "blocked" &&
       (task.depends_on ?? []).length === 0 && (isCiFrictionRemedyProposal(task) || isHotFileRemedyProposal(task))) return true;
   return (
@@ -1481,7 +1490,7 @@ export function machineFilingAdmissionViolations(
     }
   }
 
-  const newTestAllowed = isCiFrictionRemedyProposal(task) || isFlowBlockerRemedyProposal(task) || isJudgeReleasedFlowBlockerRemedy(task) ||
+  const newTestAllowed = isCommentCompressionShape(task) || isCiFrictionRemedyProposal(task) || isFlowBlockerRemedyProposal(task) || isJudgeReleasedFlowBlockerRemedy(task) ||
     isSelectorShadowStructuralShape(task) || isHotFileRemedyProposal(task);
   // A merge-driver remedy creates the repository's .gitattributes; no other declared non-test file may be new.
   const created = (path: string) => NEW_TEST_FILE.test(path) || (path === ".gitattributes" && isHotFileRemedyProposal(task));

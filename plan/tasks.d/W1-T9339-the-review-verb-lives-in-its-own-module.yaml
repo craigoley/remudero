@@ -74,6 +74,8 @@
        was exported, or that another run-task.ts symbol calls, as a thin function with the same name and signature. That
        function builds the host from run-task.ts's own symbols and delegates to the module. HANDLERS, every in-file
        caller, and every test that imports a root from src/run-task.ts stay unchanged.
+       A moved non-root that a test imports from src/run-task.ts (withMaterializedWorktree) is
+       re-exported there by name from the module, so that test stays unchanged too.
     4. Unchanged: COMMANDS (scripts/rmd-help.mjs source-scans that array), and the verb's behaviour, ledger rows,
        stdout and exit codes. Only the 26 declared existing test companions may follow the original source
        subjects into the review module, retaining their original logical assertions and falsifiers. Exactly one
@@ -86,8 +88,15 @@
        to reviewCommandHost:2; the raw-Git table relocates their two counts of 2 to reviewCommandHost:4,
        and the widened-Git table relocates their two CHECKOUT counts of 1 to reviewCommandHost:2.
        The original managed-checkout and subject-origin reasons remain explicit; aggregate counts do not grow.
-       The comment baseline may split the original 14750 ceiling into run-task.ts:14072 and review.ts:678,
-       conserving 14750 rather than the native proposal's 15000. Every other entry, exclusion, population,
+       The comment baseline may split the original 14750 ceiling into run-task.ts:14057 and review.ts:693,
+       conserving 14750 rather than the native proposal's 15000; withMaterializedWorktree's 15 comment
+       lines move with it. If an earlier extraction already lowered run-task.ts's row, lower that row
+       by the same 693 instead. Where comment volume no longer blocks on the adopted base (#14087),
+       leaving the baseline untouched also satisfies this step.
+       The clock-signature baseline may relocate only reviewCommand's two original Date.now() run-id calls:
+       src/run-task.ts dateNow 48 -> 46 (or 2 below whatever row an earlier extraction left) and
+       src/cli/commands/review.ts dateNow 0 -> 2, legacy and newDate unchanged, so the aggregate holds.
+       This permits restoring both original expressions in place of systemClock.now(). Every other entry, exclusion, population,
        threshold, acceptance criterion and falsifier stays unchanged. Restore the original literal
        origin/main:plan/tasks.d read in the host; layout overrides must not change this extraction's behavior.
     5. The PR body reports the moved symbol count and line count, and the host's member count. A large host is

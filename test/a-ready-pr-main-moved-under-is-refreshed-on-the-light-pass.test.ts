@@ -7,7 +7,7 @@
  * light pass could arm that PR but never refresh it. Main stayed red 55 minutes.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -24,6 +24,8 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildSweepLightHook } from "../src/run-task.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
 import { appendGitConfigEnv } from "./setup/no-live-remote.js";
+import { taskContractRevision } from "#src/lib/escalate.js";
+import { reviewInputDigest } from "#src/lib/review.js";
 
 const NOW = 1_800_000_000_000;
 const FILE = "src/lib/read-model-worker.ts";
@@ -223,6 +225,58 @@ test("W1-T7214: buildSweepLightHook presses update-branch on a ready PR main mov
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+    rmSync(shim.dir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the production light hook refreshes an approved contract held at the old head", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}head-contract-hook-`));
+  const task = { id: "W1-T7214", title: "approved repair", files: [FILE, "src/lib/approved-companion.ts"],
+    acceptance: [{ claim: "repair works", proof: "unit test: repair works" }], verify: "auto", repo: "r",
+    type: "implement", status: "queued", depends_on: [] };
+  const ledger = join(root, "ledger.ndjson");
+  writeFileSync(ledger, [
+    { step: "review.posted", task_id: task.id, pr_url: PR.html_url, head_sha: HEAD.sha, state: "failure",
+      review_input_digest: reviewInputDigest(HEAD.sha, "Remudero-Task: W1-T7214"),
+      unmet_criteria: ["repair works"], reasons: ["the production repair is still needed"], ts: new Date().toISOString() },
+    { step: "fix.contract_hold", kind: "open-escalation", task_id: task.id,
+      pr_url: PR.html_url, head_sha: HEAD.sha, contract_revision: "prior-head-contract", ts: new Date().toISOString() },
+  ].map(row => JSON.stringify(row)).join("\n") + "\n");
+  const routes = readyOverlapRoutes();
+  const status = routes.find(route => route.when === "/status")!;
+  status.stdout = JSON.stringify({ statuses: [{ context: "remudero-review", state: "failure", description: "repair remains unmet" }] });
+  routes.unshift({ when: "issues?", stdout: JSON.stringify([{ number: 1, html_url: "https://github.com/o/r/issues/1",
+    title: "BLOCKED", body: `**Task:** ${task.id}\n**Head:** ${HEAD.sha}\n**Contract:** ${taskContractRevision(task)}` }]) });
+  const shim = ghShim(routes, { kind: "head-contract-hook-gh" });
+  const oldPath = process.env.PATH;
+  const gitConfigIndex = Number(process.env.GIT_CONFIG_COUNT ?? "0");
+  const keys = ["RMD_GH_TRANSPORT_FLOOR", "RMD_GH_CACHE_HOME", "RMD_GH_SHARED_READ_GAP_MS",
+    "GIT_CONFIG_COUNT", `GIT_CONFIG_KEY_${gitConfigIndex}`, `GIT_CONFIG_VALUE_${gitConfigIndex}`];
+  const prior = keys.map(key => [key, process.env[key]] as const);
+  process.env.PATH = `${shim.dir}:${oldPath}`;
+  process.env.RMD_GH_TRANSPORT_FLOOR = "advisory";
+  process.env.RMD_GH_CACHE_HOME = join(root, "gh-cache");
+  process.env.RMD_GH_SHARED_READ_GAP_MS = "0";
+  appendGitConfigEnv("remote.origin.url", "https://github.com/o/r.git");
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  try {
+    const plan = { tasks: [task], byId: new Map([[task.id, task]]) };
+    const hook = buildSweepLightHook("o", "r", { root, claudeBin: "/bin/false" } as never, ledger,
+      "HEAD-CONTRACT-HOOK", plan as never, (step, extra) => logs.push({ step, extra }));
+    await withLiveWritesAllowed(() => hook({ reviewOnly: true, scope: "pause" }));
+    await withLiveWritesAllowed(() => hook({ reviewOnly: false, admit: () => false }));
+    assert.equal(shim.calls().filter(call => call.includes("pulls/7214/update-branch")).length, 0,
+      "review-only and restart-admission holds remain closed");
+    await withLiveWritesAllowed(() => hook());
+    assert.ok(!logs.some(row => row.step === "sweep_light.error"), JSON.stringify(logs));
+    const updates = shim.calls().filter(call => call.includes("pulls/7214/update-branch"));
+    assert.equal(updates.length, 1, JSON.stringify({ calls: shim.calls(), logs }));
+    assert.ok(updates[0].includes(`expected_head_sha=${HEAD.sha}`));
+    assert.equal(logs.some(row => row.step === "fix.dispatch"), false);
+  } finally {
+    process.env.PATH = oldPath;
+    for (const [key, value] of prior) if (value === undefined) delete process.env[key]; else process.env[key] = value;
     rmSync(shim.dir, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
