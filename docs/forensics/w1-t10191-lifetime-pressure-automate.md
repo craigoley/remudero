@@ -1,6 +1,6 @@
 # W1-T10191 lifetime-pressure automate finding
 
-The reported `blocked_inflight` verdict is a benign scheduling deferral, not evidence that W1-T10191 failed to build.
+The reported `blocked_inflight` verdict is a benign scheduling deferral, not evidence that W1-T10191 failed to build. W1-T10191's lifetime-pressure `automate` verdict therefore needs nothing further before ordinary dispatch.
 
 ## Judge evidence
 
