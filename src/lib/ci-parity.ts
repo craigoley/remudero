@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { availableParallelism, hostname, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 
 import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
@@ -2566,10 +2567,26 @@ function censusWalksFromText(text: string): string[] {
   return walks;
 }
 
+/** Enumeration evidence excludes comments and embedded fixture bodies, preserving standalone argv tokens. */
+function censusEnumerationText(text: string): string {
+  const scanner = createScanner(false, undefined, text);
+  const pieces: string[] = [];
+  for (let kind = scanner.scan(); kind !== SyntaxKind.EndOfFileToken; kind = scanner.scan()) {
+    const raw = scanner.getTokenText();
+    const embedded = kind === SyntaxKind.StringLiteral || kind === SyntaxKind.NoSubstitutionTemplateLiteral ||
+      kind === SyntaxKind.TemplateHead || kind === SyntaxKind.TemplateMiddle || kind === SyntaxKind.TemplateTail;
+    const ignored = kind === SyntaxKind.SingleLineCommentTrivia || kind === SyntaxKind.MultiLineCommentTrivia ||
+      (embedded && scanner.getTokenValue() !== "ls-files");
+    pieces.push(ignored ? raw.replace(/[^\r\n]/g, " ") : raw);
+  }
+  return pieces.join("");
+}
+
 export function censusCandidateWalks(text: string): string[] {
   const walks = new Set<string>();
   const idiom = /ls-files|readdirSync|globSync/g;
-  for (let match = idiom.exec(text); match; match = idiom.exec(text)) {
+  const evidence = censusEnumerationText(text);
+  for (let match = idiom.exec(evidence); match; match = idiom.exec(evidence)) {
     const lineStart = text.lastIndexOf("\n", match.index) + 1;
     const lineEnd = text.indexOf("\n", match.index);
     const windowEnd = lineEnd === -1 ? text.length : Math.min(text.length, lineEnd + 1);
@@ -2647,9 +2664,10 @@ export function discoverCensusCandidates(
       out.push({ testFile, idiom: "ls-files", walks: ["src/"] });
       continue;
     }
-    const idiom: CensusEnumerationIdiom | undefined = /ls-files/.test(text)
+    const evidence = censusEnumerationText(text);
+    const idiom: CensusEnumerationIdiom | undefined = /ls-files/.test(evidence)
       ? "ls-files"
-      : /readdirSync|globSync/.test(text)
+      : /readdirSync|globSync/.test(evidence)
         ? "dir-walk"
         : undefined;
     if (!idiom) continue;

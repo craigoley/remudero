@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { test } from "node:test";
 import { classifyGateRepair, gateRepairCandidates, renderFalsePositiveShard } from "#src/lib/gate-gardener.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations } from "#src/lib/plan.js";
-import { PRECHECK_TRIGGERED_SUITES, PRECHECK_PATH_TRIGGERED_SUITES } from "#scripts/census-precheck.mjs";
+const { PRECHECK_TRIGGERED_SUITES, PRECHECK_PATH_TRIGGERED_SUITES } = createRequire(import.meta.url)("#scripts/census-precheck.mjs") as {
+  PRECHECK_TRIGGERED_SUITES: Array<{ testFile: string; ownFiles: string[]; recognizer: string }>;
+  PRECHECK_PATH_TRIGGERED_SUITES: Array<{ testFile: string; ownFiles: string[]; recognizer: string; symbol: string }>;
+};
 
 const baseline = "scripts/census-precheck-parity-baseline.json";
 const pair = { pr: 10787, gate: "census", redSha: "red", greenSha: "green", state: "repaired" as const,

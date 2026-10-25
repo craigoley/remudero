@@ -17,6 +17,8 @@ import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations, retiremen
 import { hostWorktreeGit } from "./worktree-git.js";
 import { loadPolicy } from "./policy.js";
 import { sameTestFile } from "./test-path-resolver.js";
+import { ghJsonAsync, ghTextAsync, type GhAsyncExecutor } from "./github-transport.js";
+import { checkRunsRestArgs, combinedStatusRestArgs } from "./open-prs-rest.js";
 import { collectCiFailureCorpus, rollupAtSha, type CiFailurePair } from "./ci-failure-corpus.js";
 
 /**
@@ -68,7 +70,7 @@ function rebuiltTokens(line: string): Array<{ expression: string; value: string 
 }
 
 export function classifyGateRepair(pair: GateRepairPair, repairDiff: string, ownFiles: readonly string[], gateRegex: RegExp): GateRepairClass {
-  if (pair.state !== "repaired" || !pair.greenSha || !pair.repairFiles?.length) return "genuine";
+  if (pair.state !== "repaired" || !pair.greenSha || (pair.repairFiles === undefined || pair.repairFiles.length === 0)) return "genuine";
   if (pair.repairFiles.every((file) => ownFiles.includes(file))) return "baseline-only";
   if (pair.triggered === false) return "off-subject";
   const chunks = repairDiff.split(/^(?:diff --git .*|@@.*)$/m);
@@ -128,41 +130,48 @@ export function renderFalsePositiveShard(action: GateGardenAction, taskId: strin
   });
 }
 
-export function loadGateRepairObservations(deps: GardenerDeps, rules: readonly GateRepairRule[], sources: GateDefuseSources): GateRepairObservation[] {
-  const run = (args: string[]): string => sources.execFile
-    ? sources.execFile("gh", args, { cwd: deps.repoRoot, encoding: "utf8" })
-    : execFileSync("gh", args, { cwd: deps.repoRoot, encoding: "utf8" });
-  const read = (args: string[]): unknown => JSON.parse(run(args));
-  const repo = read(["repo", "view", "--json", "nameWithOwner"]) as { nameWithOwner: string };
+export async function loadGateRepairObservations(deps: GardenerDeps, rules: readonly GateRepairRule[], sources: GateDefuseSources = {}): Promise<GateRepairObservation[]> {
+  const read = (args: string[]) => ghJsonAsync(args, sources.execAsync);
+  const repo = await read(["repo", "view", "--json", "nameWithOwner"]) as { nameWithOwner: string };
   const api = `repos/${repo.nameWithOwner}`;
-  const prs = read(["api", `${api}/pulls?state=all&sort=updated&direction=desc&per_page=100`]) as Array<{ number: number; base: { sha: string } }>;
+  const prs = await read(["api", `${api}/pulls?state=all&sort=updated&direction=desc&per_page=100`]) as Array<{ number: number; base: { sha: string } }>;
   const observations: GateRepairObservation[] = [];
   for (const pr of prs) {
-    const commits = read(["api", `${api}/pulls/${pr.number}/commits?per_page=100`]) as Array<{ sha: string }>;
+    const commits = await read(["api", `${api}/pulls/${pr.number}/commits?per_page=100`]) as Array<{ sha: string }>;
     const runs = new Map<string, { check_runs: Array<{ id: number; name: string; conclusion: string }> }>();
-    const corpus = collectCiFailureCorpus({ prs: [{ number: pr.number, commits: commits.map(({ sha }) => ({ sha,
-      rollup: rollupAtSha(...repo.nameWithOwner.split("/") as [string, string], sha, (args) => {
-        const value = read(args);
-        if (args[1]?.includes("/check-runs")) runs.set(sha, value as ReturnType<typeof runs.get> & {});
-        return value;
-      }) })) }] });
+    const snapshots = [];
+    const [owner, name] = repo.nameWithOwner.split("/") as [string, string];
+    for (const { sha } of commits) {
+      const checkArgs = checkRunsRestArgs(owner, name, sha), statusArgs = combinedStatusRestArgs(owner, name, sha);
+      const checks = await read(checkArgs) as { check_runs: Array<{ id: number; name: string; conclusion: string }> };
+      const status = await read(statusArgs);
+      runs.set(sha, checks);
+      snapshots.push({ sha, rollup: rollupAtSha(owner, name, sha, (args) => args[1] === checkArgs[1] ? checks : status) });
+    }
+    const corpus = collectCiFailureCorpus({ prs: [{ number: pr.number, commits: snapshots }] });
     for (const pair of corpus.pairs.filter((pair) => pair.state === "repaired")) {
-      const diff = read(["api", `${api}/compare/${pair.redSha}...${pair.greenSha}`]) as { files: Array<{ filename: string; patch?: string }> };
-      if (!diff.files?.length || diff.files.some((file) => file.patch === undefined)) throw new Error(`gate repair diff unreadable for PR #${pr.number}`);
+      const diff = await read(["api", `${api}/compare/${pair.redSha}...${pair.greenSha}`]) as { files: Array<{ filename: string; patch?: string }> };
+      if ((diff.files === undefined || diff.files.length === 0) || diff.files.some((file) => file.patch === undefined)) throw new Error(`gate repair diff unreadable for PR #${pr.number}`);
       const repairDiff = diff.files.map((file) => `diff --git a/${file.filename} b/${file.filename}\n${file.patch}`).join("\n");
       const direct = rules.filter((rule) => rule.gate === pair.gate);
       const failed = runs.get(pair.redSha)?.check_runs.find((check) => check.name === pair.gate && check.conclusion === "failure");
-      const log = direct.length || !failed ? "" : run(["run", "view", "--job", String(failed.id), "--log-failed"]);
+      const log = direct.length || !failed ? "" : await ghTextAsync(["run", "view", "--job", String(failed.id), "--log-failed"], {}, sources.execAsync);
       const implicated = direct.length ? direct : rules.filter((rule) => log.includes(rule.gate));
       for (const rule of implicated) {
-        const before = read(["api", `${api}/compare/${pr.base.sha}...${pair.redSha}`]) as { merge_base_commit: { sha: string }; files: Array<{ filename: string }> };
-        const readAt = (sha: string, path: string): string | null => {
-          const value = read(["api", `${api}/contents/${path}?ref=${sha}`]) as { content?: string; encoding?: string };
-          if (value.encoding !== "base64" || typeof value.content !== "string") throw new Error(`gate trigger content unreadable: ${path}@${sha}`);
-          return Buffer.from(value.content, "base64").toString("utf8");
-        };
+        const before = await read(["api", `${api}/compare/${pr.base.sha}...${pair.redSha}`]) as { merge_base_commit: { sha: string }; files: Array<{ filename: string }> };
+        const blobs = new Map<string, string>();
+        if (rule.trigger) {
+          for (const file of before.files) {
+            for (const sha of [pair.redSha, before.merge_base_commit.sha]) {
+              const value = await read(["api", `${api}/contents/${file.filename}?ref=${sha}`]) as { content?: string; encoding?: string };
+              if (value.encoding !== "base64" || typeof value.content !== "string") throw new Error(`gate trigger content unreadable: ${file.filename}@${sha}`);
+              blobs.set(`${sha}:${file.filename}`, Buffer.from(value.content, "base64").toString("utf8"));
+            }
+          }
+        }
         const triggered = rule.trigger?.({ changed: before.files.map((file) => file.filename),
-          readHead: (path) => readAt(pair.redSha, path), readBase: (path) => readAt(before.merge_base_commit.sha, path) });
+          readHead: (path) => blobs.get(`${pair.redSha}:${path}`) ?? null,
+          readBase: (path) => blobs.get(`${before.merge_base_commit.sha}:${path}`) ?? null });
         observations.push({ pair: { ...pair, gate: rule.gate, repairFiles: diff.files.map((file) => file.filename), triggered }, repairDiff });
       }
     }
@@ -170,14 +179,18 @@ export function loadGateRepairObservations(deps: GardenerDeps, rules: readonly G
   return observations;
 }
 
-function falsePositiveInventory(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources): { actions: GateGardenAction[]; tally: Outcome } {
-  const reportPath = gateFireRatesPath(deps.stateDir);
-  if (!sources.repairObservations && (!existsSync(reportPath) || !(readJson(reportPath).gates as GateFireRate[] | undefined)?.some((gate) => gate.repaired > 0))) {
-    return { actions: [], tally: { trials: 0, successes: 0 } };
-  }
+function hasGateRepairEvidence(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources): boolean {
+  if (sources.repairObservations) return true;
+  const report = gateFireRatesPath(deps.stateDir);
+  const rules = sources.repairRules ?? probes.fp?.GATE_REPAIR_RULES ?? [];
+  return existsSync(report) && (readJson(report).gates as GateFireRate[]).some((gate) =>
+    gate.repaired > 0 && rules.some((rule) => rule.gate === gate.gate));
+}
+
+async function falsePositiveInventory(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources): Promise<{ actions: GateGardenAction[]; tally: Outcome }> {
   const rules = sources.repairRules ?? probes.fp?.GATE_REPAIR_RULES;
   if (!rules) throw new Error("gate gardener: false-positive rule metadata is missing");
-  const observations = sources.repairObservations?.() ?? loadGateRepairObservations(deps, rules, sources);
+  const observations = sources.repairObservations ? sources.repairObservations() : await loadGateRepairObservations(deps, rules, sources);
   const tally: Outcome = { trials: observations.length, successes: 0 };
   for (const observation of observations) {
     const rule = rules.find((rule) => rule.gate === observation.pair.gate);
@@ -187,9 +200,8 @@ function falsePositiveInventory(deps: GardenerDeps, probes: GateProbes, sources:
   const layout = resolveRepoLayout(deps.repoRoot);
   const queued = existsSync(layout.planMonolith) ? loadPlan(layout.planMonolith).tasks.filter((task) =>
     task.status === "queued" && !task.retirement).flatMap((task) => task.origin ? [task.origin] : []) : [];
-  const open = sources.openOrigins?.() ?? (JSON.parse(sources.execFile
-    ? sources.execFile("gh", ["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"], { cwd: deps.repoRoot, encoding: "utf8" })
-    : execFileSync("gh", ["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"], { cwd: deps.repoRoot, encoding: "utf8" })) as Array<{ body: string }> )
+  const open = sources.openOrigins?.() ?? (await ghJsonAsync(
+    ["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"], sources.execAsync) as Array<{ body: string }> )
     .flatMap((pr) => [...pr.body.matchAll(/gate-false-positive:[^\s"'`]+/g)].map(([origin]) => origin));
   return { actions: gateRepairCandidates(observations, rules, [...queued, ...open], deps.log), tally };
 }
@@ -200,6 +212,7 @@ interface ExpiringFixture {
 }
 
 export interface GateDefuseSources {
+  execAsync?: GhAsyncExecutor;
   repairObservations?: () => readonly GateRepairObservation[];
   repairRules?: readonly GateRepairRule[];
   thresholdDays?: number;
@@ -664,6 +677,12 @@ function prBody(actions: GateGardenAction[], heading: string): string {
 /** The repo's gates as a gardener spec, over probes loaded by {@link loadGateProbes}. */
 export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources = {}): GardenSpec<GateGardenClass, GateInventory, GateGardenAction, GardenCheckout> {
   const clock = deps.clock ?? systemClock;
+  const inventory = () => {
+    const inv = gateInventory(deps.repoRoot, deps.stateDir, probes);
+    if (!existsSync(join(deps.stateDir, "GATE_OFF-defuse"))) inv.candidates.push(...defuseCandidates(deps, probes, sources));
+    return inv;
+  };
+  const repairEvidence = !existsSync(join(deps.stateDir, "GATE_OFF-false-positive")) && hasGateRepairEvidence(deps, probes, sources);
   return {
     name: "gate",
     landingRefusal: machineShardLandingGuard({ ...deps, admissionViolations: sources.admissionViolations }),
@@ -675,16 +694,14 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
       const report = gateFireRatesPath(deps.stateDir);
       return `${head}:${existsSync(report) ? readFileSync(report, "utf8").length : 0}:${clock.iso().slice(0, 10)}`;
     },
-    inventory: () => {
-      const inv = gateInventory(deps.repoRoot, deps.stateDir, probes);
-      if (!existsSync(join(deps.stateDir, "GATE_OFF-defuse"))) inv.candidates.push(...defuseCandidates(deps, probes, sources));
-      if (!existsSync(join(deps.stateDir, "GATE_OFF-false-positive"))) {
-        const repairs = falsePositiveInventory(deps, probes, sources);
-        inv.candidates.push(...repairs.actions);
-        inv.repairTally = repairs.tally;
-      }
+    inventory,
+    ...(repairEvidence ? { inventoryAsync: async () => {
+      const inv = inventory();
+      const repairs = await falsePositiveInventory(deps, probes, sources);
+      inv.candidates.push(...repairs.actions);
+      inv.repairTally = repairs.tally;
       return inv;
-    },
+    } } : {}),
     fingerprint: (inv) => inv.candidates.map((a) => a.target).join(","),
     metric: (inv, actionClass) => actionClass === "false-positive" ? inv.repairTally ?? { trials: 0, successes: 0 } : inv.tally,
     candidates: (inv) => inv.candidates,
