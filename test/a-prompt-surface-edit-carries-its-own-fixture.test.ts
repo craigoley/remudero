@@ -415,7 +415,7 @@ test("deleting or opting out a formerly injected skill retains its base-side pro
     const result = mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
     assert.equal(result.ok, false, change);
     assert.ok(result.surfaces.includes(INJECTED_PATH), change);
-    assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "a-missing-base" }), /git cat-file/);
+    assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "a-missing-base" }), /git (cat-file|merge-base)/);
   });
   withFixture(root => {
     write(root, INJECTED_PATH, skillSource("Check the invariant."));
@@ -457,6 +457,13 @@ test("injected skill evidence qualifies only the actual maintained prompt effect
 });
 
 test("injected skill surface regressions preserve selection and operator-only macro behavior", () => {
+  withFixture(root => {
+    write(root, INJECTED_PATH, skillSource("Unchanged actual prompt.", "applies-to: implement, review"));
+    commit(root, "base");
+    write(root, INJECTED_PATH, skillSource("Unchanged actual prompt.", "# frontmatter furniture\napplies-to: review, implement"));
+    commit(root, "non-injected metadata furniture");
+    assert.equal(mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }).ok, true);
+  });
   withFixture(root => {
     write(root, INJECTED_PATH, skillSource("Old skill."));
     write(root, "settings/macros.yaml", MACRO_ROW("old operator macro"));

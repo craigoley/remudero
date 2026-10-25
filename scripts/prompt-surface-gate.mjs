@@ -284,8 +284,8 @@ function revisionSkills(root, revision) {
   const names = [];
   const texts = new Map();
   for (const entry of entries) {
-    const [metadata, name] = entry.split("\t");
-    if (!name || /[\r\n/]/.test(name)) throw new Error("skill reachability: ambiguous approved skill name");
+    const fields = entry.split("\t"), [metadata, name] = fields;
+    if (fields.length !== 2 || !name || /[\r\n/]/.test(name)) throw new Error("skill reachability: ambiguous approved skill name");
     if (metadata.startsWith("120000 ")) throw new Error("skill reachability: a symbolic skill entry cannot be resolved from Git");
     if (!metadata.startsWith("040000 tree ")) continue;
     const path = `.claude/skills/${name}/SKILL.md`;
@@ -305,8 +305,15 @@ function skillSurfaceContext(root, base, head, files) {
   const candidates = [...new Set(files.flatMap(file => [file.oldPath, file.newPath]).filter(path => INJECTED_SKILL_PATH_RE.test(path)))];
   if (!candidates.length) return { surfaces: [], before: [], after: [] };
   const before = revisionSkills(root, base), after = revisionSkills(root, head);
-  const loaded = new Set([...before, ...after].map(skill => skill.name));
-  return { before, after, surfaces: candidates.filter(path => loaded.has(INJECTED_SKILL_PATH_RE.exec(path)[1])) };
+  const signature = (skills, name) => {
+    const skill = skills.find(skill => skill.name === name);
+    return skill ? JSON.stringify({ name: skill.name, body: skill.body, appliesTo: [...new Set(skill.appliesTo)].sort(),
+      whenPaths: skill.whenPaths === undefined ? null : [...new Set(skill.whenPaths)].sort() }) : null;
+  };
+  return { before, after, surfaces: candidates.filter(path => {
+    const name = INJECTED_SKILL_PATH_RE.exec(path)[1];
+    return signature(before, name) !== signature(after, name);
+  }) };
 }
 
 function skillEvidenceFor(root, head, files, context) {
@@ -322,6 +329,8 @@ function skillEvidenceFor(root, head, files, context) {
     const select = skills => selectSkillsForTask(skills, fixture.task_type, DEFAULT_KNOWLEDGE_BUDGET_CHARS, fixture.task_files);
     const before = select(context.before), after = select(context.after);
     if (![...before, ...after].some(skill => skill.name === fixture.skill)) continue;
+    if (renderSkillsPart(before.filter(skill => skill.name === fixture.skill)) ===
+        renderSkillsPart(after.filter(skill => skill.name === fixture.skill))) continue;
     const beforePrompt = renderSkillsPart(before), afterPrompt = renderSkillsPart(after);
     if (beforePrompt === afterPrompt || fixture.before !== beforePrompt || fixture.after !== afterPrompt) continue;
     qualified.set(fixture.skill, path);
@@ -416,7 +425,8 @@ export function evaluatePromptSurfaceDiff(diffText, { root = REPO_ROOT, base = "
 }
 
 export function evaluatePromptSurfaceGate({ root = REPO_ROOT, base = "origin/main", head = "HEAD" } = {}) {
-  return evaluatePromptSurfaceDiff(readGitDiff(root, base, head), { root, base, head });
+  const comparisonBase = runGit(root, ["merge-base", base, head]).trim();
+  return evaluatePromptSurfaceDiff(readGitDiff(root, base, head), { root, base: comparisonBase, head });
 }
 
 export function main(argv = process.argv.slice(2), { log = console.log, error = console.error } = {}) {
