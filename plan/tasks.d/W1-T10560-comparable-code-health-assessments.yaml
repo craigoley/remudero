@@ -23,6 +23,8 @@
     - src/lib/ops.ts
     - src/run-task.ts
     - .github/workflows/coverage-nightly.yml
+    - .github/workflows/codeql.yml
+    - scripts/code-health-provenance.mjs
     - src/lib/read-model-worker.ts
     - src/lib/views.ts
     - src/lib/serve.ts

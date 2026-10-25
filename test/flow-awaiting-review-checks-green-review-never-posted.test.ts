@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { DEFAULT_SWEEP_POLICY, runSweepLightPass, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { DEFAULT_SWEEP_POLICY, drainInFlightReviews, runSweepLightPass, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 
 function view(n: number, now: number): OpenPrView {
   return {
@@ -64,5 +64,46 @@ test("W1-T6044: flow-awaiting-review-checks-green-review-never-posted clears wit
         assert.deepEqual(posted, [waiting.prNumber, older.prNumber], "elapsed backoff or a due fresh-source probe releases the older head");
       } finally { rmSync(dir, { recursive: true, force: true }); }
     });
+  }
+});
+
+test("W1-T9904: flow-awaiting-review-checks-green-review-never-posted clears without a person", async () => {
+  const now = Date.now();
+  const dir = mkdtempSync(join(tmpdir(), "rmd-flow-review-handoff-"));
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const prs = [view(1, now), view(2, now), view(3, now)];
+    const posted: number[] = [];
+    let active = 0;
+    let peak = 0;
+    const deps: SweepDeps = {
+      ledgerPath, runId: "flow-review-handoff", now: () => now,
+      arm: () => assert.fail("must not arm"), close: () => assert.fail("must not close"),
+      dispatchFix: () => assert.fail("must not fix"), escalate: () => assert.fail("must not ask a person"),
+      readLiveHeadSha: async pr => pr.headSha,
+      postReview: async pr => {
+        peak = Math.max(peak, ++active);
+        try {
+          posted.push(pr.prNumber);
+          appendLedger(ledgerPath, {
+            run_id: "review", task_id: pr.taskId!, step: "review.posted", state: "success",
+            pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest,
+          });
+        } finally { active--; }
+      },
+    };
+    await runSweepLightPass(prs, deps, { ...DEFAULT_SWEEP_POLICY, reviewLanes: 1 });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(posted, [1, 2, 3], "reviews settled before refill setup must still release the queued tail");
+    assert.equal(peak, 1, "refill retains the shared semantic width");
+    const rows = readLedgerLines(ledgerPath);
+    assert.deepEqual(rows.filter(row => row.step === "sweep.review_refilled").map(row => row.pr_number), [2, 3]);
+    assert.equal(rows.filter(row => row.step === "review.posted").length, 3);
+    await runSweepLightPass(prs, deps, { ...DEFAULT_SWEEP_POLICY, reviewLanes: 1 });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(posted, [1, 2, 3], "delivered exact inputs stay deduplicated");
+  } finally {
+    await drainInFlightReviews({ boundMs: 1000 });
+    rmSync(dir, { recursive: true, force: true });
   }
 });
