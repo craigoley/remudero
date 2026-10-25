@@ -86,6 +86,14 @@ test("corrupt or unreadable product state cannot become an empty successful stor
   duplicate.receipts["f".repeat(64)] = Object.values(duplicate.receipts)[0];
   writeFileSync(path, JSON.stringify(duplicate));
   assert.equal(store.list(ACTOR).code, "corrupt", "one revision cannot have two committed command receipts");
+  const overBudget = JSON.parse(original);
+  const donor = Object.values(overBudget.products)[0] as Record<string, unknown>;
+  overBudget.products = Object.fromEntries(Array.from({ length: 65 }, (_, index) => {
+    const id = `prd_${index.toString(16).padStart(32, "0")}`;
+    return [id, { ...donor, id }];
+  }));
+  writeFileSync(path, JSON.stringify(overBudget));
+  assert.equal(store.list(ACTOR).code, "corrupt", "a structurally valid record cannot exceed the maintained collection quota");
   const changed = JSON.parse(original);
   Object.values(changed.products as Record<string, { brief: { idea: string } }>)[0]!.brief.idea = "Changed without a durable receipt";
   writeFileSync(path, JSON.stringify(changed));
