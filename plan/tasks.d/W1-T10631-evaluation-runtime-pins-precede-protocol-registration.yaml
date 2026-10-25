@@ -2,6 +2,7 @@
   title: "Evaluation runtime pins are validated before a prospective protocol can be registered"
   repo: remudero
   depends_on: []
+  plan_refs: [W1-T5341, W1-T5432, W1-T5433, W1-T5434]
   type: implement
   principles: {tdd: strict}
   budget_usd: 12.00
@@ -28,6 +29,7 @@
       proof: "unit test: registration pin refusals preserve truthful idempotent readiness gaps"
   note: "Parked plan-only proposal with dispatch_hold true and test-first implementation requirements. Normal reservation, machine judgment, full CI, coverage, security and semantic review retain authority. Future implementation tests are requirements, not passing evidence from this filing; no new author allowance or field-trial permission is inferred."
   rationale: |
+    W1-T5433 owns exclusive admission for readiness-gap sidecar appends, not prospective protocol registration. W1-T5434 owns reading a competing frozen calibration population instead of throwing on creation, not the order of runtime-pin validation before registration. Preserve both independent mechanisms and their owners; this narrower proposal neither supersedes those tasks nor changes its two declared paths to hide their shared surface.
     Observed main96425de0e66503c6f81569d0955bd5bfbc18b52c source blob1e902d08e11682043db9cfa239b061db48fb6e17 registers with runProspectiveAa(action:register) before its runtimePinRefusals call. Existing W5341 protects dispatch; this narrowly proposes pre-registration no-write protection, not a claim that any invalid pair actually ran.
     Registration can activate the ordinary daemon side-pair seam. Validate-before-write therefore matters separately from validate-before-dispatch. Reuse W4647/W5341/W5432 and their existing protocol/receipt/task intake rather than duplicate the evaluation framework or run a readiness command merely to inspect it.
     Fresh advertised-head shard and inline-plan subject scope, complete open-PR FILE plus SUBJECT scope and original issue7418 remain required before reservation/publication. A captured population and positive controls establish that bounded scope only, never universal absence or runtime adoption.
