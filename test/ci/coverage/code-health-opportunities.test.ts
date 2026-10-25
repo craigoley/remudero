@@ -781,6 +781,7 @@ async function featureModule<T extends object>(load: Promise<T>, leaf: string): 
   });
   return new Proxy(loaded, { get(target, key, receiver) {
     const value = Reflect.get(target, key, receiver);
+    if (key === "then" && value === undefined) return undefined; // A module namespace is not a promise.
     return value === undefined ? () => assert.fail(`${leaf}: ${String(key)} is not implemented on this branch`) : value;
   } });
 }
