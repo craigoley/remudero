@@ -27072,7 +27072,7 @@ export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
   const io: GardenLandIo = {
     git,
     fetcher: opts.fetcher ?? ghJson,
-    docsIndex: () => execFileSync(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root, stdio: "pipe" }),
+    generate: (script) => execFileSync(process.execPath, [...(script === "generate-capability-snapshot.mjs" ? ["--import", import.meta.resolve("tsx")] : []), join(root, "scripts", script)], { cwd: root, stdio: "pipe" }),
     preflight: opts.preflight ?? ((input) => planPrPreflight(input, { log: opts.log })),
   };
   return {
@@ -27090,7 +27090,7 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
   const io: GardenLandIo = {
     git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
     fetcher: opts.fetcher ?? ((args) => ghJsonAsync(args)),
-    docsIndex: () => execFilePromise(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root }),
+    generate: (script) => execFilePromise(process.execPath, [...(script === "generate-capability-snapshot.mjs" ? ["--import", import.meta.resolve("tsx")] : []), join(root, "scripts", script)], { cwd: root }),
     preflight: opts.preflight ?? ((input) => planPrPreflightAsync(input, { log: opts.log })),
   };
   return {
@@ -27117,7 +27117,7 @@ export interface GardenCheckoutOpts {
 interface GardenLandIo {
   git: (...args: string[]) => string | Promise<string>;
   fetcher: GhApiFetcher;
-  docsIndex: () => unknown;
+  generate: (script: "generate-docs-index.mjs" | "generate-capability-snapshot.mjs") => unknown;
   preflight: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
 }
 
@@ -27132,8 +27132,14 @@ function* gardenLandSteps(
   // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
   // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
   if (paths.some((p) => p.startsWith("docs/") && p.endsWith(".md"))) {
-    yield* step(io.docsIndex);
+    yield* step(() => io.generate("generate-docs-index.mjs"));
     yield* step(() => io.git("add", "--", "docs/docs-index.json"));
+  }
+  // The gate garden edits REQUIRED; the capability block derives that same list. Commit its
+  // checkout-owned regeneration before either preflight or push, with failures left intact.
+  if (paths.includes(".github/workflows/ci-gate.yml")) {
+    yield* step(() => io.generate("generate-capability-snapshot.mjs"));
+    yield* step(() => io.git("add", "--", "MASTER-PLAN.md"));
   }
   // commitlint refuses a header over 100 characters, and a cause name makes a long title: fit
   // the header (prefix kept, cut at a space or hyphen, since a cause is one hyphenated token)
