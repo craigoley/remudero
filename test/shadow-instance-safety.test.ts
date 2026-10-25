@@ -12,7 +12,7 @@ import { observeSelectedMode } from "#src/lib/instance-mode.js";
 import { daemonCommand } from "#src/cli/commands/daemon.js";
 import { runTask as directRunTask } from "#src/cli/commands/run-task-verb.js";
 import { spawnCodexWorker, spawnFoundryClaudeWorker, spawnOpenWeightWorker, type OpenWeightSpawnArgs } from "#src/lib/worker-provider.js";
-import { realDeployDeps } from "#src/lib/deployer.js";
+import { deployLedgerPath, realDeployDeps } from "#src/lib/deployer.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { writeMutantModule } from "#test/helpers/mutant-module.js";
 import * as modeRuntime from "#src/lib/instance-mode.js";
@@ -153,6 +153,32 @@ test("selected runtime canonical identity lookup shares the bounded read deadlin
   } finally { fixture.cleanup(); }
 });
 
+test("selected invocation refuses unreadable input transport and invalid target identities before effects", async () => {
+  const fixture = runtimeRegistryFixture();
+  let effects = 0;
+  try {
+    const input = { envPath: fixture.selected, get requiredCapabilities(): readonly string[] { throw new Error(fixture.selected); } };
+    const brokenIO = new Proxy(runtimeRegistry.registryFileIO, { get(target, property) {
+      if (property === "lstat") throw new Error(fixture.selected);
+      return Reflect.get(target, property);
+    } });
+    for (const operation of [
+      () => runtimeRegistry.withInstanceRegistryRuntime(() => { effects++; }, input),
+      () => runtimeRegistry.withInstanceRegistryRuntime(() => { effects++; }, { envPath: fixture.selected }, brokenIO),
+    ]) await assert.rejects(operation(), /selected instance registry unavailable \(input_unreadable\)/);
+    for (const instanceName of ["", "wrong/instance"]) {
+      await assert.rejects(runtimeRegistryRunner()(() => { effects++; }, { envPath: fixture.selected, instanceName }), /selected instance registry unavailable \(invalid_instance\)/);
+    }
+    await runtimeRegistryRunner()(() => {
+      for (const repo of ["", "owner//repo", "https://github.com/owner/repo"]) {
+        assert.throws(() => instanceMode(repo, fixture.legacy), /selected instance registry unavailable \(target_missing_or_mismatched\)/);
+      }
+      assert.equal(instanceMode("owner/repo", fixture.legacy), "shadow", "healthy numeric-free repository syntax is still supported");
+    }, { envPath: fixture.selected });
+    assert.equal(effects, 0);
+  } finally { fixture.cleanup(); }
+});
+
 test("selected runtime trusted launcher packet uses the real bounded child and immutable digest", async () => {
   const fixture = runtimeRegistryFixture();
   const script = 'const {pathToFileURL}=await import("node:url"); const m=await import(pathToFileURL(process.argv[1]).href); try { await m.withInstanceRegistryRuntime(()=>process.stdout.write(m.trustedInstanceRegistryLaunchPacket()), {envPath:process.env.RMD_INSTANCE_REGISTRY,instanceName:process.argv[2],expectedDigest:process.env.RMD_INSTANCE_REGISTRY_DIGEST}); } catch { process.exitCode=2; }';
@@ -228,6 +254,38 @@ test("selected supervisor hands immutable private identity only to its trusted r
         assert.equal(error.message.includes(fixture.root), false, "exec failures must not quote private argv");
         return true;
       });
+    }, { envPath: fixture.selected, instanceName: "worker" });
+  } finally { fixture.cleanup(); }
+});
+
+test("selected supervisor defaults cover target refusals derived waits and nested binding changes without live effects", async () => {
+  const fixture = runtimeRegistryFixture(), stateRoot = join(fixture.root, "selected-state"), calls: string[][] = [];
+  const selectedText = (mode: string) => registry(mode) + `    state_dir: ${stateRoot}\n    container_name: selected-container\n`;
+  writeFileSync(fixture.selected, selectedText("shadow"));
+  mkdirSync(join(stateRoot, "state", "inflight"), { recursive: true });
+  writeFileSync(deployLedgerPath(stateRoot), JSON.stringify({ step: "implement.done", worker_duration_ms: 3000 }) + "\n");
+  try {
+    await runtimeRegistryRunner()(async () => {
+      const options: Parameters<typeof realDeployDeps>[0] = { installPath: fixture.root, stateRoot, daemonLabel: "fixture", serveLabel: "fixture-serve",
+        servePort: 1, uid: 1, ledgerPath: join(stateRoot, "unused"), log: () => {},
+        execFile: (cmd, args) => { calls.push([cmd, ...args]); return ""; } };
+      for (const over of [{ stateRoot: join(fixture.root, "unselected-state") }, { instance: "different" }]) {
+        assert.throws(() => realDeployDeps({ ...options, ...over }), /selected instance registry unavailable \(target_missing_or_mismatched\)/);
+      }
+      const deps = realDeployDeps(options), backends = deps.restartBackends!(), launchctl = backends.find(b => b.name === "launchctl")!, recycler = backends.find(b => b.name === "recycle-container")!;
+      assert.equal(launchctl.probe(), false, "selected launchctl cannot borrow compatibility from a healthy host");
+      assert.throws(() => deps.kickstartConsole!(), /selected instance registry unavailable \(launcher_unsupported\)/);
+      assert.deepEqual(calls, [], "every unsupported restart and mismatched target refuses before transport");
+      recycler.restart();
+      assert.equal(calls.length, 1); assert.equal(calls[0]![0], "bash");
+      assert.ok(calls[0]!.includes("recycle-wait"), "actual on-disk duration selects the derived-wait command arm");
+      assert.ok(calls[0]!.some(arg => arg.includes("RMD_RECYCLE_WAIT_S")));
+      calls.length = 0;
+      writeFileSync(fixture.selected, selectedText("live"));
+      await runtimeRegistryRunner()(() => {
+        assert.throws(() => recycler.restart(), /selected instance registry unavailable \(revision_changed\)/);
+      }, { envPath: fixture.selected, instanceName: "worker" });
+      assert.deepEqual(calls, [], "an old launcher cannot adopt a different nested invocation binding");
     }, { envPath: fixture.selected, instanceName: "worker" });
   } finally { fixture.cleanup(); }
 });
