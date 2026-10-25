@@ -5,7 +5,10 @@
   type: recon
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=82b6f7b9bd78f5d8
+  # backlog gardener: placed=2026-10-25T09:04:56.056Z
   attempts: 0
   design: |
     Read-only research. The lifetime-pressure judge rated W1-T10191 "automate" from this
