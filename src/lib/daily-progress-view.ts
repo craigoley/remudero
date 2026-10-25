@@ -166,7 +166,7 @@ export function validateDailyProgressRequest(params: URLSearchParams, source: Vi
 
 export function createDailyProgressView(opts: { stateDir?: string; timeZone?: string; keys?: () => string[] } = {}): {
   name: string; version: number; demand: true;
-  materialize(ctx: { now: number; sourceStore?: ReadModelDb }): Array<{ key: string; data: DailyProgressReport; sources: ViewSource[] }>;
+  materialize(ctx: { now: number; sourceStore?: ReadModelDb; instances: ReadonlyArray<unknown> }): Array<{ key: string; data: DailyProgressReport; sources: ViewSource[] }>;
 } {
   return { name: DAILY_PROGRESS_VIEW_NAME, version: 1, demand: true, materialize(ctx) {
     const stateDir = opts.stateDir ?? (ctx.sourceStore ? dirname(readModelSidecarDir(dirname(ctx.sourceStore.path))) : undefined);
