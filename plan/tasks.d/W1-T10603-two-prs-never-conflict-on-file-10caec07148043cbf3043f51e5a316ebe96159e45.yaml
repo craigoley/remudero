@@ -1,0 +1,19 @@
+- id: W1-T10603
+  title: "HOT FILE scripts/comment-load-baseline.json — its merge conflicts cost 16.9 PR minute(s) across 10 round(s) on 7 pull request(s), and nothing restructures it: split-per-entry"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "hot-file:scripts/comment-load-baseline.json"
+  files:
+    - scripts/comment-load-baseline.json
+    - test/gardeners/two-prs-never-conflict-on-file-10caec07148043cbf3043f51e5a316ebe96159e45.test.ts
+  acceptance:
+    - claim: "scripts/comment-load-baseline.json no longer strands pull requests in merge conflicts: SPLIT-PER-ENTRY: the file is a keyed map many pull requests each add one key to, so it becomes one file per entry"
+      proof: "grep: test(\"W1-T10603: two pull requests editing scripts/comment-load-baseline.json merge without a conflict\" in test/gardeners/two-prs-never-conflict-on-file-10caec07148043cbf3043f51e5a316ebe96159e45.test.ts"
+  note: "Filed by the hot-file gardener (W1-T4803). BEFORE: scripts/comment-load-baseline.json cost 16.9 recency-weighted PR minute(s) across 10 conflict round(s) on 7 pull request(s). Remedy: SPLIT-PER-ENTRY: the file is a keyed map many pull requests each add one key to, so it becomes one file per entry. The gardener measures the same file again once this lands and credits or debits the split-per-entry class by whether it stopped conflicting. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
