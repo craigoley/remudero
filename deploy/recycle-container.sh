@@ -74,10 +74,58 @@ selected_registry_docker_read() {
     });
   ' "$@" 2>/dev/null
 }
+selected_registry_mounts() {
+  [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
+  if ! node --input-type=module -e '
+    import {realpath} from "node:fs/promises"; import {dirname,resolve,isAbsolute,relative} from "node:path";
+    const [selected,destination,...args]=process.argv.slice(1), timer=setTimeout(()=>process.exit(2),5000);
+    const canonical=async p=>{try{return await realpath(p);}catch(error){
+      if(error.code!=="ENOENT"||dirname(p)===p) throw error;
+      return resolve(await canonical(dirname(p)),relative(dirname(p),p));
+    }};
+    try {
+      if(args.length>1024) throw Error(); const file=await realpath(selected);
+      for(let i=0;i<args.length;i++){
+        let source,target;
+        if(args[i]==="-v"||args[i]==="--volume"){
+          const parts=args[++i]?.split(":"); if(!parts||parts.length<2||parts.length>3) throw Error();
+          [source,target]=parts;
+        } else if(args[i]==="--mount"){
+          const fields=Object.fromEntries(args[++i]?.split(",").map(p=>{const j=p.indexOf("=");return j<0?[p,""]:[p.slice(0,j),p.slice(j+1)];})??[]);
+          if(fields.type!=="bind") throw Error(); source=fields.src??fields.source; target=fields.dst??fields.destination??fields.target;
+          if(source===selected&&target===destination&&Object.hasOwn(fields,"readonly")) continue;
+        } else continue;
+        if(!source||!target||!isAbsolute(source)) throw Error();
+        const root=await canonical(source), rel=relative(root,file);
+        if(rel===""||(!rel.startsWith("../")&&rel!==".."&&!isAbsolute(rel))) throw Error();
+      }
+    } catch {process.exitCode=2;} finally {clearTimeout(timer);}
+  ' "${SELECTED_REGISTRY_HOST_FILE}" "${SELECTED_REGISTRY_CONTAINER_FILE}" "$@" 2>/dev/null; then
+    selected_registry_refuse mount_alias_unknown; return 2
+  fi
+}
+selected_registry_planned_mounts() {
+  [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
+  if [ "${SELECTED_REGISTRY_CALLER}" = recycle-container ]; then
+    local -a planned
+    planned=("${SELECTED_REGISTRY_BROAD_MOUNT_ARGS[@]}")
+    if [ -f "${SCRIPT_DIR:-}/codex-sessions-mount.sh" ]; then
+      . "${SCRIPT_DIR}/codex-sessions-mount.sh"
+      if codex_sessions_plan "${STATE_DIR}"; then planned+=("${CODEX_SESSIONS_ARGS[@]}"); fi
+    fi
+    if command -v scratch_plan >/dev/null 2>&1 && scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}"; then
+      planned+=("${SCRATCH_ARGS[@]}")
+    fi
+    selected_registry_mounts "${planned[@]}"
+  else
+    selected_registry_mounts "${SELECTED_REGISTRY_BROAD_MOUNT_ARGS[@]}"
+  fi
+}
 selected_registry_image() {
   [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
   local endpoint probe image="$1"
   selected_registry_recheck || return 2
+  selected_registry_planned_mounts || return 2
   if [ "${DOCKER_HOST+x}" = x ]; then
     endpoint="${DOCKER_HOST}"
   elif ! endpoint="$(selected_registry_docker_read context inspect --format '{{.Endpoints.docker.Host}}')"; then
@@ -106,7 +154,7 @@ selected_registry_diagnostic_filter() {
       "read_failed","close_failed","cancelled","timeout","invalid_encoding","malformed","digest_mismatch","file_identity_unqualified",
       "invalid_path","invalid_bounds","invalid_digest","unsupported_contract","unsupported_capability","unsupported_field",
       "instance_missing","invalid_instance","target_missing_or_mismatched","unsupported_mount_path","reader_unavailable",
-      "unsupported_reader","packet_unreadable","namespace_unknown","image_reader_unknown"]);
+      "unsupported_reader","packet_unreadable","namespace_unknown","image_reader_unknown","mount_alias_unknown"]);
     const emit=line=>{ if(count++<64) process.stdout.write(caller+": "+line+"\n"); };
     const line=text=>{
       const reason=/REFUSING -- selected registry unavailable \(([a-z_]+)\)[.]$/.exec(text)?.[1];
@@ -568,6 +616,8 @@ if [ -d "${CONTAINER_CONFIG_DIR}" ]; then
 else
   echo "recycle-container: NOTE — no container config directory at ${CONTAINER_CONFIG_DIR}; recycling without a Remudero config mount" >&2
 fi
+SELECTED_REGISTRY_BROAD_MOUNT_ARGS=(-v "${STATE_DIR}:${STATE_MOUNT_DEST}" -v "${CRED_DIR}:${CRED_MOUNT_DEST}"
+  "${CODEX_MOUNT_ARGS[@]+"${CODEX_MOUNT_ARGS[@]}"}" "${CONTAINER_CONFIG_MOUNT_ARGS[@]+"${CONTAINER_CONFIG_MOUNT_ARGS[@]}"}")
 
 # Resolve the reusable provider-runtime verifier before any lifecycle action. The PWD fallback is
 # load-bearing for a copied script (the mutation fixtures exercise that supported test shape); an
@@ -2585,6 +2635,7 @@ LAUNCH_IMAGE="${REF}"
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then LAUNCH_IMAGE="${PULLED_IMAGE_ID}"; fi
 DOCKER_RUN_ARGS+=("${LAUNCH_IMAGE}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
 selected_registry_recheck
+selected_registry_mounts "${DOCKER_RUN_ARGS[@]}"
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null
 
 # ── 7. PROVE IT — THE STARTED CONTAINER'S IMAGE MUST BE THE DIGEST JUST PULLED ──────────────────
