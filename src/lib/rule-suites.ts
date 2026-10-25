@@ -157,6 +157,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "spawn says so inline at its own call site (`node-test-reporter: exempt`), so every violation bites, not only new ones",
   ),
   refusedForPredicate(
+    "test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts",
+    "a",
+    "W1-T9049's repair-classification suite. The `ls-files` literal is a synthetic before/after token-dodge fixture " +
+      "for a production gate regex, not an enumeration call. The suite exercises repair evidence and gardener proposals " +
+      "with injected inputs and temporary inventories; it never walks tracked src/ or asserts a per-src-file property",
+  ),
+  refusedForPredicate(
     "test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts",
     "a",
     "W1-T2680's own suite. Its single ls-files call is `git ls-files test/*.test.ts`, used as a CONTROL to size the test " +

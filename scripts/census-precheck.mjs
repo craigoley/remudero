@@ -1164,6 +1164,12 @@ export const PRECHECK_TRIGGERED_SUITES = [
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
+  { testFile: "test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts", gitFree: true,
+    trigger: ({ changed }) => changed.some((p) => [
+      "src/lib/gate-gardener.ts", "scripts/census-precheck.mjs",
+      "test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts",
+    ].includes(p)),
+    remedy: "classify suspect repairs through production gate metadata and file against the gate recognizer" },
   { testFile: "test/coverage-session-blanking.test.ts",
     trigger: (input) => input.changed.some((path) => ["scripts/coverage-session-blanking-check.mjs",
       "test/coverage-session-blanking.test.ts"].includes(path)) || addsMatch(input, TEST_TS_SCOPE_RE, childCoverageFindings),
