@@ -756,3 +756,15 @@ test("code health background collection is leased, daily, restart-aware and inde
     now += 86_400_000; await unit.run(); assert.equal(calls.length, 2, "next day is due without a page load or Analytics");
   });
 });
+
+
+test("code health bounded evidence reads refuse a pipe without blocking the worker", async () => {
+  await withTempDir("code-health-pipe", dir => {
+    const path = join(dir, "metadata.json"), fifo = join(dir, "metadata-pipe");
+    writeFileSync(path, JSON.stringify({ observed: true }));
+    execFileSync("mkfifo", [fifo]);
+    const script = 'import {readCodeHealthArtifactJson} from "#src/lib/code-health-store.js";const p=readCodeHealthArtifactJson(process.argv[1]);if(!p.observed)process.exit(2);try{readCodeHealthArtifactJson(process.argv[2]);process.exit(3);}catch{process.stdout.write("refused");}';
+    const read = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, path, fifo], { cwd: repoRoot(), timeout: 3000, encoding: "utf8" });
+    assert.equal(read, "refused", "an invalid file type is an unavailable source, never an unbounded blocking read");
+  });
+});

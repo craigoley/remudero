@@ -247,6 +247,14 @@ test("code health cached view preserves scope, pinned pages and saved source clo
     assert.equal(deniedReport.data.repositories[0]!.state, "unauthorized", "a denied alert read stays distinct even when the metadata read succeeded");
     assert.equal(deniedReport.data.planningAvailable, false);
     assert.match(deniedReport.data.repositories[0]!.reason!, /allow/);
+    assert("snapshotId" in deniedSave);
+    const unresolved = input(); unresolved.baseline!.scans[0]!.findings = [finding()];
+    const unresolvedSave = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(stateDir, value.repository), input: unresolved, expectedSnapshotId: deniedSave.snapshotId, clock });
+    assert.equal(unresolvedSave.state, "published");
+    const retained = readCodeHealthReport({ stateDir, params, now });
+    assert.equal(retained.data.urgentFindings.value, 1);
+    assert.equal(retained.data.urgentFindings.precision, "at_least", "an unresolved earlier finding cannot become an exact current count");
+
 
 
   });
