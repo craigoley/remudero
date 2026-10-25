@@ -40,17 +40,42 @@ export function shiftDailyDate(date: string, days: number): string {
   return result;
 }
 
-/** Solve for the named midnight, rather than assuming a day has 24 elapsed hours. */
+const dayStarts = new Map<string, number>();
+/** Find the first real instant of a civil date, including repeated and skipped midnight.
+ * Local date labels can briefly go backwards (St Johns 2010); a binary search over date
+ * labels alone would omit that first occurrence. Compare offset candidates and transitions. */
 function midnight(date: string, timeZone: string): number {
-  const target = civilUtc(date);
-  let at = target;
-  for (let i = 0; i < 8; i++) {
+  const target = civilUtc(date), key = `${timeZone}:${date}`, cached = dayStarts.get(key);
+  if (cached !== undefined) return cached;
+  // PRIMARY CONTROL: all IANA offsets fit in this 72-hour bracket. Hourly offset observations
+  // locate the zone's transitions; refine changed brackets to the exact millisecond.
+  const hour = 3_600_000, lower = target - 36 * hour, upper = target + 36 * hour;
+  const offset = (at: number): number => {
     const p = parts(at, timeZone);
-    const local = Date.parse(`${p.year!.padStart(4, "0")}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}.000Z`);
-    if (local === target) return at;
-    at += target - local;
+    return Date.parse(`${p.year!.padStart(4, "0")}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}.000Z`) - Math.floor(at / 1000) * 1000;
+  };
+  const offsets = new Set<number>(), candidates = new Set<number>();
+  let previous = lower, previousOffset = offset(previous); offsets.add(previousOffset);
+  for (let at = lower + hour; at <= upper; at += hour) {
+    const currentOffset = offset(at); offsets.add(currentOffset);
+    if (currentOffset !== previousOffset) {
+      let lo = previous, hi = at;
+      while (hi - lo > 1) {
+        const middle = lo + Math.floor((hi - lo) / 2);
+        if (offset(middle) === previousOffset) lo = middle; else hi = middle;
+      }
+      candidates.add(hi);
+    }
+    previous = at; previousOffset = currentOffset;
   }
-  throw new RangeError("the reporting date has no supported local midnight");
+  for (const value of offsets) candidates.add(target - value);
+  const starts = [...candidates].filter(at => dailyDateAt(at, timeZone) === date && dailyDateAt(at - 1, timeZone) !== date);
+  if (!starts.length) throw new RangeError("the reporting date has no actual local start");
+  const start = Math.min(...starts);
+  // BACKSTOP: finite reusable calendar cache; new zones or dates never grow it indefinitely.
+  if (dayStarts.size >= 512) dayStarts.delete(dayStarts.keys().next().value!);
+  dayStarts.set(key, start);
+  return start;
 }
 
 export function dailyWindow(date: string, timeZone = DEFAULT_DAILY_PROGRESS_ZONE): { reportDate: string; timeZone: string; windowStart: string; windowEnd: string } {

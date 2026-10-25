@@ -35,6 +35,7 @@ test("daily progress uses calendar days across DST and midnight", () => {
   assert.equal(fall.windowEnd, "2026-11-02T05:00:00.000Z");
   const repeatedMidnight = dailyWindow("2026-11-01", "America/Havana");
   assert.equal(repeatedMidnight.windowStart, "2026-11-01T04:00:00.000Z", "a repeated midnight starts at its first occurrence");
+  assert.equal(dailyWindow("2010-11-07", "America/St_Johns").windowStart, "2010-11-07T02:30:00.000Z", "a short first occurrence is not lost when local dates briefly go backwards");
   const skippedMidnight = dailyWindow("2018-11-04", "America/Sao_Paulo");
   assert.equal(skippedMidnight.windowStart, "2018-11-04T03:00:00.000Z", "a civil day begins at its first actual instant even when 00:00 was skipped");
   assert.equal(skippedMidnight.windowEnd, "2018-11-05T02:00:00.000Z");
