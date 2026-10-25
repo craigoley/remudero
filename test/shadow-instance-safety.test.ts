@@ -507,9 +507,10 @@ test("selected private denials follow scratch-backed Claude invocations without 
 function privateClaudeArgs(fixture: ReturnType<typeof runtimeRegistryFixture>, sink: { options?: Record<string, unknown>; prompt?: unknown; calls: number }): SpawnWorkerArgs {
   const cwd = join(fixture.root, "checkout"), settingsFile = join(fixture.root, "settings.json");
   mkdirSync(cwd);
+  const publicTmp = join(fixture.root, "public-worker-tmp"); mkdirSync(publicTmp);
   writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true,
     allowUnsandboxedCommands: false, network: { allowedDomains: ["api.github.com"] } } }));
-  return { cwd, settingsFile, prompt: "selected privacy fixture", permissionMode: "bypassPermissions",
+  return { cwd, settingsFile, prompt: "selected privacy fixture", permissionMode: "bypassPermissions", env: { TMPDIR: publicTmp },
     config: { root: fixture.root, claudeBin: "/unused" }, mountProvider: "claude", egress: { mode: "off" },
     claudeExecutable: { cache: createClaudeExecutableCache(), deps: {
       env: { [CLAUDE_BIN_ENV_OVERRIDE]: "/fake/claude" }, home: fixture.root, exists: () => true, canExecute: () => true, locations: [] } },
@@ -522,6 +523,25 @@ function privateClaudeArgs(fixture: ReturnType<typeof runtimeRegistryFixture>, s
         result: "done", session_id: "selected-fixture", total_cost_usd: 0, num_turns: 1 }; })();
     }) as SpawnWorkerArgs["queryFn"] };
 }
+
+test("selected Claude public policy never names private inputs while preserving workspace edits", async () => {
+  const fixture = runtimeRegistryFixture(), sink = { calls: 0 } as { calls: number; options?: Record<string, unknown> };
+  try {
+    const args = privateClaudeArgs(fixture, sink), originalPolicy = args.settingsFile;
+    args.onMemoryAdmissionEnd = () => { args.env!.TMPDIR = fixture.root; };
+    await runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected });
+    assert.equal(sink.calls, 1);
+    const policy = sink.options!.settings as { sandbox: { filesystem: { denyRead: string[]; allowRead: string[]; allowWrite: string[] } }; permissions: { allow: string[] } };
+    assert.equal(JSON.stringify(policy).includes(fixture.selected), false, "sandbox instructions are model input, not a private host-only envelope");
+    assert.equal(JSON.stringify(policy).includes(originalPolicy), false);
+    assert.equal(sink.options!.permissionMode, "dontAsk");
+    assert.ok(policy.sandbox.filesystem.denyRead.includes("/"));
+    assert.ok(policy.sandbox.filesystem.allowRead.includes(realpathSync(args.cwd)));
+    assert.ok(policy.sandbox.filesystem.allowWrite.includes(realpathSync(args.cwd)));
+    assert.ok(policy.permissions.allow.includes(`Edit(/${realpathSync(args.cwd)}/**)`), "Edit(path) governs Write and NotebookEdit; Write(path) never matches");
+    assert.equal((sink.options!.env as Record<string, string>).TMPDIR, join(fixture.root, "public-worker-tmp"), "queued env mutation cannot broaden the public scope");
+  } finally { fixture.cleanup(); }
+});
 
 test("selected Claude actual SDK transport keeps private registry paths out of child arguments", async () => {
   const fixture = runtimeRegistryFixture();
