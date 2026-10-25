@@ -237,6 +237,8 @@ if [ "${RMD_INSTANCE_REGISTRY+x}" = x ]; then
   fi
   source "${SCRIPT_ROOT}/deploy/recycle-container.sh"
   selected_registry_init "${SCRIPT_ROOT}" "${INSTANCE_NAME}" serve-container
+  selected_registry_diagnostics
+  trap 'selected_registry_finish_diagnostics $?' EXIT
 fi
 
 registry_field() {

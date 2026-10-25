@@ -99,6 +99,50 @@ selected_registry_image() {
   [ "$probe" = selected-registry-capability-v1 ] || { selected_registry_refuse image_reader_unknown; return 2; }
   selected_registry_recheck
 }
+selected_registry_diagnostic_filter() {
+  node --input-type=module -e '
+    const caller=process.argv[1]; let pending="", count=0;
+    const reasons=new Set(["missing","not_regular","oversized","revision_changed","lstat_failed","open_failed","stat_failed",
+      "read_failed","close_failed","cancelled","timeout","invalid_encoding","malformed","digest_mismatch","file_identity_unqualified",
+      "invalid_path","invalid_bounds","invalid_digest","unsupported_contract","unsupported_capability","unsupported_field",
+      "instance_missing","invalid_instance","target_missing_or_mismatched","unsupported_mount_path","reader_unavailable",
+      "unsupported_reader","packet_unreadable","namespace_unknown","image_reader_unknown"]);
+    const emit=line=>{ if(count++<64) process.stdout.write(caller+": "+line+"\n"); };
+    const line=text=>{
+      const reason=/REFUSING -- selected registry unavailable \(([a-z_]+)\)[.]$/.exec(text)?.[1];
+      if(reason && reasons.has(reason)) emit("REFUSING -- selected registry unavailable ("+reason+").");
+      else if(text.includes("REFUSING")||text.includes("FAILED")) emit("selected lifecycle reported refusal/failure (private details withheld).");
+      else if(text.includes("--dry-run")) emit("selected lifecycle dry-run; image capability and live effects NOT RUN.");
+      else if(text.trim()) emit("selected lifecycle diagnostic (private details withheld).");
+    };
+    for await(const chunk of process.stdin){pending+=chunk.toString("utf8");let end;
+      while((end=pending.indexOf("\n"))>=0){line(pending.slice(0,end));pending=pending.slice(end+1);}
+      if(pending.length>8192){pending="";emit("selected lifecycle oversized diagnostic withheld.");}
+    }
+    if(pending) line(pending);
+  ' "${SELECTED_REGISTRY_CALLER}" 2>/dev/null
+}
+selected_registry_diagnostics() {
+  [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
+  exec 3>&1 4>&2
+  # Only the public streams are projected. Captured protocol bytes and explicit file redirects remain unchanged.
+  exec > >(selected_registry_diagnostic_filter >&4)
+  SELECTED_REGISTRY_DIAGNOSTIC_PID=$!
+  exec 2>&1
+}
+selected_registry_finish_diagnostics() {
+  local status="$1" failed=0
+  [ -n "${SELECTED_REGISTRY_DIAGNOSTIC_PID:-}" ] || return 0
+  exec 1>&3 2>&4
+  exec 3>&- 4>&-
+  wait "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" || failed=1
+  SELECTED_REGISTRY_DIAGNOSTIC_PID=""
+  if [ "$failed" = 1 ]; then
+    echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; outcome unknown." >&2
+    [ "$status" -ne 0 ] || exit 2
+  fi
+  printf '%s: selected lifecycle command exited %s; no release or activation permission is implied.\n' "${SELECTED_REGISTRY_CALLER}" "$status"
+}
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then return 0; fi
 
 # recycle-container — replace the running remudero-daemon container with a freshly pulled image.
@@ -293,6 +337,10 @@ trap 'commission_on_exit' EXIT
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 DEFAULT_INSTANCE_REGISTRY="${SCRIPT_DIR%/deploy}/.remudero/daemon-instances.yaml"
 selected_registry_init "${SCRIPT_DIR%/deploy}" "${INSTANCE_NAME}" recycle-container
+selected_registry_diagnostics
+if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+  trap 'selected_exit=$?; commission_on_exit; selected_registry_finish_diagnostics "$selected_exit"' EXIT
+fi
 
 validate_instance_name() {
   case "$1" in
@@ -1407,6 +1455,7 @@ recycle_cleanup_tmp() {
   [ -n "${COMMISSION_PROBE_FILE}" ] && rm -f "${COMMISSION_PROBE_FILE}"
   release_host_recycle_lock
   commission_on_exit
+  selected_registry_finish_diagnostics "${exit_status}"
   return 0
 }
 # W1-T6160: the cleanup also emits the commissioning receipt (a no-op unless --commission-git-author).
