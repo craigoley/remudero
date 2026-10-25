@@ -79,6 +79,12 @@ test("code health separates fixes from changed measurement scope", () => {
     assert.equal(result.fixedFindings.length, 0);
     assert.equal(result.unconfirmedMissingFindings.length, 1);
   }
+  const dismissed = structuredClone(value); dismissed.scans[0]!.findings = [finding("dismissed")];
+  dismissed.scans[0]!.checks[0] = { id: "quality", met: false, reason: "A dismissed finding has not been verified as fixed." };
+  const stillKnown = projectCodeHealth(dismissed);
+  assert.equal(stillKnown.findings.length, 1, "dismissal does not erase a known finding from the assessment");
+  assert.equal(stillKnown.findings[0]!.severity, "high");
+  assert.equal(stillKnown.summary.healthy, false);
   const repeated = structuredClone(value); repeated.scans[0] = structuredClone(repeated.baseline!.scans[0]!);
   repeated.scans[0]!.analyzedSha = repeated.currentSha;
   assert.equal(compareCodeHealthEvidence(repeated).state, "insufficient_evidence", "rereading one immutable scan is not remeasurement");
