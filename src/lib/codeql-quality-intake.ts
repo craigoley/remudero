@@ -123,20 +123,32 @@ export function qualityScanFromCollectedEvidence(input: {
       reason: findings.some(finding => finding.status !== "fixed") ? "Known maintainability findings have not been verified as fixed." : "No open findings in the measured maintainability subset." }], findings };
 }
 
-function evidenceSnapshotId(input: CodeHealthProjectionInput, assessment: ReturnType<typeof projectCodeHealth>): string {
-  // The source scan IDs and normalized content, not the time a page read them, pin this briefing.
-  const normalizedScans = (scans: readonly CodeHealthProjectionInput["scans"][number][]) => [...scans].sort((a, b) => a.kind.localeCompare(b.kind)).map(value => {
-    const findings = new Map(value.findings.map(finding => [codeHealthFindingFingerprint(assessment.repository, value.kind, finding),
-      [finding.id, finding.ruleId, finding.status, finding.severity, finding.category, finding.path, finding.title, finding.effortMinutes, finding.fixedAt ?? null, finding.fixedSha ?? null]]));
-    return [value.kind, value.scanId, value.measurement ?? null, [...findings].sort(([a], [b]) => a.localeCompare(b))];
-  });
-  return createHash("sha256").update(JSON.stringify([assessment.repository, assessment.currentSha, assessment.analyzedSha, assessment.baselineSha,
-    assessment.policyVersion, assessment.sources, assessment.checks, assessment.findings,
-    normalizedScans(input.scans), normalizedScans(input.baseline?.scans ?? [])])).digest("hex");
+function canonicalCodeHealthValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalCodeHealthValue);
+  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([key, child]) => [key, canonicalCodeHealthValue(child)]));
+  return value;
+}
+const canonicalCodeHealthJson = (value: unknown): string => JSON.stringify(canonicalCodeHealthValue(value));
+const orderedCodeHealthValues = <T>(values: readonly T[]): T[] => [...values].sort((a, b) => {
+  const left = canonicalCodeHealthJson(a), right = canonicalCodeHealthJson(b); return left < right ? -1 : left > right ? 1 : 0;
+});
+
+/** V1 identity seals source facts and declared policy, independently of today's projection. Keep v1 normalization compatible. */
+function evidenceSnapshotId(input: CodeHealthProjectionInput): string {
+  const normalizedScans = (scans: readonly CodeHealthScan[]) => orderedCodeHealthValues(scans.map(scan => ({ ...scan,
+    checks: orderedCodeHealthValues(scan.checks), exclusions: [...scan.exclusions].sort(),
+    findings: orderedCodeHealthValues([...new Map(scan.findings.map(finding => [canonicalCodeHealthJson(finding), finding])).values()]),
+  })));
+  const { observedAt: _observedAt, nextDueAt: _nextDueAt, ...facts } = input;
+  const evidence = { ...facts, registry: { ...input.registry, checks: orderedCodeHealthValues(input.registry.checks) }, scans: normalizedScans(input.scans),
+    baseline: input.baseline ? { ...input.baseline, scans: normalizedScans(input.baseline.scans) } : null };
+  return createHash("sha256").update(canonicalCodeHealthJson({ version: "code-health-evidence-input-v1", evidence })).digest("hex");
 }
 
 export function codeHealthEvidenceSnapshotId(input: CodeHealthProjectionInput): string {
-  return evidenceSnapshotId(input, projectCodeHealth(input));
+  projectCodeHealth(input); // New publication must meet current validation; reading old sealed facts does not re-assess them.
+  return evidenceSnapshotId(input);
 }
 
 export interface CodeHealthStoredSnapshot {
@@ -148,7 +160,7 @@ export interface CodeHealthStoredSnapshot {
 }
 export type CodeHealthSnapshotRead = { state: "observed"; snapshot: CodeHealthStoredSnapshot } | { state: "not_collected" | "unavailable"; reason: string };
 const CODE_HEALTH_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024;
-const evidenceDigest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const evidenceDigest = (value: unknown): string => createHash("sha256").update(canonicalCodeHealthJson(value)).digest("hex");
 function boundedEvidenceJson(path: string, maxBytes: number): unknown {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -182,9 +194,10 @@ export function readCodeHealthSnapshot(stateDir: string, repository: string, sna
     if (pointer && pointer.repository !== repository.toLowerCase()) throw new Error("Code health repository does not match.");
     const id = snapshotId ?? pointer!.snapshotId;
     const snapshot = boundedEvidenceJson(join(stateDir, "code-health", "snapshots", `${id}.json`), CODE_HEALTH_SNAPSHOT_MAX_BYTES) as CodeHealthStoredSnapshot;
+    const { contentHash, ...sealed } = snapshot;
     if (!snapshot || Object.keys(snapshot).sort().join(",") !== "contentHash,input,previousSnapshotId,snapshotId,version" || snapshot.version !== "code-health-snapshot-v1" ||
         snapshot.snapshotId !== id || !(snapshot.previousSnapshotId === null || /^[a-f0-9]{64}$/.test(snapshot.previousSnapshotId) && snapshot.previousSnapshotId !== id) || snapshot.input?.repository.toLowerCase() !== repository.toLowerCase() ||
-        snapshot.contentHash !== evidenceDigest(snapshot.input) || codeHealthEvidenceSnapshotId(snapshot.input) !== id) throw new Error("Code health evidence identity or integrity does not match.");
+        contentHash !== evidenceDigest(sealed) || evidenceSnapshotId(snapshot.input) !== id) throw new Error("Code health evidence identity or integrity does not match.");
     return { state: "observed", snapshot };
   } catch { return { state: "unavailable", reason: "Saved code health evidence is unavailable, invalid, or belongs to another repository." }; }
 }
@@ -218,7 +231,8 @@ export function publishCodeHealthSnapshot(opts: { stateDir: string; input: CodeH
     const attemptAt = (opts.clock ?? systemClock).iso();
     if (!Number.isFinite(Date.parse(attemptAt)) || Date.parse(opts.input.observedAt) > Date.parse(attemptAt)) throw new Error("Code health measurement is later than its collection attempt.");
     if (opts.expectedSnapshotId !== null && !/^[a-f0-9]{64}$/.test(opts.expectedSnapshotId)) throw new Error("Invalid expected code health snapshot.");
-    const snapshot: CodeHealthStoredSnapshot = { version: "code-health-snapshot-v1", snapshotId, contentHash: evidenceDigest(opts.input), previousSnapshotId: opts.expectedSnapshotId, input: opts.input };
+    const sealed = { version: "code-health-snapshot-v1" as const, snapshotId, previousSnapshotId: opts.expectedSnapshotId, input: opts.input };
+    const snapshot: CodeHealthStoredSnapshot = { ...sealed, contentHash: evidenceDigest(sealed) };
     const serialized = JSON.stringify(snapshot);
     if (Buffer.byteLength(serialized) > CODE_HEALTH_SNAPSHOT_MAX_BYTES) throw new Error("Code health snapshot exceeds its bound.");
     lock = codeHealthPublicationLock(opts.stateDir);
@@ -275,7 +289,7 @@ export function buildCodeHealthOpportunities(input: CodeHealthProjectionInput, r
     if (finding.status !== "open" || !retained.has(fingerprint)) continue;
     const group = groups.get(finding.ruleId) ?? new Set<string>(); group.add(fingerprint); groups.set(finding.ruleId, group);
   }
-  const snapshotId = evidenceSnapshotId(input, assessment);
+  const snapshotId = evidenceSnapshotId(input);
   const scopedRelated = (proposalId: string): CodeHealthRelatedWork[] => {
     const rows = relatedWork.filter(work => work.repository.toLowerCase() === assessment.repository && work.proposalId === proposalId).map(work => {
       const value: CodeHealthRelatedWork = { repository: assessment.repository, proposalId };
