@@ -23,6 +23,7 @@
     - src/lib/project-init.ts
     - .remudero/managed-repos.json
     - test/review/wreckterra-web-profile.test.ts
+    - test/managed-repos.test.ts
   status: queued
   attempts: 0
   rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required.
