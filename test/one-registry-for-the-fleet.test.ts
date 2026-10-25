@@ -341,7 +341,17 @@ test("recycle-container and install-host-units accept the project layer's fields
       env: { ...process.env, RMD_INSTANCE_REGISTRY: registryPath, RMD_RECYCLE_DOCKERENV_PATH: join(dir, "no-dockerenv") },
     });
   const ok = recycle(accepted);
-  assert.match(ok.stderr, /unknown argument '--no-such-flag'/, ok.stderr);
+  assert.equal(ok.status, 2, "the unsupported argument remains an error, not a successful lifecycle effect");
+  assert.match(ok.stderr, /selected lifecycle diagnostic \(private details withheld\)/, ok.stderr);
+  assert.equal((ok.stdout + ok.stderr).includes(dir), false);
+  assert.equal(ok.stderr.includes("--no-such-flag"), false, "argument details may contain private data and remain redacted");
+  const acceptedReader = spawnSync(BASH_BIN, ["-c",
+    'source "$1"; selected_registry_init "$2" demo fixture || exit; printf selected-reader-ready',
+    "selected-reader-control", join(REPO_ROOT, "deploy", "recycle-container.sh"), REPO_ROOT], {
+    encoding: "utf8", cwd: REPO_ROOT, env: { ...process.env, RMD_INSTANCE_REGISTRY: accepted },
+  });
+  assert.equal(acceptedReader.status, 0, acceptedReader.stderr);
+  assert.equal(acceptedReader.stdout, "selected-reader-ready", "actual shared launcher reader is the healthy acceptance control");
   assert.doesNotMatch(ok.stderr, /unknown field/);
   const recycleRefused = recycle(refused);
   assert.notEqual(recycleRefused.status, 0, "control: explicit invalid selection still refuses");
