@@ -1702,14 +1702,14 @@ export function resolveReleases(deps: ReleaseReaders, plan?: Plan): ReleaseResol
     // Carry durableUnreadable to the caller and refuse machine receipts that cannot exclude a human hold.
     durableUnreadable = String((e as Error)?.message ?? e);
   }
-  const { authors, reapproval } = qualifyReleaseEvidence(lines, durable, releaseContractPins(plan?.tasks ?? []));
+  const { authors, reapproval, unknownHistory } = qualifyReleaseEvidence(lines, durable, releaseContractPins(plan?.tasks ?? []));
   const ids = new Set<string>();
   const setAside = new Set<string>(reapproval);
   const unknownReleaseHistory = new Set<string>();
   for (const [id, author] of authors) {
     const t = plan?.byId.get(id);
     const escalated = plan === undefined || (t?.risk_ruling?.action === "escalate" && t.risk_ruling.pin === taskRulingPin(t));
-    if (author === "machine" && durableUnreadable !== undefined) { setAside.add(id); unknownReleaseHistory.add(id); }
+    if (author === "machine" && (durableUnreadable !== undefined || unknownHistory)) { setAside.add(id); unknownReleaseHistory.add(id); }
     else if (author === "machine" && escalated) setAside.add(id);
     else ids.add(id);
   }
