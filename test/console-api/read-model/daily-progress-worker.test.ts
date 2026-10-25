@@ -185,3 +185,22 @@ test("daily progress collects hourly and closes local days without page demand",
     } finally { lane.stop(); ticker.release(); }
   });
 });
+
+
+test("daily repository inventory refuses a named pipe without blocking the admitted collector", async () => {
+  const { spawnSync } = await import("node:child_process"), { unlinkSync } = await import("node:fs");
+  const { pathToFileURL } = await import("node:url"), { repoRoot } = await import("#test/helpers/repo-root.js");
+  const { readDailyProgressRepositories } = await import("#src/lib/daily-progress-collector.js");
+  await withTempDir("daily-inventory-pipe", async root => {
+    const directory = join(root, "read-model"), path = join(directory, "repositories-sources.json"); mkdirSync(directory);
+    writeFileSync(path, JSON.stringify({ improvementEvidence: { version: "repository-evidence-inventory-v1", repositories: [{ repository: "acme/app" }], unresolvedInstances: [] } }));
+    assert.deepEqual(readDailyProgressRepositories(root), ["acme/app"], "the real regular-file source is the positive control");
+    unlinkSync(path); const fifo = spawnSync("mkfifo", [path], { encoding: "utf8" }); assert.equal(fifo.status, 0, fifo.stderr);
+    const moduleUrl = pathToFileURL(join(repoRoot(), "src", "lib", "daily-progress-collector.ts")).href;
+    const code = `import { readDailyProgressRepositories } from ${JSON.stringify(moduleUrl)}; try { readDailyProgressRepositories(process.argv[1]); process.exitCode = 2; } catch (error) { if (!String(error).includes("inventory is unavailable")) throw error; }`;
+    // BACKSTOP: isolate a blocking source regression so it cannot stall the full native runner.
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code, root], { encoding: "utf8", timeout: 5000 });
+    assert.equal(child.error, undefined, "the inventory read must refuse before waiting for a pipe writer");
+    assert.equal(child.status, 0, child.stderr);
+  });
+});
