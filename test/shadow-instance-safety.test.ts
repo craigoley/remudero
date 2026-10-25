@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -129,6 +129,30 @@ test("selected runtime binding reaches the existing default mode reader", async 
       assert.equal(effects, 1, "runtime configuration binding is not an observation toggle or publication permission");
     }, { envPath: fixture.selected, instanceName: "worker" });
     assert.equal(readInstanceRegistryText(fixture.root), fixture.legacy, "completion does not change the ambient legacy reader");
+  } finally { fixture.cleanup(); }
+});
+
+test("selected runtime private file binds canonical identity and refuses aliasable hardlinks", async () => {
+  const fixture = runtimeRegistryFixture();
+  try {
+    const run = runtimeRegistryRunner(), link = join(fixture.root, "hardlink.yaml");
+    linkSync(fixture.selected, link);
+    await assert.rejects(run(() => undefined, { envPath: fixture.selected }), /selected instance registry unavailable/,
+      "an existing hardlink bypasses a pathname-only OS denial");
+    unlinkSync(link);
+    const privateFile = Reflect.get(runtimeRegistry, "runtimeInstanceRegistryPrivateFile");
+    assert.equal(typeof privateFile, "function", "only the trusted invocation may obtain the actual canonical file");
+    const parent = join(fixture.root, "parent");
+    symlinkSync(fixture.root, parent);
+    await run(async () => {
+      assert.equal(privateFile(), fixture.selected, "deny the physical file, not merely a symlink spelling");
+      const replacement = join(fixture.root, "replacement.yaml");
+      writeFileSync(replacement, readFileSync(fixture.selected));
+      renameSync(replacement, fixture.selected);
+      await assert.rejects(runtimeRegistry.assertInstanceRegistryRuntimeCurrent(), /selected instance registry unavailable/,
+        "same bytes at a replacement inode are still revised evidence");
+    }, { envPath: join(parent, "private.yaml") });
+    assert.equal(privateFile(), undefined, "a later worker cannot inherit the completed invocation's private target");
   } finally { fixture.cleanup(); }
 });
 
