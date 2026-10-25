@@ -185,6 +185,12 @@ test("W1-T9049: token reconstruction must preserve the removed token and its con
   ]) assert.equal(classifyGateRepair(pair, diff, [], /tree-walk/), "genuine");
 });
 
+test("W1-T9049: the join recognizer is linear on comma-less literal runs", { timeout: 5000 }, () => {
+  assert.equal(classifyGateRepair(pair, '-const token = "tree-walk";\n+const token = [ "tree", "walk", ].join("-");', [], /tree-walk/), "token-dodge");
+  const run = `[${'"a" '.repeat(40)};`;
+  assert.equal(classifyGateRepair(pair, `-const token = "tree-walk";\n+const token = ${run}`, [], /tree-walk/), "genuine");
+});
+
 test("W1-T9049: a false trigger is off subject and incomplete repairs are not classified", () => {
   assert.equal(classifyGateRepair({ ...pair, triggered: false }, "-x\n+y", [], /x/), "off-subject");
   for (const repair of [{ ...pair, state: "open" as const }, { ...pair, greenSha: undefined },

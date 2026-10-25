@@ -64,7 +64,7 @@ const stringValue = (literal: string): string => literal.slice(1, -1).replace(/\
 
 function rebuiltTokens(line: string): Array<{ expression: string; value: string }> {
   const literal = STRING_LITERAL.source;
-  const expressions = new RegExp(`\\[(?:\\s*(?:${literal})\\s*,?)+\\]\\.join\\(\\s*(?:${literal})\\s*\\)|(?:${literal})(?:\\s*\\+\\s*(?:${literal}))+`, "g");
+  const expressions = new RegExp(`\\[\\s*(?:${literal})(?:\\s*,\\s*(?:${literal}))*\\s*(?:,\\s*)?\\]\\.join\\(\\s*(?:${literal})\\s*\\)|(?:${literal})(?:\\s*\\+\\s*(?:${literal}))+`, "g");
   return [...line.matchAll(expressions)].map(([expression]) => {
     const strings = [...expression.matchAll(STRING_LITERAL)].map(([s]) => stringValue(s));
     const value = expression.startsWith("[") ? strings.slice(0, -1).join(strings.at(-1)) : strings.join("");
