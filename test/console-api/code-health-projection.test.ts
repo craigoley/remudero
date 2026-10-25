@@ -19,6 +19,17 @@ function input(): CodeHealthProjectionInput {
 const finding = (status: CodeHealthScanFinding["status"] = "open"): CodeHealthScanFinding => ({ id: "42", ruleId: "js/maintainability-example", status,
   severity: "high", category: "maintainability", path: "src/example.ts", title: "Repeated work makes this function hard to change.", effortMinutes: null });
 
+test("code health distinguishes checked code from unassessed newer code", () => {
+  const previous = { ...input(), analyzedSha: "a".repeat(40), currentSha: "c".repeat(40) };
+  const assessment = projectCodeHealth(previous);
+  assert.equal(assessment.analyzedSha, "a".repeat(40), "the report names the code actually selected for assessment");
+  assert.equal(assessment.currentSha, "c".repeat(40));
+  assert.equal(assessment.state, "stale");
+  assert.equal(assessment.summary.met, 2, "keep the checked version's measured results");
+  assert.equal(assessment.summary.healthy, null, "a past passing scan cannot certify newer code");
+  assert(assessment.sources.every(source => source.analyzedSha === "a".repeat(40)));
+});
+
 test("code health rejects incomplete scans and mismatched source revisions", () => {
   const positive = projectCodeHealth(input());
   assert.equal(validateCodeHealthAssessment(positive).ok, true);
