@@ -104,7 +104,7 @@ cfg = dict(m.DEFAULTS, home=home, roots=[root], preserve_root=expiry, repack_min
 published = type("Published", (), {"bases": [], "excludes": lambda self, repo: []})()
 actions = [
     ("preserve", lambda: m.preserve(record, published, cfg, home, now)),
-    ("remove", lambda: m.remove(remove, [root], [])),
+    ("remove", lambda: m.remove(remove, [root], [], [record])),
     ("prune", lambda: m.prune_worktrees([record.store], [record])),
     ("repack", lambda: m.housekeeping(cfg, [], [record], None, now, True)),
     ("compress", lambda: m.compress(compressed)),
