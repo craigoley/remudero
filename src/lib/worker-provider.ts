@@ -2820,13 +2820,22 @@ async function withPrivateRegistryCodexProfile<T>(
     // Unavailable private profile is unknown containment, never a fallback to broad workspace reads.
     throw new InstanceRegistryRuntimeError("worker_profile_unavailable");
   }
+  let operationFailed = false, originalError: unknown;
   try { return await operation(name); }
+  catch (error) { operationFailed = true; originalError = error; throw error; }
   finally {
-    const current = lstatSync(path);
-    if (!current.isFile() || current.dev !== identity.dev || current.ino !== identity.ino || readFileSync(path, "utf8") !== text) {
-      throw new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
+    try {
+      const current = lstatSync(path);
+      if (!current.isFile() || current.nlink !== 1 || current.dev !== identity.dev || current.ino !== identity.ino || readFileSync(path, "utf8") !== text) {
+        throw new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
+      }
+      rmSync(path);
+    } catch {
+      // Missing/replaced/unreadable evidence is not certified cleanup. Retain any original failure as cause.
+      const error = new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
+      if (operationFailed) error.cause = originalError;
+      throw error;
     }
-    rmSync(path);
   }
 }
 
