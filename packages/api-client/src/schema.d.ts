@@ -3628,6 +3628,113 @@ export interface components {
       ready: boolean;
       reason: string;
     };
+    CodeHealthView: {
+      view: "code-health";
+      version: 1;
+      generatedAt: string;
+      asOf: unknown;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: CodeHealthViewData;
+    };
+    CodeHealthViewData: {
+      version: "code-health-view-v1";
+      /** all, or a configured owner/repository */
+      repository: string;
+      expectedRepositories: (string)[];
+      unresolvedInstances: (string)[];
+      repositories: ({
+        repository: string;
+        snapshotId: unknown;
+        state: "measured" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized" | "rate_limited";
+        summary: unknown;
+        urgentFindings: {
+          value: unknown;
+          precision: "exact" | "at_least" | "unavailable";
+          /** The measured CodeQL scope; this is not a comprehensive security assessment. */
+          scope: string;
+        };
+        measuredAt: unknown;
+        analyzedSha: unknown;
+        currentSha: unknown;
+        freshness: "fresh" | "stale" | "unavailable";
+        lastAttemptAt: unknown;
+        nextCheckDueAt: unknown;
+        collection: ({
+          state: "none";
+        }) | ({
+          state: "failed";
+          startedAt: string;
+          finishedAt: string;
+          snapshotId: unknown;
+          reason: string;
+          failureKind?: "unauthorized" | "rate_limited" | "unavailable";
+        }) | ({
+          state: "unavailable";
+          reason: string;
+        });
+        reason: unknown;
+        sourceClocks: ({
+          kind: string;
+          state: "complete" | "partial" | "stale" | "not_collected" | "unavailable";
+          measuredAt: unknown;
+          analyzedSha: unknown;
+        })[];
+      })[];
+      snapshotId: unknown;
+      isCurrentSnapshot: unknown;
+      assessment: unknown;
+      findingCount: unknown;
+      urgentFindings: {
+        value: unknown;
+        precision: "exact" | "at_least" | "unavailable";
+        /** The measured CodeQL scope; this is not a comprehensive security assessment. */
+        scope: string;
+      };
+      opportunities: ({
+        id: string;
+        snapshotId: string;
+        repository: string;
+        proposalId: string;
+        ruleId: string;
+        title: string;
+        consequence: string;
+        expectedResult: string;
+        acceptanceIdeas: (string)[];
+        uncertainty: (string)[];
+        mayPlan: boolean;
+        /** Total stable findings in this group; evidence entries may be paged. Effort estimates describe the whole group. */
+        evidenceCount: number;
+        evidence: ({
+          fingerprint: string;
+          sourceId: string;
+          scanId: string;
+          analyzedSha: unknown;
+          observedAt: unknown;
+          severity: "critical" | "high" | "medium" | "low";
+          title: string;
+          path: string;
+        })[];
+        effortMinutes: unknown;
+        estimateKind: unknown;
+        relatedWork: ({
+          repository: string;
+          proposalId: string;
+          taskId?: string;
+          prUrl?: string;
+          threadId?: string;
+        })[];
+      })[];
+      relatedWorkState: "reported" | "partial" | "stale" | "unavailable" | "not_collected";
+      relatedWorkAsOf: unknown;
+      relatedWorkReason: unknown;
+      /** Current source evidence can support a planning conversation; this does not approve, file or execute work. */
+      planningAvailable: boolean;
+      freshness: "fresh" | "stale" | "unavailable";
+      page: {
+        nextCursor: unknown;
+      };
+    };
     /** GET /v1/views/repositories (docs/views.md, src/lib/repositories-view.ts): the repository portfolio across every instance serve holds, in one body. Each instance's `summary` IS its GET /v1/i/<instance>/repos/summary body, computed by the read-model worker from that instance's projected `repo_row` table; `projects` precomputes the console's grouping and its "worst is <repo>" line. Dark until state/read-model/switches.json sets `repositories` to `serve`. Version 2 carries no clock stamp in `data`: each summary's `generated_at` is its `repositories:<instance>` source's `asOf`, so the ETag moves only when the content does. */
     RepositoriesView: {
       view: "repositories";
@@ -6885,6 +6992,19 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": undefined;
+        };
+    };
+  };
+  "/v1/views/code-health": {
+    get: {
+      responses: {
+          "200": CodeHealthView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+          "503": undefined;
         };
     };
   };
