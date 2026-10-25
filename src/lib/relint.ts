@@ -227,7 +227,9 @@ export async function runRelintLoop<D>(opts: {
     }
     if (attempt < maxAttempts) {
       opts.log(`${opts.lane}.relint`, { attempt, filed: [...opts.filedIds], violations: violations.map((v) => v.message) });
-      prompt = filedTaskRelintPrompt(opts.lane, opts.filedIds, violations);
+      // Each attempt may be a fresh worker; retain its original scope, feedback and verdict protocol.
+      // Rebuild from that contract, so superseded findings do not accumulate across attempts.
+      prompt = [opts.initialPrompt, filedTaskRelintPrompt(opts.lane, opts.filedIds, violations)].join("\n\n");
     }
   }
   return { decision, violations, attempts: attempt, stop };
