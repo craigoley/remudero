@@ -105,7 +105,7 @@ for (const asynchronous of [false, true]) {
         }
         symlinkSync(join(sourceRoot, "src"), join(seed.dir, "src"), "dir");
         const workflow = join(seed.dir, ".github", "workflows", "ci-gate.yml");
-        writeFileSync(workflow, 'jobs:\n  ci-gate:\n    env:\n      REQUIRED: '["ci", "proof-discrimination"]'\n');
+        writeFileSync(workflow, `jobs:\n  ci-gate:\n    env:\n      REQUIRED: '["ci", "proof-discrimination"]'\n`);
         writeFileSync(join(seed.dir, "MASTER-PLAN.md"), "# Fixture\n<!-- CAPABILITY SNAPSHOT:BEGIN -->\nplaceholder\n<!-- CAPABILITY SNAPSHOT:END -->\n");
         execFileSync(process.execPath, ["--import", import.meta.resolve("tsx"), join(sourceRoot, "scripts", "generate-capability-snapshot.mjs"), "--root", seed.dir, "--master-plan", join(seed.dir, "MASTER-PLAN.md")], { cwd: sourceRoot, stdio: "pipe" });
         seed.git("add", "-A");
@@ -127,7 +127,7 @@ for (const asynchronous of [false, true]) {
           },
         };
         garden = asynchronous ? await gardenCheckoutAsync(options) : gardenCheckout(options);
-        writeFileSync(join(garden.root, ".github", "workflows", "ci-gate.yml"), 'jobs:\n  ci-gate:\n    env:\n      REQUIRED: '["ci", "proof-discrimination", "fixture-check"]'\n');
+        writeFileSync(join(garden.root, ".github", "workflows", "ci-gate.yml"), `jobs:\n  ci-gate:\n    env:\n      REQUIRED: '["ci", "proof-discrimination", "fixture-check"]'\n`);
         if (generatorFails) writeFileSync(join(garden.root, "scripts", "generate-capability-snapshot.mjs"), 'throw new Error("fixture generation failure");\n');
         const landing = { paths: [".github/workflows/ci-gate.yml"], title: "chore(gates): update fixture", body: "fixture" };
         if (generatorFails) {
