@@ -1,3 +1,4 @@
+import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
   runTask as runTaskFromModule,
   runTaskBody as runTaskBodyFromModule,
@@ -116,6 +117,9 @@ import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-upda
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
 import { revisionedRead, type ReadGeneration } from "./lib/read-plane.js";
+import { LightPassPreReviewTiming, observeLightPassReviewEligibility } from "./lib/sweep.js";
+import { distanceRefreshProbeTargets } from "./lib/tick-read-worker.js";
+import { GITHUB_COMPARE_FILES_LISTED } from "./lib/base-reproduction.js";
 import { readPlaneWorkerInput } from "./lib/read-plane.worker.js";
 import { globSync, renameSync } from "node:fs";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
@@ -311,7 +315,7 @@ import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import {
-  gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, operatorRulingTimes, parkedEscalation, readOperatorReleases,
+  gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, operatorRulingTimes, parkedEscalation, readOperatorReleaseRecords,
   recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts,
 } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
@@ -2500,6 +2504,7 @@ export function buildSweepEffects(
   | "postReview"
   | "repushAbsent"
   | "updateBranch"
+  | "readBranchProtectionStrict"
   | "readyDraft"
   | "draftRefusalAmendments"
   | "captureRepairFeedback"
@@ -25017,7 +25022,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   if (scope && !offline) {
     try {
       const config = (deps.loadConfig ?? loadConfig)();
-      releasedIdsForAdmission = releasedTaskIds(readLedgerRawLines(ledgerPathFor(config)));
+      releasedIdsForAdmission = new Set(resolveReleasedIds(releaseReadersFor(ledgerPathFor(config)), plan));
     } catch {
       // An unreadable ledger releases nothing. That is the safe direction for a machine filing:
       // it must not become dispatchable by guessing that an operator approved it.
@@ -27617,7 +27622,7 @@ export async function defaultVerifyHumanCadenceResult(
       appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
       runId,
       release: productionVerifyHumanRelease(plan, repoRoot, ledgerPath, runId),
-      releasedIds: releasedTaskIds(readLedgerRawLines(ledgerPath)),
+      releasedIds: resolveReleasedIds(releaseReadersFor(ledgerPath), plan),
       releaseEscalatedKeys: releaseEscalatedKeys(rows),
     });
     // W1-T4083: measure the release judge over the board's week of rotations, remembering what older
@@ -34207,7 +34212,6 @@ function daemonCommandHost(): DaemonCommandHost {
     productionLifetimePressureHook,
     quarantineReporter,
     queueGovernorGateFor,
-    readLedgerRawLines,
     readMainCeilingVerdictAsync,
     readPushedRunBranchesOutputAsync,
     readUsageSnapshotPreferSdk,
@@ -39502,6 +39506,63 @@ export function reviewOnlyLightPassDeps(scope?: LightPassScope): Pick<SweepDeps,
   return name ? { lightPassScope: name, standDownReasonFor: () => reviewOnlyStandDownReason(name) } : {};
 }
 
+interface LightPassReadPorts {
+  openPrViews?: () => Promise<OpenPrView[]>;
+  effects?: (deps: Parameters<typeof buildSweepEffects>[0]) => SweepDeps;
+  readCompare?: (args: string[]) => Promise<unknown>;
+  clock?: Pick<Clock, "now">;
+}
+
+function createLightPassCompareReader(owner: string, repo: string, read: (args: string[]) => Promise<unknown>) {
+  type Facts = { behindBy: number; baseFiles?: BaseChangedFiles };
+  const memo = new Map<number, { head: string; main: string | undefined; value: Promise<Facts | undefined> }>();
+  return {
+    retain: (prs: readonly OpenPrView[]) => {
+      const heads = new Map(prs.map((pr) => [pr.prNumber, pr.headSha]));
+      for (const [number, entry] of memo) if (heads.get(number) !== entry.head) memo.delete(number);
+    },
+    read: async (prs: readonly OpenPrView[], main: string | undefined, timing: LightPassPreReviewTiming) => {
+      const behindMainByPr = new Map<number, number>();
+      const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
+      await timing.measure("compare", () => Promise.all(distanceRefreshProbeTargets(prs).map(async (pr) => {
+        const start = timing.clock.now();
+        let entry = memo.get(pr.prNumber);
+        const cacheHit = main !== undefined && entry?.head === pr.headSha && entry.main === main;
+        if (!cacheHit) {
+          const value = Promise.resolve().then(async (): Promise<Facts | undefined> => {
+            const compare = await read(["api", `repos/${owner}/${repo}/compare/${pr.headSha}...${main ?? "main"}`]) as {
+              ahead_by?: unknown; files?: unknown;
+            };
+            if (typeof compare?.ahead_by !== "number" || !Number.isFinite(compare.ahead_by)) return undefined;
+            return { behindBy: compare.ahead_by, ...(Array.isArray(compare.files) ? { baseFiles: {
+              files: compare.files.flatMap((f) => typeof f?.filename === "string" ? [f.filename] : []),
+              truncated: compare.files.length >= GITHUB_COMPARE_FILES_LISTED,
+            } } : {}) };
+          });
+          entry = { head: pr.headSha, main, value };
+          if (main !== undefined) memo.set(pr.prNumber, entry);
+        }
+        const row: Record<string, unknown> = { pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: main ?? null, cache_hit: cacheHit };
+        try {
+          const facts = await entry!.value;
+          row.outcome = facts ? "read" : "unreadable";
+          if (facts) {
+            behindMainByPr.set(pr.prNumber, facts.behindBy);
+            if (facts.baseFiles) baseChangedFilesByPr.set(pr.prNumber, facts.baseFiles);
+          } else if (memo.get(pr.prNumber) === entry) memo.delete(pr.prNumber);
+        } catch (error) {
+          Object.assign(row, { outcome: "error", error: String(error) });
+          if (memo.get(pr.prNumber) === entry) memo.delete(pr.prNumber);
+        } finally {
+          row.elapsed_ms = timing.clock.now() - start;
+          timing.compareReads.push(row);
+        }
+      })));
+      return { behindMainByPr, baseChangedFilesByPr };
+    },
+  };
+}
+
 export function buildSweepLightHook(
   owner: string,
   repo: string,
@@ -39517,6 +39578,7 @@ export function buildSweepLightHook(
   readMainPlan?: (root: string) => Plan,
   planAccessor?: () => Plan,
   mainHealthRung?: () => Promise<void>,
+  io: LightPassReadPorts = {},
 ): (scope?: LightPassScope) => Promise<void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -39528,19 +39590,30 @@ export function buildSweepLightHook(
     : readMainPlan;
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
+  const compares = createLightPassCompareReader(owner, repo, io.readCompare ?? ghJsonAsync);
   return withMainHealthOnLightPass(async (scope?: LightPassScope) => {
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
     // so `post-review` is the only lane left.
     const reviewOnly = scope?.reviewOnly === true;
+    const timing = new LightPassPreReviewTiming(io.clock);
+    let timingWritten = false;
+    const finishTiming = () => {
+      if (timingWritten) return;
+      timingWritten = true;
+      log("sweep_light.pre_review_timing", { run_id: runId, ...timing.finish() });
+    };
     try {
-      const openPrs = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
+      await timing.run(async () => {
+      const readViews = () => io.openPrViews?.() ?? buildOpenPrViewsAsync(owner, repo, ledgerPath, {
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
         isMerged,
         readMainPlan: resolvedReadMainPlan,
       });
+      const openPrs = await timing.run(() => timing.measure("open_pr_views", readViews));
+      compares.retain(openPrs);
       const activePlan = planAccessor?.() ?? plan;
-      const effects = buildSweepEffects({
+      const effects: Omit<SweepDeps, "ledgerPath" | "runId"> = timing.run(() => (io.effects ?? buildSweepEffects)({
         productionProgressJudge: true,
         owner: owner,
         repo: repo,
@@ -39551,30 +39624,19 @@ export function buildSweepLightHook(
         log: log,
         policy: DEFAULT_SWEEP_POLICY,
         feedbackLandingStateRoot: config.root,
-      });
+      }));
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
       // W1-T9808: after a restart latched, a fix that would outlast the drain's time left closes the fix rung.
       const fixAdmitted = lightPassFixAdmitted(scope);
-      const fixRungAllowed = fixAdmitted && fixRungAllowedBesideInFlight(
+      const fixRungAllowed = timing.run(() => fixAdmitted && fixRungAllowedBesideInFlight(
         readLedgerLines(ledgerPath),
         inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
-      );
-      // W1-T2430 — SPLIT OFF THE REQUEUE-ONLY PRs, off the SAME `openPrs` snapshot both batches
-      // below evaluate (no re-fetch between this filter and `runSweep`'s own switch, so no race
-      // — see `blockedFixableIsRequeueOnly`'s own doc). A PR in this subset is PROVEN to reach
-      // `runSweep`'s "cancelled required check(s)" stand-down before it can ever call
-      // `dispatchFix`, so admitting its `blocked-fixable` disposition here — even though
-      // `fixRungAllowed` is false — can never spend a fix-rung strike. Every other open PR
-      // (including a `blocked-fixable` PR with a genuine, non-cancelled failure) stays in the
-      // batch below, where the existing fix-capacity claim gates own-red workers (W1-T8086).
-      // W1-T7214: a ready PR main moved under is refreshed HERE, once over the whole snapshot (never
-      // per PR — W1-T528), before either batch below can arm it on the base main has left. Only a
-      // ready PR is probed, so a pass with none spends no compare read. The refreshed PR sits out
-      // this pass: its snapshot names the head the update just replaced.
-      let readyRefreshed: number | undefined;
+      ));
+      // W1-T7214: only ready heads wait for distance and the whole-snapshot refresh selection.
       const readyPrs = reviewOnly ? [] : openPrs.filter((pr) =>
         pr.isDraft !== true && pr.checksState === "green" && pr.reviewState === "success");
+<<<<<<< HEAD
       if (readyPrs.length > 0) {
         const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
         const behindMainByPr = buildBehindMainByPr(owner, repo, readyPrs, undefined, undefined, baseChangedFilesByPr);
@@ -39675,8 +39737,99 @@ export function buildSweepLightHook(
         );
       }
       await Promise.all(passes);
+=======
+      const runBatches = async (passPrs: OpenPrView[], distanceKnown = true) => {
+        const requeueOnlyPrs = reviewOnly ? [] : passPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
+        const requeueNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
+        const restPrs = passPrs.filter((pr) => !requeueNumbers.has(pr.prNumber));
+        const common = { ...effects, ledgerPath, runId, log, reviewerCodeRecovery, updateBranch: undefined };
+        // W1-T528: branch updates belong to the whole-snapshot selection, never this per-PR fan-out.
+        const passes: Array<Promise<unknown>> = [runSweepLightPass(restPrs, {
+          ...common,
+          restartAdmission: scope?.admit,
+          actionable: (d) => (distanceKnown || d !== "mergeable") &&
+            lightPassActionable(d, fixRungAllowed, false, !reviewOnly, fixAdmitted),
+          ...reviewOnlyLightPassDeps(scope),
+          ...(!distanceKnown ? { standDownReasonFor: (d: Disposition) => d === "mergeable"
+            ? "ready PR distance is unreadable — held until its compare succeeds" : undefined } : {}),
+          readLiveStateAtAct: effects.readLiveState,
+          rereadPrAtAct: effects.rereadPrAtAct ?? buildRereadPrAtAct(owner, repo, ledgerPath, {
+            views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
+              readMainPlan: resolvedReadMainPlan },
+          }),
+          judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
+          planContextDigestFor: riskJudgePlanContextDigestFor(activePlan),
+          ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
+        }, DEFAULT_SWEEP_POLICY)];
+        // W1-T2430: cancelled-only CI has its separate admission and may only requeue that job.
+        if (requeueOnlyPrs.length > 0) passes.push(runSweepLightPass(requeueOnlyPrs, {
+          ...common,
+          actionable: (d) => lightPassActionable(d, fixRungAllowed, true),
+          readCiGateRollup: undefined,
+          reaggregateCiGate: undefined,
+        }, DEFAULT_SWEEP_POLICY));
+        await Promise.all(passes);
+      };
+      const readyNumbers = new Set(readyPrs.map((pr) => pr.prNumber));
+      const ordinaryPrs = openPrs.filter((pr) => !readyNumbers.has(pr.prNumber));
+      // Publish ordinary eligibility now. The action batch follows the whole-snapshot refresh
+      // decisions, so its ledger rows cannot change which held or armed head gets refreshed.
+      const observationLines = timing.run(() => timing.sync("review_eligibility", () => observeLightPassReviewEligibility(
+        ordinaryPrs, { ...effects, ledgerPath, runId }, DEFAULT_SWEEP_POLICY)));
+      // Review-lane heads cannot be selected by ready-overlap refresh. A head named in a
+      // previous refresh admission, or already armed, stays in the later action batch.
+      const lastAdmission = observationLines.findLast((row) => row.step === "sweep.base_red.refresh_admission");
+      const admissionWaiters = new Set((Array.isArray(lastAdmission?.waiting) ? lastAdmission.waiting : [])
+        .flatMap((entry) => typeof entry?.pr_number === "number" && typeof entry.head_sha === "string"
+          ? [`${entry.pr_number}@${entry.head_sha}`] : []));
+      const earlyReviewPrs = ordinaryPrs.filter((pr) => !pr.autoMergeArmed &&
+        !admissionWaiters.has(`${pr.prNumber}@${pr.headSha}`) && isReviewLaneDisposition(deriveDisposition(pr).disposition));
+      const earlyNumbers = new Set(earlyReviewPrs.map((pr) => pr.prNumber));
+      const laterOrdinaryPrs = ordinaryPrs.filter((pr) => !earlyNumbers.has(pr.prNumber));
+      const earlyReviews = earlyReviewPrs.length > 0
+        ? timing.run(() => runBatches(earlyReviewPrs)) : Promise.resolve();
+      const refresh = timing.run(async () => {
+        let readyRefreshed: number | undefined;
+        let measuredReadyPrs = readyPrs;
+        if (readyPrs.length > 0) {
+          const main = await timing.measure("main_tip", () => effects.readMainTip?.()).catch((error) => {
+            log("sweep_light.main_tip_unreadable", { error: String(error) });
+            return undefined;
+          });
+          // An unread tip keeps the former symbolic compare, without caching an unidentified main.
+          const facts = await compares.read(readyPrs, main, timing);
+          measuredReadyPrs = readyPrs.filter((pr) => facts.behindMainByPr.has(pr.prNumber));
+          readyRefreshed = await runLightPassReadyRefresh(openPrs, {
+            ...effects, ledgerPath, runId, ...facts,
+            inFlightTaskIds: new Set(inFlightTaskIdsFrom(join(config.root, "state", "inflight"))),
+          }, DEFAULT_SWEEP_POLICY, timing);
+        }
+        const admitted = reviewOnly ? [] : await timing.measure("refresh_admission", () =>
+          runLightPassRefreshAdmission(openPrs, { ...effects, ledgerPath, runId }));
+        const ratchetRefreshed = reviewOnly ? [] : await timing.measure("armed_ratchet_rejudge", () =>
+          runArmedRatchetRejudge(openPrs, { ...effects, ledgerPath, runId }));
+        return { prs: readyPrs.filter((pr) => pr.prNumber !== readyRefreshed &&
+          !admitted.includes(pr.prNumber) && !ratchetRefreshed.includes(pr.prNumber)),
+          measured: new Set(measuredReadyPrs.map((pr) => pr.prNumber)) };
+      });
+      const ready = refresh.then(({ prs, measured }) => {
+        const known = prs.filter((pr) => measured.has(pr.prNumber));
+        const unknown = prs.filter((pr) => !measured.has(pr.prNumber));
+        return Promise.all([
+          known.length > 0 ? timing.run(() => runBatches(known)) : undefined,
+          unknown.length > 0 ? timing.run(() => runBatches(unknown, false)) : undefined,
+        ]);
+      });
+      const ordinary = refresh.then(() => laterOrdinaryPrs.length > 0 || readyPrs.length === 0
+        ? timing.run(() => runBatches(laterOrdinaryPrs)) : undefined);
+      const results = await Promise.allSettled([earlyReviews, ordinary, ready]);
+      for (const result of results) if (result.status === "rejected") throw result.reason;
+      });
+>>>>>>> origin/main
     } catch (e) {
       log("sweep_light.error", { error: String((e as Error)?.message ?? e) });
+    } finally {
+      finishTiming();
     }
   }, mainHealthRung, { log });
 }
@@ -43347,7 +43500,8 @@ export function productionMachineFilingJudgePorts(opts: {
     },
     riskPolicy: () => readRiskPolicy(policyPath(opts.repoRoot)),
     gardenRecord: (family) => gardenFamilyRecord(opts.stateDir, family),
-    operatorReleases: () => readOperatorReleases(opts.stateDir),
+    operatorReleases: () => readOperatorReleaseRecords(opts.stateDir),
+    releaseLedgerLines: () => readReleaseLedgerLines(join(opts.stateDir, LEDGER_FILENAME)),
     // W1-T9043: a ledgered release, `rmd release`, or an `rmd note` on a parked escalation is a ruling that stops its withdrawal.
     operatorRulings: () => {
       // ledger-read-intent: live — `dispatch.breaker_released` is in the retention set, and `rmd approve` is durable in operator-releases.json.
@@ -43468,7 +43622,7 @@ export async function verifyHumanSweepCommand(
     const deferred = due.length - selected.length;
     console.log(`verify-human-sweep --dry-run: ${shards.length} parked shard(s), ${selected.length} would be judged, ${shards.length - due.length} already settled, ${deferred} deferred due. Nothing spent.`);
     for (const d of selected) console.log(`  would judge ${d.id} (${observedStateKey(d)})`);
-    const pending = awaitingRelease(shards, priorVerdicts, releasedTaskIds(readLedgerRawLines(ledgerPath)), releaseEscalatedKeys(rows));
+    const pending = awaitingRelease(shards, priorVerdicts, resolveReleasedIds(releaseReadersFor(ledgerPath), plan), releaseEscalatedKeys(rows));
     console.log(`verify-human-sweep --dry-run: ${pending.length} earlier automate verdict(s) would be put to the risk judge for release.`);
     for (const d of pending) console.log(`  would release-check ${d.id}`);
     return 0;
@@ -43495,7 +43649,7 @@ export async function verifyHumanSweepCommand(
     appendRow: (row) => appendLedger(ledgerPath, row),
     runId: sweepRunId,
     release: productionVerifyHumanRelease(plan, root, ledgerPath, sweepRunId),
-    releasedIds: releasedTaskIds(readLedgerRawLines(ledgerPath)),
+    releasedIds: resolveReleasedIds(releaseReadersFor(ledgerPath), plan),
     releaseEscalatedKeys: releaseEscalatedKeys(rows),
   });
 
@@ -43850,11 +44004,12 @@ export function approveParkedTask(
     riskPolicy?: RiskPolicy;
     stageProposal?: (proposal: Proposal) => void;
     /** A MACHINE-written release carries who decided it and why (Law 5: the author class rides
-     *  the record). Absent — the operator's own `rmd approve` — the row is byte-identical to before. */
+     *  the record). Both classes carry the exact release contract pin. */
     provenance?: Record<string, unknown>;
     /** The operator's own release, kept where rotation cannot shed it until the machine-filing
      *  judge pins it on the record (operator ruling 2026-09-29). */
-    recordDurableRelease?: (taskId: string) => void;
+    recordDurableRelease?: (task: Task) => void;
+    readDurableReleaseEvidence?: () => ReleaseEvidence;
     /** W1-T9252: told of the release row once it is written, so the release lands on every open ask about the
      *  task; a failure here never fails the release. */
     recordThreadRow?: (row: Record<string, unknown>) => void;
@@ -43880,9 +44035,14 @@ export function approveParkedTask(
   if (deps.provenance !== undefined && task.risk === "high") {
     return { code: 2, message: `rmd approve: ${taskId} is high-risk in the plan — a machine cannot release its human verification` };
   }
-  const already = releasedTaskIds(deps.ledgerLines ?? readLedgerRawLines(deps.ledgerPath));
+  const releaseEvidence = qualifyReleaseEvidence(deps.ledgerLines ?? readReleaseLedgerLines(deps.ledgerPath),
+    deps.readDurableReleaseEvidence?.() ?? readOperatorReleaseRecords(dirname(deps.ledgerPath)), releaseContractPins(deps.plan.tasks));
+  if (deps.provenance && releaseEvidence.unknownHistory) return { code: 2, message: `rmd approve: ${taskId} operator release history is unreadable: malformed ledger record` };
+  if (deps.provenance && (releaseEvidence.reapproval.has(taskId) || operatorReleaseContractChanged(task))) return { code: 2,
+    message: `rmd approve: ${taskId} requires explicit operator reapproval of its current contract` };
+  const already = new Set(releaseEvidence.authors.keys());
   if (already.has(taskId)) {
-    if (!deps.provenance) deps.recordDurableRelease?.(taskId);
+    if (!deps.provenance) deps.recordDurableRelease?.(task);
     return { code: 0, released: true, message: `rmd approve: ${taskId} is already released — no second row written` };
   }
   const riskPolicy = deps.riskPolicy ?? DEFAULT_RISK_POLICY;
@@ -43903,16 +44063,17 @@ export function approveParkedTask(
     step: RELEASE_LEDGER_STEP,
     released: "verify-human",
     ...(deps.provenance ?? {}),
+    release_pin: operatorReleasePin(task),
   };
   (deps.append ?? appendLedger)(deps.ledgerPath, releaseRow);
   deps.recordThreadRow?.(releaseRow);
-  if (!deps.provenance) deps.recordDurableRelease?.(taskId);
+  if (!deps.provenance) deps.recordDurableRelease?.(task);
   return { code: 0, released: true, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
 }
 
 /** W1-T10348: the two release records beside a ledger, for the shared resolver (drain.ts `resolveReleases`). */
 export function releaseReadersFor(ledgerPath: string): ReleaseReaders {
-  return { readLedgerLines: () => readLedgerRawLines(ledgerPath), readDurableReleases: () => readOperatorReleases(dirname(ledgerPath)) };
+  return { readLedgerLines: () => readReleaseLedgerLines(ledgerPath), readDurableReleases: () => readOperatorReleaseRecords(dirname(ledgerPath)) };
 }
 
 /** The ledger's RAW lines. `releasedTaskIds` parses them itself (it rejects on a cheap substring
@@ -44065,7 +44226,7 @@ export async function approveCommand(
       riskPolicy: readRiskPolicy(policyPath(repoRoot)),
       stageProposal: (proposal) =>
         void stageInboxProposalOnce(join(config.root, "state", "inbox-proposals.json"), proposal),
-      recordDurableRelease: (taskId) => recordOperatorRelease(join(config.root, "state"), taskId, (deps.clock ?? systemClock).iso()),
+      recordDurableRelease: (task) => recordOperatorRelease(join(config.root, "state"), task, (deps.clock ?? systemClock).iso()),
       recordThreadRow: (row) =>
         void recordRowThreadEvents(
           // The row as the ledger stamped it: the event's key is the stored row's `ts`, which this call never chose.
@@ -44112,7 +44273,7 @@ export async function approveCommand(
 
   if (classification.state === "ready" && classification.releaseTaskId) {
     const code = await approveCommand([classification.releaseTaskId], deps);
-    if (code === 0 && releasedTaskIds(readLedgerRawLines(ledgerPath)).has(classification.releaseTaskId)) {
+    if (code === 0 && releasedTaskIds(readLedgerRawLines(ledgerPath), loadPlan(planPath)).has(classification.releaseTaskId)) {
       appendLedger(ledgerPath, { run_id: `APPROVE-${proposalId}`, task_id: proposalId,
         step: "ratify.approved", release_task_id: classification.releaseTaskId });
       approveNoteChain(rest, proposalId, config, deps);

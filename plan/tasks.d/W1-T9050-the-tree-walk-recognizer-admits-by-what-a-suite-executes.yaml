@@ -6,10 +6,11 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 10.00
-  risk: medium
+  risk: high  # Rule 19 span: widened to ci-parity, rule-suites by a scope amendment for #14007
+  band_meaning: span
   origin: "operator session 2026-10-13: gardener loop audit (PR #10787 token dodge)"
   plan_refs: [W1-T6092, W1-T6087]
-  files: [src/lib/ci-parity.ts, test/the-tree-walk-recognizer-admits-by-what-a-suite-executes.test.ts]
+  files: [src/lib/ci-parity.ts, test/the-tree-walk-recognizer-admits-by-what-a-suite-executes.test.ts, "src/lib/rule-suites.ts"]
   status: queued
   priority: 1.5
   attempts: 0

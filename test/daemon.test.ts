@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { operatorReleasePin } from "#src/lib/operator-release.js";
 import { test } from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -192,7 +193,8 @@ test("idle_starved: an operator-released human task or failed board read keeps t
     let stopReads = 0;
     const lines: string[] = [];
     const dispatched: string[] = [];
-    const s = await runDaemon(fixturePlan(), {
+    const plan = fixturePlan();
+    const s = await runDaemon(plan, {
       refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
       // W1-T10348: the daemon's own tick now dispatches the released task, rather than only staying awake for it.
       runOne: async (id) => {
@@ -201,7 +203,7 @@ test("idle_starved: an operator-released human task or failed board read keeps t
         return okResult(id);
       },
       isCreditIndeterminate: () => false,
-      readLedgerLines: () => mode === "released" ? [JSON.stringify({ step: "ratify.approved", task_id: "H" })] : [],
+      readLedgerLines: () => mode === "released" ? [JSON.stringify({ step: "ratify.approved", task_id: "H", release_pin: operatorReleasePin(plan.byId.get("H")!) })] : [],
       confirmedOpenPrCount: () => {
         if (mode === "failed-board") throw new Error("board unreadable");
         return 0;
