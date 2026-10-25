@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.15
   status: queued
@@ -27,3 +27,14 @@
     - PR #13223: 13.13 PR-hours — non-test paths need scope [provider codex, selected_model gpt-6-sol, model sonnet, effort high] — worker saw: state/runs/DAEMON-1792592063763-fix1-1792593501750.tail
     - PR #11904: 12.91 PR-hours — non-test paths need scope [provider codex, selected_model gpt-6.1-sol, model sonnet, effort medium] — worker saw: state/runs/DAEMON-1792042718195-fix1-1792044798247.tail
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.75
+    reasons:
+      - "Change is confined to src/run-task.ts and a corresponding test file in the fix-lane harness itself, not touching secrets, auth, deploy, merge policy, or data deletion."
+      - "Acceptance criterion is a grep-verifiable test assertion, which is checkable from what is shown."
+      - "Gates state shows author_class \"machine\" with a clean family track record (4 merged, 0 declined) and no operator-only decision is requested."
+      - "Declared files touched (2) match the scope described in the title/rationale; no infra/policy files are named."
+    judged_at: "2026-10-25T06:37:48.141Z"
+    pin: "75cf83d785e6829392ad4c505bd8e4a2208dd990c08afc4867d4ce3325cbabc5"
