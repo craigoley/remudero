@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -554,6 +554,53 @@ test("selected private recycler preserves configured app and heap fields after i
     assert.deepEqual(runEnvValues(result, "GH_APP_PRIVATE_KEY_PATH"), ["/home/node/.claude/rmd-app.pem"]);
     assert.deepEqual(runEnvValues(result, "NODE_OPTIONS"), ["--max-old-space-size=4096 --max-semi-space-size=16"]);
     assert.deepEqual(runEnvValues(result, "RMD_SHADOW_MODE"), [], "reading existing mode does not authorize activation");
+  } finally { fixture.cleanup(); }
+});
+
+test("selected private shared guards cover mount aliases unknown syntax and diagnostic completion", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-shared-guards-`));
+  const selected = join(root, "private.yaml"), safe = join(root, "safe"), alias = join(root, "alias");
+  mkdirSync(safe); writeFileSync(selected, "synthetic-private-canary\n", { mode: 0o600 });
+  symlinkSync(root, alias, "dir");
+  const run = (command: string, args: string[], input = "") => spawnSync("bash", ["-c",
+    'source "$1"; SELECTED_REGISTRY_ACTIVE=1; SELECTED_REGISTRY_CALLER=fixture; SELECTED_REGISTRY_HOST_FILE="$2"; ' +
+      'SELECTED_REGISTRY_CONTAINER_FILE=/private-selected.yaml; SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION=fixture-end-frame; shift 2; ' + command,
+    "fixture", SCRIPT, selected, ...args], { cwd: REPO_ROOT, encoding: "utf8", input, timeout: 10000 });
+  try {
+    const healthy = run('selected_registry_mounts "$@"', ["-v", `${safe}:/safe`, "--mount", `type=bind,src=${selected},dst=/private-selected.yaml,readonly`]);
+    assert.equal(healthy.status, 0, healthy.stderr);
+    for (const mounts of [["-v", `${root}:/broad`], ["-v", `${alias}:/symlinked-broad`], ["-v", `${selected}:/second-name:ro`],
+      ["-v", "named-volume:/other"], ["-v"], ["--mount", "type=volume,src=named,dst=/other"]]) {
+      const result = run('selected_registry_mounts "$@"', mounts);
+      assert.equal(result.status, 2, JSON.stringify(mounts));
+      assert.match(result.stderr, /mount_alias_unknown/);
+      assert.equal((result.stdout + result.stderr).includes(root), false);
+    }
+    const complete = run("selected_registry_diagnostic_filter", [], "synthetic-private-canary\nfixture-end-frame\nafter-completion-private\n");
+    assert.equal(complete.status, 0, complete.stderr);
+    assert.match(complete.stdout, /private details withheld/);
+    assert.doesNotMatch(complete.stdout, /synthetic-private-canary|fixture-end-frame|after-completion-private/);
+    const missing = run("selected_registry_diagnostic_filter", [], "synthetic-private-canary\n");
+    assert.equal(missing.status, 2, "EOF without the owned completion frame is not a certified diagnostic stream");
+    const unavailable = run("TMPDIR=/nonexistent/selected-diagnostic-fixture; selected_registry_diagnostics", []);
+    assert.equal(unavailable.status, 2);
+    assert.match(unavailable.stderr, /diagnostics unavailable; no operation started/);
+    assert.equal((unavailable.stdout + unavailable.stderr).includes(root), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("selected private recycler preserves independent owner pause and stop without publishing private diagnostics", () => {
+  const fixture = privateRecyclerFixture(), state = join(fixture.root, "state", "state");
+  mkdirSync(state);
+  const pause = JSON.stringify({ reason: "owner hold", pid: 4242, host: "owner" });
+  writeFileSync(join(state, "PAUSE"), pause); writeFileSync(join(state, "STOP"), "owner STOP remains authoritative\n");
+  try {
+    const result = fixture.run("private-good");
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(state, "PAUSE"), "utf8"), pause);
+    assert.equal(readFileSync(join(state, "STOP"), "utf8"), "owner STOP remains authoritative\n");
+    assert.equal((result.stdout + result.stderr).includes(fixture.root), false);
+    assert.deepEqual(runEnvValues(result, "RMD_SHADOW_MODE"), []);
   } finally { fixture.cleanup(); }
 });
 
