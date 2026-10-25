@@ -424,3 +424,19 @@ test("code health collection preserves source clocks and prior partial findings"
   assert.equal(repeated.scans[0]!.observedAt, complete.scans[0]!.observedAt, "re-reading a source cannot move its own measurement clock");
   assert.notEqual(projectCodeHealth(repeated).summary.healthy, true, "a repeated scan is not an independent baseline");
 });
+
+
+test("code health collection rejects foreign evidence and flags changed facts under one scan identity", () => {
+  const previous = input(), scans = structuredClone(previous.scans);
+  scans[0]!.repository = "acme/foreign";
+  assert.throws(() => prepareCodeHealthCollection({ repository: previous.repository, currentSha: previous.currentSha,
+    observedAt: "2026-11-02T06:00:00.000Z", scans, previous }), /repository/i);
+  scans[0]!.repository = previous.repository; scans[0]!.scopeHash = "different-scope";
+  scans[0]!.findings = [{ ...scans[0]!.findings[0]!, id: "99", severity: "critical" }];
+  const changed = prepareCodeHealthCollection({ repository: previous.repository, currentSha: previous.currentSha,
+    observedAt: "2026-11-02T06:00:00.000Z", scans, previous });
+  assert.equal(changed.scans[0]!.state, "partial", "one saved measurement identity cannot silently change its measured facts");
+  const report = projectCodeHealth(changed);
+  assert(report.findings.some(finding => finding.severity === "critical" && finding.fingerprint.includes(":")), "keep newly known urgent evidence explicit while unassessed");
+  assert.equal(report.summary.healthy, null);
+});
