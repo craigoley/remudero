@@ -101,18 +101,29 @@ export function validateRepositoryEvidenceInventory(value: unknown): ContractRes
   return { ok: true, value: value as unknown as RepositoryEvidenceInventory };
 }
 
-/** Validate exact local midnight bounds, including real 23- and 25-hour days. */
+/** Validate canonical civil-day bounds, including repeated or skipped local midnights. */
 function calendarWindow(report: DailyProgressReport): ContractResult<true> {
   if (!/^\d{4}-\d\d-\d\d$/.test(report.reportDate) || !instant(`${report.reportDate}T00:00:00.000Z`) || !/^[A-Za-z][A-Za-z0-9_+/-]*$/.test(report.timeZone)) return { ok: false, reason: "invalid calendar date or zone" };
   const next = fixedClock(Date.parse(`${report.reportDate}T00:00:00.000Z`)).date(); next.setUTCDate(next.getUTCDate() + 1);
   const nextDate = next.toISOString().slice(0, 10);
   try {
     const formatter = new Intl.DateTimeFormat("en-CA", { timeZone: report.timeZone, calendar: "iso8601", numberingSystem: "latn", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
-    const localMidnight = (stamp: string, date: string) => {
-      const p = Object.fromEntries(formatter.formatToParts(fixedClock(Date.parse(stamp)).date()).map((part) => [part.type, part.value]));
-      return `${p.year}-${p.month}-${p.day}` === date && p.hour === "00" && p.minute === "00" && p.second === "00" && Date.parse(stamp) % 1000 === 0;
+    const localDate = (stamp: number) => {
+      const p = Object.fromEntries(formatter.formatToParts(fixedClock(stamp).date()).map((part) => [part.type, part.value]));
+      return `${p.year.padStart(4, "0")}-${p.month}-${p.day}`;
     };
-    return localMidnight(report.windowStart, report.reportDate) && localMidnight(report.windowEnd, nextDate)
+    const dayStart = (date: string) => {
+      const midnight = Date.parse(`${date}T00:00:00.000Z`), margin = 36 * 60 * 60_000;
+      let before = midnight - margin, after = midnight + margin;
+      while (after - before > 1) {
+        const middle = Math.floor((before + after) / 2);
+        if (localDate(middle) < date) before = middle;
+        else after = middle;
+      }
+      return after;
+    };
+    const start = dayStart(report.reportDate), end = dayStart(nextDate);
+    return localDate(start) === report.reportDate && Date.parse(report.windowStart) === start && Date.parse(report.windowEnd) === end
       ? { ok: true, value: true } : { ok: false, reason: "report bounds are not the named local calendar day" };
   } catch (error) {
     return { ok: false, reason: error instanceof RangeError ? "unsupported reporting time zone" : "calendar conversion unavailable" };

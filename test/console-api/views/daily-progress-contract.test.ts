@@ -29,6 +29,17 @@ function report(): DailyProgressReport {
 
 test("daily contracts preserve coverage and reject contradictory day identity", () => {
   assert.equal(validateDailyProgressReport(report()).ok, true, "measured merge totals and a 25-hour day are valid while other source gaps remain visible");
+  const havana = report(); havana.timeZone = "America/Havana";
+  assert.equal(validateDailyProgressReport(havana).ok, true, "Havana's day starts at the first midnight, at 04:00Z");
+  const lateStart = structuredClone(havana); lateStart.windowStart = "2026-11-01T05:00:00.000Z";
+  lateStart.coverage.sources[0]!.coverageStart = lateStart.windowStart;
+  assert.equal(validateDailyProgressReport(lateStart).ok, false, "the repeated midnight cannot omit the day's first hour even when source coverage agrees");
+  const lateEnd = structuredClone(havana); lateEnd.reportDate = "2026-10-31";
+  lateEnd.windowStart = "2026-10-31T04:00:00.000Z"; lateEnd.windowEnd = "2026-11-01T04:00:00.000Z";
+  Object.assign(lateEnd.coverage.sources[0]!, { coverageStart: lateEnd.windowStart, coverageThrough: lateEnd.windowEnd });
+  assert.equal(validateDailyProgressReport(lateEnd).ok, true, "the preceding day ends at the first occurrence of midnight too");
+  lateEnd.windowEnd = "2026-11-01T05:00:00.000Z"; lateEnd.coverage.sources[0]!.coverageThrough = lateEnd.windowEnd;
+  assert.equal(validateDailyProgressReport(lateEnd).ok, false, "the repeated midnight cannot append an hour from the next report day");
   const invalid = [
     { ...report(), version: "unknown" },
     { ...report(), reportDate: "2026-02-30" },
