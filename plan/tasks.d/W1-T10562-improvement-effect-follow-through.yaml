@@ -12,12 +12,15 @@
   id: W1-T10562
   title: Measure whether planned improvements helped using comparable before-and-after evidence
   depends_on:
+    - W1-T10559
     - W1-T10560
     - W1-T10561
   priority: 2
   budget_usd: 45
   files:
     - src/lib/opportunity-outcomes.ts
+    - src/run-task.ts
+    - src/lib/code-health-view.ts
     - src/lib/gardener-opportunity-evidence.ts
     - src/lib/gardeners-route.ts
     - src/lib/code-health-projection.ts
