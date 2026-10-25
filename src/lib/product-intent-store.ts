@@ -207,9 +207,12 @@ export class ProductIntentStore {
           revision: product.revision, objectiveRevision: product.objectiveRevision,
           savedAt: now, payloadDigest, recordDigest: productRecordDigest(product),
         };
-        state.products[id] = product;
-        state.receipts[requestKey] = receipt;
-        this.commit(paths, state);
+        // Rebuild the records: no property write is keyed by a request-derived name.
+        this.commit(paths, {
+          ...state,
+          products: Object.fromEntries([...Object.entries(state.products).filter(([key]) => key !== id), [id, product] as const]),
+          receipts: Object.fromEntries([...Object.entries(state.receipts), [requestKey, receipt] as const]),
+        });
         return { receipt, replayed: false };
       }, { run_id: `product-${randomUUID()}` });
     });
