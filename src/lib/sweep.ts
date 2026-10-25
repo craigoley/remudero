@@ -7137,8 +7137,10 @@ export const REQUIRED_CHECK_FAIL = new Set([
 function rollupProducerKey(c: RollupCheckEntry): { key: string; known: boolean } {
   const posted = /^(?:run:\d+:\d+:)?job:\d+$/.test(c.externalId ?? "");
   const kind = c.context !== undefined && c.name === undefined ? "status" : "check";
-  const workflow = posted ? "posted" : c.workflowId !== undefined ? `workflow:${c.workflowId}`
-    : c.workflowName ? `workflow-name:${c.workflowName}` : "legacy";
+  const identifiedWorkflow = c.workflowId !== undefined ? `workflow:${c.workflowId}`
+    : c.workflowName ? `workflow-name:${c.workflowName}` : undefined;
+  const workflow = posted ? identifiedWorkflow ? `posted:${identifiedWorkflow}` : "posted"
+    : identifiedWorkflow ?? "legacy";
   return { key: JSON.stringify([kind, workflow, c.name ?? c.context ?? ""]),
     known: posted || c.workflowId !== undefined || Boolean(c.workflowName) };
 }
@@ -19149,11 +19151,12 @@ export async function runSweep(
         }
         if (deferred !== undefined) continue;
         if (check.explainedFailures?.length) {
-          const producer = freshByName.get(check.name);
+          const producers = freshProducers.filter(latest => (latest.name ?? latest.context) === check.name && checkJobId(latest) === check.jobId);
+          const producer = producers.length === 1 ? producers[0] : undefined;
           if (!producer || (producer.conclusion ?? producer.state ?? "").toUpperCase() !== "CANCELLED" ||
-              (producer.status ?? "").toUpperCase() !== "COMPLETED" || checkJobId(producer) !== check.jobId || !check.explainedFailures.every(alias => {
-                const latest = freshByName.get(alias.name);
-                return latest !== undefined && latest.checkRunId === alias.checkRunId && rollupState(latest) === "FAILURE";
+              (producer.status ?? "").toUpperCase() !== "COMPLETED" || !check.explainedFailures.every(alias => {
+                const aliases = freshProducers.filter(latest => (latest.name ?? latest.context) === alias.name && latest.checkRunId === alias.checkRunId);
+                return aliases.length === 1 && rollupState(aliases[0]) === "FAILURE";
               })) {
             outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
             continue;
