@@ -17,9 +17,10 @@ Invariants (JANITOR.md "Preserve-then-retire"):
 - Housekeeping changes no history: a repository with too many packs is repacked keeping every
   object, and outside any checkout idle dumps are compressed (deleted after dump_retain_days) and
   idle regenerable build folders are removed.
-- Temp roots (`temp_roots`, matched under /private/tmp) count only when owned by this account, and
-  a clone or bare repository there is deleted only when other accounts cannot enter its root. The
-  borrower census always walks the temp folders as well as the home.
+- Temp roots (`temp_roots`, matched under /private/tmp) count only when owned by this account. The
+  borrower census always walks the temp folders as well as the home, so a kept clone of this
+  account keeps a temp lender; macOS clears /private/tmp at boot, so no account can rely on
+  borrowing objects from it.
 - Codex session logs idle for `codex_session_days` (0 = never) and not open are deleted.
 - No action touches a path under a keep declaration (`KEEP_MARKERS`, or a seed generation's
   `ready.json` beside `consumers/`) on it, above it or inside it, or one that cannot be inspected:
@@ -63,10 +64,10 @@ def say(action, detail="", path=""):
     print(" ".join(x for x in ("preserve-retire:", action, detail, path) if x), flush=True)
 
 
-def run(cmd, inp=None, timeout=600):
+def run(cmd, inp=None, timeout=600, env_override=None):
     env = dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
     try:
-        return subprocess.run(cmd, input=inp, capture_output=True, env=env, timeout=timeout)
+        return subprocess.run(cmd, input=inp, capture_output=True, env=env_override or env, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as error:
         return subprocess.CompletedProcess(cmd, 255, b"", str(error).encode())
 
@@ -188,11 +189,6 @@ def owned_temp_roots(base, patterns):
         if stat.S_ISDIR(st.st_mode) and st.st_uid == uid and os.path.realpath(m) == m:
             out.append(m)
     return out
-
-
-def shared_temp(path, cfg):
-    """True when `path` is inside a temp root that other accounts can enter."""
-    return any((path + "/").startswith(r + "/") and os.lstat(r).st_mode & 0o011 for r in cfg.get("temp_roots", []))
 
 
 def protected_paths(home, cfg):
@@ -527,6 +523,117 @@ def save_tar(path, members, dest):
             t.add(os.path.join(path, rel), arcname=rel, recursive=False)
 
 
+def copy_git_env():
+    """Neither inherited object stores nor replacement objects may qualify a saved copy."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return dict(env, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null",
+                GIT_NO_REPLACE_OBJECTS="1", GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0",
+                GIT_OPTIONAL_LOCKS="0")
+
+
+def copy_git(repo, *args, inp=None):
+    prefix = ["git", "--git-dir", repo.path] if repo.kind == "bare" else ["git", "-C", repo.path]
+    return run(prefix + list(args), inp=inp, env_override=copy_git_env())
+
+
+def git_snapshot(repo):
+    """Freeze all named refs, not just branches/tags or commits unpublished upstream."""
+    fmt = copy_git(repo, "rev-parse", "--show-object-format")
+    shallow = copy_git(repo, "rev-parse", "--is-shallow-repository")
+    if fmt.returncode or fmt.stdout.strip() != b"sha1" or shallow.returncode or shallow.stdout.strip() != b"false":
+        raise Hold("git-copy-unsupported-format-or-shallow")
+    refs = copy_git(repo, "for-each-ref", "--format=%(objectname) %(refname)")
+    if refs.returncode or refs.stderr:
+        raise Hold("refs-unreadable")
+    entries = []
+    for line in refs.stdout.decode(errors="surrogateescape").splitlines():
+        parts = line.split(" ", 1)
+        if len(parts) != 2 or not re.fullmatch("[0-9a-f]{40}", parts[0]) or not parts[1].startswith("refs/"):
+            raise Hold("refs-unreadable")
+        entries.append(parts)
+    head = copy_git(repo, "rev-parse", "--verify", "HEAD")
+    symbolic = copy_git(repo, "symbolic-ref", "-q", "HEAD")
+    if head.returncode or not re.fullmatch(b"[0-9a-f]{40}\n?", head.stdout):
+        raise Hold("history-unrecoverable (HEAD unreadable)")
+    if symbolic.returncode not in (0, 1):
+        raise Hold("HEAD-unreadable")
+    return {"refs": entries, "head": head.stdout.decode().strip(),
+            "symbolic_head": symbolic.stdout.decode().strip() if symbolic.returncode == 0 else ""}
+
+
+def verify_git_copy(bundle, snapshot, expected, work):
+    """Qualify in an empty independent store; source objects cannot satisfy prerequisites."""
+    require_action_authorized()
+    target = tempfile.mkdtemp(prefix=".verify-", dir=work)
+    env = copy_git_env()
+    try:
+        def checked(*args, inp=None):
+            result = run(["git", "--git-dir", target, *args], inp=inp, env_override=env)
+            if result.returncode:
+                raise Hold(f"independent-git-copy-unverified ({git_reason(result)})")
+            return result.stdout
+        checked("init", "--bare", "--quiet", "--template=")
+        checked("bundle", "verify", bundle)
+        checked("bundle", "unbundle", bundle)
+        commands = "".join(f"update {ref} {oid}\n" for oid, ref in snapshot["refs"])
+        checked("update-ref", "--stdin", inp=commands.encode(errors="surrogateescape"))
+        checked("update-ref", "--no-deref", "HEAD", snapshot["head"])
+        restored = checked("for-each-ref", "--format=%(objectname) %(refname)")
+        wanted = "".join(f"{oid} {ref}\n" for oid, ref in snapshot["refs"]).encode(errors="surrogateescape")
+        if restored != wanted or checked("rev-parse", "HEAD").decode().strip() != snapshot["head"]:
+            raise Hold("independent-git-copy-ref-mismatch")
+        actual = checked("cat-file", "--batch-all-objects", "--batch-check=%(objectname)").splitlines()
+        if set(actual) != set(expected):
+            raise Hold("independent-git-copy-object-mismatch")
+        checked("fsck", "--full", "--no-reflogs", "--no-dangling")
+    finally:
+        require_action_authorized()
+        shutil.rmtree(target)
+
+
+def save_git_copy(repo, snapshot, work, cfg):
+    roots = list(dict.fromkeys([oid for oid, _ in snapshot["refs"]] + [snapshot["head"]]))
+    root_input = ("\n".join(roots) + "\n").encode()
+    objects = copy_git(repo, "rev-list", "--objects", "--no-object-names", "--stdin", inp=root_input)
+    if objects.returncode:
+        raise Hold("git-copy-closure-unreadable")
+    oids = objects.stdout.splitlines()
+    if not oids or any(not re.fullmatch(b"[0-9a-f]{40}", oid) for oid in oids):
+        raise Hold("git-copy-closure-unreadable")
+    sizes = copy_git(repo, "cat-file", "--batch-check=%(objectname) %(objectsize)", inp=objects.stdout)
+    total = 0
+    try:
+        rows = [line.split() for line in sizes.stdout.splitlines()]
+        if sizes.returncode or len(rows) != len(oids) or any(len(row) != 2 or row[0] != oid for row, oid in zip(rows, oids)):
+            raise ValueError()
+        total = sum(int(row[1]) for row in rows)
+    except ValueError:
+        raise Hold("git-copy-size-unreadable")
+    # Uncompressed, un-deltified pack plus index overhead, twice: bundle and verifier store.
+    bound = total + total // 100 + len(oids) * 256 + 65536
+    if free_bytes(cfg["preserve_root"]) < MIN_FREE_BYTES + 2 * bound:
+        raise Hold("git-copy-disk-floor (complete independent copy would not fit)")
+    bundle = os.path.join(work, "unpublished.bundle")  # stable artifact name, now every saved ref
+    require_action_authorized()
+    with open(bundle, "wb") as output:
+        output.write(b"# v2 git bundle\n")
+        for oid, ref in snapshot["refs"] + [[snapshot["head"], "HEAD"]]:
+            output.write(f"{oid} {ref}\n".encode(errors="surrogateescape"))
+        output.write(b"\n")
+        output.flush()  # subprocess shares this fd; buffered headers must precede PACK
+        prefix = ["git", "--git-dir", repo.path] if repo.kind == "bare" else ["git", "-C", repo.path]
+        try:
+            made = subprocess.run(prefix + ["pack-objects", "--stdout", "--revs", "--no-use-bitmap-index",
+                "--no-reuse-object", "--no-reuse-delta", "--window=0", "--threads=1"], input=root_input,
+                stdout=output, stderr=subprocess.PIPE, env=copy_git_env(), timeout=600)
+        except (OSError, subprocess.TimeoutExpired):
+            raise Hold("git-copy-pack-failed")
+        if made.returncode:
+            raise Hold(f"git-copy-pack-failed ({git_reason(made)})")
+    verify_git_copy(bundle, snapshot, oids, work)
+    return len(set(oids))
+
+
 def preserve(repo, published, cfg, home, now):
     """Write a verified copy of everything retirement would lose. Returns (dir, summary) or raises Hold."""
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
@@ -537,6 +644,8 @@ def preserve(repo, published, cfg, home, now):
     work = tempfile.mkdtemp(prefix=".incoming-", dir=cfg["preserve_root"])
     summary = {"path": repo.path, "kind": repo.kind, "preserved_at": now}
     try:
+        snapshot = git_snapshot(repo)
+        summary["git_snapshot"] = snapshot
         remotes = repo.git("remote")
         if remotes.returncode != 0:
             raise Hold("remotes-unreadable")
@@ -564,21 +673,11 @@ def preserve(repo, published, cfg, home, now):
             raise Hold("history-unrecoverable (rev-list failed)")
         summary["unpublished_commits"] = int(count.stdout or 0)
         summary["published_base"] = excl
-        if summary["unpublished_commits"]:
-            bundle = os.path.join(work, "unpublished.bundle")
-            require_action_authorized()
-            made = repo.git("bundle", "create", bundle, *revs)
-            if made.returncode != 0:
-                raise Hold(f"bundle-create-failed ({git_reason(made)})")
-            checks = [repo.git("bundle", "verify", bundle)] + [
-                run(["git", "--git-dir", b, "bundle", "verify", bundle]) for b in published.bases]
-            if not any(c.returncode == 0 for c in checks):
-                raise Hold("bundle-unverified")
-        refs = repo.git("for-each-ref", "--format=%(objectname) %(refname)")
-        if refs.returncode != 0:
-            raise Hold("refs-unreadable")
+        summary["packed_objects"] = save_git_copy(repo, snapshot, work, cfg)
+        summary["bundle_prerequisites"] = []
         require_action_authorized()
-        open(os.path.join(work, "refs.txt"), "wb").write(refs.stdout)
+        with open(os.path.join(work, "refs.txt"), "w", errors="surrogateescape") as refs:
+            refs.write("".join(f"{oid} {ref}\n" for oid, ref in snapshot["refs"]))
         if repo.kind == "bare":
             save_tar(repo.path, [p for p in ("config", "description", "hooks", "info", "packed-refs")
                                  if os.path.exists(os.path.join(repo.path, p))], os.path.join(work, "config-hooks.tar.gz"))
@@ -606,6 +705,8 @@ def preserve(repo, published, cfg, home, now):
         json.dump(summary, open(os.path.join(work, "manifest.json"), "w"), indent=1)
         require_action_authorized()
         open(os.path.join(work, "MANIFEST.txt"), "w").write(restore_text(summary, final))
+        if git_snapshot(repo) != snapshot:
+            raise Hold("refs-changed-during-preservation")
         require_action_authorized()
         os.rename(work, final)
         return final, summary
@@ -626,9 +727,11 @@ remotes: {json.dumps(remotes)}
 commits not in published main: {s['unpublished_commits']}
 
 Restore:
-  git clone {shlex.quote(upstream)} <dir> && cd <dir>
-  git bundle unbundle {final}/unpublished.bundle   # if present; restores every commit, detached HEAD included
-  # refs.txt lists every original ref: git update-ref <ref> <sha> recreates the ones you want
+  git init <dir> && cd <dir>
+  git remote add origin {shlex.quote(upstream)}   # optional: names the upstream; restore never fetches it
+  git bundle unbundle {shlex.quote(final + "/unpublished.bundle")}   # self-contained; no upstream required
+  # refs.txt lists every saved ref: recreate EACH with git update-ref <ref> <sha>
+  # manifest.json git_snapshot also records original symbolic HEAD; restore it if wanted
   git checkout {s.get('head', '<sha from refs.txt>')}
   git apply --binary {final}/uncommitted.patch                              # if present
   tar -xzf {final}/untracked.tar.gz                                          # if present
@@ -958,8 +1061,6 @@ def main_authorized():
             keep[r.path] = r.scoped
         elif os.lstat(r.path).st_uid != os.getuid():
             keep[r.path] = "foreign-owner"
-        elif r.kind != "worktree" and shared_temp(r.path, cfg):
-            keep[r.path] = "shared-temp-root (other accounts may borrow its objects)"
         elif snap is None:
             keep[r.path] = "process-visibility-unknown"
         else:
@@ -1028,6 +1129,8 @@ def main_authorized():
             why = keep_scope(r.path) or (r.store and keep_scope(r.store, below=False))
             if why:
                 raise Hold(f"{why} (declared before retire)")
+            if git_snapshot(r) != saved[r.path][1]["git_snapshot"]:
+                raise Hold("refs-changed-before-retire")
             remove(r, cfg["roots"], protected, repos)
             retired += 1
             say("RETIRED", r.kind, r.path)

@@ -46,15 +46,16 @@ const NOT_MERGED: PrLifecycleState = { merged: false, closed: false };
 // end-to-end below, over what `gh` observes, because #2714 made that spawn injectable and a
 // source-text lock on its call site had already red-lined a PR that only moved it) ────────────
 
+const reviewSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/review.ts", import.meta.url)), "utf8");
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 const REPO_ROOT = process.cwd();
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
 
 test("W1-T913 criterion 1 (run lane): runReview posts remudero-review=pending via postReviewPending BEFORE the diff fetch and judgeReview", () => {
-  const start = runTaskSrc.indexOf("async function runReview(");
-  const end = runTaskSrc.indexOf("// ── THE blocked_review FIX RUNG");
+  const start = reviewSrc.indexOf("async function runReview(");
+  const end = reviewSrc.indexOf("\n}\n", start) + 3;
   assert.ok(start > -1 && end > start, "could not locate runReview's body in run-task.ts");
-  const body = runTaskSrc.slice(start, end);
+  const body = reviewSrc.slice(start, end);
 
   const pendingIdx = body.indexOf("postReviewPending(");
   const diffIdx = body.indexOf('execFileSync("gh", ["pr", "diff"');
@@ -71,7 +72,8 @@ test("W1-T913 criterion 1 (run lane): runReview posts remudero-review=pending vi
 });
 
 test("semantic review worker carries an idle-activity watchdog", () => {
-  const start = runTaskSrc.indexOf("args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon");
+  const start = reviewSrc.indexOf("host.reviewerClockBoundMs(args.reviewerClockBoundMs)");
+  assert.match(runTaskSrc, /reviewerClockBoundMs: \(reviewerClockBoundMs\) => reviewerClockBoundMs \?\? loadDefaultPolicy\(\)\.values\.workerAbandon/);
   assert.ok(start > -1, "the semantic reviewer spawn must use the existing worker-abandon policy");
 });
 
@@ -277,10 +279,10 @@ esac
 });
 
 test("W1-T913 criterion 1 (rmd review's own start): reviewCommand posts remudero-review=pending via postReviewPendingDep BEFORE materialize() and before runReviewDep()", () => {
-  const start = runTaskSrc.indexOf("async function reviewCommand(");
-  const end = runTaskSrc.indexOf("async function depReviewCommand(");
+  const start = reviewSrc.indexOf("async function reviewCommand(");
+  const end = reviewSrc.indexOf("\n}\n", start) + 3;
   assert.ok(start > -1 && end > start, "could not locate reviewCommand's body in run-task.ts");
-  const body = runTaskSrc.slice(start, end);
+  const body = reviewSrc.slice(start, end);
 
   const pendingIdx = body.indexOf("await postReviewPendingDep({");
   const materializeIdx = body.indexOf("const materialized = materialize(");

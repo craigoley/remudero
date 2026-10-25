@@ -170,7 +170,7 @@ test("preserved restore instructions name the actual upstream repository", () =>
     const copy = preserved(fx, "Remudero/a-different-project");
     const manifest = JSON.parse(readFileSync(join(copy, "manifest.json"), "utf8"));
     assert.equal(manifest.remotes.origin, fx.origin);
-    assert.ok(readFileSync(join(copy, "MANIFEST.txt"), "utf8").includes(`git clone ${fx.origin} <dir>`));
+    assert.ok(readFileSync(join(copy, "MANIFEST.txt"), "utf8").includes(`git remote add origin ${fx.origin} `));
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
@@ -499,7 +499,7 @@ test("dump expiry spares small files, a package root's files and anything inside
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
-test("an owned temp root is scanned, a clone in a shared one is held, and a symlinked one is never a root", () => {
+test("an owned temp root is scanned, a clone in a root other accounts can enter is preserved then retired, and a symlinked one is never a root", () => {
   const fx = setup({ temp_roots: ["remudero-*"] });
   try {
     const tmp = join(fx.root, "tmp");
@@ -521,10 +521,12 @@ test("an owned temp root is scanned, a clone in a shared one is held, and a syml
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.match(r.stdout, /RETIRED worktree .*remudero-shared\/task/);
     assert.match(r.stdout, /RETIRED clone .*remudero-private\/repo/);
-    assert.match(r.stdout, /HOLD shared-temp-root .*remudero-shared\/repo/);
+    assert.match(r.stdout, /RETIRED clone .*remudero-shared\/repo/);
+    assert.doesNotMatch(r.stdout, /shared-temp-root/);
     assert.equal(existsSync(worktree), false);
     assert.equal(existsSync(owned), false);
-    assert.equal(existsSync(shared), true);
+    assert.equal(existsSync(shared), false, "a 755 temp root no longer holds its clone forever");
+    assert.ok(readdirSync(join(fx.home, "Remudero-preserved")).some(n => n.includes("remudero-shared__repo@")), "it is preserved before it goes");
     assert.equal(existsSync(linked), true, r.stdout);
     assert.doesNotMatch(r.stdout, /remudero-link|outside\/remudero-elsewhere/);
     const back = restore(fx, readdirSync(join(fx.home, "Remudero-preserved")).filter(n => n.includes("remudero-shared__task@"))
@@ -588,12 +590,12 @@ test("a failed preservation bundle is held with git's own reason", () => {
     commit(repo, "work.ts", "export const work = 1;\n", "unpublished local work");
     const native = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
     writeFileSync(join(fx.bin, "git"), `#!/bin/bash
-case " $* " in *" bundle create "*) echo "fatal: simulated pack failure" >&2; exit 128 ;; esac
+case " $* " in *" pack-objects "*) echo "fatal: simulated pack failure" >&2; exit 128 ;; esac
 exec '${native}' "$@"
 `, { mode: 0o755 });
     const r = helper(fx);
     assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.match(r.stdout, /HOLD bundle-create-failed \(fatal: simulated pack failure\) .*Remudero\/task-run\/repo/);
+    assert.match(r.stdout, /HOLD git-copy-pack-failed \(fatal: simulated pack failure\) .*Remudero\/task-run\/repo/);
     assert.equal(existsSync(repo), true);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
