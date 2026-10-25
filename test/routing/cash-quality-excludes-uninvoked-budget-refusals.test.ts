@@ -39,6 +39,7 @@ async function workerOutcome(result?: WorkerResult) {
     try {
       const worker = await spawnWorker({ cwd: REPO_ROOT, settingsFile, config, prompt: "Classify fixture only.",
         model: "haiku", effort: "low", mountProvider: "cash", maxTurns: 1, tools: [],
+        onSelectionAssignment: (assignment) => rows.push({ step: "worker.selection.assigned", assignment }),
         routingTrial: { id: "quality-fixture", arm: "cash", reason: "fixture", models: [deployment] },
         draftRouting: { lane, proposalId: "P1", readStats: () => ({}), random: seededRandom(3),
           log: (step, extra = {}) => rows.push({ step, ...extra }),
