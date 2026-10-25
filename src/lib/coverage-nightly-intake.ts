@@ -118,7 +118,7 @@ export async function readCoverageNightlySummary(opts: {
   const saveSource = (summary: Record<string, unknown>): void => {
     if (summary.code_health === undefined) return;
     const saved = saveCodeHealthCoverageSource({ stateDir, repository: `${opts.owner}/${opts.repo}`, provenance: summary.code_health, clock });
-    if (saved.state !== "published" && saved.state !== "duplicate") log(`Code health coverage evidence was not saved: ${saved.reason}`);
+    if ("reason" in saved) log(`Code health coverage evidence was not saved: ${saved.reason}`);
   };
   try {
     const decision = opts.cadence.check(markerPath, clock.date());

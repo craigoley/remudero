@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { fixedClock } from "./clock.js";
 import { createGhCallPacer, ghExec, paceGhEntry } from "./github-transport.js";
 import { join } from "node:path";
 import { appendLedger } from "./ledger.js";
@@ -274,7 +275,7 @@ export interface CodeScanningAnalysisInstance {
 
 function analysisInstance(raw: GhCodeScanningAlertJson): CodeScanningAnalysisInstance {
   const bounded = (value: unknown, max = 256): string | null => typeof value === "string" && value.length > 0 && value.length <= max && !value.includes("\0") ? value : null;
-  const ownTime = (value: unknown): string | null => typeof value === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(value) && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
+  const ownTime = (value: unknown): string | null => typeof value === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(value) && Number.isFinite(Date.parse(value)) ? fixedClock(Date.parse(value)).iso() : null;
   const instance = raw.most_recent_instance, sha = bounded(instance?.commit_sha), environment = bounded(instance?.environment, 4096);
   return { alertId: String(raw.number ?? "?"), analyzedSha: sha !== null && /^[a-f0-9]{40}$/i.test(sha) ? sha.toLowerCase() : null,
     toolVersion: bounded(raw.tool?.version), ref: bounded(instance?.ref), analysisKey: bounded(instance?.analysis_key), category: bounded(instance?.category),
