@@ -22202,8 +22202,7 @@ export async function runSweepLightPass(
   let refillAgain = false;
   // Assigned once the fan-out's own controller exists.
   let refillFreedLanes: () => Promise<void> = async () => {};
-  // Only a lane freed AFTER this pass returns refills: one freed during the fan-out is re-derived by
-  // the next pass, so a pass's own rows always describe the admission it actually made.
+  // Releases during fan-out are picked up once refill setup completes; later releases refill directly.
   const onOwnLaneFreed = (): void => {
     if (refillArmed) void refillFreedLanes();
   };
@@ -22501,6 +22500,8 @@ export async function runSweepLightPass(
   // Let completed effects release their capacity before a caller starts the next pass.
   if (detachedNumbers.size > 0) await new Promise<void>((resolve) => setImmediate(resolve));
   refillArmed = true;
+  // W1-T9904: a review may have settled before its release callback could reach this controller.
+  if (unsettledSpawning < spawning.length) setImmediate(() => { void refillFreedLanes(); });
   return summaries;
   } finally {
     releasePlanMerge();

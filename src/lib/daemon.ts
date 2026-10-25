@@ -1,3 +1,4 @@
+import type { ReleaseEvidence } from "./operator-release.js";
 /** lib/daemon.ts — the daemon's scheduler-loop core (W1-T12a).
  *
  * This is the headless, unit-testable half of W1-T12 (Daemonize). Launchd unit generation is W1-T12b
@@ -1306,7 +1307,7 @@ export interface DaemonDeps {
   readLedgerLines?: () => readonly string[];
   /** W1-T10348 — the operator releases kept in state/operator-releases.json, which ledger rotation cannot
    *  shed. Read with `readLedgerLines` once per tick by the shared release resolver. Absent = ledger only. */
-  readDurableReleases?: () => ReadonlySet<string>;
+  readDurableReleases?: () => ReleaseEvidence;
   /** Complete archive union for the boot-time restart estimates and sweep-bound seed (W1-T9632); unreadable disables holdouts. */
   readRestartHistory?: () => readonly string[];
   /** Re-read the plan from the same source the boot used, returning the fresh plan or `null` when
@@ -1997,7 +1998,7 @@ export function releasedFilteredLogger(
     named.add(key);
     log("dispatch.released_filtered", {
       task: task.id, reason, release_author: releases.authors.get(task.id) ?? "operator",
-      ...(setAside ? { set_aside: "current-pin escalate ruling" } : {}),
+      ...(setAside ? { set_aside: releases.reapprovalRequired?.has(task.id) ? "explicit operator reapproval required" : releases.unknownReleaseHistory?.has(task.id) ? "operator release history is unreadable" : "current-pin escalate ruling" } : {}),
     });
   };
 }
