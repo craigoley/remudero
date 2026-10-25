@@ -3412,7 +3412,7 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
     // A CALL, not a mention: the pattern must demand an invocation…
     if (!pattern.includes("(")) return undefined;
     // …in a src/ file, not a test. Tests prove behavior; they do not prove production reachability.
-    if (!path.startsWith("src/") || (!path.endsWith(".ts") && !path.endsWith(".tsx")) || path.includes("*")) return undefined;
+    if (!path.startsWith("src/") || !path.endsWith(".ts") || path.includes("*")) return undefined;
     return { pattern, path };
   };
   const proofs = (task.acceptance ?? []).map(parsedGrepCallProof).filter((p): p is { pattern: string; path: string } => !!p);
