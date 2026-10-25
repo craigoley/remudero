@@ -88,7 +88,7 @@ export function qualityScanFromCollectedEvidence(input: {
       if (alert.state !== "fixed" && !identified) reasons.add("A CodeQL finding cannot be tied to the checked code and configuration.");
       if (!alert.ruleId || !/^[1-9][0-9]*$/.test(alert.id) || alert.ruleId.length > 256 ||
           !["critical", "high", "medium", "low"].includes(alert.severity) || !["open", "dismissed", "fixed"].includes(alert.state) ||
-          !alert.location?.path || alert.location.path.startsWith("/") || alert.location.path.includes("\\") || alert.location.path.length > 4096 ||
+          alert.location === undefined || !alert.location.path || alert.location.path.startsWith("/") || alert.location.path.includes("\\") || alert.location.path.length > 4096 ||
           alert.location.path.split("/").some(part => !part || part === "..") || !alert.summary || alert.summary.length > 2048) {
         if (alert.state !== "fixed") reasons.add("Some CodeQL findings have incomplete identity, severity or location evidence."); continue;
       }

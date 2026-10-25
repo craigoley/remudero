@@ -113,7 +113,8 @@ function configuredQualityLanguages(value: unknown): string[] {
       const field = qualityObject(init) && qualityObject(init.with) ? init.with.languages : undefined;
       if (typeof field === "string" && !field.includes("${{")) configured = field.split(/[,\s]+/).filter(Boolean);
     }
-    if (!configured?.length || configured.some(language => typeof language !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(language))) throw new Error("The configured CodeQL languages cannot be resolved safely.");
+    if (configured === undefined) throw new Error("The configured CodeQL languages could not be resolved.");
+    if (configured.length === 0 || configured.some(language => typeof language !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(language))) throw new Error("The configured CodeQL languages cannot be resolved safely.");
     languages.push(...configured as string[]);
   }
   if (!languages.length || languages.length > 8 || new Set(languages).size !== languages.length) throw new Error("The configured CodeQL language inventory is missing, repeated or exceeds its bound.");

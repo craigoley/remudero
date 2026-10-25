@@ -111,7 +111,11 @@ function codeHealthPublicationOwnership(lock: InflightLockHandle): () => boolean
     try {
       const now = lstatSync(lockPath), info = boundedEvidenceJson(lockPath, 4096);
       return now.isFile() && now.dev === held.dev && now.ino === held.ino && evidenceDigest(info) === evidenceDigest(identity);
-    } catch { return false; }
+    } catch {
+      // An unreadable, replaced or malformed lock cannot prove ownership. False refuses every write
+      // until ownership is established again; none of these failures means the lock is free.
+      return false;
+    }
   };
 }
 function syncEvidenceDirectory(path: string): void {
@@ -122,7 +126,8 @@ export function publishCodeHealthSnapshot(opts: { stateDir: string; input: CodeH
   { state: "published" | "duplicate"; snapshotId: string } | { state: "busy" | "superseded" | "unavailable"; reason: string } {
   let lock: InflightLockHandle | undefined, owns: (() => boolean) | undefined;
   try {
-    if (opts.mayPublish?.() === false) return { state: "superseded", reason: "Code health publication ownership changed." };
+    const mayPublish = opts.mayPublish ?? (() => true);
+    if (!mayPublish()) return { state: "superseded", reason: "Code health publication ownership changed." };
     const snapshotId = codeHealthEvidenceSnapshotId(opts.input), repository = opts.input.repository.toLowerCase();
     const attemptAt = (opts.clock ?? systemClock).iso();
     if (!Number.isFinite(Date.parse(attemptAt)) || Date.parse(opts.input.observedAt) > Date.parse(attemptAt)) throw new Error("Code health measurement is later than its collection attempt.");
@@ -154,11 +159,11 @@ export function publishCodeHealthSnapshot(opts: { stateDir: string; input: CodeH
       duplicate = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      if (!writeAtomic(path, serialized, { mode: 0o600, beforeRename: () => owns!() && opts.mayPublish?.() !== false })) throw new Error("Code health publication ownership changed.");
+      if (!writeAtomic(path, serialized, { mode: 0o600, beforeRename: () => owns!() && mayPublish() })) throw new Error("Code health publication ownership changed.");
       syncEvidenceDirectory(dir);
     }
     const pointer: EvidencePointer = { version: "code-health-pointer-v1", repository, snapshotId, attemptAt };
-    if (!writeAtomic(join(root, "latest.json"), JSON.stringify(pointer), { mode: 0o600, beforeRename: () => owns!() && opts.mayPublish?.() !== false &&
+    if (!writeAtomic(join(root, "latest.json"), JSON.stringify(pointer), { mode: 0o600, beforeRename: () => owns!() && mayPublish() &&
         (evidencePointer(opts.stateDir)?.snapshotId ?? null) === opts.expectedSnapshotId })) throw new Error("Code health publication was superseded.");
     syncEvidenceDirectory(root);
     syncEvidenceDirectory(opts.stateDir);

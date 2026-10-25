@@ -69,7 +69,7 @@ export interface CodeHealthViewData {
   version: "code-health-view-v1"; repository: string; expectedRepositories: string[]; unresolvedInstances: string[];
   repositories: RepositorySummary[]; snapshotId: string | null; isCurrentSnapshot: boolean | null; assessment: CodeHealthAssessment | null;
   findingCount: number | null; urgentFindings: UrgentCount; opportunities: CodeHealthImprovementOpportunity[];
-  relatedWorkState: "reported" | "partial" | "stale" | "unavailable" | "not_collected"; relatedWorkAsOf: string | null; planningAvailable: boolean; freshness: "fresh" | "stale" | "unavailable";
+  relatedWorkState: "reported" | "partial" | "stale" | "unavailable" | "not_collected"; relatedWorkAsOf: string | null; relatedWorkReason: string | null; planningAvailable: boolean; freshness: "fresh" | "stale" | "unavailable";
   page: { nextCursor: string | null };
 }
 const unknownUrgent = (): UrgentCount => ({ value: null, precision: "unavailable", scope: "Findings in the measured quality scope; this is not a complete security assessment." });
@@ -109,11 +109,11 @@ export function readCodeHealthReport(opts: { stateDir: string; params: URLSearch
   const report = input.repository === "all" ? null : reports[0]!;
   const data: CodeHealthViewData = { version: "code-health-view-v1", repository: input.repository, expectedRepositories: expected, unresolvedInstances: inventory.unresolvedInstances,
     repositories: reports.map(value => value.summary), snapshotId: report?.summary.snapshotId ?? null, isCurrentSnapshot: report?.isCurrentSnapshot ?? null, assessment: report?.assessment ? { ...report.assessment, findings: [] } : null,
-    findingCount: report?.assessment?.findings.length ?? null, urgentFindings: report?.summary.urgentFindings ?? unknownUrgent(), opportunities: [], relatedWorkState: "not_collected", relatedWorkAsOf: null,
+    findingCount: report?.assessment?.findings.length ?? null, urgentFindings: report?.summary.urgentFindings ?? unknownUrgent(), opportunities: [], relatedWorkState: "not_collected", relatedWorkAsOf: null, relatedWorkReason: "Saved related work has not been collected for this view.",
     planningAvailable: false, freshness: report?.summary.freshness ?? (reports.every(value => value.summary.freshness === "fresh") && !inventory.unresolvedInstances.length ? "fresh" : "unavailable"), page: { nextCursor: null } };
   if (report?.assessment && data.assessment) {
     const related = readRelatedWork(opts.stateDir, inventory, input.repository, opts.now);
-    data.relatedWorkState = related.state; data.relatedWorkAsOf = related.asOf;
+    data.relatedWorkState = related.state; data.relatedWorkAsOf = related.asOf; data.relatedWorkReason = related.reason;
     // These are saved work links, not newly verified delivery or benefit receipts.
     report.opportunities = buildCodeHealthOpportunities(report.input!, related.work);
     const offset = input.page?.o ?? 0, findings = report.assessment.findings;
@@ -173,13 +173,13 @@ export function createCodeHealthView(opts: { stateDir?: string; keys?: () => str
 
 
 function readRelatedWork(stateDir: string, inventory: RepositoryEvidenceInventory, repository: string, now: number): {
-  state: CodeHealthViewData["relatedWorkState"]; asOf: string | null; work: CodeHealthRelatedWork[];
+  state: CodeHealthViewData["relatedWorkState"]; asOf: string | null; work: CodeHealthRelatedWork[]; reason: string | null;
 } {
   const work: CodeHealthRelatedWork[] = [], clocks: string[] = []; let missing = 0, invalid = 0, stale = false;
   const member = inventory.repositories.find(repo => repo.repository === repository)!;
   try {
     const publisher = readCodeHealthArtifactJson(join(stateDir, "read-model", "repositories-sources.json"), 2 * 1024 * 1024) as { instances?: Array<{ instanceId: string; options?: { ledgerPath?: string } }> };
-    if (!Array.isArray(publisher?.instances) || publisher.instances.length > 256) throw new Error("Saved work scope is unavailable.");
+    if (publisher === null || publisher === undefined || !Array.isArray(publisher.instances) || publisher.instances.length > 256) throw new Error("Saved work scope is unavailable.");
     for (const instanceId of member.instanceIds) {
       const instances = publisher.instances.filter(instance => instance?.instanceId === instanceId), path = instances[0]?.options?.ledgerPath;
       if (instances.length !== 1 || typeof path !== "string" || path.length > 4096 || path.includes("\0") || !isAbsolute(path)) { missing++; continue; }
@@ -195,8 +195,13 @@ function readRelatedWork(stateDir: string, inventory: RepositoryEvidenceInventor
           work.push({ repository, proposalId: row.proposalId, taskId: row.task.id,
             ...(row.pr?.repo?.toLowerCase() === repository && row.pr.taskId === row.task.id && typeof row.pr.url === "string" ? { prUrl: row.pr.url } : {}) });
         }
-      } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") missing++; else invalid++; }
+      } catch (error) {
+        // Missing saved work stays not collected; unreadable or malformed work stays unavailable.
+        // The returned state and reason preserve that distinction rather than certify no existing work.
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") missing++; else invalid++;
+      }
     }
-  } catch { invalid++; }
-  return { state: invalid ? clocks.length ? "partial" : "unavailable" : missing ? clocks.length ? "partial" : "not_collected" : stale ? "stale" : "reported", asOf: clocks.sort()[0] ?? null, work };
+  } catch { return { state: "unavailable", asOf: null, work: [], reason: "The configured sources for saved work could not be read or verified." }; }
+  return { state: invalid ? clocks.length ? "partial" : "unavailable" : missing ? clocks.length ? "partial" : "not_collected" : stale ? "stale" : "reported", asOf: clocks.sort()[0] ?? null, work,
+    reason: invalid ? "Some saved work could not be read or verified. These links may be incomplete." : missing ? "Some saved work has not been collected. These links may be incomplete." : stale ? "Saved work links have not been checked within the daily cadence." : null };
 }

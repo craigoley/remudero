@@ -208,7 +208,8 @@ export function codeHealthFindingFixedAfter(finding: CodeHealthScanFinding | und
 export function independentCodeHealthScans(current: CodeHealthScan, prior: CodeHealthScan): boolean {
   if (current.scanId === prior.scanId || Date.parse(current.observedAt) <= Date.parse(prior.observedAt)) return false;
   if (current.componentIds === undefined && prior.componentIds === undefined) return true;
-  if (!current.componentIds?.length || !prior.componentIds?.length) return false;
+  if (current.componentIds === undefined || prior.componentIds === undefined) return false;
+  if (current.componentIds.length === 0 || prior.componentIds.length === 0) return false;
   const previous = new Set(prior.componentIds);
   return current.componentIds.every(id => !previous.has(id));
 }
