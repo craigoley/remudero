@@ -210,7 +210,8 @@ test("improvement planning separates conversation drafting filing and execution"
     const requested = await requestImprovementAction("draft", review, deps); assert(requested.state === "requested"); assert.equal(launches.length, 1);
     assert.equal(requested.operation.state, "requested");
     let draftCalls = 0, fileCalls = 0;
-    let nativeReceipt: import("#src/lib/improvement-thread.js").ImprovementPlanReceipt | undefined;
+    const { improvementNativeFilingReceipt } = await import("#src/run-task.js");
+    const { appendLedger } = await import("#src/lib/ledger.js");
     const runner = { ...deps,
       draft: async (target: { proposalId: string }) => {
         draftCalls++;
@@ -221,8 +222,8 @@ test("improvement planning separates conversation drafting filing and execution"
         commitInboxDraftOutcomes({ stateDir, scope: { repository: request.repository }, snapshots: [snapshot], outcomes: [{ ok: true, proposalId: proposal.id, candidate, snapshot }], log: () => {} });
       },
       file: async () => {
-        fileCalls++; nativeReceipt = { state: "plan_pr_opened" as const, prUrl: "https://github.com/acme/atlas/pull/123", branch: "ratify-improvement-123", taskIds: ["W1-T99999"], nativeReceiptId: "native-ratify-receipt-123" }; return nativeReceipt;
-      }, recoverFiling: () => nativeReceipt,
+        fileCalls++; throw new Error("the caller lost contact after native filing started");
+      }, recoverFiling: (target: { proposalId: string; ledgerPath: string }) => improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, request.repository, deps.clock),
     };
     const drafted = await runImprovementAction(requested.operation.operationId, runner); assert("kind" in drafted); assert.equal(drafted.state, "completed"); assert.equal(draftCalls, 1); assert.equal(fileCalls, 0);
     view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved"); assert.equal(view.drafting.state, "ready"); assert(view.drafting.digest);
@@ -241,7 +242,13 @@ test("improvement planning separates conversation drafting filing and execution"
     const answered = readImprovementThread(saved.requestId, deps); assert(answered.state === "saved"); assert.equal(answered.correspondence.pendingInputs, 0);
     const filing = await requestImprovementAction("file", { ...review, idempotencyKey: "explicit-reviewed-file-0001", draftDigest: view.drafting.digest }, deps);
     assert(filing.state === "requested"); assert.equal(fileCalls, 0, "saving the reviewed decision does not claim filing completed");
+    const interrupted = await runImprovementAction(filing.operation.operationId, runner); assert.equal(interrupted.state, "uncertain"); assert.equal(fileCalls, 1);
+    const uncertain = await runImprovementAction(filing.operation.operationId, runner); assert.equal(uncertain.state, "uncertain"); assert.equal(fileCalls, 1, "an ambiguous filing is not retried without a native receipt");
+    const ledgerPath = join(inboxRoot, "state", "ledger.ndjson");
+    appendLedger(ledgerPath, { ts: deps.clock.iso(), run_id: "APPROVE-fixture-123", task_id: saved.proposalId, proposal_id: saved.proposalId, step: "approve.id_materialized", ids: ["W1-T99999"] });
+    appendLedger(ledgerPath, { ts: deps.clock.iso(), run_id: "APPROVE-fixture-123", task_id: saved.proposalId, step: "ratify.approved", pr_url: "https://github.com/acme/atlas/pull/123", branch: "ratify-improvement-123" });
     const filed = await runImprovementAction(filing.operation.operationId, runner); assert("kind" in filed); assert.equal(filed.state, "completed"); assert.equal(filed.receipt?.state, "plan_pr_opened"); assert.equal(fileCalls, 1);
+    assert.equal(filed.receipt?.taskIdsState, "observed"); assert.deepEqual(filed.receipt?.taskIds, ["W1-T99999"]);
     const replay = await runImprovementAction(filing.operation.operationId, runner); assert("kind" in replay); assert.deepEqual(replay, filed); assert.equal(fileCalls, 1);
     assert.equal(filing.execution.state, "not_requested");
     assert.equal(existsSync(join(inboxRoot, "repos", "atlas", "plan", "tasks.yaml")), false, "the test filing callback creates no task, dispatch, merge or deployment");
@@ -353,5 +360,26 @@ test("improvement concurrent creation processes recover one saved conversation",
     const retry = await createImprovementThread(request, deps); assert(retry.state === "saved"); assert.equal(retry.reused, true);
     const thread = readThread(retry.threadId, { threadStorePath: join(inboxRoot, "state", "inbox-threads.jsonl") }); assert(thread.status === "ok"); assert.equal(thread.messages.length, 2);
     assert.equal(JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-proposals.json"), "utf8")).proposals.length, 1);
+  });
+});
+
+
+test("improvement draft handoff narrows the native selector and preserves the attempt guard", async () => {
+  const { createImprovementThread, readImprovementThread, requestImprovementAction } = await planningModule();
+  const { buildInboxDraftHook } = await import("#src/run-task.js");
+  const { updateProposalRegistry } = await import("#src/lib/inbox.js");
+  await withTempDir("improvement-draft-selection", async dir => {
+    const { deps, request, inboxRoot } = sourceFixture(dir), saved = await createImprovementThread(request, deps); assert(saved.state === "saved");
+    const view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
+    const requested = await requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: "bounded-native-draft-0001" }, { ...deps, launchAction: () => {} }); assert(requested.state === "requested");
+    updateProposalRegistry(join(inboxRoot, "state", "inbox-proposals.json"), current => [...current, { id: "P-UNRELATED", summary: "Other work", evidenceAnchors: [] }]);
+    writeFileSync(join(inboxRoot, "state", "ledger.ndjson"), "");
+    const batches: string[][] = [];
+    const hook = buildInboxDraftHook("acme", "atlas", { root: inboxRoot } as import("#src/lib/config.js").Config, "IMPROVEMENT-TEST", () => {},
+      async proposals => { batches.push(proposals.map(proposal => proposal.id)); return proposals.map(proposal => ({ ok: false as const, proposalId: proposal.id, error: "ordinary test failure" })); },
+      undefined, () => "a".repeat(40), undefined, undefined, saved.proposalId);
+    await hook(); assert.deepEqual(batches, [[saved.proposalId]], "the explicit request does not draft unrelated queued proposals");
+    await hook(); assert.equal(batches.length, 1, "the normal one-attempt-per-cause guard still applies");
+    const attempts = JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-draft-attempts.json"), "utf8")); assert.equal(typeof attempts[saved.proposalId], "string"); assert.equal(attempts["P-UNRELATED"], undefined);
   });
 });

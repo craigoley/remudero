@@ -9,7 +9,7 @@ import { buildCodeHealthOpportunities } from "./codeql-quality-intake.js";
 import { acquireInflightLock, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
-import { inboxDraftGeneration, invalidateDraft, parseProposalRegistryResult, updateProposalRegistry, type DraftCache, type DraftedCandidate, type Proposal } from "./inbox.js";
+import { inboxDraftGeneration, invalidateDraft, parseProposalRegistryResult, syncProposalRegistryEntry, updateProposalRegistry, type DraftCache, type DraftedCandidate, type Proposal } from "./inbox.js";
 import { bearerTokenId, jsonAction, sendJson } from "./panel-actions.js";
 import type { Route } from "./service.js";
 import { causalThreadInputs, appendThreadMessageOnce, inboxThreadId, inboxThreadIdentity, readThread, type ThreadMessageExtra } from "./inbox-thread.js";
@@ -163,7 +163,7 @@ function readIntent(path: string): Intent | undefined {
 function publishThreadLink(stateDir: string, intent: Intent, owns: () => boolean): void {
   const dir = join(stateDir, "improvement-threads", "thread-links"), link = { version: "improvement-thread-link-v1", threadId: intent.threadId, requestId: intent.requestId };
   if (!writeAtomic(join(dir, `${hash(intent.threadId)}.json`), JSON.stringify({ ...link, contentHash: hash(link) }), { mode: 0o600, beforeRename: owns })) throw new Error("Conversation link ownership changed.");
-  syncPath(dir, true);
+  syncPath(dir, true); syncPath(dirname(dir), true);
 }
 function requestOfThread(stateDir: string, threadId: string): string | undefined {
   let raw: unknown;
@@ -219,7 +219,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
         if (proposal.improvement.requestId !== requestId || proposal.improvement.conversationReady) return null;
         return current.map(row => row.id === previous.proposalId ? { ...row, improvement: { ...row.improvement!, conversationReady: true } } : row);
       }, { maxWaitMs: 0 });
-      syncPath(registryPath); syncPath(scope.inboxStateDir, true);
+      syncProposalRegistryEntry(registryPath, previous.proposalId);
       if (!requestOfThread(deps.stateDir, previous.threadId)) publishThreadLink(deps.stateDir, previous, owns);
       return owns() ? saved(previous, true) : fail("uncertain", "The request writer changed before acknowledgement.", requestId);
     }
@@ -233,7 +233,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
       if (!owns!()) throw new Error("Improvement request ownership changed.");
       intent.stage = stage; mayHaveWritten = true; mkdirSync(root, { recursive: true });
       if (!writeAtomic(path, JSON.stringify({ ...intent, contentHash: hash(intent) }), { mode: 0o600, beforeRename: owns })) throw new Error("Improvement request ownership changed.");
-      syncPath(root, true); deps.afterPersist?.(stage === "saved" ? "receipt" : stage);
+      syncPath(root, true); syncPath(deps.stateDir, true); deps.afterPersist?.(stage === "saved" ? "receipt" : stage);
     };
     if (!previous) persist("intent");
     if (!readActionIndex(deps.stateDir, intent.proposalId)) writeActionIndex(deps.stateDir, { version: "improvement-actions-v1", proposalId: intent.proposalId, draft: null, file: null }, owns);
@@ -259,7 +259,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
           snapshotId: request.snapshotId, requestId, threadId: intent.threadId, goalDigest, conversationReady: false } };
       return [...current.filter(row => row.id !== proposal.id), proposal];
     }, { maxWaitMs: 0 });
-    syncPath(registryPath); syncPath(scope.inboxStateDir, true); persist("proposal");
+    syncProposalRegistryEntry(registryPath, intent.proposalId); persist("proposal");
     const store = { threadStorePath: join(scope.inboxStateDir, "inbox-threads.jsonl"), now: () => (deps.clock ?? systemClock).now() };
     for (const [role, body, id] of [["escalation", intent.context, intent.contextId], ["reply", intent.goalBody, intent.goalId]] as const) {
       if (!owns()) return fail("uncertain", "The writer changed before the conversation was saved.", requestId);
@@ -279,7 +279,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
       }
       return current.map(row => row.id === intent.proposalId ? { ...row, improvement: { ...row.improvement!, conversationReady: true } } : row);
     }, { maxWaitMs: 0 });
-    syncPath(registryPath); syncPath(scope.inboxStateDir, true);
+    syncProposalRegistryEntry(registryPath, intent.proposalId);
     publishThreadLink(deps.stateDir, intent, owns);
     return owns() ? saved(intent, previous !== undefined) : fail("uncertain", "The writer changed before the saved conversation could be acknowledged.", requestId);
   } catch {
@@ -434,7 +434,7 @@ export function buildImprovementThreadRoutes(options: { stateDir: string; clock?
 
 export interface ImprovementActionRequest { requestId: string; goalDigest: string; idempotencyKey: string; draftDigest?: string }
 export interface ImprovementPlanReceipt {
-  state: "plan_pr_opened"; prUrl: string; branch: string; taskIds: string[]; nativeReceiptId: string;
+  state: "plan_pr_opened"; prUrl: string; branch: string; taskIds: string[]; taskIdsState: "observed" | "unavailable"; recordedAt: string; nativeReceiptId: string;
 }
 export interface ImprovementAction {
   version: "improvement-action-v1"; operationId: string; kind: "draft" | "file"; requestId: string; proposalId: string;
@@ -468,7 +468,7 @@ function readActionIndex(stateDir: string, proposalId: string): ActionIndex | un
 function writeActionIndex(stateDir: string, index: ActionIndex, owns: () => boolean): void {
   const dir = join(stateDir, "improvement-threads", "action-index");
   if (!writeAtomic(join(dir, `${hash(index.proposalId)}.json`), JSON.stringify({ ...index, contentHash: hash(index) }), { mode: 0o600, beforeRename: owns })) throw new Error("Improvement action ownership changed.");
-  syncPath(dir, true);
+  syncPath(dir, true); syncPath(dirname(dir), true);
 }
 function actionPath(stateDir: string, operationId: string): string { return join(stateDir, "improvement-threads", "actions", `${operationId}.json`); }
 function readAction(stateDir: string, operationId: string): ImprovementAction | undefined {
@@ -485,7 +485,7 @@ function readAction(stateDir: string, operationId: string): ImprovementAction | 
 function writeAction(stateDir: string, action: ImprovementAction, owns: () => boolean): void {
   const path = actionPath(stateDir, action.operationId);
   if (!writeAtomic(path, JSON.stringify({ ...action, contentHash: hash(action) }), { mode: 0o600, beforeRename: owns })) throw new Error("Improvement action ownership changed.");
-  syncPath(dirname(path), true);
+  syncPath(dirname(path), true); syncPath(dirname(dirname(path)), true);
 }
 function actionTarget(intent: Intent): { operationId: string; stateDir: string; repoRoot: string } {
   // The plan path is published by the server-owned instance registry, never supplied in the request.
@@ -544,7 +544,7 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
         if (!proposal || !proposal.improvement || proposal.improvement.goalDigest !== input.goalDigest || !proposal.improvement.conversationReady) throw new Error("The conversation changed before drafting was requested.");
         return current.map(row => row.id === intent.proposalId ? { ...row, trigger: { fired: true, description: "Plan drafting explicitly requested for this saved goal." } } : row);
       }, { maxWaitMs: 0 });
-      syncPath(registryPath); syncPath(intent.scope.inboxStateDir, true);
+      syncProposalRegistryEntry(registryPath, intent.proposalId);
     }
     if (!owns()) return fail("uncertain", "The decision was saved, but its writer changed before handoff.");
     // The worker independently takes the same conversation lock and revalidates source, goal and draft.

@@ -215,6 +215,8 @@ components:
         - prUrl
         - branch
         - taskIds
+        - taskIdsState
+        - recordedAt
         - nativeReceiptId
       properties:
         state:
@@ -230,6 +232,14 @@ components:
           type: array
           items:
             type: string
+        taskIdsState:
+          type: string
+          enum:
+            - observed
+            - unavailable
+        recordedAt:
+          type: string
+          format: date-time
         nativeReceiptId:
           type: string
     ImprovementNativeMessage:

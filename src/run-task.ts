@@ -42673,14 +42673,15 @@ export function projectionReadinessAccessors(projection: ReadonlyMap<string, Sta
  * NOTE (W1-T192): the daemon's OWN per-poll draft rung ({@link buildInboxDraftHook}) is what
  * makes a draft exist without this command ever being invoked — see that function's doc.
  */
-function improvementNativeFilingReceipt(ledgerPath: string, proposalId: string, repository: string): ImprovementPlanReceipt | undefined {
+export function improvementNativeFilingReceipt(ledgerPath: string, proposalId: string, repository: string, clock: Clock = systemClock): ImprovementPlanReceipt | undefined {
   const rows = readLedgerLines(ledgerPath);
   const receipt = rows.filter(row => row.task_id === proposalId && row.step === "ratify.approved").at(-1);
   if (!receipt || typeof receipt.pr_url !== "string" || !receipt.pr_url.startsWith(`https://github.com/${repository}/pull/`) ||
-      !/\/pull\/[1-9][0-9]*$/.test(receipt.pr_url) || typeof receipt.branch !== "string" || typeof receipt.run_id !== "string") return undefined;
+      !/\/pull\/[1-9][0-9]*$/.test(receipt.pr_url) || typeof receipt.branch !== "string" || typeof receipt.run_id !== "string" ||
+      typeof receipt.ts !== "string" || !Number.isFinite(Date.parse(receipt.ts)) || Date.parse(receipt.ts) > clock.now()) return undefined;
   const materialized = rows.filter(row => row.run_id === receipt.run_id && row.step === "approve.id_materialized" && row.proposal_id === proposalId).at(-1);
   const taskIds = Array.isArray(materialized?.ids) && materialized.ids.every(id => typeof id === "string" && /^[A-Za-z0-9-]{1,128}$/.test(id)) ? materialized.ids as string[] : [];
-  return { state: "plan_pr_opened", prUrl: receipt.pr_url, branch: receipt.branch, taskIds,
+  return { state: "plan_pr_opened", prUrl: receipt.pr_url, branch: receipt.branch, taskIds, taskIdsState: taskIds.length ? "observed" : "unavailable", recordedAt: receipt.ts,
     nativeReceiptId: `${receipt.run_id}|${receipt.step}|${String(receipt.ts)}` };
 }
 

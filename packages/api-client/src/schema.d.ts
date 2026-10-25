@@ -42,6 +42,8 @@ export interface components {
       prUrl: string;
       branch: string;
       taskIds: (string)[];
+      taskIdsState: "observed" | "unavailable";
+      recordedAt: string;
       nativeReceiptId: string;
     };
     ImprovementNativeMessage: {

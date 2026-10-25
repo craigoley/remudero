@@ -3068,6 +3068,23 @@ function proposalShardPath(registryPath: string, id: string): string {
   return join(proposalShardDir(registryPath), proposalShardFilename(id));
 }
 
+/** Durability acknowledgement for a source-bound saved conversation, using the native blob and optional shard. */
+export function syncProposalRegistryEntry(registryPath: string, proposalId: string): void {
+  const sync = (path: string, directory = false): void => {
+    const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK | (directory ? fs.constants.O_DIRECTORY : 0));
+    try {
+      const stat = fs.fstatSync(fd);
+      if (directory ? !stat.isDirectory() : !stat.isFile()) throw new Error("proposal durability requires a regular native store");
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+  };
+  sync(registryPath);
+  const shardPath = proposalShardPath(registryPath, proposalId);
+  try { sync(shardPath); sync(proposalShardDir(registryPath), true); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } // A legacy blob entry need not have a shard.
+  sync(dirname(registryPath), true);
+}
+
 /** List the shard files under `shardDir`. `[]` when it does not exist, the unmigrated case; any OTHER read failure is
  *  NOT forgiven, since an empty answer would hide every proposal it holds. */
 function listProposalShardFiles(shardDir: string): string[] {
