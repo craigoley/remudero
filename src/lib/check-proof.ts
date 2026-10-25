@@ -13,7 +13,7 @@ import { hostWorktreeGit, WorktreePointerRefusedError, type HostWorktreeGitOptio
 import { resolveTestPath } from "./test-path-resolver.js";
 import {
   explainGrepProofRefusal, explainUnitTestProofRefusal, materialiseBaseProofBlobs,
-  parseWhitelistedProof, resolveNameFilteredCandidates, narrowNameFilteredArgs, resolveProofTestPath,
+  parseWhitelistedProof, resolveNameFilteredCandidates, narrowNameFilteredArgs, resolveProofTestPath, wrappedGrepPattern,
   execWhitelistedProof, defaultProofSpawner, proofFailureTail, registerReviewerCheckout, type ProofSpawner,
 } from "./review.js";
 
@@ -518,12 +518,23 @@ export function checkProofCommand(
           "            file's actual case, or write a separate case-insensitive proof if that is truly\n" +
           "            the intent."
         );
-      case "absent":
+      case "absent": {
+        const wrapped = wrappedGrepPattern(proof);
+        // A literal identifier needs no second regex dialect to establish its presence.
+        if (wrapped && /^[A-Za-z0-9_-]+$/.test(wrapped.bare) && fileText.includes(wrapped.bare)) {
+          return (
+            "cause:      literal-wrapper — the unquoted identifier IS present on a physical line,\n" +
+            "            but the proof also requires its literal surrounding delimiters. The executor\n" +
+            "            passes argv directly: quotes/backticks inside the pattern are data, not shell\n" +
+            "            quoting. The original proof still fails; this is not unwritten future work."
+          );
+        }
         return (
           "cause:      absent — the pattern's text is not in the file in any form (line-wrap and case\n" +
           "            both probed). This reads as a legitimate FORWARD REFERENCE to work not yet\n" +
           "            written, not as a broken proof."
         );
+      }
       case "matched":
         return (
           "cause:      matched — this classifier's own probe found a line match despite the real grep\n" +

@@ -92,7 +92,7 @@ test("matched: a real GNU-grep-vs-classifier disagreement over an escaped `\\+` 
 test("quoted identifiers are reported as literal wrappers while their proof still fails", () => {
   const dir = markerFixture("Observed task W1-T10191; last recorded verdict blocked_inflight.\n");
   try {
-    for (const quote of [String.fromCharCode(34), String.fromCharCode(39), String.fromCharCode(96)]) {
+    for (const quote of ["\"", "'", "`"]) {
       const pattern = `${quote}W1-T10191${quote}`;
       const { code, out } = runCheckProof(["grep:", pattern, "in", "src/marker.txt"], dir);
       assert.equal(code, 1, "diagnosis must not turn the original proof green");
