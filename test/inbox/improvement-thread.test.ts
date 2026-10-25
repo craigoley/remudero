@@ -403,3 +403,31 @@ test("improvement decisions recover sealed intent across each publication gap", 
     const after = readImprovementThread(saved.requestId, deps); assert(after.state === "saved"); assert.equal(after.drafting.state, "requested"); assert.equal(after.drafting.operationId, recovered.result.operation.operationId);
   });
 });
+
+test("improvement saves release their own resource lease after a separate request lease changes", async () => {
+  const { createImprovementThread, readImprovementThread, requestImprovementAction } = await planningModule();
+  const { readdirSync } = await import("node:fs");
+  for (const operation of ["conversation", "decision"] as const) await withTempDir(`improvement-lease-${operation}`, async dir => {
+    const { deps, request, inboxRoot } = sourceFixture(dir);
+    let replaced: string | undefined;
+    const replace = (prefix: string) => {
+      const lockDir = join(deps.stateDir, "improvement-threads", "locks"), entries = readdirSync(lockDir);
+      assert.equal(entries.length, 2, "the request and conversation leases are both observed");
+      const matching = entries.filter(name => name.startsWith(prefix)); assert.equal(matching.length, 1);
+      replaced = join(lockDir, matching[0]!); unlinkSync(replaced); writeFileSync(replaced, '{"replacement":"preserve unknown holder"}');
+    };
+    if (operation === "conversation") {
+      const lost = await createImprovementThread(request, { ...deps, afterPersist: stage => { if (stage === "intent") replace("request-"); } }); assert.equal(lost.state, "uncertain");
+      assert.equal(existsSync(join(inboxRoot, "state", "inbox-threads.jsonl")), false, "lost request ownership cannot acknowledge or append a chat");
+      const later = await createImprovementThread({ ...request, idempotencyKey: "new-conversation-request-after-loss" }, deps);
+      assert.equal(later.state, "saved", "the independently owned conversation lease must be released on refusal");
+    } else {
+      const saved = await createImprovementThread(request, deps); assert(saved.state === "saved"); const view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
+      const input = { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: "decision-with-lost-request-lease" };
+      const lost = await requestImprovementAction("draft", input, { ...deps, launchAction: () => {}, afterActionPersist: stage => { if (stage === "prepared") replace("action-"); } }); assert.equal(lost.state, "uncertain");
+      const later = await requestImprovementAction("draft", { ...input, idempotencyKey: "new-decision-request-after-loss" }, { ...deps, launchAction: () => {} });
+      assert.equal(later.state, "requested", "loss of a request lease does not strand our separate conversation lease");
+    }
+    assert(replaced); assert.equal(readFileSync(replaced, "utf8"), '{"replacement":"preserve unknown holder"}', "the replacement holder is never removed");
+  });
+});
