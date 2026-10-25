@@ -174,7 +174,11 @@ test("the extracted fix rung gives its judge the current CI or semantic evidence
         waitForCiGreen: async () => { throw Error("no CI wait expected"); },
         runReview: async () => { throw Error("no reviewer expected"); }, push: () => { throw Error("no push expected"); },
         issues: { create: () => { throw Error("no issue expected"); } }, ledgerPath: "/unused/ledger",
-        ledgerLines: () => [], log: () => {}, say: () => {}, account: result => result,
+        ledgerLines: () => [
+          { task_id: "W1-T9297", step: "fix.dispatch", round_id: "previous-evidence-round", head_sha: headSha, strike: 1 },
+          { task_id: "W1-T9297", step: "fix.done", round_id: "previous-evidence-round", head_sha: headSha,
+            fix_outcome: "NO_CHANGE", subtype: "success" },
+        ], log: () => {}, say: () => {}, account: result => result,
         fixProgressJudge: async input => { captured = input; return undefined; } } });
     assert.equal(outcome.outcome, "handed_off");
     assert.ok(captured, "the real rung must reach the injected judgment boundary");
@@ -211,14 +215,16 @@ test("the retry classifier preserves the exact CI and review evidence its caller
   const progressInput = buildBase(facts({ ciFailures: [{ name: "ci", logTail: TAIL }], reviewFailures: [{
     claim: "literal", proof: "unit test: literal", met: false, proof_exec: "executed_pass", reason: "semantic diagnosis" }] }));
   let calls = 0;
+  let captured: FixProgressInput | undefined;
   const result = await runDiagnoseThenRetry({ progressInput,
     attempt: async () => ({ success: false, evidence: { text: "controlled deterministic failure" } }),
     diagnose: async () => ({ text: "controlled diagnosis" }), fixProgressJudge: async input => {
       calls++;
-      assert.deepEqual(input.failureEvidence, progressInput.failureEvidence);
-      assert.deepEqual(input.reviewFailureEvidence, progressInput.reviewFailureEvidence);
+      captured = input;
       return { verdict: "escalate", loop: "controlled test", reason: "no additional retry granted" };
     } });
   assert.equal(calls, 1);
   assert.equal(result.outcome, "gave_up");
+  assert.deepEqual(captured?.failureEvidence, progressInput.failureEvidence);
+  assert.deepEqual(captured?.reviewFailureEvidence, progressInput.reviewFailureEvidence);
 });
