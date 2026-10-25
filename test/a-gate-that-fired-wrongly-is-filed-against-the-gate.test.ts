@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { classifyGateRepair, gateRepairCandidates, loadGateRepairObservations, renderFalsePositiveShard } from "#src/lib/gate-gardener.js";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test, type TestContext } from "node:test";
+import { classifyGateRepair, gateGardenSpec, gateRepairCandidates, loadGateProbes, loadGateRepairObservations, renderFalsePositiveShard } from "#src/lib/gate-gardener.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations } from "#src/lib/plan.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // @ts-ignore executable census module has no declaration file.
 import { PRECHECK_TRIGGERED_SUITES, PRECHECK_PATH_TRIGGERED_SUITES } from "#scripts/census-precheck.mjs";
 
@@ -138,4 +143,120 @@ test("W1-T9049: repair evidence is read through awaited gh calls, with the trigg
     await assert.rejects(loadGateRepairObservations([failing], { ghJson, ghText: async () => "" }),
       (error: unknown) => error === failure);
   }
+});
+
+async function inventoryFixture(t: TestContext) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-gate-repair-inventory-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const put = (path: string, text: string) => {
+    const file = join(root, path);
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, text);
+  };
+  put(".github/workflows/ci-gate.yml", "jobs:\n  ci-gate:\n    env:\n      REQUIRED: '[]'\n      ADVISORY: '[]'\n");
+  put("scripts/source-size-baseline.json", "{}\n");
+  put("scripts/learnings-budget-baseline.json", '{"measuredChars":0,"measuredActiveEntries":0}\n');
+  put("plan/tasks.yaml", "[]\n");
+  put("state/GATE_OFF-defuse", "");
+  put("state/GATE_OFF-compress", "");
+  mkdirSync(join(root, "learnings"));
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const deps = {
+    repoRoot: root, stateDir: join(root, "state"),
+    log: (step: string, extra?: Record<string, unknown>) => { rows.push({ step, extra }); },
+    openWorkspace: () => { throw new Error("inventory must not open a workspace"); },
+  };
+  return { root, put, rows, deps, probes: await loadGateProbes(REPO_ROOT) };
+}
+
+test("W1-T9049: inventory counts genuine repairs and suppresses queued and open gate remedies", async t => {
+  const f = await inventoryFixture(t);
+  const gates = ["census", "open", "completed", "retired", "uncovered"];
+  const rules = gates.map(gate => ({ ...rule, gate }));
+  const observations = gates.map(gate => ({ pair: { ...pair, gate }, repairDiff: dodge }));
+  observations.push({ pair: { ...pair, pr: 10789 }, repairDiff: '-const token = "tree-walk";\n+const token = "other";' });
+  observations.push({ pair: { ...pair, gate: "unknown" }, repairDiff: dodge });
+  const task = (id: string, status: string, origin?: string, retirement?: string) => ({
+    id, title: "repair a gate", repo: "remudero", depends_on: [], type: "implement",
+    verify: "human", risk: "low", status, attempts: 0, origin, retirement,
+  });
+  f.put("plan/tasks.yaml", JSON.stringify([
+    task("W1-T990001", "queued", "gate-false-positive:census"),
+    task("W1-T990002", "done", "gate-false-positive:completed"),
+    task("W1-T990003", "queued", "gate-false-positive:retired", "retired"),
+    task("W1-T990004", "queued"),
+  ]));
+  const spec = gateGardenSpec(f.deps, f.probes, { repairRules: rules,
+    repairObservations: () => observations, openOrigins: () => ["gate-false-positive:open"] });
+  const inv = spec.inventory();
+  assert.deepEqual(spec.metric!(inv, "false-positive"), { trials: 7, successes: 1 });
+  assert.deepEqual(inv.candidates.map(action => ({ target: action.target, file: action.file })),
+    ["completed", "retired", "uncovered"].map(gate => ({ target: `gate-false-positive:${gate}`, file: rule.recognizer })));
+  assert.deepEqual(f.rows.map(row => row.extra?.classification), Array(5).fill("token-dodge"));
+  assert.ok(f.rows.every(row => row.step === "gate.false_positive_suspected"));
+});
+
+test("W1-T9049: empty async repair inventory has a zero tally and never reads open PRs", async t => {
+  const f = await inventoryFixture(t);
+  let reads = 0;
+  const spec = gateGardenSpec(f.deps, f.probes, { repairRules: [rule], repairObservations: () => [],
+    ghJson: async () => { reads++; throw new Error("empty inventory must not read GitHub"); } });
+  const inv = await spec.inventoryAsync!();
+  assert.deepEqual(spec.metric!(inv, "false-positive"), { trials: 0, successes: 0 });
+  assert.deepEqual(inv.candidates, []);
+  assert.deepEqual(f.rows, []);
+  assert.equal(reads, 0);
+});
+
+test("W1-T9049: async inventory parses open PR origins and preserves baseline-only evidence", async t => {
+  const f = await inventoryFixture(t);
+  const calls: string[][] = [];
+  const spec = gateGardenSpec(f.deps, f.probes, { repairRules: [rule, { ...rule, gate: "other" }],
+    repairObservations: () => [
+      { pair: { ...pair, repairFiles: [baseline] }, repairDiff: "-1\n+2" },
+      { pair: { ...pair, gate: "other" }, repairDiff: dodge },
+    ],
+    ghJson: async args => {
+      calls.push(args);
+      return [{ body: 'Remedies: "gate-false-positive:census"\n`gate-false-positive:unrelated`' }, { body: "ordinary PR" }];
+    } });
+  const inv = await spec.inventoryAsync!();
+  assert.deepEqual(calls, [["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"]]);
+  assert.deepEqual(inv.candidates.map(action => action.target), ["gate-false-positive:other"]);
+  assert.deepEqual(spec.metric!(inv, "false-positive"), { trials: 2, successes: 0 });
+  assert.deepEqual(f.rows.map(row => row.extra?.classification), ["baseline-only", "token-dodge"]);
+});
+
+test("W1-T9049: async inventory propagates open PR read failures", async t => {
+  const f = await inventoryFixture(t);
+  const failure = new Error("open PR inventory unavailable");
+  const spec = gateGardenSpec(f.deps, f.probes, { repairRules: [rule],
+    repairObservations: () => [{ pair, repairDiff: dodge }], ghJson: async () => { throw failure; } });
+  await assert.rejects(spec.inventoryAsync!(), error => error === failure);
+  assert.deepEqual(f.rows, [], "an unreadable open-PR inventory must not propose duplicate work");
+});
+
+test("W1-T9049: async inventory uses the default transport to read open PRs", async t => {
+  const f = await inventoryFixture(t);
+  const shim = ghShim([{ when: "pr list --state open --limit 1000 --json body",
+    stdout: JSON.stringify([{ body: "gate-false-positive:census" }]) },
+    { when: "", stderr: "unexpected inventory command", exit: 1 }]);
+  const previousPath = process.env.PATH;
+  const previousCache = process.env.RMD_GH_CACHE_HOME;
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousCache === undefined) delete process.env.RMD_GH_CACHE_HOME;
+    else process.env.RMD_GH_CACHE_HOME = previousCache;
+    rmSync(shim.dir, { recursive: true, force: true });
+  });
+  process.env.PATH = `${shim.dir}:${previousPath ?? ""}`;
+  process.env.RMD_GH_CACHE_HOME = join(f.root, "github-cache");
+  const spec = gateGardenSpec(f.deps, f.probes, { repairRules: [rule],
+    repairObservations: () => [{ pair, repairDiff: dodge }] });
+  const inv = await spec.inventoryAsync!();
+  assert.deepEqual(shim.calls(), ["pr list --state open --limit 1000 --json body"]);
+  assert.deepEqual(inv.candidates, []);
+  assert.deepEqual(spec.metric!(inv, "false-positive"), { trials: 1, successes: 0 });
+  assert.equal(f.rows[0].extra?.classification, "token-dodge");
 });
