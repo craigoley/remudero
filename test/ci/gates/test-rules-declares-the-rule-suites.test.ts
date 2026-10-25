@@ -108,7 +108,7 @@ test("W1-T9877: diff classification includes declared rules and preserves struct
 test("W1-T9877: census drift resolves moved roster paths with the shared resolver", (t) => {
   const member = parity.CENSUS_POPULATION[0]!;
   const path = member.testFile.replace("test/", "test/rules/");
-  const dir = fixture(t, { [path]: `git ${["ls", "files"].join("-")} src/;\n` });
+  const dir = fixture(t, { [path]: 'execFileSync("git", ["ls-files", "--", "src/"]);\n' });
   const resolvePath: typeof resolveTestPath = (cited, opts) => resolveTestPath(cited, {
     ...opts, cache: new Map(), git: { treeSha: () => "fixture-tree", listTestTree: () => [path] },
   });
@@ -122,7 +122,7 @@ test("W1-T9877: census drift resolves moved roster paths with the shared resolve
 
 test("W1-T9877: census drift uses its default resolver for exact roster paths", (t) => {
   const files = Object.fromEntries(parity.CENSUS_POPULATION.map((member) => [
-    member.testFile, `git ${["ls", "files"].join("-")} src/;\n`,
+    member.testFile, 'execFileSync("git", ["ls-files", "--", "src/"]);\n',
   ]));
   const dir = fixture(t, files);
   const result = parity.censusPopulationDrift(dir,
