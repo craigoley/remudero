@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { writeMutantModule } from "#test/helpers/mutant-module.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "#src/lib/learnings.js";
 import { loadInjectableSkills, observeSkillSelection, selectSkillsForTask, renderSkillsPart, SKILL_FIX_TASK_TYPE } from "#src/lib/skill-workshop.js";
 import { renderFixPrompt } from "#src/lib/prompt-render.js";
@@ -549,13 +550,12 @@ test("injected skill surface regressions preserve selection and operator-only ma
     write(root, INJECTED_PATH, skillSource("Changed procedure."));
     commit(root, "source-deletion head");
     // Execute the maintained gate with its skill check deleted, then restore that exact source.
-    // Absolute imports let the disposable modules use the real maintained dependencies.
-    const source = readFileSync(SCRIPT, "utf8").replace(/\bfrom "([^"]+)"/g, (_match, specifier: string) =>
-      `from ${JSON.stringify(specifier.startsWith(".") ? new URL(specifier, pathToFileURL(SCRIPT)).href : import.meta.resolve(specifier))}`);
+    const source = readFileSync(SCRIPT, "utf8");
     const deleted = source.replace("const skillContext = skillSurfaceContext(root, base, head, files);",
       "const skillContext = { surfaces: [], before: [], after: [] };");
-    const load = (text: string) => import(`data:text/javascript;base64,${Buffer.from(text).toString("base64")}`) as Promise<typeof mod>;
-    const removedGate = await load(deleted), restoredGate = await load(source);
+    const load = (name: string, text: string) =>
+      import(pathToFileURL(writeMutantModule(name, text, dirname(SCRIPT))).href) as Promise<typeof mod>;
+    const removedGate = await load("removed-gate.mjs", deleted), restoredGate = await load("restored-gate.mjs", source);
     const refuses = (gate: typeof mod) => assert.equal(gate.evaluatePromptSurfaceGate({ root, base: "HEAD^" }).ok, false,
       "the changed approved skill must be refused");
     assert.throws(() => refuses(removedGate), /the changed approved skill must be refused/);
