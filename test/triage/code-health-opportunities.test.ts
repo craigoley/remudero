@@ -9,7 +9,7 @@ import { withTempDir } from "#src/lib/tmp.js";
 import { buildCodeHealthOpportunities, codeqlQualityProposalId, qualityScanFromCollectedEvidence } from "#src/lib/codeql-quality-intake.js";
 import { prepareCodeHealthCollection } from "#src/lib/code-health-collector.js";
 import { projectCodeHealth, codeHealthFindingFingerprint } from "#src/lib/code-health-projection.js";
-import { readCodeHealthSnapshot, publishCodeHealthSnapshot } from "#src/lib/code-health-store.js";
+import { readCodeHealthSnapshot, publishCodeHealthSnapshot, readCodeHealthCoverageSource } from "#src/lib/code-health-store.js";
 import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
 import { readCoverageNightlySummary } from "#src/lib/coverage-nightly-intake.js";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
@@ -239,6 +239,11 @@ test("code health retains coverage provenance at the existing ledger boundary", 
     assert.equal((await readCoverageNightlySummary(opts)).status, "appended");
     const stored = JSON.parse(readFileSync(ledgerPath, "utf8").trim());
     assert.deepEqual(stored.code_health, provenance, "keep allowlisted source facts in the same durable ledger");
+    const cached = readCodeHealthCoverageSource(dir, "acme/atlas");
+    assert.equal(cached.state, "observed", "reuse the existing intake's validated artifact rather than downloading coverage again");
+    assert("provenance" in cached); assert.deepEqual(cached.provenance, provenance);
+    assert.equal(readCodeHealthCoverageSource(dir, "acme/foreign").state, "unavailable");
+    assert.equal(readCodeHealthCoverageSource(join(dir, "not-yet-collected"), "acme/atlas").state, "not_collected");
     const foreignDir = join(dir, "foreign"); mkdirSync(foreignDir);
     const foreign = { ...summary, code_health: { ...provenance, repository: "acme/foreign" } };
     const refused = await readCoverageNightlySummary({ ...opts, ledgerPath: join(foreignDir, "ledger.ndjson"),

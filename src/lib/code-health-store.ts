@@ -161,3 +161,10 @@ export function publishCodeHealthSnapshot(opts: { stateDir: string; input: CodeH
   } catch { return { state: "unavailable", reason: "Code health evidence could not be saved safely; prior snapshots were retained." }; }
   finally { if (lock && owns?.()) lock.release(); }
 }
+
+
+export type CodeHealthCoverageRead = { state: "observed"; provenance: import("./code-health-projection.js").CodeHealthSourceProvenance }
+  | { state: "not_collected" | "unavailable"; reason: string };
+export function readCodeHealthCoverageSource(_stateDir: string, _repository: string): CodeHealthCoverageRead {
+  return { state: "not_collected", reason: "Coverage source evidence has not been saved." };
+}
