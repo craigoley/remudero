@@ -581,3 +581,22 @@ if (a[0] === "api") {
     if (savedMode === undefined) delete process.env.RMD_CODE_HEALTH_FIXTURE_CASE; else process.env.RMD_CODE_HEALTH_FIXTURE_CASE = savedMode;
   }
 });
+
+test("code health collection compacts redundant known facts without dropping unresolved evidence", () => {
+  const value = input();
+  for (const scan of value.scans) scan.checks[0]!.id = scan.kind === "quality" ? "quality-maintainability-open" : "coverage-existing-tier";
+  let previous = prepareCodeHealthCollection({ repository: value.repository, currentSha: value.currentSha, observedAt: value.observedAt, scans: value.scans, previous: null });
+  for (let n = 1; n <= 20; n++) {
+    const at = Date.parse("2026-11-02T05:00:00.000Z") + n * 60_000, sha = String(n).padStart(40, "a");
+    const scans = previous.scans.map(scan => ({ ...structuredClone(scan), scanId: `${scan.kind}:measurement:${n}`, analyzedSha: sha, observedAt: new Date(at).toISOString() }));
+    previous = prepareCodeHealthCollection({ repository: value.repository, currentSha: sha, observedAt: new Date(at + 1000).toISOString(), scans, previous });
+    assert.equal(projectCodeHealth(previous).findings.length, 2);
+    assert((previous.retainedEvidence?.length ?? 0) <= 1, "ordinary independent reruns must not fill the history bound with facts freshly confirmed by the current scan");
+  }
+  const at = Date.parse(previous.observedAt) + 60_000, sha = "c".repeat(40);
+  const fixed = previous.scans.map(scan => ({ ...structuredClone(scan), scanId: `${scan.kind}:confirmed-fixed`, analyzedSha: sha, observedAt: new Date(at).toISOString(),
+    checks: scan.checks.map(check => ({ ...check, met: true })), findings: scan.findings.map(finding => ({ ...finding, status: "fixed" as const, fixedSha: sha, fixedAt: new Date(at).toISOString() })) }));
+  const result = prepareCodeHealthCollection({ repository: value.repository, currentSha: sha, observedAt: new Date(at + 1000).toISOString(), scans: fixed, previous });
+  assert.equal(result.retainedEvidence?.length ?? 0, 0, "only independently confirmed fixes retire unresolved source facts");
+  assert.equal(projectCodeHealth(result).summary.healthy, true);
+});

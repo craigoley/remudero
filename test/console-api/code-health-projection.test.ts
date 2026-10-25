@@ -171,3 +171,15 @@ test("code health requires independent source parts when an analysis matrix is p
   assert.equal(compareCodeHealthEvidence(shared).state, "comparable");
   assert.equal(projectCodeHealth(shared).summary.healthy, true, "wholly independent complete measurements remain assessable");
 });
+
+test("code health retains unresolved urgent severity when measurement rules change", () => {
+  const value = input();
+  value.baseline!.scans[0]!.findings = [{ ...finding(), severity: "critical" }];
+  value.scans[0]!.findings = [{ ...finding(), severity: "low" }]; value.scans[0]!.configHash = "changed-method";
+  value.scans[0]!.checks[0]!.met = false;
+  const report = projectCodeHealth(value), known = report.findings[0]!;
+  assert.equal(known.severity, "critical", "a changed rule cannot erase the known urgent finding by relabeling the same identity");
+  assert.equal(known.status, "unknown");
+  assert.equal(report.sources.find(source => source.id === known.sourceId)!.observedAt, value.baseline!.scans[0]!.observedAt);
+  assert.equal(compareCodeHealthEvidence(value).fixedFindings.length, 0);
+});
