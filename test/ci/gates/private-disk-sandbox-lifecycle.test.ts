@@ -274,3 +274,36 @@ process.stdout.write(JSON.stringify({type:String(f.statfsSync('/tmp',{bigint:tru
   }
   t.diagnostic(`two real disk-backed private sandboxes, 128 KiB total: ${Math.round(performance.now() - started)} ms; existing 10s startup bounds unchanged`);
 });
+
+
+test("proof temp selection uses only its owned HOME and never forwards a caller temp grant", (t) => {
+  const { dir } = ownedFixtureDir(t, "proof-owned-temp-env");
+  const home = join(dir, "home");
+  mkdirSync(home, { mode: 0o700 });
+  const env = review.proofChildEnv(home, { PATH: process.env.PATH, HOME: "/foreign-home",
+    TMPDIR: "/foreign-temp", TMP: "/foreign-tmp", TEMP: "/foreign-temp2", GH_TOKEN: "fixture-not-a-secret" });
+  assert.equal(env.HOME, home);
+  assert.equal(env.TMPDIR, home);
+  for (const key of ["TMP", "TEMP", "GH_TOKEN"]) assert.equal(env[key], undefined, key);
+  assert.equal(review.buildProofEnv({ TMPDIR: "/foreign-temp" }).TMPDIR, undefined,
+    "the parent-environment allowlist remains closed");
+});
+
+test("both real proof launchers keep temporary writes inside their owned home and remove them", async (t) => {
+  const { dir } = ownedFixtureDir(t, "proof-owned-temp-launchers");
+  // This portable control exercises real Node launches and cleanup, not Linux kernel isolation.
+  review.setProofSandboxForTests({ mode: "unsandboxed", reason: "portable owned-temp lifecycle fixture" });
+  const code = "const fs=require('node:fs'),os=require('node:os'),path=require('node:path');" +
+    "const temp=fs.mkdtempSync(path.join(os.tmpdir(),'proof-child-owned-'));" +
+    "fs.writeFileSync(path.join(temp,'control'),'owned');" +
+    "process.stdout.write(JSON.stringify({home:process.env.HOME,tmp:os.tmpdir(),temp}));";
+  const outputs = [review.defaultProofSpawner(process.execPath, ["-e", code], dir, 5000),
+    await review.defaultAsyncProofSpawner(process.execPath, ["-e", code], dir, 5000)];
+  for (const output of outputs) {
+    const value = JSON.parse(output) as { home: string; tmp: string; temp: string };
+    assert.equal(value.tmp, value.home);
+    assert.equal(dirname(value.temp), value.home);
+    assert.equal(existsSync(value.home), false);
+    assert.equal(existsSync(value.temp), false);
+  }
+});

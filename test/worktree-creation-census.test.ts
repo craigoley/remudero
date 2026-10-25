@@ -229,6 +229,7 @@ test("the real registry declares EXACTLY the five exempt raw sites — the two t
   // W1-T5533 moves it 8 -> 9: a hand build's worktree hard-links node_modules, which worktreeAdd's symlink forbids.
   // W1-T6258 moves it 9 -> 10: the node-pin sync commits on top of a Dependabot PR's own head, not origin/main.
   // W1-T9077 moves it 10 -> 11: a run child's engine tree is cut DETACHED at the daemon's own pinned sha.
+  // W1-T9578 moves it 11 -> 12: artifact conflicts are resolved in a leased tree at the PR's head.
   assert.deepEqual(exempt, [
     "src/lib/check-proof.ts::buildBaseProofDir",
     "src/lib/composition-root.ts::addWorktree",
@@ -239,6 +240,7 @@ test("the real registry declares EXACTLY the five exempt raw sites — the two t
     "src/lib/plan-pr-emitter.ts::planPrPreflightAtCommitAsync",
     "src/lib/serve-slots.ts::createSlotPreparer",
     "src/lib/sweep.ts::rebaseDirtyFleetBranchViaGit",
+    "src/lib/sweep.ts::regenerateConflictViaGit",
     "src/run-task.ts::createFixRungWorktree",
     "src/run-task.ts::defaultNodePinSyncIo",
   ]);
@@ -318,6 +320,7 @@ test("findRawWorktreeAddSites finds every real raw site, including both canonica
       "src/lib/plan-pr-emitter.ts::planPrPreflightAtCommitAsync",
       "src/lib/serve-slots.ts::createSlotPreparer",
       "src/lib/sweep.ts::rebaseDirtyFleetBranchViaGit",
+      "src/lib/sweep.ts::regenerateConflictViaGit",
       "src/lib/worker.ts::worktreeAdd",
       "src/lib/worker.ts::worktreeAddAsync",
       "src/lib/check-proof.ts::buildBaseProofDir", // R-11: the merge-base worktree the staleness check re-runs proofs in
