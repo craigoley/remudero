@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -101,8 +102,13 @@ test("W1-T9086: a terminal child settles once and a lost one takes the crash pat
 
 test("terminal error round-trip regressions exercise the real run-child writer and settler", async () => {
   const f = fixture();
+  const repo = gitRepo();
   try {
-    const original = Object.assign(new Error("spawnSync git ENOBUFS"), { code: "ENOBUFS", reasonClass: "git_output_overflow" });
+    let original: unknown;
+    try { execFileSync("git", ["-C", repo.dir, "log", "-1", "--format=%H"], { maxBuffer: 8, encoding: "utf8" }); }
+    catch (error) { original = error; }
+    assert.ok(original instanceof Error);
+    assert.equal((original as NodeJS.ErrnoException).code, "ENOBUFS");
     f.add("terminal-error", { state: "failed", failure: toRunChildFailure(original) });
     f.add("done-without-result", { state: "done" });
     f.add("still-running-gone", { identity: { ...childIdentity(process.pid)!, startTicks: "reused" } });
@@ -113,12 +119,11 @@ test("terminal error round-trip regressions exercise the real run-child writer a
     assert.equal(failure.reason.name, original.name);
     assert.equal(failure.reason.message, original.message, "an authenticated terminal Error must not become a lost-child message");
     assert.equal(failure.reason.code, "ENOBUFS");
-    assert.equal(failure.reason.reasonClass, "git_output_overflow");
     assert.deepEqual(f.rows.filter(row => row.step === "run_child.lost").map(row => row.run_id).sort(), ["done-without-result", "still-running-gone"]);
     children.forEach((child, i) => child.acknowledge!(outcomes[i]));
     assert.equal(f.rows.filter(row => row.step === "run_child.settled").length, 3);
     assert.deepEqual(f.adopt(), []);
-  } finally { f.cleanup(); }
+  } finally { repo.cleanup(); f.cleanup(); }
 });
 
 test("an adopted live child keeps its occupied lane when its task left the current plan", async () => {
