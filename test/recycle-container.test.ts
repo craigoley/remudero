@@ -370,6 +370,35 @@ const isStop = (c: Call) => c.bin === "docker" && c.argv[0] === "stop";
 const isRm = (c: Call) => c.bin === "docker" && c.argv[0] === "rm";
 const isRun = (c: Call) => c.bin === "docker" && c.argv[0] === "run";
 
+test("selected private recycler refuses unknown input before any transport or public fallback", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}private-recycle-binding-`));
+  const scriptPath = join(root, "deploy", "recycle-container.sh"), prior = process.env.RMD_INSTANCE_REGISTRY;
+  try {
+    for (const dir of ["deploy", ".remudero", "state", "claude", "codex", "config"]) mkdirSync(join(root, dir));
+    writeFileSync(scriptPath, readFileSync(SCRIPT));
+    writeFileSync(join(root, "config", "config.json"), JSON.stringify({ workerProviders: { enabled: ["openweight"], cashFallbackWhenBlocked: true }, dailyCapUsd: 25 }));
+    writeFileSync(join(root, ".remudero", "daemon-instances.yaml"), ["instances:", "  fixture:",
+      "    repo: remudero", "    github_repo: owner/remudero", `    state_dir: ${join(root, "state")}`,
+      "    container_name: remudero-fixture", "    image: test-registry.azurecr.io/remudero:latest",
+      `    claude_dir: ${join(root, "claude")}`, `    codex_dir: ${join(root, "codex")}`,
+      `    container_config_dir: ${join(root, "config")}`, ""].join("\n"));
+    delete process.env.RMD_INSTANCE_REGISTRY;
+    const opts = { scriptPath, args: ["--instance", "fixture"], stateDir: join(root, "state") };
+    const control = runRecycle("good", opts);
+    assert.equal(control.status, 0, control.stderr);
+    assert.ok(control.calls.some(isRun), "healthy unselected public input must reach the contained Docker transport");
+    for (const selected of ["", "relative.yaml", join(root, "missing.yaml")]) {
+      const result = runRecycle("good", { ...opts, extraEnv: { RMD_INSTANCE_REGISTRY: selected } });
+      assert.equal(result.status, 2, result.stderr);
+      assert.match(result.stderr, /selected registry unavailable/);
+      assert.deepEqual(result.calls, [], "unknown selection must not consult or mutate Docker/Azure state");
+    }
+  } finally {
+    if (prior === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = prior;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── ACCEPTANCE 1: no captured credential refuses before mutating anything ───────────────────────
 
 test("W1-T1010: a recycle with no captured credential refuses before mutating", () => {
