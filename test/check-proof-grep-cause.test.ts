@@ -87,3 +87,37 @@ test("matched: a real GNU-grep-vs-classifier disagreement over an escaped `\\+` 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test("quoted identifiers are reported as literal wrappers while their proof still fails", () => {
+  const dir = markerFixture("Observed task W1-T10191; last recorded verdict blocked_inflight.\n");
+  try {
+    for (const quote of [String.fromCharCode(34), String.fromCharCode(39), String.fromCharCode(96)]) {
+      const pattern = `${quote}W1-T10191${quote}`;
+      const { code, out } = runCheckProof(["grep:", pattern, "in", "src/marker.txt"], dir);
+      assert.equal(code, 1, "diagnosis must not turn the original proof green");
+      assert.match(out, /^hits:\s+0\s*$/m);
+      assert.match(out, /^verdict:\s+fail\s*$/m);
+      assert.ok(out.includes(` ${pattern} `), "the original literal delimiters remain in the executor argv");
+      assert.match(out, /^cause:\s+literal-wrapper —/m);
+      assert.doesNotMatch(out, /legitimate FORWARD REFERENCE/, "present identifiers are not missing future work");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("literal wrapper diagnosis preserves genuine quote matches and absent identifiers", () => {
+  const dir = markerFixture('The recorded label is "W1-T10191".\n');
+  try {
+    const matched = runCheckProof(["grep:", '\"W1-T10191\"', "in", "src/marker.txt"], dir);
+    assert.equal(matched.code, 0, "a real quoted match keeps passing");
+    assert.doesNotMatch(matched.out, /^cause:/m);
+    const absent = runCheckProof(["grep:", '\"not_recorded\"', "in", "src/marker.txt"], dir);
+    assert.equal(absent.code, 1);
+    assert.match(absent.out, /^cause:\s+absent —/m);
+    assert.match(absent.out, /legitimate FORWARD REFERENCE/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
