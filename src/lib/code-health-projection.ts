@@ -46,6 +46,7 @@ export interface CodeHealthCheckRegistry {
 export interface CodeHealthProjectionInput {
   repository: string;
   currentSha: string;
+  analyzedSha: string;
   observedAt: string;
   nextDueAt: string | null;
   registry: CodeHealthCheckRegistry;
@@ -74,7 +75,7 @@ export function codeHealthFindingFingerprint(repository: string, kind: CodeHealt
 }
 
 function validateInput(input: CodeHealthProjectionInput): void {
-  if (!repositoryShape.test(input.repository) || !shaShape.test(input.currentSha) || !time(input.observedAt) ||
+  if (!repositoryShape.test(input.repository) || !shaShape.test(input.currentSha) || !shaShape.test(input.analyzedSha) || !time(input.observedAt) ||
       !(input.nextDueAt === null || time(input.nextDueAt)) || !text(input.registry.version)) throw new Error("Code health report identity or clock is invalid.");
   if (input.registry.checks.length > 256 || new Set(input.registry.checks.map(check => check.id)).size !== input.registry.checks.length ||
       input.registry.checks.some(check => !text(check.id) || !CODE_HEALTH_SOURCE_KINDS.includes(check.sourceKind) || !text(check.description, 2048))) throw new Error("Code health check registry is invalid.");
@@ -111,7 +112,7 @@ function scanProblem(scan: CodeHealthScan | undefined, sha: string, observedAt: 
 
 function pairState(input: CodeHealthProjectionInput, current: CodeHealthScan | undefined, prior: CodeHealthScan | undefined): CodeHealthComparison["state"] {
   const baseline = input.baseline;
-  if (!baseline || !shaShape.test(baseline.analyzedSha) || scanProblem(current, input.currentSha, input.observedAt) ||
+  if (!baseline || !shaShape.test(baseline.analyzedSha) || scanProblem(current, input.analyzedSha, input.observedAt) ||
       scanProblem(prior, baseline.analyzedSha, input.observedAt)) return "insufficient_evidence";
   if (baseline.policyVersion !== input.registry.version || !isDeepStrictEqual(
     [current!.scopeHash, current!.toolVersion, current!.rulesVersion, current!.configHash, [...current!.exclusions].sort()],
@@ -125,7 +126,7 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
   const repository = input.repository.toLowerCase();
   const pairs = CODE_HEALTH_SOURCE_KINDS.map(kind => {
     const scan = input.scans.find(source => source.kind === kind), prior = input.baseline?.scans.find(source => source.kind === kind);
-    return { kind, scan, prior, problem: scanProblem(scan, input.currentSha, input.observedAt), pair: pairState(input, scan, prior) };
+    return { kind, scan, prior, problem: scanProblem(scan, input.analyzedSha, input.observedAt), pair: pairState(input, scan, prior) };
   });
   const sources: CodeHealthAssessment["sources"] = pairs.map(({ kind, scan, prior, problem }) => ({
     id: sourceId(repository, kind), kind, required: true,
@@ -155,12 +156,13 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
   if (findings.size > 1000) throw new Error("Code health findings exceed the public contract bound; prior evidence must remain available.");
   const met = checks.filter(check => check.state === "met").length, assessed = checks.filter(check => check.state !== "not_measured").length;
   const complete = pairs.every(pair => !pair.problem && pair.pair === "comparable") && checks.length > 0 && assessed === checks.length;
-  const result: CodeHealthAssessment = { version: CODE_HEALTH_VERSION, repository, currentSha: input.currentSha.toLowerCase(), analyzedSha: input.currentSha.toLowerCase(),
+  const newerCode = input.currentSha.toLowerCase() !== input.analyzedSha.toLowerCase();
+  const result: CodeHealthAssessment = { version: CODE_HEALTH_VERSION, repository, currentSha: input.currentSha.toLowerCase(), analyzedSha: input.analyzedSha.toLowerCase(),
     baselineSha: input.baseline && shaShape.test(input.baseline.analyzedSha) ? input.baseline.analyzedSha.toLowerCase() : null,
     policyVersion: input.registry.version, observedAt: input.observedAt, nextDueAt: input.nextDueAt,
-    state: !input.scans.length ? "not_collected" : pairs.some(pair => pair.scan?.state === "stale") ? "stale" : complete ? "measured" : "partial", sources, checks,
+    state: !input.scans.length ? "not_collected" : newerCode || pairs.some(pair => pair.scan?.state === "stale") ? "stale" : complete ? "measured" : "partial", sources, checks,
     findings: [...findings.values()].sort((a, b) => a.fingerprint.localeCompare(b.fingerprint)),
-    summary: { met, assessed, expected: checks.length, healthy: checks.some(check => check.state === "not_met") ? false : complete && met === checks.length && !findings.size ? true : null } };
+    summary: { met, assessed, expected: checks.length, healthy: newerCode ? null : checks.some(check => check.state === "not_met") ? false : complete && met === checks.length && !findings.size ? true : null } };
   const valid = validateCodeHealthAssessment(result);
   if (!valid.ok) throw new Error(`Code health projection refused: ${valid.reason}`);
   return result;

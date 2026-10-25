@@ -10,7 +10,7 @@ function input(): CodeHealthProjectionInput {
     rulesVersion: "rules1", configHash: "config1", exclusions: [], reason: null,
     checks: [{ id: kind, met: true, reason: kind === "quality" ? "No findings in the measured maintainability subset." : "Meets this repository's existing coverage baseline." }], findings: [],
   }));
-  return { repository: "acme/atlas", currentSha: "a".repeat(40), observedAt: "2026-11-02T05:01:00.000Z", nextDueAt: null,
+  return { repository: "acme/atlas", currentSha: "a".repeat(40), analyzedSha: "a".repeat(40), observedAt: "2026-11-02T05:01:00.000Z", nextDueAt: null,
     registry: { version: "checks1", checks: [{ id: "quality", sourceKind: "quality", category: "maintainability", description: "No findings in the measured maintainability subset." },
       { id: "coverage", sourceKind: "coverage", category: "tests", description: "Meets the repository's configured coverage baseline." }] }, scans,
     baseline: { analyzedSha: "b".repeat(40), policyVersion: "checks1", scans: scans.map(s => ({ ...structuredClone(s), scanId: `${s.kind}:old`, analyzedSha: "b".repeat(40), observedAt: "2026-11-01T05:00:00.000Z" })) } };

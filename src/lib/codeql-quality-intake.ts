@@ -50,7 +50,7 @@ export function buildCodeHealthOpportunities(input: CodeHealthProjectionInput, r
       [finding.id, finding.ruleId, finding.status, finding.severity, finding.category, finding.path, finding.title, finding.effortMinutes]]));
     return [value.kind, value.scanId, [...findings].sort(([a], [b]) => a.localeCompare(b))];
   });
-  const snapshotId = createHash("sha256").update(JSON.stringify([assessment.repository, assessment.currentSha, assessment.baselineSha,
+  const snapshotId = createHash("sha256").update(JSON.stringify([assessment.repository, assessment.currentSha, assessment.analyzedSha, assessment.baselineSha,
     assessment.policyVersion, assessment.sources, assessment.checks, assessment.findings,
     normalizedScans(input.scans), normalizedScans(input.baseline?.scans ?? [])])).digest("hex");
   const scopedRelated = (proposalId: string): CodeHealthRelatedWork[] => {
