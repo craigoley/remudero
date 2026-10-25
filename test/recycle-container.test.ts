@@ -190,6 +190,7 @@ function writeStubs(dir: string): void {
     '        if [ -d "${RMD_CODEX_DIR:-}" ]; then printf \'%s\\t%s\\ttrue\\n\' "$RMD_CODEX_DIR" /home/node/.codex; fi',
     '        if [ -d "${RMD_CONTAINER_CONFIG_DIR:-}" ]; then printf \'%s\\t%s\\ttrue\\n\' "$RMD_CONTAINER_CONFIG_DIR" /home/node/.config/remudero; fi',
     '        if [ -n "${STUB_EXTRA_MOUNTS:-}" ]; then printf \'%s\\n\' "$STUB_EXTRA_MOUNTS"; fi',
+    '        if [ "$STUB_MODE" = private-good ]; then printf \'%s\\t%s\\tfalse\\n\' "$RMD_INSTANCE_REGISTRY" /home/node/.config/remudero/selected-registry.yaml; fi',
     "        exit 0 ;;",
     "      *Config.Image*)",
     '        echo "test-registry/remudero:old"',
@@ -287,6 +288,7 @@ interface RunOpts {
   extraEnv?: Record<string, string>;
   instanceRoot?: string;
   shellPath?: string;
+  unsetDockerHost?: boolean;
 }
 
 function runRecycle(mode: string, opts: RunOpts = {}): Run {
@@ -351,6 +353,7 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
       // overrides this deliberately to point at a real file.
       RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "recycle-container-test-no-such-dockerenv-marker"),
       ...opts.extraEnv,
+      ...(opts.unsetDockerHost ? { DOCKER_HOST: undefined } : {}),
     },
   });
   let calls: Call[] = [];
@@ -428,7 +431,7 @@ function privateRecyclerFixture() {
     `    claude_dir: ${join(root, "claude")}`, `    codex_dir: ${join(root, "codex")}`, `    container_config_dir: ${join(root, "config")}`, ""].join("\n"), { mode: 0o600 });
   const runs: Run[] = [];
   return { root, selected, run(mode: string) {
-    const result = runRecycle(mode, { args: ["--instance", "fixture"], stateDir: join(root, "state"),
+    const result = runRecycle(mode, { args: ["--instance", "fixture"], stateDir: join(root, "state"), unsetDockerHost: true,
       extraEnv: { RMD_INSTANCE_REGISTRY: selected, RMD_RECYCLE_HOST_LOCK: join(root, "own-recycle.lock") } });
     runs.push(result); return result;
   }, cleanup() {

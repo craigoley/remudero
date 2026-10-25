@@ -42,6 +42,7 @@ selected_registry_init() {
   SELECTED_REGISTRY_TEXT=""
   SELECTED_REGISTRY_HOST_FILE=""
   SELECTED_REGISTRY_CONTAINER_FILE="/home/node/.config/remudero/selected-registry.yaml"
+  SELECTED_REGISTRY_LAUNCH_ARGS=()
   if [ "${RMD_INSTANCE_REGISTRY+x}" = x ]; then
     SELECTED_REGISTRY_ACTIVE=1
     [ -n "${SELECTED_REGISTRY_NAME}" ] || { selected_registry_refuse instance_missing; return 2; }
@@ -60,7 +61,43 @@ selected_registry_init() {
     if ! SELECTED_REGISTRY_TEXT="$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '6p' | node -e 'process.stdout.write(Buffer.from(require("node:fs").readFileSync(0,"utf8").trim(),"base64"))')"; then
       selected_registry_refuse packet_unreadable; return 2
     fi
+    SELECTED_REGISTRY_LAUNCH_ARGS=(--mount "type=bind,src=${SELECTED_REGISTRY_HOST_FILE},dst=${SELECTED_REGISTRY_CONTAINER_FILE},readonly"
+      -e "RMD_INSTANCE_REGISTRY=${SELECTED_REGISTRY_CONTAINER_FILE}" -e "RMD_INSTANCE_REGISTRY_DIGEST=${SELECTED_REGISTRY_DIGEST}"
+      -e "RMD_INSTANCE_NAME=${SELECTED_REGISTRY_NAME}")
   fi
+}
+selected_registry_docker_read() {
+  node --input-type=module -e '
+    const {execFile}=await import("node:child_process");
+    execFile("docker",process.argv.slice(1),{timeout:10000,killSignal:"SIGKILL",maxBuffer:65536},(error,out)=>{
+      if(error) process.exitCode=2; else process.stdout.write(out);
+    });
+  ' "$@" 2>/dev/null
+}
+selected_registry_image() {
+  [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
+  local endpoint probe image="$1"
+  selected_registry_recheck || return 2
+  if [ "${DOCKER_HOST+x}" = x ]; then
+    endpoint="${DOCKER_HOST}"
+  elif ! endpoint="$(selected_registry_docker_read context inspect --format '{{.Endpoints.docker.Host}}')"; then
+    selected_registry_refuse namespace_unknown; return 2
+  fi
+  case "$endpoint" in unix:///*) : ;; *) selected_registry_refuse namespace_unknown; return 2 ;; esac
+  if ! probe="$(selected_registry_docker_read run --rm --network none --pull never --user 1000:1000 \
+    "${SELECTED_REGISTRY_LAUNCH_ARGS[@]}" --entrypoint node -w /app "$image" --import tsx --input-type=module -e '
+      try {
+        const m=await import("./src/lib/instance-registry-selection.ts");
+        await m.withInstanceRegistryRuntime(async()=>{
+          m.trustedInstanceRegistryLaunchPacket(); await m.assertInstanceRegistryRuntimeCurrent();
+          process.stdout.write("selected-registry-capability-v1");
+        });
+      } catch { process.exitCode=2; }
+    ')"; then
+    selected_registry_refuse image_reader_unknown; return 2
+  fi
+  [ "$probe" = selected-registry-capability-v1 ] || { selected_registry_refuse image_reader_unknown; return 2; }
+  selected_registry_recheck
 }
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then return 0; fi
 
@@ -473,6 +510,9 @@ if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
 fi
 if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
   RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${CONTAINER_CONFIG_DIR}" "${CONTAINER_CONFIG_MOUNT_DEST}" rw)
+fi
+if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+  RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${SELECTED_REGISTRY_HOST_FILE}" "${SELECTED_REGISTRY_CONTAINER_FILE}" ro)
 fi
 DAEMON_REPO="${RMD_DAEMON_REPO:-remudero}"
 
@@ -937,6 +977,9 @@ CAPTURED_SOURCE_get() { local ref="CAPTURED_SOURCE__$1"; printf '%s' "${!ref-}";
 # policy's build args set it at every launch, so it is never captured and carrying it is not drift.
 is_declared_runtime_var() {
   local needle="$1" candidate
+  if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+    case "$needle" in RMD_INSTANCE_REGISTRY|RMD_INSTANCE_REGISTRY_DIGEST) return 0 ;; esac
+  fi
   for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}" RMD_INSTANCE_NAME GLIBC_TUNABLES; do
     [ "${candidate}" = "${needle}" ] && return 0
   done
@@ -1463,6 +1506,7 @@ if [ -z "${PULLED_IMAGE_ID}" ]; then
   exit 1
 fi
 echo "recycle-container: pulled image id ${PULLED_IMAGE_ID}"
+selected_registry_image "${PULLED_IMAGE_ID}"
 
 COMMISSION_PHASE="drain"
 
@@ -2349,6 +2393,7 @@ record_recycled_cadence_child() {
 # THE PAUSE MUST COME OFF BEFORE THE START, never after: the new container reads the SAME bind
 # mount, so a pause left in place would make it come up paused with no dispatch — this marker is a
 # file in shared state, not process state, and the new container has no memory of who set it.
+selected_registry_image "${PULLED_IMAGE_ID}"
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   # W1-T5281: from here a signal leaves PAUSE engaged — the stop may land even if this script does not.
   RECYCLE_SIGNAL_PHASE="stopping"
@@ -2425,6 +2470,7 @@ DOCKER_RUN_ARGS=(
   --security-opt systempaths=unconfined
   --user 1000:1000
   "${RUN_ENV_ARGS[@]}"
+  "${SELECTED_REGISTRY_LAUNCH_ARGS[@]+"${SELECTED_REGISTRY_LAUNCH_ARGS[@]}"}"
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
   -v "${CRED_DIR}:${CRED_MOUNT_DEST}"
 )
@@ -2447,10 +2493,13 @@ fi
 # /home/node/Remudero, which matches no registry state_dir (those are host paths), so the daemon
 # could not tell which instance it was and the SRE lane never started on core. A recycle run with
 # --instance holds the name; the legacy no-instance path has none to give and adds nothing.
-if [ -n "${INSTANCE_NAME}" ]; then
+if [ -n "${INSTANCE_NAME}" ] && [ "${SELECTED_REGISTRY_ACTIVE}" != 1 ]; then
   DOCKER_RUN_ARGS+=(-e "RMD_INSTANCE_NAME=${INSTANCE_NAME}")
 fi
-DOCKER_RUN_ARGS+=("${REF}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
+LAUNCH_IMAGE="${REF}"
+if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then LAUNCH_IMAGE="${PULLED_IMAGE_ID}"; fi
+DOCKER_RUN_ARGS+=("${LAUNCH_IMAGE}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
+selected_registry_recheck
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null
 
 # ── 7. PROVE IT — THE STARTED CONTAINER'S IMAGE MUST BE THE DIGEST JUST PULLED ──────────────────
