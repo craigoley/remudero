@@ -8,7 +8,7 @@ import { loadPlanFromYaml, machineFilingAdmissionViolations } from "#src/lib/pla
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // @ts-ignore executable census module has no declaration file.
-import { GATE_REPAIR_RULES, PRECHECK_TRIGGERED_SUITES, PRECHECK_PATH_TRIGGERED_SUITES } from "#scripts/census-precheck.mjs";
+import { evaluateAdmittedCensusSuites, GATE_REPAIR_RULES, PRECHECK_TRIGGERED_SUITES, PRECHECK_PATH_TRIGGERED_SUITES } from "#scripts/census-precheck.mjs";
 
 interface PrecheckEntry { testFile: string; ownFiles?: string[]; recognizer?: string; symbol?: string }
 
@@ -225,6 +225,30 @@ test("W1-T9049: precheck gate ownership is explicit and names the census recogni
     assert.equal(classifyGateRepair({ ...repair, triggered: false }, dodge, production.ownFiles, null), "off-subject");
     assert.equal(classifyGateRepair({ ...repair, repairFiles: [...production.ownFiles] }, "-1\n+2", production.ownFiles, null), "baseline-only");
   }
+});
+
+test("W1-T9049: repair classification and census registry changes run the repair suite before push", () => {
+  const suite = "test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts";
+  const evaluate = (path: string, failing: boolean) => {
+    const ran: string[] = [];
+    const result = evaluateAdmittedCensusSuites({
+      changed: [path], loadMembers: () => [], readHead: () => "", readBase: () => "",
+      runSuites: (files: string[]) => {
+        ran.push(...files);
+        return failing && files.includes(suite) ? [suite] : [];
+      },
+    });
+    assert.equal(result.unmeasured, null);
+    return { ran, violations: result.violations as string[] };
+  };
+  for (const path of ["src/lib/gate-gardener.ts", "scripts/census-precheck.mjs", "src/lib/rule-suites.ts", suite]) {
+    const red = evaluate(path, true);
+    assert.ok(red.ran.includes(suite), `${path}: must run the repair suite`);
+    assert.equal(red.violations.length, 1, `${path}: must propagate the repair suite's failure`);
+    assert.ok(red.violations[0]!.startsWith(`census-suite: ${suite} fails`));
+    assert.deepEqual(evaluate(path, false).violations, []);
+  }
+  assert.deepEqual(evaluate("docs/example.md", true), { ran: [], violations: [] });
 });
 
 test("W1-T9049: repair evidence is read through awaited gh calls, with the trigger's files fetched on demand", async () => {

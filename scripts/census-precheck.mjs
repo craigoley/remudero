@@ -1166,7 +1166,7 @@ export const PRECHECK_TRIGGERED_SUITES = [
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
   { testFile: "test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts", gitFree: true,
     trigger: ({ changed }) => changed.some((p) => [
-      "src/lib/gate-gardener.ts", "scripts/census-precheck.mjs",
+      "src/lib/gate-gardener.ts", "scripts/census-precheck.mjs", "src/lib/rule-suites.ts",
       "test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts",
     ].includes(p)),
     remedy: "classify suspect repairs through production gate metadata and file against the gate recognizer" },
