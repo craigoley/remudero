@@ -4,7 +4,7 @@ import type { RawAlert } from "./ops.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { codeHealthFindingFingerprint, projectCodeHealth, type CodeHealthProjectionInput, type CodeHealthScan } from "./code-health-projection.js";
+import { codeHealthFindingFingerprint, projectCodeHealth, validateCodeHealthProvenance, type CodeHealthProjectionInput, type CodeHealthScan } from "./code-health-projection.js";
 
 export interface CodeHealthRelatedWork {
   repository: string;
@@ -32,11 +32,73 @@ export interface CodeHealthImprovementOpportunity {
   relatedWork: CodeHealthRelatedWork[];
 }
 
-export function qualityScanFromCollectedEvidence(_input: {
+export function qualityScanFromCollectedEvidence(input: {
   repository: string; analyzedSha: string; runId: string; requiredLanguages: string[]; artifacts: unknown[];
-  analyses: Array<{ sarifId: string; analyzedSha: string; category: string; toolVersion: string; analysisKey: string; environmentHash: string; error: string; warning: string }>;
+  analyses: Array<{ sarifId: string; analyzedSha: string; category: string; toolVersion: string; analysisKey: string; environmentHash: string; createdAt: string; rulesCount: number; error: string; warning: string }>;
   source: import("./ops.js").CodeScanningAlertsRead;
-}): CodeHealthScan { throw new Error("Code health source adaptation is not implemented."); }
+}): CodeHealthScan {
+  const { repository, analyzedSha, runId, requiredLanguages } = input;
+  if (!/^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/i.test(repository) || !/^[a-f0-9]{40}$/i.test(analyzedSha) ||
+      !/^[1-9][0-9]{0,19}$/.test(runId) || !requiredLanguages.length || requiredLanguages.length > 32 ||
+      new Set(requiredLanguages).size !== requiredLanguages.length || requiredLanguages.some(language => !/^[a-z][a-z0-9-]{0,63}$/.test(language)) ||
+      input.artifacts.length > 32 || input.analyses.length > 100) throw new Error("Code health configured source inventory is invalid.");
+  const artifacts = input.artifacts.map(value => validateCodeHealthProvenance(value, { repository, analyzedSha, runId, kind: "quality" }));
+  if (new Set(artifacts.map(artifact => artifact.language)).size !== artifacts.length || artifacts.some(artifact => !requiredLanguages.includes(artifact.language!)))
+    throw new Error("Code health source inventory repeats a language or includes an unconfigured analysis.");
+  const reasons = new Set<string>(), matched = new Map<string, typeof input.analyses[number]>();
+  for (const language of requiredLanguages) {
+    const artifact = artifacts.find(value => value.language === language);
+    if (!artifact || artifact.state !== "complete") { reasons.add("A configured language analysis is missing or incomplete."); continue; }
+    const candidates = input.analyses.filter(value => value.sarifId === artifact.sarifId);
+    const analysis = candidates[0];
+    if (candidates.length !== 1 || !analysis || analysis.analyzedSha !== analyzedSha.toLowerCase() || analysis.category !== `/language:${language}` ||
+        analysis.toolVersion !== artifact.toolVersion || !analysis.analysisKey || !/^[a-f0-9]{64}$/.test(analysis.environmentHash) ||
+        !Number.isFinite(Date.parse(analysis.createdAt)) || Date.parse(analysis.createdAt) > Date.parse(artifact.observedAt) ||
+        analysis.rulesCount !== artifact.ruleCount || analysis.error || analysis.warning) {
+      reasons.add("A source artifact cannot be matched to its successful GitHub analysis."); continue;
+    }
+    matched.set(language, analysis);
+  }
+  const findings: CodeHealthScan["findings"] = [];
+  if (!input.source.ok) reasons.add("The existing code-scanning read failed.");
+  else {
+    if (!input.source.analysisInstances || input.source.analysisInstances.length !== input.source.alerts.length) reasons.add("The alert read has incomplete analysis identities.");
+    for (const alert of input.source.alerts) {
+      if (alert.source !== "code-scanning" || alert.toolName?.trim().toLowerCase() !== "codeql" || !hasTag(alert, "quality") || !hasTag(alert, "maintainability")) continue;
+      const instance = input.source.analysisInstances?.find(value => value.alertId === alert.id);
+      const analysis = [...matched.values()].find(value => value.category === instance?.category);
+      const identified = instance?.analyzedSha === analyzedSha.toLowerCase() && instance.ref === "refs/heads/main" && analysis !== undefined &&
+        instance.toolVersion === analysis.toolVersion && instance.analysisKey === analysis.analysisKey && instance.environmentHash === analysis.environmentHash;
+      if (!identified) reasons.add("A maintainability finding cannot be tied to the checked code and configuration.");
+      if (!alert.ruleId || !/^[1-9][0-9]*$/.test(alert.id) || alert.ruleId.length > 256 ||
+          !["critical", "high", "medium", "low"].includes(alert.severity) || !["open", "dismissed", "fixed"].includes(alert.state) ||
+          !alert.location?.path || alert.location.path.startsWith("/") || alert.location.path.includes("\\") || alert.location.path.length > 4096 ||
+          alert.location.path.split("/").some(part => !part || part === "..") || !alert.summary || alert.summary.length > 2048) {
+        reasons.add("Some maintainability findings have incomplete identity, severity or location evidence."); continue;
+      }
+      if (alert.state === "fixed" && (!identified || instance!.instanceState !== "fixed")) {
+        reasons.add("A reported fix is not yet confirmed by a matching analysis instance."); continue;
+      }
+      findings.push({ id: alert.id, ruleId: alert.ruleId, status: alert.state as "open" | "dismissed" | "fixed",
+        severity: alert.severity as CodeHealthScan["findings"][number]["severity"], category: "maintainability", path: alert.location.path,
+        title: alert.summary, effortMinutes: null });
+    }
+  }
+  if (findings.length > 1000) throw new Error("Code health findings exceed the public contract bound; prior evidence must remain available.");
+  const ordered = [...artifacts].sort((a, b) => a.language!.localeCompare(b.language!));
+  const digest = (field: "scope" | "rulesVersion" | "configHash"): string | null => artifacts.length !== requiredLanguages.length ||
+    artifacts.some(artifact => field === "scope" ? !artifact.scope.hash : !artifact[field]) ? null :
+    createHash("sha256").update(JSON.stringify(ordered.map(artifact => [artifact.language, field === "scope" ? artifact.scope.hash : artifact[field]]))).digest("hex");
+  const versions = [...new Set(artifacts.flatMap(artifact => artifact.toolVersion ? [artifact.toolVersion] : []))].sort().join(", ");
+  if (!versions || versions.length > 256) reasons.add("A bounded tool-version inventory is unavailable.");
+  return { kind: "quality", repository: repository.toLowerCase(), analyzedSha: analyzedSha.toLowerCase(),
+    scanId: `codeql:${createHash("sha256").update(JSON.stringify(ordered.map(artifact => artifact.scanId))).digest("hex")}`,
+    observedAt: ordered.map(artifact => artifact.observedAt).sort()[0] ?? "", state: !input.source.ok ? "unavailable" : reasons.size ? "partial" : "complete",
+    scopeHash: digest("scope"), toolVersion: versions && versions.length <= 256 ? versions : null, rulesVersion: digest("rulesVersion"), configHash: digest("configHash"),
+    exclusions: [...new Set(ordered.flatMap(artifact => artifact.exclusions))].sort(), reason: reasons.size ? [...reasons].join(" ") : null,
+    checks: [{ id: "quality-maintainability-open", met: findings.every(finding => finding.status === "fixed"),
+      reason: findings.some(finding => finding.status !== "fixed") ? "Known maintainability findings have not been verified as fixed." : "No open findings in the measured maintainability subset." }], findings };
+}
 
 /** A read-only briefing over existing evidence and opportunity identities; never files or ranks. */
 export function buildCodeHealthOpportunities(input: CodeHealthProjectionInput, relatedWork: readonly CodeHealthRelatedWork[] = []): CodeHealthImprovementOpportunity[] {
