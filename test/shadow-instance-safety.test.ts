@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import * as runtimeRegistry from "#src/lib/instance-registry-selection.js";
 import { observeSelectedMode } from "#src/lib/instance-mode.js";
 import { daemonCommand } from "#src/cli/commands/daemon.js";
 import { runTask as directRunTask } from "#src/cli/commands/run-task-verb.js";
 import { main } from "#src/run-task.js";
+import { spawnCodexWorker } from "#src/lib/worker-provider.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 import { parseInstanceRegistry } from "../src/lib/instance-registry.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -153,6 +157,56 @@ test("selected runtime private file binds canonical identity and refuses aliasab
         "same bytes at a replacement inode are still revised evidence");
     }, { envPath: join(parent, "private.yaml") });
     assert.equal(privateFile(), undefined, "a later worker cannot inherit the completed invocation's private target");
+  } finally { fixture.cleanup(); }
+});
+
+test("selected runtime Codex spawn denies private bytes without adding them to child arguments", async () => {
+  const fixture = runtimeRegistryFixture(), codexHome = join(fixture.root, "codex-home");
+  mkdirSync(codexHome);
+  let profileFile = "", spawns = 0;
+  try {
+    for (const intent of ["reader", "writer", "review"] as const) {
+      const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough();
+      const child = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
+      let prompt = "";
+      stdin.on("data", chunk => { prompt += String(chunk); });
+      stdin.on("finish", () => {
+        stdout.end(JSON.stringify({ type: "turn.completed", usage: {} }) + "\n");
+        queueMicrotask(() => child.emit("exit", 0));
+      });
+      await runtimeRegistryRunner()(() => spawnCodexWorker({
+        cwd: fixture.root, workerHome: fixture.root, prompt: "contained boundary probe",
+        settingsFile: join(REPO_ROOT, "settings", "worker.json"),
+        tools: intent === "writer" ? ["Read", "Edit", "Bash"] : ["Read", "Bash"],
+        ...(intent === "review" ? { sandboxIntent: "disposable-review" as const, sandboxReadRoots: [fixture.root] } : {}),
+        containment: { spawn: options => {
+          spawns++;
+          const index = options.args.indexOf("--profile");
+          assert.ok(index >= 0, "actual worker spawn must use the protected per-invocation profile");
+          profileFile = join(codexHome, options.args[index + 1]! + ".config.toml");
+          const text = readFileSync(profileFile, "utf8");
+          assert.ok(text.includes(`${JSON.stringify(fixture.selected)}="deny"`));
+          assert.ok(text.includes(`${JSON.stringify(profileFile)}="deny"`), "the profile must not launder its private target");
+          assert.ok(text.includes(`extends="${intent === "reader" ? ":read-only" : ":workspace"}"`));
+          if (intent === "review") {
+            assert.ok(text.includes(`${JSON.stringify(fixture.root)}="read"`), "existing reviewer read roots compose with the narrower denial");
+            assert.ok(text.includes('\":slash_tmp\"="deny"'));
+            assert.ok(options.args.includes("network_proxy"));
+          }
+          assert.ok(options.args.includes("--strict-config"), "unsupported old config must refuse, never silently ignore denial");
+          assert.equal(options.args.includes("--sandbox"), false, "a legacy sandbox flag must not replace the named denial");
+          assert.equal(JSON.stringify(options.args).includes(fixture.selected), false);
+          assert.equal(JSON.stringify(options.env).includes(fixture.selected), false);
+          return { process: child as never, pid: 9876 };
+        }, teardown: () => {} },
+      }, { root: fixture.root, claudeBin: "/unused", workerProviders: {
+        enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome,
+      } }), { envPath: fixture.selected });
+      assert.equal(prompt.includes(fixture.selected), false);
+      assert.equal(existsSync(profileFile), false, "only the invocation's own profile is retired after the child ends");
+      assert.deepEqual(readdirSync(codexHome), [], "shared authentication/configuration files are never copied or changed");
+    }
+    assert.equal(spawns, 3);
   } finally { fixture.cleanup(); }
 });
 
