@@ -94,6 +94,9 @@ function runScript(opts: {
       RMD_CLAUDE_DIR: credDir,
       RMD_STATE_DIR: stateDir,
       RMD_RECYCLE_DOCKERENV_PATH: join(stateDir, "no-dockerenv-marker"),
+      // This env drops NODE_TEST_CONTEXT, so deploy/scratch-mounts.sh's test guard cannot see a test:
+      // on the Azure host it left /mnt/scratch/rmd/rmd-appauth-state-* behind.
+      RMD_SCRATCH: "off",
       ...(opts.shellEnv ?? {}),
     },
   });
