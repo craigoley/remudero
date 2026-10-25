@@ -5,7 +5,7 @@ import { ghTextAsync } from "./github-transport.js";
 import { withTempDir } from "./tmp.js";
 import { readCodeHealthArtifactJson, readCodeHealthSnapshot, readCodeHealthCoverageSource, publishCodeHealthSnapshot, recordCodeHealthCollectionFailure } from "./code-health-store.js";
 import { qualityScanFromCollectedEvidence } from "./codeql-quality-intake.js";
-import { readCodeScanningAlerts, codeScanningReadFailureKind } from "./ops.js";
+import { readCodeScanningAlertsAsync, codeScanningReadFailureKind } from "./ops.js";
 import { isDeepStrictEqual } from "node:util";
 import { fixedClock, systemClock } from "./clock.js";
 import { CODE_HEALTH_SOURCE_KINDS } from "./code-health-contract.js";
@@ -196,18 +196,27 @@ export interface CollectCodeHealthOptions {
 }
 
 export async function collectCodeHealth(opts: CollectCodeHealthOptions): Promise<ReturnType<typeof publishCodeHealthSnapshot>> {
+  const permitted = opts.mayPublish ?? (() => true);
+  const lost = () => ({ state: "superseded" as const, reason: "Code health collection ownership changed; saved results were retained." });
+  if (!permitted()) return lost();
   const clock = opts.clock ?? systemClock, startedAt = clock.iso();
   const previous = readCodeHealthSnapshot(opts.stateDir, opts.repository);
   if (previous.state === "unavailable") return { state: "unavailable", reason: previous.reason };
   const expectedSnapshotId = previous.state === "observed" ? previous.snapshot.snapshotId : null;
   const failed = (reason: string, failureKind: import("./ops.js").CodeScanningReadFailureKind = "unavailable"): ReturnType<typeof publishCodeHealthSnapshot> => {
+    if (!permitted()) return lost();
     const status = recordCodeHealthCollectionFailure({ stateDir: opts.stateDir, repository: opts.repository, expectedSnapshotId, startedAt, reason, failureKind, clock });
     return status.state === "recorded" ? { state: "unavailable", reason } : status;
   };
   try {
-    const read = await (opts.readQualityEvidence ?? readCodeHealthQualityEvidence)(opts.repository);
+    const read = await (opts.readQualityEvidence ?? (repository => readCodeHealthQualityEvidence(repository, async (args, options) => {
+      if (!permitted()) throw new Error("Code health collection ownership changed.");
+      return ghTextAsync(args, options);
+    })))(opts.repository);
+    if (!permitted()) return lost();
     const [owner, repo] = opts.repository.split("/") as [string, string];
-    const source = opts.source ?? readCodeScanningAlerts(owner, repo, { includeAnalysisInstances: true });
+    const source = opts.source ?? await readCodeScanningAlertsAsync(owner, repo);
+    if (!permitted()) return lost();
     const old = previous.state === "observed" ? previous.snapshot.input : null;
     const knownFindingIds = [...new Set((old ? [...old.scans, ...(old.baseline?.scans ?? []), ...(old.retainedEvidence ?? []).map(entry => entry.scan)] : [])
       .filter(scan => scan.kind === "quality").flatMap(scan => scan.findings.map(finding => finding.id)))];
@@ -225,7 +234,7 @@ export async function collectCodeHealth(opts: CollectCodeHealthOptions): Promise
         scopeHash: null, toolVersion: null, rulesVersion: null, configHash: null, exclusions: [], reason: coverage.reason, checks: [], findings: [] });
     }
     const input = prepareCodeHealthCollection({ repository: opts.repository, currentSha: read.currentSha, observedAt: clock.iso(), scans, previous: old });
-    const result = publishCodeHealthSnapshot({ stateDir: opts.stateDir, input, expectedSnapshotId, clock });
+    const result = publishCodeHealthSnapshot({ stateDir: opts.stateDir, input, expectedSnapshotId, clock, mayPublish: permitted });
     return "reason" in result && result.state === "unavailable" ? failed(result.reason) : result;
   } catch (error) {
     const kind = codeScanningReadFailureKind(error);

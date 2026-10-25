@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { fixedClock } from "./clock.js";
-import { createGhCallPacer, ghExec, paceGhEntry } from "./github-transport.js";
+import { createGhCallPacer, ghExec, ghTextAsync, paceGhEntry } from "./github-transport.js";
 import { join } from "node:path";
 import { appendLedger } from "./ledger.js";
 import { escalate, splitConcatenatedJsonPages, type Escalation, type IssueGateway } from "./escalate.js";
@@ -318,13 +318,7 @@ export function readCodeScanningAlerts(owner: string, repo: string, options: { i
           { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
         ),
     );
-    const pages = splitConcatenatedJsonPages(raw).map((chunk) => {
-      const parsed = JSON.parse(chunk) as unknown;
-      if (!Array.isArray(parsed)) throw new Error("GitHub returned a non-array code-scanning response");
-      return parsed as GhCodeScanningAlertJson[];
-    });
-    const alerts = pages.flat();
-    return { ok: true, alerts: alerts.map(normalizeCodeScanningAlert), ...(options.includeAnalysisInstances ? { analysisInstances: alerts.map(analysisInstance) } : {}) };
+    return parseCodeScanningAlerts(raw, options);
   } catch (error) {
     return { ok: false, error: codeScanningReadError(error), ...(options.includeAnalysisInstances ? { failureReason: codeScanningReadFailureKind(error) } : {}) };
   }
@@ -680,4 +674,22 @@ export async function pollAlerts(owner: string, repo: string, deps: OpsPollDeps)
   }
 
   return { summary, newCritical, escalated, feedbackCreated, reconciled };
+}
+
+
+function parseCodeScanningAlerts(raw: string, options: { includeAnalysisInstances?: boolean }): CodeScanningAlertsRead {
+  const pages = splitConcatenatedJsonPages(raw).map((chunk) => {
+    const parsed = JSON.parse(chunk) as unknown;
+    if (!Array.isArray(parsed)) throw new Error("GitHub returned a non-array code-scanning response");
+    return parsed as GhCodeScanningAlertJson[];
+  });
+  const alerts = pages.flat();
+  return { ok: true, alerts: alerts.map(normalizeCodeScanningAlert), ...(options.includeAnalysisInstances ? { analysisInstances: alerts.map(analysisInstance) } : {}) };
+}
+
+/** Same paginated read and normalization, with the native async transport so lease messages stay live. */
+export async function readCodeScanningAlertsAsync(owner: string, repo: string): Promise<CodeScanningAlertsRead> {
+  try {
+    return parseCodeScanningAlerts(await ghTextAsync(["api", `repos/${owner}/${repo}/code-scanning/alerts`, "--paginate"], { maxBuffer: 16 * 1024 * 1024, timeout: 10_000 }), { includeAnalysisInstances: true });
+  } catch (error) { return { ok: false, error: codeScanningReadError(error), failureReason: codeScanningReadFailureKind(error) }; }
 }
