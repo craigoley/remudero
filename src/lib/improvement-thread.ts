@@ -5,7 +5,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { CODE_HEALTH_POLICY_VERSION } from "./code-health-collector.js";
 import { codeHealthRepositoryStateDir, readCodeHealthArtifactJson, readCodeHealthCollectionFailure, readCodeHealthSnapshot } from "./code-health-store.js";
 import { readCodeHealthInventory, readCodeHealthRelatedWork } from "./code-health-view.js";
-import { buildCodeHealthOpportunities } from "./codeql-quality-intake.js";
+import { buildCodeHealthOpportunities, qualifiedCodeHealthPlanningSource } from "./codeql-quality-intake.js";
 import { acquireInflightLock, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
@@ -105,9 +105,8 @@ function sourceFor(request: ImprovementThreadRequest, scope: Scope, deps: Improv
   const latest = readCodeHealthSnapshot(repoState, request.repository);
   if (latest.state !== "observed") return fail("source_unavailable", "Refresh Code health before opening this improvement.");
   if (latest.snapshot.snapshotId !== request.snapshotId) return fail("source_stale", "Code health has changed. Review the latest finding before continuing.");
-  const input = latest.snapshot.input, scan = input.scans.find(value => value.kind === "quality"), failure = readCodeHealthCollectionFailure(repoState, request.repository);
-  if (failure.state !== "none" || input.registry.version !== CODE_HEALTH_POLICY_VERSION || !scan || scan.state !== "complete" || scan.analyzedSha !== input.currentSha ||
-      !Number.isFinite(Date.parse(scan.observedAt)) || Date.parse(scan.observedAt) > now || now - Date.parse(scan.observedAt) > 86_400_000)
+  const input = latest.snapshot.input, scan = qualifiedCodeHealthPlanningSource(input, now, CODE_HEALTH_POLICY_VERSION), failure = readCodeHealthCollectionFailure(repoState, request.repository);
+  if (failure.state !== "none" || !scan)
     return fail("source_stale", "This finding needs a current, complete source before planning can begin.");
   const inventory = readCodeHealthInventory(deps.stateDir), related = readCodeHealthRelatedWork(deps.stateDir, inventory, request.repository, now);
   const opportunity = buildCodeHealthOpportunities(input, related.work).find(row => row.id === request.opportunityId);
