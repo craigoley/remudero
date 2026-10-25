@@ -203,7 +203,14 @@ test("code health binds coverage provenance to the existing measured inventory a
     assert.equal(run(red).state, "partial", "a failing suite cannot certify complete coverage");
     const wrongTotal = { ...summary, lf: 3 };
     assert.equal(run(wrongTotal).state, "partial", "summary and original LCOV must agree");
-    assert.equal(run(summary, "").state, "partial", "an empty measured population is unknown");
+    const empty = run(summary, "");
+    assert.equal(empty.state, "partial", "an empty measured population is unknown");
+    assert.equal(empty.check.met, false, "an empty report cannot emit a passing check beneath its partial state");
+    const moreCode = { ...summary, lf: 3, lh: 3, brf: 12, brh: 11, branches_pct: 100 * 11 / 12 };
+    const changedLines = "SF:src/example.ts\nDA:1,1\nDA:2,1\nDA:3,1\nLF:3\nLH:3\nBRF:12\nBRH:11\nend_of_record\n";
+    const expanded = run(moreCode, changedLines);
+    assert.equal(expanded.scope.hash, measured.scope.hash, "code changes within the same measured files do not change the measurement selection");
+    assert.deepEqual(expanded.measurement, { branches: { covered: 11, total: 12 }, lines: { covered: 3, total: 3 } }, "keep changed denominators as explicit facts");
     const changed = run(summary, lcov.replace("src/example.ts", "src/other.ts"));
     assert.notEqual(changed.scope.hash, measured.scope.hash);
     const newPolicy = run(summary, lcov, { tierPassPct: 91, tierBlockPct: 85 });
