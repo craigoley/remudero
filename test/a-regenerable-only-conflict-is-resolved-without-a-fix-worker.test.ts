@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import * as sweep from "#src/lib/sweep.js";
@@ -9,6 +9,51 @@ import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { setProofSandboxForTests } from "#src/lib/review.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+// This trusted Node-only fixture uses Node's filesystem permissions rather than requiring host
+// user namespaces. Production still requires bwrap; this adapter checks its invocation and runs npm.
+function generatorFixtureSandbox(t: TestContext, repoDir: string) {
+  const binary = join(repoDir, "fixture-sandbox.mjs");
+  const receipt = join(repoDir, "fixture-sandbox.json");
+  writeFileSync(binary, `#!${process.execPath}
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const argv = process.argv.slice(2);
+const at = argv.indexOf("--");
+assert.ok(at > 0, "generator must enter through the sandbox argv");
+assert.deepEqual(argv.slice(at + 1), ["npm", "run", "--silent", "learnings-index"]);
+assert.ok(argv.includes("--unshare-net"));
+assert.equal(argv[argv.indexOf("--chdir") + 1], process.cwd());
+const permissions = ["--permission"];
+const writable = [];
+for (let i = 0; i < at; i++) {
+  if (argv[i] !== "--bind" && argv[i] !== "--ro-bind") continue;
+  const mode = argv[i], source = argv[++i], target = argv[++i];
+  if (source !== target) continue;
+  permissions.push("--allow-fs-read=" + source);
+  if (mode === "--bind") {
+    writable.push(source);
+    permissions.push("--allow-fs-write=" + source);
+  }
+}
+assert.ok(writable.includes(process.cwd()), "the merged tree must be writable");
+assert.ok(writable.includes(process.env.HOME), "the generator must have its own writable HOME");
+assert.notEqual(process.env.HOME, ${JSON.stringify(repoDir)});
+assert.equal(process.env.RMD_CONFLICT_GENERATOR_SECRET, undefined);
+writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ cwd: process.cwd(), home: process.env.HOME }));
+// npm passes node-options to its lifecycle scripts, leaving the real generator unable to spawn
+// children or access files outside the supplied binds. npm itself runs only this trusted fixture.
+const result = spawnSync("npm", ["--node-options=" + permissions.map(p => JSON.stringify(p)).join(" "),
+  ...argv.slice(at + 2)], { cwd: process.cwd(), env: process.env, stdio: "inherit" });
+if (result.error) throw result.error;
+process.exit(result.status ?? 1);
+`);
+  chmodSync(binary, 0o755);
+  setProofSandboxForTests({ mode: "bwrap", binary });
+  t.after(() => setProofSandboxForTests());
+  return () => JSON.parse(readFileSync(receipt, "utf8")) as { cwd: string; home: string };
+}
 
 async function fixture(t: TestContext, kind: "deletion" | "generated" | "mixed" = "deletion", brokenGenerator = false, guardedGenerator = false) {
   const origin = gitRepo({ bare: true });
@@ -141,6 +186,7 @@ test("W1-T9578: an unmerged path outside the registry falls through to the confl
 
 test("W1-T9578: a registry path both sides edited resolves to the generator output on the merged tree", async (t) => {
   const f = await fixture(t, "generated", false, true);
+  const sandboxRun = generatorFixtureSandbox(t, f.repo.dir);
   const previous = process.env.RMD_CONFLICT_GENERATOR_SECRET;
   process.env.RMD_CONFLICT_GENERATOR_SECRET = "must-not-reach-generator";
   t.after(() => {
@@ -161,6 +207,8 @@ test("W1-T9578: a registry path both sides edited resolves to the generator outp
   assert.deepEqual(f.receipts()[0]!.paths, [{ path: f.path, action: "learnings-index" }]);
   assert.deepEqual(f.counts(), { workers: 0, admissions: 0, attempts: 1 });
   assert.equal(readFileSync(join(f.repo.dir, "outside.txt"), "utf8"), "outside the detached tree");
+  assert.equal(sandboxRun().cwd, join(f.repo.dir, "resolution"));
+  assert.equal(existsSync(sandboxRun().home), false, "the generator's temporary HOME is removed");
 });
 
 test("W1-T9578: an unavailable generator sandbox refuses to push", async (t) => {
@@ -204,6 +252,7 @@ test("W1-T9578: moved head and main leases refuse a stale resolution without a w
 
 test("W1-T9578: a failed generator records its error and falls through once", async (t) => {
   const f = await fixture(t, "generated", true);
+  const sandboxRun = generatorFixtureSandbox(t, f.repo.dir);
   await f.run();
   assert.equal(f.remoteHead(), f.headSha);
   assert.equal(f.receipts()[0]!.outcome, "error");
@@ -213,6 +262,8 @@ test("W1-T9578: a failed generator records its error and falls through once", as
   assert.equal(f.counts().attempts, 1);
   assert.equal(f.receipts().length, 1);
   assert.equal(existsSync(join(f.repo.dir, "resolution")), false);
+  assert.equal(sandboxRun().cwd, join(f.repo.dir, "resolution"));
+  assert.equal(existsSync(sandboxRun().home), false, "failed generators also remove their temporary HOME");
 });
 
 test("W1-T9578: overlapping passes attempt one resolution for the head and main pair", async (t) => {
