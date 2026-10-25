@@ -5,7 +5,7 @@ import { ghTextAsync } from "./github-transport.js";
 import { withTempDir } from "./tmp.js";
 import { readCodeHealthArtifactJson, readCodeHealthSnapshot, readCodeHealthCoverageSource, publishCodeHealthSnapshot, recordCodeHealthCollectionFailure } from "./code-health-store.js";
 import { qualityScanFromCollectedEvidence } from "./codeql-quality-intake.js";
-import { readCodeScanningAlerts } from "./ops.js";
+import { readCodeScanningAlerts, codeScanningReadFailureKind } from "./ops.js";
 import { isDeepStrictEqual } from "node:util";
 import { fixedClock, systemClock } from "./clock.js";
 import { CODE_HEALTH_SOURCE_KINDS } from "./code-health-contract.js";
@@ -199,8 +199,8 @@ export async function collectCodeHealth(opts: CollectCodeHealthOptions): Promise
   const previous = readCodeHealthSnapshot(opts.stateDir, opts.repository);
   if (previous.state === "unavailable") return { state: "unavailable", reason: previous.reason };
   const expectedSnapshotId = previous.state === "observed" ? previous.snapshot.snapshotId : null;
-  const failed = (reason: string): ReturnType<typeof publishCodeHealthSnapshot> => {
-    const status = recordCodeHealthCollectionFailure({ stateDir: opts.stateDir, repository: opts.repository, expectedSnapshotId, startedAt, reason, clock });
+  const failed = (reason: string, failureKind: import("./ops.js").CodeScanningReadFailureKind = "unavailable"): ReturnType<typeof publishCodeHealthSnapshot> => {
+    const status = recordCodeHealthCollectionFailure({ stateDir: opts.stateDir, repository: opts.repository, expectedSnapshotId, startedAt, reason, failureKind, clock });
     return status.state === "recorded" ? { state: "unavailable", reason } : status;
   };
   try {
@@ -226,7 +226,10 @@ export async function collectCodeHealth(opts: CollectCodeHealthOptions): Promise
     const input = prepareCodeHealthCollection({ repository: opts.repository, currentSha: read.currentSha, observedAt: clock.iso(), scans, previous: old });
     const result = publishCodeHealthSnapshot({ stateDir: opts.stateDir, input, expectedSnapshotId, clock });
     return "reason" in result && result.state === "unavailable" ? failed(result.reason) : result;
-  } catch {
-    return failed("The latest code check results could not be loaded or verified. Any earlier results are still available.");
+  } catch (error) {
+    const kind = codeScanningReadFailureKind(error);
+    return failed(kind === "unauthorized" ? "GitHub did not allow the latest code-check read. Any earlier results are still available."
+      : kind === "rate_limited" ? "GitHub limited the latest code-check read. Any earlier results are still available."
+      : "The latest code check results could not be loaded or verified. Any earlier results are still available.", kind);
   }
 }

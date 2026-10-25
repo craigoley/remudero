@@ -163,6 +163,7 @@ function validateInput(input: CodeHealthProjectionInput): void {
           scan.exclusions.length > 128 || scan.exclusions.some(path => !text(path)) || scan.checks.length > 256 ||
           new Set(scan.checks.map(check => check.id)).size !== scan.checks.length ||
           scan.checks.some(check => !text(check.id) || typeof check.met !== "boolean" || !text(check.reason, 2048))) throw new Error("Code health scan shape is invalid.");
+      if (scan.failureKind !== undefined && (scan.state !== "unavailable" || !["unauthorized", "rate_limited", "unavailable"].includes(scan.failureKind))) throw new Error("Code health source failure kind is invalid.");
       if (scan.componentIds !== undefined && (!Array.isArray(scan.componentIds) || scan.componentIds.length > 32 ||
           scan.state === "complete" && scan.componentIds.length === 0 || scan.componentIds.some(id => !text(id)) ||
           new Set(scan.componentIds).size !== scan.componentIds.length)) throw new Error("Code health source component identities are invalid.");

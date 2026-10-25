@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { appendLedger } from "./ledger.js";
 import { escalate, splitConcatenatedJsonPages, type Escalation, type IssueGateway } from "./escalate.js";
 import type { LandFeedbackOpts } from "./feedback-landing.js";
-import { isGhRateLimitError, readLedgerLines } from "./status.js";
+import { classifyGhFailure, isGhRateLimitError, readLedgerLines } from "./status.js";
 import { feedbackCaptured, feedbackDir, setFeedbackStatus, stageFeedbackCapture, type FeedbackEntry, type FeedbackOrigin } from "./feedback.js";
 import { isTestRunner } from "./live-write-guard.js";
 
@@ -257,7 +257,17 @@ export interface AlertGateway {
 
 export type CodeScanningReadFailureKind = "unauthorized" | "rate_limited" | "unavailable";
 
-export function codeScanningReadFailureKind(_error: unknown): CodeScanningReadFailureKind { return "unavailable"; }
+export function codeScanningReadFailureKind(error: unknown): CodeScanningReadFailureKind {
+  if (!error || typeof error !== "object") return "unavailable";
+  const failed = error as { status?: unknown; code?: unknown; stderr?: unknown };
+  if (!(typeof failed.stderr === "string" || Buffer.isBuffer(failed.stderr)) ||
+      !(typeof failed.status === "number" || typeof failed.code === "number" || typeof failed.code === "string")) return "unavailable";
+  const stderr = String(failed.stderr), reason = classifyGhFailure(typeof failed.status === "number" ? failed.status : undefined, stderr,
+    typeof failed.code === "string" ? failed.code : undefined);
+  if (reason === "rate_limit") return "rate_limited";
+  if (reason === "auth" || /\(HTTP (?:401|403)\)/.test(stderr)) return "unauthorized";
+  return "unavailable";
+}
 
 export type CodeScanningAlertsRead =
   | { ok: true; alerts: RawAlert[]; analysisInstances?: CodeScanningAnalysisInstance[] }
@@ -316,7 +326,7 @@ export function readCodeScanningAlerts(owner: string, repo: string, options: { i
     const alerts = pages.flat();
     return { ok: true, alerts: alerts.map(normalizeCodeScanningAlert), ...(options.includeAnalysisInstances ? { analysisInstances: alerts.map(analysisInstance) } : {}) };
   } catch (error) {
-    return { ok: false, error: codeScanningReadError(error) };
+    return { ok: false, error: codeScanningReadError(error), ...(options.includeAnalysisInstances ? { failureReason: codeScanningReadFailureKind(error) } : {}) };
   }
 }
 
