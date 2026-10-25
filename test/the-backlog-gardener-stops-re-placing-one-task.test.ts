@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { applyBacklogActions, backlogGardenSpec, backlogInventory, type BacklogAction, type BacklogSources } from "#src/lib/backlog-gardener.js";
+import { applyBacklogActions, backlogGardenSpec, backlogInventory, readOpenBacklogDecisions, type BacklogAction, type BacklogSources } from "#src/lib/backlog-gardener.js";
 import { fixedClock } from "#src/lib/clock.js";
 import type { PlanInventory } from "#src/lib/plan-gardener.js";
 import type { Task } from "#src/lib/plan.js";
@@ -120,4 +121,30 @@ test("unread open backlog ownership refuses the async proposal without opening a
     openWorkspace: () => { throw new Error("must not open workspace"); } },
     { ...f.sources, openDecisions: async () => { throw new Error("open PR pages unread"); } });
   await assert.rejects(async () => spec.inventoryAsync ? spec.inventoryAsync() : spec.inventory(), /open PR pages unread/);
+});
+
+
+test("open backlog decisions use the real Git origin and every returned PR page", async (t) => {
+  const f = fixture(t, `- id: ${ID}\n`);
+  execFileSync("git", ["init", f.root], { stdio: "pipe" });
+  execFileSync("git", ["-C", f.root, "remote", "add", "origin", "https://github.com/craigoley/remudero.git"]);
+  const body = "The backlog gardener (W1-T4941) proposes these plan-only changes.\n\n- **W1-T6117**: band 4. Evidence hash may change.\n- **W1-T9697**: withdrawn. Original evidence remains.";
+  const pr = { number: 14156, head: { ref: "backlog-garden-1792935077215", sha: "a".repeat(40) }, body };
+  let args: string[] = [];
+  const decisions = await readOpenBacklogDecisions(f.root, { pages: async a => {
+    args = a;
+    return [[{ ...pr, head: { ...pr.head, ref: "run-unfiled-123" } }], [pr], []];
+  } });
+  assert.deepEqual(args, ["api", "--paginate", "--slurp", "repos/craigoley/remudero/pulls?state=open&per_page=100"]);
+  assert.deepEqual(decisions, [
+    { target: "W1-T6117", decision: "band 4", prNumber: 14156, headSha: "a".repeat(40) },
+    { target: "W1-T9697", decision: "withdrawn", prNumber: 14156, headSha: "a".repeat(40) },
+  ]);
+  assert.deepEqual(await readOpenBacklogDecisions(f.root, { pages: async () => [[]] }), [], "a complete empty page is evidence");
+  for (const pages of [null, [], [null], [[null]], [[{ ...pr, body: undefined }]], [[{ ...pr, head: { ...pr.head, sha: "unknown" } }]]]) {
+    await assert.rejects(readOpenBacklogDecisions(f.root, { pages: async () => pages }), /unreadable/);
+  }
+  await assert.rejects(readOpenBacklogDecisions(f.root, { pages: async () => { throw new Error("API unavailable"); } }), /API unavailable/);
+  await assert.rejects(readOpenBacklogDecisions(f.root, { origin: async () => "local-only" }), /origin does not identify/);
+  await assert.rejects(readOpenBacklogDecisions(f.root, { origin: async () => { throw new Error("origin unread"); } }), /origin unread/);
 });
