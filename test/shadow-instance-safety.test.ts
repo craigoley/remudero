@@ -496,7 +496,7 @@ test("selected private denials follow scratch-backed Claude invocations without 
         else delete process.env.RMD_WORKER_HOME_DIR;
         await spawnWorker(args);
         const policy = sink.options!.settings as { sandbox: { filesystem: { denyRead: string[]; allowRead: string[] } } };
-        assert.ok(policy.sandbox.filesystem.denyRead.includes("/"));
+        assert.ok(policy.sandbox.filesystem.denyRead.some(path => selected.startsWith(path + "/")));
         assert.ok(policy.sandbox.filesystem.allowRead.every(path => selected !== path && !selected.startsWith(path + "/")), "actual SDK positive scopes exclude the physical input under either home");
         assert.equal(JSON.stringify(policy).includes(selected), false);
         assert.equal(readFileSync(rendered, "utf8").includes(selected), false);
@@ -537,7 +537,7 @@ test("selected Claude public policy never names private inputs while preserving 
     assert.equal(JSON.stringify(policy).includes(fixture.selected), false, "sandbox instructions are model input, not a private host-only envelope");
     assert.equal(JSON.stringify(policy).includes(originalPolicy), false);
     assert.equal(sink.options!.permissionMode, "dontAsk");
-    assert.ok(policy.sandbox.filesystem.denyRead.includes("/"));
+    assert.ok(policy.sandbox.filesystem.denyRead.some(path => fixture.selected.startsWith(path + "/")));
     assert.ok(policy.sandbox.filesystem.allowRead.includes(realpathSync(args.cwd)));
     assert.ok(policy.sandbox.filesystem.allowWrite.includes(realpathSync(args.cwd)));
     assert.ok(policy.permissions.allow.includes(`Edit(/${realpathSync(args.cwd)}/**)`), "Edit(path) governs Write and NotebookEdit; Write(path) never matches");
@@ -604,7 +604,7 @@ test("selected Claude actual SDK transport keeps private registry paths out of c
     assert.equal(JSON.stringify(argv).includes(args.settingsFile), false);
     assert.ok(policyPath && policy, "the child receives one opaque invocation policy path, not private policy bytes");
     const filesystem = (policy.sandbox as { filesystem: { denyRead: string[]; denyWrite: string[]; allowRead: string[] } }).filesystem;
-    assert.ok(filesystem.denyRead.includes("/")); assert.ok(filesystem.denyWrite.includes(policyPath), "public invocation policy cannot be rewritten to grant itself private access");
+    assert.ok(filesystem.denyRead.some(path => fixture.selected.startsWith(path + "/"))); assert.ok(filesystem.denyWrite.includes(policyPath), "public invocation policy cannot be rewritten to grant itself private access");
     for (const target of [fixture.selected, args.settingsFile]) assert.equal(JSON.stringify(policy).includes(target), false);
     assert.ok(filesystem.allowRead.every(path => fixture.selected !== path && !fixture.selected.startsWith(path + "/")));
     assert.equal(existsSync(policyPath), false, "the owned invocation policy is gone after its SDK stream closes");
@@ -649,7 +649,7 @@ test("selected Claude SDK boundary snapshots private denials across queued argum
         assert.equal(JSON.stringify(settings).includes(target), false, "neither policy nor permissions disclose the captured private inputs");
         assert.ok(settings.sandbox.filesystem.allowRead.every(path => target !== path && !target.startsWith(path + "/")));
       }
-      assert.ok(settings.sandbox.filesystem.denyRead.includes("/"));
+      assert.ok(settings.sandbox.filesystem.denyRead.some(path => fixture.selected.startsWith(path + "/")));
       assert.equal(sink.options!.permissionMode, "dontAsk");
       assert.equal(settings.sandbox.filesystem.denyRead.includes(args.settingsFile), false, "queued caller mutation never retargets the invocation policy file");
       assert.equal(String(sink.prompt).includes("retargeted"), false, "queued caller mutation cannot replace the captured dispatch");

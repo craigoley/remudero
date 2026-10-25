@@ -3448,7 +3448,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         await selectedPolicy.recheck();
         // File settings avoid inline argv disclosure; public-only scopes also avoid the SDK's
         // model-visible sandbox instructions naming the private inputs.
-        const scope = privateRegistryWorkerPublicScope(args, childEnv, privateRegistry!, workerHome);
+        const scope = privateRegistryWorkerPublicScope(args, childEnv, privateRegistry!, workerHome, selectedPolicy.canonicalPath);
         privatePolicyArtifact = createPrivateRegistryWorkerPolicy(options.settings, privateRegistry!, workerHome, scope);
         options.settings = privatePolicyArtifact.path;
       }
@@ -4270,8 +4270,30 @@ export function renderWorkerSettings(opts: {
 }
 
 interface PrivateRegistryWorkerPolicyArtifact { path: string; text: string; dev: number; ino: number }
-interface PrivateRegistryWorkerPublicScope { read: string[]; write: string[]; metadata: string[]; edits: string[] }
-function privateRegistryWorkerPublicScope(args: SpawnWorkerArgs, env: Record<string, string>, selected: string, workerHome: string): PrivateRegistryWorkerPublicScope {
+interface PrivateRegistryWorkerPublicScope { read: string[]; write: string[]; metadata: string[]; edits: string[]; denyRead: string[]; denyWrite: string[] }
+
+/** Model-visible regions use already-public ancestors or standard OS roots, never a private filename. Not authority. */
+export function privateRegistryDenyRegions(inputs: readonly string[], publicRoots: readonly string[]): string[] {
+  const inside = (path: string, root: string): boolean => path === root || path.startsWith(root + sep);
+  if (publicRoots.some(path => typeof path !== "string" || !isAbsolute(path) || path === "/")
+    || inputs.some(path => typeof path !== "string" || !isAbsolute(path) || /[\r\n\0]/.test(path))) {
+    throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+  }
+  const standardRoots = new Set(["/home", "/Users", "/root", "/private", "/var", "/tmp", "/run", "/mnt", "/Volumes", "/media", "/srv", "/opt", "/data", "/workspace", "/workspaces", "/app"]);
+  const regions = inputs.filter(path => !publicRoots.some(root => inside(path, root))).map(path => {
+    const ancestors = publicRoots.map(root => {
+      let parent = dirname(path);
+      while (parent !== "/" && !inside(root, parent)) parent = dirname(parent);
+      return parent;
+    }).filter(parent => parent !== "/").sort((a, b) => b.length - a.length);
+    const region = ancestors[0] ?? sep + path.split(sep)[1];
+    if (!ancestors.length && !standardRoots.has(region)) throw new InstanceRegistryRuntimeError("worker_scope_region_unqualified");
+    return region;
+  });
+  return [...new Set(regions)];
+}
+
+function privateRegistryWorkerPublicScope(args: SpawnWorkerArgs, env: Record<string, string>, selected: string, workerHome: string, policyFile: string): PrivateRegistryWorkerPublicScope {
   try {
     const canonical = (target: string, missingLeaf = false): string => {
       if (!isAbsolute(target)) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
@@ -4289,7 +4311,8 @@ function privateRegistryWorkerPublicScope(args: SpawnWorkerArgs, env: Record<str
     const cwd = directory(args.cwd), home = directory(workerHome), temp = directory(env.TMPDIR ?? "/tmp");
     if (directory(env.HOME ?? "") !== home) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
     const readOnly = args.sandboxIntent === "disposable-review" || args.permissionMode === "plan" || codexReadOnly(args);
-    const read = new Set([cwd, home, temp]), write = new Set<string>(readOnly ? [] : [cwd, home, temp]), metadata: string[] = [];
+    const read = new Set([cwd, home, temp]), write = new Set<string>(readOnly ? [home, temp] : [cwd, home, temp]), metadata: string[] = [];
+    const readOnlyRoots = new Set<string>(readOnly ? [cwd] : []);
     for (const target of ["/bin", "/usr", "/lib", "/lib64", "/sbin", "/System/Library", "/Library/Apple", "/opt/homebrew", "/dev/null", "/dev/urandom", "/etc/ssl/certs", "/etc/resolv.conf", "/etc/hosts"]) {
       if (existsSync(target)) read.add(canonical(target));
     }
@@ -4297,7 +4320,7 @@ function privateRegistryWorkerPublicScope(args: SpawnWorkerArgs, env: Record<str
     if (existsSync(join(cwd, "node_modules"))) read.add(directory(join(cwd, "node_modules")));
     if (args.sandboxIntent === "disposable-review") {
       if ((args.sandboxReadRoots?.length ?? 0) > 16) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
-      for (const target of args.sandboxReadRoots ?? []) read.add(directory(target));
+      for (const target of args.sandboxReadRoots ?? []) { const root = directory(target); read.add(root); readOnlyRoots.add(root); }
     }
     const recorded = recordedWorktreeGitDir(cwd);
     if (recorded !== null) {
@@ -4308,7 +4331,7 @@ function privateRegistryWorkerPublicScope(args: SpawnWorkerArgs, env: Record<str
         if (!relative || relative.length > 4096 || relative.includes("\0")) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
         metadata.push(directory(resolve(gitDir, relative)));
       }
-      for (const target of metadata) { read.add(target); if (!readOnly) write.add(target); }
+      for (const target of metadata) { read.add(target); if (!readOnly) write.add(target); else readOnlyRoots.add(target); }
     }
     if (!readOnly && !process.env.NODE_TEST_CONTEXT) {
       const slot = canonical(resolveTestSlotDir(env).dir, true); read.add(slot); write.add(slot);
@@ -4317,7 +4340,11 @@ function privateRegistryWorkerPublicScope(args: SpawnWorkerArgs, env: Record<str
     if ([...read].some(path => selected === path || selected.startsWith(path + sep))) {
       throw new InstanceRegistryRuntimeError("worker_scope_contains_private_file");
     }
+    if ([home, temp].some(path => [...readOnlyRoots].some(root => path === root || path.startsWith(root + sep)))) {
+      throw new InstanceRegistryRuntimeError("worker_scope_readonly_scratch_overlap");
+    }
     return { read: [...read], write: [...write], metadata,
+      denyRead: privateRegistryDenyRegions([selected, policyFile], [...read]), denyWrite: [...readOnlyRoots],
       edits: !readOnly && ["bypassPermissions", "acceptEdits"].includes(args.permissionMode) ? [cwd] : [] };
   } catch (error) {
     if (error instanceof InstanceRegistryRuntimeError) throw error;
@@ -4377,11 +4404,11 @@ function privateRegistryWorkerSettings(input: unknown, selected: string, policyP
     throw new InstanceRegistryRuntimeError("worker_policy_rules_unqualified");
   }
   if (scope) {
-    policy.sandbox.filesystem = { ...filesystem, denyRead: [...new Set([...denyRead, "/"])],
+    policy.sandbox.filesystem = { ...filesystem, denyRead: [...new Set([...denyRead, ...scope.denyRead])],
       allowRead: scope.read.slice(), allowWrite: scope.write.slice(),
-      denyWrite: [...new Set([...denyWrite, "/", policyPath,
+      denyWrite: [...new Set([...denyWrite, ...scope.denyWrite, policyPath,
         ...scope.metadata.flatMap(root => ["config", "config.worktree", "commondir", "gitdir", "hooks", "worktrees/*/config.worktree", "worktrees/*/commondir", "worktrees/*/gitdir"].map(path => join(root, path)))])] };
-    policy.permissions = { ...permissions, deny: [...new Set([...deny, `Edit(/${policyPath})`])],
+    policy.permissions = { ...permissions, deny: [...new Set([...deny, `Edit(/${policyPath})`, ...scope.denyWrite.map(path => `Edit(/${path}/**)`)])],
       allow: [...scope.read.map(path => `Read(/${path}/**)`), ...scope.edits.map(path => `Edit(/${path}/**)`)] };
   }
   validateWorkerSettings(policy);
