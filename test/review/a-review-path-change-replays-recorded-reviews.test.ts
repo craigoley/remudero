@@ -364,7 +364,7 @@ async function reviewWithReplayProvenance(legacy: string | null, identified: boo
       },
       arm: () => { arms++; return "skipped"; }, disarm: () => {},
     });
-    return { rows, freshnessReads, arms, codeSha, head };
+    return { rows, freshnessReads, arms, codeSha, head, publication: readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>) };
   } finally {
     resetLoadedReviewerCodeSha();
     if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath;
@@ -378,7 +378,8 @@ test("computed review replay uses the verified reviewer identity when checkout a
     assert.equal(f.freshnessReads, 1, "the real publication boundary must assess reviewer provenance");
     const recorded = f.rows.filter(r => r.step === "review.replay_input");
     assert.equal(recorded.length, 1);
-    assert.equal(recorded[0]!.recorded_class, "refused", "stale code still cannot publish");
+    assert.equal(recorded[0]!.recorded_class, "withheld", "stale code still cannot publish");
+    assert.ok(f.publication.some(r => r.step === "review.post_refused" && r.reviewer_code_freshness === "stale"));
     assert.equal(recorded[0]!.reviewer_code_sha, f.codeSha, "record the same code identity the publication guard assessed");
     assert.notEqual(recorded[0]!.reviewer_code_sha, f.head, "the consumer's PR head is not reviewer code");
     assert.equal(f.arms, 0);
@@ -391,7 +392,8 @@ test("unavailable reviewer provenance remains unknown and cannot enter a replay 
   assert.equal(f.freshnessReads, 1);
   const recorded = f.rows.filter(r => r.step === "review.replay_input");
   assert.equal(recorded.length, 1);
-  assert.equal(recorded[0]!.recorded_class, "refused");
+  assert.equal(recorded[0]!.recorded_class, "withheld");
+  assert.ok(f.publication.some(r => r.step === "review.post_refused" && r.reviewer_code_freshness === "unreadable"));
   assert.equal(recorded[0]!.reviewer_code_sha, null);
   assert.equal(f.arms, 0);
   assert.throws(() => derive(recorded), /invalid review replay row field: reviewer_code_sha/);
