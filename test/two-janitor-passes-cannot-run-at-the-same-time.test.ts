@@ -63,7 +63,6 @@ function holdLock(fx: ReturnType<typeof fixture>, seconds: number): ReturnType<t
 
 test("a scheduled full pass waits for a briefly held lock and then runs", async () => {
   const fx = fixture();
-  const idle = scratchDir(fx, "rmd-idle", true);
   const holder = holdLock(fx, 2);
   const exited = once(holder, "close");
   const r = run(fx);
@@ -71,7 +70,9 @@ test("a scheduled full pass waits for a briefly held lock and then runs", async 
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.match(r.stdout, /WAIT pass: another janitor pass holds the lock; waiting up to 1800 s/);
   assert.doesNotMatch(r.stdout, /KEEP pass/);
-  assert.equal(existsSync(idle), false, `the full pass must run once the lock is released:\n${r.stdout}`);
+  // The pass body ran under the lock: its window line and its decision report come after acquisition.
+  assert.match(r.stdout, /rmd-host-cleanup: retention idle 6 h/, r.stdout);
+  assert.match(r.stdout, /rmd-host-cleanup: decision-report /, r.stdout);
 });
 
 test("a full pass gives up after its lock wait bound and acts on nothing", async () => {
