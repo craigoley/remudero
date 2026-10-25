@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { hostname } from "node:os";
 import { repoRoot } from "#test/helpers/repo-root.js";
@@ -9,7 +9,7 @@ import { withTempDir } from "#src/lib/tmp.js";
 import { buildCodeHealthOpportunities, codeqlQualityProposalId, qualityScanFromCollectedEvidence } from "#src/lib/codeql-quality-intake.js";
 import { prepareCodeHealthCollection } from "#src/lib/code-health-collector.js";
 import { projectCodeHealth, codeHealthFindingFingerprint } from "#src/lib/code-health-projection.js";
-import { readCodeHealthSnapshot, publishCodeHealthSnapshot, readCodeHealthCoverageSource } from "#src/lib/code-health-store.js";
+import { readCodeHealthSnapshot, publishCodeHealthSnapshot, readCodeHealthCoverageSource, saveCodeHealthCoverageSource } from "#src/lib/code-health-store.js";
 import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
 import { readCoverageNightlySummary } from "#src/lib/coverage-nightly-intake.js";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
@@ -244,6 +244,27 @@ test("code health retains coverage provenance at the existing ledger boundary", 
     assert("provenance" in cached); assert.deepEqual(cached.provenance, provenance);
     assert.equal(readCodeHealthCoverageSource(dir, "acme/foreign").state, "unavailable");
     assert.equal(readCodeHealthCoverageSource(join(dir, "not-yet-collected"), "acme/atlas").state, "not_collected");
+    const sourcePath = join(dir, "code-health", "coverage-source.json"), originalBytes = readFileSync(sourcePath, "utf8");
+    assert.equal(saveCodeHealthCoverageSource({ stateDir: dir, repository: "acme/atlas", provenance, clock: opts.clock }).state, "duplicate");
+    const live = acquireInflightLock(join(dir, "code-health", "locks"), "publication", { run_id: "own-cache-fixture", reclaim: false });
+    try { assert.equal(saveCodeHealthCoverageSource({ stateDir: dir, repository: "acme/atlas", provenance, clock: opts.clock }).state, "busy"); }
+    finally { live.release(); }
+    assert.equal(readFileSync(sourcePath, "utf8"), originalBytes, "a live publication keeps its existing source evidence");
+    assert.equal(saveCodeHealthCoverageSource({ stateDir: dir, repository: "acme/foreign", provenance, clock: opts.clock }).state, "unavailable");
+    assert.equal(saveCodeHealthCoverageSource({ stateDir: dir, repository: "acme/atlas", provenance: { ...provenance, configHash: "e".repeat(64) }, clock: opts.clock }).state, "unavailable");
+    assert.equal(saveCodeHealthCoverageSource({ stateDir: dir, repository: "acme/atlas", provenance, clock: fixedClock(Date.parse(at) - 1) }).state, "unavailable");
+    const earlier = new Date(Date.parse(at) - 60_000).toISOString();
+    assert.equal(saveCodeHealthCoverageSource({ stateDir: dir, repository: "acme/atlas", provenance: { ...provenance, runId: "122", scanId: "coverage-nightly:122", observedAt: earlier }, clock: opts.clock }).state, "superseded");
+    writeFileSync(sourcePath, "broken");
+    assert.equal(readCodeHealthCoverageSource(dir, "acme/atlas").state, "unavailable");
+    assert.equal(saveCodeHealthCoverageSource({ stateDir: dir, repository: "acme/atlas", provenance, clock: opts.clock }).state, "unavailable");
+    writeFileSync(sourcePath, originalBytes);
+    unlinkSync(sourcePath);
+    opts.reader.summaryForRun = async () => { throw new Error("A repeated intake must not download the artifact again."); };
+    assert.equal((await readCoverageNightlySummary(opts)).status, "duplicate");
+    assert.equal(readCodeHealthCoverageSource(dir, "acme/atlas").state, "observed", "recover a missed cache write from the existing durable ledger receipt");
+    assert.equal(readFileSync(sourcePath, "utf8"), originalBytes);
+
     const foreignDir = join(dir, "foreign"); mkdirSync(foreignDir);
     const foreign = { ...summary, code_health: { ...provenance, repository: "acme/foreign" } };
     const refused = await readCoverageNightlySummary({ ...opts, ledgerPath: join(foreignDir, "ledger.ndjson"),
