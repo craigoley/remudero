@@ -252,3 +252,40 @@ test("daily collector keeps every configured PR source visible before counting e
     }
   });
 });
+
+test("daily projector refuses a publication it cannot commit and keeps durable history unchanged", { timeout: 30_000 }, async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { dailyProgressStorePath } = await import("#src/lib/daily-progress-store.js");
+  await withTempDir("daily-refused-threads", async root => {
+    const stateDir = join(root, "ledger"), boardRoot = join(root, "snapshot-owner");
+    mkdirSync(stateDir); mkdirSync(boardRoot); writeFileSync(join(stateDir, "ledger.ndjson"), "");
+    const now = systemClock.now();
+    const cache = createBoardSnapshotCache(boardRoot, "acme", "app", { clock: fixedClock(now) });
+    cache.recordClosedAttempt!({ ok: true, persisted: cache.commitClosed([]) }); cache.commitOpen!([], now);
+    createRepositoriesSourcePublisher({ stateDir, instances: () => [{ instanceId: "core", options: { root: boardRoot, instanceRepository: { owner: "acme", repo: "app" } } }] })();
+    writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { analytics: "off", "daily-progress": "off" } }));
+    // Hold the real publication lock, so the owning projector's commit fails on its non-waiting writer lock.
+    const store = dailyProgressStorePath(stateDir); mkdirSync(store, { recursive: true });
+    const lock = new DatabaseSync(join(store, "publication-lock.sqlite"), { timeout: 0 });
+    lock.exec("BEGIN IMMEDIATE");
+    let refused: string | undefined, committed = false;
+    const worker = createReadModelWorker({ stateDir, instances: [{ name: "core", repo: "acme/app", ledgerDir: stateDir, boardRoot }], tickMs: 50,
+      log(step, extra) {
+        if (step === "read_model.daily_publication_refused") refused = String(extra?.reason ?? "");
+        if (step === "read_model.daily_committed") committed = true;
+      } });
+    worker.start();
+    try {
+      // BACKSTOP: wait for the parent's refusal receipt, never a staged worker verdict.
+      for (let attempt = 0; refused === undefined && attempt < 600; attempt++) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.ok(refused, "the projector reports the publication it could not commit");
+      assert.match(refused, /locked|busy/i, "the refusal names the held publication lock");
+      assert.equal(committed, false, "a refused publication is never reported as committed");
+      assert.equal(readDailyProgressManifest(stateDir).generation, 0, "a refused publication leaves durable history unchanged");
+    } finally {
+      lock.exec("ROLLBACK"); lock.close();
+      assert.equal(worker.stop(), true, "the real worker confirms shutdown and releases its own leases");
+      await flushReadModelTransactions();
+    }
+  });
+});
