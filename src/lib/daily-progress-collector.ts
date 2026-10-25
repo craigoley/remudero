@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { createBoardSnapshotReader, readBoardClosedCollectionReceipt, readOpenBoardSnapshot } from "./board-snapshot-cache.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { dailyDateAt, dailyWindow, DEFAULT_DAILY_PROGRESS_ZONE, nextDailyDue, shiftDailyDate } from "./daily-progress-calendar.js";
@@ -27,10 +27,19 @@ const jobId = (repository: string, zone: string): string => createHash("sha256")
 export function readDailyProgressRepositories(stateDir: string): string[] {
   let fd: number | undefined;
   try {
-    fd = openSync(repositoriesSourcesPath(stateDir), constants.O_RDONLY | constants.O_NOFOLLOW);
+    fd = openSync(repositoriesSourcesPath(stateDir), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size > 1024 * 1024) throw new Error("repository inventory exceeds its read bound");
-    const raw = JSON.parse(readFileSync(fd, "utf8")) as { improvementEvidence?: { version?: string; repositories?: Array<{ repository: string }>; unresolvedInstances?: unknown[] } };
+    const bytes = Buffer.alloc(1024 * 1024 + 1);
+    let size = 0;
+    while (size < bytes.length) {
+      const read = readSync(fd, bytes, size, bytes.length - size, size);
+      if (read === 0) break;
+      size += read;
+    }
+    const after = fstatSync(fd);
+    if (size !== stat.size || size > 1024 * 1024 || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) throw new Error("repository inventory changed during the bounded read");
+    const raw = JSON.parse(bytes.subarray(0, size).toString("utf8")) as { improvementEvidence?: { version?: string; repositories?: Array<{ repository: string }>; unresolvedInstances?: unknown[] } };
     const inventory = raw.improvementEvidence;
     if (!inventory || inventory.version !== "repository-evidence-inventory-v1" || !Array.isArray(inventory.repositories) ||
         !Array.isArray(inventory.unresolvedInstances) || inventory.unresolvedInstances.length ||
