@@ -384,14 +384,19 @@ test("selected Claude SDK final recheck refuses changed missing and replaced pol
 });
 
 test("selected policy real default reader keeps unreadable evidence unknown and diagnostics private", async () => {
-  for (const mode of ["invalid-json", "invalid-schema", "invalid-encoding", "missing", "symlink", "hardlink", "oversized", "resume"] as const) {
+  for (const mode of ["invalid-json", "invalid-schema", "invalid-rules", "invalid-entry", "invalid-encoding", "missing", "directory", "empty-input", "glob-path", "symlink", "hardlink", "oversized", "resume"] as const) {
     const fixture = runtimeRegistryFixture(), sink = { calls: 0 };
     try {
       const args = privateClaudeArgs(fixture, sink);
       if (mode === "invalid-json") writeFileSync(args.settingsFile, `{"private":"${fixture.selected}", BAD`);
       if (mode === "invalid-schema") writeFileSync(args.settingsFile, JSON.stringify({ sandbox: { enabled: false }, private: fixture.selected }));
+      if (mode === "invalid-rules") { const policy = JSON.parse(readFileSync(args.settingsFile, "utf8")); policy.permissions = { deny: {} }; writeFileSync(args.settingsFile, JSON.stringify(policy)); }
+      if (mode === "invalid-entry") { const policy = JSON.parse(readFileSync(args.settingsFile, "utf8")); policy.sandbox.filesystem = { denyRead: [42] }; writeFileSync(args.settingsFile, JSON.stringify(policy)); }
       if (mode === "invalid-encoding") writeFileSync(args.settingsFile, Buffer.from([0xff]));
       if (mode === "missing") unlinkSync(args.settingsFile);
+      if (mode === "directory") args.settingsFile = fixture.root;
+      if (mode === "empty-input") args.settingsFile = "";
+      if (mode === "glob-path") { const path = join(fixture.root, "policy[opaque].json"); renameSync(args.settingsFile, path); args.settingsFile = path; }
       if (mode === "symlink") { unlinkSync(args.settingsFile); symlinkSync(fixture.selected, args.settingsFile); }
       if (mode === "hardlink") linkSync(args.settingsFile, join(fixture.root, "policy-alias.json"));
       if (mode === "oversized") writeFileSync(args.settingsFile, Buffer.alloc(65537));
@@ -403,6 +408,31 @@ test("selected policy real default reader keeps unreadable evidence unknown and 
       });
       assert.equal(sink.calls, 0);
     } finally { fixture.cleanup(); }
+  }
+});
+
+test("selected policy late default reads cannot outlive their original invocation", async t => {
+  for (const phase of ["capture", "recheck"] as const) {
+    const fixture = runtimeRegistryFixture(), args = privateClaudeArgs(fixture, { calls: 0 });
+    const actualOpen = runtimeRegistry.registryFileIO.open.bind(runtimeRegistry.registryFileIO);
+    let release!: () => void, entered!: () => void, intercept = false;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const mocked = t.mock.method(runtimeRegistry.registryFileIO, "open", async path => {
+      if (path === args.settingsFile && intercept) { entered(); await blocked; }
+      return actualOpen(path);
+    });
+    let pending: Promise<unknown> | undefined;
+    try {
+      await runtimeRegistryRunner()(async () => {
+        if (phase === "capture") { intercept = true; pending = runtimeRegistry.captureInstanceRegistryRuntimeFile(args.settingsFile); }
+        else { const snapshot = await runtimeRegistry.captureInstanceRegistryRuntimeFile(args.settingsFile); intercept = true; pending = snapshot.recheck(); }
+        await started;
+      }, { envPath: fixture.selected });
+      assert.ok(pending);
+      const refused = assert.rejects(pending, /selected instance registry unavailable \(invocation_closed\)/);
+      release(); await refused;
+    } finally { release(); mocked.mock.restore(); fixture.cleanup(); }
   }
 });
 
