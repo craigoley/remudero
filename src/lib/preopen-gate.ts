@@ -19,6 +19,7 @@
  * the worktree; a `coverage/preflight-summary.json` inside the worktree is never read. No sandbox, no run:
  * the gate is unmeasured with the reason, never run with the daemon's environment.
  */
+import { execFileSync } from "node:child_process";
 import { accessSync, constants as fsConstants, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, sep } from "node:path";
@@ -152,6 +153,40 @@ export interface PreopenGateOptions {
   contain?: GateContain;
   /** W1-T9602: the harness push gate asked after the fast gate; default the push leaf's own {@link runPushGate}. */
   runPushGate?: (cwd: string) => Promise<PushGateOutcome>;
+  /** W1-T10267: the procfs-write census asked of the changed test files; default {@link changedProcfsWriteOffences}. */
+  scanProcfsWrites?: (cwd: string) => string[];
+}
+
+/** W1-T10267: fs entry points that block when handed a procfs path (same list as the W1-T3345 census). */
+const PROCFS_WRITE_CALLS = ["mkdirSync", "mkdtempSync", "writeFileSync", "appendFileSync", "rmSync", "openSync", "createWriteStream", "cpSync"];
+const PROCFS_WRITE_OPTION = /\b(?:dir|path|cwd|root|out|outDir)\s*:\s*["'`]\/proc\//;
+
+/** W1-T10267: `file:line  text` for each line aiming a write-shaped call at procfs. Pure. */
+export function procfsWriteOffences(files: readonly { name: string; text: string }[]): string[] {
+  const out: string[] = [];
+  for (const f of files) {
+    f.text.split("\n").forEach((raw, i) => {
+      if (!raw.includes("/proc/")) return;
+      if (PROCFS_WRITE_CALLS.some((c) => raw.includes(`${c}(`)) || PROCFS_WRITE_OPTION.test(raw)) out.push(`${f.name}:${i + 1}  ${raw.trim().slice(0, 120)}`);
+    });
+  }
+  return out;
+}
+
+/** W1-T10267: scan the test files this branch changed against origin/main; an unreadable diff yields no offences (the hosted census still runs). */
+export function changedProcfsWriteOffences(cwd: string): string[] {
+  let names: string[];
+  try {
+    names = execFileSync("git", ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", "test/"], { cwd, encoding: "utf8", timeout: 20_000 })
+      .split("\n").filter((n) => n.endsWith(".test.ts") && !n.endsWith("no-test-aims-a-write-at-procfs.test.ts"));
+  } catch {
+    return [];
+  }
+  const files: { name: string; text: string }[] = [];
+  for (const name of names) {
+    try { files.push({ name, text: readFileSync(join(cwd, name), "utf8") }); } catch { /* deleted or unreadable: nothing to scan */ }
+  }
+  return procfsWriteOffences(files);
 }
 
 export type GateLog = (step: string, extra?: Record<string, unknown>) => void;
@@ -475,6 +510,12 @@ export async function runPreopenGate(worktreePath: string, deps: PreopenGateOpti
   const run = await (deps.runGate ?? ((cwd) => defaultRunGate(cwd, undefined, deps.log, {}, { contain: deps.contain, readFile: deps.readFile })))(worktreePath);
   const fast = classifyGateRun(run, now() - startedAt);
   if (fast.kind === "unmeasured") return fast;
+  // W1-T10267: a procfs write in a changed test blocks until timeout-minutes in CI; refuse it here, before a PR opens.
+  const procfs = (deps.scanProcfsWrites ?? changedProcfsWriteOffences)(worktreePath);
+  if (procfs.length > 0) {
+    const steps = [...(fast.kind === "fail" ? fast.failedSteps : []), `procfs-write: a test aims a write-shaped call at /proc (it blocks, use a FILE where a directory must be): ${procfs.join("; ")}`];
+    return { kind: "fail", failedSteps: steps, durationMs: fast.durationMs, ...(fast.containment ? { containment: fast.containment } : {}), ...(fast.sandboxMetrics ? { sandboxMetrics: fast.sandboxMetrics } : {}) };
+  }
   // W1-T9602: the same harness push gate the push leaf runs, asked now on the clean committed tree. A pass is
   // recorded and the push of that identical tree reuses it; a refusal joins the steps handed back, as push-gate.
   const pushStarted = now();
