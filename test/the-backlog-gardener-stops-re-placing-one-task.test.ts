@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { applyBacklogActions, backlogInventory, type BacklogAction, type BacklogSources } from "#src/lib/backlog-gardener.js";
+import { applyBacklogActions, backlogGardenSpec, backlogInventory, type BacklogAction, type BacklogSources } from "#src/lib/backlog-gardener.js";
 import { fixedClock } from "#src/lib/clock.js";
 import type { PlanInventory } from "#src/lib/plan-gardener.js";
 import type { Task } from "#src/lib/plan.js";
@@ -88,4 +88,36 @@ test("W1-T9053: band 2 needs a clear rise, not any rise", (t) => {
   ]);
   const c = backlogInventory(f.sources).candidates[0];
   assert.deepEqual(c?.disposition, { kind: "band", band: 3 });
+});
+
+
+test("an open backlog decision defers the same async proposal despite a new evidence hash", async (t) => {
+  const f = fixture(t, `- id: ${ID}\n  title: t\n  status: queued\n`);
+  const first = backlogInventory(f.sources).candidates[0]!;
+  assert.ok(first, "a positive candidate proves this is not an empty inventory");
+  const decision = first.disposition.kind === "band" ? `band ${first.disposition.band}` : first.disposition.retirement;
+  let open = [{ target: ID, decision, prNumber: 14156, headSha: "a".repeat(40) }];
+  const events: Array<{ step: string; extra: unknown }> = [];
+  const deps = { repoRoot: f.root, stateDir: join(f.root, "state"),
+    log: (step: string, extra?: unknown) => { events.push({ step, extra }); },
+    openWorkspace: () => { throw new Error("inventory must not open a workspace"); } };
+  const spec = backlogGardenSpec(deps, { ...f.sources, openDecisions: async () => open });
+  const inventory = async () => spec.inventoryAsync ? spec.inventoryAsync() : spec.inventory();
+  assert.deepEqual((await inventory()).candidates, [], "an existing open decision owns this proposal");
+  assert.ok(events.some(e => e.step === "backlog.open_decision_deferred"));
+  assert.equal(f.read(), `- id: ${ID}\n  title: t\n  status: queued\n`, "deferral changes no task bytes");
+  open = [{ ...open[0]!, target: "W1-T99999" }];
+  assert.equal((await inventory()).candidates.length, 1, "another task cannot suppress this decision");
+  open = [{ ...open[0]!, target: ID, decision: decision === "band 4" ? "band 3" : "band 4" }];
+  assert.equal((await inventory()).candidates.length, 1, "a different decision remains eligible");
+  open = [];
+  assert.equal((await inventory()).candidates.length, 1, "closed or merged proposals no longer defer it");
+});
+
+test("unread open backlog ownership refuses the async proposal without opening a workspace", async (t) => {
+  const f = fixture(t, `- id: ${ID}\n  title: t\n  status: queued\n`);
+  const spec = backlogGardenSpec({ repoRoot: f.root, stateDir: join(f.root, "state"), log: () => {},
+    openWorkspace: () => { throw new Error("must not open workspace"); } },
+    { ...f.sources, openDecisions: async () => { throw new Error("open PR pages unread"); } });
+  await assert.rejects(async () => spec.inventoryAsync ? spec.inventoryAsync() : spec.inventory(), /open PR pages unread/);
 });
