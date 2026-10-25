@@ -133,6 +133,19 @@ test("code health exports bounded provenance without publishing security results
     assert.equal(produced.state, "complete", "the real workflow-facing CLI reads original output without installing dependencies");
     assert.deepEqual(produced.exclusions, ["test/**"]);
     assert.equal(produced.scope.hash, manifest.scope.hash);
+    const withoutInvocation = structuredClone(original);
+    delete (withoutInvocation.runs[0] as { invocations?: unknown }).invocations;
+    writeFileSync(join(sarifDir, "javascript.sarif"), JSON.stringify(withoutInvocation));
+    const completedOutput = join(dir, "workflow-completion.json");
+    execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--sarif-dir", sarifDir,
+      "--config", config, "--workflow", workflow, "--output", completedOutput], { encoding: "utf8", env: { ...process.env,
+        GITHUB_REPOSITORY: raw.repository, GITHUB_SHA: raw.analyzedSha, GITHUB_REF: raw.ref, GITHUB_RUN_ID: raw.runId,
+        GITHUB_RUN_ATTEMPT: raw.runAttempt, CODE_HEALTH_LANGUAGE: raw.language, CODE_HEALTH_SARIF_ID: raw.sarifId,
+        CODE_HEALTH_ANALYSIS_OUTCOME: "success" } });
+    const completed = JSON.parse(readFileSync(completedOutput, "utf8"));
+    assert.equal(completed.state, "complete", "the existing successful workflow step can attest optional SARIF completion fields");
+    assert.equal(completed.completion.kind, "workflow-analysis-step");
+    assert.equal(completed.completion.state, "success");
 
     assert.equal(manifest.version, "code-health-source-v1");
     assert.equal(manifest.repository, "acme/atlas");
