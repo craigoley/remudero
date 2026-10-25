@@ -1,0 +1,52 @@
+- id: W1-T10635
+  title: "Skill conformance uses the governed worker capability context without confusing empty auto-approval rules with unavailable tools"
+  repo: remudero
+  depends_on: []
+  plan_refs: [W1-T10135, W1-T10576, W1-T2766, W1-T3101, W1-T4283, W1-T9337]
+  type: implement
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  verify: human
+  dispatch_hold: true
+  risk: high
+  band_meaning: blast-radius
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=f501bc985e1299ea
+  # backlog gardener: placed=2026-10-25T20:57:31.291Z
+  attempts: 0
+  author_class: machine
+  origin: "skill-conformance-context:W1-T10135-scanner-observation-20261025"
+  files:
+    - src/lib/skill-workshop.ts
+    - src/run-task.ts
+    - test/a-staged-skill-reaches-the-worker-prompt.test.ts
+  acceptance:
+    - claim: "The maintained skill scan/conformance boundary obtains the concrete execution lane/provider and available tool surface from the existing worker contract, with explicit source identity. Empty permissions.allow or allowedTools auto-approval entries do not erase an independently known permitted Read tool. Do not copy a second broad tool list, union providers into the most permissive surface, or change the worker's actual tools, permission mode, settings, hooks, denies or provider routing."
+      proof: "unit test: skill conformance uses actual worker tool bounds with zero auto approval rules"
+    - claim: "A tool actually unavailable or explicitly denied in that exact context stays refused; absent, malformed, unbounded, stale or ambiguous capability context yields a named unknown/refusal, never an allow-all or a successful empty scan. Preserve existing scanner host/path/secret/instruction-injection/outcome-only protections and all runtime deny/approval floors without altering settings/worker.json or approved skill text."
+      proof: "unit test: skill conformance preserves denied and unknown worker contexts"
+    - claim: "The real stageSkillDrafts production caller supplies the governed context rather than pretending undefined settings establish the worker's capability policy. A private registry fixture reaches the default staging/scan path and proves unknown or prohibited context creates no ratifiable skill proposal, while a valid known-context procedure can be staged. Explicit operator approval remains necessary before anything is written into the approved injectable tree; no automatic ratification or injection is added."
+      proof: "unit test: real skill staging retains scanner and operator approval boundaries"
+    - claim: "The context identifies the actual consumer lane, including the existing SKILL_FIX_TASK_TYPE path, instead of equating all injection contexts with plan TASK_TYPES. Reuse the maintained fix/implement/provider contracts; do not duplicate W10576's prompt-surface repair or silently change W10135's separately filed invariants. Any required W10135 criterion amendment must receive its own explicit governed approval before its test-only implementation is called qualified."
+      proof: "unit test: skill conformance names the real eligible execution context"
+    - claim: "Bounded real private fixtures reach the maintained default context construction, scanner and registry boundary without model/provider calls or live production writes. Include a valid zero-auto-approval positive control, actual unavailable/denied tool controls, provider/lane distinction and missing-context controls. Removing only the context repair causes named intended failures and exact restoration passes. Keep all existing tests and normal author, full CI, coverage, security, semantic review and ordinary merge gates; no skip, permission expansion or hold release."
+      proof: "unit test: skill context conformance regressions fail without the boundary repair"
+  note: "Parked test-first proposal: verify:human means unjudged under the maintained machine-filing contract, with an independent dispatch_hold:true that remains even if the normal judge proceeds. Filing/merge is not authority to implement or widen permissions. Author NOT RUN is disclosed under Craig's one-PR full-CI route. W10135 test implementation remains explicitly blocked on a qualified and separately approved context contract; no source, task hold, approved skill, worker or live policy is changed by this filing."
+  rationale: |
+    Actual committed-tree diagnostic on the prior captured source refused BOTH opted-in skills, ci-state-forensics and proof-preflight, because their ordinary Read step encounters the scanner's intentionally empty named-tool list. This is a reported contract contradiction, not evidence that the actual workers lack Read or that any permission should be widened.
+    Source investigation finds workerAllowlistFromSettings derives allowedTools solely from settings permissions.allow; real staging calls it with undefined. Separately, worker.ts exports maintained implement/provider tool bounds containing Read and threads args.tools into SDK options.tools. The proposed change is a truthful shared context at the scan/staging boundary, not a modification of those bounds. Source blobs and the full current caller must be refreshed and verified before publication; never use a truncated hub prefix as absence evidence.
+    Read-only dependency src/lib/worker.ts remains the authoritative profile owner; no worker-profile source edit is declared or authorized here. Passing already-maintained descriptors at the run-task caller avoids a duplicated allowlist or a reverse import/cycle. settings/worker.json, approved .claude skills, permission modes, routing and all runtime tool grants stay unchanged. A future need to change another file requires a separately governed scope amendment, not an undeclared edit.
+    W2766 owns the workshop/scanner mechanism, W3101 its maintained staging/injection route and W4283 its outcome-only-content guard. W10135 owns the new discovery census, not this source boundary. W10576 and its existing PR14173 fix lane own prompt-surface evidence and the concrete fix-task gate correction. W9337/PR13851 owns fix-command extraction in the shared run-task hub, a different call site. Preserve those owners and concerns; this proposal neither retires them nor hides shared-file overlap.
+    W2698's merged credential-reach work is not implementing credit for the older scanner comment's promised nonempty tool policy. An empty auto-approval rule set is not the complete capability set: the primary Anthropic SDK permissions documentation at https://code.claude.com/docs/en/agent-sdk/permissions and the installed SDK type documentation distinguish allowedTools auto-approval from tools availability and deny rules. Documentation supports the diagnosis; exact local policy and default-path tests must qualify any repair.
+    The existing real fix prompt consumes SKILL_FIX_TASK_TYPE even though fix is not a plan TASK_TYPES member. Preserve that domain distinction and coordinate with W10576; do not silently weaken or rewrite W10135 to make a green test. No selection-budget, withholding, task registry, cash, consent, ratification or evaluation activation change is proposed.
+    Craig approved publication of this parked plan-only proposal only. Normal reservation, machine judgment, plan lint, hooks, full hosted CI/coverage/security and semantic review retain their authority; no new hosted-author attempt, paid runner, manual merge/arm/review, production Inbox reply/readmark, forced gardener, permission change or production lifecycle action. Foundation and Janitor retain their existing owners; W7740 remains USER_HELD90 and SHADOW/independent overrides remain unchanged.
+    The initial maintained renderer defaulted these three non-sensitive paths to risk:low; the actual sizing check refused three concerns at that band. This unjudged parked proposal declares risk:high with band_meaning:blast-radius to retain all three necessary files under Rule 19, not to narrow scope, invent a ruling or alter any worker permission. The normal machine judge and independent dispatch hold remain authoritative.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it touches secrets, auth, tokens or permissions (\"permissions\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-25T21:43:33.728Z"
+    pin: "b4c3e42d1bf1ca8e7d7a0d77e9114d0e4612d248af24693e48083c85ef275b37"

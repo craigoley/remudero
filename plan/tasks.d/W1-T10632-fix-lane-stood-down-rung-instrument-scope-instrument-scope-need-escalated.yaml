@@ -1,0 +1,36 @@
+- id: W1-T10632
+  title: "THE FIX-LANE GARDENER'S COSTLIEST DEFECT CLASS — stood-down:rung.instrument_scope:instrument scope need escalated cost 44.95 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.19
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "fix-lane:stood-down:rung.instrument_scope:instrument scope need escalated"
+  files:
+    - scripts/test-placement/test-folders.tsv
+    - test/gardeners/fix-lane-stood-down-rung-instrument-scope-instrument-scope-need-escalated.test.ts
+  acceptance:
+    - claim: "stood-down:rung.instrument_scope:instrument scope need escalated no longer needs an operator hand fix"
+      proof: "grep: test(\"W1-T10632: fix-lane-stood-down-rung-instrument-scope-instrument-scope-need-escalated clears without a person\" in test/gardeners/fix-lane-stood-down-rung-instrument-scope-instrument-scope-need-escalated.test.ts"
+  note: "Filed by fix-lane at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    stood-down:rung.instrument_scope:instrument scope need escalated cost 44.95 PR-hours; owner fix-lane
+    Owner: the fix lane itself (a defect in the harness that repairs PRs, not in the PR).
+    Source owner: scripts/test-placement/test-folders.tsv. Top five PRs by observed hours, with original blocker reasons:
+    - PR #14007: 26.61 PR-hours — instrument scope need escalated
+    - PR #13223: 16.93 PR-hours — instrument scope need escalated
+    - PR #13416: 8.30 PR-hours — instrument scope need escalated
+    - PR #13313: 1.81 PR-hours — instrument scope need escalated
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The filing lists repeated blocker labels and PR-hours but supplies no root-cause finding or specific remedy; its finding cannot be verified from the supplied evidence.; on the change's description/files alone, no diff was read — Acceptance checks only for a test-title string using grep, which does not establish that instrument-scope escalation clears automatically or preserves the existing gate."
+    judged_at: "2026-10-25T18:50:06.632Z"
+    pin: "282343c37d551792282e24bb20d6fa3e9d23f7ee19fc323a3ed8a0fa19e19f03"

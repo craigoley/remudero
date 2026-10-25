@@ -932,6 +932,7 @@ const SUITE_ROOTS = [{ root: "test/", runner: "node" }] as const;
  *  root under its own checkout-local pinned Vitest, no forced config path. */
 const REMUDERO_SITE_SUITE_ROOTS: readonly SuiteRoot[] = [{ root: "tests/", runner: "vitest" }] as const;
 const REMUDERO_CONSOLE_SUITE_ROOTS: readonly SuiteRoot[] = [{ root: "tests/", runner: "vitest" }] as const;
+const WRECKTERRA_SUITE_ROOTS: readonly SuiteRoot[] = [{ root: "tests/", runner: "vitest" }] as const;
 
 /**
  * W1-T3525 — THE CLOSED SUITE REGISTRY, KEYED ON THE RESOLVED CANONICAL `owner/repo`. A third
@@ -943,6 +944,7 @@ const SUITE_REGISTRY: ReadonlyArray<SuiteRegistryTarget & { roots: readonly Suit
   { owner: "craigoley", repo: "remudero", roots: SUITE_ROOTS },
   { owner: "craigoley", repo: "remudero-site", roots: REMUDERO_SITE_SUITE_ROOTS },
   { owner: "craigoley", repo: "remudero-console", roots: REMUDERO_CONSOLE_SUITE_ROOTS },
+  { owner: "craigoley", repo: "wreckterra", roots: WRECKTERRA_SUITE_ROOTS },
 ];
 
 const TEST_PATH_EXACT_RE = /^(?:test|apps\/dashboard\/src)\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
@@ -2125,12 +2127,13 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
   ];
 }
 
-/** The proof child's env: {@link buildProofEnv}'s allowlist with HOME replaced by a throwaway one, and the browser
- *  cache pinned to where the reviewer installed it (that path used to be derived from the real HOME). */
+/** The proof child's env uses its owned HOME for temporary writes, never a parent's TMPDIR.
+ *  The browser cache remains pinned to the reviewer's installation. */
 export function proofChildEnv(home: string, parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   return {
     ...buildProofEnv(parent),
     HOME: home,
+    TMPDIR: home,
     PLAYWRIGHT_BROWSERS_PATH: playwrightCacheRoot(parent, process.platform, parent.HOME ?? homedir()),
   };
 }

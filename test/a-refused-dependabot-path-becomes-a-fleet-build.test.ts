@@ -234,3 +234,26 @@ test("a folded refused-path repair binds each observed PR and refuses corrupt lo
   }
   assert.equal(f.captures.length, 1, "invalid bindings never capture another proposal");
 });
+
+
+test("a dependency repair priority refusal names its unavailable evidence without changing FIFO", async () => {
+  const candidates = ["older-incident", "linked-repair"];
+  const snapshot = { owner: "craigoley", repo: "remudero", asOfMs: NOW, prs: [] };
+  for (const [input, now, reasonCode] of [
+    [undefined, NOW, "snapshot-missing"],
+    [{ ...snapshot, asOfMs: NOW - 300001 }, NOW, "snapshot-stale"],
+    [{ ...snapshot, asOfMs: NOW + 1 }, NOW, "snapshot-future"],
+    [{ ...snapshot, asOfMs: Number.NaN }, NOW, "clock-unreadable"],
+    [snapshot, Number.NaN, "clock-unreadable"],
+    [{ ...snapshot, owner: "../other" }, NOW, "repository-unreadable"],
+    [snapshot, NOW, "no-aged-red-dependency"],
+  ] as const) {
+    const events: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    assert.deepEqual(await prioritizeDepReviewRepairs(candidates, "unused-no-disk", input, now,
+      (step, extra) => { events.push({ step, extra }); }), candidates);
+    assert.deepEqual(events.map(e => [e.step, e.extra.reasonCode, e.extra.candidate_count]),
+      [["auto_triage.repair_priority_unavailable", reasonCode, 2]], reasonCode);
+  }
+  assert.deepEqual(await prioritizeDepReviewRepairs(candidates, "unused-no-disk", undefined, NOW,
+    () => { throw new Error("telemetry unavailable"); }), candidates, "a logging failure never changes FIFO or admits work");
+});

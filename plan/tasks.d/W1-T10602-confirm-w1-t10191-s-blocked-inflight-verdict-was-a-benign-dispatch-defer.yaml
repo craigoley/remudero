@@ -6,6 +6,11 @@
   verify: auto
   risk: low
   priority: 4
+  # refusal-amendment (W1-T10602, run DAEMON-1792952454440@868b610564f42762005aca0380ebd288795d3d0f, 2026-10-25T19:16:28.069Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The proof requires literal double quotes around W1-T10191, absent from the verified document, whose content is frozen.
+  # refusal-amendment (W1-T10602, run DAEMON-1792952454440@868b610564f42762005aca0380ebd288795d3d0f, 2026-10-25T19:16:28.069Z): the worker refused criterion 2 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The proof requires literal double quotes around blocked_inflight, absent from the verified document, whose content is frozen.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   # backlog gardener: band=4 evidence=82b6f7b9bd78f5d8
   # backlog gardener: placed=2026-10-25T09:04:56.056Z

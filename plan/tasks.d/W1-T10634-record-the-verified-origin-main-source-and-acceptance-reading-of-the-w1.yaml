@@ -1,0 +1,27 @@
+- id: W1-T10634
+  title: Record the verified origin/main source and acceptance reading of the W1-T10572 gardener-source shard
+  repo: remudero
+  depends_on:
+    - W1-T10572
+  type: recon
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=22f76f010384aa42
+  # backlog gardener: placed=2026-10-25T18:42:40.880Z
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T10572-declare-independent-gardener-source-semantics.yaml
+  acceptance:
+    - claim: The shard records which origin/main revision and remote URL its design rationale and four acceptance criteria were read from
+      proof: "grep: recon_read_from_origin_main in plan/tasks.d/W1-T10572-declare-independent-gardener-source-semantics.yaml"
+    - claim: The shard records whether each of its four grep proofs fails on the merge base, as its own rationale requires
+      proof: "grep: recon_proofs_fail_on_base in plan/tasks.d/W1-T10572-declare-independent-gardener-source-semantics.yaml"
+  origin: followup:W1-T10572-1792898790455:2026-10-25T03:29:26.745Z:0
+  rationale: >-
+    From the 2026-10-25 follow-up on W1-T10572-1792898790455, ratified via rmd approve:
+  
+    follow-up harvest [research]: Confirm origin/main URL and fetch the exact contents of
+    plan/tasks.d/W1-T10572-declare-independent-gardener-source-semantics.yaml to verify its design
+    rationale and acceptance criteria. — from W1-T10572 (run W1-T10572-1792898790455)

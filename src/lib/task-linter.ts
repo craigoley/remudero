@@ -2115,9 +2115,16 @@ export interface BlockedDispositionContext {
  *  RETIREMENT_REASONS} IS TREATED AS ABSENT — "present" means present AND legal, so a bogus string
  *  cannot slip past, and nothing here writes or infers one. Why: W1-T2487, W1-T2474. */
 export function blockedDispositionViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
-  if (task.status !== "blocked") return [];
   const ctx = opts.blockedDisposition;
   if (!ctx) return []; // whole-plan pass: no base to compare against, so no opinion at all
+  // A disposition on a still-runnable record is inert at every retirement consumer. Diagnose
+  // the changed record before publication; only the operator performs the status transition.
+  if (task.retirement !== undefined && task.status !== "blocked") {
+    return [{ check: "blocked-task-disposition", severity: "block", message:
+      `task ${task.id} carries retirement: ${task.retirement} at status: ${task.status}; ` +
+      "retirement requires status: blocked to reach its reader and stop dispatch" }];
+  }
+  if (task.status !== "blocked") return [];
   const hasLegalDisposition = task.retirement !== undefined && (RETIREMENT_REASONS as readonly string[]).includes(task.retirement);
   if (hasLegalDisposition) return [];
   const legalValues = RETIREMENT_REASONS.join("|");
@@ -3388,7 +3395,7 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
   // is the caller's to answer; a wrong guess here would flag every task that merely EDITS a module.
   if (!opts.moduleExists) return [];
   const severity: LintSeverity = opts.callSite ?? "warn";
-  const declaredSrc = (task.files ?? []).filter((f) => f.startsWith("src/") && f.endsWith(".ts") && !f.includes("*"));
+  const declaredSrc = (task.files ?? []).filter((f) => f.startsWith("src/") && (f.endsWith(".ts") || f.endsWith(".tsx")) && !f.includes("*"));
   const declaredSrcSet = new Set(declaredSrc);
   const created = declaredSrc.filter((f) => !opts.moduleExists!(f));
   const addedExports = (opts.addedExports ?? []).filter(
@@ -3405,7 +3412,7 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
     // A CALL, not a mention: the pattern must demand an invocation…
     if (!pattern.includes("(")) return undefined;
     // …in a src/ file, not a test. Tests prove behavior; they do not prove production reachability.
-    if (!path.startsWith("src/") || !path.endsWith(".ts") || path.includes("*")) return undefined;
+    if (!path.startsWith("src/") || (!path.endsWith(".ts") && !path.endsWith(".tsx")) || path.includes("*")) return undefined;
     return { pattern, path };
   };
   const proofs = (task.acceptance ?? []).map(parsedGrepCallProof).filter((p): p is { pattern: string; path: string } => !!p);

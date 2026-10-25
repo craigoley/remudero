@@ -166,7 +166,7 @@
     {
       "path": "docs/ci-friction-remedies.md",
       "title": "CI friction remedies",
-      "summary": "This file is the ledger of remedies for the causes the ci-friction gardener (W1-T4435, `src/lib/ci-friction-gardener.ts`) prices. The gardener files one parked…",
+      "summary": "The ci-friction gardener prices observed fix rounds and files governed implementation work only against a located repair subject. For a cause eligible for a ne…",
       "grepHint": "CI friction remedies"
     },
     {
@@ -714,6 +714,12 @@
       "title": "unwired-gate-check.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
       "grepHint": "unwired-gate-check.mjs comment forensics"
+    },
+    {
+      "path": "docs/forensics/w1-t10191-lifetime-pressure-automate.md",
+      "title": "W1-T10191 lifetime-pressure automate finding",
+      "summary": "Required phrases for the acceptance greps: `W1-T10191` (the task) and `blocked_inflight` (the verdict).",
+      "grepHint": "W1-T10191 lifetime-pressure automate finding"
     },
     {
       "path": "docs/forensics/why-a-review-refuses-head-task-metadata-unavailable.md",

@@ -26,6 +26,7 @@
     - src/lib/code-health-projection.ts
     - src/lib/daily-progress-collector.ts
     - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
     - test/**/improvement-effect-follow-through.test.ts
   rationale: Gardeners save outcome classifications but reported states alone do not prove benefit. The cockpit
     should connect a finding to a plan, merged implementation and comparable follow-up rather than reward

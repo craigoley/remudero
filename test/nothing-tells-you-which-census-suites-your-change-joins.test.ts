@@ -154,8 +154,8 @@ test("censusSuiteMembershipFor drives 'git grep -l ls-files -- test/*.test.ts' v
 test("censusSuiteMembershipFor names an unrecognised src/-filtering caller as unknownCoverage, never omits it", () => {
   const stdout = ["test/bound-kind-declared.test.ts", "test/a-brand-new-census-suite.test.ts", ""].join("\n");
   const files: Record<string, string> = {
-    "test/bound-kind-declared.test.ts": "git ls-files -- src/",
-    "test/a-brand-new-census-suite.test.ts": "git ls-files scoped to src/ walks the whole tree",
+    "test/bound-kind-declared.test.ts": 'execFileSync("git", ["ls-files", "--", "src/"])',
+    "test/a-brand-new-census-suite.test.ts": 'execFileSync("git", ["ls-files", "--", "src/"]).forEach(assertFile)',
   };
   const report = censusSuiteMembershipFor([], "/fake/repo", grepSpawn(stdout), (path) => files[path] ?? "");
   assert.deepEqual(report.unknownCoverage, ["test/a-brand-new-census-suite.test.ts"]);

@@ -36,7 +36,9 @@ const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, viol
 // sanctioned shapes that must stay cheap), the fix rung's zero-strike
 // escalation, the taught resolution, and the shared, single path-set constant.
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+// W1-T9337: inspect the extracted fix implementation as well as its entrypoint.
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8") + "\n" +
+  readFileSync(fileURLToPath(new URL("../src/cli/commands/fix.ts", import.meta.url)), "utf8").replace(/\bhost\./g, "");
 const reviewSrc = readFileSync(fileURLToPath(new URL("../src/lib/review.ts", import.meta.url)), "utf8");
 
 // A criterion satisfied purely by the REPORT text (judgeCriterion never reads
