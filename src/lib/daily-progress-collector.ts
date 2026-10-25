@@ -3,7 +3,7 @@ import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { createBoardSnapshotReader, readBoardClosedCollectionReceipt, readOpenBoardSnapshot } from "./board-snapshot-cache.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { dailyDateAt, dailyWindow, DEFAULT_DAILY_PROGRESS_ZONE, nextDailyDue, shiftDailyDate } from "./daily-progress-calendar.js";
-import type { DailyProgressEvent, DailyProgressReport, SourceCoverage } from "./daily-progress-contract.js";
+import { validateRepositoryEvidenceInventory, type DailyProgressEvent, type DailyProgressReport, type SourceCoverage, type ExpectedDailySource } from "./daily-progress-contract.js";
 import { dailyProgressDayKey, prepareDailyProgressPublication, readDailyProgressManifest, readDailyProgressRevision, type DailyProgressJob, type DailyProgressRecord } from "./daily-progress-store.js";
 import { openLedgerUnion } from "./ledger-union.js";
 import type { BoardPrRest } from "./open-prs-rest.js";
@@ -40,10 +40,9 @@ export function readDailyProgressRepositories(stateDir: string): string[] {
     const after = fstatSync(fd);
     if (size !== stat.size || size > 1024 * 1024 || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) throw new Error("repository inventory changed during the bounded read");
     const raw = JSON.parse(bytes.subarray(0, size).toString("utf8")) as { improvementEvidence?: { version?: string; repositories?: Array<{ repository: string }>; unresolvedInstances?: unknown[] } };
-    const inventory = raw.improvementEvidence;
-    if (!inventory || inventory.version !== "repository-evidence-inventory-v1" || !Array.isArray(inventory.repositories) ||
-        !Array.isArray(inventory.unresolvedInstances) || inventory.unresolvedInstances.length ||
-        !inventory.repositories.length || inventory.repositories.length > 256 || inventory.repositories.some(r => !r || typeof r.repository !== "string" || !REPOSITORY.test(r.repository))) throw new Error("expected repository scope is unresolved");
+    const checked = validateRepositoryEvidenceInventory(raw.improvementEvidence);
+    if (!checked.ok || checked.value.unresolvedInstances.length || !checked.value.repositories.length || checked.value.repositories.length > 256) throw new Error("expected repository scope is unresolved or invalid");
+    const inventory = checked.value;
     return [...new Set(inventory.repositories.map(r => r.repository.toLowerCase()))].sort();
   } catch (error) {
     throw new Error("Daily progress repository inventory is unavailable; complete fleet scope is not established.", { cause: error });
@@ -109,13 +108,13 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
     if (dates.size > MAX_DATES) throw new Error("daily catch-up exceeds its per-pass calendar bound");
     const ordered = [...dates].sort(), earliest = dailyWindow(ordered[0]!, timeZone).windowStart;
     const instances = config.instances.filter(s => s.repository.toLowerCase() === repository).map(s => ({ ...s, repository }));
-    const configured: import("./daily-progress-contract.js").ExpectedDailySource[] = instances.flatMap(instance => [
+    const configured: ExpectedDailySource[] = instances.flatMap(instance => [
       { id: `${repository}:prs:${instance.name}`, repository, instanceId: instance.name, kind: "pull_requests" as const, required: true },
       { id: `${repository}:ledger:${instance.name}`, repository, instanceId: instance.name, kind: "ledger_activity" as const, required: false },
     ]);
     if (!instances.length) configured.push({ id: `${repository}:prs:missing`, repository, instanceId: null, kind: "pull_requests", required: true },
       { id: `${repository}:ledger:missing`, repository, instanceId: null, kind: "ledger_activity", required: false });
-    const expectedSources: import("./daily-progress-contract.js").ExpectedDailySource[] = [...configured,
+    const expectedSources: ExpectedDailySource[] = [...configured,
       { id: `${repository}:deployments`, repository, instanceId: null, kind: "deployments", required: false },
       { id: `${repository}:open`, repository, instanceId: null, kind: "pull_requests", required: false }];
     const raw = instances.map(instance => {

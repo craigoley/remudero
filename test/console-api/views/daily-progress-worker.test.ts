@@ -193,7 +193,8 @@ test("daily repository inventory refuses a named pipe without blocking the admit
   const { readDailyProgressRepositories } = await import("#src/lib/daily-progress-collector.js");
   await withTempDir("daily-inventory-pipe", async root => {
     const directory = join(root, "read-model"), path = join(directory, "repositories-sources.json"); mkdirSync(directory);
-    writeFileSync(path, JSON.stringify({ improvementEvidence: { version: "repository-evidence-inventory-v1", repositories: [{ repository: "acme/app" }], unresolvedInstances: [] } }));
+    const { buildRepositoryEvidenceInventory } = await import("#src/lib/daily-progress-contract.js");
+    writeFileSync(path, JSON.stringify({ improvementEvidence: buildRepositoryEvidenceInventory([{ instanceId: "core", options: { instanceRepository: { owner: "acme", repo: "app" } } }]) }));
     assert.deepEqual(readDailyProgressRepositories(root), ["acme/app"], "the real regular-file source is the positive control");
     unlinkSync(path); const fifo = spawnSync("mkfifo", [path], { encoding: "utf8" }); assert.equal(fifo.status, 0, fifo.stderr);
     const moduleUrl = pathToFileURL(join(repoRoot(), "src", "lib", "daily-progress-collector.ts")).href;
