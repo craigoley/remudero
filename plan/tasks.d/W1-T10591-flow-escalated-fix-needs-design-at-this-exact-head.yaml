@@ -27,3 +27,11 @@
     - PR #13877: 1.40 PR-hours — fix needs design at this exact head (round DAEMON-1792809329037:1:1792810977017) — Truthful per-ID outcomes are known only after the leased push, when ledger writes can fail. Prewriting released outcomes would falsely label rejected deletes. The design must permit per-ID pending intents and reconciliation, or relax its atomic guarantee.
     - PR #13416: 0.96 PR-hours — fix needs design at this exact head (round DAEMON-1792613880153:1:1792617998057) — Authentic bootstrap evidence is unavailable; supplying retained production ledger rows is required to satisfy acceptance without fabricating the sample.
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.87
+    reasons:
+      - "high-risk verdict at confidence 0.87 — on the change's description/files alone, no diff was read — The plan requires the “needs design” blocker to clear without manual intervention, while its cited examples describe unresolved design choices, including whether to relax constraints or change guarantees.; on the change's description/files alone, no diff was read — The plan provides no design direction or plan references for resolving those choices."
+    judged_at: "2026-10-25T03:34:17.408Z"
+    pin: "dc9535586455cbed0425596567454bf55498f50d54cb186e52eaeb9e62190757"
