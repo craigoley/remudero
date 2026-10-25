@@ -3417,6 +3417,7 @@ async function cashRequestJson<T>(input: {
   try {
     for (;;) {
       checkActive();
+      if (runtimeInstanceRegistryPrivateFile() !== undefined) await assertInstanceRegistryRuntimeCurrent();
       const attempt = input.next(checkActive);
       checkActive();
       try {
@@ -3937,6 +3938,38 @@ export interface OpenWeightSpawnArgs {
     request: ExternalEffectRequest;
     onReconciled?: (result: ExternalEffectResult) => void | Promise<void>;
   };
+}
+
+interface PrivateRegistryCashInvocation {
+  args: OpenWeightSpawnArgs;
+  config: Config;
+  selection: Pick<OpenWeightModelSelection, "model" | "effort">;
+}
+
+async function privateRegistryCashInvocation(
+  args: OpenWeightSpawnArgs, config: Config, selection: PrivateRegistryCashInvocation["selection"],
+): Promise<PrivateRegistryCashInvocation> {
+  const selected = runtimeInstanceRegistryPrivateFile()!;
+  try {
+    args = { ...args, tools: args.tools?.slice(), env: args.env && { ...args.env },
+      workerEnv: args.workerEnv && { ...args.workerEnv } };
+    config = structuredClone(config); selection = { ...selection };
+    assertInstanceRegistryWorkerEnvironment(args.workerEnv);
+    const roots = [args.cwd, args.workerHome];
+    if (args.tools?.includes("RunCheck")) roots.push(...["/usr", "/lib", "/lib64", "/bin", "/usr/local"].filter(existsSync));
+    for (const root of roots) {
+      if (!isAbsolute(root)) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+      const path = realpathSync(root);
+      if (!lstatSync(path).isDirectory()) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+      if (isWithin(path, selected)) throw new InstanceRegistryRuntimeError("worker_scope_contains_private_file");
+    }
+  } catch (error) {
+    // Unknown argument or mount scope cannot authorize private input in the in-process tool loop.
+    if (error instanceof InstanceRegistryRuntimeError) throw error;
+    throw new InstanceRegistryRuntimeError("worker_arguments_unqualified");
+  }
+  await assertInstanceRegistryRuntimeCurrent();
+  return { args, config, selection };
 }
 
 /**
@@ -4552,6 +4585,7 @@ async function executeOpenWeightTool(
   runCheck: ((input: OpenWeightCheckInput) => string | Promise<string>) | undefined,
   ledger: OpenWeightRunCheckLedger,
 ): Promise<unknown> {
+  if (runtimeInstanceRegistryPrivateFile() !== undefined) await assertInstanceRegistryRuntimeCurrent();
   switch (name) {
     case "read_file":
       return { content: readFileSync(openWeightContainedPath(cwd, args.path), "utf8") };
@@ -4916,6 +4950,7 @@ export async function spawnFoundryClaudeWorker(
   config: Config,
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
+  if (runtimeInstanceRegistryPrivateFile() !== undefined) ({ args, config, selection } = await privateRegistryCashInvocation(args, config, selection));
   const label = selection.model === "claude-haiku-5-5" ? "Haiku" : selection.model === "claude-sonnet-5-5" ? "Sonnet" : "Opus";
   const toolLineage = createWorkerToolLineage({ provider: "cash-claude", root: config.root, runId: args.runId, taskId: args.taskId });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
@@ -5110,6 +5145,7 @@ export async function spawnOpenWeightWorker(
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
   if (isFoundryClaudeDeployment(selection.model)) return spawnFoundryClaudeWorker(args, config, selection);
+  if (runtimeInstanceRegistryPrivateFile() !== undefined) ({ args, config, selection } = await privateRegistryCashInvocation(args, config, selection));
   const toolLineage = createWorkerToolLineage({ provider: selection.model === "gpt-6.1-sol" ? "cash-responses" : "cash-chat",
     root: config.root, runId: args.runId, taskId: args.taskId });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
