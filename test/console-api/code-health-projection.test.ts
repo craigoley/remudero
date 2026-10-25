@@ -187,11 +187,13 @@ test("code health retains unresolved urgent severity when measurement rules chan
 
 test("code health cached view preserves scope, pinned pages and saved source clocks", async () => {
   const { withTempDir } = await import("#src/lib/tmp.js");
-  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const { mkdirSync, writeFileSync, readFileSync } = await import("node:fs");
+  const requireText = (path: string) => readFileSync(path, "utf8");
   const { join } = await import("node:path");
   const { fixedClock } = await import("#src/lib/clock.js");
   const { publishCodeHealthSnapshot, codeHealthRepositoryStateDir } = await import("#src/lib/code-health-store.js");
   const { readCodeHealthReport } = await import("#src/lib/code-health-view.js");
+  const { codeqlQualityProposalId } = await import("#src/lib/codeql-quality-intake.js");
   await withTempDir("code-health-view-", stateDir => {
     mkdirSync(join(stateDir, "read-model"));
     writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [], improvementEvidence: {
@@ -221,6 +223,21 @@ test("code health cached view preserves scope, pinned pages and saved source clo
     const older = readCodeHealthReport({ stateDir, params, now: now + 2 * 86_400_000 });
     assert(older.data.assessment); assert.equal(older.data.assessment.observedAt, value.observedAt); assert.equal(older.data.freshness, "stale");
     assert.equal(older.data.planningAvailable, false);
+    const instanceDir = join(stateDir, "instance-atlas"); mkdirSync(instanceDir);
+    const publisher = JSON.parse(requireText(join(stateDir, "read-model", "repositories-sources.json")));
+    publisher.instances = [{ instanceId: "acme/atlas", options: { ledgerPath: join(instanceDir, "ledger.ndjson") } }];
+    writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify(publisher));
+    const proposalId = codeqlQualityProposalId(finding().ruleId), row = { key: `acme/atlas/${proposalId}`, proposalId, at: clock.iso(), state: "filed", sourceIds: ["quality:original"],
+      candidate: { repo: "acme/atlas", key: proposalId, observedAt: value.observedAt }, task: { repo: "acme/atlas", key: proposalId, id: "W1-T7" },
+      pr: { repo: "acme/atlas", taskId: "W1-T7", url: "https://github.com/acme/atlas/pull/7" } };
+    writeFileSync(join(instanceDir, "opportunity-outcomes.json"), JSON.stringify([row]));
+    const linked = readCodeHealthReport({ stateDir, params, now });
+    assert.equal(linked.data.relatedWorkState, "reported");
+    assert.deepEqual(linked.data.opportunities[0]!.relatedWork, [{ repository: "acme/atlas", proposalId, taskId: "W1-T7", prUrl: row.pr.url }]);
+    row.pr.repo = "acme/foreign"; writeFileSync(join(instanceDir, "opportunity-outcomes.json"), JSON.stringify([row]));
+    const foreign = readCodeHealthReport({ stateDir, params, now });
+    assert(foreign.data.opportunities.every(opportunity => opportunity.relatedWork.every(work => !work.prUrl)), "a saved row cannot join a foreign pull request");
+
   });
 });
 
