@@ -704,7 +704,7 @@ interface EscalationJudgeReceipt {
   runId: string;
   assignmentId?: string;
 }
-// Keep telemetry off the public verdict shape. The rejudge memo reuses the same verdict object;
+// Keep telemetry off the public verdict shape. Reusing a verdict object preserves its receipt;
 // a clone or an injected verdict has no producer receipt and must remain explicitly unknown.
 const escalationJudgeReceipts = new WeakMap<EscalationJudgeVerdict, EscalationJudgeReceipt>();
 
