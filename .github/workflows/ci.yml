@@ -1331,7 +1331,7 @@ jobs:
             npm run --silent source-size-signal
           fi
 
-      - name: Comment-load ratchet (no file grows past its ceiling; no added block over 25 lines)
+      - name: Comment volume signal (high-priority follow-up, no volume ceiling)
         id: comment-load-ratchet
         if: steps.classify.outputs.class == 'SOURCE'
         continue-on-error: true
