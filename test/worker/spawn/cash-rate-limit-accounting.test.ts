@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { Config } from "#src/lib/config.js";
@@ -11,28 +11,38 @@ const fixtureSecret = "cash-accounting-fixture-not-a-credential";
 
 async function attempt(t: TestContext, fetchImpl: typeof fetch, options: {
   model?: string; endpoint?: string; maxTurns?: number; requestTimeoutMs?: number;
+  existing?: Record<string, { reservedUsd: number; settledUsd: number | null; settledReason?: string }>;
 } = {}) {
   const { dir } = ownedFixtureDir(t, "cash-rate-limit-accounting");
+  const clock = fixedClock(Date.now());
+  if (options.existing) {
+    mkdirSync(join(dir, "state"));
+    writeFileSync(join(dir, "state", OPENWEIGHT_ALLOWANCE_FILENAME), JSON.stringify({
+      utcDay: clock.iso().slice(0, 10), fleetCapUsd: 25, reservations: options.existing,
+    }));
+  }
   const result = await spawnOpenWeightWorker({
     cwd: dir, workerHome: dir, prompt: "bounded accounting replay", tools: [],
     maxTurns: options.maxTurns ?? 3,
     env: { RMD_OPENWEIGHT_API_KEY: fixtureSecret, RMD_FOUNDRY_CLAUDE_API_KEY: fixtureSecret,
       RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://fixture.cognitiveservices.azure.com/anthropic" },
-    clock: fixedClock(Date.now()), requestTimeoutMs: options.requestTimeoutMs ?? 1000, fetchImpl,
+    clock, requestTimeoutMs: options.requestTimeoutMs ?? 1000, fetchImpl,
   }, { root: dir, dailyCapUsd: 25, workerProviders: {
     cashEndpoint: options.endpoint ?? "https://fixture.openai.azure.com/",
   } } as Config, { model: options.model ?? "gpt-6-luna", effort: "low" });
   const allowance = JSON.parse(readFileSync(join(dir, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "utf8")) as {
     reservations: Record<string, { reservedUsd: number; settledUsd: number | null; settledReason?: string }>;
   };
-  return { result, rows: Object.values(allowance.reservations) };
+  return { result, rows: Object.values(allowance.reservations), reservations: allowance.reservations };
 }
 
 test("cash rate-limit accounting zero-settles only definite Azure OpenAI throttles", async t => {
   for (const model of ["gpt-5-nano", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-luna", "gpt-6.1-sol"]) {
     await t.test(model, async child => {
       let calls = 0;
-      const { result, rows } = await attempt(child, async () => { calls++; return new Response(null, { status: 429 }); }, { model });
+      const { result, rows } = await attempt(child, async () => { calls++; return new Response(null, { status: 429 }); }, {
+        model, ...(model === "gpt-6.1-sol" ? { endpoint: "https://fixture.cognitiveservices.azure.com/" } : {}),
+      });
       assert.equal(calls, 1, "no retry without a server cooldown");
       assert.equal(result.isError, true);
       assert.match(result.stderr, /HTTP 429/);
@@ -135,4 +145,24 @@ test("cash rate-limit accounting preserves the existing definite deployment-abse
   const { result, rows } = await attempt(t, async () => new Response(null, { status: 404 }));
   assert.equal(result.isError, true);
   assert.equal(rows[0]!.settledUsd, 0);
+});
+
+test("cash rate-limit accounting does not rewrite earlier charges or unsettled reservations", async t => {
+  const existing = { "older-failure": { reservedUsd: 1, settledUsd: 0.75, settledReason: "earlier input estimate" },
+    "unknown-inflight": { reservedUsd: 1.75, settledUsd: null } };
+  const { result, reservations } = await attempt(t, async () => new Response(null, { status: 429 }), { existing });
+  assert.equal(result.budgetSettledUsd, 0);
+  for (const [id, row] of Object.entries(existing)) assert.deepEqual(reservations[id], row);
+});
+
+test("cash rate-limit accounting still reserves against the fixed cap before transport", async t => {
+  let calls = 0;
+  const existing = { spent: { reservedUsd: 24.9999, settledUsd: 24.9999 } };
+  const { result, reservations } = await attempt(t, async () => {
+    calls++; return new Response(null, { status: 429 });
+  }, { existing });
+  assert.equal(calls, 0);
+  assert.equal(result.budgetRefused, true);
+  assert.equal(result.subtype, "cash_allowance_exhausted");
+  assert.deepEqual(reservations, existing);
 });
