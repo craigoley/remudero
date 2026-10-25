@@ -644,5 +644,18 @@ test("code health collection publishes cached facts and keeps failed refreshes v
     assert.equal((await collectCodeHealth({ ...opts, stateDir: empty, readQualityEvidence: async () => { throw new Error("no source"); } })).state, "unavailable");
     assert.equal(readCodeHealthSnapshot(empty, repository).state, "not_collected");
     assert.equal(readCodeHealthCollectionFailure(empty, repository).state, "failed", "a failed first read is explicit, never an empty healthy assessment");
+    const during = join(stateDir, "measured-during-read"), measuredAt = new Date(now + 30_000).toISOString(), laterSarifId = "22345678-1234-1234-1234-123456789012";
+    assert.equal(saveCodeHealthCoverageSource({ stateDir: during, repository, provenance, clock }).state, "published");
+    const completed = await collectCodeHealth({ ...opts, stateDir: during, readQualityEvidence: async () => {
+      now += 60_000;
+      return { currentSha: sha, quality: { ...evidence.quality,
+        artifacts: [{ ...artifact, observedAt: measuredAt, completion: { ...artifact.completion, at: measuredAt }, sarifId: laterSarifId, runAttempt: "2", scanId: `codeql:123:2:actions:${laterSarifId}` }],
+        analyses: evidence.quality.analyses.map(analysis => ({ ...analysis, sarifId: laterSarifId, createdAt: measuredAt })) } };
+    } });
+    assert.equal(completed.state, "published");
+    const withinRead = readCodeHealthSnapshot(during, repository); assert("snapshot" in withinRead);
+    assert.equal(projectCodeHealth(withinRead.snapshot.input).sources.find(source => source.kind === "quality" && source.required)!.state, "complete", "a scan completed during collection is measured by the finished report, not treated as a future scan");
+    assert(Date.parse(withinRead.snapshot.input.observedAt) >= Date.parse(measuredAt));
+
   });
 });
