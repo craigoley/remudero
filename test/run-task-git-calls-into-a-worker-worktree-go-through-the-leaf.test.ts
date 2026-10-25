@@ -61,8 +61,7 @@ const HARNESS_SITES: Readonly<Record<string, { count: number; reason: string }>>
   materializeReviewerSnapshot: { count: 1, reason: "the `git clone --shared` of the source top level the leaf has just pinned; the checkout and every read go through the leaf (W1-T6135)" },
   refreshManagedCheckout: { count: 2, reason: CLONE },
   pushFixRound: { count: 2, reason: "seam argv for its exec/capture, whose defaults run the leaf (W1-T6106)" },
-  resolveReviewSubjectCheckout: { count: 2, reason: CLONE },
-  planTreeIsBehindMain: { count: 2, reason: CLONE },
+  reviewCommandHost: { count: 4, reason: CLONE },
   taskIdsEverFiled: { count: 1, reason: OWN },
   remotePlanCeilingOnRef: { count: 1, reason: OWN },
   checkAcceptanceChangedFiles: { count: 1, reason: OWN },
@@ -158,7 +157,7 @@ function sitesByDeclaration(text: string): { raw: Map<string, number>; leaf: Set
 }
 
 describe("W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS site", () => {
-  const text = `${readFileSync(SOURCE, "utf8")}\n${readFileSync(MOVED_SOURCE, "utf8")}\n${readFileSync(DAEMON_MODULE, "utf8")}\n${readFileSync(EXTRACTED_SOURCE, "utf8")}`;
+  const text = `${readFileSync(SOURCE, "utf8")}\n${readFileSync(MOVED_SOURCE, "utf8")}\n${readFileSync(DAEMON_MODULE, "utf8")}\n${readFileSync(EXTRACTED_SOURCE, "utf8")}\n${readFileSync(fileURLToPath(new URL("../src/cli/commands/review.ts", import.meta.url)), "utf8")}`;
   const { raw, leaf, declared } = sitesByDeclaration(text);
   const proofSites = sitesByDeclaration(readFileSync(fileURLToPath(new URL("../src/lib/check-proof.ts", import.meta.url)), "utf8"));
 

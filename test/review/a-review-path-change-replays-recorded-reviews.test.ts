@@ -125,7 +125,7 @@ test("W1-T10270: the sample is refreshed from the ledger and excludes regressed 
 
 // @source-text-subject: the declared wiring proof checks both production call sites, not policy behavior.
 test("W1-T10270: production review decisions route through the replayed seam", () => {
-  const source = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
+  const source = readFileSync(join(REPO_ROOT, "src/cli/commands/review.ts"), "utf8");
   const run = source.slice(source.indexOf("async function runReview("), source.indexOf("async function reviewCommand("));
   const command = source.slice(source.indexOf("async function reviewCommand("));
   assert.match(run, /const replayDecision = classifyReviewOutcome\(replayInput\)/);
