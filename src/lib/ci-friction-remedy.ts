@@ -338,6 +338,11 @@ export function reviewStatusWithoutMechanism(key: string, details: readonly stri
   return key === "check:ci-log:remudero-review" && ownerSearchTerms(key, details).length === 1;
 }
 
+/** Missing source coverage is a predicate refusal, not evidence that its verdict producer is defective. */
+export function coverageRefusalWithoutMechanism(key: string, details: readonly string[]): boolean {
+  return key.startsWith("check:ci-log:") && details.some(detail => /\bdiff-coverage:\s*BLOCKED\b/i.test(detail));
+}
+
 /**
  * The code that owns a cause. A refusal is owned by whatever raises its reason; a CI check by the
  * scripts and source that name it; a main-merge cause by the file it conflicts on. `undefined` when
@@ -357,6 +362,7 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
     const file = key.slice("main_merge:".length);
     return search.fileExists(file) ? { files: [file], why: [`${file}: main merged into the PR over a change to it`] } : undefined;
   }
+  if (!testPath && coverageRefusalWithoutMechanism(key, details)) return undefined;
   const terms = ownerSearchTerms(key, details);
   const family = key.startsWith("check:") ? terms.at(-1) : undefined;
   const distinctive = family && key.startsWith("check:ci-log:") ? terms.slice(0, -1) : [];

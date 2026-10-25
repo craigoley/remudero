@@ -97,6 +97,124 @@ export interface components {
       sources: (ViewSource)[];
       data: DailyProgressReport;
     };
+    ProductId: string;
+    ProductRequestId: string;
+    ProductRevision: number;
+    ProductResearchLink: {
+      label: string;
+      /** HTTP(S) only; credentials and token, access_token, api_key or x-vercel-protection-bypass query keys are refused. */
+      url: string;
+    };
+    /** Private operator proposals. Text is trimmed and must remain nonempty. Requested repository and resources confer no execution authority. The resulting stored product must fit 24576 bytes. */
+    ProductBrief: {
+      idea: string;
+      name?: string;
+      portfolio?: string;
+      objective?: string;
+      constraints?: (string)[];
+      decisions?: ({
+        key: string;
+        value: string;
+        provenance: {
+          kind: "operator" | "research" | "recommendation";
+          reference?: string;
+        };
+      })[];
+      research?: (ProductResearchLink)[];
+      requestedRepository?: {
+        owner: string;
+        name: string;
+      };
+      resourceEnvelope?: {
+        budgetUsd: number;
+        maxConcurrentBuilds: number;
+        existingSetupOnly: boolean;
+      };
+    };
+    /** At most 65536 raw request bytes. Omit id and use expectedRevision 0 to create; an update names its existing product and current revision. Ownership comes only from verifiedActor. Reusing requestId with the same normalized command replays its original receipt; a changed command conflicts. Owner, verified repository, stage evidence and execution authority fields are rejected. A changed brief advances objectiveRevision; every accepted write advances revision. */
+    ProductWrite: {
+      version: "product-intent-v1";
+      requestId: ProductRequestId;
+      id?: ProductId;
+      expectedRevision: number;
+      brief: ProductBrief;
+    };
+    ProductRepositoryIdentity: {
+      provider: "github";
+      id: number;
+      owner: string;
+      name: string;
+      defaultBranch: string;
+      visibility: "public" | "private" | "internal";
+      verifiedAt: string;
+    };
+    ProductStageEvidence: {
+      id: string;
+      stage: "research" | "repository" | "plan" | "build" | "review" | "deploy" | "improve";
+      outcome: "proposed" | "queued" | "admitted" | "running" | "succeeded" | "failed" | "unknown" | "blocked";
+      objectiveRevision: ProductRevision;
+      observedAt: string;
+      references: (ProductResearchLink)[];
+    };
+    ProductReceipt: {
+      operationId: string;
+      productId: ProductId;
+      revision: ProductRevision;
+      objectiveRevision: ProductRevision;
+      savedAt: string;
+      payloadDigest: string;
+      recordDigest: string;
+    };
+    ProductProjection: {
+      version: "product-intent-v1";
+      id: ProductId;
+      revision: ProductRevision;
+      objectiveRevision: ProductRevision;
+      createdAt: string;
+      updatedAt: string;
+      brief: ProductBrief;
+      repository: (ProductRepositoryIdentity) | (null);
+      stageEvidence: (ProductStageEvidence)[];
+      executionAuthority: "none";
+      history: (ProductReceipt)[];
+    };
+    ProductSummary: {
+      id: ProductId;
+      revision: ProductRevision;
+      objectiveRevision: ProductRevision;
+      createdAt: string;
+      updatedAt: string;
+      name: string;
+      portfolio?: string;
+    };
+    ProductListResponse: {
+      version: "product-intent-v1";
+      products: (ProductSummary)[];
+    };
+    ProductReadResponse: {
+      version: "product-intent-v1";
+      product: ProductProjection;
+    };
+    ProductReceiptResponse: {
+      version: "product-intent-v1";
+      receipt: ProductReceipt;
+    };
+    ProductWriteResponse: {
+      version: "product-intent-v1";
+      receipt: ProductReceipt;
+      replayed: boolean;
+    };
+    ProductError: {
+      version: "product-intent-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large";
+    };
+    /** The service's scope, tier or sensitivity gate refused access before the product handler. */
+    ProductAccessError: {
+      error: "unauthorized" | "forbidden";
+      required_scope?: "read" | "write";
+      required_tier?: "middle";
+      required_sensitivity?: "sensitive";
+    };
     /** Bounded read-only answer-v1; missing evidence is explicit and citations are dated. */
     OperatorAgentAnswer: {
       version: "answer-v1";
@@ -5796,6 +5914,30 @@ export interface components {
 }
 
 export interface paths {
+  "/v1/products": {
+    get: {
+      responses: {
+          "200": (ProductListResponse) | (ProductReadResponse) | (ProductReceiptResponse);
+          "400": ProductError;
+          "401": ProductAccessError;
+          "403": (ProductError) | (ProductAccessError);
+          "404": ProductError;
+          "503": ProductError;
+        };
+    };
+    post: {
+      responses: {
+          "200": ProductWriteResponse;
+          "400": ProductError;
+          "401": ProductAccessError;
+          "403": (ProductError) | (ProductAccessError);
+          "404": ProductError;
+          "409": ProductError;
+          "413": ProductError;
+          "503": ProductError;
+        };
+    };
+  };
   "/v1/analytics": {
     get: {
       responses: {

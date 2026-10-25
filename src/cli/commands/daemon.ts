@@ -1188,7 +1188,15 @@ export async function daemonCommand(
   // exactly how #1066 merged: consumer wired, producer never.
   const autoTriageHooks = target.isSelf ? (deps.buildAutoTriageHooks ?? buildAutoTriageDaemonHooks)({ config, repairSnapshot: () => {
     const generation = freshReadGeneration(tickReadGeneration, { consumer: "auto_triage_repair", log });
-    if (!generation || generation.facts.openPrError) return undefined;
+    if (!generation || generation.facts.openPrError) {
+      log("auto_triage.repair_snapshot_unavailable", {
+        reasonCode: tickReadGeneration === undefined ? "unpublished-generation" : !generation ? "stale-generation" : "open-pr-read-error",
+        generation: tickReadGeneration?.generation ?? null,
+        read_started_at_ms: tickReadGeneration?.publishedAtMs ?? null,
+        settled_at_ms: tickReadGeneration?.settledAtMs ?? null,
+      });
+      return undefined;
+    }
     return { owner: target.owner, repo: target.repo, asOfMs: generation.publishedAtMs, prs: generation.facts.openPrViews };
   } }) : undefined;
   // W1-T1040: the GitHub-side posture drift check. SELF-TARGET ONLY, same reason retro/auto-triage

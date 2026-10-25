@@ -22106,7 +22106,11 @@ export async function runSweep(
   // conflict is REPORTED and skipped rather than retried this pass.
   const ratchetRefreshed = new Set(await runArmedRatchetRejudge(openPrs, deps));
   if (!deps.dryRun && deps.updateBranch) {
-    const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && !refreshAdmission.has(pr.prNumber) && !ladderUpdatedPrs.has(pr.prNumber) && !gardenRecordRefusals.has(pr.prNumber) && !ratchetRefreshed.has(pr.prNumber));
+    // An overlap judgment cannot override a clearance refusal for this same red head and main.
+    // A different identity or a head whose checks are no longer red keeps its ordinary eligibility.
+    const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && !refreshAdmission.has(pr.prNumber) && !ladderUpdatedPrs.has(pr.prNumber) && !gardenRecordRefusals.has(pr.prNumber) && !ratchetRefreshed.has(pr.prNumber))
+      .filter((pr) => pr.checksState !== "red" || mainTipSha === undefined ||
+        ![...refusedClearances.keys()].some((key) => key.startsWith(`${pr.prNumber}@${pr.headSha}@${mainTipSha}@`)));
     const behindMainByPr = deps.behindMainByPr ?? new Map<number, number>();
     // W1-T6022: the ready refresh stands down in an Actions incident and spends one update per (PR, head).
     // The status is read only when a ready PR sits under the distance gate, so a pass with none spends no read.

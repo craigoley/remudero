@@ -225,6 +225,234 @@ components:
         stale: {type: boolean}
         sources: {type: array, items: {$ref: "#/components/schemas/ViewSource"}}
         data: {$ref: "#/components/schemas/DailyProgressReport"}
+    ProductId:
+      type: string
+      minLength: 36
+      maxLength: 36
+      pattern: '^prd_[a-f0-9]{32}$'
+    ProductRequestId:
+      type: string
+      minLength: 16
+      maxLength: 128
+      pattern: '^[A-Za-z0-9_-]{16,128}$'
+    ProductRevision:
+      type: integer
+      minimum: 1
+      maximum: 9007199254740991
+    ProductResearchLink:
+      type: object
+      additionalProperties: false
+      required: [label, url]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 120 }
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          pattern: '^[Hh][Tt][Tt][Pp][Ss]?:'
+          description: HTTP(S) only; credentials and token, access_token, api_key or x-vercel-protection-bypass query keys are refused.
+    ProductBrief:
+      type: object
+      additionalProperties: false
+      description: >
+        Private operator proposals. Text is trimmed and must remain nonempty. Requested repository
+        and resources confer no execution authority. The resulting stored product must fit 24576 bytes.
+      required: [idea]
+      properties:
+        idea: { type: string, minLength: 1, maxLength: 6000 }
+        name: { type: string, minLength: 1, maxLength: 80 }
+        portfolio: { type: string, minLength: 1, maxLength: 120 }
+        objective: { type: string, minLength: 1, maxLength: 2000 }
+        constraints:
+          type: array
+          maxItems: 24
+          items: { type: string, minLength: 1, maxLength: 500 }
+        decisions:
+          type: array
+          maxItems: 32
+          items:
+            type: object
+            additionalProperties: false
+            required: [key, value, provenance]
+            properties:
+              key: { type: string, minLength: 1, maxLength: 80 }
+              value: { type: string, minLength: 1, maxLength: 2000 }
+              provenance:
+                type: object
+                additionalProperties: false
+                required: [kind]
+                properties:
+                  kind: { type: string, enum: [operator, research, recommendation] }
+                  reference: { type: string, minLength: 1, maxLength: 500 }
+        research:
+          type: array
+          maxItems: 16
+          items: { $ref: "#/components/schemas/ProductResearchLink" }
+        requestedRepository:
+          type: object
+          additionalProperties: false
+          required: [owner, name]
+          properties:
+            owner: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+            name:
+              type: string
+              minLength: 1
+              maxLength: 100
+              pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$'
+        resourceEnvelope:
+          type: object
+          additionalProperties: false
+          required: [budgetUsd, maxConcurrentBuilds, existingSetupOnly]
+          properties:
+            budgetUsd: { type: number, exclusiveMinimum: 0, maximum: 10000 }
+            maxConcurrentBuilds: { type: integer, minimum: 1, maximum: 16 }
+            existingSetupOnly: { type: boolean }
+    ProductWrite:
+      type: object
+      additionalProperties: false
+      description: >
+        At most 65536 raw request bytes. Omit id and use expectedRevision 0 to create; an update
+        names its existing product and current revision. Ownership comes only from verifiedActor.
+        Reusing requestId with the same normalized command replays its original receipt; a changed
+        command conflicts. Owner, verified repository, stage evidence and execution authority fields
+        are rejected. A changed brief advances objectiveRevision; every accepted write advances revision.
+      required: [version, requestId, expectedRevision, brief]
+      if: { required: [id] }
+      else:
+        properties:
+          expectedRevision: { enum: [0] }
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        requestId: { $ref: "#/components/schemas/ProductRequestId" }
+        id: { $ref: "#/components/schemas/ProductId" }
+        expectedRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        brief: { $ref: "#/components/schemas/ProductBrief" }
+    ProductRepositoryIdentity:
+      type: object
+      additionalProperties: false
+      required: [provider, id, owner, name, defaultBranch, visibility, verifiedAt]
+      properties:
+        provider: { type: string, enum: [github] }
+        id: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        owner: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+        name: { type: string, minLength: 1, maxLength: 100, pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$' }
+        defaultBranch: { type: string, minLength: 1, maxLength: 255 }
+        visibility: { type: string, enum: [public, private, internal] }
+        verifiedAt: { type: string, format: date-time }
+    ProductStageEvidence:
+      type: object
+      additionalProperties: false
+      required: [id, stage, outcome, objectiveRevision, observedAt, references]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 128 }
+        stage: { type: string, enum: [research, repository, plan, build, review, deploy, improve] }
+        outcome: { type: string, enum: [proposed, queued, admitted, running, succeeded, failed, unknown, blocked] }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        observedAt: { type: string, format: date-time }
+        references:
+          type: array
+          maxItems: 16
+          items: { $ref: "#/components/schemas/ProductResearchLink" }
+    ProductReceipt:
+      type: object
+      additionalProperties: false
+      required: [operationId, productId, revision, objectiveRevision, savedAt, payloadDigest, recordDigest]
+      properties:
+        operationId: { type: string, minLength: 71, maxLength: 71, pattern: '^pwrite_[a-f0-9]{64}$' }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        revision: { $ref: "#/components/schemas/ProductRevision" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        savedAt: { type: string, format: date-time }
+        payloadDigest: { type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$' }
+        recordDigest: { type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$' }
+    ProductProjection:
+      type: object
+      additionalProperties: false
+      required: [version, id, revision, objectiveRevision, createdAt, updatedAt, brief, repository, stageEvidence, executionAuthority, history]
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        id: { $ref: "#/components/schemas/ProductId" }
+        revision: { $ref: "#/components/schemas/ProductRevision" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        brief: { $ref: "#/components/schemas/ProductBrief" }
+        repository:
+          oneOf:
+            - $ref: "#/components/schemas/ProductRepositoryIdentity"
+            - { type: "null" }
+        stageEvidence:
+          type: array
+          maxItems: 128
+          items: { $ref: "#/components/schemas/ProductStageEvidence" }
+        executionAuthority: { type: string, enum: [none] }
+        history:
+          type: array
+          maxItems: 128
+          items: { $ref: "#/components/schemas/ProductReceipt" }
+    ProductSummary:
+      type: object
+      additionalProperties: false
+      required: [id, revision, objectiveRevision, createdAt, updatedAt, name]
+      properties:
+        id: { $ref: "#/components/schemas/ProductId" }
+        revision: { $ref: "#/components/schemas/ProductRevision" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        name: { type: string, minLength: 1, maxLength: 80 }
+        portfolio: { type: string, minLength: 1, maxLength: 120 }
+    ProductListResponse:
+      type: object
+      additionalProperties: false
+      required: [version, products]
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        products:
+          type: array
+          maxItems: 64
+          items: { $ref: "#/components/schemas/ProductSummary" }
+    ProductReadResponse:
+      type: object
+      additionalProperties: false
+      required: [version, product]
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        product: { $ref: "#/components/schemas/ProductProjection" }
+    ProductReceiptResponse:
+      type: object
+      additionalProperties: false
+      required: [version, receipt]
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        receipt: { $ref: "#/components/schemas/ProductReceipt" }
+    ProductWriteResponse:
+      type: object
+      additionalProperties: false
+      required: [version, receipt, replayed]
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        receipt: { $ref: "#/components/schemas/ProductReceipt" }
+        replayed: { type: boolean }
+    ProductError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, request_too_large]
+    ProductAccessError:
+      type: object
+      additionalProperties: false
+      description: The service's scope, tier or sensitivity gate refused access before the product handler.
+      required: [error]
+      properties:
+        error: { type: string, enum: [unauthorized, forbidden] }
+        required_scope: { type: string, enum: [read, write] }
+        required_tier: { type: string, enum: [middle] }
+        required_sensitivity: { type: string, enum: [sensitive] }
     OperatorAgentAnswer:
       type: object
       description: Bounded read-only answer-v1; missing evidence is explicit and citations are dated.
@@ -13594,6 +13822,126 @@ components:
 # DECISIONS feed, escalation inbox, question backlog, cost meter) describes is explicit
 # follow-on work, not added here.
 paths:
+  /v1/products:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Both reads and writes require the
+          configured operator identity; browser owner fields, actor headers and shared bearers
+          cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema: { type: string, minLength: 1 }
+    get:
+      summary: Read the verified operator's private product briefs or durable save receipt.
+      description: >
+        With no query, returns at most 64 summaries without source idea text. Supply exactly one
+        id to read its brief, repository identity, stage evidence and latest 128 history receipts,
+        or one requestId to reconcile a save. Duplicate, combined and unknown query keys fail.
+        Responses use Cache-Control private, no-store. Unknown or corrupt storage is a failure.
+      parameters:
+        - name: id
+          in: query
+          schema: { $ref: "#/components/schemas/ProductId" }
+        - name: requestId
+          in: query
+          schema: { $ref: "#/components/schemas/ProductRequestId" }
+      responses:
+        "200":
+          description: A bounded private summary list, full product projection or original receipt.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductListResponse"
+                  - $ref: "#/components/schemas/ProductReadResponse"
+                  - $ref: "#/components/schemas/ProductReceiptResponse"
+        "400":
+          description: Invalid, duplicate or combined query selectors.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAccessError" }
+        "403":
+          description: The verified operator identity or sensitive read grant is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductError"
+                  - $ref: "#/components/schemas/ProductAccessError"
+        "404":
+          description: The product or request receipt does not exist for this operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+        "503":
+          description: The state root is unavailable, unreadable or corrupt; no empty success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+    post:
+      summary: Atomically save a private versioned brief with optimistic revisions and a durable receipt.
+      description: >
+        Requires the verified operator and middle write tier. At most 65536 raw request bytes and
+        24576 bytes per stored product; up to 64 products and 4096 receipts per operator in at most
+        4194304 state bytes. Data and receipts commit together in the existing core state root.
+        A post-rename outcome_unknown must be reconciled with GET by requestId or the identical
+        retry; recovery_required preserves a pending artifact for recovery. These outcomes never
+        imply a failed write was rolled back. Responses use Cache-Control private, no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductWrite" }
+      responses:
+        "200":
+          description: The durable acknowledgement, or the same original receipt on an identical retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductWriteResponse" }
+        "400":
+          description: Malformed JSON, invalid brief, forbidden authority fields or excessive product size.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAccessError" }
+        "403":
+          description: The verified operator identity or required write grant is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductError"
+                  - $ref: "#/components/schemas/ProductAccessError"
+        "404":
+          description: The product to update does not exist for this operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+        "409":
+          description: stale_revision, idempotency_conflict or the bounded product, receipt or state capacity is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+        "413":
+          description: The raw request exceeds 65536 bytes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+        "503":
+          description: busy, corrupt, unavailable, outcome_unknown or recovery_required; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
   /v1/analytics:
     get:
       summary: Read the internal benchmark evidence-quality or routing-pool projection.

@@ -13,9 +13,10 @@ import { deriveReviewReplaySample, parseReviewReplaySample, replayReviewSample,
 import { selectAffectedSuites } from "#src/lib/affected-suites.js";
 import { readConfigGardenLedgerRows } from "#src/lib/config-gardener.js";
 import { evaluateReviewerHealthNow, loadReviewerHealthState, reviewerHealthStatePath,
-  saveReviewerHealthState } from "#src/lib/reviewer-health.js";
+  saveReviewerHealthState, resetLoadedReviewerCodeSha, loadedReviewerCodeSha } from "#src/lib/reviewer-health.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { reviewCommand } from "#src/run-task.js";
+import { reviewCommand, runReview } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import type { Config } from "#src/lib/config.js";
 
 const samplePath = join(REPO_ROOT, "test/fixtures/review-replay/sample.ndjson");
@@ -327,4 +328,73 @@ test("W1-T10270: an unavailable health projection refuses refresh and inventory 
   writeFileSync(statePath, seeded);
   assert.equal(refreshReviewReplaySample({ stateDir, root, generatorRevision: "test" }).rows.length, 1);
   assert.equal(parseReviewReplaySample(spec.inventory()).rows.length, 1);
+});
+
+async function reviewWithReplayProvenance(legacy: string | null, identified: boolean) {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}replay-code-provenance-`));
+  const head = "e".repeat(40), codeSha = "a".repeat(40), nextSha = "b".repeat(40);
+  const diff = ["diff --git a/plan/tasks.yaml b/plan/tasks.yaml", "--- a/plan/tasks.yaml", "+++ b/plan/tasks.yaml",
+    "@@ -1,2 +1,2 @@", " - id: W1-T10270", "-  title: previous", "+  title: revised"].join("\n");
+  const shim = ghShim([
+    { when: "pr diff", stdout: diff },
+    { when: "headRefOid", stdout: JSON.stringify({ headRefOid: head }) },
+    { when: "state", stdout: '{"state":"OPEN"}' },
+    { when: "pulls/", stdout: JSON.stringify({ number: 1, state: "open", html_url: "https://github.com/acme/consumer/pull/1",
+      body: "recorded reviewer identity", head: { ref: "topic", sha: head } }) },
+    { when: "", stderr: "fixture refuses unexpected GitHub access", exit: 87 },
+  ], { kind: "replay-code-provenance" });
+  const priorPath = process.env.PATH;
+  const rows: Record<string, unknown>[] = [];
+  let freshnessReads = 0, arms = 0;
+  try {
+    resetLoadedReviewerCodeSha();
+    assert.equal(loadedReviewerCodeSha(() => { if (legacy === null) throw new Error("bundle has no checkout"); return legacy; }), legacy);
+    process.env.PATH = `${shim.dir}:${priorPath ?? ""}`;
+    await runReview({ owner: "acme", repo: "consumer", prUrl: "https://github.com/acme/consumer/pull/1",
+      task: { id: "W1-T10270", acceptance: [{ claim: "recorded reviewer identity", proof: "recorded reviewer identity" }] },
+      report: "recorded reviewer identity", settingsFile: join(root, "settings.json"), config: { root } as Config,
+      log: (step, extra) => rows.push({ ts: "2026-10-25T13:04:41.366Z", run_id: "fixture-review", step, ...extra }),
+      say: () => {}, account: result => result, spawnReviewer: false, headCheckoutDir: REPO_ROOT,
+      lintPlanForReviewFn: async () => ({ ran: true, label: "fixture", checked: 1, violations: [] }),
+      ledgerPath: join(root, "state", "ledger.ndjson"), runId: "fixture-review",
+      reviewerCodeFreshness: () => {
+        freshnessReads++;
+        return identified ? { status: "stale", codeSha, originMainSha: nextSha, changedPaths: ["src/cli/commands/review.ts"] }
+          : { status: "unreadable", reason: "fixture cannot establish reviewer provenance" };
+      },
+      arm: () => { arms++; throw new Error("replay attribution must not arm"); }, disarm: () => {},
+    });
+    return { rows, freshnessReads, arms, codeSha, head, publication: readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>) };
+  } finally {
+    resetLoadedReviewerCodeSha();
+    if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath;
+    rmSync(shim.dir, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("computed review replay uses the verified reviewer identity when checkout attribution is absent or different", async () => {
+  for (const legacy of [null, "c".repeat(40)]) {
+    const f = await reviewWithReplayProvenance(legacy, true);
+    assert.equal(f.freshnessReads, 1, "the real publication boundary must assess reviewer provenance");
+    const recorded = f.rows.filter(r => r.step === "review.replay_input");
+    assert.equal(recorded.length, 1);
+    assert.equal(recorded[0]!.recorded_class, "withheld", "stale code still cannot publish");
+    assert.ok(f.publication.some(r => r.step === "review.post_refused" && r.reviewer_code_freshness === "stale"));
+    assert.equal(recorded[0]!.reviewer_code_sha, f.codeSha, "record the same code identity the publication guard assessed");
+    assert.notEqual(recorded[0]!.reviewer_code_sha, f.head, "the consumer's PR head is not reviewer code");
+    assert.equal(f.arms, 0);
+    replayReviewSample(derive(recorded));
+  }
+});
+
+test("unavailable reviewer provenance remains unknown and cannot enter a replay sample", async () => {
+  const f = await reviewWithReplayProvenance(null, false);
+  assert.equal(f.freshnessReads, 1);
+  const recorded = f.rows.filter(r => r.step === "review.replay_input");
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0]!.recorded_class, "withheld");
+  assert.ok(f.publication.some(r => r.step === "review.post_refused" && r.reviewer_code_freshness === "unreadable"));
+  assert.equal(recorded[0]!.reviewer_code_sha, null);
+  assert.equal(f.arms, 0);
+  assert.throws(() => derive(recorded), /invalid review replay row field: reviewer_code_sha/);
 });
