@@ -349,8 +349,8 @@ test("code health planning follows a qualified finding while other checks remain
     const saved = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(stateDir, value.repository), input: value, expectedSnapshotId: null, clock }); assert(saved.state === "published");
     const read = (now: number) => readCodeHealthReport({ stateDir, params: new URLSearchParams({ repository: value.repository }), now }).data;
     const report = read(clock.now()); assert(report.assessment); assert.equal(report.assessment.summary.healthy, null);
-    assert(report.opportunities.length > 0); assert.equal(report.planningAvailable, true, "unknown coverage must not hide a qualified finding's existing planning path");
-    assert(report.opportunities.every(opportunity => opportunity.mayPlan));
+    assert(report.opportunities.length > 0); assert(report.opportunities.every(opportunity => opportunity.mayPlan), "the finding itself is a qualified positive control");
+    assert.equal(report.planningAvailable, true, "unknown coverage must not hide a qualified finding's existing planning path");
     assert.equal(read(clock.now() + 2 * 86_400_000).planningAvailable, false, "the finding's own expired source still blocks planning");
   });
 });
