@@ -587,6 +587,7 @@ import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, spoolingStarvationAlert } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
 import { testPlaceOutcome } from "./lib/test-placement.js";
+import { readPlanBase } from "./lib/plan-base-reader.js";
 import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "./lib/baked-closure-catalog.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
@@ -22779,7 +22780,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // W1-T4381: `--merge-base` scopes to the fork point of HEAD and `--base`, so a record main
   // changed after the fork is never linted as this branch's change. ci.yml's `--base HEAD^1` on a
   // merge ref already has that scope; a local checkout diffed against origin/main's TIP does not.
-  const scopeBase = baseRef && rest.includes("--merge-base") ? lintScopeMergeBase(checkoutRoot, baseRef) : baseRef;
+  let scopeBase = baseRef && rest.includes("--merge-base") ? lintScopeMergeBase(checkoutRoot, baseRef) : baseRef;
   const baseLabel = scopeBase === baseRef ? baseRef : `${baseRef} at merge-base ${scopeBase!.slice(0, 12)}`;
   let plan: Plan;
   let planRaw: string;
@@ -22828,11 +22829,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // matches exactly what `loadPlan` would see from a real checkout at `baseRef`.
     const tmpDir = makeTempDir("lint-plan-base");
     try {
-      const oldRaw = hostWorktreeGit(checkoutRoot, ["show", `${scopeBase}:${relPath}`], {
-        // maxBuffer: the SAME blob syncPlanFromOrigin reads at :576, so it overflows Node's 1 MiB
-        // default at the same moment — fixing one site alone would just move the failure to CI.
-        maxBuffer: 1 << 26,
-      });
+      const base = readPlanBase(checkoutRoot, scopeBase!, relPath);
+      scopeBase = base.commit;
+      const oldRaw = base.raw;
       const tmpFile = join(tmpDir, "tasks.yaml");
       writeFileSync(tmpFile, oldRaw, "utf8");
       materializeOriginShards(checkoutRoot, dirname(relPath), tmpDir, undefined, scopeBase);
