@@ -7,6 +7,8 @@ import { hostname } from "node:os";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { buildCodeHealthOpportunities, codeqlQualityProposalId, qualityScanFromCollectedEvidence } from "#src/lib/codeql-quality-intake.js";
+import { prepareCodeHealthCollection } from "#src/lib/code-health-collector.js";
+import { projectCodeHealth } from "#src/lib/code-health-projection.js";
 import { readCodeHealthSnapshot, publishCodeHealthSnapshot } from "#src/lib/code-health-store.js";
 import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
 import { readCoverageNightlySummary } from "#src/lib/coverage-nightly-intake.js";
@@ -395,4 +397,30 @@ test("code health detects corruption of an immutable snapshot's history link", a
     writeFileSync(path, original);
     assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas", saved.snapshotId).state, "observed");
   });
+});
+
+
+test("code health collection preserves source clocks and prior partial findings", () => {
+  const previous = input(); previous.baseline = null;
+  const old = previous.scans[0]!; old.state = "partial"; old.reason = "A configured analysis did not finish.";
+  const value = prepareCodeHealthCollection({ repository: previous.repository, currentSha: previous.currentSha,
+    observedAt: "2026-11-02T06:00:00.000Z", scans: [], previous });
+  assert.equal(value.baseline, null, "a partial source cannot become a comparison baseline");
+  const report = projectCodeHealth(value);
+  assert.equal(report.findings.length, old.findings.length);
+  assert.equal(report.sources.filter(source => source.required).length, 2);
+  assert.equal(report.summary.healthy, null);
+  for (const known of report.findings) {
+    const source = report.sources.find(source => source.id === known.sourceId)!;
+    assert.equal(source.observedAt, old.observedAt); assert.equal(source.analyzedSha, old.analyzedSha);
+  }
+  const retry = prepareCodeHealthCollection({ repository: previous.repository, currentSha: previous.currentSha,
+    observedAt: "2026-11-02T07:00:00.000Z", scans: [], previous: value });
+  assert.equal(projectCodeHealth(retry).findings.length, old.findings.length, "two failed reads cannot erase prior partial findings");
+  const complete = input(), scans = structuredClone(complete.scans);
+  for (const scan of scans) scan.observedAt = "2026-11-02T05:59:00.000Z";
+  const repeated = prepareCodeHealthCollection({ repository: complete.repository, currentSha: complete.currentSha,
+    observedAt: "2026-11-02T06:00:00.000Z", scans, previous: complete });
+  assert.equal(repeated.scans[0]!.observedAt, complete.scans[0]!.observedAt, "re-reading a source cannot move its own measurement clock");
+  assert.notEqual(projectCodeHealth(repeated).summary.healthy, true, "a repeated scan is not an independent baseline");
 });
