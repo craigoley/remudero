@@ -343,7 +343,11 @@ test("recycle-container and install-host-units accept the project layer's fields
   const ok = recycle(accepted);
   assert.match(ok.stderr, /unknown argument '--no-such-flag'/, ok.stderr);
   assert.doesNotMatch(ok.stderr, /unknown field/);
-  assert.match(recycle(refused).stderr, /unknown field 'bogus_field'/, "control: the probe sees a refusal");
+  const recycleRefused = recycle(refused);
+  assert.notEqual(recycleRefused.status, 0, "control: explicit invalid selection still refuses");
+  assert.match(recycleRefused.stderr, /REFUSING -- selected registry unavailable \(unsupported_field\)/);
+  assert.equal((recycleRefused.stdout + recycleRefused.stderr).includes(dir), false, "selected diagnostics expose no private file path");
+  assert.equal(recycleRefused.stderr.includes("bogus_field"), false, "selected diagnostics do not echo private field names or values");
 
   const install = (registryPath: string, name: string) =>
     spawnSync(BASH_BIN, [join(REPO_ROOT, "deploy", "install-host-units.sh"), "--install", "--instance", "demo"], {
