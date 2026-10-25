@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13 (agree, go: site-fleet health check): measured on the Azure host, read-only"
   plan_refs: [W1-T4601, W1-T4598, W1-T7729, W1-T8775]
   files: [deploy/idle-starved-probe.sh, deploy/entrypoint.sh, test/a-quiet-daemon-wakes-for-an-engine-change-on-a-learned-backoff.test.ts, test/entrypoint-boot.test.ts]
-  status: queued
+  status: merged
   priority: 1.5 # operator-2026-10-13: ~100 empty full-daemon boots/day for the site instance on a memory-tight host
   attempts: 0
   rationale: |
