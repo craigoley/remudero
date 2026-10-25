@@ -47,10 +47,11 @@ export function isAgeOnlyInboxInformation(proposal: InboxOwnershipEvidence): boo
   if (proposal.trigger !== undefined ||
       (proposal.requiresReview !== undefined && proposal.requiresReview !== false) ||
       (proposal.reframeHistory !== undefined && (!Array.isArray(proposal.reframeHistory) || proposal.reframeHistory.length !== 0))) return false;
-  const referent = /^board-review:stale:(PR-[1-9]\d*|#[1-9]\d*)$/.exec(proposal.id)?.[1];
-  if (!referent || proposal.originatingItemId !== referent || typeof proposal.summary !== "string") return false;
+  const identity = /^board-review:stale:(PR-[1-9]\d*|#[1-9]\d*)$/.exec(proposal.id);
+  const referent = identity?.[1];
+  if (!referent || identity?.[0] !== proposal.id || proposal.originatingItemId !== referent || typeof proposal.summary !== "string") return false;
   const observation = /^board-review: (PR-[1-9]\d*|#[1-9]\d*) has sat open ((?:0|[1-9]\d*)\.\d)h, past the ((?:0|[1-9]\d*)(?:\.\d+)?)h depth threshold$/.exec(proposal.summary);
-  if (!observation || observation[1] !== referent) return false;
+  if (!observation || observation[0] !== proposal.summary || observation[1] !== referent) return false;
   const age = Number(observation[2]), threshold = Number(observation[3]);
   return Number.isFinite(age) && Number.isFinite(threshold) && threshold > 0 && age >= threshold;
 }

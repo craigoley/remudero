@@ -56,6 +56,7 @@ test("W1-T10431: age-only information preserves explicit unreadable and restored
     { ...AGE_INFORMATION, id: "board-review:escalation:PR-41", summary: "board-review: PR-41 carries an unhandled escalation whose ask could not be read" },
     { ...AGE_INFORMATION, id: "board-review:future:PR-41" },
     { ...AGE_INFORMATION, id: "board-review:stale:unknown-41" },
+    { ...AGE_INFORMATION, id: AGE_INFORMATION.id + "\n" },
     { ...AGE_INFORMATION, summary: "" },
     { ...AGE_INFORMATION, summary: undefined },
     { ...AGE_INFORMATION, summary: { text: AGE_INFORMATION.summary } },
