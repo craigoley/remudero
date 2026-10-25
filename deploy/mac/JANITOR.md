@@ -515,3 +515,16 @@ unlocks that resolver. Updated maintained routes do not constrain old standalone
 copies or arbitrary same-account Python code. Keep old copies unused, both account
 holds disabled, and require separate explicit release after qualification and
 installation; code installation does not enable either account.
+
+Preservation Git copies are self-contained: the stable `unpublished.bundle` name now
+contains the complete object closure of every recorded ref and HEAD, including custom
+checkpoint, remote, tag and non-commit refs. Published-main counts remain diagnostic
+only. Before retirement, the helper unbundles into a new empty store, recreates every
+saved ref and HEAD, compares its exact object set and runs full Git integrity checks.
+No upstream or source-store object can satisfy that qualification. Ref or symbolic-HEAD
+changes during preservation or before retirement retain the source. Shallow/unsupported
+object formats and insufficient space for both the complete bundle and independent
+verification store retain it too. This covers recorded Git roots, not unreferenced
+objects or a byte-for-byte copy of the index, reflogs, configuration or working files;
+patch and untracked-archive preservation remain separate. Installation never releases
+an account's disabled hold.

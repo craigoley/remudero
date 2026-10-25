@@ -260,9 +260,9 @@ test("wiring: runReview computes the scope section AND pushes it into the commen
   // A source-structure check, the same idiom test/review.test.ts uses for W1-T359's rubric
   // wiring, because the failure it guards is INVISIBLE to a renderer test: a section that is
   // computed, gated on, and then never appended renders perfectly in isolation and reaches no PR.
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/cli/commands/review.ts", import.meta.url), "utf8");
   const start = src.indexOf("async function runReview(");
-  const end = src.indexOf("// ── THE blocked_review FIX RUNG");
+  const end = src.indexOf("\n}\n", start) + 3;
   assert.ok(start > -1 && end > start, "could not locate runReview's body in run-task.ts");
   const runReviewSrc = src.slice(start, end);
 
