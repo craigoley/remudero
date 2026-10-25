@@ -322,3 +322,12 @@ async function featureModule<T extends object>(load: Promise<T>, leaf: string): 
     return value === undefined ? () => assert.fail(`${leaf}: ${String(key)} is not implemented on this branch`) : value;
   } });
 }
+
+test("code health grades declared code-quality checks separately from urgent security findings", () => {
+  const value = input();
+  value.scans[0]!.findings = [{ ...finding(), category: "security", ruleId: "js/security-example" }];
+  const assessment = projectCodeHealth(value);
+  assert.equal(assessment.summary.met, 2); assert.equal(assessment.summary.assessed, 2); assert.equal(assessment.summary.expected, 2);
+  assert.equal(assessment.findings.length, 1, "the urgent source finding stays visible and is not dismissed");
+  assert.equal(assessment.summary.healthy, true, "all declared code-quality checks passed; urgency is shown separately and does not invent another grade threshold");
+});
