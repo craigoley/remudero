@@ -14,12 +14,15 @@ function record(size = 205): DailyProgressRecord {
   const window = dailyWindow("2026-11-01");
   const at = "2026-11-02T06:00:00.000Z";
   return { version: "daily-progress-v1", scope: { kind: "repository", repository: "acme/app" }, ...window,
-    generatedAt: at, phase: "complete", coverage: { state: "partial", expectedRepositories: ["acme/app"], includedRepositories: ["acme/app"], sources: [{
-      id: "acme/app:prs", repository: "acme/app", kind: "pull_requests", required: true, state: "complete", lastAttemptAt: at, lastSuccessAt: at,
+    generatedAt: at, phase: "complete", coverage: { state: "partial", expectedRepositories: ["acme/app"], includedRepositories: ["acme/app"], expectedSources: [
+      { id: "acme/app:prs", repository: "acme/app", kind: "pull_requests", instanceId: null, required: true },
+      { id: "acme/app:ledger", repository: "acme/app", kind: "ledger_activity", instanceId: null, required: false },
+      { id: "acme/app:deployments", repository: "acme/app", kind: "deployments", instanceId: null, required: false }], sources: [{
+      id: "acme/app:prs", repository: "acme/app", kind: "pull_requests", instanceId: null, required: true, state: "complete", lastAttemptAt: at, lastSuccessAt: at,
       coverageStart: window.windowStart, coverageThrough: window.windowEnd, nextDueAt: "2026-11-02T07:00:00.000Z", reason: null,
-    }, { id: "acme/app:ledger", repository: "acme/app", kind: "ledger_activity", required: false, state: "not_collected", lastAttemptAt: null,
+    }, { id: "acme/app:ledger", repository: "acme/app", kind: "ledger_activity", instanceId: null, required: false, state: "not_collected", lastAttemptAt: null,
       lastSuccessAt: null, coverageStart: null, coverageThrough: null, nextDueAt: null, reason: "Activity evidence is not collected." },
-    { id: "acme/app:deployments", repository: "acme/app", kind: "deployments", required: false, state: "not_collected", lastAttemptAt: null,
+    { id: "acme/app:deployments", repository: "acme/app", kind: "deployments", instanceId: null, required: false, state: "not_collected", lastAttemptAt: null,
       lastSuccessAt: null, coverageStart: null, coverageThrough: null, nextDueAt: null, reason: "Deployment evidence is not collected." }] },
     totals: { mergedChanges: { value: size, precision: "exact" }, completedTasks: { value: size, precision: "exact" } }, currentWork: null,
     events: Array.from({ length: size }, (_, i) => ({ id: `acme/app:pr:${i + 1}`, repository: "acme/app", kind: "merged", sourceId: "acme/app:prs",

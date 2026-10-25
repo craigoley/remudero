@@ -14,9 +14,11 @@ import { judgeSource } from "#src/lib/view-freshness.js";
 function record(repository: string, count: number, at = "2026-11-02T04:50:00.000Z"): DailyProgressRecord {
   const window = dailyWindow("2026-11-01"), end = at;
   return { version: "daily-progress-v1", scope: { kind: "repository", repository }, ...window, generatedAt: at, phase: "provisional",
-    coverage: { state: "partial", expectedRepositories: [repository], includedRepositories: [repository], sources: [{ id: `${repository}:prs`, repository,
-      kind: "pull_requests", required: true, state: "complete", lastAttemptAt: at, lastSuccessAt: at, coverageStart: window.windowStart, coverageThrough: end, nextDueAt: window.windowEnd, reason: null },
-      ...(["ledger_activity", "deployments"] as const).map(kind => ({ id: `${repository}:${kind}`, repository, kind, required: false, state: "not_collected" as const,
+    coverage: { state: "partial", expectedRepositories: [repository], includedRepositories: [repository], expectedSources: [
+      { id: `${repository}:prs`, repository, kind: "pull_requests", instanceId: null, required: true },
+      ...(["ledger_activity", "deployments"] as const).map(kind => ({ id: `${repository}:${kind}`, repository, kind, instanceId: null, required: false }))], sources: [{ id: `${repository}:prs`, repository,
+      kind: "pull_requests", instanceId: null, required: true, state: "complete", lastAttemptAt: at, lastSuccessAt: at, coverageStart: window.windowStart, coverageThrough: end, nextDueAt: window.windowEnd, reason: null },
+      ...(["ledger_activity", "deployments"] as const).map(kind => ({ id: `${repository}:${kind}`, repository, kind, instanceId: null, required: false, state: "not_collected" as const,
         lastAttemptAt: null, lastSuccessAt: null, coverageStart: null, coverageThrough: null, nextDueAt: null, reason: "This evidence is not collected." }))] },
     totals: { mergedChanges: { value: count, precision: "exact" }, completedTasks: { value: count, precision: "exact" } }, currentWork: null,
     events: Array.from({ length: count }, (_, index) => ({ id: `${repository}:pr:${index + 1}`, repository, kind: "merged", sourceId: `${repository}:prs`, occurredAt: "2026-11-01T15:00:00.000Z",

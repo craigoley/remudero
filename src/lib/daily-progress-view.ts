@@ -57,7 +57,7 @@ function scopeKey(input: Request, repositories: readonly string[]): string {
 }
 
 function missingSources(repository: string): SourceCoverage[] {
-  return (["pull_requests", "ledger_activity", "deployments"] as const).map(kind => ({ id: `${repository}:missing:${kind}`, repository, kind,
+  return (["pull_requests", "ledger_activity", "deployments"] as const).map(kind => ({ id: `${repository}:missing:${kind}`, repository, instanceId: null, kind,
     required: kind === "pull_requests", state: "not_collected", lastAttemptAt: null, lastSuccessAt: null, coverageStart: null, coverageThrough: null,
     nextDueAt: null, reason: "No retained report supplies this source for the selected day and revision." }));
 }
@@ -95,16 +95,20 @@ export function readDailyProgressReport(opts: { stateDir: string; params: URLSea
   const first = selected[0]!.report;
   const allEvents = selected.flatMap(r => r.events).sort((a, b) => b.occurredAt.localeCompare(a.occurredAt) || a.id.localeCompare(b.id));
   const sourceEvidence = [...selected.flatMap(r => r.report.coverage.sources), ...missing.flatMap(missingSources)];
+  const expectedSources = [...selected.flatMap(r => r.report.coverage.expectedSources), ...missing.flatMap(repository => missingSources(repository).map(({ id, repository, kind, instanceId, required }) => ({ id, repository, kind, instanceId, required })))];
   const generatedAt = selected.map(r => r.report.generatedAt).sort().at(-1)!;
   const cutoff = Math.min(Date.parse(generatedAt), Date.parse(first.windowEnd));
-  const complete = !missing.length && sourceEvidence.filter(s => s.required).every(s => s.state === "complete" && s.coverageStart !== null && s.coverageThrough !== null && Date.parse(s.coverageStart) <= Date.parse(first.windowStart) && Date.parse(s.coverageThrough) >= cutoff);
+  const complete = !missing.length && expectedSources.filter(s => s.required).every(identity => {
+    const s = sourceEvidence.find(source => source.id === identity.id);
+    return s !== undefined && s.state === "complete" && s.coverageStart !== null && s.coverageThrough !== null && Date.parse(s.coverageStart) <= Date.parse(first.windowStart) && Date.parse(s.coverageThrough) >= cutoff;
+  });
   const included = [...new Set(selected.flatMap(r => r.report.coverage.includedRepositories))].sort();
   const current = selected.flatMap(r => r.report.currentWork ? [r.report.currentWork] : []);
   const { events: _events, page: _page, ...base } = { ...first, events: [], page: null };
   const data: DailyProgressReport = { ...base, scope: input.repository === "all" ? { kind: "all" } : { kind: "repository", repository: input.repository },
     revision, generatedAt, correctionReason: selected.some(r => r.report.correctionReason !== null) ? "Includes revised source evidence." : null,
     phase: Date.parse(first.windowEnd) <= Date.parse(generatedAt) ? complete ? selected.some(r => r.report.phase === "corrected") ? "corrected" : "complete" : "finalizing" : "provisional",
-    coverage: { state: "partial", expectedRepositories: expected, includedRepositories: included, sources: sourceEvidence },
+    coverage: { state: "partial", expectedRepositories: expected, includedRepositories: included, expectedSources, sources: sourceEvidence },
     totals: { mergedChanges: count(selected.map(r => r.report.totals.mergedChanges), complete), completedTasks: count(selected.map(r => r.report.totals.completedTasks), complete) },
     currentWork: current.length ? { asOf: current.map(c => c.asOf).sort()[0]!, items: current.flatMap(c => c.items).slice(0, 200) } : null,
     events: [], page: { totalEvents: allEvents.length, nextCursor: null } };
