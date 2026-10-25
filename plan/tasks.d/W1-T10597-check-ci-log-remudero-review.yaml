@@ -1,0 +1,54 @@
+- id: W1-T10597
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:remudero-review cost 27 PR minute(s) across 11 round(s) on 6 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.21
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:remudero-review"
+  files:
+    - .github/workflows/merge-queue-review-attest.yml
+    - test/gardeners/check-ci-log-remudero-review.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:remudero-review"
+      proof: "grep: test(\"W1-T10597: check:ci-log:remudero-review is prevented, not retried\" in test/gardeners/check-ci-log-remudero-review.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:remudero-review's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:remudero-review cost 27 PR minute(s) (seven-day half-life) across 11 fix round(s) on 6 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/merge-queue-review-attest.yml: declares job remudero-review for remudero-review
+
+    RECENT ROUNDS (newest first):
+    - PR #14007 (https://github.com/craigoley/remudero/pull/14007) at 2026-10-25T02:26:52.522Z: ci-log round — rule-checks: test/census-discovery-is-blind-to-a-second-idiom.test.ts; coverage-shard (7/8): WN-TN: census drift resolves moved roster paths with the shared resolver, WN-TN: census drif
+        failing tests: W1-T2809: the ls-files and dir-walk populations are DISJOINT at head — the blindness is structural; W1-T2809: censusPopulationDrift still gates on the ls-files projection alone — widening the report moved no gate; W1-T9877: census drift resolves moved roster paths with the shared resolver, W1-T9877: census drift uses its default resolver for exact roster paths; W1-T9708: a test the census recognizer names but the registry does not is a census too; censusPopulationDrift: a discovered src-filtering caller with no population entry is named in `unknown` by path — UNCLASSIFIED, never dropped, never merged into the members
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/census-discovery-is-blind-to-a-second-idiom.test.ts:1:3596
+          | ✖ W1-T2809: the ls-files and dir-walk populations are DISJOINT at head — the blindness is structural (3742.328808ms)
+          |   AssertionError [ERR_ASSERTION]: test/the-tree-walk-recognizer-admits-by-what-a-suite-executes.test.ts carries both idiom tokens as source text and is not a refused fixture/meta suite
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/census-discovery-is-blind-to-a-second-idiom.test.ts:161:12)
+          |       at Test.runInAsyncScope (node:async_hooks:227:14)
+          |       at Test.run
+    - PR #13851 (https://github.com/craigoley/remudero/pull/13851) at 2026-10-24T10:39:03.044Z: ci-log round — coverage-ratchet: diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/e; remudero-review
+        log excerpt:
+          | diff-coverage: exempt (relocated) src/cli/commands/fix.ts:5448 -- relocated from src/run-task.ts:39920 (26-line contiguous match against the diff's removed lines)
+          | diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:
+          |   - src/cli/commands/fix.ts:2
+          |   - src/cli/commands/fix.ts:5307
+          |   - src/cli/commands/fix.ts:5308
+          | ##[error]diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each lin
+    - PR #10597 at 2026-10-10T12:21:59.087Z: ci-log round — task-id-existence; remudero-review
+    - PR #10551 (https://github.com/craigoley/remudero/pull/10551) at 2026-10-10T05:50:23.646Z: ci-log round — remudero-review
+        failing tests: W1-T4693: the sweep's fix dispatch hands runFixRung the same push, so its refusal surfaces too; W1-T2862: production consumes the summary before the first implementation verdict branch removes its worktree; MUTANT: the read is wired ONCE, and ABOVE every verdict branch that reclaims the worktree; the REAL PR gate config's commandRunner is scoped to exactly the test files that import src/lib/classify.ts -- not the full suite (W1-T133 latency fix)
+    - PR #10388 at 2026-10-09T18:52:46.764Z: ci-log round — lint-plan: test/every-shard-on-main-is-lintable.test.ts; rule-checks: test/every-shard-on-main-is-lintable.test.ts; ci-shard (6/8): test/ci-parity.test.ts; ci-shard (5/8): test/every-sh
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
