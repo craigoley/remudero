@@ -15,11 +15,11 @@ import { affectedReachBaselinePatch, measureAffectedReach, reportAffectedReachEx
  */
 
 const FIXTURE = new Map([
-  ["src/run-task.ts", 'export { a } from "#test/ci/gates/a.js";'],
+  ["src/run-task.ts", 'export { a } from "./a.js";'],
   ["src/a.ts", "export const a = 1;"],
   ["src/isolated.ts", "export {};"],
-  ["test/old.test.ts", 'import "#test/ci/src/run-task.js";'],
-  ["test/isolated.test.ts", 'import "#test/ci/src/isolated.js";'],
+  ["test/old.test.ts", 'import "../src/run-task.js";'],
+  ["test/isolated.test.ts", 'import "../src/isolated.js";'],
 ]);
 
 test("W1-T10191: fix_refusal:census-precheck is prevented, not retried", () => {
@@ -27,7 +27,7 @@ test("W1-T10191: fix_refusal:census-precheck is prevented, not retried", () => {
   assert.deepEqual(baseline, { importerCount: 1, largestScc: 1, medianReachPercent: 50, importers: ["test/old.test.ts"] });
 
   // A new test genuinely growing the reach — the exact shape of #12700 and #12830's refusal.
-  const grown = new Map(FIXTURE).set("test/new.test.ts", 'import "#test/ci/src/run-task.js";');
+  const grown = new Map(FIXTURE).set("test/new.test.ts", 'import "../src/run-task.js";');
   const measured = measureAffectedReach(grown);
   assert.ok(measured.importerCount > baseline.importerCount, "the fixture must reproduce genuine growth");
 
