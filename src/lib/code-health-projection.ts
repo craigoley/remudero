@@ -67,6 +67,8 @@ export interface CodeHealthProjectionInput {
   registry: CodeHealthCheckRegistry;
   scans: CodeHealthScan[];
   baseline: null | { analyzedSha: string; policyVersion: string; scans: CodeHealthScan[] };
+  /** Known source facts retained independently of the last complete comparison baseline. */
+  retainedEvidence?: Array<{ policyVersion: string; scan: CodeHealthScan }>;
 }
 
 /** Allowlisted producer metadata. Legacy artifacts without this envelope are unassessed. */
@@ -149,7 +151,9 @@ function validateInput(input: CodeHealthProjectionInput): void {
       !(input.nextDueAt === null || time(input.nextDueAt)) || !text(input.registry.version)) throw new Error("Code health report identity or clock is invalid.");
   if (input.registry.checks.length > 256 || new Set(input.registry.checks.map(check => check.id)).size !== input.registry.checks.length ||
       input.registry.checks.some(check => !text(check.id) || !CODE_HEALTH_SOURCE_KINDS.includes(check.sourceKind) || !text(check.description, 2048))) throw new Error("Code health check registry is invalid.");
-  for (const scans of [input.scans, input.baseline?.scans ?? []]) {
+  if (input.retainedEvidence !== undefined && (!Array.isArray(input.retainedEvidence) || input.retainedEvidence.length > 64 ||
+      input.retainedEvidence.some(entry => !text(entry.policyVersion) || !entry.scan))) throw new Error("Code health retained evidence is invalid or exceeds its bound.");
+  for (const scans of [input.scans, input.baseline?.scans ?? [], ...(input.retainedEvidence ?? []).map(entry => [entry.scan])]) {
     if (scans.length > CODE_HEALTH_SOURCE_KINDS.length || new Set(scans.map(scan => scan.kind)).size !== scans.length) throw new Error("Code health source inventory is duplicated or invalid.");
     for (const scan of scans) {
       if (scan.repository.toLowerCase() !== input.repository.toLowerCase()) throw new Error("Code health repository evidence does not match the requested repository.");
@@ -210,6 +214,16 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
       !confirmedFindingFix(current.get(codeHealthFindingFingerprint(repository, kind, finding)), prior!.observedAt));
     return { kind, scan, prior, current, unconfirmedMissing, problem: scanProblem(scan, input.analyzedSha, input.observedAt), pair: pairState(input, scan, prior) };
   });
+  const history = [...(input.baseline?.scans ?? []).map(scan => ({ policyVersion: input.baseline!.policyVersion, scan })), ...(input.retainedEvidence ?? [])]
+    .sort((a, b) => b.scan.observedAt.localeCompare(a.scan.observedAt));
+  const unresolvedHistory = history.flatMap(entry => {
+    const pair = pairs.find(pair => pair.kind === entry.scan.kind)!;
+    const comparable = pairState({ ...input, baseline: { analyzedSha: entry.scan.analyzedSha, policyVersion: entry.policyVersion, scans: [entry.scan] } }, pair.scan, entry.scan) === "comparable";
+    return entry.scan.findings.filter(finding => finding.status !== "fixed" &&
+      pair.current.get(codeHealthFindingFingerprint(repository, pair.kind, finding))?.status !== "open" &&
+      !(comparable && confirmedFindingFix(pair.current.get(codeHealthFindingFingerprint(repository, pair.kind, finding)), entry.scan.observedAt)))
+      .map(finding => ({ scan: entry.scan, finding }));
+  });
   const sources: CodeHealthAssessment["sources"] = pairs.map(({ kind, scan, prior, problem }) => ({
     id: sourceId(repository, kind), kind, required: true,
     state: problem ? !scan ? "not_collected" : scan.state === "complete" ? "partial" : scan.state : "complete",
@@ -224,7 +238,7 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
   const checks: CodeHealthAssessment["checks"] = input.registry.checks.map(definition => {
     const pair = pairs.find(source => source.kind === definition.sourceKind)!, check = pair.scan?.checks.find(value => value.id === definition.id);
     const unavailable = pair.problem ?? (!check ? "This declared check was not measured." : check.met && pair.pair !== "comparable" ? "A passing comparison needs an independent scan with the same scope and policy." :
-      check.met && pair.unconfirmedMissing ? "A previously known finding is missing or dismissed without a verified fix." : undefined);
+      check.met && (pair.unconfirmedMissing || unresolvedHistory.some(entry => entry.scan.kind === pair.kind)) ? "A previously known finding is missing or dismissed without a verified fix." : undefined);
     return { id: definition.id, category: definition.category, state: unavailable ? "not_measured" : check!.met ? "met" : "not_met",
       sourceIds: [sourceId(repository, definition.sourceKind)], reason: unavailable ?? check!.reason };
   });
@@ -236,13 +250,13 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
       status: pair.pair !== "comparable" ? "unknown" : pair.prior!.findings.some(old => old.status !== "fixed" && codeHealthFindingFingerprint(repository, pair.kind, old) === fingerprint) ? "existing" : "new",
       path: finding.path, title: finding.title, effortMinutes: finding.effortMinutes, estimateKind: finding.effortMinutes === null ? null : "modeled" });
   }
-  for (const pair of pairs) for (const prior of pair.prior?.findings ?? []) {
-    const fingerprint = codeHealthFindingFingerprint(repository, pair.kind, prior);
-    if (prior.status === "fixed" || findings.has(fingerprint) || pair.pair === "comparable" && confirmedFindingFix(pair.current.get(fingerprint), pair.prior!.observedAt)) continue;
-    const historicalId = `${sourceId(repository, pair.kind)}:history:${createHash("sha256").update(JSON.stringify([pair.prior!.scanId, pair.prior!.analyzedSha, pair.prior!.observedAt])).digest("hex")}`;
+  for (const { scan: historical, finding: prior } of unresolvedHistory) {
+    const fingerprint = codeHealthFindingFingerprint(repository, historical.kind, prior);
+    if (findings.has(fingerprint)) continue;
+    const historicalId = `${sourceId(repository, historical.kind)}:history:${createHash("sha256").update(JSON.stringify([historical.scanId, historical.analyzedSha, historical.observedAt])).digest("hex")}`;
     if (!sources.some(source => source.id === historicalId)) {
-      const historical = pair.prior!, problem = scanProblem(historical, historical.analyzedSha, input.observedAt);
-      sources.push({ id: historicalId, kind: pair.kind, required: false,
+      const problem = scanProblem(historical, historical.analyzedSha, input.observedAt);
+      sources.push({ id: historicalId, kind: historical.kind, required: false,
         state: problem ? historical.state === "complete" ? "partial" : historical.state : "complete",
         analyzedSha: shaShape.test(historical.analyzedSha) ? historical.analyzedSha : null,
         observedAt: time(historical.observedAt) && Date.parse(historical.observedAt) <= Date.parse(input.observedAt) ? historical.observedAt : null,

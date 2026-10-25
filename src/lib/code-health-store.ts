@@ -26,7 +26,8 @@ function evidenceSnapshotId(input: CodeHealthProjectionInput): string {
   })));
   const { observedAt: _observedAt, nextDueAt: _nextDueAt, ...facts } = input;
   const evidence = { ...facts, registry: { ...input.registry, checks: orderedCodeHealthValues(input.registry.checks) }, scans: normalizedScans(input.scans),
-    baseline: input.baseline ? { ...input.baseline, scans: normalizedScans(input.baseline.scans) } : null };
+    baseline: input.baseline ? { ...input.baseline, scans: normalizedScans(input.baseline.scans) } : null,
+    ...(input.retainedEvidence === undefined ? {} : { retainedEvidence: orderedCodeHealthValues(input.retainedEvidence.map(entry => ({ ...entry, scan: normalizedScans([entry.scan])[0] }))) }) };
   return createHash("sha256").update(canonicalCodeHealthJson({ version: "code-health-evidence-input-v1", evidence })).digest("hex");
 }
 
