@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -8,7 +9,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { daemonBoot, runDaemon, runLanePool, type LanePoolControl } from "#src/lib/daemon.js";
 import { adoptRunChildren } from "#src/lib/run-child.js";
-import { childIdentity, readSpec, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
+import { childIdentity, readSpec, RUN_CHILD_SCHEMA, toRunChildFailure, writeSpec, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
 import { loadPlan } from "#src/lib/plan.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import { daemonCommand, ledgerPathFor, orphanSweepRunActive } from "#src/run-task.js";
@@ -97,6 +98,32 @@ test("W1-T9086: a terminal child settles once and a lost one takes the crash pat
     assert.equal(f.rows.filter((r) => r.step === "run_child.settled").length, 2);
     assert.deepEqual(f.adopt(), []);
   } finally { f.cleanup(); }
+});
+
+test("terminal error round-trip regressions exercise the real run-child writer and settler", async () => {
+  const f = fixture();
+  const repo = gitRepo();
+  try {
+    let original: unknown;
+    try { execFileSync("git", ["-C", repo.dir, "log", "-1", "--format=%H"], { maxBuffer: 8, encoding: "utf8" }); }
+    catch (error) { original = error; }
+    assert.ok(original instanceof Error);
+    assert.equal((original as NodeJS.ErrnoException).code, "ENOBUFS");
+    f.add("terminal-error", { state: "failed", failure: toRunChildFailure(original) });
+    f.add("done-without-result", { state: "done" });
+    f.add("still-running-gone", { identity: { ...childIdentity(process.pid)!, startTicks: "reused" } });
+    const children = f.adopt();
+    const outcomes = await Promise.allSettled(children.map(child => child.settled));
+    const failure = outcomes[children.findIndex(child => child.runId === "terminal-error")];
+    assert.ok(failure.status === "rejected");
+    assert.equal(failure.reason.name, original.name);
+    assert.equal(failure.reason.message, original.message, "an authenticated terminal Error must not become a lost-child message");
+    assert.equal(failure.reason.code, "ENOBUFS");
+    assert.deepEqual(f.rows.filter(row => row.step === "run_child.lost").map(row => row.run_id).sort(), ["done-without-result", "still-running-gone"]);
+    children.forEach((child, i) => child.acknowledge!(outcomes[i]));
+    assert.equal(f.rows.filter(row => row.step === "run_child.settled").length, 3);
+    assert.deepEqual(f.adopt(), []);
+  } finally { repo.cleanup(); f.cleanup(); }
 });
 
 test("an adopted live child keeps its occupied lane when its task left the current plan", async () => {

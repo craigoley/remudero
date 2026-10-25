@@ -390,6 +390,7 @@ function scanLedgerBuffer(
   onBad?: (line: string) => void,
   /** A line this answers true for is never parsed: an exact replay costs a Set lookup, not a JSON.parse. */
   skip?: (line: string) => boolean,
+  requireObjects = false,
 ): { bad: number; next: number } {
   let bad = 0;
   let lines = 0;
@@ -403,6 +404,7 @@ function scanLedgerBuffer(
         try {
           const parsed = parseObject(line);
           if (parsed !== undefined) onRow(parsed, line);
+          else if (requireObjects) { bad += 1; onBad?.(line); }
         } catch {
           // deliberate: a malformed row increments torn and the remaining corpus still parses.
           bad += 1;
@@ -1309,6 +1311,8 @@ export function createLedgerRotationMemo(
     yieldTurn?: () => Promise<void>;
     /** Only lines matching this are parsed by `load`; `reduce` must drop every row it would reject. */
     pattern?: RegExp;
+    /** Strict authoritative history preserves valid JSON non-objects as unattributed torn evidence. */
+    requireObjects?: boolean;
     holder?: string;
     /** Bump the version whenever the reducer or its input pattern changes. W1-T6263. */
     durableDigest?: { reducerVersion: string };
@@ -1423,7 +1427,7 @@ export function createLedgerRotationMemo(
         const buf = entry.form === "gzip" ? await gunzipAsync(raw) : raw;
         for (let at = 0; at < buf.length; ) {
           const slice: Array<Record<string, unknown>> = [];
-          const scanned = scanLedgerBuffer(buf, io.pattern, (row) => slice.push(row), at, LEDGER_ROTATION_LOAD_LINES_PER_TURN, (line) => tornLines.push(line));
+          const scanned = scanLedgerBuffer(buf, io.pattern, (row) => slice.push(row), at, LEDGER_ROTATION_LOAD_LINES_PER_TURN, (line) => tornLines.push(line), undefined, io.requireObjects);
           torn += scanned.bad;
           at = scanned.next;
           rows = reduce([...rows, ...slice]);
@@ -1448,6 +1452,7 @@ export function createLedgerRotationMemo(
               try {
                 const parsed = parseObject(line);
                 if (parsed !== undefined) slice.push(parsed);
+                else if (io.requireObjects) { torn++; tornLines.push(line); }
               } catch {
                 // deliberate: malformed JSON remains torn evidence, not a missing or valid row;
                 // retain its exact text for the union caller's onTorn provenance check.

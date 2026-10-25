@@ -1,6 +1,8 @@
 # CI friction remedies
 
-This file is the ledger of remedies for the causes the ci-friction gardener (W1-T4435, `src/lib/ci-friction-gardener.ts`) prices. The gardener files one parked, `verify: human` shard per priced cause, and each shard's acceptance proof is `grep: ci-friction:<kind>:<name> in docs/ci-friction-remedies.md`, so a remedy counts as landed once a person records it here on a line that names that cause. Until then the proof stays unmet, and the file must not name a cause whose remedy has not landed.
+The ci-friction gardener prices observed fix rounds and files governed implementation work only against a located repair subject. For a cause eligible for a new nomination, a bare `remudero-review` status identifies a verdict producer; without a failure mechanism its diagnosis remains UNKNOWN, not a workflow repair. A concrete failing test, source signature or workflow diagnostic can still establish the normal owner. New remedy tasks require an executable `unit test:` regression, then normal CI, review and measured post-merge effect. This file preserves historical remedy notes; a mention here is not current completion or deployment evidence.
+
+Existing filing receipts and operator-rejected holds retain their existing semantics. A closed proposal does not authorize a repeat filing, and no receipt alone proves a completed repair. Costs and historical failures stay recorded.
 
 ## Remedies
 

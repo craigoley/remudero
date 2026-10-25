@@ -520,7 +520,8 @@ test("a lock the running identity cannot write is still acquired and still exclu
   const lock = fx.env.RMD_CLEANUP_LOCK_FILE;
   writeFileSync(lock, "");
   chmodSync(lock, 0o444);
-  const held = spawnSync(fx.flock, ["-n", lock, "bash", SCRIPT], { encoding: "utf8", env: { ...process.env, ...fx.env } });
+  // No wait: the holder is this pass's own parent, so a waiting pass would wait on itself.
+  const held = spawnSync(fx.flock, ["-n", lock, "bash", SCRIPT], { encoding: "utf8", env: { ...process.env, ...fx.env, RMD_CLEANUP_LOCK_WAIT_SECONDS: "0" } });
   assert.equal(held.status, 0, held.stderr + held.stdout);
   assert.match(held.stdout, /another janitor pass holds the lock/);
   assert.equal(existsSync(idle), true, "the other identity's held lock still excludes this pass");

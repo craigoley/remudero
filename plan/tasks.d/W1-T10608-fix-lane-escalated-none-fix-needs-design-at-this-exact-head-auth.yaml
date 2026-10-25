@@ -24,3 +24,11 @@
     Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
     - PR #13416: 39.60 PR-hours — cao825: commit 6b62f0802 merged main into a fleet PR head
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares test/sweep/fix-lane-escalated-none-fix-needs-design-at-this-exact-head-auth.test.ts, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-25T13:54:17.898Z"
+    pin: "5696b691bdb356af5afa45b5344a19a9c22dfb77d94a1f006a46a220d3531b2d"
