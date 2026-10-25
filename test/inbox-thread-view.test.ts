@@ -265,7 +265,7 @@ test("W1-T10431: reclassified age history remains readable without action author
     const legacy=await res.json() as {attention:string;messages:Array<{text:string;actions?:string[]}>};
     assert.equal(legacy.attention,"history");assert.deepEqual(legacy.messages[0]!.actions,[]);
     assert.equal(legacy.messages.at(-1)!.text,"The earlier age observation is retained.");
-    const cached=f.build(key);assert.equal(cached.data.found,true,cached.data.reason);
+    const cached=f.build(key);assert.equal(cached.data.found,true,`persisted detail retains the source-qualified informational thread: ${cached.data.reason ?? ""}`);
     assert.equal(cached.data.thread?.attention,"history");assert.deepEqual(cached.data.thread?.messages[0]?.actions,[]);
     assert.equal(cached.data.thread?.messages.at(-1)?.text,legacy.messages.at(-1)?.text);
     assert.equal(cached.sources[0]?.asOf,new Date(T0).toISOString(),"history retains the producer clock");
