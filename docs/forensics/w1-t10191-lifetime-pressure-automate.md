@@ -9,6 +9,8 @@ terminal verdict was `blocked_inflight`. That verdict records a deferred dispatc
 worker held the live claim), so W1-T10191 has no build-failure record; the dispatch queue
 simply retries it once the claim releases.
 
+The recorded task identifier is "W1-T10191"; its one "blocked_inflight" verdict is a scheduling deferral, not a failed build.
+
 ## Judge evidence
 
 The 2026-10-25 proposal, preserved in
