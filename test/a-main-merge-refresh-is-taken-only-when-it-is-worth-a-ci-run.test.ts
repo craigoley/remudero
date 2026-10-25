@@ -334,6 +334,43 @@ test("W1-T7735: the production refresh judge has an off switch, a single flight,
     cause: "c", ciInFlight: true }, ""), /5 more cut[\s\S]*GitHub truncated this list/);
 });
 
+test("a failed refresh worker cannot release a refresh or cache a valid-looking ruling", async (t) => {
+  const refusals = [
+    { subtype: "error_max_turns" },
+    { isError: true },
+    { apiError: true },
+    { usageRefusal: { matched: "fixture account refusal" } },
+    { budgetRefused: true },
+  ];
+  for (const refusal of refusals) await t.test(Object.keys(refusal)[0]!, async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rmd-refresh-failed-worker-"));
+    try {
+      let calls = 0;
+      const spend: Array<Record<string, unknown>> = [];
+      const spawn = (async () => {
+        calls += 1;
+        return { text: '{"verdict":"overlap","reason":"fixture only"}', costUsd: 0.01, numTurns: 1,
+          subtype: "success", isError: false, apiError: false, ...(calls < 3 ? refusal : {}) };
+      }) as unknown as Parameters<typeof productionRefreshJudge>[0]["spawn"];
+      const judge = productionRefreshJudge({ repoRoot: process.cwd(), stateDir, diff: async () => "fixture diff", spawn,
+        log: (_step, fields) => spend.push(fields) });
+      const q: RefreshJudgeQuestion = { prNumber: 5, headSha: "same-head", prFiles: ["a.ts"], baseFiles: ["b.ts"],
+        baseTruncated: false, cause: "distance-baseline", ciInFlight: true };
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const result = await askRefreshJudge(judge, q);
+        assert.equal(result.verdict, "judge-unavailable", "failed worker text is not a refresh ruling");
+      }
+      assert.equal(calls, 2, "a failed ruling is never cached and single-flight is released");
+      assert.equal((await askRefreshJudge(judge, q)).verdict, "overlap", "a later actual success still works");
+      assert.equal((await askRefreshJudge(judge, q)).verdict, "overlap", "only the successful ruling is cached");
+      assert.equal(calls, 3);
+      assert.deepEqual(spend.map((row) => row.cost_usd), [0.01, 0.01, 0.01], "refused evidence retains observed spend");
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+});
+
 test("W1-T7735: the production sweep effects read main's protection strictness and wire the judge only for production", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t7735-effects-"));
   try {
