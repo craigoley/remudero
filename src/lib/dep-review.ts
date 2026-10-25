@@ -1716,7 +1716,9 @@ export async function prioritizeDepReviewRepairs(
       if (!proposals.some(p => p && candidates.includes(p.feedbackId) &&
           Array.isArray(p.prNumbers) && p.prNumbers.includes(pr.prNumber))) continue;
       const state: unknown = JSON.parse(await readFile(join(dir, `PR${pr.prNumber}.json`), "utf8"));
-      const record = (state as { ownRed?: unknown } | null)?.ownRed;
+      const records = state as { ownRed?: unknown; refusedPathRepair?: unknown } | null;
+      const record = [records?.ownRed, records?.refusedPathRepair].find(candidate =>
+        isOwnRedRecord(candidate) && candidate.headSha === pr.headSha && candidate.feedbackId !== undefined);
       if (!isOwnRedRecord(record) || record.headSha !== pr.headSha || !record.feedbackId ||
           !candidates.includes(record.feedbackId)) continue;
       const bumps = record.bumps.map(ownRedBumpKey);
@@ -1941,9 +1943,31 @@ export function reconcileDependabotRefusedPath(args: {
   const submissionKey = depReviewOwnRedSubmissionKey(args.owner, args.repo, bumps);
   try {
     const proposals = readOwnRedProposals(registryPath);
+    const bindRepair = (feedbackId: string) => {
+      const statePath = join(args.registryDir, `PR${args.prNumber}.json`);
+      const state = readRefreshState(statePath, args.headSha) as DepReviewHoldState & { refusedPathRepair?: unknown };
+      if (!state || typeof state.headSha !== "string" || !Array.isArray(state.asks)) {
+        throw new Error("invalid refused-path repair state; refusing to overwrite it");
+      }
+      const prior = state.refusedPathRepair;
+      if (prior !== undefined && !isOwnRedRecord(prior)) throw new Error("invalid refused-path repair binding");
+      if (isOwnRedRecord(prior) && prior.headSha === args.headSha && prior.feedbackId !== undefined && prior.feedbackId !== feedbackId) {
+        throw new Error("refused-path repair already binds this head to different feedback");
+      }
+      state.refusedPathRepair = { headSha: args.headSha, bumps, redChecks: args.result.redChecks,
+        firstSeenMs: isOwnRedRecord(prior) && prior.headSha === args.headSha ? prior.firstSeenMs : args.nowMs,
+        lastSeenMs: args.nowMs, feedbackId } satisfies DependabotOwnRedRecord;
+      writeAtomic(statePath, `${JSON.stringify(state)}\n`);
+      args.log("dep-review.refused_path.repair_bound", { ...facts, feedback_id: feedbackId });
+    };
     const mine = bumps.map(ownRedBumpKey);
     const carrier = proposals.find((p) => mine.every((k) => p.bumps.includes(k)));
     if (carrier !== undefined) {
+      if (!carrier.prNumbers.includes(args.prNumber)) {
+        carrier.prNumbers.push(args.prNumber);
+        writeAtomic(registryPath, `${JSON.stringify({ proposals })}\n`);
+      }
+      bindRepair(carrier.feedbackId);
       args.log("dep-review.refused_path.folded", { ...facts, feedback_id: carrier.feedbackId });
       return "folded";
     }
@@ -1953,6 +1977,7 @@ export function reconcileDependabotRefusedPath(args: {
     writeAtomic(registryPath, `${JSON.stringify({ proposals: [...proposals, {
       feedbackId: entry.id, submissionKey, bumps: [...new Set(mine)].sort(), prNumbers: [args.prNumber], filedAtMs: args.nowMs,
     }] })}\n`);
+    bindRepair(entry.id);
     args.log("dep-review.refused_path.feedback_captured", { ...facts, feedback_id: entry.id, submission_key: submissionKey });
     return "captured";
   } catch (error) {

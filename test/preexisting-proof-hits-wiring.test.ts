@@ -225,7 +225,7 @@ test("the production call site actually supplies baseCheckoutDir — the gap tha
   // `reviewCommand` end to end would need a gh gateway, so this pins the wiring the only other way
   // available. It asserts a CALL, not prose: `laneWindow`-style, the same shape
   // test/arm-outcome-five-sites.test.ts uses for the identical "is this lane actually wired" question.
-  const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const src = readFileSync(join(REPO_ROOT, "src", "cli", "commands", "review.ts"), "utf8");
 
   // W1-T460 turned the old one-line ternary into a one-line SPREAD, because the builder now
   // returns two facts (the dir AND the paths whose blob could not be read) named as the evidence

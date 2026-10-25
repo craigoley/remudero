@@ -1,0 +1,36 @@
+- id: W1-T10620
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — armed-idle:review success, required checks green cost 5.04 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.27
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:armed-idle:review success, required checks green"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/flow-armed-idle-review-success-required-checks-green.test.ts
+  acceptance:
+    - claim: "armed-idle:review success, required checks green is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T10620: flow-armed-idle-review-success-required-checks-green clears without a person\" in test/sweep/flow-armed-idle-review-success-required-checks-green.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    armed-idle:review success, required checks green cost 5.04 PR-hours; owner armed-idle-merge
+    Owner armed-idle-merge failed to clear eligible episodes.
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #13952: 5.09 PR-hours — review success, required checks green — arming auto-merge
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "Declared files are narrow (src/lib/sweep.ts plus one new test), consistent with the plan's stated source owner."
+      - "The description says an existing owner failed to clear eligible episodes where required checks are green, which implies fixing the owner's behavior and not changing merge or review policy."
+      - "The family track record (9 merged, Beta mean 0.90) and the grep-verifiable acceptance support low risk. The PR still passes CI and review."
+      - "The change is near merge-arming logic, which lowers my confidence somewhat. No diff was shown, so I cannot confirm that it stays within the owner's existing behavior."
+    judged_at: "2026-10-25T13:57:51.505Z"
+    pin: "4af5c80f9d95f8dca47bf7c9814e3f79e4986ffea4ee2b1c3bd0362632507f5c"

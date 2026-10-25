@@ -1,0 +1,40 @@
+- id: W1-T10616
+  title: Bind product deployments to the existing Vercel scope with read-back identity
+  repo: remudero
+  depends_on:
+    - W1-T10613
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: operator-request#wreckterra-console-product-2026-10-25
+  plan_refs:
+    - W1-T4264
+    - W1-T4265
+    - W1-T4266
+    - W1-T4657
+    - W1-T4658
+    - W1-T4694
+  files:
+    - src/lib/product-deployment.ts
+    - src/lib/product-routes.ts
+    - test/infra/product-deployment.test.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required.
+  design: Inspect/adopt an existing Vercel project or create the authorized product project in the established team using server-held credentials and explicit repo binding. Persist operation/digest/provider IDs and reconcile lost responses before another mutation. Enforce existing resource limits and no domain purchase, transfer, DNS change, new paid service or plan upgrade. Domain/name availability is dated discovery, not reservation. Verify project GitHub identity on readback; source SHA, deployment status, served route and physical-device playthrough remain independent evidence fields. Future catalog target is cao825/oley-arcade; do not edit it before a verified playable deployment. Mount buildProductDeploymentRoutes from the existing serve composition; the route builder delegates to the named product operation rather than a test-only seam.
+  acceptance:
+    - claim: deployment binding rejects a different repository or team
+      proof: "unit test: W1-T10616: deployment binding rejects a different repository or team"
+    - claim: a lost project response resumes the same provider project
+      proof: "unit test: W1-T10616: a lost project response resumes the same provider project"
+    - claim: project creation never marks a product deployed or playable
+      proof: "unit test: W1-T10616: project creation never marks a product deployed or playable"
+    - claim: the served product route invokes the production capability
+      proof: "grep: buildProductDeploymentRoutes( in src/lib/serve.ts"
+  falsifier: Remove the named ownership, idempotency, evidence or refusal guard independently. Its corresponding behavioral proof must fail against the same fixture and pass when restored. Test real durable files/default transport boundaries plus each catch arm; never a zero-test wrapper result. Keep initial live read/write/dispatch/deployment receipts separate from fixtures.

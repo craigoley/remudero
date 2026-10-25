@@ -1,0 +1,22 @@
+id: incident-1a80b9cd89779f4f
+ts: 2026-10-25T13:25:19.526Z
+raw: |-
+  Incident 1a80b9cd8977: flow pr-stage-stall:other:unknown signature
+  First seen: 2026-10-25T13:24:17.409Z
+  Last seen: 2026-10-25T13:24:17.409Z
+  Count: 1, burn: 1.00/hr
+  Deploy sha(s): unknown
+  Instance(s): core
+  Sample events:
+    - pr=14151 other: unknown signature
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#1a80b9cd89779f4f36f91c5c9170c966bceec4a08d61cf47820be685f1160cb3
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
