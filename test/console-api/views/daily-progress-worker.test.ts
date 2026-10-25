@@ -115,7 +115,7 @@ test("daily progress collector reuses complete snapshots with truthful attributi
       const retained = readDailyProgressRevision(stateDir, readDailyProgressManifest(stateDir).days[key]!);
       assert.equal(retained.report.totals.mergedChanges.value, 207);
       assert.equal(retained.report.coverage.sources.find(s => s.kind === "pull_requests")!.state, "unavailable");
-    } finally { db.close(); }
+    } finally { db.close(); await flushReadModelTransactions(); }
   });
 });
 
@@ -185,7 +185,7 @@ test("daily progress collects hourly and closes local days without page demand",
         const afterExpiry = acquireLease(peer, { holder: "daily-worker-proof", clock }); assert.ok(afterExpiry.ok);
         if (afterExpiry.ok) assert.notEqual(readModelLeaseEpoch(peer, afterExpiry.lease), epoch, "an expired lease starts a new ownership epoch even without an intervening holder");
       } finally { peer.close(); }
-    } finally { lane.stop(); ticker.release(); }
+    } finally { lane.stop(); ticker.release(); await flushReadModelTransactions(); }
   });
 });
 
@@ -244,7 +244,11 @@ test("daily collector keeps every configured PR source visible before counting e
         assert.equal(report.coverage.sources.filter(source => source.kind === "pull_requests" && source.required).length, 2);
         assert.equal(report.totals.mergedChanges.precision, both ? "exact" : "unavailable", "one complete sibling cannot erase a missing required source");
         if (both) assert.equal(report.totals.mergedChanges.value, 0, "complete persisted source receipts support the measured zero");
-      } finally { db.close(); }
+      } finally {
+        db.close();
+        // The transaction recorder writes and removes its sidecar asynchronously; settle it before the temp root goes.
+        await flushReadModelTransactions();
+      }
     }
   });
 });
