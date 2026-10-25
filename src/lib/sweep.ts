@@ -248,6 +248,12 @@ import {
   NEEDS_HUMAN_LABEL,
   buildEscalationJudgePrompt,
   escalationCause,
+  fixEscalationDedupKey,
+  matchDuplicateEscalation,
+  openEscalationStandDownReason,
+  clearedConflictEscalationCause,
+  CONFLICT_EVIDENCE_MISSING_REASON_CODE,
+  CONFLICT_NOT_ADMITTED_REASON_CODE,
   escalate,
   ghIssueGateway,
   isEscalationJudgeExempt,
@@ -2002,6 +2008,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readTaskContractRevision",
   "readTaskSemanticRevision",
   "readMergedRatchets", // W1-T9962
+  "readOpenEscalations",
 ] as const;
 
 export function productionFixProgressJudge(opts: {
@@ -2146,6 +2153,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readTaskContractRevision"
   | "readTaskSemanticRevision"
   | "readMergedRatchets"
+  | "readOpenEscalations"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -2582,6 +2590,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
+    readOpenEscalations: () => issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
     readTaskContractRevision,
     readTaskSemanticRevision,
@@ -6141,12 +6150,8 @@ export const MERGEABILITY_UNKNOWN_WAIT_BACKSTOP = 6;
 
 /** W1-T5908 — the reason code a conflict escalation records as its `**Raised-by:**` line: which
  *  disposition raised it. Only the no-evidence code is a question a later capture can answer. */
-export const CONFLICT_EVIDENCE_MISSING_REASON_CODE = "conflict-evidence-missing";
-export const CONFLICT_NOT_ADMITTED_REASON_CODE = "conflict-not-admitted";
-
-/** W1-T5908 — the `**Raised-by:**`/`**Base:**` lines {@link conflictEscalationContext} writes. */
-export const RAISED_BY_LINE_RE = /^\*\*Raised-by:\*\*\s*(\S+)\s*$/m;
-export const BASE_SHA_LINE_RE = /^\*\*Base:\*\*\s*(\S+)\s*$/m;
+export { CONFLICT_EVIDENCE_MISSING_REASON_CODE, CONFLICT_NOT_ADMITTED_REASON_CODE,
+  RAISED_BY_LINE_RE, BASE_SHA_LINE_RE, clearedConflictEscalationCause } from "./escalate.js";
 
 /** W1-T5908 — GitHub's raw `mergeable_state` this pass read `unknown`: the pass cannot tell a
  *  conflict whose evidence is still computing from one whose evidence will never come. */
@@ -6179,22 +6184,6 @@ export function conflictEscalationContext(pr: Pick<OpenPrView, "mergeConflict">,
   return `**Raised-by:** ${code}\n${baseSha ? `**Base:** ${baseSha}\n` : ""}\n`;
 }
 
-/** W1-T5908 — an open conflict escalation's cause when THIS round shows it cleared (evidence now
- *  captured, or the base moved); `undefined` when it still holds or was never recorded. */
-export function clearedConflictEscalationCause(
-  body: string | undefined,
-  current: { conflictEvidenceCaptured: boolean; baseSha?: string },
-): string | undefined {
-  const raisedBy = RAISED_BY_LINE_RE.exec(body ?? "")?.[1];
-  if (raisedBy === CONFLICT_EVIDENCE_MISSING_REASON_CODE && current.conflictEvidenceCaptured) {
-    return `raised by ${raisedBy} — the conflicting-file evidence is now captured and the PR dispositions conflicted`;
-  }
-  const raisedBase = BASE_SHA_LINE_RE.exec(body ?? "")?.[1];
-  if (raisedBase !== undefined && current.baseSha !== undefined && raisedBase !== current.baseSha) {
-    return `raised against base ${raisedBase} — the base has moved to ${current.baseSha}`;
-  }
-  return undefined;
-}
 
 /** W1-T78 policy (rule 2) — how many strikes a fix-rung RE-DISPATCH gets once an operator answers a
  *  clarification question. Nested inside {@link SweepPolicy}, the config object every `runSweep`
@@ -13435,6 +13424,8 @@ export function reviewOnlyStandDownReason(scope: LightPassScopeName): string {
 }
 
 export interface SweepDeps {
+  /** One shared open needs-human snapshot per pass; missing or unreadable fails toward fixing. */
+  readOpenEscalations?: () => OpenIssue[] | Promise<OpenIssue[]>;
   fixProgressJudge?: FixProgressJudge;
   /** W1-T9970 test seam: the running reviewer image. Default {@link readRuntimeImageSha}. */
   runtimeImageSha?: () => string | undefined;
@@ -16746,6 +16737,15 @@ export async function runSweep(
   const now = deps.now ? deps.now() : Date.now();
   const repairDemandMark = repairMemoryDemandMark(); // W1-T9706: what this pass did not refuse again, it clears at its end.
   const log = deps.log ?? (() => {});
+  let openEscalations: Promise<OpenIssue[]> | undefined;
+  const readOpenEscalations = () => openEscalations ??= (async () => {
+    try {
+      return await deps.readOpenEscalations?.() ?? [];
+    } catch (error) {
+      log("sweep.open_escalations.read_error", { reason: String(error) });
+      return []; // The rung retains its live probe when this pass cannot observe open issues.
+    }
+  })();
   // W1-T7736: the sweep never disposes, reviews, fixes or refreshes a merge-queue rehearsal's replay PR.
   for (const pr of openPrs.filter(isMergeQueueReplayPr)) log("sweep.replay_pr_excluded", { pr_number: pr.prNumber, head_ref: pr.headRefName });
   openPrs = openPrs.filter((pr) => !isMergeQueueReplayPr(pr));
@@ -19899,6 +19899,13 @@ export async function runSweep(
               break;
             }
             case "blocked-fixable": {
+              const escalationKey = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha,
+                pr.mergeConflict !== undefined, isBlockedCi(pr), deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
+              const candidate = matchDuplicateEscalation(escalationKey, await readOpenEscalations());
+              const openHold = openEscalationStandDownReason(pr.headSha, candidate, escalationKey.contractRevision,
+                { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
+                isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer);
+              if (openHold) { acted = false; spent = false; standDownReason = openHold.reason; break; }
               if (terminalDesignHold?.amended) {
                 const amended = await refreshAmendedContract([{ progress_contract_revision: terminalDesignHold.revision }], undefined, terminalDesignHold.observedRevision, terminalDesignHold.semantic);
                 if (amended === undefined) acted = false;
@@ -22316,6 +22323,11 @@ export async function runSweepLightPass(
     noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
     return [await runSweep([], deps, policy)];
   }
+  // A light pass fans out into one runSweep per PR; their issue snapshot belongs to this pass.
+  const readOpenEscalations = deps.readOpenEscalations;
+  let openEscalations: Promise<OpenIssue[]> | undefined;
+  if (readOpenEscalations) deps = { ...deps,
+    readOpenEscalations: () => openEscalations ??= Promise.resolve().then(readOpenEscalations) };
   if (!deps.restartAdmission) lightPassRefillsClosed = false;
   // W1-T526/W1-T2792 — THE QUEUE-ADMISSION RULE. The light pass admits at most the existing
   // `reviewLanes` semantic width, never the old hidden hard-coded one. Every other PR's own
