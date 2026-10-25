@@ -16,7 +16,7 @@ import { main } from "#src/run-task.js";
 import { spawnCodexWorker } from "#src/lib/worker-provider.js";
 import { realDeployDeps } from "#src/lib/deployer.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, renderWorkerSettings, spawnWorker,
+import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, privateRegistryDenyRegions, renderWorkerSettings, spawnWorker,
   startWorkerEgressProxy, type SpawnWorkerArgs } from "#src/lib/worker.js";
 
 import { parseInstanceRegistry } from "../src/lib/instance-registry.js";
@@ -572,6 +572,39 @@ for (const intent of ["writer", "review"] as const) {
     } finally { fixture.cleanup(); }
   });
 }
+
+test("selected private deny regions are public ancestors or fixed standard roots, never authority", () => {
+  const publicRoots = ["/private/public-fixture/checkout", "/private/public-fixture/tmp"];
+  const before = publicRoots.slice();
+  assert.deepEqual(privateRegistryDenyRegions(["/private/public-fixture/private.yaml", "/private/public-fixture/policy.json"], publicRoots), ["/private/public-fixture"]);
+  assert.deepEqual(publicRoots, before, "policy derivation does not mutate a caller's public roots");
+  assert.deepEqual(privateRegistryDenyRegions(["/home/node/.config/remudero/selected-registry.yaml", "/app/settings/worker.json"], ["/mnt/task", "/usr/bin"]), ["/home", "/app"]);
+  assert.deepEqual(privateRegistryDenyRegions(["/home/private.yaml", "/public/settings.json"], ["/public"]), ["/home"], "already-public policy bytes do not create a blanket public-source denial");
+  for (const [inputs, roots] of [
+    [["relative"], ["/public"]], [["/home/line\nprivate.yaml"], ["/public"]],
+    [["/home/private.yaml"], ["/"]], [["/home/private.yaml"], ["relative"]],
+    [["/unknown-private-root/private.yaml"], ["/public"]],
+  ]) assert.throws(() => privateRegistryDenyRegions(inputs, roots), error => {
+    assert.ok(error instanceof runtimeRegistry.InstanceRegistryRuntimeError);
+    assert.match(error.message, /worker_scope_(?:region_)?unqualified/);
+    assert.equal(error.message.includes("private.yaml"), false);
+    return true;
+  });
+});
+
+test("selected read-only Claude scopes refuse contradictory scratch grants before query", async () => {
+  for (const mode of ["temp-in-cwd", "home-in-cwd", "temp-is-review-source"] as const) {
+    const fixture = runtimeRegistryFixture(), sink = { calls: 0 };
+    try {
+      const args = privateClaudeArgs(fixture, sink); args.sandboxIntent = "disposable-review";
+      if (mode === "temp-in-cwd") args.env!.TMPDIR = args.cwd;
+      if (mode === "home-in-cwd") args.config = { ...args.config, root: args.cwd };
+      if (mode === "temp-is-review-source") args.sandboxReadRoots = [args.env!.TMPDIR!];
+      await assert.rejects(runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected }), /worker_scope_readonly_scratch_overlap/);
+      assert.equal(sink.calls, 0, "unknown read/write overlap is not a private-input grant");
+    } finally { fixture.cleanup(); }
+  }
+});
 
 test("selected Claude actual SDK transport keeps private registry paths out of child arguments", async () => {
   const fixture = runtimeRegistryFixture();
