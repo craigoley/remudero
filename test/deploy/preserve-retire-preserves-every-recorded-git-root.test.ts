@@ -78,6 +78,19 @@ m.save_git_copy(r,snap,str(work),cfg)
 size=(work/'unpublished.bundle').stat().st_size;assert size<(4<<20),size
 `));
 
+test("complete Git copy counts a stored delta whose base lies outside the saved closure at full size and holds before packing", () => probe(`
+def git(*a,inp=None):
+ x=m.copy_git(r,*a,inp=inp);assert x.returncode==0,x.stderr;return x.stdout.decode().strip()
+base=os.urandom(1<<20);kept=git('hash-object','-w','--stdin',inp=base);gone=git('hash-object','-w','--stdin',inp=base+b'outside the closure\\n')
+git('update-ref','refs/private/kept',kept);git('update-ref','refs/private/gone',gone);git('repack','-adq');git('update-ref','-d','refs/private/gone')
+assert git('cat-file','--batch-check=%(deltabase)',inp=kept.encode()+b'\\n')==gone,'fixture did not store the kept blob as a delta'
+snap=m.git_snapshot(r);m.free_bytes=lambda _:m.MIN_FREE_BYTES+(1<<20)
+try:m.save_git_copy(r,snap,str(work),cfg)
+except m.Hold as e:assert 'complete independent copy would not fit' in str(e),str(e)
+else:raise AssertionError('a delta against a base outside the closure was counted as reusable')
+assert not (work/'unpublished.bundle').exists()
+`));
+
 test("complete Git copy holds before verification when the written bundle leaves no room for the verifier store", () => probe(`
 calls=[]
 def free(_):
