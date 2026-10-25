@@ -1452,7 +1452,9 @@ export function machineFilingAdmissionViolations(
       `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
         `task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`,
     );
-  } else if (task.verify === "human" && !context.releasedIds.has(task.id) && !isParkedMachineProposal(task)) {
+  // An explicit hold permits filing, not dispatch; dependency and path guards still apply.
+  } else if (task.verify === "human" && !context.releasedIds.has(task.id) &&
+      !(task.status === "queued" && task.dispatch_hold === true) && !isParkedMachineProposal(task)) {
     reasons.push(
       `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
         `task ${task.id} is verify:human — not auto-runnable by the proto-runner`,
