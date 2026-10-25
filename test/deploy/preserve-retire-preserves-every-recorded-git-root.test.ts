@@ -72,3 +72,44 @@ assert m.git_snapshot(r)==snap
 assert m.copy_git(r,'checkout','--detach','--quiet','HEAD').returncode==0
 assert m.git_snapshot(r)!=snap
 `));
+
+test("retirement rechecks recorded refs after the last activity probe while an unchanged checkout retires", () => probe(`
+roots=home/'Remudero';roots.mkdir();changing=roots/'changing';healthy=roots/'healthy'
+for p in [changing,healthy]:
+ out=m.run(['git','clone','--quiet',str(root),str(p)]);assert out.returncode==0,out.stderr
+c.write_text(json.dumps({'enabled':True,'idle_hours':24,'interval_hours':0,'roots':['Remudero'],
+ 'preserve_root':'saved','published_remotes':[],'temp_roots':[]}));c.chmod(0o600)
+m.process_snapshot=lambda:([],set())
+original_preserve=m.preserve;original_scope=m.keep_scope;copied=set();changed=False
+def preserve(*args):
+ result=original_preserve(*args);copied.add(args[0].path);return result
+def scope(path,below=True):
+ global changed
+ if path==str(changing) and path in copied and not changed:
+  changed=True
+  rr=m.Repo(path,'clone');out=m.copy_git(rr,'update-ref','refs/checkpoints/late',snap['head']);assert out.returncode==0
+ return original_scope(path,below)
+m.preserve=preserve;m.keep_scope=scope
+sys.argv=['helper','--home',str(home),'--apply','--temp-base',str(home/'tmp'),'--now',str(int(m.time.time())+48*3600)]
+assert m.main()==0
+assert changed,'did not reach late retirement boundary'
+assert changing.is_dir(),'changed ref was retired'
+assert not healthy.exists(),'healthy unmarked positive control never retired'
+`));
+
+test("preservation packs a private blob even when every commit is already counted as published", () => probe(`
+blob=m.copy_git(r,'hash-object','-w','--stdin',inp=b'blob outside all commits').stdout.decode().strip()
+assert m.copy_git(r,'update-ref','refs/private/blob',blob).returncode==0
+class Published:
+ def excludes(self,repo):return [snap['head']]
+# Put preservation outside its source so untracked collection cannot ingest its own output.
+source=home/'source';out=m.run(['git','clone','--quiet',str(root),str(source)]);assert out.returncode==0
+rr=m.Repo(str(source),'clone')
+assert m.copy_git(rr,'hash-object','-w','--stdin',inp=b'blob outside all commits').stdout.decode().strip()==blob
+assert m.copy_git(rr,'update-ref','refs/private/blob',blob).returncode==0
+saved,summary=m.preserve(rr,Published(),cfg,str(home),m.time.time())
+assert summary['unpublished_commits']==0
+assert summary['packed_objects']>=3
+assert (pathlib.Path(saved)/'unpublished.bundle').exists()
+assert ['%s'%blob,'refs/private/blob'] in summary['git_snapshot']['refs']
+`));
