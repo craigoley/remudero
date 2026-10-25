@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import fs, { fsyncSync, fstatSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, fsyncSync, fstatSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join, relative } from "node:path";
 import { test } from "node:test";
@@ -73,6 +73,19 @@ test("corrupt or unreadable product state cannot become an empty successful stor
   assert.ok(store.write(ACTOR, create).ok);
   const path = productStatePaths(root, ACTOR).state;
   const original = readFileSync(path, "utf8");
+  chmodSync(path, 0o644);
+  assert.equal(store.list(ACTOR).code, "unavailable", "private product records refuse a publicly readable state file");
+  chmodSync(path, 0o600);
+  const wrongIdentity = JSON.parse(original);
+  const key = Object.keys(wrongIdentity.products)[0]!;
+  wrongIdentity.products[`prd_${"a".repeat(32)}`] = wrongIdentity.products[key];
+  delete wrongIdentity.products[key];
+  writeFileSync(path, JSON.stringify(wrongIdentity));
+  assert.equal(store.list(ACTOR).code, "corrupt", "the keyed identity must match the stored product identity");
+  const duplicate = JSON.parse(original);
+  duplicate.receipts["f".repeat(64)] = Object.values(duplicate.receipts)[0];
+  writeFileSync(path, JSON.stringify(duplicate));
+  assert.equal(store.list(ACTOR).code, "corrupt", "one revision cannot have two committed command receipts");
   const changed = JSON.parse(original);
   Object.values(changed.products as Record<string, { brief: { idea: string } }>)[0]!.brief.idea = "Changed without a durable receipt";
   writeFileSync(path, JSON.stringify(changed));
