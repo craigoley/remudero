@@ -31,8 +31,8 @@ const GOLDEN_FIXTURE_RE = /^test\/fixtures\/golden-verdicts\//;
 const TEST_FILE_RE = /^test\/.*\.test\.ts$/;
 const INJECTED_SKILL_PATH_RE = /^\.claude\/skills\/([^/]+)\/SKILL\.md$/;
 
-function runGit(root, args) {
-  const result = git(args, { cwd: root });
+function runGit(root, args, encoding = "utf8") {
+  const result = git(args, { cwd: root, encoding });
   if (result.error || result.status !== 0) {
     throw new Error(`git ${args.join(" ")} failed: ${result.error?.message ?? result.stderr}`);
   }
@@ -41,6 +41,30 @@ function runGit(root, args) {
 
 export function readGitDiff(root, base, head = "HEAD") {
   return runGit(root, ["diff", "--no-ext-diff", "--unified=0", `${base}...${head}`]);
+}
+
+function readGitPathChanges(root, base, head) {
+  const bytes = runGit(root, ["diff", "--no-ext-diff", "--name-status", "-z", `${base}...${head}`], null);
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  if (text === "") return [];
+  const records = text.split("\0");
+  if (records.pop() !== "") throw new Error("prompt surface diff: unterminated name-status record");
+  const files = [];
+  for (let i = 0; i < records.length;) {
+    const status = records[i++];
+    if (!/^(?:[ADMTUXB]|[RCM][0-9]{1,3})$/.test(status)) throw new Error("prompt surface diff: invalid name-status record");
+    const oldPath = records[i++];
+    const newPath = /^[RC]/.test(status) ? records[i++] : oldPath;
+    if (!oldPath || !newPath) throw new Error("prompt surface diff: missing name-status path");
+    // Git renders a type change as separate deletion and addition patches.
+    if (status === "T") {
+      files.push({ oldPath, newPath: "/dev/null" }, { oldPath: "/dev/null", newPath });
+      continue;
+    }
+    files.push({ oldPath: status === "A" ? "/dev/null" : oldPath,
+      newPath: status === "D" ? "/dev/null" : newPath });
+  }
+  return files;
 }
 
 function readRevisionFile(root, rev, path) {
@@ -71,26 +95,32 @@ function decodeGitPath(path) {
   return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(bytes));
 }
 
-export function parseUnifiedDiff(diffText) {
+export function parseUnifiedDiff(diffText, pathChanges) {
   const files = [];
   let current;
   for (const line of diffText.split("\n")) {
     if (line.startsWith("diff --git ")) {
-      const fileMatch = /^diff --git ("(?:[^"\\]|\\.)*"|a\/.+) ("(?:[^"\\]|\\.)*"|b\/.+)$/.exec(line);
-      if (!fileMatch) throw new Error("prompt surface diff: unparsed Git file header");
-      current = { oldPath: decodeGitPath(fileMatch[1]).replace(/^a\//, ""),
-        newPath: decodeGitPath(fileMatch[2]).replace(/^b\//, ""), hunks: [], changedLines: [] };
+      // Real Git comparisons use NUL-delimited paths; display headers can contain an
+      // unquoted " b/" inside either rename path and cannot delimit those paths safely.
+      const paths = pathChanges?.[files.length];
+      if (pathChanges && !paths) throw new Error("prompt surface diff: path record count mismatch");
+      const fileMatch = paths ? null : /^diff --git ("(?:[^"\\]|\\.)*"|a\/.+) ("(?:[^"\\]|\\.)*"|b\/.+)$/.exec(line);
+      if (!paths && !fileMatch) throw new Error("prompt surface diff: unparsed Git file header");
+      current = { ...(paths ?? { oldPath: decodeGitPath(fileMatch[1]).replace(/^a\//, ""),
+        newPath: decodeGitPath(fileMatch[2]).replace(/^b\//, "") }), hunks: [], changedLines: [] };
       files.push(current);
       continue;
     }
     if (!current) continue;
     if (line.startsWith("+++ ")) {
+      if (pathChanges) continue;
       const path = line.slice(4);
       if (path === "/dev/null") continue;
       current.newPath = decodeGitPath(path.replace(/\t$/, "")).replace(/^b\//, "");
       continue;
     }
     if (line.startsWith("--- ")) {
+      if (pathChanges) continue;
       const path = line.slice(4);
       if (path === "/dev/null") continue;
       current.oldPath = decodeGitPath(path.replace(/\t$/, "")).replace(/^a\//, "");
@@ -114,6 +144,7 @@ export function parseUnifiedDiff(diffText) {
       current.changedLines.push(line);
     }
   }
+  if (pathChanges && files.length !== pathChanges.length) throw new Error("prompt surface diff: path record count mismatch");
   return files;
 }
 
@@ -306,6 +337,7 @@ function revisionSkills(root, revision) {
     const metadata = entry.slice(0, separator), name = entry.slice(separator + 1);
     if (separator < 0 || !name || /[\r\n/]/.test(name)) throw new Error("skill reachability: ambiguous approved skill name");
     if (metadata.startsWith("120000 ")) throw new Error("skill reachability: a symbolic skill entry cannot be resolved from Git");
+    if (metadata.startsWith("160000 ")) throw new Error("skill reachability: a gitlink skill entry cannot be resolved from Git");
     if (!metadata.startsWith("040000 tree ")) continue;
     const path = `.claude/skills/${name}/SKILL.md`;
     const record = runGit(root, ["ls-tree", "-z", revision, "--", path]);
@@ -420,8 +452,8 @@ export function refusalMessage(surfaces) {
   return parts.join(" ");
 }
 
-export function evaluatePromptSurfaceDiff(diffText, { root = REPO_ROOT, base = "origin/main", head = "HEAD" } = {}) {
-  const files = parseUnifiedDiff(diffText);
+export function evaluatePromptSurfaceDiff(diffText, { root = REPO_ROOT, base = "origin/main", head = "HEAD", pathChanges } = {}) {
+  const files = parseUnifiedDiff(diffText, pathChanges);
   const skillContext = skillSurfaceContext(root, base, head, files);
   const ordinarySurfaces = [...new Set(files.flatMap(file => [...touchedPathSurfaces(root, head, file), ...touchedSymbolSurfaces(root, base, head, file)]))];
   const surfaces = [
@@ -446,7 +478,8 @@ export function evaluatePromptSurfaceDiff(diffText, { root = REPO_ROOT, base = "
 
 export function evaluatePromptSurfaceGate({ root = REPO_ROOT, base = "origin/main", head = "HEAD" } = {}) {
   const comparisonBase = runGit(root, ["merge-base", base, head]).trim();
-  return evaluatePromptSurfaceDiff(readGitDiff(root, base, head), { root, base: comparisonBase, head });
+  const pathChanges = readGitPathChanges(root, base, head);
+  return evaluatePromptSurfaceDiff(readGitDiff(root, base, head), { root, base: comparisonBase, head, pathChanges });
 }
 
 export function main(argv = process.argv.slice(2), { log = console.log, error = console.error } = {}) {

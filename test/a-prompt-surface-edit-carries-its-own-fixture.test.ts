@@ -475,6 +475,103 @@ test("deleting or opting out a formerly injected skill retains its base-side pro
   });
 });
 
+test("a pure skill rename preserves exact base and head prompt evidence obligations", () => {
+  for (const [oldPath, newPath] of [
+    [INJECTED_PATH, ".claude/skills/renamed b/SKILL.md"],
+    [".claude/skills/original b/SKILL.md", '.claude/skills/renamed\t"b/SKILL.md'],
+    [INJECTED_PATH, "archived/renamed b/SKILL.md"],
+    ["drafts/original b/SKILL.md", ".claude/skills/renamed b/SKILL.md"],
+  ]) withFixture(root => {
+    write(root, oldPath, skillSource("Preserve this invariant across a pure rename."));
+    const before = renderedSkillPrompt(root);
+    commit(root, "approved rename source");
+    const base = git(root, ["rev-parse", "HEAD"]).trim();
+    mkdirSync(dirname(join(root, newPath)), { recursive: true });
+    renameSync(join(root, oldPath), join(root, newPath));
+    const after = renderedSkillPrompt(root);
+    commit(root, "pure skill rename");
+    assert.equal(git(root, ["diff", "--name-status", "-z", base, "HEAD"]),
+      `R100\0${oldPath}\0${newPath}\0`, "the fixture must exercise a pure rename");
+    assert.notEqual(before, after, "the production renderer observes the renamed skill");
+    const expected = [oldPath, newPath].filter(path => path.startsWith(".claude/skills/"));
+    const result = mod.evaluatePromptSurfaceGate({ root, base });
+    assert.equal(result.ok, false, result.message);
+    assert.deepEqual(result.surfaces, expected, "both reachable sides keep their exact paths");
+    assert.deepEqual(result.evidence, []);
+    for (const [index, path] of expected.entries()) {
+      const skill = path.split("/")[2];
+      write(root, EFFECT_PATH.replace(".yaml", `-${index}.yaml`), effectFixture(before, after, { skill }));
+      commit(root, "evidence for one side of the rename");
+      assert.equal(mod.evaluatePromptSurfaceGate({ root, base }).ok, index === expected.length - 1,
+        "every reachable side requires its own qualified evidence");
+    }
+  });
+});
+
+test("a copied skill requires evidence for its new prompt identity", () => {
+  withFixture(root => {
+    const copiedPath = ".claude/skills/copied b/SKILL.md";
+    const original = skillSource("The original invariant remains in the copy.");
+    git(root, ["config", "diff.renames", "copies"]);
+    write(root, INJECTED_PATH, original);
+    const before = renderedSkillPrompt(root);
+    commit(root, "approved copy source");
+    const base = git(root, ["rev-parse", "HEAD"]).trim();
+    write(root, copiedPath, original);
+    write(root, INJECTED_PATH, skillSource("A new invariant in the source."));
+    const after = renderedSkillPrompt(root);
+    commit(root, "copy and change the source");
+    assert.ok(git(root, ["diff", "--name-status", "-z", base, "HEAD"]).includes(
+      `C100\0${INJECTED_PATH}\0${copiedPath}\0`), "the fixture must exercise a copy record");
+    write(root, EFFECT_PATH, effectFixture(before, after));
+    commit(root, "evidence for the source only");
+    const result = mod.evaluatePromptSurfaceGate({ root, base });
+    assert.equal(result.ok, false, "source evidence cannot discharge the copied skill's obligation");
+    assert.deepEqual(new Set(result.surfaces), new Set([INJECTED_PATH, copiedPath]));
+    write(root, EFFECT_PATH.replace(".yaml", "-copy.yaml"), effectFixture(before, after, { skill: "copied b" }));
+    commit(root, "evidence for the copied identity");
+    assert.equal(mod.evaluatePromptSurfaceGate({ root, base }).ok, true);
+  });
+});
+
+test("unreadable utf-8 skill paths are refused instead of becoming absent", () => {
+  withFixture(root => {
+    const directory = Buffer.concat([Buffer.from(join(root, ".claude/skills/")), Buffer.from([0xff])]);
+    const path = Buffer.concat([directory, Buffer.from("/SKILL.md")]);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(path, skillSource("Original invariant."));
+    commit(root, "skill path with an undecodable byte");
+    writeFileSync(path, skillSource("Changed invariant."));
+    commit(root, "edit the undecodable skill path");
+    assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }), /encoded data/);
+  });
+});
+
+test("unresolved gitlink skill entries are refused at both base and head", () => {
+  for (const side of ["base", "head"]) withFixture(root => {
+    write(root, INJECTED_PATH, skillSource("A readable approved skill."));
+    commit(root, "regular skill tree");
+    const regular = git(root, ["rev-parse", "HEAD"]).trim();
+    const path = ".claude/skills/unresolved";
+    git(root, ["update-index", "--add", "--cacheinfo", `160000,${regular},${path}`]);
+    git(root, ["commit", "-q", "-m", "unresolved submodule skill"]);
+    let base = regular;
+    if (side === "base") {
+      base = git(root, ["rev-parse", "HEAD"]).trim();
+      git(root, ["update-index", "--force-remove", path]);
+      git(root, ["commit", "-q", "-m", "remove unresolved submodule skill"]);
+    }
+    assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base }), /skill reachability:.*gitlink/,
+      `${side} skill contents cannot be inferred from a gitlink`);
+    const errors: string[] = [];
+    assert.equal(mod.main(["--base", base, "--worktree-path", root], {
+      log: () => assert.fail("unresolved reachability must never be accepted"),
+      error: message => errors.push(message),
+    }), 1);
+    assert.match(errors.join("\n"), /REFUSED.*gitlink/);
+  });
+});
+
 test("injected skill evidence qualifies only the actual maintained prompt effect", () => {
   for (const name of ["procedure", "fix\tprocedure"]) withFixture(root => {
     const path = `.claude/skills/${name}/SKILL.md`;
