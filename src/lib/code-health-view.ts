@@ -10,8 +10,7 @@ import type { CodeHealthAssessment } from "./code-health-contract.js";
 import { buildCodeHealthOpportunities, qualifiedCodeHealthPlanningSource, type CodeHealthImprovementOpportunity, type CodeHealthRelatedWork } from "./codeql-quality-intake.js";
 import { codeHealthRepositoryStateDir, improvementOutcomeStateDir, readCodeHealthArtifactJson, readCodeHealthCollectionFailure, readCodeHealthSnapshot, type CodeHealthCollectionFailureRead } from "./code-health-store.js";
 import { validateRepositoryEvidenceInventory, type RepositoryEvidenceInventory } from "./daily-progress-contract.js";
-import { readModelSidecarDir } from "./read-model-db.js";
-import type { ReadModelView } from "./read-model-worker.js";
+import { readModelSidecarDir, type ReadModelDb } from "./read-model-db.js";
 import { OPPORTUNITY_EVIDENCE_FILE, OPPORTUNITY_EVIDENCE_MAX_BYTES, projectGardenerOpportunityEvidence } from "./gardener-opportunity-evidence.js";
 import { judgeSource } from "./view-freshness.js";
 import { viewKey, type ViewBodySource, type ViewRequestFailure, type ViewSource } from "./views.js";
@@ -168,7 +167,10 @@ export function validateCodeHealthRequest(params: URLSearchParams, source?: View
     return undefined;
   } catch (error) { return error instanceof RangeError || error instanceof SyntaxError ? { error: "invalid_request", status: 400, detail: error instanceof RangeError ? error.message : "Invalid Code health page." } : { error: "view_not_ready", status: 503, detail: "Code health scope is unavailable." }; }
 }
-export function createCodeHealthView(opts: { stateDir?: string; keys?: () => string[] } = {}): ReadModelView {
+export function createCodeHealthView(opts: { stateDir?: string; keys?: () => string[] } = {}): {
+  name: string; version: number; demand: true;
+  materialize(ctx: { now: number; sourceStore?: ReadModelDb; instances: ReadonlyArray<unknown> }): Array<{ key: string; data: CodeHealthViewData; sources: ViewSource[] }>;
+} {
   return { name: CODE_HEALTH_VIEW_NAME, version: 1, demand: true, materialize(ctx) {
     const stateDir = opts.stateDir ?? (ctx.sourceStore ? dirname(readModelSidecarDir(dirname(ctx.sourceStore.path))) : undefined);
     if (!stateDir) throw new CodeHealthNotReady("Code health durable state is unavailable.");
