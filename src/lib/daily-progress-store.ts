@@ -28,7 +28,7 @@ const PUBLICATION_STARTED = "publication-started";
 const MAX_OBJECT_BYTES = 64 * 1024 * 1024;
 
 function read(path: string): string {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size > MAX_OBJECT_BYTES) throw new Error("daily history object is not a bounded regular file");
