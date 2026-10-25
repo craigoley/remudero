@@ -277,3 +277,27 @@ test("an unpinned operator release cannot dispatch or be reapproved by a model d
 test("an observed legacy reapproval hold survives rotation until an explicit new approval during parked escalation re-asks", async t => {
   await parkedReapprovalControl(t, "durable");
 });
+
+test("unread operator history cannot be overruled by a machine receipt beside a damaged ledger row", async t => {
+  const f = fixture(t);
+  const pin = operatorReleasePin(f.task());
+  const machine = JSON.stringify({ step: "ratify.approved", task_id: ID, author_class: "machine", release_pin: pin });
+  for (const damaged of ['{"step":"ratify.approved",', "not-json", "null", "[]"]) {
+    writeFileSync(f.ledger, damaged + "\n" + machine + "\n");
+    const resolution = resolveReleases(releaseReadersFor(f.ledger), f.plan());
+    assert.equal(resolution.ids.has(ID), false, damaged);
+    assert.equal(resolution.unknownReleaseHistory?.has(ID), true, damaged);
+    await assert.rejects(f.judge(), /operator release history is unreadable/, damaged);
+    assert.equal(f.modelCalls(), 0, damaged);
+    const result = approveParkedTask(ID, { plan: f.plan(), ledgerPath: f.ledger, runId: "machine",
+      provenance: { author_class: "machine" }, riskPolicy: { verifyHumanReleaseEnabled: true } as never });
+    assert.equal(result.code, 2, damaged);
+  }
+  writeFileSync(f.ledger, JSON.stringify({ step: "unrelated" }) + "\n" + machine + "\n");
+  assert.equal(resolveReleases(releaseReadersFor(f.ledger), f.plan()).ids.has(ID), true,
+    "a complete readable history still admits the existing qualified machine receipt");
+  writeFileSync(f.ledger, "{ torn\n" + JSON.stringify({ step: "ratify.approved", task_id: ID,
+    author_class: "operator", release_pin: pin }) + "\n");
+  assert.equal(resolveReleases(releaseReadersFor(f.ledger), f.plan()).ids.has(ID), true,
+    "a matching explicit operator receipt remains independent positive authority");
+});
