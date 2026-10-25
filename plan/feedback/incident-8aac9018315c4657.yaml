@@ -1,0 +1,30 @@
+id: incident-8aac9018315c4657
+ts: 2026-10-24T17:46:52.089Z
+raw: >-
+  Incident 8aac9018315c: intervention
+  plan-proof-unrunnable:plan-repair:plan-scoped-round-already-handled-this-h
+
+  First seen: 2026-10-24T17:19:34.446Z
+
+  Last seen: 2026-10-24T17:46:49.012Z
+
+  Count: 10, burn: 10.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#11781@23964a959 actor=cao825 cause=plan-proof-unrunnable:plan-repair:plan-scoped-round-already-handled-this-h — a hand action answered a fleet state no lane resolved
+    - surface=pr action=close target=pr#11781@2026-10-14T22:11:37Z actor=cao825 cause=plan-proof-unrunnable:plan-repair:plan-scoped-round-already-handled-this-h — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#8aac9018315c46579e6d8400557af191c946e597d322903b10908a6c2fa2102e
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

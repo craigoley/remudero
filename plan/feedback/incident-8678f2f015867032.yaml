@@ -1,0 +1,31 @@
+id: incident-8678f2f015867032
+ts: 2026-10-24T17:06:08.322Z
+raw: >-
+  Incident 8678f2f01586: intervention
+  none:none:light-pass-action-for-this-head-is-still
+
+  First seen: 2026-10-24T16:58:53.708Z
+
+  Last seen: 2026-10-24T17:06:06.508Z
+
+  Count: 43, burn: 43.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#12575@e70328a2e actor=cao825 cause=none:none:light-pass-action-for-this-head-is-still — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#12582@e17e01d1f actor=cao825 cause=none:none:light-pass-action-for-this-head-is-still — a hand action answered a fleet state no lane resolved
+    - surface=pr action=update-branch target=pr#12582@89c5d5fab actor=cao825 cause=none:none:light-pass-action-for-this-head-is-still — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#8678f2f0158670323c55fb0564538bb6353fb6a08e42ae8ed60143df2d735977
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

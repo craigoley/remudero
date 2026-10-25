@@ -1,3 +1,4 @@
+import { operatorReleasePin } from "#src/lib/operator-release.js";
 /**
  * Operator ruling 2026-09-29: "There should be an LLM judge in the middle deciding what needs that
  * level of escalation and what can be automated."
@@ -30,6 +31,7 @@ import {
   judgeMachineShard,
   MACHINE_JUDGE_STATE_FILE,
   readOperatorReleases,
+  readOperatorReleaseRecords,
   recordOperatorRelease,
   machineFamily,
   needsMachineJudgement,
@@ -73,7 +75,7 @@ test("the production machine judge reads an approved amendment from main while i
   const local = gitRepo({ cloneFrom: origin.dir, kind: "judge-main-plan-local", scope: t });
   const head = local.git("rev-parse", "HEAD");
   const stateDir = join(local.dir, "state"); mkdirSync(stateDir);
-  recordOperatorRelease(stateDir, id, CLOCK.iso());
+  recordOperatorRelease(stateDir, loadPlan(join(local.dir, "plan/tasks.yaml")).byId.get(id)!, CLOCK.iso());
   const before = await machineJudgeInputsAsync(local.dir, stateDir, "origin/main");
   const amended = machineShard(id, { files: ["docs/ci-friction-remedies.md", "docs/approved-companion.md"] });
   writeFileSync(join(seed.dir, path), amended);
@@ -86,7 +88,8 @@ test("the production machine judge reads an approved amendment from main while i
   assert.equal(task.verify, "human");
   assert.deepEqual(task.files, ["docs/ci-friction-remedies.md", "docs/approved-companion.md"]);
   assert.equal(task.sourcePath, join(local.dir, path));
-  assert.equal(needsMachineJudgement(task, ports.operatorReleases!()), true);
+  recordOperatorRelease(stateDir, task, CLOCK.iso());
+  assert.equal(needsMachineJudgement(task, readOperatorReleases(stateDir, plan.tasks)), true);
   assert.notEqual(await machineJudgeInputsAsync(local.dir, stateDir, "origin/main"), before);
   assert.equal(local.git("rev-parse", "HEAD"), head);
   assert.equal(readFileSync(join(local.dir, path), "utf8"), old + "# private dirty bytes must survive\n");
@@ -515,12 +518,14 @@ test("earned autonomy lowers the bar for a family that helps and raises it for o
   });
   try {
     const plan = readPlan(root);
-    const merged = (id: string) => plan.byId.get(id)?.status === "merged";
+    const mergedIds = new Set(["W1-T9014", "W1-T9015"]);
+    const merged = (id: string) => mergedIds.has(id);
     assert.equal(machineFamily(plan.byId.get("W1-T9010")!), "helps");
     assert.ok(familyTrackRecord(plan, "helps", merged).mean > 0.5);
     assert.ok(familyTrackRecord(plan, "fails", merged).mean < 0.5);
     const seen: RiskJudgeInput[] = [];
-    const report = await runMachineFilingJudge(ports(root, async (input) => (seen.push(input), verdict("low", 0.75))).p);
+    const report = await runMachineFilingJudge(ports(root,
+      async (input) => (seen.push(input), verdict("low", 0.75)), { isMerged: merged }).p);
     assert.deepEqual(report.proceeded, ["W1-T9010"], "the same verdict clears the family that has helped");
     assert.deepEqual(report.escalated, ["W1-T9011"], "and escalates the family that has failed");
     assert.match(String(seen[0]!.planContext.family_track_record), /2 merged/);
@@ -767,12 +772,12 @@ test("a pinned release survives ledger rotation and compaction where a ledger re
   const ledger = join(root, "ledger.ndjson");
   try {
     const row = (id: string, i: number) =>
-      JSON.stringify({ ts: new Date(1790000000000 + i * 1000).toISOString(), run_id: `R${i}`, task_id: id, step: RELEASE_LEDGER_STEP, released: "verify-human" });
+      JSON.stringify({ ts: new Date(1790000000000 + i * 1000).toISOString(), run_id: `R${i}`, task_id: id, step: RELEASE_LEDGER_STEP, released: "verify-human", release_pin: readPlan(root).byId.has(id) ? operatorReleasePin(readPlan(root).byId.get(id)!) : undefined });
     const lines = [row("W1-T9090", 0), ...Array.from({ length: 220 }, (_, i) => row(`W1-T8${String(i).padStart(3, "0")}`, i + 1))];
     writeFileSync(ledger, lines.join("\n") + "\n");
-    assert.ok(releasedTaskIds(readFileSync(ledger, "utf8").split("\n")).has("W1-T9090"), "the control: released by a ledger row");
+    assert.ok(releasedTaskIds(readFileSync(ledger, "utf8").split("\n"), readPlan(root)).has("W1-T9090"), "the control: released by a ledger row");
     assert.equal(rotateLedger(ledger, { ceilingBytes: 1, smoothingWindowMs: 0 }).rotated, true);
-    const survivors = releasedTaskIds(readFileSync(ledger, "utf8").split("\n"));
+    const survivors = releasedTaskIds(readFileSync(ledger, "utf8").split("\n"), readPlan(root));
     assert.equal(survivors.has("W1-T9090"), false, "rotation shed the ledger release");
     assert.deepEqual(runnableCandidates(readPlan(root), () => false, 50, { releasedIds: survivors }).map((t) => t.id), []);
 
@@ -882,17 +887,17 @@ test("rmd approve becomes a pinned operator ruling that no ledger rotation can s
   rmSync(join(root, "plan", "tasks.d", "W1-T9110-x.yaml"));
   try {
     assert.equal(await approveCommand(["W1-T9110"], { config: { root } as never, clock: CLOCK, planPath: join(root, "plan", "tasks.yaml") }), 0);
-    assert.deepEqual([...readOperatorReleases(state)], ["W1-T9110"], "the operator's bit is kept outside the ledger");
+    assert.deepEqual([...readOperatorReleases(state, readPlan(root).tasks)], ["W1-T9110"], "the operator's bit is kept outside the ledger");
     // Monolith records are never rewritten, so file the shard where the judge can pin it.
     writeFileSync(join(root, "plan", "tasks.d", "W1-T9110-x.yaml"), readFileSync(join(root, "plan", "tasks.yaml"), "utf8"));
     writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
-    const escalated = await runMachineFilingJudge(ports(root, async () => verdict("high", 0.9, "needs him")).p);
+    const escalated = await runMachineFilingJudge(ports(root, async () => verdict("high", 0.9, "needs him"), { operatorReleases: () => new Map() }).p);
     assert.deepEqual(escalated.escalated.sort(), ["W1-T9110", "W1-T9111"], "the judge and the backstop parked both");
 
-    recordOperatorRelease(state, "W1-T9111", CLOCK.iso());
+    recordOperatorRelease(state, readPlan(root).byId.get("W1-T9111")!, CLOCK.iso());
     let asked = 0;
     const report = await runMachineFilingJudge(
-      ports(root, async () => (asked++, verdict("high", 0.99)), { operatorReleases: () => readOperatorReleases(state) }).p,
+      ports(root, async () => (asked++, verdict("high", 0.99)), { operatorReleases: () => readOperatorReleaseRecords(state) }).p,
     );
     assert.equal(asked, 0, "an operator release asks no model and no backstop");
     assert.deepEqual(report.proceeded.sort(), ["W1-T9110", "W1-T9111"]);

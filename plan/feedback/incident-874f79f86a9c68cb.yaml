@@ -1,0 +1,29 @@
+id: incident-874f79f86a9c68cb
+ts: 2026-10-24T18:03:30.726Z
+raw: >-
+  Incident 874f79f86a9c: intervention
+  plan-proof-unrunnable:plan-repair:duplicate-fix-dispatch-key-already-claim
+
+  First seen: 2026-10-24T17:54:24.535Z
+
+  Last seen: 2026-10-24T18:03:28.264Z
+
+  Count: 9, burn: 9.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10398@d95838832 actor=cao825 cause=plan-proof-unrunnable:plan-repair:duplicate-fix-dispatch-key-already-claim — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#874f79f86a9c68cbfe4a9cf6ce914f922718eb0aa23296072b1dd5e27a68da7d
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

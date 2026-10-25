@@ -1,0 +1,31 @@
+id: incident-ae0813895d5815d5
+ts: 2026-10-24T17:02:57.595Z
+raw: >-
+  Incident ae0813895d58: intervention
+  conflict:conflict-rebase:merge-conflict-rmd-owned-branch-has-capt
+
+  First seen: 2026-10-24T16:58:53.708Z
+
+  Last seen: 2026-10-24T17:02:56.318Z
+
+  Count: 42, burn: 42.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#11702@65e884d2e actor=cao825 cause=conflict:conflict-rebase:merge-conflict-rmd-owned-branch-has-capt — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#11759@434657dce actor=cao825 cause=conflict:conflict-rebase:merge-conflict-rmd-owned-branch-has-capt — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10491@f184f5439 actor=cao825 cause=conflict:conflict-rebase:merge-conflict-rmd-owned-branch-has-capt — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#ae0813895d5815d532dd8b1d9ca8dea4ccc66d7fc3bee0d8139ce3ea10051e5c
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

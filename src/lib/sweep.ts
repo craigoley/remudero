@@ -15,7 +15,7 @@ import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from ".
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -3366,16 +3366,36 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const live = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as {
           head: { ref: string; sha: string }; user: { login: string }; title: string; body: string;
         };
-        if (live.head.sha !== pr.headSha || !isMachineLanePlanHead(live.head.ref) || !isFleetAppAuthor(live.user.login)) {
+        if (live.head.sha !== pr.headSha || !isFleetAppAuthor(live.user.login)) {
           return { outcome: "refused", reason: "the filing head or author changed" };
         }
         const paths = await fetchPrDiffFilesViaGh(pr.prUrl);
-        const resolved = fixRungTaskForForBuild(plan, { prNumber: pr.prNumber }, live.body, live.head.ref, paths);
-        const task = { ...resolved.task, id: escalationTaskIdFor(pr), files: resolved.task.files.filter(isInPlanScope) };
+        const filed = pr.taskId === undefined ? undefined : plan.tasks.find(task => task.id === pr.taskId);
+        const filedCandidate = filedPlanTaskReady(filed) && live.head.ref === pr.headRefName &&
+          filedTaskPlanRepairCandidate({ ...pr, headRefName: live.head.ref,
+          changedFiles: paths, taskExistsOnMain: filed !== undefined, taskDeclaredFiles: filed?.files });
+        if (!isMachineLanePlanHead(live.head.ref) && !filedCandidate) {
+          return { outcome: "refused", reason: "the filing head or author changed" };
+        }
+        const resolved = fixRungTaskForForBuild(plan, { prNumber: pr.prNumber,
+          ...(filedCandidate ? { taskId: pr.taskId } : {}) }, live.body, live.head.ref, paths);
+        let task = { ...resolved.task, id: escalationTaskIdFor(pr), files: resolved.task.files.filter(isInPlanScope) };
         claim = acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, live.head.ref), { run_id: runId });
         const materialized = materializePlanRoundWorktree(config, repoDir, pr.prNumber, pr.headSha);
         if (!materialized.worktreePath) return { outcome: "refused", reason: materialized.failure?.message ?? "the plan head could not be materialized" };
         worktreePath = materialized.worktreePath;
+        if (filedCandidate) {
+          if (!resolveTaskContractAtHeadImpl) return { outcome: "refused", reason: "filed plan repair has no head-contract resolver" };
+          const head = await resolveTaskContractAtHeadImpl(pr.prUrl, pr.taskId!, worktreePath);
+          const atHead = fixRungTaskAtHead(resolved, pr.taskId!, head);
+          if ("standDown" in atHead) return { outcome: "refused", reason: atHead.standDown };
+          if (head?.taskDeclaredFiles === undefined || taskContractRevision(atHead.task) !== taskContractRevision(task) ||
+              taskSemanticRevision(atHead.task) !== taskSemanticRevision(filed!) ||
+              atHead.task.risk !== task.risk || atHead.task.budget_usd !== task.budget_usd) {
+            return { outcome: "refused", reason: "filed plan repair contract differs between head and main" };
+          }
+          task = { ...atHead.task, files: [...atHead.task.files] };
+        }
         const mount = resolveMount(loadMounts(mountsPath(repoRoot)), "fix", task.risk);
         const settingsFile = renderWorkerSettings({ templatePath: join(repoRoot, "settings", "worker.json"),
           hooksDir: join(repoRoot, "hooks"), outPath: join(config.root, "tmp", `plan-round-${pr.prNumber}.json`) });
@@ -4380,9 +4400,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T7735 — read once per pass by the refresh value test. A shape without a boolean `strict` is
     // unread (`undefined`), which keeps the pre-W1-T7735 refresh.
     readBranchProtectionStrict: () => {
-      const protection = ghJsonForBuild(["api", `repos/${owner}/${repo}/branches/main/protection/required_status_checks`]) as
-        { strict?: unknown } | null | undefined;
-      return typeof protection?.strict === "boolean" ? protection.strict : undefined;
+      const args = ["api", `repos/${owner}/${repo}/branches/main/protection/required_status_checks`];
+      const strict = (value: unknown): boolean | undefined => {
+        const protection = value as { strict?: unknown } | null | undefined;
+        return typeof protection?.strict === "boolean" ? protection.strict : undefined;
+      };
+      // Explicit synchronous fixtures keep their seam; production never blocks the loop here.
+      return deps.ghJsonImpl ? strict(ghJsonForBuild(args)) : readJsonImpl(args).then(strict);
     },
     // W1-T7735 — the LLM overlap judge spends only for a production entrypoint, the same flag the
     // progress judge reads; a fixture gets none, and ambiguous overlap reads `judge-unavailable`.
@@ -4859,6 +4883,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         user?: { login?: string }; title?: string; head?: { sha?: string; ref?: string };
       };
       const facts: PlanRepairFacts = { authorLogin: row?.user?.login, title: row?.title };
+      if (filedTaskPlanRepairCandidate(pr) && row?.head?.sha === pr.headSha && row.head.ref === pr.headRefName) {
+        facts.filedTaskRepairReady = filedPlanTaskReady(plan.tasks.find(task => task.id === pr.taskId));
+      }
       if (!gardenRecordRefusalCandidate(pr) || row?.head?.sha !== pr.headSha || row.head.ref !== pr.headRefName) return facts;
       const files = ghJsonForBuild(["api", `${pulls}/files?per_page=2`]) as { filename: string; status: string }[];
       if (!Array.isArray(files) || files.length !== 1 || files[0]?.status !== "added" ||
@@ -9440,6 +9467,19 @@ export function isMachineLanePlanHead(head: string | undefined): boolean {
   return head !== undefined && MACHINE_LANE_HEAD_RE.test(head);
 }
 
+function filedPlanTaskReady(task: Task | undefined): boolean {
+  return task?.verify === "auto" && task.status === "queued" && task.dispatch_hold !== true && task.retirement === undefined;
+}
+
+/** A filed plan-only task keeps its existing exact grant when using the plan repair effect. */
+export function filedTaskPlanRepairCandidate(pr: OpenPrView): boolean {
+  const files = pr.taskDeclaredFiles;
+  return pr.isPlanFiling === true && pr.mergeState === "clean" && pr.taskExistsOnMain === true &&
+    pr.taskId !== undefined && TASK_ID_TRAILER_RE.test(pr.taskId) && taskIdFromRunBranch(pr.headRefName) === pr.taskId &&
+    files !== undefined && files.length > 0 && files.every(path => isInPlanScope(path) && !path.split("/").includes("..")) &&
+    pr.changedFiles !== undefined && pr.changedFiles.length > 0 && pr.changedFiles.every(path => files.includes(path));
+}
+
 /** W1-T9289 — a DIRTY plan filing on a machine-lane head whose captured conflict evidence names only
  *  plan-scope paths. The author is a separate, async read (`readPlanRepairFacts`) the caller adds. */
 export function planConflictRoundCandidate(pr: OpenPrView): boolean {
@@ -9454,6 +9494,7 @@ export function isFleetAppAuthor(login: string | undefined): boolean {
 }
 
 export interface PlanRepairFacts {
+  filedTaskRepairReady?: boolean;
   authorLogin?: string;
   title?: string;
   gardenRecordRefusal?: string;
@@ -15053,13 +15094,18 @@ export function fixSeedRead(
   }
   if (fixRungStalledWithoutNewHead([...window], taskId)) return { kind: "ended", seed };
   const handoffAt = window.findLastIndex((line) => rung(line) && line.step === "fix.stood_down" && line.outcome === "handed_off");
+  // Rotation may retain another seed's handoff and an older head's dispatch in this window.
+  // Neither owns this seed; unread identities still veto recovery.
+  const ownerHandedOff = window.some(line => rung(line) && line.step === "fix.stood_down" && line.outcome === "handed_off" &&
+    (typeof line.run_id !== "string" || seed.runId === undefined || line.run_id === seed.runId || line.run_id.startsWith(`${seed.runId}-`)));
   // A started in-process rung also loses its continuation when its daemon dies (#12904).
   // Re-enter the ordinary owner/checkout claim, never clear it here: a surviving worker,
   // dirty unpublished tree or unreadable process census must still refuse there. Require
   // this boot's explicit empty adoption receipt; a different run id or age alone proves nothing.
-  if (handoffAt < 0 && seed.runId !== undefined &&
+  if (!ownerHandedOff && seed.runId !== undefined &&
       continuationEndedAtEmptyBoot(lines, seedAt, seed.runId, taskId, runId) &&
-      window.filter((line) => rung(line) && line.step === "fix.dispatch").every((line) => line.run_id === seed.runId)) {
+      window.filter((line) => rung(line) && line.step === "fix.dispatch" &&
+        (typeof line.head_sha !== "string" || line.head_sha === pr.headSha)).every((line) => line.run_id === seed.runId)) {
     return { kind: "orphaned", seed, orphanReason: "owner-run-ended" };
   }
   // A hand-off to the sweep is a live wait only until the sweep has disposed the same head after it.
@@ -17416,7 +17462,7 @@ export async function runSweep(
     if (!deps.readPlanRepairFacts || !deps.repairPlanPr) return notRepaired;
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
     let facts: PlanRepairFacts = {};
-    if (isMachineLanePlanHead(pr.headRefName)) {
+    if (isMachineLanePlanHead(pr.headRefName) || filedTaskPlanRepairCandidate(pr)) {
       try {
         facts = planRoundFacts.get(pr.prNumber) ?? await deps.readPlanRepairFacts(pr);
         planRoundFacts.set(pr.prNumber, facts);
@@ -18799,7 +18845,7 @@ export async function runSweep(
       const facts = planRoundFacts.get(pr.prNumber);
       let planRoundExhausted = false;
       if (!repair.repaired && deps.dispatchPlanGateRound && isFleetAppAuthor(facts?.authorLogin) &&
-          isMachineLanePlanHead(pr.headRefName)) {
+          (isMachineLanePlanHead(pr.headRefName) || facts?.filedTaskRepairReady === true && filedTaskPlanRepairCandidate(pr))) {
         const row = { pr_number: pr.prNumber, head_sha: pr.headSha, lane_head: pr.headRefName,
           checks: (pr.ciFailures ?? []).map((f) => f.name), run_id: deps.runId, task_id: pr.taskId ?? "SWEEP" };
         repair.repaired = true;
@@ -21790,12 +21836,61 @@ function ledgerDependabotDeferrals(
 
 let lightPassReadyRefreshInFlight = false;
 
+/** Wall phases and synchronous execution attributed to this pass's async context, excluding sibling work. */
+export class LightPassPreReviewTiming {
+  readonly phaseMs: Record<string, number> = Object.fromEntries([
+    "open_pr_views", "review_eligibility", "main_tip", "compare", "ready_ledger", "ready_actions", "ready_value_gate",
+    "ready_update", "refresh_admission", "armed_ratchet_rejudge",
+  ].map((phase) => [phase, 0]));
+  readonly compareReads: Array<Record<string, unknown>> = [];
+  private readonly scope = new AsyncLocalStorage<boolean>();
+  private depth = 0;
+  private started = 0;
+  private syncMs = 0;
+  private readonly hook = createHook({
+    before: () => { if (this.scope.getStore()) this.enter(); },
+    after: () => { if (this.scope.getStore()) this.leave(); },
+  });
+
+  constructor(readonly clock: Pick<Clock, "now"> = clockFromMillisFn(() => performance.now())) { this.hook.enable(); }
+
+  private enter(): void { if (this.depth++ === 0) this.started = performance.now(); }
+  private leave(): void { if (--this.depth === 0) this.syncMs += performance.now() - this.started; }
+
+  run<T>(action: () => T): T {
+    this.enter();
+    try { return this.scope.run(true, action); }
+    finally { this.leave(); }
+  }
+
+  sync<T>(phase: string, action: () => T): T {
+    const start = this.clock.now();
+    try { return action(); }
+    finally { this.phaseMs[phase] = (this.phaseMs[phase] ?? 0) + this.clock.now() - start; }
+  }
+
+  async measure<T>(phase: string, action: () => T | Promise<T>): Promise<T> {
+    const start = this.clock.now();
+    try { return await action(); }
+    finally { this.phaseMs[phase] = (this.phaseMs[phase] ?? 0) + this.clock.now() - start; }
+  }
+
+  finish(): Record<string, unknown> {
+    if (this.depth > 0) this.syncMs += performance.now() - this.started;
+    this.hook.disable();
+    this.scope.disable();
+    return { phase_ms: { ...this.phaseMs }, compare_count: this.compareReads.filter((r) => !r.cache_hit).length,
+      compare_reads: [...this.compareReads], sync_on_loop_ms: this.syncMs };
+  }
+}
+
 export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-overlap refresh, once per light pass
   openPrs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "mergeQueue" | "readActionsStatusSummary" |
     "readPrFileSource" | "behindMainByPr" | "baseChangedFilesByPr" | "inFlightTaskIds" | "now" | "readLedger" |
     "appendLine" | "dryRun" | "readBranchProtectionStrict" | "refreshJudge" | "log">,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  timing?: LightPassPreReviewTiming,
 ): Promise<number | undefined> {
   const updateBranch = deps.updateBranch;
   if (deps.dryRun || !updateBranch || deps.baseChangedFilesByPr === undefined || lightPassReadyRefreshInFlight) return undefined;
@@ -21803,7 +21898,8 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
   try {
     const appendLine = deps.appendLine ?? appendLedger;
     const now = clockFromMillisFn(deps.now).now();
-    const ledgerLines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+    const readLedger = () => (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+    const ledgerLines = timing ? timing.sync("ready_ledger", readLedger) : readLedger();
     const spentHeads = new Set<string>();
     for (const l of ledgerLines) {
       if (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") {
@@ -21818,8 +21914,9 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     let candidates = select(facts);
     if (candidates.length === 0) return undefined;
     if (deps.readActionsStatusSummary !== undefined) {
-      const incident = await Promise.resolve().then(() => deps.readActionsStatusSummary!())
+      const readActions = () => Promise.resolve().then(() => deps.readActionsStatusSummary!())
         .then((s) => classifyActionsIncident(s), (error) => unreadableActionsIncident(error));
+      const incident = await (timing ? timing.measure("ready_actions", readActions) : readActions());
       if (actionsIncidentHoldDecision(incident, undefined, now) === "hold") return undefined;
     }
     const mergeQueue = deps.mergeQueue;
@@ -21845,7 +21942,8 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     const dependabotDeferred = candidates.filter((c) => byNumber.get(c.prNumber)!.isDependabot === true);
     ledgerDependabotDeferrals(dependabotDeferred, ledgerLines, (row) => appendLine(deps.ledgerPath, row), deps.runId, "light_pass");
     // W1-T7735: the same value test as the full sweep's slot, built once for this light pass.
-    const valueGate = await buildRefreshValueGate(deps, openPrs, ledgerLines, now, appendLine);
+    const readValueGate = () => buildRefreshValueGate(deps, openPrs, ledgerLines, now, appendLine);
+    const valueGate = await (timing ? timing.measure("ready_value_gate", readValueGate) : readValueGate());
     const eligible = candidates.filter((c) => {
       const view = byNumber.get(c.prNumber)!;
       const runTaskId = taskIdFromRunBranch(view.headRefName);
@@ -21854,7 +21952,9 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     });
     const winner = oldestActivityFirst(eligible.map((c) => byNumber.get(c.prNumber)!), now);
     const target = eligible.find((c) => c.prNumber === winner?.prNumber);
-    if (!target || !(await valueGate.settle(target, byNumber.get(target.prNumber)!, "ready-light"))) return undefined;
+    if (!target) return undefined;
+    const settleValue = () => valueGate.settle(target, byNumber.get(target.prNumber)!, "ready-light");
+    if (!(await (timing ? timing.measure("ready_value_gate", settleValue) : settleValue()))) return undefined;
     const row = {
       run_id: deps.runId, task_id: target.taskId ?? "SWEEP", pr_number: target.prNumber, pr_url: target.prUrl,
       head_sha: target.headSha, ...(target.behindBy === undefined ? {} : { behind_by: target.behindBy }),
@@ -21864,7 +21964,9 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     };
     appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.attempted" });
     try {
-      appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${await updateBranch(target)}` });
+      const update = () => updateBranch(target);
+      const outcome = await (timing ? timing.measure("ready_update", update) : update());
+      appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${outcome}` });
     } catch (e) {
       appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.error", error: String((e as Error)?.message ?? e) });
     }
@@ -22059,6 +22161,35 @@ export function reviewAdmissionBound(width: number): { bound: number; inFlight: 
   return { bound: Math.max(0, width - inFlight), inFlight };
 }
 
+/** Publish eligibility from the same selection inputs the light batch uses, before ready-only reads. */
+export function observeLightPassReviewEligibility(
+  openPrs: OpenPrView[], deps: SweepDeps, policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): ReadonlyArray<Record<string, unknown>> {
+  if (openPrs.length === 0 || deps.dryRun) return [];
+  const now = deps.now ? deps.now() : systemClock.now();
+  const lines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+  const retryViews = openPrs.map(pr => promiseHarvestRetryView(pr, lines));
+  const prior = priorActionsFromLedger(lines, retryViews);
+  const views = retryViews.map(pr => completedRefusalRetryView(pr, prior));
+  const freshnessBackoffs = new Set<string>();
+  for (const pr of views) {
+    const key = reviewOutcomeKeyForPr(pr);
+    const refusal = prior.reviewFreshnessRefusals.get(key);
+    const probe = refusal?.probe?.loadedCodeSha === deps.reviewerCodeRecovery?.loadedCodeSha
+      ? refusal?.probe : undefined;
+    const probeDue = refusal?.freshness === "unreadable" && deps.reviewerCodeRecovery?.loadedCodeSha &&
+      refusal.attemptedAt !== undefined && now - (probe?.attemptedAt ?? refusal.attemptedAt) >=
+        Math.min(probe?.backoffMinutes ?? UNREADABLE_REVIEWER_BACKOFF_MINUTES, policy.pendingCeilingMinutes) * 60_000;
+    if (!probeDue && reviewerCodeFreshnessBackoffReason(prior.reviewFreshnessRefusals,
+      key, policy, now, deps.reviewerCodeRecovery) !== undefined) freshnessBackoffs.add(key);
+  }
+  observeReviewEligibility(views, deps, policy, now, lines, {
+    delivered: prior.reviewDelivered, refused: prior.reviewRefused,
+    retryableThrows: prior.reviewRetryableThrows, freshnessBackoffs,
+  }, "light");
+  return lines;
+}
+
 export async function runSweepLightPass(
   openPrs: OpenPrView[],
   deps: SweepDeps,
@@ -22160,8 +22291,7 @@ export async function runSweepLightPass(
   let refillAgain = false;
   // Assigned once the fan-out's own controller exists.
   let refillFreedLanes: () => Promise<void> = async () => {};
-  // Only a lane freed AFTER this pass returns refills: one freed during the fan-out is re-derived by
-  // the next pass, so a pass's own rows always describe the admission it actually made.
+  // Releases during fan-out are picked up once refill setup completes; later releases refill directly.
   const onOwnLaneFreed = (): void => {
     if (refillArmed) void refillFreedLanes();
   };
@@ -22459,6 +22589,8 @@ export async function runSweepLightPass(
   // Let completed effects release their capacity before a caller starts the next pass.
   if (detachedNumbers.size > 0) await new Promise<void>((resolve) => setImmediate(resolve));
   refillArmed = true;
+  // W1-T9904: a review may have settled before its release callback could reach this controller.
+  if (unsettledSpawning < spawning.length) setImmediate(() => { void refillFreedLanes(); });
   return summaries;
   } finally {
     releasePlanMerge();

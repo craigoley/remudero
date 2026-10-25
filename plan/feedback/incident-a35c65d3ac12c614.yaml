@@ -1,0 +1,30 @@
+id: incident-a35c65d3ac12c614
+ts: 2026-10-24T17:48:50.564Z
+raw: >-
+  Incident a35c65d3ac12: intervention
+  plan-proof-unrunnable:plan-repair:plan-only-pr-is-red-on-lint-plan-ci-shar
+
+  First seen: 2026-10-24T17:19:34.446Z
+
+  Last seen: 2026-10-24T17:48:49.097Z
+
+  Count: 13, burn: 13.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=close target=pr#12569@2026-10-17T15:21:03Z actor=cao825 cause=plan-proof-unrunnable:plan-repair:plan-only-pr-is-red-on-lint-plan-ci-shar — a hand action answered a fleet state no lane resolved
+    - surface=pr action=close target=pr#10395@2026-10-09T21:10:30Z actor=cao825 cause=plan-proof-unrunnable:plan-repair:plan-only-pr-is-red-on-lint-plan-ci-shar — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#a35c65d3ac12c61499b49832cec970d366ef64fb5005ccb469cbf4a88d6c162d
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

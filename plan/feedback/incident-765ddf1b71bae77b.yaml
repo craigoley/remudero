@@ -1,0 +1,31 @@
+id: incident-765ddf1b71bae77b
+ts: 2026-10-24T17:16:21.991Z
+raw: >-
+  Incident 765ddf1b71ba: intervention
+  plan-proof-unrunnable:plan-repair:plan-scoped-round-dispatched
+
+  First seen: 2026-10-24T17:09:08.632Z
+
+  Last seen: 2026-10-24T17:16:21.025Z
+
+  Count: 22, burn: 22.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#11710@e664bb7b8 actor=cao825 cause=plan-proof-unrunnable:plan-repair:plan-scoped-round-dispatched — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10394@f1f0cc634 actor=cao825 cause=plan-proof-unrunnable:plan-repair:plan-scoped-round-dispatched — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10434@77317ed7f actor=cao825 cause=plan-proof-unrunnable:plan-repair:plan-scoped-round-dispatched — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#765ddf1b71bae77b9dec3587d96d823c556ee747ddb21f1c29730ba57adcfd96
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

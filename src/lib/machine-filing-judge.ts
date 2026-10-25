@@ -1,3 +1,4 @@
+import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, releaseContractPins, type ReleaseEvidence } from "./operator-release.js";
 import { stampVerificationAsk } from "./inbox-retirement.js";
 /**
  * lib/machine-filing-judge.ts — the LLM judge in the middle of machine-filed work (operator ruling
@@ -22,7 +23,7 @@ import { stampVerificationAsk } from "./inbox-retirement.js";
  * ({@link reaskIntervalMs}). The judge asks again when an input moves or the schedule falls due.
  * An unchanged answer writes nothing; a changed one lands through the one judge PR and is re-pinned.
  *
- * EARNED AUTONOMY, NO FIXED BAR. Each filer family's record (its merged tasks, its declined ones,
+ * EARNED AUTONOMY, NO FIXED BAR. Each filer family's record (its approvals, merges and declines,
  * and its gardener's Beta credit where it keeps one) is shown to the judge and sets how confident
  * a `low` verdict must be: {@link earnedConfidenceBar}. A family that keeps helping is trusted
  * more, one that keeps failing less, and either recovers as its outcomes move.
@@ -36,6 +37,7 @@ import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { fetchOriginRetryingRefLock } from "./git-fetch-retry.js";
 import { ghExec } from "./github-transport.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { loadMounts, mountsPath } from "./mounts.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import type { GardenWorkspacePort, PrState } from "./gardener.js";
 import type { Proposal } from "./inbox.js";
@@ -45,6 +47,7 @@ import {
   DEFAULT_RISK_POLICY,
   planRiskJudgeAction,
   recordFilingRiskRuling,
+  resolveRiskJudgeMount,
   type FilingRiskRuling,
   type RiskJudgeInput,
   type RiskJudgeVerdict,
@@ -83,25 +86,59 @@ export function isRulingShaped(task: Task): boolean {
   return rulingVerifyViolation({ ...task, verify: "auto" }) !== undefined;
 }
 
-/** Operator releases (`rmd approve`) awaiting their pinned ruling, kept where ledger rotation cannot
- *  shed them. The judge pins each as an operator ruling, with no model asked. */
+/** Exact operator receipts awaiting their pinned ruling. Legacy receipts are evidence of a human
+ *  decision, but require explicit reapproval before they can authorize the current contract. */
 export const OPERATOR_RELEASES_FILE = "operator-releases.json";
 
-export function readOperatorReleases(stateDir: string): Set<string> {
+function readOperatorReleaseFileRecords(stateDir: string): Map<string, unknown> {
   const raw = readFileIfExists(join(stateDir, OPERATOR_RELEASES_FILE));
-  return new Set(Object.keys(raw === undefined ? {} : ((JSON.parse(raw) as { releases?: Record<string, string> }).releases ?? {})));
+  if (raw === undefined) return new Map();
+  const parsed = JSON.parse(raw) as { releases?: unknown };
+  if (parsed === null || typeof parsed !== "object" || parsed.releases === null ||
+      typeof parsed.releases !== "object" || Array.isArray(parsed.releases)) throw new Error("operator release state is malformed");
+  return new Map(Object.entries(parsed.releases));
 }
 
-export function recordOperatorRelease(stateDir: string, taskId: string, atIso: string): void {
+export function readOperatorReleaseRecords(stateDir: string): Map<string, unknown> {
+  const records = readOperatorReleaseFileRecords(stateDir);
+  const raw = readFileIfExists(join(stateDir, MACHINE_JUDGE_STATE_FILE));
+  if (raw !== undefined) {
+    const state = JSON.parse(raw) as { operatorReapprovalRequired?: unknown };
+    if (state === null || typeof state !== "object" || Array.isArray(state)) throw new Error("operator reapproval state is malformed");
+    const holds = state.operatorReapprovalRequired;
+    if (holds !== undefined && (!Array.isArray(holds) || !holds.every(id => typeof id === "string"))) {
+      throw new Error("operator reapproval state is malformed");
+    }
+    for (const id of holds as string[] | undefined ?? []) if (!records.has(id)) records.set(id, { requires_reapproval: true });
+  }
+  return records;
+}
+
+export function readOperatorReleases(stateDir: string, tasks: readonly Task[] = []): Set<string> {
+  return new Set(qualifyReleaseEvidence([], readOperatorReleaseRecords(stateDir), releaseContractPins(tasks)).authors.keys());
+}
+
+export function recordOperatorRelease(stateDir: string, task: Task, atIso: string): void {
+  if (!Number.isFinite(Date.parse(atIso))) throw new Error("operator release timestamp is invalid");
   const path = join(stateDir, OPERATOR_RELEASES_FILE);
-  const raw = readFileIfExists(path);
-  const releases = raw === undefined ? {} : ((JSON.parse(raw) as { releases?: Record<string, string> }).releases ?? {});
-  writeAtomic(path, JSON.stringify({ releases: { ...releases, [taskId]: releases[taskId] ?? atIso } }) + "\n");
+  const records = readOperatorReleaseFileRecords(stateDir);
+  const previous = records.get(task.id);
+  if (previous !== undefined && typeof previous !== "string" &&
+      (previous === null || typeof previous !== "object" || Array.isArray(previous))) throw new Error("operator release record is malformed");
+  const pin = operatorReleasePin(task);
+  const matching = previous !== null && typeof previous === "object" && (previous as Record<string, unknown>).pin === pin;
+  if (matching) return;
+  const legacy = typeof previous === "string" ? previous : previous !== null && typeof previous === "object"
+    ? (previous as Record<string, unknown>).legacy : undefined;
+  records.set(task.id, { ...(previous !== null && typeof previous === "object" ? previous : {}),
+    at: atIso, pin, ...(legacy === undefined ? {} : { legacy }) });
+  writeAtomic(path, JSON.stringify({ releases: Object.fromEntries(records) }) + "\n");
 }
 
 export interface FamilyTrackRecord {
   family: string;
   merged: number;
+  approved?: number;
   declined: number;
   alpha: number;
   beta: number;
@@ -109,28 +146,30 @@ export interface FamilyTrackRecord {
 }
 
 /**
- * A family's record as Beta(1 + credits, 1 + debits). A credit is a merged record; a debit is one
- * a person retired as `closed` or `retired`. A `withdrawn` duplicate is neither: the plan gardener
- * folded it into a sibling, which says nothing about whether the work was worth doing. A gardener
- * that keeps its own Beta record (gardener.ts) adds what it learned beyond its optimistic prior.
+ * Approvals and merged builds are separate credits, each counted once per task. Declines and
+ * silence-policy withdrawals debit once; duplicate withdrawals say nothing about the family's quality.
  */
 export function familyTrackRecord(
   plan: Plan,
   family: string,
   isMerged: (id: string) => boolean,
   garden?: { alpha: number; beta: number },
+  outcomes: { released?: ReadonlySet<string>; declined?: ReadonlySet<string>; withdrawn?: ReadonlySet<string> } = {},
 ): FamilyTrackRecord {
   let merged = 0;
+  let approved = 0;
   let declined = 0;
   for (const t of plan.tasks) {
     // Only records a judge or filer is answerable for: every machine record, and operator records a ruling released.
-    if (judgementFamily(t) !== family || (t.author_class !== "machine" && t.risk_ruling === undefined)) continue;
+    if (judgementFamily(t) !== family || (t.author_class !== "machine" && t.risk_ruling === undefined && outcomes.released?.has(t.id) !== true)) continue;
+    if (outcomes.released?.has(t.id) || (t.risk_ruling?.verdict === "operator" && t.risk_ruling.action === "proceed")) approved += 1;
     if (isMerged(t.id)) merged += 1;
-    else if (t.retirement === "closed" || t.retirement === "retired") declined += 1;
+    else if (t.retirement === "closed" || t.retirement === "retired" || outcomes.declined?.has(t.id) ||
+      (t.retirement === "withdrawn" && outcomes.withdrawn?.has(t.id))) declined += 1;
   }
-  const alpha = 1 + merged + Math.max(0, (garden?.alpha ?? 3) - 3);
+  const alpha = 1 + approved + merged + Math.max(0, (garden?.alpha ?? 3) - 3);
   const beta = 1 + declined + Math.max(0, (garden?.beta ?? 1) - 1);
-  return { family, merged, declined, alpha, beta, mean: alpha / (alpha + beta) };
+  return { family, merged, approved, declined, alpha, beta, mean: alpha / (alpha + beta) };
 }
 
 /** How confident a `low` verdict must be: the policy's bar at an even record, lower as the family
@@ -329,7 +368,7 @@ export function machineJudgeInput(task: Task, record: FamilyTrackRecord, pathExi
       ...base.planContext,
       author_family: record.family,
       family_track_record:
-        `${record.merged} merged and ${record.declined} declined machine task(s) from this family ` +
+        `${record.merged} merged, ${record.approved ?? 0} operator-approved and ${record.declined} declined machine task(s) from this family ` +
         `(Beta mean ${record.mean.toFixed(2)}); a family that keeps failing is judged more strictly.`,
     },
   };
@@ -343,7 +382,8 @@ export type MachineJudgement =
 export async function judgeMachineShard(
   task: Task,
   record: FamilyTrackRecord,
-  ports: { riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>; policy: RiskPolicy; clock: Clock; evidence?: string },
+  ports: { riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>; policy: RiskPolicy; clock: Clock; evidence?: string;
+    log?: MachineJudgePorts["log"] },
 ): Promise<MachineJudgement> {
   const bar = earnedConfidenceBar(ports.policy.confidenceThreshold, record.mean);
   const backstop = deterministicEscalation(task);
@@ -356,6 +396,27 @@ export async function judgeMachineShard(
     verdict = await ports.riskJudge(machineJudgeInput(task, record, undefined, ports.evidence));
   } catch (e) {
     return { kind: "unavailable", task, reason: `the risk judge threw: ${String((e as Error)?.message ?? e)}` };
+  }
+  if (ports.log) {
+    const root = shardRepoRoot(task);
+    let model: string | undefined;
+    let modelReason = "the judged record has no checkout with a mounts file";
+    try {
+      if (root !== undefined && existsSync(mountsPath(root))) {
+        const mounts = loadMounts(mountsPath(root));
+        model = (mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts)).model;
+      }
+    } catch (error) {
+      modelReason = `judge mount is unreadable: ${String(error)}`;
+    }
+    ports.log("risk_judge.decision", {
+      task_id: task.id, run_id: `machine-judge:${task.id}:${taskRulingPin(task)}:${ports.clock.iso()}`,
+      verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons,
+      action: planRiskJudgeAction(verdict, { confidenceThreshold: bar }).kind,
+      ...(verdict.availability === undefined ? {} : { availability: verdict.availability }),
+      ...(model === undefined ? { model_reason: modelReason } : { model }),
+      evidence_tier: "filing", family: record.family,
+    });
   }
   if (verdict.availability === "unavailable") {
     return { kind: "unavailable", task, reason: verdict.reasons.join("; ") || "the risk judge reached no decision" };
@@ -423,7 +484,7 @@ function flakeRetirementReason(facts: FlakeJudgeFacts & { retries: FlakeIncident
 
 /** W1-T9694: ONE shard's text with the record retired, as the operator retired W1-T9532: `status: blocked`,
  *  `retirement: <kind>` with the reason, and `verify: human`. Undefined, with the reason, when it cannot be.
- *  W1-T9043 withdraws an unanswered escalation as `withdrawn`, which no family's track record counts against it. */
+ *  W1-T9043 withdraws an unanswered escalation as `withdrawn`; the judge keeps that outcome separately from duplicates. */
 export function renderRetiredShard(
   text: string, relPath: string, reason: string, kind: "retired" | "withdrawn" = "retired",
 ): { contents: string } | { refused: string } {
@@ -494,7 +555,7 @@ export function renderRuledShard(
   lines[verifyAt] = `  verify: ${verify}`;
   // Released machine work with no measured cost dispatches mid-queue, never last (2026-09-29).
   const released = shardRecord(text, relPath);
-  if (ruling.action === "proceed" && released.author_class === "machine" && released.priority === undefined) {
+  if (ruling.action === "proceed" && ruling.verdict !== "operator" && released.author_class === "machine" && released.priority === undefined) {
     lines.splice(verifyAt + 1, 0, `  priority: ${UNPRICED_PRIORITY}`);
   }
   const flipped = lines.join("\n") + "\n";
@@ -512,6 +573,7 @@ export function renderRuledShard(
     ...(ruling.reasons.length > 0 ? ruling.reasons.map((r) => `      - ${q(r)}`) : ["      - \"(the judge recorded no reason)\""]),
     `    judged_at: ${q(ruling.judgedAt)}`,
     `    pin: ${q(ruled.risk_ruling!.pin)}`,
+    ...(ruling.verdict === "operator" ? [`    operator_release_pin: ${q(operatorReleasePin(before))}`] : []),
   ];
   const contents = flipped + block.join("\n") + "\n";
   const reparsed = shardRecord(contents, relPath);
@@ -543,6 +605,7 @@ interface RulingPins {
   relPath: string;
   pin: string;
   sourcePin: string;
+  operatorReleasePin?: string;
   action?: string;
 }
 
@@ -570,11 +633,15 @@ function staleRulingPins(records: RulingPins[], main: Map<string, string>): { id
     // and a retirement (W1-T9694) is current while the tree reads the record as it was written.
     const current = (task?.status === "queued" && task.retirement === undefined && (pin === record.sourcePin || pin === record.pin)) ||
       ((record.action === "retire" || record.action === "withdraw") && pin === record.pin);
-    return current ? [] : [{ id: record.id, pin: record.pin, main_pin: pin }];
+    const operatorCurrent = record.operatorReleasePin === undefined || (task !== undefined && operatorReleasePin(task) === record.operatorReleasePin);
+    return current && operatorCurrent ? [] : [{ id: record.id, pin: record.pin, main_pin: pin }];
   });
 }
 
 interface MachineJudgeState {
+  unansweredWithdrawn?: Record<string, string>;
+  operatorDeclined?: Record<string, string>;
+  operatorReapprovalRequired?: string[];
   pending?: { prUrl: string; ids: string[]; records?: RulingPins[]; repoRoot?: string };
   /** A record whose judge PR a person closed, by the pin it had: not re-asked until it changes. */
   declined?: Record<string, string>;
@@ -625,13 +692,14 @@ export interface MachineJudgePorts {
   riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>;
   riskPolicy?: () => RiskPolicy;
   isMerged?: (id: string) => boolean;
-  /** Where a family's gardener keeps its Beta record: `<stateDir>/<family>-gardener.json`. */
+  /** Override the family-to-gardener Beta record lookup. */
   gardenRecord?: (family: string) => { alpha: number; beta: number } | undefined;
   /** Land the rewrites as one plan-only PR (the daemon). Absent, `writeRoot` is written in place. */
   openWorkspace?: GardenWorkspacePort;
   writeRoot?: string;
   /** Task ids the operator released with `rmd approve` ({@link readOperatorReleases}). */
-  operatorReleases?: () => ReadonlySet<string>;
+  operatorReleases?: () => ReleaseEvidence;
+  releaseLedgerLines?: () => readonly string[];
   prState?: (prUrl: string) => PrState;
   stageProposal: (proposal: Proposal) => void;
   log: (step: string, extra?: Record<string, unknown>) => void;
@@ -705,9 +773,16 @@ export interface MachineJudgeReport {
   withdrawn?: string[];
 }
 
-/** The Beta record gardener.ts keeps for a family, summed over its classes. */
+const FAMILY_GARDENER_STATE: Readonly<Record<string, string>> = {
+  "flow-blocker": "flow-remedy", "admission-flow": "flow-remedy", "fix-lane": "fix-lane", "ci-friction": "ci-friction",
+  "expiring-fixture": "gate", "selector-shadow-miss": "selector-shadow", "selector-shadow-structural": "selector-shadow",
+};
+
+/** The family's gardener record, summed over classes; unaliased families retain their own state name. */
 export function gardenFamilyRecord(stateDir: string, family: string): { alpha: number; beta: number } | undefined {
-  const path = join(stateDir, `${family}-gardener.json`);
+  if (!/^[a-z][a-z0-9-]*$/.test(family)) return undefined;
+  const gardener = Object.hasOwn(FAMILY_GARDENER_STATE, family) ? FAMILY_GARDENER_STATE[family] : family;
+  const path = join(stateDir, `${gardener}-gardener.json`);
   if (!existsSync(path)) return undefined;
   const state = JSON.parse(readFileSync(path, "utf8")) as { classes?: Record<string, { alpha: number; beta: number }> };
   const classes = Object.values(state.classes ?? {});
@@ -719,6 +794,32 @@ export function gardenFamilyRecord(stateDir: string, family: string): { alpha: n
   };
 }
 
+function familyRecordForPass(plan: Plan, family: string, isMerged: (id: string) => boolean,
+  ports: MachineJudgePorts, state: MachineJudgeState, released: ReadonlySet<string>): FamilyTrackRecord {
+  return familyTrackRecord(plan, family, isMerged, (ports.gardenRecord ?? (f => gardenFamilyRecord(ports.stateDir, f)))(family), {
+    released, declined: new Set(Object.keys(state.operatorDeclined ?? {})),
+    withdrawn: new Set(Object.keys(state.unansweredWithdrawn ?? {})),
+  });
+}
+
+async function mergedTasksForPass(plan: Plan, log: MachineJudgePorts["log"]): Promise<Set<string> | undefined> {
+  const merged = new Set<string>();
+  const roots = new Set(plan.tasks.map(shardRepoRoot).filter((root): root is string => root !== undefined));
+  for (const root of roots) {
+    if (!existsSync(join(root, ".git"))) continue;
+    try {
+      const bodies = await hostWorktreeGitAsync(root, ["log", "origin/main", "--format=%B", "--grep=^Remudero-Task:"], {
+        stdio: "pipe", maxBuffer: 64 * 1024 * 1024,
+      });
+      for (const match of bodies.matchAll(/^Remudero-Task: ([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)$/gm)) merged.add(match[1]!);
+    } catch (error) {
+      log("machine_judge.merge_history_unavailable", { reason: String(error), repo_root: root });
+      return undefined;
+    }
+  }
+  return merged;
+}
+
 export function machineJudgeProposal(ruled: Extract<MachineJudgement, { kind: "ruled" }>): Proposal {
   const { task, ruling, record } = ruled;
   return stampVerificationAsk({
@@ -726,7 +827,7 @@ export function machineJudgeProposal(ruled: Extract<MachineJudgement, { kind: "r
     summary:
       `${task.id} ${task.author_class === "machine" ? `was filed by the ${record.family} gardener` : "is your verify: human record"} and the risk judge escalated it, so it ` +
       `stays parked for you:\n  ${ruling.reasons.join("\n  ")}\n\n${task.title}\n\n` +
-      `Family record: ${record.merged} merged, ${record.declined} declined. Release it with ` +
+      `Family record: ${record.merged} merged, ${record.approved ?? 0} operator-approved, ${record.declined} declined. Release it with ` +
       `\`rmd approve ${task.id}\`, or edit the record and the judge will rule again.`,
     evidenceAnchors: [],
   }, task.id, "machine-filing-judge-v1");
@@ -769,6 +870,7 @@ async function reaskParkedEscalations(c: {
   report: MachineJudgeReport;
   records: Map<string, FamilyTrackRecord>;
   released: ReadonlySet<string>;
+  reapproval: ReadonlySet<string>;
   excluded: ReadonlySet<string>;
   isMerged: (id: string) => boolean;
   policy: RiskPolicy;
@@ -788,11 +890,11 @@ async function reaskParkedEscalations(c: {
   let room = c.room;
   for (const task of plan.tasks) {
     if (room <= 0) break;
-    if (!parkedEscalation(task, c.released) || c.withdrawing.has(task.id)) continue;
+    if (!parkedEscalation(task, c.released) || c.reapproval.has(task.id) || c.withdrawing.has(task.id)) continue;
     const family = judgementFamily(task);
     const pin = task.risk_ruling!.pin; // parkedEscalation proved it is the record's own pin
     if (c.excluded.has(family) || state.declined?.[task.id] === pin) continue;
-    if (!c.records.has(family)) c.records.set(family, familyTrackRecord(plan, family, c.isMerged, ports.gardenRecord?.(family)));
+    if (!c.records.has(family)) c.records.set(family, familyRecordForPass(plan, family, c.isMerged, ports, state, c.released));
     const record = c.records.get(family)!;
     const inputs = machineJudgeEvidence(task, earnedConfidenceBar(c.policy.confidenceThreshold, record.mean), ports.costEvidence?.(task), c.isMerged);
     const prior = state.reask[task.id];
@@ -824,7 +926,7 @@ async function reaskParkedEscalations(c: {
           ruling: { ...pinned, action: "proceed", judgedAt: ports.clock.iso(),
             reasons: [...pinned.reasons, `confidence bar crossing: ${entry.inputs.bar} -> ${inputs.bar}; recorded confidence ${pinned.confidence} now clears the bar`] },
         }
-      : await judgeMachineShard(task, record, { riskJudge: ports.riskJudge, policy: c.policy, clock: ports.clock });
+      : await judgeMachineShard(task, record, { riskJudge: ports.riskJudge, policy: c.policy, clock: ports.clock, log: ports.log });
     if (judged.kind === "unavailable") {
       c.report.unavailable.push(task.id);
       ports.log("machine_judge.unavailable", { task_id: task.id, reason: judged.reason, reask: true });
@@ -963,6 +1065,7 @@ async function reconsiderReleasedFlakes(c: {
   isMerged: (id: string) => boolean;
   policy: RiskPolicy;
   releasedFlakes: readonly Task[];
+  released: ReadonlySet<string>;
   retries: ReadonlyMap<string, FlakeIncidentRecordEvidence>;
   retire: Retirement[];
 }): Promise<Extract<MachineJudgement, { kind: "ruled" }>[]> {
@@ -980,8 +1083,8 @@ async function reconsiderReleasedFlakes(c: {
       continue;
     }
     const family = judgementFamily(task);
-    if (!c.records.has(family)) c.records.set(family, familyTrackRecord(c.plan, family, c.isMerged, c.ports.gardenRecord?.(family)));
-    const judged = await judgeMachineShard(task, c.records.get(family)!, { riskJudge: c.ports.riskJudge, policy: c.policy, clock: c.ports.clock, evidence: flakeEvidenceLine(facts) });
+    if (!c.records.has(family)) c.records.set(family, familyRecordForPass(c.plan, family, c.isMerged, c.ports, c.state, c.released));
+    const judged = await judgeMachineShard(task, c.records.get(family)!, { riskJudge: c.ports.riskJudge, policy: c.policy, clock: c.ports.clock, log: c.ports.log, evidence: flakeEvidenceLine(facts) });
     if (judged.kind === "unavailable") {
       c.report.unavailable.push(task.id);
       c.ports.log("machine_judge.unavailable", { task_id: task.id, reason: judged.reason, flake_reconsidered: true });
@@ -1029,22 +1132,35 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       state.declined ??= {};
       for (const id of state.pending.ids) {
         const t = plan.byId.get(id);
-        if (t) state.declined[id] = taskRulingPin(t);
+        if (t) {
+          state.declined[id] = taskRulingPin(t);
+          (state.operatorDeclined ??= {})[id] = ports.clock.iso();
+        }
       }
     }
     state.pending = undefined;
   }
 
   const plan = await ports.plan();
-  const isMerged = ports.isMerged ?? ((id: string) => ["merged", "done"].includes(plan.byId.get(id)?.status ?? ""));
+  const merged = ports.isMerged === undefined ? await mergedTasksForPass(plan, ports.log) : undefined;
+  // An unreadable history contributes no credit and satisfies no dependency; its diagnostic names the repair.
+  const isMerged = ports.isMerged ?? ((id: string) => merged?.has(id) === true);
   const excluded = new Set(ports.excludeFamilies ?? []);
-  const released = ports.operatorReleases?.() ?? new Set<string>();
+  const releaseEvidence = qualifyReleaseEvidence(ports.releaseLedgerLines?.() ?? [], ports.operatorReleases?.() ?? readOperatorReleaseRecords(ports.stateDir), releaseContractPins(plan.tasks));
+  if (releaseEvidence.unknownHistory) throw new Error("operator release history is unreadable: malformed ledger record");
+  for (const task of plan.tasks) if (operatorReleaseContractChanged(task) && releaseEvidence.authors.get(task.id) !== "operator") releaseEvidence.reapproval.add(task.id);
+  const priorReapproval = new Set(state.operatorReapprovalRequired ?? []);
+  state.operatorReapprovalRequired = [...releaseEvidence.reapproval].sort();
+  const released = new Set([...releaseEvidence.authors].filter(([, author]) => author === "operator").map(([id]) => id));
+  for (const id of releaseEvidence.reapproval) if (!priorReapproval.has(id) && plan.byId.get(id)?.verify === "human") {
+    ports.log("machine_judge.reapproval_required", { task_id: id, reason: "operator release is unpinned or the contract changed; explicit reapproval required" });
+  }
   const due = plan.tasks.filter(
     (t) =>
-      needsMachineJudgement(t, released) &&
+      !releaseEvidence.reapproval.has(t.id) && needsMachineJudgement(t, released) &&
       // W1-T10348: a release is masked only by a settled RELEASE; a settled escalation is what it overrules.
       (released.has(t.id)
-        ? state.settledReleases?.[t.id] !== taskRulingPin(t) && state.refusedReleases?.[t.id] !== taskRulingPin(t)
+        ? state.settledReleases?.[t.id] !== operatorReleasePin(t) && state.refusedReleases?.[t.id] !== operatorReleasePin(t)
         : state.settled?.[t.id] !== taskRulingPin(t) && !excluded.has(judgementFamily(t)) && state.declined?.[t.id] !== taskRulingPin(t)),
   );
   const policy = ports.riskPolicy?.() ?? DEFAULT_RISK_POLICY;
@@ -1062,13 +1178,13 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   state.settledReleases = Object.fromEntries(
     Object.entries(state.settledReleases ?? {}).filter(([id, pin]) => {
       const t = plan.byId.get(id);
-      return t !== undefined && pin === taskRulingPin(t);
+      return t !== undefined && pin === operatorReleasePin(t);
     }),
   );
   state.refusedReleases = Object.fromEntries(
     Object.entries(state.refusedReleases ?? {}).filter(([id, pin]) => {
       const t = plan.byId.get(id);
-      return t !== undefined && pin === taskRulingPin(t);
+      return t !== undefined && pin === operatorReleasePin(t);
     }),
   );
   const records = new Map<string, FamilyTrackRecord>();
@@ -1083,7 +1199,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   const retire: Retirement[] = [];
   for (const task of judgedNow) {
     const family = judgementFamily(task);
-    if (!records.has(family)) records.set(family, familyTrackRecord(plan, family, isMerged, ports.gardenRecord?.(family)));
+    if (!records.has(family)) records.set(family, familyRecordForPass(plan, family, isMerged, ports, state, released));
     let flakeLine: string | undefined;
     if (flakePort !== undefined && isFlakeIncident(task) && !released.has(task.id)) {
       const facts = await flakeFacts(task, retries, flakePort);
@@ -1101,7 +1217,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
         }
       : cached !== undefined
         ? { kind: "ruled", task, bar: cached.bar, record: records.get(family)!, ruling: cached.ruling }
-        : await judgeMachineShard(task, records.get(family)!, { riskJudge: ports.riskJudge, policy, clock: ports.clock, ...(flakeLine ? { evidence: flakeLine } : {}) });
+        : await judgeMachineShard(task, records.get(family)!, { riskJudge: ports.riskJudge, policy, clock: ports.clock, log: ports.log, ...(flakeLine ? { evidence: flakeLine } : {}) });
     if (judged.kind === "unavailable") {
       report.unavailable.push(task.id);
       ports.log("machine_judge.unavailable", { task_id: task.id, reason: judged.reason });
@@ -1126,12 +1242,12 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   }
   const withdraw = unansweredEscalations({ ports, plan, state, released, excluded });
   const reasks = await reaskParkedEscalations({
-    ports, plan, state, report, records, released, excluded, isMerged, policy,
+    ports, plan, state, report, records, released, reapproval: releaseEvidence.reapproval, excluded, isMerged, policy,
     room: ports.limit === undefined ? Infinity : ports.limit - due.length, withdrawing: new Set(withdraw.map((w) => w.task.id)),
   });
   ruled.push(...[...reasks.values()].map((r) => r.judged));
   if (flakePort !== undefined) {
-    ruled.push(...await reconsiderReleasedFlakes({ ports, port: flakePort, plan, state, report, records, isMerged, policy, releasedFlakes, retries, retire }));
+    ruled.push(...await reconsiderReleasedFlakes({ ports, port: flakePort, plan, state, report, records, isMerged, policy, releasedFlakes, released, retries, retire }));
   }
   // Persisted before landing, so a landing that throws never costs these rulings again.
   writeAtomic(statePath, JSON.stringify(state) + "\n");
@@ -1189,6 +1305,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
         writeAtomic(join(root, relPath), out.contents);
         landed.push({ id: task.id, relPath, pin: taskRulingPin(shardRecord(out.contents, relPath)), sourcePin: taskRulingPin(shardRecord(text!, relPath)), action: "withdraw" });
         (report.withdrawn ??= []).push(task.id);
+        (state.unansweredWithdrawn ??= {})[task.id] = ports.clock.iso();
         ports.log("machine_judge.unanswered_withdrawn", {
           task_id: task.id, family: judgementFamily(task), age_days: w.ageDays, age_band: w.band,
           withdraw_after_days: MACHINE_JUDGE_UNANSWERED_WITHDRAW_DAYS, escalated_at: w.escalatedAt, retirement: "withdrawn",
@@ -1206,6 +1323,8 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
         const admission = { plan, isMerged: (t: Task) => isMerged(t.id), pathExists: (p: string) => existsSync(join(root, p)) };
         let out = text === undefined
           ? { refused: `${relPath} is absent from the landing tree` }
+          : r.byOperator && operatorReleasePin(shardRecord(text, relPath)) !== operatorReleasePin(r.task)
+          ? { refused: `${r.task.id} operator-approved contract changed before landing` }
           : renderRuledShard(text, relPath, judgedPin, r.ruling, plan.byId, admission);
         if (text !== undefined && "refused" in out && out.lint && !r.byOperator) {
           // A proceed the record cannot honour is BROKEN, which is the operator's to see: park it,
@@ -1228,7 +1347,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
           // Settled by the record's pin, so an unchanged record is not re-judged every pass. A release
           // bypasses `declined`, so it is settled in its own map and told to the operator once.
           if (r.byOperator) {
-            (state.refusedReleases ??= {})[r.task.id] = taskRulingPin(r.task);
+            (state.refusedReleases ??= {})[r.task.id] = operatorReleasePin(r.task);
             ports.stageProposal(refusedReleaseProposal(r.task, out.refused));
           } else (state.declined ??= {})[r.task.id] = taskRulingPin(r.task);
           report.refused.push(r.task.id);
@@ -1241,13 +1360,14 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
           // again commits nothing or only a timestamp. Settled by its pin instead (W1-T5359, W1-T5406).
           delete state.rulings[r.task.id];
           state.settled[r.task.id] = taskRulingPin(r.task);
-          if (r.byOperator) (state.settledReleases ??= {})[r.task.id] = taskRulingPin(r.task);
+          if (r.byOperator) (state.settledReleases ??= {})[r.task.id] = operatorReleasePin(r.task);
           report.settled.push(r.task.id);
           ports.log("machine_judge.already_landed", { task_id: r.task.id, pin });
           continue;
         }
         writeAtomic(join(root, relPath), out.contents);
-        landed.push({ id: r.task.id, relPath, pin, sourcePin: taskRulingPin(shardRecord(text!, relPath)), action: r.ruling.action });
+        landed.push({ id: r.task.id, relPath, pin, sourcePin: taskRulingPin(shardRecord(text!, relPath)), action: r.ruling.action,
+          ...(r.byOperator ? { operatorReleasePin: operatorReleasePin(r.task) } : {}) });
         if (r.ruling.action === "proceed") report.proceeded.push(r.task.id);
         else {
           // The inputs this escalation was judged on, kept so that a later move re-opens it (W1-T8830).

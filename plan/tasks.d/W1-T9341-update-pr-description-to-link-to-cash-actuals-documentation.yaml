@@ -9,7 +9,18 @@
   # refusal-amendment (W1-T9341, run W1-T9341-1792576971565, 2026-10-21T10:34:58.963Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
   #   worker evidence: The only declared file, `docs/forensics/cash-actuals.md`, and the acceptance test `tests/pr_description_links_cash_actuals` are absent at this HEAD. The retirement task also records that the target PR body is already merged and the document does not exist.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
+  retirement: retired # PR #5907 closed without merging; docs/forensics/cash-actuals.md is absent, so the requested link has no landed target.
+  # RECON FINDING (2026-10-25): no cash-actuals documentation exists on origin/main at
+  # 07e755535aae5725a477fbceac6cd55a4bee3718, also the live GitHub main SHA when verified.
+  # docs/forensics/cash-actuals.md is absent; the docs/ inventory and docs/docs-index.json
+  # contain no replacement under another name (controls: docs/forensics/README.md and the index).
+  # PR 5907 verified: https://github.com/craigoley/remudero/pull/5907 was read directly via
+  # GitHub PR metadata and its seven-file patch: state=closed, merged=false, merged_at=null,
+  # closed_at=2026-09-17T14:03:36Z. It merged nothing; the earlier "already merged" note is incorrect.
+  # Its body held the duplicated cash summary: Azure $0.9646, local settled $0.9270,
+  # local cap charge $2.6771. The patch proposed the same figures in the new
+  # docs/forensics/cash-actuals.md plus its docs-index entry; these were proposed, not landed.
   # backlog gardener: band=4 evidence=b402dc3581f35d1c
   attempts: 0
   files:

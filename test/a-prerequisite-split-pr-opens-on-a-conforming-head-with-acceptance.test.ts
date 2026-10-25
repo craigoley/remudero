@@ -14,7 +14,7 @@
  * gateway-free — hand-rolled fakes for spawn, CI, the head read and the body read.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -32,6 +32,7 @@ import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { listArchivedTranscripts, TRANSCRIPT_EXCERPT_CAP } from "#src/run-task.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
 const INSTRUMENT = ["scripts/diff-coverage.mjs"];
@@ -111,6 +112,9 @@ interface Drive {
 /** Drive the entangled arm once. `head`/`body` see the head the prompt named, so a fake can answer
  *  "the worker obeyed" or "the worker did not" without the test guessing the epoch. */
 async function drive(over: {
+  root?: string;
+  report?: string;
+  onSpawn?: (args: { prompt: string; env?: Record<string, string> }) => void;
   head?: (minted: string) => { ok: boolean; headSha?: string; headRefName?: string };
   body?: () => Promise<string>;
 }) {
@@ -124,9 +128,10 @@ async function drive(over: {
     },
   };
   const deps = {
-    spawn: async (a: { prompt: string }) => {
+    spawn: async (a: { prompt: string; env?: Record<string, string> }) => {
+      over.onSpawn?.(a);
       prompt = a.prompt;
-      return worker(`opened it.\nPR_URL: ${PREREQ_URL}`);
+      return worker(over.report ?? `opened it.\nPR_URL: ${PREREQ_URL}`);
     },
     waitForCiGreen: async (url: string) => {
       d.ciWaits.push(url);
@@ -137,7 +142,7 @@ async function drive(over: {
     },
     push: () => {},
     issues,
-    ledgerPath: join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t5779-ledger-`)), "ledger.ndjson"),
+    ledgerPath: join(over.root ?? mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t5779-ledger-`)), "ledger.ndjson"),
     log: (step: string, extra?: Record<string, unknown>) => d.lines.push({ step, ...(extra ?? {}) }),
     say: () => {},
     account: (r: WorkerResult) => r,
@@ -146,7 +151,7 @@ async function drive(over: {
     ...(over.head ? { readLiveHead: async () => over.head!(d.minted()) } : {}),
     ...(over.body ? { fetchPrBody: over.body } : {}),
   };
-  const outcome = await runFixRung({ ...opts(), initialReview: entangledReview(), deps } as never);
+  const outcome = await runFixRung({ ...opts(), ...(over.root ? { config: { root: over.root }, worktreePath: over.root } : {}), initialReview: entangledReview(), deps } as never);
   return { outcome, ...d };
 }
 
@@ -250,4 +255,57 @@ test("ghLiveHead reads the head ref name beside the head sha", () => {
   });
   assert.deepEqual(head, { ok: true, headSha: "abc", author: "fleet", headRefName: "run-unfiled-1" });
   assert.match(calls[0].join(" "), /headRefName/);
+});
+
+
+test("a prerequisite worker that opens no PR retains its bounded diagnostic transcript", async t => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prerequisite-evidence-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const reason = "publication refused by the normal hook";
+  const r = await drive({ root, report: reason + "\n" + "x".repeat(TRANSCRIPT_EXCERPT_CAP + 100) });
+  assert.equal(r.outcome.outcome, "escalated");
+  assert.equal(r.outcome.reason, "instrument_entangled");
+  assert.deepEqual(r.ciWaits, []);
+  const archived = listArchivedTranscripts(root, opts().taskId);
+  assert.equal(archived.length, 1, "a no-PR exit is still a real worker exit");
+  const text = readFileSync(archived[0]!.path, "utf8");
+  assert.ok(text.includes(reason), "retain the actual refusal, not only success=true");
+  assert.ok(Buffer.byteLength(text) < TRANSCRIPT_EXCERPT_CAP + 2000, "reuse the existing transcript cap");
+  const archivedAt = r.lines.findIndex(row => row.step === "transcript.archived");
+  const refusedAt = r.lines.findIndex(row => row.step === "fix.prerequisite_dispatch_failed");
+  assert.ok(archivedAt >= 0 && archivedAt < refusedAt, "preserve evidence before the no-PR return");
+});
+
+test("a prerequisite worker retains its transcript before waiting on protected CI", async t => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prerequisite-success-evidence-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const r = await drive({ root,
+    head: minted => ({ ok: true, headSha: "abc", headRefName: minted }),
+    body: async () => CONFORMING_BODY,
+  });
+  assert.equal(r.outcome.outcome, "parked");
+  assert.deepEqual(r.ciWaits, [PREREQ_URL]);
+  const archived = listArchivedTranscripts(root, opts().taskId);
+  assert.equal(archived.length, 1);
+  assert.ok(readFileSync(archived[0]!.path, "utf8").includes(`PR_URL: ${PREREQ_URL}`));
+  const archivedAt = r.lines.findIndex(row => row.step === "transcript.archived");
+  const openedAt = r.lines.findIndex(row => row.step === "fix.prerequisite_opened");
+  assert.ok(archivedAt >= 0 && archivedAt < openedAt);
+});
+
+
+test("a repeated prerequisite worker can read the prior refusal in the same daemon run", async t => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prerequisite-predecessor-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const reason = "normal publication refused: preserve this diagnostic";
+  await drive({ root, report: reason });
+  let copied: string | undefined;
+  let scratch: string | undefined;
+  await drive({ root, report: "still cannot publish", onSpawn: args => {
+    scratch = args.env?.TMPDIR;
+    if (scratch) copied = readdirSync(scratch).map(name => readFileSync(join(scratch!, name), "utf8")).join("\n");
+  } });
+  assert.ok(copied?.includes(reason), "the actual next spawn receives a readable bounded predecessor copy");
+  assert.ok(scratch && !existsSync(scratch), "only this spawn's temporary copies are retired");
+  assert.equal(listArchivedTranscripts(root, opts().taskId).length, 2, "same-daemon attempts do not overwrite each other");
 });

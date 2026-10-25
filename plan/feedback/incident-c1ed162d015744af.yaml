@@ -1,0 +1,31 @@
+id: incident-c1ed162d015744af
+ts: 2026-10-24T17:15:23.493Z
+raw: >-
+  Incident c1ed162d0157: intervention
+  own-red:fix-lane:required-checks-red-ci-log-fix-strike
+
+  First seen: 2026-10-24T17:09:08.632Z
+
+  Last seen: 2026-10-24T17:15:21.471Z
+
+  Count: 20, burn: 20.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10779@5b135a223 actor=cao825 cause=own-red:fix-lane:required-checks-red-ci-log-fix-strike — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#11949@678ffb270 actor=cao825 cause=own-red:fix-lane:required-checks-red-ci-log-fix-strike — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10350@8d377921b actor=cao825 cause=own-red:fix-lane:required-checks-red-ci-log-fix-strike — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#c1ed162d015744af75821e8e2d0597f02e8874b8224142f1c35cf66ed0df81ce
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
