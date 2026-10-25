@@ -19,7 +19,7 @@
  * the worktree; a `coverage/preflight-summary.json` inside the worktree is never read. No sandbox, no run:
  * the gate is unmeasured with the reason, never run with the daemon's environment.
  */
-import { execFileSync } from "node:child_process";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { accessSync, constants as fsConstants, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, sep } from "node:path";
@@ -177,14 +177,15 @@ export function procfsWriteOffences(files: readonly { name: string; text: string
 export function changedProcfsWriteOffences(cwd: string): string[] {
   let names: string[];
   try {
-    names = execFileSync("git", ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", "test/"], { cwd, encoding: "utf8", timeout: 20_000 })
+    names = hostWorktreeGit(cwd, ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", "test/"], { timeout: 20_000 })
       .split("\n").filter((n) => n.endsWith(".test.ts") && !n.endsWith("no-test-aims-a-write-at-procfs.test.ts"));
-  } catch {
+  } catch (error) {
+    process.stderr.write(`preopen gate: procfs-write scan skipped, diff unreadable: ${String((error as Error)?.message ?? error).slice(0, 120)}\n`);
     return [];
   }
   const files: { name: string; text: string }[] = [];
   for (const name of names) {
-    try { files.push({ name, text: readFileSync(join(cwd, name), "utf8") }); } catch { /* deleted or unreadable: nothing to scan */ }
+    try { files.push({ name, text: readFileSync(join(cwd, name), "utf8") }); } catch (error) { process.stderr.write(`preopen gate: procfs-write scan skipped ${name}: ${String((error as NodeJS.ErrnoException)?.code ?? "unreadable")}\n`); }
   }
   return procfsWriteOffences(files);
 }
