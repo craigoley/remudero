@@ -237,6 +237,15 @@ test("code health cached view preserves scope, pinned pages and saved source clo
     row.pr.repo = "acme/foreign"; writeFileSync(join(instanceDir, "opportunity-outcomes.json"), JSON.stringify([row]));
     const foreign = readCodeHealthReport({ stateDir, params, now });
     assert(foreign.data.opportunities.every(opportunity => opportunity.relatedWork.every(work => !work.prUrl)), "a saved row cannot join a foreign pull request");
+    const denied = structuredClone(value); denied.scans[0]!.state = "unavailable"; denied.scans[0]!.failureKind = "unauthorized";
+    denied.scans[0]!.reason = "GitHub did not allow this code-check read.";
+    const deniedSave = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(stateDir, value.repository), input: denied, expectedSnapshotId: published.snapshotId, clock });
+    assert.equal(deniedSave.state, "published");
+    const deniedReport = readCodeHealthReport({ stateDir, params, now });
+    assert.equal(deniedReport.data.repositories[0]!.state, "unauthorized", "a denied alert read stays distinct even when the metadata read succeeded");
+    assert.equal(deniedReport.data.planningAvailable, false);
+    assert.match(deniedReport.data.repositories[0]!.reason!, /allow/);
+
 
   });
 });

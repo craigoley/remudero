@@ -14,7 +14,7 @@ import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/
 import { readCoverageNightlySummary } from "#src/lib/coverage-nightly-intake.js";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { fixedClock, clockFromMillisFn } from "#src/lib/clock.js";
-import { readCodeScanningAlerts, codeScanningReadFailureKind } from "#src/lib/ops.js";
+import { readCodeScanningAlerts, readCodeScanningAlertsAsync, codeScanningReadFailureKind } from "#src/lib/ops.js";
 import { ghStubPath, pathWith } from "#test/helpers/gh-stub.js";
 
 function copyMeasurementMethod(dir: string): string {
@@ -76,7 +76,7 @@ test("code health deduplicates opportunities and preserves urgent findings", () 
   assert.equal(buildCodeHealthOpportunities(dismissed, related).length, 0, "retaining a dismissed finding does not silently reopen its work");
 });
 
-test("code health retains analysis identity through the real alert reader", () => {
+test("code health retains analysis identity through the real alert reader", async () => {
   const payload = [{ number: 41, state: "fixed", fixed_at: "2026-11-02T04:59:00Z", created_at: "2026-11-01T05:00:00Z",
     html_url: "https://github.com/acme/atlas/security/code-scanning/41",
     tool: { name: "CodeQL", version: "2.25.0" },
@@ -107,6 +107,17 @@ test("code health retains analysis identity through the real alert reader", () =
     assert(!JSON.stringify(source).includes("do-not-copy"), "retain a stable environment identity without copying its private values");
     assert.deepEqual(read.analysisInstances![1], { alertId: "42", analyzedSha: null, toolVersion: null, ref: null, analysisKey: null,
       category: null, environmentHash: null, instanceState: null, fixedAt: null, dismissedAt: null }, "missing source metadata stays unknown");
+    assert.deepEqual(await readCodeScanningAlertsAsync("acme", "atlas"), read, "the production asynchronous reader preserves the same evidence through a real process");
+    for (const [script, reason] of [
+      ['process.stdout.write("not-json");', "unavailable"],
+      ['process.stderr.write("HTTP 401: Bad credentials"); process.exit(1);', "unauthorized"],
+      ['process.stderr.write("HTTP 403: API rate limit exceeded"); process.exit(1);', "rate_limited"],
+    ]) {
+      process.env.PATH = pathWith(ghStubPath(`#!/usr/bin/env node\n${script}\n`));
+      const failed = await readCodeScanningAlertsAsync("acme", "atlas"); assert.equal(failed.ok, false);
+      if (!failed.ok) assert.equal(failed.failureReason, reason);
+    }
+    process.env.PATH = pathWith(bin);
     const ordinary = readCodeScanningAlerts("acme", "atlas");
     assert.equal(ordinary.ok, true);
     assert.equal(Object.hasOwn(ordinary, "analysisInstances"), false, "ordinary alert callers keep their existing bounded response");
@@ -688,6 +699,17 @@ test("code health distinguishes denied GitHub access from unavailable or rate-li
   try {
     const result = readCodeScanningAlerts("acme", "atlas", { includeAnalysisInstances: true });
     assert.equal(result.ok, false); assert(!result.ok); assert.equal(result.failureReason, "unauthorized");
+    assert.deepEqual(await readCodeScanningAlertsAsync("acme", "atlas"), read, "the production asynchronous reader preserves the same evidence through a real process");
+    for (const [script, reason] of [
+      ['process.stdout.write("not-json");', "unavailable"],
+      ['process.stderr.write("HTTP 401: Bad credentials"); process.exit(1);', "unauthorized"],
+      ['process.stderr.write("HTTP 403: API rate limit exceeded"); process.exit(1);', "rate_limited"],
+    ]) {
+      process.env.PATH = pathWith(ghStubPath(`#!/usr/bin/env node\n${script}\n`));
+      const failed = await readCodeScanningAlertsAsync("acme", "atlas"); assert.equal(failed.ok, false);
+      if (!failed.ok) assert.equal(failed.failureReason, reason);
+    }
+    process.env.PATH = pathWith(bin);
     const ordinary = readCodeScanningAlerts("acme", "atlas"); assert(!ordinary.ok);
     assert.equal(Object.hasOwn(ordinary, "failureReason"), false, "ordinary consumers retain the existing failure shape");
   } finally { process.env.PATH = saved; }
