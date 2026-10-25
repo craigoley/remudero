@@ -23,6 +23,7 @@
 
 import { isDeepStrictEqual } from "node:util";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { validateEvidenceRevision } from "./feedback-evidence-revision.js";
 
 /** Mirrors `feedback.ts`'s `FEEDBACK_STATUSES` verbatim (§7B) — array position IS the lifecycle
  *  rank a landing may only move forward through. `new` at rank 0 is the one status that may
@@ -96,6 +97,16 @@ function hasHistory(record: RecordShape, field: (typeof HISTORY_FIELDS)[number])
  * local rank is `take-local`, unchanged from today.
  */
 export function mergeFeedbackRecord(upstreamBytes: string | undefined, localBytes: string): FeedbackRecordMergeDecision {
+  let revision: unknown;
+  try { revision = parseYaml(localBytes)?.evidence_coverage_revision; }
+  catch { /* The ordinary parser below reports malformed YAML with its existing reason. */ }
+  let upstreamRevision: unknown;
+  try { upstreamRevision = upstreamBytes === undefined ? undefined : parseYaml(upstreamBytes)?.evidence_coverage_revision; }
+  catch { /* The ordinary parser below owns malformed upstream YAML. */ }
+  if (revision && !isDeepStrictEqual(revision, upstreamRevision)) {
+    const reason = validateEvidenceRevision(upstreamBytes, localBytes);
+    return reason ? { kind: "refuse", reason } : { kind: "take-local" };
+  }
   if (upstreamBytes === undefined) return { kind: "take-local" };
   if (upstreamBytes === localBytes) return { kind: "keep-upstream" };
 
@@ -114,10 +125,14 @@ export function mergeFeedbackRecord(upstreamBytes: string | undefined, localByte
   const upstream = upstreamParsed.record;
   const local = localParsed.record;
   const takeLocal = (): FeedbackRecordMergeDecision => {
-    if (upstream.contribution == null || isDeepStrictEqual(upstream.contribution, local.contribution)) {
+    const retained = { ...local,
+      ...(upstream.contribution != null ? { contribution: upstream.contribution } : {}),
+      ...(upstream.evidence_coverage_last_reopened !== undefined ? { evidence_coverage_last_reopened: upstream.evidence_coverage_last_reopened } : {}),
+    };
+    if (isDeepStrictEqual(retained, local)) {
       return { kind: "take-local" };
     }
-    return { kind: "take-local", content: stringifyYaml({ ...local, contribution: upstream.contribution }) };
+    return { kind: "take-local", content: stringifyYaml(retained) };
   };
 
   const upstreamRank = typeof upstream.status === "string" ? STATUS_RANK.get(upstream.status) : undefined;

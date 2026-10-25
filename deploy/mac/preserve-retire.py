@@ -604,11 +604,46 @@ class Hold(Exception):
 
 # ---------- retirement and retention ----------
 
-def remove(repo, roots, protected):
+def store_keep_scope(store, repos):
+    """Recheck declarations on every checkout sharing this store, including registered worktrees
+    outside discovery roots. Cached positive holds stay held; a cached absence grants nothing."""
+    why = keep_scope(store, below=False)
+    if why:
+        return why
+    for q in repos:
+        if q.store == store:
+            why = q.scoped or keep_scope(q.path)
+            if why:
+                return f"store-of-a-keep-scoped-checkout ({why})"
+    listing = run(["git", "--git-dir", store, "worktree", "list", "--porcelain", "-z"], timeout=30)
+    if listing.returncode != 0 or not listing.stdout.endswith(b"\0\0"):
+        return "keep-inspection-unknown (worktree listing unavailable)"
+    paths = []
+    for record in listing.stdout.split(b"\0\0")[:-1]:
+        first = record.split(b"\0", 1)[0]
+        if not first.startswith(b"worktree "):
+            return "keep-inspection-unknown (worktree listing malformed)"
+        path = os.fsdecode(first[len(b"worktree "):])
+        if not os.path.isabs(path) or os.path.islink(path):
+            return "keep-inspection-unknown (worktree path unsafe)"
+        paths.append(path)
+    if not paths:
+        return "keep-inspection-unknown (worktree listing empty)"
+    for path in paths:
+        why = keep_scope(path)
+        if why:
+            return f"store-of-a-keep-scoped-checkout ({why})"
+    return ""
+
+
+def remove(repo, roots, protected, repos):
     p = repo.path
     if (not os.path.isabs(p) or os.path.realpath(p) != p or os.path.islink(p) or inside(p, protected)
             or not any(p.startswith(r + "/") for r in roots)):
         raise Hold("path-guard")
+    why = keep_scope(p) or (repo.store and store_keep_scope(repo.store, repos))
+    if why:
+        raise Hold(f"{why} (declared before remove)")
     if repo.kind == "worktree":
         out = run(["git", "--git-dir", repo.store, "worktree", "remove", "--force", p])
         if out.returncode != 0:
@@ -622,7 +657,7 @@ def prune_worktrees(stores, repos):
     declaration: its stale worktree records are admin data of a held store. Returns those pruned."""
     pruned = []
     for store in stores:
-        if any(q.scoped for q in repos if q.store == store) or keep_scope(store, below=False):
+        if store_keep_scope(store, repos):
             continue
         run(["git", "--git-dir", store, "worktree", "prune"])
         pruned.append(store)
@@ -737,6 +772,10 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
         pack_dir = os.path.join(store, "objects", "pack")
         packs = len([f for f in os.listdir(pack_dir) if f.endswith(".pack")]) if os.path.isdir(pack_dir) else 0
         if packs < cfg["repack_min_packs"] or os.path.exists(os.path.join(store, "gc.pid")):
+            continue
+        why = store_keep_scope(store, repos)
+        if why:
+            say("HOLD", why, store)
             continue
         if apply:
             # -l leaves borrowed objects with their lender; --keep-unreachable drops nothing.
@@ -936,7 +975,7 @@ def main():
             why = keep_scope(r.path) or (r.store and keep_scope(r.store, below=False))
             if why:
                 raise Hold(f"{why} (declared before retire)")
-            remove(r, cfg["roots"], protected)
+            remove(r, cfg["roots"], protected, repos)
             retired += 1
             say("RETIRED", r.kind, r.path)
         except Hold as h:
