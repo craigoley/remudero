@@ -1,0 +1,61 @@
+- id: W1-T10602
+  title: "Confirm W1-T10191's blocked_inflight verdict was a benign dispatch deferral, not a build failure, before its lifetime-pressure automate verdict is acted on"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  design: |
+    Read-only research. The lifetime-pressure judge rated W1-T10191 "automate" from this
+    observed state: attributable dispatches=1; capacity refusals=0; open PR evidence=0;
+    merge evidence=0; last terminal verdict=blocked_inflight; attributable terminal-verdict
+    history=none.
+
+    Read plan/tasks.d/W1-T10191-ci-friction-remedy-f9833e0a349fb48b.yaml and confirm its
+    current fields: verify, status, depends_on, and the machine-filing judge's risk_ruling
+    (verdict/action/judged_at).
+
+    Read src/lib/status.ts's own comment at the `blocked_inflight` case (near line 3593,
+    "a live scheduling DEFERRAL, not a failure") and cite task W1-T3979, which shipped that
+    distinction, to establish what a `blocked_inflight` verdict does and does not mean.
+
+    Write the findings to the file below: the judge's observed state verbatim, the shard's
+    current fields, the `blocked_inflight` citation, and a conclusion stating whether anything
+    beyond the lifetime-pressure judge's "automate" verdict is needed before W1-T10191 is left
+    to proceed through the ordinary dispatch queue. Per the automate proposal's own text, this
+    task touches neither W1-T10191's shard nor any release row, merge gate, or plan record.
+    CREATES: docs/forensics/w1-t10191-lifetime-pressure-automate.md
+  files:
+    - docs/forensics/w1-t10191-lifetime-pressure-automate.md
+  acceptance:
+    - claim: "The findings file records W1-T10191's lifetime-pressure observed state and explains why its one blocked_inflight verdict is not a build failure"
+      proof: "grep: \"W1-T10191\" in docs/forensics/w1-t10191-lifetime-pressure-automate.md"
+    - claim: "The findings file cites the status.ts blocked_inflight scheduling-deferral distinction and states whether any plan change is needed before dispatch proceeds"
+      proof: "grep: \"blocked_inflight\" in docs/forensics/w1-t10191-lifetime-pressure-automate.md"
+  origin: "architect"
+  rationale: >-
+    From the 2026-10-25 proposal on verify-human-automate:W1-T10191, ratified via rmd approve:
+  
+    W1-T10191 kept failing to build (1 attempts over 5 days) and a judge reads it as safe to enter
+    the self-improvement flow:
+      All dependencies are merged and there are no open PRs or merges, so the build can proceed automatically without operator input.
+  
+    THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — fix_refusal:census-precheck cost 19.2 PR
+    minute(s) across 10 round(s) on 9 pull request(s)
+  
+  
+    Dependencies all merged: yes. Cited in src/: no.
+  
+  
+    Evidence: adaptive lifetime pressure: attributable dispatches=1; capacity refusals=0; open PR
+    evidence=0; merge evidence=0; last terminal verdict=blocked_inflight; attributable
+    terminal-verdict history=none
+  
+    Judge provenance: decision=automate;
+    observed_state=W1-T10191:adaptive-lifetime=1:capacity=0:open=0:merged=0:last=verdict:blocked_inflight:2.
+  
+  
+    This is an automation candidate only. The existing inbox/draft flow owns the next step; the
+    shard, plan records, release rows, and merge gates remain unchanged.
