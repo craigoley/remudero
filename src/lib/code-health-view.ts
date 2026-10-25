@@ -115,7 +115,7 @@ export function readCodeHealthReport(opts: { stateDir: string; params: URLSearch
     findingCount: report?.assessment?.findings.length ?? null, urgentFindings: report?.summary.urgentFindings ?? unknownUrgent(), opportunities: [], relatedWorkState: "not_collected", relatedWorkAsOf: null, relatedWorkReason: "Saved related work has not been collected for this view.",
     planningAvailable: false, freshness: report?.summary.freshness ?? (reports.every(value => value.summary.freshness === "fresh") && !inventory.unresolvedInstances.length ? "fresh" : "unavailable"), page: { nextCursor: null } };
   if (report?.assessment && data.assessment) {
-    const related = readRelatedWork(opts.stateDir, inventory, input.repository, opts.now);
+    const related = readCodeHealthRelatedWork(opts.stateDir, inventory, input.repository, opts.now);
     data.relatedWorkState = related.state; data.relatedWorkAsOf = related.asOf; data.relatedWorkReason = related.reason;
     // These are saved work links, not newly verified delivery or benefit receipts.
     report.opportunities = buildCodeHealthOpportunities(report.input!, related.work);
@@ -175,7 +175,7 @@ export function createCodeHealthView(opts: { stateDir?: string; keys?: () => str
 }
 
 
-function readRelatedWork(stateDir: string, inventory: RepositoryEvidenceInventory, repository: string, now: number): {
+export function readCodeHealthRelatedWork(stateDir: string, inventory: RepositoryEvidenceInventory, repository: string, now: number): {
   state: CodeHealthViewData["relatedWorkState"]; asOf: string | null; work: CodeHealthRelatedWork[]; reason: string | null;
 } {
   const work: CodeHealthRelatedWork[] = [], clocks: string[] = []; let missing = 0, invalid = 0, stale = false;
