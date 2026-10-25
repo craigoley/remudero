@@ -42686,27 +42686,32 @@ export function improvementNativeFilingReceipt(ledgerPath: string, proposalId: s
 }
 
 /** Only a saved, authenticated decision can reach the existing bounded draft and governed approve paths. */
-export async function improvementActionCommand(rest: string[]): Promise<number> {
+export async function improvementActionCommand(rest: string[], deps: {
+  config?: Config;
+  clock?: Clock;
+  draftHook?: typeof buildInboxDraftHook;
+  approve?: typeof approveCommandMirrored;
+} = {}): Promise<number> {
   const bad = unknownArgError("improvement-action", rest.slice(1), ["--state-dir"], []), operationId = rest[0];
   if (bad || !operationId || !/^[a-f0-9]{64}$/.test(operationId)) { console.error("rmd improvement-action: use a saved action identity and its fleet state directory"); return 2; }
-  const config = loadConfig(), stateDir = flagValue(rest, "--state-dir");
+  const config = deps.config ?? loadConfig(), stateDir = flagValue(rest, "--state-dir");
   if (!stateDir || resolve(stateDir) !== resolve(config.root, "state")) { console.error("rmd improvement-action: the request store must belong to this configured fleet"); return 2; }
   const identity = resolveOwnerRepo(), repository = `${identity.owner}/${identity.repo}`.toLowerCase();
   const checkTarget = (target: { repository: string; repoRoot: string }) => {
     if (target.repository !== repository || resolve(target.repoRoot) !== resolve(repoRoot)) throw new Error("The saved action does not belong to the selected repository checkout.");
   };
-  const result = await runImprovementAction(operationId, { stateDir, actorId: "owned-improvement-cli",
+  const result = await runImprovementAction(operationId, { stateDir, actorId: "owned-improvement-cli", clock: deps.clock,
     draft: async target => {
       checkTarget(target);
       const scopedConfig = { ...config, root: target.controlRoot }, runId = `IMPROVEMENT-DRAFT-${operationId}`;
       const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPathFor(scopedConfig), { run_id: runId, task_id: target.proposalId, step, ...extra });
-      await buildInboxDraftHook(identity.owner, identity.repo, scopedConfig, runId, log, undefined, undefined, undefined, undefined, undefined, target.proposalId)();
+      await (deps.draftHook ?? buildInboxDraftHook)(identity.owner, identity.repo, scopedConfig, runId, log, undefined, undefined, undefined, undefined, undefined, target.proposalId)();
     },
     recoverFiling: target => improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, repository),
     file: async target => {
       checkTarget(target);
       const scopedConfig = { ...config, root: target.controlRoot };
-      await approveCommandMirrored([target.proposalId], { config: scopedConfig, root: target.controlRoot, planPath: target.planPath,
+      await (deps.approve ?? approveCommandMirrored)([target.proposalId], { config: scopedConfig, root: target.controlRoot, planPath: target.planPath,
         reviewedImprovement: { goalDigest: target.goalDigest, draftDigest: target.draftDigest } });
       return improvementNativeFilingReceipt(ledgerPathFor(scopedConfig), target.proposalId, repository);
     },

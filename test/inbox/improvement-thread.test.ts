@@ -88,8 +88,8 @@ test("improvement chat concurrent processes and reload keep one message per writ
 });
 
 
-function sourceFixture(dir: string, options: { findingTitle?: string; findingCount?: number } = {}) {
-  const stateDir = join(dir, "fleet-state"), inboxRoot = join(dir, "atlas-instance"), repository = "acme/atlas", instance = "atlas";
+function sourceFixture(dir: string, options: { findingTitle?: string; findingCount?: number; repository?: string; planPath?: string; stateDir?: string } = {}) {
+  const stateDir = options.stateDir ?? join(dir, "fleet-state"), inboxRoot = join(dir, "atlas-instance"), repository = options.repository ?? "acme/atlas", instance = "atlas";
   const now = Date.parse("2026-11-02T06:00:00.000Z"), clock = fixedClock(now), sha = "a".repeat(40);
   const finding = { id: "42", ruleId: "js/repeated-work", status: "open" as const, severity: "medium" as const, category: "maintainability",
     path: "src/example.ts", title: options.findingTitle ?? "Repeated work makes this function difficult to change.", effortMinutes: null };
@@ -101,7 +101,7 @@ function sourceFixture(dir: string, options: { findingTitle?: string; findingCou
       { id: "coverage-existing-tier", sourceKind: "coverage", category: "tests", description: "Meets the existing instrumented coverage tier." }] }, scans,
     baseline: { analyzedSha: "b".repeat(40), policyVersion: CODE_HEALTH_POLICY_VERSION, scans: scans.map(scan => ({ ...structuredClone(scan), scanId: `${scan.kind}:old`, componentIds: [`${scan.kind}:old`], analyzedSha: "b".repeat(40), observedAt: "2026-11-01T05:00:00.000Z" })) } };
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [{ instanceId: instance, options: { root: inboxRoot, controlRoot: inboxRoot, ledgerPath: join(inboxRoot, "state", "ledger.ndjson"), planPath: join(inboxRoot, "repos", "atlas", "plan", "tasks.yaml") } }], improvementEvidence: {
+  writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [{ instanceId: instance, options: { root: inboxRoot, controlRoot: inboxRoot, ledgerPath: join(inboxRoot, "state", "ledger.ndjson"), planPath: options.planPath ?? join(inboxRoot, "repos", "atlas", "plan", "tasks.yaml") } }], improvementEvidence: {
     version: "repository-evidence-inventory-v1", measurementState: "not_collected", repositories: [{ repository, instanceIds: [instance], expectedQualitySources: ["quality", "coverage"] }], unresolvedInstances: [] } }));
   const saved = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(stateDir, repository), input, expectedSnapshotId: null, clock });
   assert(saved.state === "published"); const opportunity = buildCodeHealthOpportunities(input)[0]!; assert(opportunity.mayPlan);
@@ -461,5 +461,25 @@ test("improvement actions refresh changed related-work context before drafting o
     const reopened = await createImprovementThread({ ...request, idempotencyKey: "refresh-changed-context-0001" }, deps); assert(reopened.state === "saved");
     const refreshed = readImprovementThread(reopened.requestId, deps); assert(refreshed.state === "saved"); assert.equal(refreshed.source.state, "current");
     assert(refreshed.messages.some(message => message.body.includes("https://github.com/acme/atlas/pull/7")), "the actual reported task and PR stay visible in the refreshed briefing");
+  });
+});
+
+
+test("improvement CLI preserves fleet execution config when selecting a repository planning store", async () => {
+  const { createImprovementThread, readImprovementThread, requestImprovementAction } = await planningModule();
+  const { improvementActionCommand } = await import("#src/run-task.js");
+  await withTempDir("improvement-execution-config", async dir => {
+    const root = join(dir, "fleet"), stateDir = join(root, "state");
+    const { deps, request, inboxRoot } = sourceFixture(dir, { stateDir, repository: "craigoley/remudero", planPath: join(repoRoot(), "plan", "tasks.yaml") });
+    const saved = await createImprovementThread(request, deps); assert(saved.state === "saved");
+    const view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
+    const operation = await requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: "preserve-execution-config-01" }, { ...deps, launchAction: () => {} }); assert(operation.state === "requested");
+    const config = { root, claudeBin: "unreachable-test-worker", workerProviders: { fleetCashAllowancePath: join(root, "shared-allowance.json") } } as import("#src/lib/config.js").Config;
+    let receivedConfig: unknown, receivedContext: unknown, called = 0;
+    const code = await improvementActionCommand([operation.operation.operationId, "--state-dir", stateDir], { config, clock: deps.clock,
+      draftHook: (...args) => { called++; receivedConfig = args[2]; receivedContext = args[11]; return async () => {}; } });
+    assert.equal(code, 0); assert.equal(called, 1);
+    assert.equal(receivedConfig, config, "budget, routing, installation and accounting keep the exact fleet config");
+    assert.deepEqual(receivedContext, { root: inboxRoot, ledgerPath: join(inboxRoot, "state", "ledger.ndjson") });
   });
 });
