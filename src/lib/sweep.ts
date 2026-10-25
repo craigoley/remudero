@@ -6853,6 +6853,7 @@ export interface RollupCheckEntry {
   externalId?: string;
   workflowRunId?: number;
   workflowId?: number;
+  workflowName?: string;
   jobId?: string;
 }
 
@@ -6882,22 +6883,27 @@ export const REQUIRED_CHECK_FAIL = new Set([
   "STALE",
 ]);
 
-/** W1-T5694: newest run per workflow/name, then latest attempt; independent producers use completion.
+function rollupProducerKey(c: RollupCheckEntry): { key: string; known: boolean } {
+  const posted = /^(?:run:\d+:\d+:)?job:\d+$/.test(c.externalId ?? "");
+  const kind = c.context !== undefined && c.name === undefined ? "status" : "check";
+  const workflow = posted ? "posted" : c.workflowId !== undefined ? `workflow:${c.workflowId}`
+    : c.workflowName ? `workflow-name:${c.workflowName}` : "legacy";
+  return { key: JSON.stringify([kind, workflow, c.name ?? c.context ?? ""]),
+    known: posted || c.workflowId !== undefined || Boolean(c.workflowName) };
+}
+
+/** Newest run per producer/name, then latest attempt. Independent producers remain independently
+ *  enforced; a later completion from another workflow cannot clear their failures (#14160).
  *  Entries without workflow identity retain start/id ordering and last-encountered status ties. */
 export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: readonly T[]): T[] {
   const groups = new Map<string, T>();
-  const identity = (c: T) => {
-    const posted = /^(?:run:\d+:\d+:)?job:\d+$/.test(c.externalId ?? "");
-    const workflow = posted ? "posted" : c.workflowId === undefined ? "legacy" : `workflow:${c.workflowId}`;
-    return { key: JSON.stringify([workflow, c.name ?? c.context ?? ""]), known: posted || c.workflowId !== undefined };
-  };
-  const later = (c: T, prior: T, completion = false): boolean => {
-    const time = (e: T) => completion ? e.completedAt ?? e.startedAt ?? "" : e.startedAt ?? "";
+  const later = (c: T, prior: T): boolean => {
+    const time = (e: T) => e.startedAt ?? "";
     if (time(c) !== time(prior)) return time(c) > time(prior);
     return typeof c.checkRunId !== "number" || typeof prior.checkRunId !== "number" || c.checkRunId >= prior.checkRunId;
   };
   for (const c of rollup) {
-    const { key, known } = identity(c);
+    const { key, known } = rollupProducerKey(c);
     const prior = groups.get(key);
     if (!prior) {
       groups.set(key, c);
@@ -6909,13 +6915,7 @@ export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: 
       groups.set(key, c);
     }
   }
-  const latest = new Map<string, T>();
-  for (const c of groups.values()) {
-    const name = c.name ?? c.context ?? "";
-    const prior = latest.get(name);
-    if (!prior || later(c, prior, true)) latest.set(name, c);
-  }
-  return [...latest.values()];
+  return [...groups.values()];
 }
 
 /** One failure a later attempt of the same check outranks; `pendingRerun` when that attempt is still running. */
@@ -6928,10 +6928,10 @@ export interface SupersededRed<T extends RollupCheckEntry = RollupCheckEntry> {
 /** W1-T4908 — `latest` is exactly {@link dedupeRollupByLatestAttempt}'s output; `superseded` names each dropped failure. */
 export function classifyRollupSupersession<T extends RollupCheckEntry>(rollup: readonly T[]): { latest: T[]; superseded: SupersededRed<T>[] } {
   const latest = dedupeRollupByLatestAttempt(rollup);
-  const keep = new Map(latest.map((c) => [c.name ?? c.context ?? "", c]));
+  const keep = new Map(latest.map((c) => [rollupProducerKey(c).key, c]));
   const state = (c: T) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
   const superseded = rollup.flatMap((entry) => {
-    const supersededBy = keep.get(entry.name ?? entry.context ?? "") as T;
+    const supersededBy = keep.get(rollupProducerKey(entry).key) as T;
     if (supersededBy === entry || !REQUIRED_CHECK_FAIL.has(state(entry))) return [];
     const s = state(supersededBy);
     return [{ entry, supersededBy, pendingRerun: !REQUIRED_CHECK_OK.has(s) && !REQUIRED_CHECK_FAIL.has(s) }];
@@ -6942,8 +6942,10 @@ export function classifyRollupSupersession<T extends RollupCheckEntry>(rollup: r
 /** W1-T9913 — check names whose dropped failure is outranked by a newest run that PASSED, never by a red or a pending one. */
 export function supersededRedsNowPassing(rollup: readonly RollupCheckEntry[]): string[] {
   const state = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
-  return [...new Set(classifyRollupSupersession(rollup).superseded
-    .filter((r) => REQUIRED_CHECK_OK.has(state(r.supersededBy))).map((r) => r.entry.name ?? r.entry.context ?? ""))];
+  const { latest, superseded } = classifyRollupSupersession(rollup);
+  return [...new Set(superseded
+    .filter((r) => REQUIRED_CHECK_OK.has(state(r.supersededBy))).map((r) => r.entry.name ?? r.entry.context ?? ""))]
+    .filter((name) => latest.filter((c) => (c.name ?? c.context ?? "") === name).every((c) => REQUIRED_CHECK_OK.has(state(c))));
 }
 
 /** W1-T4105 — what a fix worker was sent against: the PR head and the check(s) it must fix. */
@@ -6976,9 +6978,10 @@ export function decideFixSuperseded(
   }
   if (snapshot.failingChecks.length === 0) return { kind: "continue" };
   const latest = dedupeRollupByLatestAttempt(observed.rollup ?? []);
-  const green = snapshot.failingChecks.every((name) =>
-    latest.some((c) => (c.name ?? c.context) === name && REQUIRED_CHECK_OK.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase())),
-  );
+  const green = snapshot.failingChecks.every((name) => {
+    const matches = latest.filter((c) => (c.name ?? c.context) === name);
+    return matches.length > 0 && matches.every((c) => REQUIRED_CHECK_OK.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase()));
+  });
   return green ? { kind: "superseded", condition: "check-green", oldHead: head, newHead: head } : { kind: "continue" };
 }
 
@@ -7055,7 +7058,7 @@ function requiredCheckGate(
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const required = new Set(requiredContexts ?? []);
   const knownRequired = required.size > 0;
-  // Dedupe to ONE entry per check name — the LATEST attempt — before judging. Dedup cannot change
+  // Dedupe to ONE entry per producer/name — the LATEST attempt — before judging. Dedup cannot change
   // whether `gate` is empty (grouping merges rows sharing a key, it never drops one), so the
   // "required but not yet registered" distinction the caller draws is unaffected (W1-T457).
   const gate = dedupeRollupByLatestAttempt(

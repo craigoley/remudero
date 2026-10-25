@@ -83,14 +83,14 @@ test("REST identity records workflow, run, job, and external id without losing c
   assert.deepEqual(status, { context: "remudero-review", state: "SUCCESS" });
 });
 
-test("different workflows sharing ci-gate use latest completion after each selects its newest run", () => {
+test("different workflows sharing ci-gate each retain their newest run's requirement", () => {
   const rows = rollupFromRest([
     { ...check(NEW, 201, "failure", "16:53"), name: "ci-gate" },
     { ...check(OLD, 202, "success", "16:00"), name: "ci-gate", completed_at: "2026-10-04T17:45:00Z" },
   ], [], [{ id: OLD, workflow_id: 10 }, { id: NEW, workflow_id: 20 }]);
   for (const order of [rows, [...rows].reverse()]) {
-    assert.equal(checksStateFromRollup(order, ["ci-gate"]), "green");
-    assert.equal(dedupeRollupByLatestAttempt(order)[0].checkRunId, 202);
+    assert.equal(checksStateFromRollup(order, ["ci-gate"]), "red");
+    assert.deepEqual(dedupeRollupByLatestAttempt(order).map((c) => c.checkRunId).sort(), [201, 202]);
   }
   rows[0].completedAt = "2026-10-04T18:00:00Z";
   assert.equal(checksStateFromRollup(rows, ["ci-gate"]), "red");
@@ -112,7 +112,7 @@ test("legacy job-only posted gates remain a separate producer from Actions check
     check(NEW, 301, "failure", "17:00"),
     { ...check(OLD, 302, "success", "16:00"), external_id: "job:302", completed_at: "2026-10-04T18:00:00Z" },
   ], [], workflows);
-  assert.equal(checksStateFromRollup(rows, [NAME]), "green");
+  assert.equal(checksStateFromRollup(rows, [NAME]), "red");
 });
 
 test("a superseded cancellation never supplies the requeue target and skipped stays green", () => {
