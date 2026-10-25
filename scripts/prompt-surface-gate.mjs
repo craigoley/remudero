@@ -84,6 +84,15 @@ export function parseUnifiedDiff(diffText) {
       continue;
     }
     if (!current) continue;
+    // Rename records carry one whole path; an unquoted diff header can contain several " b/"s.
+    if (line.startsWith("rename from ")) {
+      current.oldPath = decodeGitPath(line.slice("rename from ".length));
+      continue;
+    }
+    if (line.startsWith("rename to ")) {
+      current.newPath = decodeGitPath(line.slice("rename to ".length));
+      continue;
+    }
     if (line.startsWith("+++ ")) {
       const path = line.slice(4);
       if (path === "/dev/null") continue;
@@ -306,6 +315,7 @@ function revisionSkills(root, revision) {
     const metadata = entry.slice(0, separator), name = entry.slice(separator + 1);
     if (separator < 0 || !name || /[\r\n/]/.test(name)) throw new Error("skill reachability: ambiguous approved skill name");
     if (metadata.startsWith("120000 ")) throw new Error("skill reachability: a symbolic skill entry cannot be resolved from Git");
+    if (metadata.startsWith("160000 ")) throw new Error("skill reachability: a gitlink skill entry cannot be resolved from Git");
     if (!metadata.startsWith("040000 tree ")) continue;
     const path = `.claude/skills/${name}/SKILL.md`;
     const record = runGit(root, ["ls-tree", "-z", revision, "--", path]);

@@ -414,6 +414,42 @@ test("an approved injected skill edit without prompt-effect evidence is refused"
 });
 
 test("deleting or opting out a formerly injected skill retains its base-side prompt evidence obligation", () => {
+  for (const name of ["renamed b", 'renamed"skill', "renamed\tskill"]) withFixture(root => {
+    const path = ".claude/skills/original b/SKILL.md";
+    const renamed = `.claude/skills/${name}/SKILL.md`;
+    const source = skillSource("The renamed procedure still changes the worker prompt.");
+    write(root, path, source);
+    const before = renderedSkillPrompt(root);
+    assert.match(before, /The renamed procedure/);
+    commit(root, "approved skill before pure rename");
+    mkdirSync(dirname(join(root, renamed)), { recursive: true });
+    renameSync(join(root, path), join(root, renamed));
+    commit(root, "pure skill rename with no body edit");
+    assert.equal(readFileSync(join(root, renamed), "utf8"), source);
+    assert.notEqual(renderedSkillPrompt(root), before);
+    const diff = mod.readGitDiff(root, "HEAD^");
+    assert.match(diff, /similarity index 100%\nrename from /);
+    assert.doesNotMatch(diff, /^@@/m, "exercise rename metadata without content headers");
+    const result = mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
+    assert.equal(result.ok, false, `pure rename to ${JSON.stringify(name)} needs evidence`);
+    assert.deepEqual(result.surfaces, [path, renamed]);
+    assert.deepEqual(result.evidence, []);
+    assert.match(result.message, /actual maintained loading/);
+  });
+  withFixture(root => {
+    write(root, INJECTED_PATH, skillSource("Known regular skill control."));
+    commit(root, "regular approved tree");
+    assert.match(renderedSkillPrompt(root), /Known regular skill control/);
+    const object = git(root, ["rev-parse", "HEAD"]).trim();
+    const path = ".claude/skills/unresolved-module";
+    git(root, ["update-index", "--add", "--cacheinfo", `160000,${object},${path}`]);
+    git(root, ["commit", "-q", "-m", "unresolved skill gitlink at head"]);
+    assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }), /skill reachability:.*gitlink/);
+    git(root, ["rm", "--cached", path]);
+    write(root, path + "/README.md", "Regular directory without an injectable skill.\n");
+    commit(root, "replace unresolved base gitlink with known non-skill directory");
+    assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }), /skill reachability:.*gitlink/);
+  });
   for (const header of [
     'diff --git "a/.claude/skills/procedure/SKILL.md" "b/.claude/skills/unterminated',
     'diff --git "a/.claude/skills/procedure/SKILL.md" "b/.claude/skills/invalid\\q/SKILL.md"',
