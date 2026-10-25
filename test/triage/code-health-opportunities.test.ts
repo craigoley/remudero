@@ -7,7 +7,7 @@ import { hostname } from "node:os";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { buildCodeHealthOpportunities, codeqlQualityProposalId, qualityScanFromCollectedEvidence } from "#src/lib/codeql-quality-intake.js";
-import { prepareCodeHealthCollection } from "#src/lib/code-health-collector.js";
+import { prepareCodeHealthCollection, readCodeHealthQualityEvidence } from "#src/lib/code-health-collector.js";
 import { projectCodeHealth, codeHealthFindingFingerprint } from "#src/lib/code-health-projection.js";
 import { readCodeHealthSnapshot, publishCodeHealthSnapshot, readCodeHealthCoverageSource, saveCodeHealthCoverageSource } from "#src/lib/code-health-store.js";
 import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
@@ -486,4 +486,49 @@ test("code health collection preserves a valid comparison when the same source e
   assert.equal(projectCodeHealth(repeated).summary.healthy, true, "rereading evidence retains its established comparison instead of making the source its own baseline");
   assert.deepEqual(repeated.baseline, second.baseline);
   assert.equal(repeated.scans[0]!.observedAt, second.scans[0]!.observedAt);
+});
+
+
+test("code health reads configured original-output artifacts through the real GitHub read port", async () => {
+  const sha = "a".repeat(40), repository = "acme/atlas", languages = ["javascript-typescript", "actions", "python"];
+  const workflow = "jobs:\n  analyze:\n    strategy:\n      matrix:\n        include:\n" + languages.map(language => `          - language: ${language}\n`).join("") + "    steps:\n      - uses: github/codeql-action/analyze@" + "f".repeat(40) + "\n";
+  const metadata = languages.map((language, n) => ({ version: "code-health-source-v1", kind: "quality", repository, analyzedSha: sha,
+    ref: "refs/heads/main", runId: "123", runAttempt: "1", observedAt: "2026-11-02T05:00:00.000Z", language,
+    sarifId: `${n + 1}2345678-1234-1234-1234-123456789012`, scanId: `codeql:123:1:${language}:${n + 1}2345678-1234-1234-1234-123456789012`,
+    state: "complete", reasons: [], toolVersion: "2.23.0", rulesVersion: "b".repeat(64), configHash: "c".repeat(64), ruleCount: 12,
+    exclusions: ["test/**"], scope: { kind: "explicit-analysis-targets", fileCount: 2, hash: "d".repeat(64) },
+    completion: { kind: "workflow-analysis-step", state: "success", at: "2026-11-02T05:00:00.000Z" } }));
+  const analyses = metadata.map(item => ({ ref: "refs/heads/main", commit_sha: sha, analysis_key: ".github/workflows/codeql.yml:analyze",
+    environment: JSON.stringify({ language: item.language }), category: `/language:${item.language}`, created_at: "2026-11-02T04:59:00Z",
+    rules_count: 12, sarif_id: item.sarifId, tool: { name: "CodeQL", version: "2.23.0" }, error: "", warning: "" }));
+  const payload = { sha, repository, languages, metadata, analyses, workflow };
+  const bin = ghStubPath(`#!/usr/bin/env node
+const { mkdirSync, writeFileSync } = require("node:fs"); const { join } = require("node:path");
+const p = ${JSON.stringify(payload)}, a = process.argv.slice(2), route = a[1] || "";
+if (a[0] === "api") {
+ let result;
+ if (route.includes("/commits/main")) result = {sha:p.sha};
+ else if (route.includes("/actions/workflows/codeql.yml/runs")) result = {workflow_runs:[{id:123,head_sha:p.sha,head_branch:"main",status:"completed",conclusion:"success",path:".github/workflows/codeql.yml"}]};
+ else if (route.includes("/contents/.github/workflows/codeql.yml")) result = {type:"file",encoding:"base64",size:Buffer.byteLength(p.workflow),content:Buffer.from(p.workflow).toString("base64")};
+ else if (route.includes("/actions/runs/123/artifacts")) result = {total_count:p.languages.length,artifacts:p.languages.map((language,n)=>({id:n+1,name:"code-health-quality-"+language,expired:false,size_in_bytes:1000,workflow_run:{id:123,head_sha:p.sha,head_branch:"main",repository_id:1,head_repository_id:1}}))};
+ else if (route.includes("/code-scanning/analyses")) result = p.analyses;
+ else {process.stderr.write("Unexpected read: "+route);process.exit(42);}
+ process.stdout.write(JSON.stringify(result));
+} else if (a[0] === "run" && a[1] === "download") {
+ const name=a[a.indexOf("--name")+1], dir=a[a.indexOf("--dir")+1], item=p.metadata.find(item=>"code-health-quality-"+item.language===name);
+ if (!item || !dir) process.exit(43); mkdirSync(dir,{recursive:true}); writeFileSync(join(dir,"code-health-quality.json"),JSON.stringify(item));
+} else {process.stderr.write("Unexpected command");process.exit(44);}
+`);
+  const saved = process.env.PATH; process.env.PATH = pathWith(bin);
+  try {
+    const read = await readCodeHealthQualityEvidence(repository);
+    assert.equal(read.currentSha, sha);
+    assert.deepEqual([...read.quality.requiredLanguages].sort(), [...languages].sort());
+    assert.equal(read.quality.artifacts.length, 3); assert.equal(read.quality.analyses.length, 3);
+    const scan = qualityScanFromCollectedEvidence({ ...read.quality, repository, source: { ok: true, alerts: [], analysisInstances: [] } });
+    assert.equal(scan.state, "complete", "zero findings need all configured original-output and API-analysis controls");
+    assert.deepEqual(scan.componentIds, metadata.map(item => item.scanId).sort());
+    assert.equal(scan.observedAt, metadata[0]!.observedAt);
+    assert(!JSON.stringify(read).includes('"environment":'), "retain only the environment fingerprint");
+  } finally { process.env.PATH = saved; }
 });

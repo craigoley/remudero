@@ -65,3 +65,12 @@ export function prepareCodeHealthCollection(input: CodeHealthCollection): CodeHe
   projectCodeHealth(result); // Refuse overflow or invalid evidence without discarding the prior saved snapshot.
   return result;
 }
+
+export interface CodeHealthQualityEvidenceRead {
+  currentSha: string;
+  quality: Omit<Parameters<typeof import("./codeql-quality-intake.js").qualityScanFromCollectedEvidence>[0], "repository" | "source" | "knownFindingIds">;
+}
+
+export async function readCodeHealthQualityEvidence(_repository: string): Promise<CodeHealthQualityEvidenceRead> {
+  throw new Error("Code health quality source has not been read.");
+}
