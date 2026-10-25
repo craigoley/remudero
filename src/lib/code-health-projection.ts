@@ -16,6 +16,18 @@ export interface CodeHealthScanFinding {
   fixedSha?: string;
 }
 
+export interface CodeHealthCoverageMeasurement {
+  branches: { covered: number; total: number };
+  lines: { covered: number; total: number };
+}
+
+function coverageMeasurementShape(value: unknown): value is CodeHealthCoverageMeasurement {
+  const object = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
+  if (!object(value) || Object.keys(value).sort().join(",") !== "branches,lines") return false;
+  return [value.branches, value.lines].every(part => object(part) && Object.keys(part).sort().join(",") === "covered,total" &&
+    Number.isSafeInteger(part.covered) && Number.isSafeInteger(part.total) && Number(part.covered) >= 0 && Number(part.total) >= Number(part.covered));
+}
+
 /** An existing collector's immutable result; reading it again is not a new scan. */
 export interface CodeHealthScan {
   kind: "quality" | "coverage";
@@ -32,6 +44,7 @@ export interface CodeHealthScan {
   reason: string | null;
   checks: Array<{ id: string; met: boolean; reason: string }>;
   findings: CodeHealthScanFinding[];
+  measurement?: CodeHealthCoverageMeasurement;
 }
 
 /** Checks describe source facts or an existing repository policy, never a new weighted grade. */
@@ -72,12 +85,13 @@ export interface CodeHealthSourceProvenance {
   rulesVersion: string | null;
   configHash: string;
   exclusions: string[];
-  scope: { kind: "explicit-analysis-targets" | "instrumented-source-lines"; fileCount: number; hash: string | null };
+  scope: { kind: "explicit-analysis-targets" | "instrumented-source-files"; fileCount: number; hash: string | null };
   completion?: { kind: "original-invocations" | "workflow-analysis-step"; state: "success"; at: string } | null;
   runAttempt?: string;
   language?: string;
   sarifId?: string;
   ruleCount?: number;
+  measurement?: CodeHealthCoverageMeasurement;
   check?: { id: string; met: boolean; reason: string };
 }
 
@@ -87,7 +101,7 @@ export function validateCodeHealthProvenance(value: unknown, expected: { reposit
   const p = value as CodeHealthSourceProvenance, digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
   const only = (value: object, keys: string): boolean => Object.keys(value).every(key => keys.split(" ").includes(key));
   const common = "version kind repository analyzedSha ref runId observedAt scanId state reasons toolVersion rulesVersion configHash exclusions scope";
-  if (!only(p, `${common} ${p.kind === "quality" ? "runAttempt language sarifId ruleCount completion" : "check"}`) ||
+  if (!only(p, `${common} ${p.kind === "quality" ? "runAttempt language sarifId ruleCount completion" : "check measurement"}`) ||
       p.version !== "code-health-source-v1" || p.kind !== expected.kind || !repositoryShape.test(p.repository) ||
       p.repository !== expected.repository.toLowerCase() || !shaShape.test(p.analyzedSha) || p.analyzedSha !== expected.analyzedSha.toLowerCase() ||
       p.ref !== "refs/heads/main" || !/^[1-9][0-9]{0,19}$/.test(p.runId) || p.runId !== expected.runId || !time(p.observedAt) || !text(p.scanId) ||
@@ -95,7 +109,7 @@ export function validateCodeHealthProvenance(value: unknown, expected: { reposit
       !(p.toolVersion === null || text(p.toolVersion)) || !(p.rulesVersion === null || digest(p.rulesVersion)) || !digest(p.configHash) ||
       !Array.isArray(p.exclusions) || p.exclusions.length > 128 || p.exclusions.some(path => !text(path)) ||
       !p.scope || typeof p.scope !== "object" || !only(p.scope, "kind fileCount hash") ||
-      p.scope.kind !== (p.kind === "quality" ? "explicit-analysis-targets" : "instrumented-source-lines") ||
+      p.scope.kind !== (p.kind === "quality" ? "explicit-analysis-targets" : "instrumented-source-files") ||
       !Number.isSafeInteger(p.scope.fileCount) || p.scope.fileCount < 0 || p.scope.fileCount > 100_000 || !(p.scope.hash === null || digest(p.scope.hash))) return fail();
   if (p.kind === "quality") {
     if (p.completion !== null && (!p.completion || typeof p.completion !== "object" || !only(p.completion, "kind state at") ||
@@ -104,9 +118,9 @@ export function validateCodeHealthProvenance(value: unknown, expected: { reposit
     if (!p.runAttempt || !/^[1-9][0-9]{0,5}$/.test(p.runAttempt) || !p.language || !/^[a-z][a-z0-9-]{0,63}$/.test(p.language) ||
         !p.sarifId || !/^[a-f0-9-]{36}$/i.test(p.sarifId) || !Number.isSafeInteger(p.ruleCount) || p.ruleCount! < 0 || p.ruleCount! > 2_560_000 ||
         p.scanId !== `codeql:${p.runId}:${p.runAttempt}:${p.language}:${p.sarifId}`) return fail();
-  } else if (!p.check || typeof p.check !== "object" || !only(p.check, "id met reason") || p.check.id !== "coverage-existing-tier" ||
+  } else if (!coverageMeasurementShape(p.measurement) || !p.check || typeof p.check !== "object" || !only(p.check, "id met reason") || p.check.id !== "coverage-existing-tier" ||
       typeof p.check.met !== "boolean" || !text(p.check.reason, 2048) || p.scanId !== `coverage-nightly:${p.runId}`) return fail();
-  if (p.state === "complete" ? p.reasons.length > 0 || !p.toolVersion || !p.rulesVersion || !p.scope.hash || !p.scope.fileCount || p.kind === "quality" && (!p.ruleCount || !p.completion) : !p.reasons.length) return fail();
+  if (p.state === "complete" ? p.reasons.length > 0 || !p.toolVersion || !p.rulesVersion || !p.scope.hash || !p.scope.fileCount || p.kind === "quality" && (!p.ruleCount || !p.completion) || p.kind === "coverage" && (!p.measurement!.branches.total || !p.measurement!.lines.total) : !p.reasons.length) return fail();
   return structuredClone(p);
 }
 
@@ -143,6 +157,7 @@ function validateInput(input: CodeHealthProjectionInput): void {
           scan.exclusions.length > 128 || scan.exclusions.some(path => !text(path)) || scan.checks.length > 256 ||
           new Set(scan.checks.map(check => check.id)).size !== scan.checks.length ||
           scan.checks.some(check => !text(check.id) || typeof check.met !== "boolean" || !text(check.reason, 2048))) throw new Error("Code health scan shape is invalid.");
+      if (scan.measurement !== undefined && (scan.kind !== "coverage" || !coverageMeasurementShape(scan.measurement))) throw new Error("Code health coverage measurement is invalid.");
       const identities = new Map<string, CodeHealthScanFinding>();
       for (const finding of scan.findings) {
         const identity = codeHealthFindingFingerprint(input.repository, scan.kind, finding), previous = identities.get(identity);

@@ -128,7 +128,7 @@ function evidenceSnapshotId(input: CodeHealthProjectionInput, assessment: Return
   const normalizedScans = (scans: readonly CodeHealthProjectionInput["scans"][number][]) => [...scans].sort((a, b) => a.kind.localeCompare(b.kind)).map(value => {
     const findings = new Map(value.findings.map(finding => [codeHealthFindingFingerprint(assessment.repository, value.kind, finding),
       [finding.id, finding.ruleId, finding.status, finding.severity, finding.category, finding.path, finding.title, finding.effortMinutes, finding.fixedAt ?? null, finding.fixedSha ?? null]]));
-    return [value.kind, value.scanId, [...findings].sort(([a], [b]) => a.localeCompare(b))];
+    return [value.kind, value.scanId, value.measurement ?? null, [...findings].sort(([a], [b]) => a.localeCompare(b))];
   });
   return createHash("sha256").update(JSON.stringify([assessment.repository, assessment.currentSha, assessment.analyzedSha, assessment.baselineSha,
     assessment.policyVersion, assessment.sources, assessment.checks, assessment.findings,

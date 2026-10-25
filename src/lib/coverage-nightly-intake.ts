@@ -83,6 +83,8 @@ function validatedSummary(value: unknown, run: CoverageNightlyRun, repository: s
   const provenance = s.code_health === undefined ? undefined : validateCodeHealthProvenance(s.code_health, {
     repository, analyzedSha: run.head_sha, runId: String(run.id), kind: "coverage",
   });
+  if (provenance && (!provenance.measurement || provenance.measurement.branches.covered !== s.brh || provenance.measurement.branches.total !== s.brf ||
+      provenance.measurement.lines.covered !== s.lh || provenance.measurement.lines.total !== s.lf)) throw new Error("coverage-nightly provenance totals do not match the original summary");
   if (provenance && provenance.observedAt !== s.measured_at) throw new Error("coverage-nightly provenance clock does not match the original measurement");
   return { ...(provenance ? { code_health: provenance } : {}), ...Object.fromEntries([
     "kind", "sha", "ref", "measured_at", "lines_pct", "branches_pct", "lf", "lh", "brf", "brh",

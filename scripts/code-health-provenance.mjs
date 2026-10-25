@@ -93,8 +93,8 @@ export function coverageProvenance(summary, lcov, baseline, workflow, repository
     ref: summary.ref, runId: summary.run_id, observedAt: summary.measured_at, scanId: `coverage-nightly:${summary.run_id}`,
     state: reasons.length ? "partial" : "complete", reasons, toolVersion: process.version,
     rulesVersion: hash(canonical(baseline)), configHash: hash(workflow), exclusions: [...new Set(exclusions)].sort(),
-    scope: { kind: "instrumented-source-lines", fileCount: records.length, hash: validScope ? hash(records.map(record =>
-      [record.sourceFile, [...new Set(record.da.map(value => value.line))].sort((a, b) => a - b), record.lf, record.brf]).sort(([a], [b]) => a.localeCompare(b))) : null },
+    scope: { kind: "instrumented-source-files", fileCount: records.length, hash: validScope ? hash(["instrumented-source-files", records.map(record => record.sourceFile).sort()]) : null },
+    measurement: { branches: { covered: totals.brh, total: totals.brf }, lines: { covered: totals.lh, total: totals.lf } },
     check: { id: "coverage-existing-tier", met: reasons.length === 0 && tier.tier === "healthy", reason: reasons.length ? "Coverage could not be assessed because its source evidence is incomplete." : `Instrumented branch coverage is in this repository's existing ${tier.tier} tier.` } };
 }
 

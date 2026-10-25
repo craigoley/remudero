@@ -225,7 +225,8 @@ test("code health retains coverage provenance at the existing ledger boundary", 
     const at = new Date().toISOString(), sha = "a".repeat(40), ledgerPath = join(dir, "ledger.ndjson");
     const provenance = { version: "code-health-source-v1", kind: "coverage", repository: "acme/atlas", analyzedSha: sha,
       ref: "refs/heads/main", runId: "123", observedAt: at, scanId: "coverage-nightly:123", state: "complete", reasons: [], toolVersion: "v24.21.0",
-      rulesVersion: "b".repeat(64), configHash: "c".repeat(64), exclusions: ["test/**"], scope: { kind: "instrumented-source-lines", fileCount: 1, hash: "d".repeat(64) },
+      rulesVersion: "b".repeat(64), configHash: "c".repeat(64), exclusions: ["test/**"], scope: { kind: "instrumented-source-files", fileCount: 1, hash: "d".repeat(64) },
+      measurement: { branches: { covered: 9, total: 10 }, lines: { covered: 2, total: 2 } },
       check: { id: "coverage-existing-tier", met: true, reason: "Instrumented branch coverage is in the existing healthy tier." } };
     const summary = { kind: "coverage_nightly.measured", sha, ref: "refs/heads/main", run_id: "123", measured_at: at,
       lines_pct: 100, branches_pct: 90, lf: 2, lh: 2, brf: 10, brh: 9, skipped_records: 0, tier: "healthy",
