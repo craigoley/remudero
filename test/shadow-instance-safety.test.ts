@@ -600,13 +600,13 @@ test("selected private deny regions are public ancestors or fixed standard roots
 
 for (const adapter of ["foundry-direct", "cash-foundry", "cash-chat"] as const) {
   test(`selected ${adapter} refuses private scope and revised binding before model transport`, async () => {
-    for (const mode of ["healthy", "cwd-overlap", "home-overlap", "child-env", "revised", "scope-relative", "scope-file", "home-absent", "config-uncopyable"] as const) {
+    for (const mode of ["healthy", "healthy-check", "cwd-overlap", "home-overlap", "child-env", "revised", "scope-relative", "scope-file", "home-absent", "config-uncopyable"] as const) {
       const fixture = runtimeRegistryFixture(), cwd = join(fixture.root, "cash-checkout"), home = join(fixture.root, "cash-home");
       mkdirSync(cwd); mkdirSync(home);
       const model = adapter === "cash-chat" ? "gpt-oss-120b" : "claude-haiku-5-5";
       let sent = 0;
       const args: OpenWeightSpawnArgs = { cwd: mode === "cwd-overlap" ? fixture.root : mode === "scope-relative" ? "relative" : mode === "scope-file" ? fixture.selected : cwd,
-        workerHome: mode === "home-overlap" ? fixture.root : mode === "home-absent" ? join(fixture.root, "absent") : home, prompt: "public synthetic provider control", tools: ["Read"],
+        workerHome: mode === "home-overlap" ? fixture.root : mode === "home-absent" ? join(fixture.root, "absent") : home, prompt: "public synthetic provider control", tools: mode === "healthy-check" ? ["Read", "RunCheck"] : ["Read"],
         env: { RMD_OPENWEIGHT_API_KEY: "synthetic", RMD_FOUNDRY_CLAUDE_API_KEY: "synthetic",
           RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.invalid/anthropic" },
         ...(mode === "child-env" ? { workerEnv: { PRIVATE_CANARY: fixture.selected } } : {}),
@@ -623,7 +623,7 @@ for (const adapter of ["foundry-direct", "cash-foundry", "cash-chat"] as const) 
           return adapter === "foundry-direct" ? spawnFoundryClaudeWorker(args, config, { model, effort: "low" })
             : spawnOpenWeightWorker(args, config, { model, effort: "low" });
         }, { envPath: fixture.selected }); } catch (error) { failure = error; }
-        if (mode === "healthy") {
+        if (mode === "healthy" || mode === "healthy-check") {
           assert.equal(failure, undefined); assert.equal(result?.isError, false, result?.stderr); assert.equal(sent, 1, "real adapter transport is the positive control");
         } else {
           assert.equal(sent, 0, `${mode} must refuse before model transport, not only annotate a later tool result`);
@@ -645,6 +645,7 @@ for (const adapter of ["foundry-direct", "cash-foundry", "cash-chat"] as const) 
       const args: OpenWeightSpawnArgs = { cwd, workerHome: home, prompt: "public immutable prompt", tools: ["Write"], maxTurns: 2,
         env: { RMD_OPENWEIGHT_API_KEY: "synthetic", RMD_FOUNDRY_CLAUDE_API_KEY: "synthetic", RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.invalid/anthropic" },
         fetchImpl: async (_url, init) => {
+          assert.ok(String(_url).startsWith(adapter === "cash-chat" ? "https://cash.example.invalid/" : "https://foundry.example.invalid/"), "queued config mutation cannot redirect provider transport");
           sent++; assert.equal(String(init?.body).includes(fixture.selected), false);
           if (sent === 1 && revised) writeFileSync(fixture.selected, registry("live"));
           const write = { path: "public-marker.txt", content: "synthetic public write" };

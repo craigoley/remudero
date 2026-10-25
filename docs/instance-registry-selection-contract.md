@@ -32,6 +32,57 @@ not-granted. A digest is integrity evidence, not a private-source release decisi
 
 ## Bounded compatibility window
 
+### Dormant explicit runtime selection
+
+W1-T10573 connects explicit selection to the actual daemon/direct-task default
+readers and host launchers. This is different from the optional observations
+below: selected invalid evidence refuses that invocation; genuine absence still
+uses the original public-registry behavior. It does not install a configuration,
+activate admission, grant publication permission, or approve a release.
+
+A synthetic later-installation example is a regular, nonsymlink, owner-private
+file outside the checkout, worker homes, shared dependency roots and broad
+container mounts. These are example values, not this installation's settings:
+
+```yaml
+instances:
+  example-shadow:
+    repo: example-public-core
+    github_repo: example/example-public-core
+    mode: shadow
+    state_dir: /srv/example/state
+    container_name: example-shadow
+    image: example.invalid/example:qualified-image
+    claude_dir: /srv/example/auth/claude
+    codex_dir: /srv/example/auth/codex
+    container_config_dir: /srv/example/config
+```
+
+After separate rollout approval, the host launcher would receive an absolute
+`RMD_INSTANCE_REGISTRY` path and explicit `--instance example-shadow`. It qualifies
+the selected bytes, physical identity, Docker source namespace and image reader
+before any replacement. The generated container arguments contain exactly one
+`--mount type=bind,src=<qualified-host-file>,dst=/home/node/.config/remudero/selected-registry.yaml,readonly`;
+only the trusted daemon/serve readers receive that container path, the original
+digest and instance name. A host path is never substituted as a container path.
+Unsupported images or source namespaces refuse; no directory is silently created
+for a missing file. This example is not a command to install, start or recycle it.
+
+Selected Claude and Codex invocations use public-only permission scopes and opaque
+per-invocation policy artifacts. Neither prompts nor untrusted child arguments
+carry the selected filename. Read-only/review work cannot write its public source;
+writers retain their ordinary public workspace and admitted test-slot access.
+Cash/Foundry tools also refuse a selected file inside their public worktree/home
+scope and recheck binding before model requests and local tool effects. Unknown
+scope or cleanup remains an explicit redacted refusal, never broader permission.
+Unselected provider policies and supported owner/service flows stay unchanged.
+
+Source publication remains independently held until the actual automatic image
+build/recycle route is protected or an exact release is separately approved.
+Isolated source and tests need no worker stop. Private installation, live selection,
+replacement and any affected-instance drain still require the human rollout
+decision below; no source merge implicitly approves them.
+
 ### Optional run and sweep mode observations
 
 W1-T9572 adds `selectedRegistryMode` to the public configuration schema. Only an
