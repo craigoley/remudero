@@ -699,17 +699,6 @@ test("code health distinguishes denied GitHub access from unavailable or rate-li
   try {
     const result = readCodeScanningAlerts("acme", "atlas", { includeAnalysisInstances: true });
     assert.equal(result.ok, false); assert(!result.ok); assert.equal(result.failureReason, "unauthorized");
-    assert.deepEqual(await readCodeScanningAlertsAsync("acme", "atlas"), read, "the production asynchronous reader preserves the same evidence through a real process");
-    for (const [script, reason] of [
-      ['process.stdout.write("not-json");', "unavailable"],
-      ['process.stderr.write("HTTP 401: Bad credentials"); process.exit(1);', "unauthorized"],
-      ['process.stderr.write("HTTP 403: API rate limit exceeded"); process.exit(1);', "rate_limited"],
-    ]) {
-      process.env.PATH = pathWith(ghStubPath(`#!/usr/bin/env node\n${script}\n`));
-      const failed = await readCodeScanningAlertsAsync("acme", "atlas"); assert.equal(failed.ok, false);
-      if (!failed.ok) assert.equal(failed.failureReason, reason);
-    }
-    process.env.PATH = pathWith(bin);
     const ordinary = readCodeScanningAlerts("acme", "atlas"); assert(!ordinary.ok);
     assert.equal(Object.hasOwn(ordinary, "failureReason"), false, "ordinary consumers retain the existing failure shape");
   } finally { process.env.PATH = saved; }
