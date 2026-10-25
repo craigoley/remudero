@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import fs, { chmodSync, fsyncSync, fstatSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { fsyncSync, fstatSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join, relative } from "node:path";
 import { test } from "node:test";
@@ -67,15 +67,27 @@ test("W1-T10612: product writes reject stale revisions and replay the same reque
   assert.ok(!JSON.stringify(listed.value).includes(brief.idea), "list summaries do not return the source idea");
 });
 
+test("publicly readable product state is refused even when the process can read it", (t) => {
+  const root = ownedFixtureDir(t, "product-public-state").dir;
+  const store = new ProductIntentStore({ root });
+  assert.ok(store.write(ACTOR, create).ok);
+  const path = productStatePaths(root, ACTOR).state;
+  const original = readFileSync(path, "utf8");
+  unlinkSync(path);
+  const previousMask = process.umask(0);
+  try { writeFileSync(path, original, { mode: 0o644, flag: "wx" }); }
+  finally { process.umask(previousMask); }
+  assert.equal(statSync(path).mode & 0o777, 0o644);
+  assert.equal(readFileSync(path, "utf8"), original);
+  assert.equal(store.list(ACTOR).code, "unavailable", "private product records refuse a publicly readable state file");
+});
+
 test("corrupt or unreadable product state cannot become an empty successful store", (t) => {
   const root = ownedFixtureDir(t, "product-corruption").dir;
   const store = new ProductIntentStore({ root });
   assert.ok(store.write(ACTOR, create).ok);
   const path = productStatePaths(root, ACTOR).state;
   const original = readFileSync(path, "utf8");
-  chmodSync(path, 0o644);
-  assert.equal(store.list(ACTOR).code, "unavailable", "private product records refuse a publicly readable state file");
-  chmodSync(path, 0o600);
   const wrongIdentity = JSON.parse(original);
   const key = Object.keys(wrongIdentity.products)[0]!;
   wrongIdentity.products[`prd_${"a".repeat(32)}`] = wrongIdentity.products[key];
