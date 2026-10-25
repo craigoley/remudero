@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { maskLiterals, stripComments } from "#src/lib/test-impact-map.js";
 
 /**
  * W1-T9872 (test restructure, letter D, part 4). A census test that lists `test/` with a bare
@@ -36,15 +37,18 @@ function callArgs(text: string, open: number): string {
 
 /** Every top-level-only listing of test/ in `text`, each as `<callee>(<first argument>)`. */
 export function topLevelTestWalks(text: string): string[] {
+  text = stripComments(text);
+  const code = maskLiterals(text);
   const anchored = new Set<string>();
-  for (const m of text.matchAll(/(?:const|let)\s+(\w+)\s*(?::[^=\n]+)?=\s*([^;\n]*)/g)) {
-    const expr = m[2];
-    const fromHere = /import\.meta\.url|__dirname/.test(expr) && !/\.\./.test(expr);
+  for (const m of code.matchAll(/(?:const|let)\s+(\w+)\s*(?::[^=\n]+)?=\s*([^;\n]*)/g)) {
+    const expr = text.slice(m.index! + m[0].length - m[2].length, m.index! + m[0].length);
+    const executable = maskLiterals(expr);
+    const fromHere = /import\.meta\.url|__dirname/.test(executable) && !/\.\./.test(expr);
     const fromRoot = /["']test["']\s*\)/.test(expr) && /\b(?:join|resolve)\(/.test(expr);
     if (fromHere || fromRoot) anchored.add(m[1]);
   }
   const found: string[] = [];
-  for (const m of text.matchAll(/\b(readdirSync|readdir)\(/g)) {
+  for (const m of code.matchAll(/\b(readdirSync|readdir)\(/g)) {
     const args = callArgs(text, m.index! + m[0].length);
     if (/recursive/.test(args)) continue;
     const first = args.split(/,(?![^()]*\))/)[0].trim();
@@ -121,6 +125,9 @@ test("W1-T9872: the guard goes red on a planted top-level-only walk and stays qu
     assert.deepEqual(plant("tmp.test.ts", 'const d = mkdtempSync(join(tmpdir(), "x-"));\nconst f = readdirSync(d);\n'), []);
     assert.deepEqual(plant("fixture.test.ts", 'const f = readdirSync(join(ROOT, "plan", "tasks.d"));\n'), []);
     assert.deepEqual(plant("git.test.ts", "const f = execFileSync(\"git\", [\"ls-files\", \"--\", \"test/**/*.test.ts\"]);\n"), []);
+    assert.deepEqual(plant("mention.test.ts", 'const f = \'readdirSync(join(REPO_ROOT, "test"))\';\n'), []);
+    assert.deepEqual(plant("comment.test.ts", '// readdirSync(join(REPO_ROOT, "test"))\n'), []);
+    assert.deepEqual(plant("template.test.ts", 'const f = `readdirSync(join(REPO_ROOT, "test"))`;\n'), []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

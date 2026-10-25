@@ -345,6 +345,10 @@ export function productionRefreshJudge(opts: {
       });
       opts.log?.("sweep.refresh.judge_spend", { pr_number: question.prNumber, head_sha: question.headSha,
         cost_usd: result.costUsd, num_turns: result.numTurns, model: mount.model, effort: mount.effort });
+      if (result.subtype !== "success" || result.isError || result.apiError ||
+        result.usageRefusal !== undefined || result.budgetRefused) {
+        throw new Error("the refresh judge worker did not complete successfully; its text is not a ruling");
+      }
       const verdict = parseRefreshJudgeReply(result.text);
       heads.set(key, verdict);
       return verdict;

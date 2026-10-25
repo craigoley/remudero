@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-13: gardener loop audit (PR #10787 token dodge)"
   plan_refs: [W1-T6092, W1-T6087]
-  files: [src/lib/ci-parity.ts, test/the-tree-walk-recognizer-admits-by-what-a-suite-executes.test.ts, "src/lib/rule-suites.ts"]
+  files: [src/lib/ci-parity.ts, test/the-tree-walk-recognizer-admits-by-what-a-suite-executes.test.ts, "src/lib/rule-suites.ts", "test/every-shard-on-main-is-lintable.test.ts"]
   status: queued
   priority: 1.5
   attempts: 0
@@ -30,6 +30,11 @@
     2. Remove every `refusedForPredicate` entry the new recognizer no longer admits, and the three runtime token dodges.
        Cite each removal in the PR body. The parity baseline only shrinks.
     3. A suite that really shells `git ls-files` over the tree stays a candidate.
+    4. Keep rule-checks running every suite whose census row step 2 removes, via an explicit roster in
+       src/lib/rule-suites.ts. test/every-shard-on-main-is-lintable.test.ts's W1-T3086 registration test asserts its
+       own REFUSED CENSUS_POPULATION row and a population above 20, both of which step 2 removes. Move that test's
+       claim to the rule-checks run set: it asserts the suite is listed by listRuleSuites, with a positive control
+       that the listing is a real population. Its other tests stay unchanged (operator approved, 2026-10-25).
   acceptance:
     - claim: "a suite that names ls-files only in a comment or fixture string is not a census candidate"
       proof: "grep: test(\"W1-T9050: a suite that names ls-files only in a comment or fixture string is not a census candidate\" in test/the-tree-walk-recognizer-admits-by-what-a-suite-executes.test.ts"

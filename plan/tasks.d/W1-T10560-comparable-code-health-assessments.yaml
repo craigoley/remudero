@@ -17,6 +17,9 @@
   budget_usd: 50
   files:
     - src/lib/code-health-projection.ts
+    - src/lib/review.ts
+    - scripts/expiring-fixture-census.mjs
+    - test/**/code-health-cached-view.test.ts
     - src/lib/code-health-store.ts
     - src/lib/code-health-view.ts
     - src/lib/code-health-collector.ts

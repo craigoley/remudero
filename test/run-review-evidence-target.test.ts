@@ -160,6 +160,8 @@ test("W1-T3529: every pre-existing judgeReview evidence field remains in the run
 });
 
 function readRunTaskSource(): string {
-  return ["run-task.ts", "cli/commands/review.ts"]
-    .map((file) => readFileSync(fileURLToPath(new URL(`../src/${file}`, import.meta.url)), "utf8")).join("\n");
+  // W1-T9337: runReview and its fix-rung caller each have an extracted owner.
+  return ["run-task.ts", "cli/commands/fix.ts", "cli/commands/review.ts"]
+    .map((owner) => readFileSync(fileURLToPath(new URL(`../src/${owner}`, import.meta.url)), "utf8").replace(/\bhost\./g, ""))
+    .join("\n");
 }

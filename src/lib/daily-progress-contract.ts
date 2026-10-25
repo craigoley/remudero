@@ -183,6 +183,7 @@ export function validateDailyProgressReport(value: unknown): ContractResult<Dail
   if (Date.parse(report.windowStart) >= Date.parse(report.windowEnd)) return fail("report ends before it starts");
   const calendar = calendarWindow(report);
   if (!calendar.ok) return fail(calendar.reason);
+  if (Date.parse(report.generatedAt) < Date.parse(report.windowStart)) return fail("The reporting day has not started.");
   if (!natural(report.revision) || report.revision < 1 || !(report.correctionReason === null || text(report.correctionReason, 2048)) || !["provisional", "finalizing", "complete", "corrected"].includes(report.phase)) return fail("invalid report revision or phase");
   if (report.phase === "corrected" && (report.revision < 2 || !text(report.correctionReason, 2048))) return fail("corrected reports need a new revision and reason");
   const scope = report.scope, c = report.coverage;
@@ -235,7 +236,7 @@ export function validateDailyProgressReport(value: unknown): ContractResult<Dail
     if (e.kind === "deployment" && (s.state === "not_collected" || s.lastSuccessAt === null)) return fail("deployment lacks an independent source receipt");
   }
   const confirmed = report.events.filter((e) => e.kind === "merged" && e.fleetAttribution === "confirmed");
-  const tasks = new Set(confirmed.flatMap((e) => e.taskIds));
+  const tasks = new Set(confirmed.flatMap((e) => e.taskIds.map((id) => JSON.stringify([repoKey(e.repository), id]))));
   if ((report.totals.mergedChanges.value !== null && report.totals.mergedChanges.value < confirmed.length) || (report.totals.completedTasks.value !== null && report.totals.completedTasks.value < tasks.size)) return fail("totals omit confirmed evidence on this page");
   if (!record(report.page) || !only(report.page, "totalEvents nextCursor") || !natural(report.page.totalEvents) || report.page.totalEvents < report.events.length || !(report.page.nextCursor === null || text(report.page.nextCursor, 1024))) return fail("invalid evidence pagination");
   if (report.currentWork !== null) {
