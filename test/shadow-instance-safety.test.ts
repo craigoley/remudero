@@ -583,6 +583,29 @@ test("selected Claude actual SDK transport keeps private registry paths out of c
   } finally { fixture.cleanup(); }
 });
 
+for (const spelling of ["original-policy", "quoted-selected", "backslash-selected"] as const) {
+  test(`selected Claude policy refuses serialized private input ${spelling}`, async () => {
+    const fixture = runtimeRegistryFixture(), sink = { calls: 0 };
+    try {
+      if (spelling !== "original-policy") {
+        const renamed = join(fixture.root, spelling === "quoted-selected" ? 'private-"quoted".yaml' : "private-\\named.yaml");
+        renameSync(fixture.selected, renamed); fixture.selected = renamed;
+      }
+      const args = privateClaudeArgs(fixture, sink);
+      const policy = JSON.parse(readFileSync(args.settingsFile, "utf8"));
+      policy.sandbox.filesystem = { denyRead: [spelling === "original-policy" ? args.settingsFile : fixture.selected] };
+      writeFileSync(args.settingsFile, JSON.stringify(policy));
+      await assert.rejects(runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected }), error => {
+        assert.ok(error instanceof runtimeRegistry.InstanceRegistryRuntimeError);
+        assert.match(error.message, /worker_policy_contains_private_source/);
+        assert.equal(error.message.includes(fixture.root), false);
+        return true;
+      });
+      assert.equal(sink.calls, 0, "serialized settings are actual model input, not a private host-only envelope");
+    } finally { fixture.cleanup(); }
+  });
+}
+
 test("selected Claude SDK boundary snapshots private denials across queued arguments and egress replacement", async () => {
   for (const proxy of [false, true]) {
     const fixture = runtimeRegistryFixture(), sink = { calls: 0 } as { calls: number; options?: Record<string, unknown>; prompt?: unknown };
