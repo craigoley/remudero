@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, cpSync, mkdirSync, readdirSync, readFileSync, realpathSync as realpathOf, writeFileSync, existsSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
@@ -483,4 +485,52 @@ test("W1-T9578: a generator output planted as a link is refused, never read thro
     assert.match(String(f.receipts()[0]!.reason), new RegExp(`outside its registered outputs: .*\\b${planted.replace(".", "\\.")}\\b`));
     assert.equal(existsSync(join(f.repo.dir, "resolution")), false);
   }
+});
+
+
+test("conflict output validation reads tracked bytes and mode from one no-follow descriptor", (t) => {
+  const repo = gitRepo();
+  t.after(() => repo.cleanup());
+  const path = join(repo.dir, "tracked.txt");
+  const outside = join(repo.dir, ".git", "outside.txt");
+  const bytes = Buffer.from("tracked bytes\n");
+  writeFileSync(path, bytes);
+  writeFileSync(outside, "outside secret\n");
+  const oid = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+  const open = fs.openSync;
+  const close = fs.closeSync;
+  const descriptors: number[] = [], closed: number[] = [];
+  t.mock.method(fs, "openSync", ((...args: Parameters<typeof fs.openSync>) => {
+    const fd = open(...args);
+    if (String(args[0]) === path) {
+      assert.equal(Number(args[1]) & fs.constants.O_NOFOLLOW, fs.constants.O_NOFOLLOW);
+      descriptors.push(fd);
+      fs.unlinkSync(path);
+      fs.symlinkSync(outside, path);
+    }
+    return fd;
+  }) as typeof fs.openSync);
+  t.mock.method(fs, "closeSync", (fd: number) => { closed.push(fd); close(fd); });
+  const outputs = sweep.conflictGeneratorOutputs(repo.dir, new Map([["tracked.txt", { mode: "100644", oid }]]), new Set());
+  assert.equal(outputs.size, 0);
+  assert.equal(descriptors.length, 1, "the tracked file must be opened through the guarded descriptor");
+  assert.deepEqual(closed, descriptors, "every owned descriptor is closed");
+});
+
+test("conflict output validation refuses a tracked leaf replaced by a symlink before open", (t) => {
+  const repo = gitRepo();
+  t.after(() => repo.cleanup());
+  const path = join(repo.dir, "tracked.txt");
+  const outside = join(repo.dir, ".git", "outside.txt");
+  const bytes = Buffer.from("tracked bytes\n");
+  writeFileSync(path, bytes);
+  writeFileSync(outside, bytes);
+  const oid = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+  const open = fs.openSync;
+  t.mock.method(fs, "openSync", ((...args: Parameters<typeof fs.openSync>) => {
+    if (String(args[0]) === path) { fs.unlinkSync(path); fs.symlinkSync(outside, path); }
+    return open(...args);
+  }) as typeof fs.openSync);
+  assert.throws(() => sweep.conflictGeneratorOutputs(repo.dir,
+    new Map([["tracked.txt", { mode: "100644", oid }]]), new Set()), /ELOOP|symbolic link/i);
 });
