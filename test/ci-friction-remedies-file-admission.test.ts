@@ -73,3 +73,18 @@ test("a drafted remedy passes the base linter's sizing and admission checks with
   const lint = lintTask(task, { duplicateSlug: stem, machineFilingAdmission: { plan, releasedIds: new Set(), pathExists: (p) => existsSync(join(REPO_ROOT, p)) } });
   assert.deepEqual(lint.violations.filter((v) => v.severity === "block"), []);
 });
+
+test("a long measured cause gets an executable proof admitted by the unchanged plan policy", () => {
+  const name = "ci-log:coverage-ratchet:diff-coverage-blocked-this-diff-adds-source-line-s-with-zero";
+  const key = `check:${name}`;
+  const yaml = ciFrictionShardYaml({ price: { cause: { kind: "check", name }, minutes: 1441, rounds: 457, prs: 291 },
+    rung: 1, owner: { files: ["src/lib/ci-parity.ts"], why: ["real diff-coverage refusal"] }, rounds: [] }, "W1-T99990");
+  const plan = loadPlanFromYaml(yaml, "long measured cause");
+  const task = plan.tasks[0]!;
+  const verdict = lintTask(task, { duplicateSlug: ciFrictionShardStem(key),
+    machineFilingAdmission: { plan, releasedIds: new Set(), pathExists: p => existsSync(join(REPO_ROOT, p)) } });
+  assert.deepEqual(verdict.violations.filter(v => v.severity === "block"), [], "the actual rendered task must file");
+  assert.equal(task.acceptance![0]!.proof, `unit test: ${ciFrictionRemedyTestTitle(task.id, key)}`);
+  assert.ok(task.origin?.includes(key), "the full measured cause is retained in provenance");
+  assert.ok(JSON.stringify(task.rationale).includes(key), "compacting a test title does not discard diagnosis");
+});

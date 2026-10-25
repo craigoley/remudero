@@ -15,9 +15,9 @@ import { ghExec } from "./github-transport.js";
 import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
 import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook } from "./ledger-union.js";
 import { readOriginMainSha } from "./inbox.js";
-import { loadPlanFromYaml, newTestPath } from "./plan.js";
+import { loadPlanFromYaml, newTestPath, type Task } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { lintTask } from "./task-linter.js";
+import { lintTask, proofResolvabilityViolations } from "./task-linter.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import {
   CI_FRICTION_REMEDIES_DOC,
@@ -1340,10 +1340,12 @@ export function ciFrictionDraftRationale(draft: CiFrictionDraft, key: string): s
   return [...head, ...ciFrictionRoundLines(draft.rounds, key), ...(end < 0 ? [] : lines.slice(end))];
 }
 
-/** The title a drafted remedy's regression test must carry — task-scoped, and never containing " in ",
- *  which would split its `grep:` proof at the wrong place. */
+/** A literal regression title admitted by the real proof policy; the full cause remains in origin/evidence. */
 export function ciFrictionRemedyTestTitle(taskId: string, key: string): string {
-  return `${taskId}: ${key.replace(/ in /g, " within ")} is prevented, not retried`;
+  const title = `${taskId}: ${key.replace(/ in /g, " within ")} is prevented, not retried`;
+  const proof = { id: taskId, acceptance: [{ claim: "prevent this CI friction cause", proof: `unit test: ${title}` }] } as Task;
+  if (proofResolvabilityViolations(proof).length === 0) return title;
+  return `${taskId}: CI friction ${createHash("sha256").update(key).digest("hex").slice(0, 16)} is prevented, not retried`;
 }
 
 /** Shard and regression share a slug; cause words must not classify that regression as a rule suite.
