@@ -196,6 +196,8 @@ export function publishCodeHealthSnapshot(opts: { stateDir: string; input: CodeH
   let lock: InflightLockHandle | undefined, owns: (() => boolean) | undefined;
   try {
     const snapshotId = codeHealthEvidenceSnapshotId(opts.input), repository = opts.input.repository.toLowerCase();
+    const attemptAt = (opts.clock ?? systemClock).iso();
+    if (!Number.isFinite(Date.parse(attemptAt)) || Date.parse(opts.input.observedAt) > Date.parse(attemptAt)) throw new Error("Code health measurement is later than its collection attempt.");
     if (opts.expectedSnapshotId !== null && !/^[a-f0-9]{64}$/.test(opts.expectedSnapshotId)) throw new Error("Invalid expected code health snapshot.");
     const snapshot: CodeHealthStoredSnapshot = { version: "code-health-snapshot-v1", snapshotId, contentHash: evidenceDigest(opts.input), previousSnapshotId: opts.expectedSnapshotId, input: opts.input };
     const serialized = JSON.stringify(snapshot);
@@ -219,7 +221,6 @@ export function publishCodeHealthSnapshot(opts: { stateDir: string; input: CodeH
       if (opts.input.scans.some(scan => scan.state === "complete" && known.some(previous => previous.kind === scan.kind && previous.state === "complete" &&
           Date.parse(previous.observedAt) > Date.parse(scan.observedAt)))) return { state: "superseded", reason: "Saved evidence includes a newer analysis than this collection returned." };
     }
-    const attemptAt = (opts.clock ?? systemClock).iso();
     if (prior && Date.parse(prior.attemptAt) > Date.parse(attemptAt)) return { state: "superseded", reason: "A later code health collection attempt has already been saved." };
     const root = join(opts.stateDir, "code-health"), dir = join(root, "snapshots"), path = join(dir, `${snapshotId}.json`);
     mkdirSync(dir, { recursive: true });
