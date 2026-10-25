@@ -31,6 +31,7 @@ import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import { mintNextTaskId } from "./task-id.js";
 import { gatedRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } from "./task-id-reservation.js";
 import { basename, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
@@ -1920,6 +1921,69 @@ export interface ConflictRegenerationOutcome {
 
 const inFlightConflictRegenerations = new Set<string>();
 
+/** W1-T9578: git's blob id for `bytes`, in the object format `oid` is written in. */
+function gitBlobId(bytes: Buffer, oid: string): string {
+  return createHash(oid.length === 64 ? "sha256" : "sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+}
+
+/** W1-T9578: after the sandboxed generators exit, compare their disposable copy with the merged tree the
+ *  parent cut it from, by lstat and blob id, with NO Git in the copy (its repository is the generator's to
+ *  rewrite). Its `.git` and the dependency links provisioned beside tracked paths are not compared. Returns
+ *  each permitted path's bytes, a regular file reached only through real directories; throws, naming every
+ *  path, when anything else changed, appeared or vanished, or a permitted path is missing or not a file. */
+export function conflictGeneratorOutputs(copy: string, manifest: ReadonlyMap<string, { mode: string; oid: string }>,
+  permitted: ReadonlySet<string>): Map<string, Buffer> {
+  const trackedDirs = new Set<string>();
+  for (const path of manifest.keys()) {
+    for (let at = path.indexOf("/"); at >= 0; at = path.indexOf("/", at + 1)) trackedDirs.add(path.slice(0, at));
+  }
+  const outputs = new Map<string, Buffer>(), refused = new Set<string>(), seen = new Set<string>();
+  const walk = (dir: string, prefix: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const rel = `${prefix}${entry.name}`, abs = join(dir, entry.name), tracked = manifest.get(rel);
+      if (rel === ".git" || (entry.name === "node_modules" && !trackedDirs.has(rel) && tracked === undefined)) continue;
+      if (entry.isDirectory()) {
+        if (tracked !== undefined && tracked.mode !== "160000") refused.add(rel);
+        if (tracked?.mode !== "160000") walk(abs, `${rel}/`);
+        continue;
+      }
+      seen.add(rel);
+      if (permitted.has(rel)) {
+        if (!entry.isFile()) { refused.add(rel); continue; }
+        const fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+        try { outputs.set(rel, readFileSync(fd)); } finally { fs.closeSync(fd); }
+        continue;
+      }
+      const same = tracked !== undefined && (entry.isSymbolicLink() ? tracked.mode === "120000" &&
+          gitBlobId(Buffer.from(fs.readlinkSync(abs, { encoding: "buffer" })), tracked.oid) === tracked.oid
+        : entry.isFile() && (tracked.mode === "100755") === ((fs.lstatSync(abs).mode & 0o100) !== 0) &&
+          tracked.mode !== "120000" && gitBlobId(readFileSync(abs), tracked.oid) === tracked.oid);
+      if (!same) refused.add(rel);
+    }
+  };
+  walk(copy, "");
+  for (const [path, { mode }] of manifest) if (mode !== "160000" && !seen.has(path)) refused.add(path);
+  for (const path of permitted) if (!outputs.has(path)) refused.add(path);
+  if (refused.size > 0) {
+    throw new Error(`conflict generator changed paths outside its registered outputs: ${[...refused].sort().join(", ")}`);
+  }
+  return outputs;
+}
+
+/** W1-T9578: write a copied-back artifact over its tracked path, never through a link. */
+function writeRegisteredArtifact(worktree: string, path: string, bytes: Buffer): void {
+  let dir = worktree;
+  for (const part of path.split("/").slice(0, -1)) {
+    dir = join(dir, part);
+    if (!fs.lstatSync(dir).isDirectory()) throw new Error(`refusing to write ${path}: ${part} is not a directory`);
+  }
+  const fd = fs.openSync(join(worktree, path), fs.constants.O_WRONLY | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW);
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw new Error(`refusing to write ${path}: not a regular file`);
+    writeFileSync(fd, bytes);
+  } finally { fs.closeSync(fd); }
+}
+
 export async function regenerateConflictViaGit(
   repoDir: string,
   worktreePath: string,
@@ -1978,23 +2042,50 @@ export async function regenerateConflictViaGit(
           paths.push({ path, action: REGENERABLE_ARTIFACT_GENERATORS[path]! });
         }
       }
-      if (paths.some(({ action }) => action !== "deleted-on-main")) {
-        const commonDir = (await run(worktreePath,
-          ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
-        excludeNodeModulesFromGit(worktreePath, { commonDir: () => commonDir });
-        await provisionWorktreeNodeModules(repoDir, worktreePath);
-      }
-      for (const { path, action } of paths) {
-        if (action === "deleted-on-main") continue;
-        await withTempDir("conflict-generator-home", async (home) => {
+      const generated = paths.filter(({ action }) => action !== "deleted-on-main");
+      if (generated.length > 0) {
+        // The generator never touches this worktree or its Git dirs: it runs in a disposable copy with a
+        // private repository, and only the registered paths' bytes come back, read here by the parent.
+        // Main's tree as a parentless root, then the merged tree on it, give that repository an origin/main
+        // and a HEAD whose fetch carries two trees, never main's history.
+        const tree = (await run(worktreePath, ["write-tree"])).trim();
+        const base = (await run(worktreePath, ["commit-tree", `${mainSha}^{tree}`, "-m", "conflict generator base"])).trim();
+        const input = (await run(worktreePath, ["commit-tree", tree, "-p", base, "-m", "conflict generator input"])).trim();
+        const manifest = new Map((await run(worktreePath, ["ls-tree", "-r", "-z", "--full-tree", tree])).split("\0")
+          .filter(Boolean).map(record => {
+            const tab = record.indexOf("\t"), [mode, , oid] = record.slice(0, tab).split(" ");
+            return [record.slice(tab + 1), { mode: mode!, oid: oid! }] as const;
+          }));
+        const outputs = await withTempDir("conflict-generator", async (scratch) => {
+          const copy = join(scratch, "tree"), home = join(scratch, "home");
+          mkdirSync(join(copy, ".git"), { recursive: true });
+          mkdirSync(home);
+          await run(copy, ["init", "--quiet"]);
+          await run(copy, ["fetch", "--quiet", "--no-tags", pathToFileURL(realpathSync(repoDir)).href, input]);
+          await run(copy, ["update-ref", "refs/remotes/origin/main", base]);
+          await run(copy, ["checkout", "--quiet", "--detach", input]);
+          const commonDir = (await run(copy, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+          excludeNodeModulesFromGit(copy, { commonDir: () => commonDir });
+          await provisionWorktreeNodeModules(repoDir, copy);
           const status = proofSandboxStatus();
           if (status.mode !== "bwrap") throw new Error(`conflict generator sandbox unavailable: ${status.reason}`);
-          const sandbox = proofSandboxArgv({ cwd: worktreePath, home });
-          await execFileLoopBounded(status.binary, [...sandbox, "npm", "run", "--silent", action], {
-            cwd: worktreePath, env: { ...proofChildEnv(home), TMPDIR: "/tmp" }, encoding: "utf8",
-          });
+          const sandbox = proofSandboxArgv({ cwd: copy, home });
+          for (const { action } of generated) {
+            await execFileLoopBounded(status.binary, [...sandbox, "npm", "run", "--silent", action], {
+              cwd: copy, env: { ...proofChildEnv(home), TMPDIR: "/tmp" }, encoding: "utf8",
+            });
+          }
+          return conflictGeneratorOutputs(copy, manifest, new Set(generated.map(({ path }) => path)));
         });
-        await run(worktreePath, ["add", "--", path]);
+        for (const [path, bytes] of outputs) {
+          writeRegisteredArtifact(worktreePath, path, bytes);
+          await run(worktreePath, ["add", "--", path]);
+        }
+        const staged = (await run(worktreePath, ["diff-index", "--cached", "--name-only", "-z", tree, "--"]))
+          .split("\0").filter(Boolean).filter(path => !outputs.has(path));
+        if (staged.length > 0) {
+          return { outcome: "error", paths, reason: `generator copy-back staged unregistered paths: ${staged.join(", ")}` };
+        }
       }
       const unexpected = (await run(worktreePath, ["diff", "--name-only", "-z"])).split("\0").filter(Boolean);
       if (unexpected.length > 0) {
