@@ -126,8 +126,27 @@ selected_registry_diagnostics() {
   [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
   exec 3>&1 4>&2
   # Only the public streams are projected. Captured protocol bytes and explicit file redirects remain unchanged.
-  exec > >(selected_registry_diagnostic_filter >&4)
+  if ! SELECTED_REGISTRY_DIAGNOSTIC_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/rmd-selected-diagnostics.XXXXXX")" 2>/dev/null; then
+    echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; no operation started." >&4
+    exec 3>&- 4>&-
+    return 2
+  fi
+  SELECTED_REGISTRY_DIAGNOSTIC_FIFO="${SELECTED_REGISTRY_DIAGNOSTIC_DIR}/stream"
+  if ! (umask 077; mkfifo "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}") 2>/dev/null; then
+    rmdir "${SELECTED_REGISTRY_DIAGNOSTIC_DIR}" 2>/dev/null || true
+    echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; no operation started." >&4
+    exec 3>&- 4>&-
+    return 2
+  fi
+  selected_registry_diagnostic_filter < "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" >&4 &
   SELECTED_REGISTRY_DIAGNOSTIC_PID=$!
+  if ! { exec > "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}"; } 2>/dev/null; then
+    kill "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" 2>/dev/null || true
+    wait "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" 2>/dev/null || true
+    echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; no operation started." >&4
+    exec 3>&- 4>&-
+    return 2
+  fi
   exec 2>&1
 }
 selected_registry_finish_diagnostics() {
@@ -135,8 +154,14 @@ selected_registry_finish_diagnostics() {
   [ -n "${SELECTED_REGISTRY_DIAGNOSTIC_PID:-}" ] || return 0
   exec 1>&3 2>&4
   exec 3>&- 4>&-
-  wait "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" || failed=1
+  wait "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" 2>/dev/null || failed=1
   SELECTED_REGISTRY_DIAGNOSTIC_PID=""
+  if [ -p "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" ]; then
+    rm -f "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" 2>/dev/null || failed=1
+    rmdir "${SELECTED_REGISTRY_DIAGNOSTIC_DIR}" 2>/dev/null || failed=1
+  else
+    failed=1
+  fi
   if [ "$failed" = 1 ]; then
     echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; outcome unknown." >&2
     [ "$status" -ne 0 ] || exit 2
