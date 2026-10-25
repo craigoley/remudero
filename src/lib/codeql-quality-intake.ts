@@ -16,13 +16,8 @@ export function qualifiedCodeHealthPlanningSource(input: CodeHealthProjectionInp
   return Number.isFinite(observedAt) && observedAt <= now && now - observedAt <= 86_400_000 ? scan : null;
 }
 
-export interface CodeHealthRelatedWork {
-  repository: string;
-  proposalId: string;
-  taskId?: string;
-  prUrl?: string;
-  threadId?: string;
-}
+export type { CodeHealthSavedWork as CodeHealthRelatedWork } from "./code-health-store.js";
+import type { CodeHealthSavedWork as CodeHealthRelatedWork } from "./code-health-store.js";
 
 export interface CodeHealthImprovementOpportunity {
   id: string;
