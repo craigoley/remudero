@@ -6,10 +6,10 @@
  * the inbox classification has retired never reaches it.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { runDaemon } from "../src/lib/daemon.js";
@@ -33,6 +33,7 @@ import { loadPlan } from "../src/lib/plan.js";
 import { createService } from "../src/lib/service.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { type RunResult } from "../src/run-task.js";
+import { inboxOwner } from "#src/lib/inbox-owner.js";
 
 const A1 = "adoption:field-no-writer:src/lib/plan.ts:context:";
 const A2 = "adoption:export-no-caller:src/lib/plan.ts:loadPlanAtRef";
@@ -41,6 +42,48 @@ const P2 = "proof-debt:W1-T3";
 const F1 = "followup:W1-T3999:research";
 const RETIRED = "proof-debt:W1-T4";
 const VH = "verify-human:W1-T235";
+
+const AGE_INFORMATION = {
+  id: "board-review:stale:PR-41",
+  originatingItemId: "PR-41",
+  summary: "board-review: PR-41 has sat open 72.0h, past the 48h depth threshold",
+  evidenceAnchors: [],
+};
+
+test("W1-T10431: age-only information preserves explicit unreadable and restored human asks", () => {
+  assert.equal(inboxOwner(AGE_INFORMATION), "fleet", "positive control: exact source-owned age finding is information");
+  const operatorItems = [
+    { ...AGE_INFORMATION, id: "board-review:escalation:PR-41", summary: "board-review: PR-41 carries an unhandled escalation whose ask could not be read" },
+    { ...AGE_INFORMATION, id: "board-review:future:PR-41" },
+    { ...AGE_INFORMATION, id: "board-review:stale:unknown-41" },
+    { ...AGE_INFORMATION, summary: "" },
+    { ...AGE_INFORMATION, summary: AGE_INFORMATION.summary + "; operator approval is required" },
+    { ...AGE_INFORMATION, originatingItemId: "PR-42" },
+    { ...AGE_INFORMATION, summary: "board-review: PR-41 has sat open 2.0h, past the 48h depth threshold" },
+    { ...AGE_INFORMATION, trigger: { description: "A person must choose the release plan." } },
+    { ...AGE_INFORMATION, reframeHistory: [{ feedback: "Keep this question open for my decision." }] },
+    { ...AGE_INFORMATION, requiresReview: true },
+  ];
+  for (const item of operatorItems) assert.equal(inboxOwner(item), "operator", JSON.stringify(item));
+  assert.equal(inboxOwner({ id: AGE_INFORMATION.id }), "operator", "an id without source facts cannot suppress a human ask");
+  assert.equal(inboxOwner({ id: P1 }), "fleet", "existing fleet ownership is unchanged");
+});
+
+test("W1-T10431: informational routing grants no new fleet execution eligibility", (t) => {
+  assert.equal(inboxOwner(AGE_INFORMATION), "fleet", "exercise the changed display owner, not the old operator filter");
+  const f = fx({ [AGE_INFORMATION.id]: "ready", [P1]: "ready", [VH]: "ready" }, [AGE_INFORMATION.id, P1, VH]);
+  t.after(() => rmSync(dirname(f.stateDir), { recursive: true, force: true }));
+  writeFileSync(join(f.stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [AGE_INFORMATION,
+    { id: P1, summary: "Proof evidence needs repair.", evidenceAnchors: [] },
+    { id: VH, summary: "A person must make this decision.", evidenceAnchors: [] }] }));
+  const result = triageFleetLane(f.deps(5));
+  assert.deepEqual(result.filed, [P1], "positive control: already-eligible fleet work still executes");
+  assert.deepEqual(result.merged, []);
+  assert.deepEqual(f.approved, [P1]);
+  assert.equal(f.ledger().filter(row => row.task_id === AGE_INFORMATION.id).length, 0,
+    "information causes no approve, merge, decline, retry or other recorded execution");
+  assert.equal(readFleetLaneStore(f.stateDir)[AGE_INFORMATION.id], undefined);
+});
 
 interface Fx {
   stateDir: string;
