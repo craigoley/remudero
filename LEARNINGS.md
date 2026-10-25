@@ -43,6 +43,14 @@ paid to discover, tagged with the run/PR that proved it. Rules:
 
 ## CI gates & the fleet quality bar (operator fleet, hard-won)
 
+- The 40 repaired ci-gate refusals identify a recurring pre-push gap in the fix and implementation
+  lanes, but the available cohort record does not establish a dominant per-PR refusal reason. Before
+  the first push, run `npm run --silent comment-load-signal` and
+  `npm run --silent source-size-ratchet` on the change and record any printed baseline repair; run
+  `rmd census-membership` for paths it maps and execute the named suites. These are the repair steps
+  already recorded for ci-gate refusals and belong in fix and implementation work, not only in the
+  hand-run path. [ci-learning:40 repaired ci-gate refusals; W1-T5875]
+
 - A required-check context is the **JOB NAME**, not the workflow file/string — branch protection keys on the job, so renaming the job silently un-requires the check. [operator fleet: SynthWatch/neon-drift/OleyArcade]
 - A **conditionally-skipped required check DEADLOCKS merge forever** (a `paths:`/`if:`-gated job that doesn't run reads as "expected, pending", never green; a skipped REUSABLE-workflow caller creates no check run at all under that nested context name, deadlocking it identically). The fix is ONE always-runs **CI-gate aggregator** job that make only the aggregator the required context — but a `needs:`-based aggregator only sees jobs WITHIN ITS OWN workflow file, so once required checks live in separate workflows (security/quality/architecture tiers), the aggregator must instead READ THE PR HEAD COMMIT'S CHECK-RUNS across all workflows via `gh api` (`checks: read`) and fail only on a real failure conclusion (W1-T24, corrected fleet pattern verified on craigoley/synthwatch). [operator fleet: SynthWatch/neon-drift/OleyArcade]
 - **"0 violations" from a newly-added strict gate is SUSPICIOUS until FALSIFIED** with a planted probe that MUST fail (the neon-drift `_probe(x)` lesson) — an inactive gate and a clean gate report identically. [operator fleet: SynthWatch/neon-drift/OleyArcade]
