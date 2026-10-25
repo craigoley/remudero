@@ -161,6 +161,21 @@ test("selected runtime private file binds canonical identity and refuses aliasab
   } finally { fixture.cleanup(); }
 });
 
+test("selected runtime canonical identity lookup shares the bounded read deadline", async () => {
+  const fixture = runtimeRegistryFixture();
+  let effects = 0;
+  try {
+    const io = { ...runtimeRegistry.registryFileIO, canonicalPath: async (path: string) => {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      return runtimeRegistry.registryFileIO.canonicalPath!(path);
+    } };
+    await assert.rejects(runtimeRegistry.withInstanceRegistryRuntime(() => { effects++; },
+      { envPath: fixture.selected, timeoutMs: 10 }, io), /selected instance registry unavailable \(timeout\)/);
+    assert.equal(effects, 0, "late physical identity is not permission to start a selected effect");
+    await new Promise(resolve => setTimeout(resolve, 70));
+  } finally { fixture.cleanup(); }
+});
+
 test("selected runtime Codex spawn denies private bytes without adding them to child arguments", async () => {
   const fixture = runtimeRegistryFixture(), codexHome = join(fixture.root, "codex-home");
   mkdirSync(codexHome);
