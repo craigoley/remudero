@@ -14,7 +14,7 @@ import { validInboxDismissalAudit, type InboxDismissalAudit } from "./inbox-dism
 
 import { declinedWithReceipts } from "./inbox-verdict-receipts.js";
 import { isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
-import { inboxKind, inboxOwner } from "./inbox-owner.js";
+import { fleetExecutionEligible, inboxKind, inboxOwner } from "./inbox-owner.js";
 import type { AttentionCensus, AttentionJudgment } from "./inbox-responder.js";
 import { classificationSnapshotKey } from "./read-page.js";
 import { createBandMeaningReplayRegistryReader, readBandMeaningReplayStore, replayBandMeaningRefusals, replayBandMeaningRefusalsAsync,
@@ -489,7 +489,7 @@ function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, re
   );
   const open = proposals.filter(
     (p: Proposal) =>
-      inboxOwner(p) === "fleet" &&
+      fleetExecutionEligible(p) &&
       OPEN_STATES.has(states[p.id] ?? "") &&
       !existsSync(fleetLaneOffPath(deps.stateDir, inboxKind(p.id))) &&
       !isRatifiedInLedger(ledger as never, p.id) &&

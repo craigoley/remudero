@@ -57,16 +57,27 @@ test("W1-T10431: age-only information preserves explicit unreadable and restored
     { ...AGE_INFORMATION, id: "board-review:future:PR-41" },
     { ...AGE_INFORMATION, id: "board-review:stale:unknown-41" },
     { ...AGE_INFORMATION, summary: "" },
+    { ...AGE_INFORMATION, summary: undefined },
+    { ...AGE_INFORMATION, summary: { text: AGE_INFORMATION.summary } },
     { ...AGE_INFORMATION, summary: AGE_INFORMATION.summary + "; operator approval is required" },
+    { ...AGE_INFORMATION, summary: AGE_INFORMATION.summary + "\n" },
     { ...AGE_INFORMATION, originatingItemId: "PR-42" },
+    { ...AGE_INFORMATION, originatingItemId: undefined },
     { ...AGE_INFORMATION, summary: "board-review: PR-41 has sat open 2.0h, past the 48h depth threshold" },
+    { ...AGE_INFORMATION, summary: "board-review: PR-41 has sat open 72.0h, past the 0h depth threshold" },
     { ...AGE_INFORMATION, trigger: { description: "A person must choose the release plan." } },
+    { ...AGE_INFORMATION, trigger: null },
     { ...AGE_INFORMATION, reframeHistory: [{ feedback: "Keep this question open for my decision." }] },
+    { ...AGE_INFORMATION, reframeHistory: null },
     { ...AGE_INFORMATION, requiresReview: true },
+    { ...AGE_INFORMATION, requiresReview: "false" },
   ];
   for (const item of operatorItems) assert.equal(inboxOwner(item), "operator", JSON.stringify(item));
   assert.equal(inboxOwner({ id: AGE_INFORMATION.id }), "operator", "an id without source facts cannot suppress a human ask");
   assert.equal(inboxOwner({ id: P1 }), "fleet", "existing fleet ownership is unchanged");
+  assert.equal(inboxOwner({ ...AGE_INFORMATION, reframeHistory: [], requiresReview: false }), "fleet");
+  assert.equal(inboxOwner({ ...AGE_INFORMATION, id: "board-review:stale:#41", originatingItemId: "#41",
+    summary: "board-review: #41 has sat open 48.0h, past the 48h depth threshold" }), "fleet");
 });
 
 test("W1-T10431: informational routing grants no new fleet execution eligibility", (t) => {

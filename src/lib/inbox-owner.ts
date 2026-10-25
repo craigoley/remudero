@@ -31,9 +31,39 @@ export function inboxKind(proposalId: string): string {
   return colon === -1 ? proposalId : proposalId.slice(0, colon);
 }
 
-export function inboxOwner(proposal: { id: string }): "operator" | "fleet" {
+/** Source facts, not a display id alone, can establish that a finding is information. */
+export interface InboxOwnershipEvidence {
+  id: string;
+  summary?: unknown;
+  originatingItemId?: unknown;
+  trigger?: unknown;
+  reframeHistory?: unknown;
+  requiresReview?: unknown;
+}
+
+/** W1-T10431: only the producer's exact PR-age observation is informational. Missing,
+ * ambiguous or human-directed evidence remains an ask. This is NOT execution permission. */
+export function isAgeOnlyInboxInformation(proposal: InboxOwnershipEvidence): boolean {
+  if (proposal.trigger !== undefined ||
+      (proposal.requiresReview !== undefined && proposal.requiresReview !== false) ||
+      (proposal.reframeHistory !== undefined && (!Array.isArray(proposal.reframeHistory) || proposal.reframeHistory.length !== 0))) return false;
+  const referent = /^board-review:stale:(PR-[1-9]\d*|#[1-9]\d*)$/.exec(proposal.id)?.[1];
+  if (!referent || proposal.originatingItemId !== referent || typeof proposal.summary !== "string") return false;
+  const observation = /^board-review: (PR-[1-9]\d*|#[1-9]\d*) has sat open ((?:0|[1-9]\d*)\.\d)h, past the ((?:0|[1-9]\d*)(?:\.\d+)?)h depth threshold$/.exec(proposal.summary);
+  if (!observation || observation[1] !== referent) return false;
+  const age = Number(observation[2]), threshold = Number(observation[3]);
+  return Number.isFinite(age) && Number.isFinite(threshold) && threshold > 0 && age >= threshold;
+}
+
+export function inboxOwner(proposal: InboxOwnershipEvidence): "operator" | "fleet" {
   const kind = inboxKind(proposal.id);
-  return kind === "feedback-docket" || FLEET_KINDS.has(kind) ? "fleet" : "operator";
+  return kind === "feedback-docket" || FLEET_KINDS.has(kind) || isAgeOnlyInboxInformation(proposal) ? "fleet" : "operator";
+}
+
+/** Display ownership never enlarges the fleet's existing executable population. */
+export function fleetExecutionEligible(proposal: InboxOwnershipEvidence): boolean {
+  const kind = inboxKind(proposal.id);
+  return kind === "feedback-docket" || FLEET_KINDS.has(kind);
 }
 
 // ── WHO SENT AN INBOX ITEM, AND WHEN (W1-T8825) ───────────────────────────────────────────────
