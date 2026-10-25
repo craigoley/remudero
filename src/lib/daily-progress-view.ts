@@ -5,8 +5,7 @@ import { dailyDateAt, dailyWindow, DEFAULT_DAILY_PROGRESS_ZONE, resolveDailyDate
 import { readDailyProgressRepositories } from "./daily-progress-collector.js";
 import { validateDailyProgressReport, type DailyProgressReport, type MeasuredCount, type SourceCoverage } from "./daily-progress-contract.js";
 import { dailyProgressDayKey, readDailyProgressManifest, readDailyProgressRevision, type DailyProgressRevision } from "./daily-progress-store.js";
-import { readModelSidecarDir } from "./read-model-db.js";
-import type { ReadModelView } from "./read-model-worker.js";
+import { readModelSidecarDir, type ReadModelDb } from "./read-model-db.js";
 import { judgeSource } from "./view-freshness.js";
 import { viewKey, type ViewBodySource, type ViewRequestFailure, type ViewSource } from "./views.js";
 
@@ -165,7 +164,10 @@ export function validateDailyProgressRequest(params: URLSearchParams, source: Vi
   }
 }
 
-export function createDailyProgressView(opts: { stateDir?: string; timeZone?: string; keys?: () => string[] } = {}): ReadModelView {
+export function createDailyProgressView(opts: { stateDir?: string; timeZone?: string; keys?: () => string[] } = {}): {
+  name: string; version: number; demand: true;
+  materialize(ctx: { now: number; sourceStore?: ReadModelDb }): Array<{ key: string; data: DailyProgressReport; sources: ViewSource[] }>;
+} {
   return { name: DAILY_PROGRESS_VIEW_NAME, version: 1, demand: true, materialize(ctx) {
     const stateDir = opts.stateDir ?? (ctx.sourceStore ? dirname(readModelSidecarDir(dirname(ctx.sourceStore.path))) : undefined);
     if (!stateDir) throw new DailyProgressNotReady("Daily progress durable state is unavailable.");
