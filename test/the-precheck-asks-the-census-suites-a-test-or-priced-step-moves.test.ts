@@ -112,13 +112,19 @@ test("the two triggered censuses have executable scripts, parity entries and CI 
   );
   const scripts = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts;
   const ciOnly = JSON.parse(readFileSync(new URL("../scripts/census-precheck-parity-baseline.json", import.meta.url), "utf8")).ciOnly;
-  for (const [testFile, script] of [[PRICED, "census:every-priced-ledger-step"], [HOST, "census:host-capability-fixtures"]]) {
+  // W1-T9050: HOST's roster row was a predicate refusal the recognizer no longer admits, so only PRICED
+  // (a PRECHECK_EXTRA_CI_CENSUSES row) is in the rule-check population; HOST still runs in CI's shards.
+  const inPopulation = precheck.ciCensusPopulation(listRuleSuites(fileURLToPath(new URL("..", import.meta.url))));
+  for (const [testFile, script, joinsPopulation] of [
+    [PRICED, "census:every-priced-ledger-step", true],
+    [HOST, "census:host-capability-fixtures", false],
+  ] as [string, string, boolean][]) {
     const member = precheck.PRECHECK_TRIGGERED_SUITES.find((m: { testFile: string }) => m.testFile === testFile);
     assert.ok(member, `${testFile} has a trigger row`);
     assert.equal(member.script, script);
     assert.deepEqual(precheck.PRECHECK_PARITY[testFile], { run: script });
     assert.equal(scripts[script], `node --test --import tsx --import ./test/setup/tmp-hygiene.ts ${testFile}`);
-    assert.ok(precheck.ciCensusPopulation(listRuleSuites(fileURLToPath(new URL("..", import.meta.url)))).includes(testFile));
+    assert.equal(inPopulation.includes(testFile), joinsPopulation, `${testFile} population membership`);
     assert.ok(!ciOnly.includes(testFile));
   }
 });
