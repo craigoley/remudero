@@ -101,7 +101,7 @@ selected_registry_image() {
 }
 selected_registry_diagnostic_filter() {
   node --input-type=module -e '
-    const caller=process.argv[1]; let pending="", count=0;
+    const caller=process.argv[1], completion=process.argv[2]; let pending="", count=0, completed=false;
     const reasons=new Set(["missing","not_regular","oversized","revision_changed","lstat_failed","open_failed","stat_failed",
       "read_failed","close_failed","cancelled","timeout","invalid_encoding","malformed","digest_mismatch","file_identity_unqualified",
       "invalid_path","invalid_bounds","invalid_digest","unsupported_contract","unsupported_capability","unsupported_field",
@@ -116,15 +116,23 @@ selected_registry_diagnostic_filter() {
       else if(text.trim()) emit("selected lifecycle diagnostic (private details withheld).");
     };
     for await(const chunk of process.stdin){pending+=chunk.toString("utf8");let end;
-      while((end=pending.indexOf("\n"))>=0){line(pending.slice(0,end));pending=pending.slice(end+1);}
+      while((end=pending.indexOf("\n"))>=0){const text=pending.slice(0,end);pending=pending.slice(end+1);
+        if(text===completion){completed=true;break;} line(text);}
+      if(completed) break;
       if(pending.length>8192){pending="";emit("selected lifecycle oversized diagnostic withheld.");}
     }
-    if(pending) line(pending);
-  ' "${SELECTED_REGISTRY_CALLER}" 2>/dev/null
+    if(!completed){if(pending) line(pending);process.exitCode=2;}
+  ' "${SELECTED_REGISTRY_CALLER}" "${SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION}" 2>/dev/null
 }
 selected_registry_diagnostics() {
   [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
   exec 3>&1 4>&2
+  SELECTED_REGISTRY_DIAGNOSTIC_OWNER="${BASH_SUBSHELL}"
+  if ! SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')" 2>/dev/null; then
+    echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; no operation started." >&4
+    exec 3>&- 4>&-
+    return 2
+  fi
   # Only the public streams are projected. Captured protocol bytes and explicit file redirects remain unchanged.
   if ! SELECTED_REGISTRY_DIAGNOSTIC_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/rmd-selected-diagnostics.XXXXXX")" 2>/dev/null; then
     echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; no operation started." >&4
@@ -152,6 +160,9 @@ selected_registry_diagnostics() {
 selected_registry_finish_diagnostics() {
   local status="$1" failed=0
   [ -n "${SELECTED_REGISTRY_DIAGNOSTIC_PID:-}" ] || return 0
+  [ "${BASH_SUBSHELL}" = "${SELECTED_REGISTRY_DIAGNOSTIC_OWNER}" ] || return 0
+  # Complete the owned stream explicitly; inherited writer descriptors are not an EOF protocol.
+  printf '\n%s\n' "${SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION}" || failed=1
   exec 1>&3 2>&4
   exec 3>&- 4>&-
   wait "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" 2>/dev/null || failed=1
