@@ -75,6 +75,20 @@ export const STALE_DAYS_OFFSET = "sweep.staleDays";
  */
 export const AGED_FIELDS = [
   {
+    field: "nextDueAt",
+    threshold: "daily progress collection due time",
+    source: "src/lib/daily-progress-collector.ts",
+    evidence: ["Date.parse(previousJob.nextDueAt) > now"],
+    offsetDays: 0,
+  },
+  {
+    field: "savedAt",
+    threshold: "daily progress open snapshot cutoff",
+    source: "src/lib/daily-progress-collector.ts",
+    evidence: ["Date.parse(s.open.snapshot.savedAt) <= now"],
+    offsetDays: 0,
+  },
+  {
     field: "lastActivityAt",
     threshold: "sweep.staleDays",
     source: "src/lib/sweep.ts",

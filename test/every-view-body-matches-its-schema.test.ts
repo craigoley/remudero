@@ -39,11 +39,15 @@ import { createTaskView, taskViewKey, type TaskViewData } from "../src/lib/task-
 import { createDemandBook, TASK_VIEW_NAME } from "../src/lib/view-demand.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { declaredBody, resolve, violations, type Schema } from "./helpers/openapi-strict.js";
+import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
+import { collectDailyProgress } from "#src/lib/daily-progress-collector.js";
+import { acquireLease, flushReadModelTransactions, openReadModel } from "#src/lib/read-model-db.js";
+import type { DailyProgressReport } from "#src/lib/daily-progress-contract.js";
 
 const NOW = Date.parse("2026-09-30T12:00:00.000Z");
 const SILENT_WORKER = new URL("data:text/javascript,setInterval(() => {}, 1000)");
 const READ = { authorization: "Bearer r" };
-type TestCtx = { after: (fn: () => void) => void };
+type TestCtx = { after: (fn: () => void | Promise<void>) => void };
 
 const clock: Clock = { now: () => NOW, date: () => new Date(NOW), iso: () => new Date(NOW).toISOString() };
 
@@ -72,7 +76,7 @@ function plan(): Plan {
 /** Core with a week of work: a merge, a running task, spend and a heartbeat, in a registry naming its project. */
 function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps; runs: Array<() => void> } {
   const root = makeTempDir("every-view-schema");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(async () => { await flushReadModelTransactions(); rmSync(root, { recursive: true, force: true }); });
   const stateDir = join(root, "state");
   mkdirSync(stateDir, { recursive: true });
   mkdirSync(join(root, ".remudero"), { recursive: true });
@@ -126,7 +130,7 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
 /** One worker tick over core with every view switched to `serve`, so each materializes a body into the read model. */
 async function materializeAll(root: string, stateDir: string, deps: ServeDeps): Promise<void> {
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", workstreams: "serve", actions: "serve", host: "serve", agent: "serve", incidents: "serve", task: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", "daily-progress": "serve", workstreams: "serve", actions: "serve", host: "serve", agent: "serve", incidents: "serve", task: "serve" } }));
   // W1-T5051: an operator-agent proposal and scoped settings, so the agent view's parts carry items to validate.
   appendFileSync(join(stateDir, "ledger.ndjson"), [
     { ts: iso(120_000), step: OPERATOR_AGENT_PROPOSAL_STEP, task_id: "operator-agent", proposal: { proposalId: "operator-agent:schema:fix:slow-runs", repo: "craigoley/remudero", proposalText: "t", confidence: 0.95, reasoning: "r", category: "fix", status: "pending", createdAt: iso(120_000), evidence: [] } },
@@ -140,6 +144,17 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
   writeFileSync(join(root, "plan", "feedback", "fb-schema.yaml"), ["id: fb-schema", `ts: '${iso(60_000)}'`, "raw: a fixture note", "attachments: []", "origin: cli", "status: new", "proposal_pr: null", ""].join("\n"));
   createRepositoriesSourcePublisher({ stateDir, instances: () => repositoriesSources(deps) })();
+  const cache = createBoardSnapshotCache(root, "craigoley", "remudero", { clock });
+  cache.recordClosedAttempt!({ ok: true, persisted: cache.commitClosed([{ number: 1, url: "https://github.com/craigoley/remudero/pull/1", state: "MERGED",
+    headRefName: "run-W1-T1-1234567890123", headRefOid: "a".repeat(40), body: "Remudero-Task: W1-T1", title: "Repair",
+    autoMergeRequest: null, updatedAt: iso(0), mergedAt: iso(4 * 3_600_000) }]) });
+  const db = openReadModel({ stateDir, instance: "daily-fixture", schemaVersion: 1 });
+  try {
+    const lease = acquireLease(db, { clock }); assert.ok(lease.ok);
+    const collected = await collectDailyProgress({ stateDir, instances: [{ name: "core", repository: "craigoley/remudero", root, stateDir }] }, clock);
+    assert.ok(collected);
+    collected.commit(db, lease.lease);
+  } finally { db.close(); }
   const now = createNowView({
     instances: [{ name: "core", ledgerDir: stateDir, repo: "craigoley/remudero", feedbackRoot: root }],
     clock, readPlan: plan, github: () => ({ github: fakeGitHub(), generation: "g", source: { asOf: iso(0), state: "fresh" } }),
@@ -187,7 +202,7 @@ async function listen(t: TestCtx, server: Server): Promise<string> {
 }
 
 /** The query each routed view is read with; a view missing here fails the corpus check below. */
-const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "", task: `?${taskViewKey("core", "W1-T1")}` };
+const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", "daily-progress": "?date=today", workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "", task: `?${taskViewKey("core", "W1-T1")}` };
 
 test("every registered view body validates against its declared schema", async (t) => {
   t.mock.method(systemClock, "now", clock.now);
@@ -226,6 +241,9 @@ test("every registered view body validates against its declared schema", async (
   const host = bodies.get("host")!.data as HostViewData;
   assert.deepEqual([host.skills.length, host.selfMeasurement.status, host.gauges.rateLimitRemaining, host.accountUsage.accountUuid !== undefined], [1, "ok", 4321, true], JSON.stringify(host));
   assert.deepEqual((bodies.get("analytics")!.data as AnalyticsViewData).coverage, { counted: 1, of: 1, missing: [] }, "the analytics body merges a committed snapshot");
+  const daily = bodies.get("daily-progress")!.data as DailyProgressReport;
+  assert.deepEqual(daily.totals.mergedChanges, { value: 1, precision: "exact" });
+  assert.ok(daily.events.some(event => event.kind === "merged" && event.taskIds.includes("W1-T1")), "the served Daily schema validates persisted evidence");
   const workstreams = bodies.get("workstreams")!.data as WorkstreamsData;
   assert.deepEqual(workstreams.instances.map((i) => [i.instance, i.activity.state, "items" in i.activity && i.activity.items.length > 0]), [["core", "verified", true]], JSON.stringify(workstreams));
   const actions = bodies.get("actions")!.data as ActionsData;

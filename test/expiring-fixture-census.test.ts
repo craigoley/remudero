@@ -117,6 +117,19 @@ test("W1-T3838: an unlisted clock-aged field fails the census", () => {
   );
 });
 
+test("daily progress due and snapshot clocks are covered by the fixture census", () => {
+  const file = "src/lib/daily-progress-collector.ts";
+  const source = readFileSync(joinPath(REPO_ROOT, file), "utf8");
+  const input = { files: [file], readFile: () => source };
+  const discovered = discoverClockAgedFields(input);
+  for (const field of ["nextDueAt", "savedAt"]) {
+    assert.ok(discovered.some(row => row.field === field), `positive control discovers ${field}`);
+    assert.throws(() => assertFieldListComplete({ ...input, agedFields: AGED_FIELDS.filter(row => row.field !== field) }), new RegExp(`INCOMPLETE TABLE[\\s\\S]*${field}`));
+  }
+  assert.doesNotThrow(() => assertFieldListComplete(input));
+  assertFieldsStillAged();
+});
+
 test("W1-T4820: the generated ledger rotation-lock timestamp is accounted for", () => {
   const source = readFileSync(joinPath(REPO_ROOT, "src/lib/ledger.ts"), "utf8");
   const discovered = discoverClockAgedFields({ files: ["src/lib/ledger.ts"], readFile: () => source });

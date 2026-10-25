@@ -8,7 +8,7 @@ import { dailyDateAt, dailyWindow, shiftDailyDate } from "#src/lib/daily-progres
 import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
 import { collectDailyProgress } from "#src/lib/daily-progress-collector.js";
 import { dailyProgressDayKey, prepareDailyProgressPublication, readDailyProgressManifest, readDailyProgressRevision } from "#src/lib/daily-progress-store.js";
-import { acquireLease, openReadModel, readModelLeaseEpoch, releaseLease } from "#src/lib/read-model-db.js";
+import { acquireLease, flushReadModelTransactions, openReadModel, readModelLeaseEpoch, releaseLease } from "#src/lib/read-model-db.js";
 import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "#src/lib/ledger-projector.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { createReadModelTicker, createReadModelWorker, readModelSwitchesPath } from "#src/lib/read-model-worker.js";
@@ -54,7 +54,10 @@ test("daily default projector publishes through the real parent and slow-lane th
       assert.deepEqual(report.report.totals.mergedChanges, { value: 1, precision: "exact" });
       assert.equal(report.events[0]!.repository, "acme/app");
       assert.equal(worker.switches().views.analytics, "off"); assert.equal(worker.switches().views["daily-progress"], "off");
-    } finally { assert.equal(worker.stop(), true, "the real worker confirms shutdown and releases its own leases"); }
+    } finally {
+      assert.equal(worker.stop(), true, "the real worker confirms shutdown and releases its own leases");
+      await flushReadModelTransactions();
+    }
   });
 });
 
@@ -188,7 +191,7 @@ test("daily progress collects hourly and closes local days without page demand",
 
 
 test("daily repository inventory refuses a named pipe without blocking the admitted collector", async () => {
-  const { spawnSync } = await import("node:child_process"), { unlinkSync } = await import("node:fs");
+  const { spawn, spawnSync } = await import("node:child_process"), { unlinkSync } = await import("node:fs");
   const { pathToFileURL } = await import("node:url"), { repoRoot } = await import("#test/helpers/repo-root.js");
   const { readDailyProgressRepositories } = await import("#src/lib/daily-progress-collector.js");
   await withTempDir("daily-inventory-pipe", async root => {
@@ -198,11 +201,23 @@ test("daily repository inventory refuses a named pipe without blocking the admit
     assert.deepEqual(readDailyProgressRepositories(root), ["acme/app"], "the real regular-file source is the positive control");
     unlinkSync(path); const fifo = spawnSync("mkfifo", [path], { encoding: "utf8" }); assert.equal(fifo.status, 0, fifo.stderr);
     const moduleUrl = pathToFileURL(join(repoRoot(), "src", "lib", "daily-progress-collector.ts")).href;
-    const code = `import { readDailyProgressRepositories } from ${JSON.stringify(moduleUrl)}; try { readDailyProgressRepositories(process.argv[1]); process.exitCode = 2; } catch (error) { if (!String(error).includes("inventory is unavailable")) throw error; }`;
-    // BACKSTOP: isolate a blocking source regression so it cannot stall the full native runner.
-    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code, root], { encoding: "utf8", timeout: 5000 });
-    assert.equal(child.error, undefined, "the inventory read must refuse before waiting for a pipe writer");
-    assert.equal(child.status, 0, child.stderr);
+    const code = `import { readDailyProgressRepositories } from ${JSON.stringify(moduleUrl)}; process.send("ready"); try { readDailyProgressRepositories(process.argv[1]); process.exitCode = 2; } catch (error) { if (!String(error).includes("inventory is unavailable")) throw error; } finally { process.disconnect(); }`;
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code, root], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+    let stderr = "", timedOut = "";
+    child.stderr!.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+    const stop = (reason: string) => { timedOut = reason; child.kill("SIGKILL"); };
+    // BACKSTOP: cold module loading has its own deadline; the read still gets only five seconds.
+    let timer = setTimeout(() => stop("collector module did not finish loading"), 60_000);
+    child.once("message", message => {
+      assert.equal(message, "ready");
+      clearTimeout(timer);
+      timer = setTimeout(() => stop("the inventory read must refuse before waiting for a pipe writer"), 5000);
+    });
+    try {
+      const status = await new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+      assert.equal(timedOut, "", timedOut);
+      assert.equal(status, 0, stderr);
+    } finally { clearTimeout(timer); child.kill("SIGKILL"); }
   });
 });
 
