@@ -632,7 +632,10 @@ test("triage relint keeps the original contract for a fresh worker", async () =>
   assert.ok(prompts[1].startsWith(`${prompts[0]}\n\n`), "the exact original feedback envelope, scope and verdict contract survive");
   assert.match(prompts[1], /\[proof-dialect\]/, "the current real lint failure is appended");
   assert.equal(ledger.filter(row => row.step === "triage.relint").length, 1);
-  assert.equal(ledger.filter(row => row.step === "triage.error").length, 0, JSON.stringify(ledger.filter(row => row.step === "triage.error")));
+  const errors = ledger.filter(row => row.step === "triage.error");
+  assert.equal(errors.length, 1);
+  assert.match(String(errors[0].error), /^live-write-guard: REFUSED git-push/, "the valid verdict reaches the unchanged write guard, never a missing-protocol error");
+  assert.equal(ledger.filter(row => row.step === "pr.opened").length, 0);
 });
 
 test("relint preserves one original contract and only the current findings at every attempt", async () => {
