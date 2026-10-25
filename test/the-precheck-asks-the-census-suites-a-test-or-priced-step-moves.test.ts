@@ -118,7 +118,11 @@ test("the two triggered censuses have executable scripts, parity entries and CI 
     assert.equal(member.script, script);
     assert.deepEqual(precheck.PRECHECK_PARITY[testFile], { run: script });
     assert.equal(scripts[script], `node --test --import tsx --import ./test/setup/tmp-hygiene.ts ${testFile}`);
-    assert.ok(precheck.ciCensusPopulation(listRuleSuites(fileURLToPath(new URL("..", import.meta.url)))).includes(testFile));
+    // The priced-step suite joins CI's population through PRECHECK_EXTRA_CI_CENSUSES. The host suite's roster
+    // row was a predicate refusal the executed-code recognizer no longer admits (W1-T9050), so it runs in CI's
+    // shards rather than the rule-check population — its trigger row and script still ask it before the push.
+    const population = precheck.ciCensusPopulation(listRuleSuites(fileURLToPath(new URL("..", import.meta.url))));
+    assert.equal(population.includes(testFile), testFile === PRICED, `${testFile} population membership`);
     assert.ok(!ciOnly.includes(testFile));
   }
 });
