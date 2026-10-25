@@ -117,6 +117,15 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
   const history=await s.get("/v1/inbox/threads");assert.equal(history.status,200);
   assert.equal(history.body.threads.find((item:any)=>item.threadId===threadId)?.attention,"history");
   assert.equal(readFileSync(store,"utf8"),original,"classification cannot fabricate a reply or retire history");
+  const fullPath=persistedInboxPath(join(w.root,"state")),heldFull=readFileSync(fullPath,"utf8"),restoredLight=JSON.parse(heldLight);
+  restoredLight.displayOwners[ageId]="operator";restoredLight.restoredForReview=[ageId];
+  writeFileSync(light,JSON.stringify(restoredLight));unlinkSync(fullPath);
+  try {
+    assert.deepEqual(readClassificationSnapshot(join(w.root,"state"))?.restoredForReview,[ageId],"positive control: the owned light snapshot retains restoration");
+    const restored=await s.get("/v1/inbox/threads");assert.equal(restored.status,200);
+    assert.equal(restored.body.threads.find((item:any)=>item.threadId===threadId)?.attention,"decision","the light fallback must preserve an explicitly restored human review");
+    assert.equal(readFileSync(store,"utf8"),original,"restoration projection cannot manufacture correspondence");
+  }finally{writeFileSync(light,heldLight);writeFileSync(fullPath,heldFull);}
   appendThreadMessage(inboxThreadIdentity(ageId),"escalation","Which existing policy should apply?",{threadStorePath:store,now:()=>w.at},{question:true});
   const sourceQuestion=readThread(threadId,{threadStorePath:store});assert.equal(sourceQuestion.status,"ok");
   assert.equal(sourceQuestion.messages.at(-1)?.extra?.question,true,"positive control: the real append API retained the question marker");
