@@ -18873,6 +18873,7 @@ export async function runSweep(
       ], rollup));
       const cancelled = pr.cancelledRequiredChecks!.filter(c => fresh.has(c.name));
       const freshProducers = dedupeRollupByLatestAttempt(rollup ?? []);
+      const freshByName = new Map(freshProducers.map(c => [c.name ?? c.context ?? "", c] as const));
       const explained = new Set(pr.cancelledRequiredChecks!.flatMap(c => c.explainedFailures ?? [])
         .filter(alias => {
           const matches = freshProducers.filter(c => (c.name ?? c.context) === alias.name);
