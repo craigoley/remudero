@@ -116,3 +116,16 @@ test("code health does not improve when findings disappear", () => {
   assert.equal(retained.findings[0]!.severity, "high");
   assert.equal(retained.summary.assessed, 0);
 });
+
+
+test("code health grants no new fix credit for a resolution predating its baseline", () => {
+  const value = input(); value.baseline!.scans[0]!.findings = [finding()];
+  value.scans[0]!.findings = [{ ...finding("fixed"), fixedAt: "2026-11-01T04:00:00.000Z", fixedSha: "c".repeat(40) }];
+  const comparison = compareCodeHealthEvidence(value);
+  assert.equal(comparison.fixedFindings.length, 0);
+  assert.equal(comparison.state, "insufficient_evidence");
+  const report = projectCodeHealth(value);
+  assert.equal(report.findings.length, 1);
+  assert.equal(report.findings[0]!.status, "unknown");
+  assert.equal(report.summary.healthy, null);
+});

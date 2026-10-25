@@ -247,7 +247,7 @@ test("code health requires every configured analysis before treating quality evi
     completion: { kind: "workflow-analysis-step", state: "success", at: "2026-11-02T05:00:00.000Z" } }));
   const analyses = artifacts.map(artifact => ({ sarifId: artifact.sarifId, analyzedSha: sha, category: `/language:${artifact.language}`,
     toolVersion: "2.23.0", analysisKey: ".github/workflows/codeql.yml:analyze", environmentHash: "e".repeat(64), createdAt: "2026-11-02T04:59:00.000Z", rulesCount: 12, error: "", warning: "" }));
-  const value = { repository: "acme/atlas", analyzedSha: sha, runId: "123", requiredLanguages, artifacts, analyses,
+  const value = { repository: "acme/atlas", analyzedSha: sha, runId: "123", requiredLanguages, artifacts, analyses, knownFindingIds: ["42"],
     source: { ok: true as const, alerts: [{ source: "code-scanning" as const, id: "42", severity: "high" as const, state: "open", createdAt: "2026-11-01T05:00:00.000Z",
       summary: "Repeated work is hard to change.", url: "https://github.com/acme/atlas/security/code-scanning/42", toolName: "CodeQL", ruleId: "js/repeated-work",
       ruleTags: ["quality", "maintainability"], location: { path: "src/example.ts" } }],
@@ -266,6 +266,9 @@ test("code health requires every configured analysis before treating quality evi
   assert.equal(qualityScanFromCollectedEvidence(mismatch).state, "partial");
   const wrongAnalysis = structuredClone(value); wrongAnalysis.analyses[0]!.sarifId = "f2345678-1234-1234-1234-123456789012";
   assert.equal(qualityScanFromCollectedEvidence(wrongAnalysis).state, "partial");
+  const newerAnalysis = structuredClone(value);
+  newerAnalysis.analyses.unshift({ ...newerAnalysis.analyses[0]!, sarifId: "f2345678-1234-1234-1234-123456789012", createdAt: "2026-11-02T05:30:00.000Z" });
+  assert.equal(qualityScanFromCollectedEvidence(newerAnalysis).state, "partial", "an older artifact cannot stand in for a later analysis at the same code revision");
   const fixed = structuredClone(value); fixed.source.alerts[0]!.state = "fixed"; fixed.source.analysisInstances[0]!.instanceState = "fixed";
   fixed.source.analysisInstances[0]!.analyzedSha = "f".repeat(40);
   const fixedInstance = fixed.source.analysisInstances[0] as typeof fixed.source.analysisInstances[number] & { fixedAt?: string | null };
