@@ -32,22 +32,23 @@ use, or link CLAUDE.md's glossary bullet.
 that broke it before, or the **falsifier** — the test or symbol that would go red if the invariant
 broke. Then cite the record (PR number, task id, `DECISIONS.md` date) instead of retelling it.
 
-## Limits
+## Signals and follow-up work
 
-| Kind of comment | Limit | Enforced by |
-|---|---|---|
-| Function or symbol doc | 12 lines | review — read this page |
-| File header | 25 lines | review — read this page |
-| Any other block | 25 lines | `comment-load-ratchet`, on **added** blocks |
-| Comment lines per file | today's count, never more | `comment-load-ratchet`, against `scripts/comment-load-baseline.json` |
+Comment volume does not block a PR. The operator reaffirmed this policy on 2026-10-24: excess prose
+must create high-priority compression work rather than clog the merge queue.
 
-Only the last two rows refuse a PR; the function-doc and file-header limits are conventions a
-reviewer applies, and nothing measures them. The block ceiling was 40 until 2026-09-06, when the
-compaction programme left no measured file carrying a block over 40 and it was lowered to the
-header limit it now matches. The per-file ceiling is the recorded count **or** what the file already
-carried at the merge base, whichever is higher — CI measures the merge ref, so without that second
-half every merge to `main` would refuse open PRs that changed nothing. Inherited growth is recorded
-for you; growth you added is yours.
+`npm run comment-load-signal` reports the measured change and long added blocks without reading or
+rewriting a shared ceiling. A successful measurement exits zero regardless of comment volume.
+An unreadable measurement is reported as unavailable, not as an absence of debt.
+
+The existing gate gardener nominates the largest untracked comment subject and files a priority-1
+compression task through normal reservation, machine-filing admission, CI and review. Queued work,
+unresolved retirement and matching open filings prevent duplicates. The originating PR can proceed
+while that follow-up is pending. An explicit `--baseline` run remains available
+for reproducing historical evidence; it does not decide whether a normal push or merge may proceed.
+
+Twelve lines for a function doc and twenty-five for a header or block remain editing guidance.
+They are signals to compress, not pass/fail limits. Keep the operative caveats and citations below.
 
 Measured forensics — a paragraph beginning "MEASURED … on 2026-08-…", a replayed incident, a table
 of observed counts — do not belong in code. Put them in `learnings/*.yaml` or a dated `docs/` page,
@@ -105,17 +106,9 @@ and match on a literal substring (R-44, `docs/audits/recon-2026-09-05.md`; froze
 about your edit. Grep the phrases first — `git grep -lF -- '<phrase>' test/` — because a compaction
 PR **migrates or keeps every pinned phrase**.
 
-## What the ratchet does not do
+## Historical ceiling records
 
-It refuses two things: a file whose comment count grew, and a newly added comment block over 25
-lines. It does not judge whether a comment is good, does not measure the function-doc or file-header
-limit, and does not read `test/`. It is a ceiling on volume, not a verdict on quality. Compacting
-the files that are already large is separate work, one file per PR.
-
-**Known follow-up, measured 2026-09-05.** The baseline matches `INSTRUMENT_SURFACE`, so a PR that
-adds executable code *and* a comment to a `src/` file — and so must raise that ceiling — reads
-`entangled: true` from `detectInstrumentEntanglement` and is refused by Standing rule 25
-(comment-only reads `false`). W1-T2526 fixed this shape for `scripts/source-size-baseline.json` with
-an `ENTANGLEMENT_EXEMPT_INSTRUMENTS` entry, on the same ledger-versus-floor reasoning: this file
-grades no falsifier, it records a count. That entry needs its own `src/`-only PR — adding it here
-would make `src/lib/review.ts` a product path and turn *this* diff entangled.
+The former ratchet refused comment growth and added blocks over 25 lines. Its baseline and explicit
+`--baseline` mode remain available to reproduce historical evidence; the default command, push
+precheck and merged-tree judgement use nonblocking measurement. Do not update or redistribute old
+comment allowances to make a current PR merge. File compression follow-up work instead.

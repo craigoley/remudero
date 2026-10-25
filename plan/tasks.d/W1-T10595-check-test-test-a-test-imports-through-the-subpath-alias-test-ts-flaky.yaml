@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.17
   status: queued
@@ -80,3 +80,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.76
+    reasons:
+      - "The declared files are a test-location codemod script and a CI test suite, and the plan frames the change as preventing a named flaky check from consuming a fix round."
+      - "The plan cites repeated CI failures and a measured cost for the target check; the evidence also notes a mismatch between the PR-reference counts, which limits confidence but does not by itself show a risky action."
+      - "The gates state filingTime is true and the author is machine; no concerning gate state is shown."
+    judged_at: "2026-10-25T03:34:44.111Z"
+    pin: "367ea57143b0758fedf4ac4d2f86374780b76ad93a9acd54372100510bc3eed4"

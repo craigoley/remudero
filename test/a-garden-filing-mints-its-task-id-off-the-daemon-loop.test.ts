@@ -420,6 +420,7 @@ test("W1-T7742: a refused defuse batch reserves no task ids", async (t) => {
   gate.classes = ["defuse"];
   gate.cheapFingerprint = () => "cheap";
   gate.inventory = () => ({ candidates: actions, tally: { trials: 0, successes: 0 } });
+  gate.inventoryAsync = async () => gate.inventory();
   gate.fingerprint = () => "full";
   gate.candidates = () => actions;
   gate.scorecard = () => ({});

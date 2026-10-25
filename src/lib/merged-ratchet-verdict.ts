@@ -15,7 +15,7 @@ import { step, type Steps } from "./git-push.js";
 import { singlePrRestArgs } from "./open-prs-rest.js";
 import type { PlanSafetyGit, PlanSafetyGitResult } from "./plan-pr-merge-safety.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
-import { CEILING_BUCKET_COMMENTS, DEFAULT_BASELINE_RELATIVE_PATH as COMMENT_BASELINE, MEASURED_ROOTS, ceilingForComments, countCommentLines, readBaseline as readCommentBaseline } from "../../scripts/comment-load-ratchet.mjs";
+import { MEASURED_ROOTS } from "../../scripts/comment-load-ratchet.mjs";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { DEFAULT_BASELINE_RELATIVE_PATH as CLOCK_BASELINE, readBaseline as readClockBaseline, scanClockSignaturesFromText } from "../../scripts/clock-signature-ratchet.mjs";
 
@@ -37,12 +37,13 @@ export interface MergedRatchetRow {
 /** A gate this judge does not count, and why: never read as clean. */
 export interface UncountedRatchetGate {
   gate: string;
-  class: "run-derived" | "delta-only" | "population";
+  class: "run-derived" | "delta-only" | "population" | "advisory";
 }
 
-export const COUNTED_RATCHET_GATES = ["comment-load", "clock-signature"] as const;
+export const COUNTED_RATCHET_GATES = ["clock-signature"] as const;
 
 export const UNCOUNTED_RATCHET_GATES: readonly UncountedRatchetGate[] = [
+  { gate: "comment-load", class: "advisory" },
   { gate: "coverage", class: "run-derived" },
   { gate: "mutation", class: "run-derived" },
   { gate: "source-size", class: "delta-only" },
@@ -120,26 +121,6 @@ function baselineOf<T>(text: string | null, parse: (t: string, p: string) => T, 
   return text === null ? {} : parse(text, path);
 }
 
-function commentLoadRows(input: Extract<MergedRatchetInputs, { changed: string[] }>): MergedRatchetRow[] {
-  const merged = baselineOf(input.readMerged(COMMENT_BASELINE), readCommentBaseline, COMMENT_BASELINE) as Record<string, number>;
-  const main = baselineOf(input.readMain(COMMENT_BASELINE), readCommentBaseline, COMMENT_BASELINE) as Record<string, number>;
-  const measured = new Set(input.measuredFiles);
-  const paths = new Set(input.changed.filter((p) => measured.has(p)));
-  if (input.changed.includes(COMMENT_BASELINE)) for (const key of Object.keys(merged)) if (measured.has(key)) paths.add(key);
-  const count = (text: string | null, path: string): number => (text === null ? 0 : countCommentLines(text, path).comments);
-  const rows: MergedRatchetRow[] = [];
-  for (const path of [...paths].sort()) {
-    const text = input.readMerged(path);
-    if (text === null) continue;
-    const n = count(text, path);
-    const prCeiling = merged[path] ?? CEILING_BUCKET_COMMENTS;
-    const mainCeiling = main[path] ?? CEILING_BUCKET_COMMENTS;
-    const verdict = judgeCount(n, prCeiling, count(input.readMain(path), path), mainCeiling);
-    if (verdict) rows.push({ gate: "comment-load", path, verdict, merged: n, mainCeiling, prCeiling, rederived: verdict === "stale-lowering" ? n : ceilingForComments(n) });
-  }
-  return rows;
-}
-
 function clockRows(input: Extract<MergedRatchetInputs, { changed: string[] }>): MergedRatchetRow[] {
   type ClockRow = Partial<Record<(typeof CLOCK_FIELDS)[number], number>>;
   const merged = baselineOf(input.readMerged(CLOCK_BASELINE), readClockBaseline, CLOCK_BASELINE) as Record<string, ClockRow>;
@@ -172,7 +153,7 @@ export function judgeMergedRatchets(input: MergedRatchetInputs): MergedRatchetJu
   if ("upToDate" in input) return { verdict: "clean", rows: [], ...base, reason: "behind_by 0: the merged tree is the head its CI counted" };
   let rows: MergedRatchetRow[];
   try {
-    rows = [...commentLoadRows(input), ...clockRows(input)];
+    rows = clockRows(input);
   } catch (e) {
     return { verdict: "unread", rows: [], ...base, reason: `a ratchet counter threw: ${String((e as Error)?.message ?? e)}` };
   }
@@ -187,8 +168,8 @@ export function ratchetVerdictHolds(judgement: Pick<MergedRatchetJudgement, "ver
 
 /** The paths the judge will read on either tree, so the I/O reads them in one batch per tree. */
 export function mergedRatchetReadSet(changed: readonly string[], baselines: ReadonlyArray<string | null>): string[] {
-  const paths = new Set([...changed, COMMENT_BASELINE, CLOCK_BASELINE]);
-  const baselineChanged = changed.includes(COMMENT_BASELINE) || changed.includes(CLOCK_BASELINE);
+  const paths = new Set([...changed, CLOCK_BASELINE]);
+  const baselineChanged = changed.includes(CLOCK_BASELINE);
   if (baselineChanged) {
     // A baseline that does not parse throws here, and the read that called this rules it unread.
     for (const text of baselines) if (text !== null) for (const key of Object.keys(JSON.parse(text) as object)) if (key !== "_comment") paths.add(key);
@@ -269,7 +250,7 @@ export function* readMergedRatchetInputsSteps(
       if (res.status !== 0) throw new Error(failed("git cat-file --batch", res));
       return parseBlobBatchAllowingMissing(res.stdout, paths);
     };
-    const baselinePaths = [COMMENT_BASELINE, CLOCK_BASELINE];
+    const baselinePaths = [CLOCK_BASELINE];
     const baselines = [...(yield* readBatch(tree, baselinePaths)).values(), ...(yield* readBatch(mainSha, baselinePaths)).values()];
     const paths = mergedRatchetReadSet([...changed], baselines);
     const mergedBlobs = yield* readBatch(tree, paths);

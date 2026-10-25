@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern, where serve's console Claude login writes; a credential write path, so the bind is the fleet-auth directory only, never the operator's whole ~/.claude
   band_meaning: blast-radius
   priority: 1  # W1-T10380 was the operator's P0 (2026-10-22); without this the console login is a silent no-op
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session measurement 2026-10-23 ~18:20Z; re-verified by the filing agent the same day on origin/main 69522863e and read-only on `ssh remudero`"
   plan_refs: [W1-T10380, W1-T6252, W1-T2434, W1-T2778, W1-T2834, W1-T6110, W1-T6125, "PR #13602 (W1-T10380)"]

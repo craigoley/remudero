@@ -105,9 +105,8 @@ export function validateCodeHealthAssessment(value: unknown): ContractResult<Cod
   if (!record(s) || !only(s, "met assessed expected healthy") || !natural(s.met) || !natural(s.assessed) || !natural(s.expected) || ![true, false, null].includes(s.healthy)) return fail("invalid assessment summary");
   if (s.met !== a.checks.filter((c) => c.state === "met").length || s.assessed !== a.checks.filter((c) => c.state !== "not_measured").length || s.expected !== a.checks.length) return fail("summary must count the declared checks without dropping missing ones");
   const complete = a.currentSha === a.analyzedSha && CODE_HEALTH_SOURCE_KINDS.every((kind) => a.sources.some((source) => source.kind === kind && source.required && comparable(source, a))) && a.sources.filter((source) => source.required).every((source) => comparable(source, a));
-  const urgent = a.findings.some((f) => f.severity === "critical" || f.severity === "high");
   if (a.state === "measured" && (!complete || s.assessed !== s.expected || !s.expected)) return fail("measured assessment has missing or incomparable evidence");
-  if (s.healthy === true && (a.state !== "measured" || !complete || !s.expected || s.met !== s.expected || urgent)) return fail("healthy assessment requires complete comparable evidence and no urgent findings");
-  if (s.healthy === false && s.met === s.assessed && !urgent) return fail("unhealthy assessment needs an observed failing check or urgent finding");
+  if (s.healthy === true && (a.state !== "measured" || !complete || !s.expected || s.met !== s.expected)) return fail("healthy assessment requires complete comparable evidence and all declared checks met");
+  if (s.healthy === false && s.met === s.assessed) return fail("unhealthy assessment needs an observed failing check");
   return { ok: true, value: a };
 }

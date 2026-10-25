@@ -17,7 +17,7 @@
 
 import { createHash } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { ghExec, ghTextAsync } from "./github-transport.js";
 import {
   existsSync,
@@ -39,6 +39,7 @@ import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord, type FeedbackRecordMergeDecision } from "./feedback-record-merge.js";
+import { evidenceRevisionOf, validateEvidenceRevision } from "./feedback-evidence-revision.js";
 import { feedbackPublicationSteps, type FeedbackPublicationContext } from "./contributor-admission.js";
 import {
   PlanPrPreflightRefusedError,
@@ -835,6 +836,31 @@ function isFeedbackRecordPath(kind: LandingKind, relPath: string): boolean {
  * sites). Never throws: an unreadable upstream blob refuses rather than guesses a winner, the
  * same posture {@link mergeFeedbackRecord} itself takes on unparseable YAML.
  */
+function* validateEvidenceStage(net: LandingNet, path: string, bytes: string): Generator<LandingAsk, string | undefined, AskReply> {
+  let parsed = false;
+  try {
+    const revision = evidenceRevisionOf(bytes);
+    parsed = true;
+    if (!revision) return undefined;
+    const upstream = yield* net.git(["show", `origin/main:${path}`]);
+    if (upstream === bytes) return undefined;
+    if (isDeepStrictEqual(evidenceRevisionOf(upstream), revision)) return undefined;
+    const invalid = validateEvidenceRevision(upstream, bytes);
+    if (invalid) return invalid;
+    for (const [source, expected] of Object.entries(revision.expectedPlan)) {
+      const listing = (yield* net.git(["ls-tree", "origin/main", "--", source])).trim();
+      const actual = listing === "" ? "absent" : listing.split(/[ \t]/)[2];
+      if (actual !== expected) return `evidence revision refuses plan-source drift: ${source}`;
+    }
+    return undefined;
+  } catch (error) {
+    // Generic malformed YAML stays under the original merge predicate, including new captures.
+    if (!parsed) return undefined;
+    const reason = `evidence revision expectation unreadable or record deleted: ${String(error)}`;
+    return reason;
+  }
+}
+
 function* decideFeedbackStage(net: LandingNet, remoteSha: string, localBytes: string): Generator<LandingAsk, FeedbackRecordMergeDecision, AskReply> {
   let upstreamBytes: string;
   try {
@@ -948,6 +974,10 @@ function* stageBranchPending(
     let pendingBlob = pending.tipBlobs.get(f);
     const mainBlob = mainBlobs.get(f) ?? null;
     if (pendingBlob === undefined || pendingBlob === mainBlob) continue; // deleted by the branch, or already merged into main for real
+    if (isFeedbackRecordPath(kind, f)) {
+      const invalid = yield* validateEvidenceStage(net, f, yield* net.git(["cat-file", "-p", pendingBlob]));
+      if (invalid) { refused.push({ path: f, reason: invalid }); continue; }
+    }
     const mainMoved = mainBlob !== baseBlob;
     if (mainMoved && (mainBlob === null || !isFeedbackRecordPath(kind, f))) {
       refused.push({
@@ -1387,6 +1417,10 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
         } catch {
           remoteSha = null; // not on origin/main at all yet
         }
+        if (isFeedbackRecordPath(kind, rel)) {
+          const invalid = yield* validateEvidenceStage(net, rel, readFileSync(abs, "utf8"));
+          if (invalid) { refused.push({ path: rel, reason: invalid }); continue; }
+        }
         if (remoteSha === localSha) {
           if (env) {
             if (!sources.has(rel)) files.push(rel);
@@ -1685,6 +1719,10 @@ function* landContentSteps(
           remoteSha = (yield* net.git(["rev-parse", `:${relPath}`], { env })).trim();
         } catch {
           remoteSha = null; // not on origin/main at all yet
+        }
+        if (isFeedbackRecordPath(kind, relPath)) {
+          const invalid = yield* validateEvidenceStage(net, relPath, content);
+          if (invalid) { refused.push({ path: relPath, reason: invalid }); continue; }
         }
         if (remoteSha === blobSha) {
           if (mainSha !== blobSha) unlanded.push(relPath);

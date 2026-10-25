@@ -24,6 +24,7 @@
     - src/lib/opportunity-intake.ts
     - src/lib/panel-graph.ts
     - src/lib/serve.ts
+    - src/run-task.ts
     - openapi/daemon.yaml
     - test/**/improvement-thread.test.ts
     - test/**/improvement-thread-route.test.ts
