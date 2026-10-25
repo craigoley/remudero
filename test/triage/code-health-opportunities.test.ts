@@ -53,6 +53,8 @@ test("code health deduplicates opportunities and preserves urgent findings", () 
   assert.equal(held.evidence.length, 2, "stale evidence does not hide known urgent findings");
   assert.equal(held.mayPlan, false, "an old reading does not authorize a new actionable conversation");
   assert(held.uncertainty.length > 0);
+  const dismissed = structuredClone(value); dismissed.scans[0]!.findings.forEach(finding => { finding.status = "dismissed"; });
+  assert.equal(buildCodeHealthOpportunities(dismissed, related).length, 0, "retaining a dismissed finding does not silently reopen its work");
 });
 
 test("code health retains analysis identity through the real alert reader", () => {

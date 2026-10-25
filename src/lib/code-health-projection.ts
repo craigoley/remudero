@@ -146,10 +146,10 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
   });
   const findings = new Map<string, CodeHealthAssessment["findings"][number]>();
   for (const pair of pairs) for (const finding of pair.scan?.findings ?? []) {
-    if (finding.status !== "open") continue;
+    if (finding.status === "fixed") continue;
     const fingerprint = codeHealthFindingFingerprint(repository, pair.kind, finding);
     findings.set(fingerprint, { fingerprint, sourceId: sourceId(repository, pair.kind), severity: finding.severity, category: finding.category,
-      status: pair.pair !== "comparable" ? "unknown" : pair.prior!.findings.some(old => old.status === "open" && codeHealthFindingFingerprint(repository, pair.kind, old) === fingerprint) ? "existing" : "new",
+      status: pair.pair !== "comparable" ? "unknown" : pair.prior!.findings.some(old => old.status !== "fixed" && codeHealthFindingFingerprint(repository, pair.kind, old) === fingerprint) ? "existing" : "new",
       path: finding.path, title: finding.title, effortMinutes: finding.effortMinutes, estimateKind: finding.effortMinutes === null ? null : "modeled" });
   }
   if (findings.size > 1000) throw new Error("Code health findings exceed the public contract bound; prior evidence must remain available.");
@@ -173,7 +173,7 @@ export function compareCodeHealthEvidence(input: CodeHealthProjectionInput): Cod
     newFindings: [], existingFindings: [], fixedFindings: [], unconfirmedMissingFindings: [], reason: "" };
   if (result.state !== "comparable") { result.reason = result.state === "measurement_changed" ? "The measurement scope, tool, rules or check policy changed." : "Independent complete scans for the same measured scope are unavailable."; return result; }
   const current = new Map(input.scans.flatMap(scan => scan.findings.map(finding => [codeHealthFindingFingerprint(input.repository, scan.kind, finding), finding] as const)));
-  const previous = new Map(input.baseline!.scans.flatMap(scan => scan.findings.filter(finding => finding.status === "open").map(finding => [codeHealthFindingFingerprint(input.repository, scan.kind, finding), finding] as const)));
+  const previous = new Map(input.baseline!.scans.flatMap(scan => scan.findings.filter(finding => finding.status !== "fixed").map(finding => [codeHealthFindingFingerprint(input.repository, scan.kind, finding), finding] as const)));
   for (const [id, finding] of current) if (finding.status === "open") (previous.has(id) ? result.existingFindings : result.newFindings).push(id);
   for (const id of previous.keys()) {
     const finding = current.get(id);
