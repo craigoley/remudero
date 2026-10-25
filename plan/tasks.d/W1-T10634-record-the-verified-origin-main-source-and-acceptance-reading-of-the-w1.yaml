@@ -6,7 +6,10 @@
   type: recon
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=22f76f010384aa42
+  # backlog gardener: placed=2026-10-25T18:42:40.880Z
   attempts: 0
   files:
     - plan/tasks.d/W1-T10572-declare-independent-gardener-source-semantics.yaml
