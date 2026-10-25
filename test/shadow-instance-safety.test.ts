@@ -16,7 +16,8 @@ import { spawnCodexWorker } from "#src/lib/worker-provider.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { workerHomeDir } from "#src/lib/config.js";
 import { perRunWorkerHomeDir } from "#src/lib/worker-home.js";
-import { renderWorkerSettings } from "#src/lib/worker.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, renderWorkerSettings, spawnWorker,
+  startWorkerEgressProxy, type SpawnWorkerArgs } from "#src/lib/worker.js";
 
 import { parseInstanceRegistry } from "../src/lib/instance-registry.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -320,6 +321,96 @@ test("selected private file denial follows actual scratch-backed Claude worker h
       assert.equal(namesSelectedFile(rules, scratch), true,
         "the actual per-spawn policy must name the selected physical file even when HOME moves to scratch");
     }, { envPath: selected });
+  } finally { fixture.cleanup(); }
+});
+
+function privateClaudeArgs(fixture: ReturnType<typeof runtimeRegistryFixture>, sink: { options?: Record<string, unknown>; prompt?: unknown; calls: number }): SpawnWorkerArgs {
+  const cwd = join(fixture.root, "checkout"), settingsFile = join(fixture.root, "settings.json");
+  mkdirSync(cwd);
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true,
+    allowUnsandboxedCommands: false, network: { allowedDomains: [] } } }));
+  return { cwd, settingsFile, prompt: "selected privacy fixture", permissionMode: "bypassPermissions",
+    config: { root: fixture.root, claudeBin: "/unused" }, mountProvider: "claude", egress: { mode: "off" },
+    claudeExecutable: { cache: createClaudeExecutableCache(), deps: {
+      env: { [CLAUDE_BIN_ENV_OVERRIDE]: "/fake/claude" }, home: fixture.root, exists: () => true, canExecute: () => true, locations: [] } },
+    keychain: { platform: "linux", readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "fixture", expiresAt: 4102444800000 } }) },
+    queryFn: ((params: { options: Record<string, unknown>; prompt: unknown }) => {
+      sink.calls++; sink.options = params.options; sink.prompt = params.prompt;
+      return (async function* () { yield { type: "result", subtype: "success", is_error: false,
+        result: "done", session_id: "selected-fixture", total_cost_usd: 0, num_turns: 1 }; })();
+    }) as SpawnWorkerArgs["queryFn"] };
+}
+
+test("selected Claude SDK boundary snapshots private denials across queued arguments and egress replacement", async () => {
+  for (const proxy of [false, true]) {
+    const fixture = runtimeRegistryFixture(), sink = { calls: 0 } as { calls: number; options?: Record<string, unknown>; prompt?: unknown };
+    try {
+      const args = privateClaudeArgs(fixture, sink), originalPolicy = args.settingsFile;
+      args.onMemoryAdmissionEnd = () => { args.settingsFile = join(fixture.root, "other-settings.json"); args.prompt = "retargeted"; };
+      if (proxy) args.egress = { mode: "enforce", checkVersion: () => {}, startProxy: startWorkerEgressProxy };
+      await runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected });
+      assert.equal(sink.calls, 1);
+      const settings = sink.options!.settings as { sandbox: { filesystem: { denyRead: string[]; denyWrite: string[] }; network?: Record<string, unknown> }; permissions: { deny: string[] } };
+      for (const target of [fixture.selected, originalPolicy]) {
+        assert.ok(settings.sandbox.filesystem.denyRead.includes(target));
+        assert.ok(settings.sandbox.filesystem.denyWrite.includes(target));
+        assert.ok(settings.permissions.deny.includes(`Read(/${target})`));
+      }
+      assert.equal(Object.isFrozen(settings.sandbox.filesystem.denyRead), true);
+      assert.equal(String(sink.prompt).includes("retargeted"), false, "queued caller mutation cannot replace the captured dispatch");
+      assert.equal(JSON.stringify(sink.options!.env).includes(fixture.selected), false, "private file is not an untrusted child environment grant");
+      assert.equal(String(sink.prompt).includes(fixture.selected), false);
+      if (proxy) assert.equal(typeof settings.sandbox.network!.httpProxyPort, "number", "the real egress replacement retained filesystem denials");
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("selected Claude SDK final recheck refuses changed missing and replaced policy or registry before query", async () => {
+  for (const mode of ["edited", "replaced", "missing", "registry"] as const) {
+    const fixture = runtimeRegistryFixture(), sink = { calls: 0 };
+    try {
+      const args = privateClaudeArgs(fixture, sink);
+      args.onMemoryAdmissionEnd = () => {
+        if (mode === "registry") writeFileSync(fixture.selected, registry("live"));
+        else if (mode === "missing") unlinkSync(args.settingsFile);
+        else if (mode === "edited") writeFileSync(args.settingsFile, readFileSync(args.settingsFile, "utf8") + " ");
+        else { const replacement = join(fixture.root, "replacement-policy.json"); writeFileSync(replacement, readFileSync(args.settingsFile)); renameSync(replacement, args.settingsFile); }
+      };
+      await assert.rejects(runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected }), /selected instance registry unavailable/);
+      assert.equal(sink.calls, 0, "no stale selected permission reaches even the injected SDK boundary");
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("selected policy real default reader keeps unreadable evidence unknown and diagnostics private", async () => {
+  for (const mode of ["invalid-json", "invalid-schema", "invalid-encoding", "missing", "symlink", "hardlink", "oversized", "resume"] as const) {
+    const fixture = runtimeRegistryFixture(), sink = { calls: 0 };
+    try {
+      const args = privateClaudeArgs(fixture, sink);
+      if (mode === "invalid-json") writeFileSync(args.settingsFile, `{"private":"${fixture.selected}", BAD`);
+      if (mode === "invalid-schema") writeFileSync(args.settingsFile, JSON.stringify({ sandbox: { enabled: false }, private: fixture.selected }));
+      if (mode === "invalid-encoding") writeFileSync(args.settingsFile, Buffer.from([0xff]));
+      if (mode === "missing") unlinkSync(args.settingsFile);
+      if (mode === "symlink") { unlinkSync(args.settingsFile); symlinkSync(fixture.selected, args.settingsFile); }
+      if (mode === "hardlink") linkSync(args.settingsFile, join(fixture.root, "policy-alias.json"));
+      if (mode === "oversized") writeFileSync(args.settingsFile, Buffer.alloc(65537));
+      if (mode === "resume") args.resumeSessionId = "saved-before-selection";
+      await assert.rejects(runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected }), error => {
+        assert.ok(error instanceof runtimeRegistry.InstanceRegistryRuntimeError);
+        assert.equal(error.message.includes(fixture.root), false, "stable diagnostics never quote the selected source or policy bytes");
+        return true;
+      });
+      assert.equal(sink.calls, 0);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("unconfigured worker policy rendering remains byte identical", () => {
+  const fixture = runtimeRegistryFixture();
+  try {
+    const template = join(REPO_ROOT, "settings", "worker.json"), hooksDir = join(REPO_ROOT, "hooks"), outPath = join(fixture.root, "legacy-settings.json");
+    renderWorkerSettings({ templatePath: template, hooksDir, outPath });
+    assert.equal(readFileSync(outPath, "utf8"), readFileSync(template, "utf8").split("${HOOKS_DIR}").join(hooksDir));
   } finally { fixture.cleanup(); }
 });
 

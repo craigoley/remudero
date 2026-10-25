@@ -356,3 +356,30 @@ export async function assertInstanceRegistryRuntimeCurrent(): Promise<void> {
   }
   if (!scope.active) throw new InstanceRegistryRuntimeError("invocation_closed");
 }
+
+/** A trusted harness policy snapshot, never a worker permission or a serialized registry binding. */
+export async function captureInstanceRegistryRuntimeFile(path: string): Promise<{
+  readonly canonicalPath: string; readonly text: string; recheck(): Promise<void>;
+}> {
+  const scope = selectedRuntime();
+  if (!scope || typeof path !== "string" || !isAbsolute(path) || path.includes("\0")) throw new InstanceRegistryRuntimeError("worker_policy_input_unqualified");
+  await assertInstanceRegistryRuntimeCurrent();
+  const original = await readWithDeadline(path, 64 * 1024, 1500, undefined, registryFileIO, true);
+  if (original.kind !== "bytes") throw new InstanceRegistryRuntimeError(`worker_policy_${original.reason}`);
+  let text: string;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(original.bytes); }
+  catch {
+    // Invalid policy bytes are unknown containment, never a lossy replacement-character policy.
+    throw new InstanceRegistryRuntimeError("worker_policy_invalid_encoding");
+  }
+  if (!scope.active) throw new InstanceRegistryRuntimeError("invocation_closed");
+  return Object.freeze({ canonicalPath: original.canonicalPath!, text, recheck: async () => {
+    if (selectedRuntime() !== scope) throw new InstanceRegistryRuntimeError("worker_policy_invocation_changed");
+    await assertInstanceRegistryRuntimeCurrent();
+    const current = await readWithDeadline(path, 64 * 1024, 1500, undefined, registryFileIO, true);
+    if (current.kind !== "bytes") throw new InstanceRegistryRuntimeError(`worker_policy_${current.reason}`);
+    if (!sameStamp(original.identity, current.identity) || original.canonicalPath !== current.canonicalPath
+      || !original.bytes.equals(current.bytes)) throw new InstanceRegistryRuntimeError("worker_policy_revision_changed");
+    if (!scope.active) throw new InstanceRegistryRuntimeError("invocation_closed");
+  } });
+}

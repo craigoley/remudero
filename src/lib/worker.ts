@@ -92,7 +92,8 @@ import {
 } from "./routing-experiments.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { assertLiveSpawnAllowed } from "./spawn-guard.js";
-import { validateWorkerSettingsFile } from "./settings.js";
+import { validateWorkerSettings, validateWorkerSettingsFile } from "./settings.js";
+import { captureInstanceRegistryRuntimeFile, InstanceRegistryRuntimeError, runtimeInstanceRegistryPrivateFile } from "./instance-registry-selection.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
 import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 // W1-T2777: same primitive `ensureInstallFresh` (run-task.ts) uses, shared via the extracted `install-hash` module so both
@@ -2464,6 +2465,19 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
 }
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
+  const privateRegistry = runtimeInstanceRegistryPrivateFile();
+  const selectedRealHome = privateRegistry === undefined ? undefined : process.env.HOME ?? homedir();
+  if (privateRegistry !== undefined) {
+    args = { ...args, config: { ...(args.config ?? loadConfig()) },
+      ...(args.tools === undefined ? {} : { tools: [...args.tools] }),
+      ...(args.disallowedTools === undefined ? {} : { disallowedTools: [...args.disallowedTools] }),
+      ...(args.sandboxReadRoots === undefined ? {} : { sandboxReadRoots: [...args.sandboxReadRoots] }),
+      ...(args.egress === undefined ? {} : { egress: { ...args.egress } }) };
+  }
+  const selectedPolicy = privateRegistry === undefined ? undefined : await captureInstanceRegistryRuntimeFile(args.settingsFile);
+  const privateSettings = selectedPolicy === undefined ? undefined
+    : privateRegistryWorkerSettings(selectedPolicy.text, privateRegistry!, selectedPolicy.canonicalPath);
+  if (selectedPolicy && args.resumeSessionId) throw new InstanceRegistryRuntimeError("worker_resume_not_qualified");
   validateWorkerMcpIsolation(args);
   const executions = new Map<WorkerProviderId, ReturnType<typeof workerExecutionForProvider>>();
   const executionFor = (provider: WorkerProviderId) => {
@@ -2508,11 +2522,11 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // Validate-before-spawn guard, enforced at the spawn boundary rather than by caller convention. TRAP: `claude -p` SILENTLY
   // IGNORES an invalid settings file and drops containment, so it is validated against the pinned SandboxSettingsSchema
   // first, throwing on the first bad key (WS-0 FF10a).
-  validateWorkerSettingsFile(args.settingsFile);
+  if (selectedPolicy === undefined) validateWorkerSettingsFile(args.settingsFile);
 
   // Capture process-global HOME before the first await. Test harnesses and embedders may vary it between concurrent calls;
   // one worker's advisory status read must not switch another's home.
-  const realHome = process.env.HOME ?? homedir();
+  const realHome = selectedRealHome ?? process.env.HOME ?? homedir();
   const config = args.config ?? loadConfig();
   // W1-T7094: the COUNTERFACTUAL host-memory verdict, taken once the start is committed (slot claimed, reservation open,
   // settings validated). Synchronous, bounded and non-throwing, and its outcome is deliberately unread: admit, defer and
@@ -3287,7 +3301,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       permissionMode: args.permissionMode,
       pathToClaudeCodeExecutable: claudeBin,
       env: childEnv,
-      settings: args.settingsFile,
+      settings: (privateSettings as Options["settings"]) ?? args.settingsFile,
       settingSources: WORKER_SETTING_SOURCES, // real value: settingSources: [] (see WORKER_SPAWN_ISOLATION above)
       // Run the CLI DETACHED into its own process group and session, so teardown reaches every descendant — including one
       // outliving the CLI's own exit — with a single group signal. This REPLACES the SDK's default local spawn, so
@@ -3403,7 +3417,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       if (egressMode !== "off") {
         try {
           (args.egress?.checkVersion ?? assertWorkerEgressEnforcerVersion)(claudeBin);
-          const policy = JSON.parse(fs.readFileSync(args.settingsFile, "utf8")) as { sandbox?: { network?: Record<string, unknown> } };
+          const policy = (privateSettings ?? JSON.parse(fs.readFileSync(args.settingsFile, "utf8"))) as { sandbox?: { network?: Record<string, unknown> } };
           egressProxy = await (args.egress?.startProxy ?? startWorkerEgressProxy)(policy);
           await verifyWorkerEgressProxy(egressProxy, diagnostic => {
             egressUnenforced = egressUnenforced ? `${egressUnenforced}; ${diagnostic}` : diagnostic;
@@ -3424,6 +3438,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // W1-T9489: EVERY Claude spawn is strict with an explicit server map (knowledge-only with ruleLookup, else none), so
       // the shared config dir's claude.ai connectors can never attach to a worker running under bypassPermissions.
       const boundaryServers = applyWorkerMcpBoundary(options);
+      if (selectedPolicy) await selectedPolicy.recheck();
       const liveQuery = runQuery({ prompt: execution.prompt, options });
       unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
@@ -4224,13 +4239,50 @@ export function renderWorkerSettings(opts: {
   outPath: string;
 }): string {
   const template = readFileSync(opts.templatePath, "utf8");
-  const rendered = template.split("${HOOKS_DIR}").join(opts.hooksDir);
+  let rendered = template.split("${HOOKS_DIR}").join(opts.hooksDir);
   // Validate JSON before writing so a bad substitution fails loud. TRAP: a settings file that fails validation is SILENTLY
   // ignored by `claude -p`.
-  JSON.parse(rendered);
+  const selected = runtimeInstanceRegistryPrivateFile();
+  if (selected === undefined) JSON.parse(rendered);
   mkdirSync(join(opts.outPath, ".."), { recursive: true });
+  if (selected !== undefined) rendered = JSON.stringify(privateRegistryWorkerSettings(rendered, selected,
+    join(realpathSync(dirname(opts.outPath)), basename(opts.outPath))));
   writeFileSync(opts.outPath, rendered, { mode: 0o600 });
   return opts.outPath;
+}
+
+function privateRegistryWorkerSettings(input: unknown, selected: string, policyPath: string): Record<string, unknown> {
+  try {
+  const paths = [selected, policyPath];
+  if (paths.some(path => !isAbsolute(path) || /[\r\n\0*?\[\]{}()]/.test(path))) {
+    throw new InstanceRegistryRuntimeError("worker_policy_path_unqualified");
+  }
+  const parsed: unknown = typeof input === "string" ? JSON.parse(input) : input;
+  validateWorkerSettings(parsed);
+  const policy = structuredClone(parsed) as { sandbox: { filesystem?: Record<string, unknown> }; permissions?: Record<string, unknown> };
+  const filesystem = policy.sandbox.filesystem ?? {};
+  const permissions = policy.permissions ?? {};
+  const list = (value: unknown): string[] => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || value.some(row => typeof row !== "string")) throw new InstanceRegistryRuntimeError("worker_policy_rules_unqualified");
+    return value;
+  };
+  policy.sandbox.filesystem = { ...filesystem,
+    denyRead: [...new Set([...list(filesystem.denyRead), ...paths])],
+    denyWrite: [...new Set([...list(filesystem.denyWrite), ...paths])] };
+  policy.permissions = { ...permissions, deny: [...new Set([...list(permissions.deny),
+    ...paths.flatMap(path => ["Read", "Edit", "Write"].map(tool => `${tool}(/${path})`))])] };
+  validateWorkerSettings(policy);
+  const freeze = (value: unknown): void => {
+    if (value !== null && typeof value === "object") { Object.values(value).forEach(freeze); Object.freeze(value); }
+  };
+  freeze(policy);
+  return policy;
+  } catch (error) {
+    // Schema/parser diagnostics can contain private paths or values; selected workers receive only the stable refusal.
+    if (error instanceof InstanceRegistryRuntimeError) throw error;
+    throw new InstanceRegistryRuntimeError("worker_policy_unqualified");
+  }
 }
 
 // ── Worker output-contract parsers ────────────────────────────────────────
