@@ -1,3 +1,4 @@
+import { CODE_HEALTH_POLICY_VERSION } from "./code-health-collector.js";
 import { parseProposalRegistryResult } from "./inbox.js";
 import { inboxThreadId } from "./inbox-thread.js";
 import { fixedClock } from "./clock.js";
@@ -6,7 +7,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { projectCodeHealth, type CodeHealthProjectionInput } from "./code-health-projection.js";
 import type { CodeHealthAssessment } from "./code-health-contract.js";
-import { buildCodeHealthOpportunities, type CodeHealthImprovementOpportunity, type CodeHealthRelatedWork } from "./codeql-quality-intake.js";
+import { buildCodeHealthOpportunities, qualifiedCodeHealthPlanningSource, type CodeHealthImprovementOpportunity, type CodeHealthRelatedWork } from "./codeql-quality-intake.js";
 import { codeHealthRepositoryStateDir, improvementOutcomeStateDir, readCodeHealthArtifactJson, readCodeHealthCollectionFailure, readCodeHealthSnapshot, type CodeHealthCollectionFailureRead } from "./code-health-store.js";
 import { validateRepositoryEvidenceInventory, type RepositoryEvidenceInventory } from "./daily-progress-contract.js";
 import { readModelSidecarDir } from "./read-model-db.js";
@@ -124,7 +125,8 @@ export function readCodeHealthReport(opts: { stateDir: string; params: URLSearch
     report.opportunities = buildCodeHealthOpportunities(report.input!, related.work);
     const offset = input.page?.o ?? 0, findings = report.assessment.findings;
     if (offset >= findings.length && offset !== 0) throw new RangeError("Code health page is outside its saved evidence.");
-    data.planningAvailable = report.isCurrentSnapshot && report.summary.freshness === "fresh" && report.summary.collection.state === "none" && report.opportunities.some(opportunity => opportunity.mayPlan);
+    const quality = qualifiedCodeHealthPlanningSource(report.input!, opts.now, CODE_HEALTH_POLICY_VERSION);
+    data.planningAvailable = report.isCurrentSnapshot && report.summary.collection.state === "none" && quality !== null && report.opportunities.some(opportunity => opportunity.mayPlan);
     if (Buffer.byteLength(JSON.stringify(data)) + 1024 > CODE_HEALTH_PAGE_BYTES) throw new CodeHealthNotReady("Code health source details exceed the response bound.");
     for (const finding of findings.slice(offset, offset + PAGE_FINDINGS)) {
       const next = [...data.assessment.findings, finding], fingerprints = new Set(next.map(value => value.fingerprint));
