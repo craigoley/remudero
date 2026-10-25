@@ -100,10 +100,12 @@ test("W1-T10431: informational routing grants no new fleet execution eligibility
   const population=[AGE_INFORMATION,human,existing];
   assert.deepEqual(proposalsNeedingDraft(population,{}).map(p=>p.id),[VH,P1],"manual/default selection cannot synthesize work from an observation");
   assert.deepEqual(draftsDueOnDaemon(population,{},{}).map(p=>p.id),[P1,VH],"the real default daemon selector retains its existing eligible population");
-  const unknown:DraftSelectionContext={isRatified:()=>false,isDeclined:()=>undefined,boardReferents:new Map(),grepAnchorTrue:()=>true,openProposalIds:new Set(),retirement:()=>({unknown:"unreadable lifecycle"})};
+  const unknown:DraftSelectionContext={isRatified:()=>false,isDeclined:()=>undefined,boardReferents:{kind:"unreadable"},grepAnchorTrue:()=>true,openProposalIds:new Set(),retirement:()=>({unknown:"unreadable lifecycle"})};
   assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},unknown).length,1,"unknown lifecycle is not proof a human review can be suppressed");
   assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},{...unknown,isRatified:()=>true}).length,0,"unknown lifecycle cannot bypass existing ratification exclusion");
   assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},{...unknown,isDeclined:()=>"held by operator"}).length,0,"unknown lifecycle cannot bypass an existing decline");
+  assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},{...unknown,retirement:()=>{throw Error("unavailable");}}).length,1);
+  assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},{...unknown,isRatified:()=>true,retirement:()=>{throw Error("unavailable");}}).length,0,"a failed lifecycle read also retains ratification precedence");
 });
 
 interface Fx {

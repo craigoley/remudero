@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
-import { persistedInboxPath, readPersistedInbox, writePersistedInbox, type PersistedInbox, type PersistedInboxContent } from "../src/lib/fleet-lane.js";
+import { classificationSnapshotPath, persistedInboxPath, readClassificationSnapshot, readPersistedInbox, writePersistedInbox, type PersistedInbox, type PersistedInboxContent } from "../src/lib/fleet-lane.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, inboxLegacyView, inboxViewBodies, refreshInboxClassification, type InboxRefresh } from "../src/lib/inbox-view.js";
 import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
 import { buildInboxAttentionCensusRoute, buildInboxRoute, buildInboxThreadReplyRoute, buildInboxThreadsRoute, buildKeepProposalRoute, inboxTriagePath, readSlowLaneInbox, type PanelGraphDeps } from "../src/lib/panel-graph.js";
@@ -101,6 +101,19 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
   assert.deepEqual(ids(Object.values(legacy.body.needsYou).flat() as Array<{proposalId:string}>),ids(needs.body.data.items));
   assert.equal(initialBadge.data.inbox.needsYou,needs.body.data.items.length,"the badge must count the same source-owned asks as the Inbox lanes");
   assert.equal(initialBadge.data.inbox.fleet,fleet.body.data.items.length);
+  const light=classificationSnapshotPath(join(w.root,"state")),heldLight=readFileSync(light,"utf8");
+  assert.equal(readClassificationSnapshot(join(w.root,"state"))?.displayOwners?.[ageId],"fleet");
+  for(const variant of ["missing-owner","foreign-owner","invalid-owner","foreign-restoration"] as const){
+    const bad=JSON.parse(heldLight);
+    if(variant==="missing-owner")delete bad.displayOwners[ageId];
+    if(variant==="foreign-owner")bad.displayOwners["foreign:id"]="fleet";
+    if(variant==="invalid-owner")bad.displayOwners[ageId]="unknown";
+    if(variant==="foreign-restoration")bad.restoredForReview.push("foreign:id");
+    writeFileSync(light,JSON.stringify(bad));
+    assert.equal(readClassificationSnapshot(join(w.root,"state")),undefined,variant);
+    const unknownBadge=await badge();assert.ok(!("error" in unknownBadge));assert.equal(unknownBadge.data.inbox.needsYou,undefined,variant);
+  }
+  writeFileSync(light,heldLight);
   const history=await s.get("/v1/inbox/threads");assert.equal(history.status,200);
   assert.equal(history.body.threads.find((item:any)=>item.threadId===threadId)?.attention,"history");
   assert.equal(readFileSync(store,"utf8"),original,"classification cannot fabricate a reply or retire history");

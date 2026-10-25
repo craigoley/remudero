@@ -20,6 +20,7 @@ import type { Proposal } from "../src/lib/inbox.js";
 import type { AddressInfo } from "node:net";
 import { createService } from "#src/lib/service.js";
 import { buildInboxThreadRoute, buildInboxVerbActions } from "#src/lib/panel-graph.js";
+import { answerThread, registryThreadItems } from "#src/lib/inbox-responder.js";
 
 const T0 = Date.parse("2026-10-02T12:00:00.000Z");
 const PROPOSAL = "ruling-w1-t1";
@@ -298,6 +299,17 @@ test("W1-T10431: reclassified age history remains readable without action author
     // An ordinary fleet finding cannot enter the history read merely by sharing the fleet page.
     const nonInformation=f.build(inboxThreadViewKey(inboxThreadId(f.proposals[1]!.id)));
     assert.equal(nonInformation.data.found,false);
+    appendThreadMessage(inboxThreadIdentity(id),"escalation","Which policy should apply?",{threadStorePath:store,now:()=>T0},{question:true});
+    const questioned=await f.refresh();f.seed(questioned.bodies,true);
+    const replies:Array<{status:number;body:unknown}>=[];
+    await actions.reply({threadId,text:"Use the existing policy.",intentId:"w10431-question-answer"},{origin:"test",operator:"fixture"},(status,body)=>{replies.push({status,body});});
+    assert.equal(replies[0]?.status,200,"a verified current question retains the existing reply flow");
+    let decisions=0,work=0;
+    const readItems=()=>registryThreadItems(join(f.root,"state"),f.deps.ledgerPath,{repository:"owner/core"});
+    assert.equal(readItems().find(item=>item.proposalId===id)?.informational,true,"the default responder retains an actual reply without execution permission");
+    assert.equal(await answerThread(threadId,{scope:{repository:"owner/core"},threadStorePath:store,ledgerPath:f.deps.ledgerPath,readItems,
+      decide:()=>{decisions++;return{action:"approve",reply:"I read your answer."};},reframe:()=>{work++;}}),"question");
+    assert.equal(decisions,1);assert.equal(work,0,"even a model-selected approval cannot turn information into new work");
   }finally{await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
 
