@@ -34,6 +34,7 @@ export interface CodeHealthScan {
   repository: string;
   scanId: string;
   componentIds?: string[];
+  failureKind?: import("./ops.js").CodeScanningReadFailureKind;
   analyzedSha: string;
   observedAt: string;
   state: "complete" | "partial" | "stale" | "not_collected" | "unavailable";

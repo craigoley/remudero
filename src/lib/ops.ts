@@ -255,9 +255,13 @@ export interface AlertGateway {
   secretScanning(owner: string, repo: string): RawAlert[];
 }
 
+export type CodeScanningReadFailureKind = "unauthorized" | "rate_limited" | "unavailable";
+
+export function codeScanningReadFailureKind(_error: unknown): CodeScanningReadFailureKind { return "unavailable"; }
+
 export type CodeScanningAlertsRead =
   | { ok: true; alerts: RawAlert[]; analysisInstances?: CodeScanningAnalysisInstance[] }
-  | { ok: false; error: string };
+  | { ok: false; error: string; failureReason?: CodeScanningReadFailureKind };
 
 /** Retained only for the evidence collector; normal alert reads keep their existing shape. */
 export interface CodeScanningAnalysisInstance {

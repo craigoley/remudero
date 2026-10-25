@@ -14,7 +14,7 @@ import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/
 import { readCoverageNightlySummary } from "#src/lib/coverage-nightly-intake.js";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { fixedClock, clockFromMillisFn } from "#src/lib/clock.js";
-import { readCodeScanningAlerts } from "#src/lib/ops.js";
+import { readCodeScanningAlerts, codeScanningReadFailureKind } from "#src/lib/ops.js";
 import { ghStubPath, pathWith } from "#test/helpers/gh-stub.js";
 
 function copyMeasurementMethod(dir: string): string {
@@ -657,5 +657,35 @@ test("code health collection publishes cached facts and keeps failed refreshes v
     assert.equal(projectCodeHealth(withinRead.snapshot.input).sources.find(source => source.kind === "quality" && source.required)!.state, "complete", "a scan completed during collection is measured by the finished report, not treated as a future scan");
     assert(Date.parse(withinRead.snapshot.input.observedAt) >= Date.parse(measuredAt));
 
+  });
+});
+
+
+test("code health distinguishes denied GitHub access from unavailable or rate-limited reads", () => {
+  const saved = process.env.PATH;
+  const bin = ghStubPath('#!/usr/bin/env node\nprocess.stderr.write("gh: Resource not accessible by integration (HTTP 403)\\n");process.exit(1);\n');
+  process.env.PATH = pathWith(bin);
+  try {
+    const result = readCodeScanningAlerts("acme", "atlas", { includeAnalysisInstances: true });
+    assert.equal(result.ok, false); assert(!result.ok); assert.equal(result.failureReason, "unauthorized");
+    const ordinary = readCodeScanningAlerts("acme", "atlas"); assert(!ordinary.ok);
+    assert.equal(Object.hasOwn(ordinary, "failureReason"), false, "ordinary consumers retain the existing failure shape");
+  } finally { process.env.PATH = saved; }
+  assert.equal(codeScanningReadFailureKind({ status: 1, stderr: "gh: API rate limit exceeded (HTTP 403)" }), "rate_limited");
+  assert.equal(codeScanningReadFailureKind(new SyntaxError("Untrusted response text mentions HTTP 403")), "unavailable");
+});
+
+test("code health retains saved facts beside an unauthorized current refresh", async () => {
+  await withTempDir("code-health-access", async stateDir => {
+    const value = input(), clock = fixedClock(Date.parse("2026-11-03T06:00:00.000Z"));
+    const saved = publishCodeHealthSnapshot({ stateDir, input: value, expectedSnapshotId: null, clock }); assert("snapshotId" in saved);
+    const result = await collectCodeHealth({ stateDir, repository: value.repository, clock, readQualityEvidence: async () => {
+      throw Object.assign(new Error("private-auth-detail-do-not-publish"), { status: 1, stderr: "gh: Bad credentials (HTTP 401)" });
+    } });
+    assert.equal(result.state, "unavailable");
+    const failure = readCodeHealthCollectionFailure(stateDir, value.repository); assert.equal(failure.state, "failed"); assert("failureKind" in failure);
+    assert.equal(failure.failureKind, "unauthorized"); assert(!JSON.stringify(failure).includes("private-auth-detail"));
+    const evidence = readCodeHealthSnapshot(stateDir, value.repository); assert("snapshot" in evidence); assert.equal(evidence.snapshot.snapshotId, saved.snapshotId);
+    assert.equal(evidence.snapshot.input.scans[0]!.observedAt, value.scans[0]!.observedAt);
   });
 });

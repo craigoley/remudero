@@ -223,7 +223,7 @@ export function readCodeHealthArtifactJson(path: string): unknown {
 }
 
 export type CodeHealthCollectionFailureRead = { state: "none" }
-  | { state: "failed"; startedAt: string; finishedAt: string; snapshotId: string | null; reason: string }
+  | { state: "failed"; startedAt: string; finishedAt: string; snapshotId: string | null; reason: string; failureKind?: import("./ops.js").CodeScanningReadFailureKind }
   | { state: "unavailable"; reason: string };
 
 interface CodeHealthCollectionFailure {
