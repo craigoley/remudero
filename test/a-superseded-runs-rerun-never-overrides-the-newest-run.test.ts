@@ -9,7 +9,8 @@ import type { Plan } from "../src/lib/plan.js";
 import {
   buildSweepEffects, cancelledRequiredCheckNames, checkJobId, checksStateFromRollup,
   classifyRollupSupersession, dedupeRollupByLatestAttempt, redQualityGateNames,
-  decideFixSuperseded, stillRedRequiredNames, supersededRedsNowPassing, type OpenPrView,
+  decideFixSuperseded, stillRedRequiredNames, supersededRedsNowPassing, staleCiGateTransition,
+  classifyMergeRefusal, deferredRequeueTarget, type OpenPrView,
 } from "#src/lib/sweep.js";
 
 const NAME = "coverage-ratchet";
@@ -53,6 +54,56 @@ test("a required commit status and same-named check must each pass", () => {
     assert.equal(classifyRollupSupersession(rows).superseded.length, 0);
   }
   assert.equal(checksStateFromRollup([{ ...status, state: "SUCCESS" }, passed], ["required"]), "green");
+});
+
+test("the real aggregate retry targets the failed producer and refuses drift or ambiguity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-independent-gates-"));
+  const calls: string[][] = [];
+  const gateRun = 40199725167;
+  const editedRun = 40204059995;
+  const raw = [
+    { id: 701, name: "ci-gate", status: "completed", conclusion: "failure", started_at: "2026-10-25T14:14:10Z",
+      completed_at: "2026-10-25T14:24:36Z", details_url: `https://github.com/o/r/actions/runs/${gateRun}/job/701` },
+    { id: 702, name: "ci-gate", status: "completed", conclusion: "success", started_at: "2026-10-25T14:49:49Z",
+      completed_at: "2026-10-25T14:50:40Z", details_url: `https://github.com/o/r/actions/runs/${editedRun}/job/702` },
+    { id: 703, name: "acceptance-author-gate", status: "completed", conclusion: "success", started_at: "2026-10-25T14:40:00Z",
+      completed_at: "2026-10-25T14:41:00Z", details_url: "https://github.com/o/r/actions/runs/40200000000/job/703" },
+  ];
+  const workflows = [{ id: gateRun, workflow_id: 10 }, { id: editedRun, workflow_id: 20 }];
+  const rows = () => rollupFromRest(raw, [], workflows);
+  try {
+    const transition = staleCiGateTransition(rows());
+    assert.ok(transition);
+    assert.equal(transition.gateRunId, gateRun);
+    assert.equal(deferredRequeueTarget(rows(), "ci-gate")?.jobId, "701");
+    const refusal = classifyMergeRefusal('Required status check "ci-gate" is failing.', rows(), ["acceptance-author-gate"]);
+    assert.equal(refusal.kind, "stale-check");
+    assert.equal(refusal.kind === "stale-check" && refusal.jobId, "701");
+    const effects = buildSweepEffects({ owner: "o", repo: "r", config: { root } as Config,
+      ledgerPath: join(root, "ledger.ndjson"), runId: "independent-producers", plan: { tasks: [], byId: new Map() } as unknown as Plan,
+      log: () => {}, readJsonImpl: async (args) => {
+        if (args[1].includes("/check-runs?")) return { check_runs: raw };
+        if (args[1].endsWith("/status")) return { statuses: [] };
+        if (args[1].includes("/actions/runs?head_sha=")) return { workflow_runs: workflows };
+        throw new Error(`unexpected fixture read: ${args[1]}`);
+      }, ghRunImpl: (_file, args) => { calls.push([...args]); },
+    });
+    await effects.reaggregateCiGate?.({ prNumber: 14160, headSha: "head" } as OpenPrView, transition);
+    assert.deepEqual(calls, [["api", "-X", "POST", "repos/o/r/actions/jobs/701/rerun"]]);
+    raw[0].conclusion = "success";
+    raw[1].conclusion = "failure";
+    await effects.reaggregateCiGate?.({ prNumber: 14160, headSha: "head" } as OpenPrView, transition);
+    assert.equal(calls.length, 1, "the other producer becoming red cannot retarget an old transition");
+    raw[0].conclusion = "failure";
+    assert.equal(staleCiGateTransition(rows()), undefined, "multiple failed aggregates are ambiguous, not an extra retry grant");
+    assert.equal(deferredRequeueTarget(rows(), "ci-gate"), undefined);
+    assert.equal(classifyMergeRefusal('Required status check "ci-gate" is failing.', rows(), ["acceptance-author-gate"]).kind, "real-red");
+    await effects.reaggregateCiGate?.({ prNumber: 14160, headSha: "head" } as OpenPrView,
+      { siblingName: transition.siblingName, siblingStartedAt: transition.siblingStartedAt });
+    assert.equal(calls.length, 1, "an unbound ambiguous transition makes no write");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("test/a-superseded-runs-rerun-never-overrides-the-newest-run.test.ts: #9124 triple, same-run retry, and lone failure", () => {

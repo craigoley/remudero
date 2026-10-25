@@ -3191,9 +3191,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       let jobId: string | undefined;
       try {
         const rollup = await restRollupFor(owner, repo, pr.headSha, readJsonImpl);
-        const gate = dedupeRollupByLatestAttempt(rollup).find(
-          (c) => (c.name ?? c.context ?? "") === CI_GATE_CHECK_NAME,
-        );
+        const gate = ciGateReaggregateTarget(rollup, transition.gateRunId);
         jobId = gate && checkJobId(gate);
       } catch (e) {
         log("sweep.ci_gate_reaggregate.rollup_error", {
@@ -5070,7 +5068,10 @@ export function classifyMergeRefusal(
   }
   if (!rollup) return { kind: "other", check, reason: `GitHub names "${check}", but this head's rollup is unreadable` };
   const { latest, superseded } = classifyRollupSupersession(rollup);
-  const newest = latest.find((c) => rollupEntryName(c) === check);
+  const matches = latest.filter((c) => rollupEntryName(c) === check);
+  const unresolved = matches.filter((c) => !REQUIRED_CHECK_OK.has(rollupEntryState(c)));
+  if (unresolved.length > 1) return { kind: "real-red", check, reason: `"${check}" has multiple unresolved independent producers` };
+  const newest = unresolved[0] ?? matches[0];
   if (!newest) return { kind: "other", check, reason: `GitHub names "${check}", but this head's rollup carries no run of it` };
   const state = rollupEntryState(newest);
   const jobOf = (c: RollupCheckEntry) => c.jobId ?? checkJobId(c);
@@ -5090,9 +5091,9 @@ export function classifyMergeRefusal(
   if (check === CI_GATE_CHECK_NAME) {
     const gated = required.filter((name) => name !== CI_GATE_CHECK_NAME);
     if (gated.length === 0) return { kind: "other", check, reason: "ci-gate's newest run failed and its REQUIRED list is unreadable" };
-    const inputs = gated.map((name) => latest.find((c) => rollupEntryName(c) === name));
-    const present = inputs.filter((c): c is RollupCheckEntry => c !== undefined);
-    const allGreen = present.length === gated.length && present.every((c) => REQUIRED_CHECK_OK.has(rollupEntryState(c)));
+    const present = latest.filter((c) => gated.includes(rollupEntryName(c)));
+    const allGreen = gated.every((name) => present.some((c) => rollupEntryName(c) === name)) &&
+      present.every((c) => REQUIRED_CHECK_OK.has(rollupEntryState(c)));
     const lastInput = present.reduce<RollupCheckEntry | undefined>((acc, c) =>
       acc === undefined || (c.completedAt ?? "") > (acc.completedAt ?? "") ? c : acc, undefined);
     if (allGreen && newest.completedAt && lastInput?.completedAt && lastInput.completedAt > newest.completedAt) {
@@ -7436,7 +7437,10 @@ const rollupRunId = (c: RollupCheckEntry): number | undefined =>
  *  still in flight. No run identity proves nothing in flight; no rollup proves nothing (W1-T5953). */
 export function deferredRequeueTarget(rollup: RollupCheckEntry[] | undefined, name: string): { jobId?: string; runInFlight: boolean } | undefined {
   if (!rollup) return undefined;
-  const entry = dedupeRollupByLatestAttempt(rollup).find((c) => (c.name ?? c.context) === name);
+  const matches = dedupeRollupByLatestAttempt(rollup).filter((c) => (c.name ?? c.context) === name);
+  const unresolved = matches.filter((c) => !REQUIRED_CHECK_OK.has(rollupState(c)));
+  if (unresolved.length > 1 || (unresolved.length === 0 && matches.length > 1)) return undefined;
+  const entry = unresolved[0] ?? matches[0];
   if (!entry) return { runInFlight: false };
   const run = rollupRunId(entry);
   return {
@@ -8047,12 +8051,23 @@ export function earlyRedEvidenceRollup<T extends RollupCheckEntry>(
  *  sibling's latest attempt is a terminal SUCCESS that STARTED AFTER ci-gate's did. `jobId` is
  *  ci-gate's OWN, never the sibling's: the AGGREGATOR is re-driven. */
 export interface StaleCiGateTransition {
+  /** Bind fresh retry targeting to the failed aggregate's run, never a same-named independent job. */
+  gateRunId?: number;
   jobId?: string;
   /** The required sibling whose later terminal success makes ci-gate's own verdict stale. */
   siblingName: string;
   /** That sibling's latest-attempt `startedAt` (ISO) — names WHICH transition (design iv), and
    *  is what {@link ciGateReaggregateKey} bounds the recompute to firing once for. */
   siblingStartedAt: string;
+}
+
+function ciGateReaggregateTarget(rollup: readonly RollupCheckEntry[], gateRunId?: number): RollupCheckEntry | undefined {
+  const gates = dedupeRollupByLatestAttempt(rollup).filter((c) => (c.name ?? c.context) === CI_GATE_CHECK_NAME);
+  const failed = gates.filter((c) => REQUIRED_CHECK_FAIL.has(rollupState(c)) &&
+    (gateRunId === undefined || rollupRunId(c) === gateRunId));
+  if (failed.length !== 1) return undefined;
+  if (gateRunId === undefined && gates.some((c) => c !== failed[0] && !REQUIRED_CHECK_OK.has(rollupState(c)))) return undefined;
+  return failed[0];
 }
 
 /** W1-T1275 — detect the ONE shape design note iii pins, and nothing wider. `ci-gate` must have a
@@ -8063,7 +8078,7 @@ export function staleCiGateTransition(rollup: RollupCheckEntry[] | undefined): S
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   if (all.length === 0) return undefined;
   const deduped = dedupeRollupByLatestAttempt(all);
-  const gate = deduped.find((c) => (c.name ?? c.context ?? "") === CI_GATE_CHECK_NAME);
+  const gate = ciGateReaggregateTarget(deduped);
   if (!gate || !gate.startedAt) return undefined;
   const gateState = (gate.state ?? gate.conclusion ?? gate.status ?? "").toUpperCase();
   if (!REQUIRED_CHECK_FAIL.has(gateState)) return undefined;
@@ -8077,7 +8092,9 @@ export function staleCiGateTransition(rollup: RollupCheckEntry[] | undefined): S
     if (!latest || c.startedAt > (latest.startedAt ?? "")) latest = c;
   }
   if (!latest) return undefined;
-  return { siblingName: latest.name ?? latest.context ?? "unknown", siblingStartedAt: latest.startedAt! };
+  const gateRunId = rollupRunId(gate);
+  return { siblingName: latest.name ?? latest.context ?? "unknown", siblingStartedAt: latest.startedAt!,
+    ...(gateRunId === undefined ? {} : { gateRunId }) };
 }
 
 /** The (head, sibling-transition) identity {@link CI_GATE_REAGGREGATE_STEP}'s rows are keyed on.
@@ -18857,11 +18874,11 @@ export async function runSweep(
         ...pr.cancelledRequiredChecks!.map(c => c.name),
       ], rollup));
       const cancelled = pr.cancelledRequiredChecks!.filter(c => fresh.has(c.name));
-      const freshByName = new Map(dedupeRollupByLatestAttempt(rollup ?? []).map(c => [c.name ?? c.context, c]));
+      const freshProducers = dedupeRollupByLatestAttempt(rollup ?? []);
       const explained = new Set(pr.cancelledRequiredChecks!.flatMap(c => c.explainedFailures ?? [])
         .filter(alias => {
-          const latest = freshByName.get(alias.name);
-          return !latest || !latest.checkRunId || latest.checkRunId === alias.checkRunId || !REQUIRED_CHECK_FAIL.has(rollupState(latest));
+          const matches = freshProducers.filter(c => (c.name ?? c.context) === alias.name);
+          return matches.every(latest => !latest.checkRunId || latest.checkRunId === alias.checkRunId || !REQUIRED_CHECK_FAIL.has(rollupState(latest)));
         }).map(alias => alias.name));
       const deterministicTimeouts = new Set<string>();
       const outcomes: string[] = [];
