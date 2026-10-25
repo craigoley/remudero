@@ -1,0 +1,64 @@
+- id: W1-T10590
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/every-source-reading-suite-declares-what-it-reads.test.ts:flaky cost 37.5 PR minute(s) across 3 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.17
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/every-source-reading-suite-declares-what-it-reads.test.ts:flaky"
+  files:
+    - src/lib/source-text-readers.ts
+    - test/ci/check-test-test-every-source-reading-suite-declares-what-it-reads-test-t.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/every-source-reading-suite-declares-what-it-reads.test.ts:flaky"
+      proof: "grep: test(\"W1-T10590: check:test:test/every-source-reading-suite-declares-what-it-reads.test.ts:flaky is prevented, not retried\" in test/ci/check-test-test-every-source-reading-suite-declares-what-it-reads-test-t.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/every-source-reading-suite-declares-what-it-reads.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/every-source-reading-suite-declares-what-it-reads.test.ts:flaky cost 37.5 PR minute(s) (seven-day half-life) across 3 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/source-text-readers.ts: test/every-source-reading-suite-declares-what-it-reads.test.ts imports it
+    - test/every-source-reading-suite-declares-what-it-reads.test.ts: named by the failing check
+    - the rounds name a failing test: test/every-source-reading-suite-declares-what-it-reads.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13895 (https://github.com/craigoley/remudero/pull/13895) at 2026-10-24T21:03:08.506Z: ci-log round — coverage-shard (4/8): test/every-source-reading-suite-declares-what-it-reads.test.ts
+        failing tests: every source-reading suite is placed by what it reads or declares it
+        log excerpt:
+          | not ok 1823 - every source-reading suite is placed by what it reads or declares it
+          |   ---
+          |   duration_ms: 1471.842477
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/every-source-reading-suite-declares-what-it-reads.test.ts:27:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     The expression evaluated to a falsy value:
+          | 
+          |       assert.ok(byFile.get("test/a-generic-route-has-an-explicit-tool-bound.test.ts")?.walks.includes("src/run-task.ts"))
+          | 
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+    - PR #13851 (https://github.com/craigoley/remudero/pull/13851) at 2026-10-24T09:22:07.884Z: ci-log round — coverage-shard (4/8): test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts; coverage-shard (2/8): test/every-source-reading-suite-declares-what-it-reads.test.ts; remudero-review
+        failing tests: W1-T9660: the daemon-wide census ignores an identifier that appears only in a string or a comment; a sync primitive handed over as a seam default counts, W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const, W1-T9660: the daemon-wide census ignores an identifier that appears only in a string or a comment; every source-reading suite is placed by what it reads or declares it
+        log excerpt:
+          | ...
+          | not ok 10 - W1-T9660: the daemon-wide census ignores an identifier that appears only in a string or a comment
+          |   ---
+          |   duration_ms: 539.127299
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts:601:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     Expected values to be strictly deep-equal:
+          |     + actual - expected
+          | 
+          |       [
+          |         'imessageChannel makes 0 synchronous spawn call(s) on the daemon loop < row 1 — delete the `imessageChannel` row from SYNC_SPAWN_LOOP_BASELINE (test/no-daemon-loop-path-reaches-a-synchronou
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
