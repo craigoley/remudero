@@ -1,0 +1,41 @@
+- id: W1-T10619
+  title: Record bounded product improvement proposals against unchanged held-out objectives
+  repo: remudero
+  depends_on:
+    - W1-T10612
+    - W1-T10615
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: operator-request#wreckterra-console-product-2026-10-25
+  plan_refs:
+    - W1-T4264
+    - W1-T4265
+    - W1-T4266
+    - W1-T4657
+    - W1-T4658
+    - W1-T4694
+  files:
+    - src/lib/product-evaluation.ts
+    - src/lib/product-routes.ts
+    - test/infra/product-evaluation.test.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required.
+  design: Persist product objective/evaluator versions, real replay/bot/device evidence, baseline/candidate comparisons, holdout coverage, confidence and bounded proposed PR/action cost. Reuse existing proposal/review authority; no new deployment loop. Reject promotion when source observations are missing, held-out geography/device regressions exist, resource limits are exceeded or objective/evaluator changed during comparison. Missing metrics remain unknown. Bots prove geometry/rule invariants; human fun, recognizable geography, originality and physical-device acceptance remain separate. Operator accept/reject/reframe decisions and outcomes are durable. No evaluator may erase failures, loosen gates, increase budget or auto-deploy. Mount buildProductEvaluationRoutes from the existing serve composition; the route builder delegates to the named product operation rather than a test-only seam.
+  acceptance:
+    - claim: product evaluation refuses changed objectives and failed holdouts
+      proof: "unit test: W1-T10619: product evaluation refuses changed objectives and failed holdouts"
+    - claim: missing device and geography measurements remain unknown
+      proof: "unit test: W1-T10619: missing device and geography measurements remain unknown"
+    - claim: improvement proposals preserve bounded authority and history
+      proof: "unit test: W1-T10619: improvement proposals preserve bounded authority and history"
+    - claim: the served product route invokes the production capability
+      proof: "grep: buildProductEvaluationRoutes( in src/lib/serve.ts"
+  falsifier: Remove the named ownership, idempotency, evidence or refusal guard independently. Its corresponding behavioral proof must fail against the same fixture and pass when restored. Test real durable files/default transport boundaries plus each catch arm; never a zero-test wrapper result. Keep initial live read/write/dispatch/deployment receipts separate from fixtures.

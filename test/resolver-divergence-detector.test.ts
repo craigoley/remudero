@@ -11,7 +11,8 @@ const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 /** The tracked source of `name` (relative to `src/`), read fresh each call — never cached, so a
  *  structural assertion always reads what is actually on disk in this worktree. */
 function readSrc(name: string): string {
-  return readFileSync(join(SRC_DIR, name), "utf8");
+  return (name === "run-task.ts" ? [name, "cli/commands/review.ts"] : [name])
+    .map((file) => readFileSync(join(SRC_DIR, file), "utf8")).join("\n");
 }
 
 // W1-T2315 — TWO RESOLVERS DECIDE WHETHER A PR BODY IS JUDGED AND NOTHING RECONCILES THEM.
@@ -266,7 +267,7 @@ test("resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — t
 
 test("nothing added paces, throttles or sleeps — W1-T1066's lockout is why", () => {
   const runTaskSrc = readSrc("run-task.ts");
-  const from = runTaskSrc.indexOf("interface ResolverDivergence");
+  const from = runTaskSrc.indexOf("let resolverDivergence");
   const to = runTaskSrc.indexOf("console.log(`### rmd review PR #${view.number}");
   assert.ok(from > 0 && to > from, "located the region this task added");
   const region = runTaskSrc.slice(from, to);

@@ -146,7 +146,7 @@ test("a spawnWorker call site with no assignment receipt fails the census by nam
 });
 
 test("the reviewer lane is inside the assignment receipt path", () => {
-  const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const source = readFileSync(join(REPO_ROOT, "src", "cli", "commands", "review.ts"), "utf8");
   const start = source.indexOf("async function runReview(");
   assert.ok(start >= 0, "runReview is where the reviewer spawns");
   const rest = source.slice(start + 1);
