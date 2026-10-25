@@ -214,7 +214,7 @@ test("selected supervisor hands immutable private identity only to its trusted r
   writeFileSync(fixture.selected, registry("shadow") + `    state_dir: ${stateRoot}\n    container_name: selected-container\n`);
   try {
     await runtimeRegistryRunner()(() => {
-      const options = { installPath: fixture.root, stateRoot, daemonLabel: "fixture", serveLabel: "fixture-serve",
+      const options: Parameters<typeof realDeployDeps>[0] = { installPath: fixture.root, stateRoot, daemonLabel: "fixture", serveLabel: "fixture-serve",
         servePort: 1, uid: 1, ledgerPath: join(stateRoot, "unused"), log: () => {},
         execFile: (cmd: string, args: string[]) => { calls.push([cmd, ...args]); return ""; } };
       const deps = realDeployDeps(options), recycler = deps.restartBackends!().find(b => b.name === "recycle-container")!;

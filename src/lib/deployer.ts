@@ -37,6 +37,8 @@ import { stopDetail } from "./fleet-control.js";
 import { appendLedger } from "./ledger.js";
 import { createHash } from "node:crypto";
 import { fixedClock } from "./clock.js";
+import { InstanceRegistryRuntimeError, runtimeInstanceRegistryPrivateFile, runtimeInstanceRegistryText,
+  trustedInstanceRegistryLaunchPacket } from "./instance-registry-selection.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
   DEPLOY_RESTART_PRESSURE_STEP,
@@ -2559,6 +2561,14 @@ export function githubSlugOf(remoteUrl: string): string | undefined {
 }
 
 export function realDeployDeps(o: RealDeployOpts): DeployDeps {
+  const selectedFile = runtimeInstanceRegistryPrivateFile();
+  if (selectedFile !== undefined) o = { ...o };
+  const selectedText = runtimeInstanceRegistryText();
+  const selectedInstance = selectedText === undefined ? undefined : instanceForStateRoot(selectedText, o.stateRoot);
+  if (selectedFile !== undefined && (selectedInstance === undefined || (o.instance !== undefined && o.instance !== selectedInstance))) {
+    throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
+  }
+  const selectedPacket = selectedFile === undefined ? undefined : trustedInstanceRegistryLaunchPacket(selectedInstance);
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const clock = (): number => Date.now();
   const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
@@ -2598,6 +2608,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   const isBinaryAbsent = (err: unknown): boolean =>
     typeof err === "object" && err !== null && (err as { code?: unknown }).code === "ENOENT";
   const kickstartDaemon = () => {
+    if (selectedPacket !== undefined) throw new InstanceRegistryRuntimeError("launcher_unsupported");
     exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.daemonLabel}`]);
   };
   const launchctlBackend: RestartBackend = {
@@ -2607,6 +2618,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     // the binary genuinely absent, as measured on this task's Linux fleet host — reads as
     // unavailable. Any other failure still means launchctl ran, which is all "usable" asks here.
     probe: () => {
+      if (selectedPacket !== undefined) return false;
       try {
         exec("launchctl", ["list"]);
         return true;
@@ -2627,6 +2639,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   // never select a daemon, and must never restore the unscoped default the registry exists to forbid.
   // W1-T3733: read ONCE, and reused for both the `--instance` flag and the image-sha container.
   const registryText = (() => {
+    if (selectedText !== undefined) return selectedText;
     try {
       return readFileSync(daemonInstanceRegistryPath(o.installPath), "utf8");
     } catch {
@@ -2702,6 +2715,9 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       `${recycleContainerScript}${recycleInstance ? ` --instance ${recycleInstance}` : ""} ` +
       `(pause, drain, pull and replace the ${o.daemonLabel} container)`,
     restart: () => {
+      if (selectedPacket !== undefined && trustedInstanceRegistryLaunchPacket(selectedInstance) !== selectedPacket) {
+        throw new InstanceRegistryRuntimeError("revision_changed");
+      }
       // W1-T3732 — NAME THE INSTANCE. `recycle-container.sh` REFUSES an unscoped invocation whenever
       // the registry declares instances (W1-T3596), and this call site passed nothing — so every
       // automated restart on this fleet was a refusal. MEASURED 2026-09-17T13:07:36Z:
@@ -2709,16 +2725,27 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // pulled. An unresolved instance still invokes the script bare, so the refusal stands wherever
       // there is no answer rather than being replaced by a guess.
       const script = recycleInstance ? [recycleContainerScript, "--instance", recycleInstance] : [recycleContainerScript];
+      const runScript = (command: string[]) => {
+        if (selectedPacket === undefined) return exec("bash", command);
+        const packet = selectedPacket.split("\n");
+        try {
+          return exec("bash", ["-c", 'export RMD_INSTANCE_REGISTRY="$1" RMD_INSTANCE_REGISTRY_DIGEST="$2" RMD_INSTANCE_REGISTRY_LAUNCH_BINDING="$3"; shift 3; exec bash "$@"',
+            "selected-registry-launch", packet[1]!, packet[2]!, packet[3]!, ...command]);
+        } catch {
+          // Child/OS errors can quote private argv; unknown launch failure is never a public diagnostic of those bytes.
+          throw new InstanceRegistryRuntimeError("launcher_failed");
+        }
+      };
       // W1-T8138: the drain wait comes from the lanes in flight, not a constant. With no run history to read
       // (or an operator's own RMD_RECYCLE_WAIT_S) the script keeps its labelled fallback.
       const derived = deriveWaitFromState();
       if (derived && derived.source !== "no_history_fallback") {
         // The derived wait is a DEFAULT: a RMD_RECYCLE_WAIT_S already in the supervisor's environment (an
         // operator's explicit choice) wins, decided by the shell so this file reads no environment itself.
-        exec("bash", ["-c", 'export RMD_RECYCLE_WAIT_S="${RMD_RECYCLE_WAIT_S:-$1}"; shift; exec bash "$@"', "recycle-wait", String(derived.waitS), ...script]);
+        runScript(["-c", 'export RMD_RECYCLE_WAIT_S="${RMD_RECYCLE_WAIT_S:-$1}"; shift; exec bash "$@"', "recycle-wait", String(derived.waitS), ...script]);
         return;
       }
-      exec("bash", script);
+      runScript(script);
     },
   };
 
@@ -3031,6 +3058,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       };
     },
     kickstartConsole: () => {
+      if (selectedPacket !== undefined) throw new InstanceRegistryRuntimeError("launcher_unsupported");
       // The SAME mechanism as the daemon kickstart below — one way to restart a service,
       // only the label differs. Both labels live in the same gui/<uid> domain.
       exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.serveLabel}`]);

@@ -37,7 +37,7 @@ selected_registry_init() {
   SELECTED_REGISTRY_CALLER="$3"
   SELECTED_REGISTRY_ACTIVE=0
   SELECTED_REGISTRY_INPUT="${RMD_INSTANCE_REGISTRY-}"
-  SELECTED_REGISTRY_DIGEST=""
+  SELECTED_REGISTRY_DIGEST="${RMD_INSTANCE_REGISTRY_DIGEST-}"
   SELECTED_REGISTRY_PACKET=""
   SELECTED_REGISTRY_TEXT=""
   SELECTED_REGISTRY_HOST_FILE=""
@@ -45,12 +45,18 @@ selected_registry_init() {
   if [ "${RMD_INSTANCE_REGISTRY+x}" = x ]; then
     SELECTED_REGISTRY_ACTIVE=1
     [ -n "${SELECTED_REGISTRY_NAME}" ] || { selected_registry_refuse instance_missing; return 2; }
+    if [ "${RMD_INSTANCE_REGISTRY_DIGEST+x}" = x ] && { [ "${#SELECTED_REGISTRY_DIGEST}" -ne 64 ] || [[ "${SELECTED_REGISTRY_DIGEST}" == *[!a-f0-9]* ]]; }; then
+      selected_registry_refuse invalid_digest; return 2
+    fi
     if ! SELECTED_REGISTRY_PACKET="$(selected_registry_packet)"; then selected_registry_refuse "${SELECTED_REGISTRY_PACKET}"; return 2; fi
     if [ "${#SELECTED_REGISTRY_PACKET}" -gt 400000 ] || [ "$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '1p')" != rmd-private-registry-v1 ]; then
       selected_registry_refuse unsupported_reader; return 2
     fi
     SELECTED_REGISTRY_HOST_FILE="$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '2p')"
     SELECTED_REGISTRY_DIGEST="$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '3p')"
+    if [ "${RMD_INSTANCE_REGISTRY_LAUNCH_BINDING+x}" = x ] && [ "${RMD_INSTANCE_REGISTRY_LAUNCH_BINDING}" != "$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '4p')" ]; then
+      selected_registry_refuse revision_changed; return 2
+    fi
     if ! SELECTED_REGISTRY_TEXT="$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '6p' | node -e 'process.stdout.write(Buffer.from(require("node:fs").readFileSync(0,"utf8").trim(),"base64"))')"; then
       selected_registry_refuse packet_unreadable; return 2
     fi

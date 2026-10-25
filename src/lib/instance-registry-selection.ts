@@ -312,14 +312,18 @@ export function runtimeInstanceRegistryPrivateFile(): string | undefined { retur
 export function runtimeInstanceRegistryDigest(): string | undefined { return selectedRuntime()?.binding?.digest; }
 
 /** Explicit trusted launcher channel, never a public projection, diagnostic or untrusted worker input. */
-export function trustedInstanceRegistryLaunchPacket(): string {
+export function trustedInstanceRegistryLaunchPacket(target?: string): string {
   const scope = selectedRuntime();
-  if (!scope?.binding || !scope.instanceName) throw new InstanceRegistryRuntimeError("instance_missing");
-  const rows = scope.binding.instances.filter(row => row.name === scope.instanceName && row.live);
+  const instance = target ?? scope?.instanceName;
+  if (!scope?.binding || !instance) throw new InstanceRegistryRuntimeError("instance_missing");
+  if (!/^[A-Za-z0-9_-]+$/.test(instance) || (scope.instanceName !== undefined && scope.instanceName !== instance)) {
+    throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
+  }
+  const rows = scope.binding.instances.filter(row => row.name === instance && row.live);
   if (rows.length !== 1) throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
   const original = trustedRegistryBytes.get(scope.binding)!;
   if (!original.canonicalPath || /[\r\n,]/.test(original.canonicalPath)) throw new InstanceRegistryRuntimeError("unsupported_mount_path");
-  const identity = { stamp: original.identity, digest: scope.binding.digest, instance: scope.instanceName };
+  const identity = { stamp: original.identity, digest: scope.binding.digest, instance };
   const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
   return ["rmd-private-registry-v1", original.canonicalPath, scope.binding.digest,
     digest({ ...identity, path: original.canonicalPath }), digest(identity), Buffer.from(original.text).toString("base64")].join("\n");
