@@ -477,10 +477,31 @@ test("improvement CLI preserves fleet execution config when selecting a reposito
     const config = { root, claudeBin: "unreachable-test-worker", workerProviders: { fleetCashAllowancePath: join(root, "shared-allowance.json") } } as import("#src/lib/config.js").Config;
     let receivedConfig: unknown, receivedContext: unknown, called = 0;
     const code = await improvementActionCommand([operation.operation.operationId, "--state-dir", stateDir], { config, clock: deps.clock,
-      draftHook: (...args) => { called++; receivedConfig = args[2]; receivedContext = args[11]; return async () => {}; } });
+      draftHook: (...args) => { called++; receivedConfig = args[2]; receivedContext = args[11]; return async () => {
+        const { captureInboxDraftSnapshot, commitInboxDraftOutcomes } = await import("#src/lib/inbox.js");
+        const proposal = JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-proposals.json"), "utf8")).proposals.find((p: { id: string }) => p.id === saved.proposalId);
+        const snapshot = captureInboxDraftSnapshot(proposal, { repository: request.repository });
+        const candidate = { proposalId: proposal.id, fragmentYaml: "- id: NEW-1\n  title: Simplify repeated work\n", stampLine: "Saved improvement draft", anchorFingerprint: "", completion: { snapshot, lintClean: true, violations: [] } };
+        commitInboxDraftOutcomes({ stateDir: join(inboxRoot, "state"), scope: { repository: request.repository }, snapshots: [snapshot], outcomes: [{ ok: true, proposalId: proposal.id, candidate, snapshot }], log: () => {} });
+      }; } });
     assert.equal(code, 0); assert.equal(called, 1);
     assert.equal(receivedConfig, config, "budget, routing, installation and accounting keep the exact fleet config");
     assert.deepEqual(receivedContext, { root: inboxRoot, ledgerPath: join(inboxRoot, "state", "ledger.ndjson") });
+    const ready = readImprovementThread(saved.requestId, deps); assert(ready.state === "saved"); assert(ready.drafting.digest);
+    const filing = await requestImprovementAction("file", { requestId: saved.requestId, goalDigest: ready.goalDigest, draftDigest: ready.drafting.digest, idempotencyKey: "preserve-filing-config-001" }, { ...deps, launchAction: () => {} }); assert(filing.state === "requested");
+    let filingCalls = 0;
+    const filedCode = await improvementActionCommand([filing.operation.operationId, "--state-dir", stateDir], { config, clock: deps.clock,
+      approve: async (ids, options) => {
+        filingCalls++; assert.deepEqual(ids, [saved.proposalId]); assert.equal(options.config, config);
+        assert.equal(options.inboxRoot, inboxRoot); assert.equal(options.inboxLedgerPath, join(inboxRoot, "state", "ledger.ndjson"));
+        assert.equal(options.planPath, join(repoRoot(), "plan", "tasks.yaml"));
+        assert.deepEqual(options.reviewedImprovement, { goalDigest: ready.goalDigest, draftDigest: ready.drafting.digest });
+        const { appendLedger } = await import("#src/lib/ledger.js");
+        appendLedger(options.inboxLedgerPath!, { ts: deps.clock.iso(), run_id: "APPROVE-CONFIG-TEST", task_id: saved.proposalId, step: "ratify.approved", pr_url: "https://github.com/craigoley/remudero/pull/123", branch: "ratify-config-test" });
+        return 0;
+      } });
+    assert.equal(filedCode, 0); assert.equal(filingCalls, 1);
+    const filed = readImprovementThread(saved.requestId, deps); assert(filed.state === "saved"); assert.equal(filed.filing.state, "completed");
   });
 });
 
