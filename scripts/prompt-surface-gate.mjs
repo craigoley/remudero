@@ -11,6 +11,7 @@ import { git } from "./lib/git.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
 import { loadInjectableSkills, selectSkillsForTask, renderSkillsPart } from "../src/lib/skill-workshop.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../src/lib/learnings.js";
+import { TASK_TYPES } from "../src/lib/plan.js";
 
 export const PROMPT_SURFACE_FUNCTIONS = new Set([
   "implementPromptParts",
@@ -322,7 +323,7 @@ function skillEvidenceFor(root, head, files, context) {
     try { fixture = parseYaml(readRevisionFile(root, head, path)); }
     catch { continue; }
     if (!fixture || fixture.kind !== "injected-skill-prompt-effect" || typeof fixture.skill !== "string" ||
-        typeof fixture.task_type !== "string" || !Array.isArray(fixture.task_files) ||
+        typeof fixture.task_type !== "string" || !TASK_TYPES.includes(fixture.task_type) || !Array.isArray(fixture.task_files) ||
         !fixture.task_files.every(p => typeof p === "string") || typeof fixture.before !== "string" || typeof fixture.after !== "string") continue;
     const select = skills => selectSkillsForTask(skills, fixture.task_type, DEFAULT_KNOWLEDGE_BUDGET_CHARS, fixture.task_files);
     const before = select(context.before), after = select(context.after);

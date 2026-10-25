@@ -445,6 +445,17 @@ test("deleting or opting out a formerly injected skill retains its base-side pro
 
 test("injected skill evidence qualifies only the actual maintained prompt effect", () => {
   withFixture(root => {
+    write(root, INJECTED_PATH, skillSource("Same body, but a new invalid selector must not invent a worker context."));
+    const before = renderedSkillPrompt(root, "implemnt");
+    commit(root, "valid base selector");
+    write(root, INJECTED_PATH, skillSource("Same body, but a new invalid selector must not invent a worker context.", "applies-to: implement, implemnt"));
+    const after = renderedSkillPrompt(root, "implemnt");
+    assert.notEqual(before, after, "the permissive loader can select an arbitrary supplied type; a real worker task cannot have that type");
+    write(root, EFFECT_PATH, effectFixture(before, after, { task_type: "implemnt" }));
+    commit(root, "invalid worker context golden");
+    assert.equal(mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }).ok, false);
+  });
+  withFixture(root => {
     write(root, INJECTED_PATH, skillSource("Check the old invariant."));
     const before = renderedSkillPrompt(root);
     commit(root, "base");
