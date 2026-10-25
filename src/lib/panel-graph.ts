@@ -110,7 +110,7 @@ import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUni
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, validInboxSnapshot, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type InboxSourceIdentity, type PersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
-import { inboxOwner, inboxSender, isAgeOnlyInboxInformation, latestInstant, type InboxSender } from "./inbox-owner.js";
+import { classifiedInboxOwner, inboxOwner, inboxSender, isAgeOnlyInboxInformation, latestInstant, type InboxSender } from "./inbox-owner.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { mergeVerdictReceipts, proposalVerdictsWithReceipts, readVerdictReceipts, verdictReceiptOf, PROPOSAL_VERDICT_RECEIPT_STEPS, type VerdictReceipt } from "./inbox-verdict-receipts.js";
 import { judgementFamily } from "./machine-filing-judge.js";
@@ -2562,6 +2562,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
   const plainStore = stores.plainMessages;
   const restoredForReview = new Set(classifications.filter(c => c.retirement?.state === "restored_for_review").map(c => c.proposalId));
+  const capturedById = new Map(classifications.map(c => [c.proposalId, c]));
   // W1-T8825: who sent each item and when, from stored instants only.
   const senderOf = (id: string): InboxSender => {
     const known = stores.provenance?.[id];
@@ -2570,7 +2571,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
 
   // W1-T8826: the plain message with each option's intent and, per lane, the route that performs it — attached here, never stored.
   const servedPlain = (proposal: Proposal, lane: InboxOptionLane) => servePlainOptions(plainInboxMessage(proposal, plainStore), lane, proposal.id,
-    isAgeOnlyInboxInformation({ ...proposal, requiresReview: restoredForReview.has(proposal.id) }));
+    isAgeOnlyInboxInformation(proposal) && classifiedInboxOwner(proposal, capturedById.get(proposal.id) ?? {}) === "fleet");
   // W1-T8950: an operator item's recommended decision, current for its summary and lane, with its route attached here.
   const recommended = (proposal: { id: string; summary: string }, lane: InboxOptionLane): { recommendation?: ServedRecommendation } => {
     const recommendation = recommendationFor(proposal, lane, stores.recommendations ?? {});
@@ -2654,7 +2655,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
   // `fleet` holds the fleet's own findings with the lane each sits in. The top-level
   // lanes retain records; only the shared projection selects the operator's asks (W1-T5340).
-  const ownerOf = (id: string) => restoredForReview.has(id) ? "operator" as const : inboxOwner(byId.get(id) ?? { id });
+  const ownerOf = (id: string) => restoredForReview.has(id) ? "operator" as const : classifiedInboxOwner(byId.get(id) ?? { id }, capturedById.get(id) ?? {});
   const isOperator = (item: { proposalId: string }) => ownerOf(item.proposalId) === "operator";
   const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)), "core", ownerOf);
   const asks = new Set(humanGates.gates.map((gate) => decodeURIComponent(gate.key.split(":")[2]!)));
@@ -2834,7 +2835,7 @@ function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan
     const proposal = proposals.find((p) => p.id === c.proposalId);
     if (!state || !proposal || inboxOwner(proposal) !== "operator" && !isAgeOnlyInboxInformation(proposal) && !c.retirement) continue;
     items.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), state,
-      ...(isAgeOnlyInboxInformation({ ...proposal, requiresReview: c.retirement?.state === "restored_for_review" }) ? { informational: true } : {}),
+      ...(isAgeOnlyInboxInformation(proposal) && classifiedInboxOwner(proposal, c) === "fleet" ? { informational: true } : {}),
       ...((deps.inboxSourceIdentity ?? deps.inboxAuditScope) ? { causalScope: deps.inboxSourceIdentity ?? deps.inboxAuditScope } : {}),
       ...(proposal.reframeHistory ? { reframeHistory: proposal.reframeHistory } : {}),
       ...(c.retirement?.state === "restored_for_review" ? { requiresReview: true } : {}) });
@@ -3035,7 +3036,7 @@ const INBOX_THREAD_LIST_WARM_MS = 60_000;
 
 export interface ThreadListInbox {
   proposals: readonly Proposal[];
-  classifications: ReadonlyArray<Pick<InboxClassification, "proposalId" | "state" | "retirement">>;
+  classifications: ReadonlyArray<Pick<InboxClassification, "proposalId" | "state" | "retirement" | "displayOwner">>;
 }
 
 export function inboxClassificationEvidence(classified: Pick<ClassifiedInbox, "projection" | "classifications">): ClassificationEvidence {
@@ -3064,7 +3065,8 @@ function readSlowLaneClassification(stateDir: string, registryPath: string): Thr
   const proposals = parseProposalRegistry(readFileIfExists(registryPath));
   const classifications = proposals.flatMap((p) => {
     const state = snapshot.states[p.id];
-    return state === undefined ? [] : [{ proposalId: p.id, state: state as InboxClassification["state"] }];
+    return state === undefined ? [] : [{ proposalId: p.id, state: state as InboxClassification["state"],
+      ...(snapshot.displayOwners?.[p.id] ? { displayOwner: snapshot.displayOwners[p.id] } : {}) }];
   });
   const complete = snapshot.complete === true;
   const incompleteReason = complete ? undefined

@@ -29,7 +29,7 @@ import { viewKey } from "./views.js";
 import { snapshotCursor } from "./read-page.js";
 import { persistedInboxPath, readPersistedInbox } from "./fleet-lane.js";
 import { inboxDraftGeneration, parseProposalRegistryResult } from "./inbox.js";
-import { isAgeOnlyInboxInformation } from "./inbox-owner.js";
+import { classifiedInboxOwner, isAgeOnlyInboxInformation } from "./inbox-owner.js";
 
 export const INBOX_THREAD_VIEW_NAME = "inbox-thread";
 export const INBOX_THREAD_VIEW_VERSION = 1;
@@ -163,7 +163,7 @@ function correspondenceItem(item: InboxThreadItem, pages: InboxPages, root: stri
   if (classified.length !== 1 || current.length !== 1 || inboxDraftGeneration(classified[0]!) !== inboxDraftGeneration(current[0]!)) return unknown("proposal generation is missing, ambiguous or changed");
   const classification = snapshot.classifications.filter(c => c.proposalId === item.proposalId);
   if (classification.length !== 1) return unknown("proposal classification is ambiguous");
-  const informational = isAgeOnlyInboxInformation({ ...classified[0]!, requiresReview: classification[0]!.retirement?.state === "restored_for_review" });
+  const informational = isAgeOnlyInboxInformation(classified[0]!) && classifiedInboxOwner(classified[0]!, classification[0]!) === "fleet";
   if (pages.section === "fleet" && !informational) return unknown("the fleet row is not source-qualified age information");
   return { item: { ...item, causalScope: { instance: scope.instance, repository: scope.repository },
     ...(informational ? { informational: true } : {}),

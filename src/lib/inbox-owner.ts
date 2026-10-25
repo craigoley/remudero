@@ -67,6 +67,28 @@ export function fleetExecutionEligible(proposal: InboxOwnershipEvidence): boolea
   return kind === "feedback-docket" || FLEET_KINDS.has(kind);
 }
 
+type OwnershipThreadMessage = { role: string; seq: number; extra?: { question?: boolean; event?: unknown } };
+
+/** Stored sequence, not a backfilled event's timestamp, establishes whether a question was answered. */
+export function hasUnansweredInboxQuestion(messages: readonly OwnershipThreadMessage[]): boolean {
+  const reply = messages.filter(m => m.role === "reply" && m.extra?.event === undefined)
+    .reduce((seq, m) => Math.max(seq, m.seq), 0);
+  return messages.some(m => m.role === "escalation" && m.extra?.event === undefined && m.extra?.question === true && m.seq > reply);
+}
+
+/** Called only with the producer's already captured, readable thread evidence. No I/O or action authority. */
+export function captureInboxOwner(proposal: InboxOwnershipEvidence, messages: readonly OwnershipThreadMessage[], requiresReview: boolean): "operator" | "fleet" {
+  if (requiresReview || isAgeOnlyInboxInformation(proposal) && hasUnansweredInboxQuestion(messages)) return "operator";
+  return inboxOwner(proposal);
+}
+
+/** A missing capture cannot move an age finding out of the human lane. Unknown kinds never inherit fleet ownership. */
+export function classifiedInboxOwner(proposal: InboxOwnershipEvidence, classification: { displayOwner?: "operator" | "fleet"; retirement?: { state?: string } }): "operator" | "fleet" {
+  if (classification.retirement?.state === "restored_for_review" || classification.displayOwner === "operator") return "operator";
+  if (classification.displayOwner === "fleet" && (fleetExecutionEligible(proposal) || isAgeOnlyInboxInformation(proposal))) return "fleet";
+  return inboxOwner({ id: proposal.id });
+}
+
 // ── WHO SENT AN INBOX ITEM, AND WHEN (W1-T8825) ───────────────────────────────────────────────
 //
 // The served inbox named every item by its proposal id and carried no time, so a console could not

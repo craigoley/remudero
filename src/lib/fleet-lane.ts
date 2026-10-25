@@ -87,22 +87,36 @@ export interface ClassificationEvidence {
 }
 
 /** Written by serve's slow lane (inbox-view.ts), never by a read: each proposal's current classification state. */
-export function writeClassificationSnapshot(stateDir: string, classifications: Array<{ proposalId: string; state: string }>, clock: Clock = systemClock, evidence?: ClassificationEvidence): void {
+export function writeClassificationSnapshot(stateDir: string, classifications: Array<{ proposalId: string; state: string; displayOwner?: "operator" | "fleet"; retirement?: { state?: string } }>, clock: Clock = systemClock, evidence?: ClassificationEvidence): void {
   const states: Record<string, string> = {};
   for (const c of classifications) states[c.proposalId] = c.state;
-  writeAtomic(classificationSnapshotPath(stateDir), JSON.stringify({ generatedAt: clock.iso(), ...(evidence ?? {}), states }) + "\n");
+  const displayOwners = classifications.every(c => c.displayOwner === "operator" || c.displayOwner === "fleet")
+    ? Object.fromEntries(classifications.map(c => [c.proposalId, c.displayOwner])) : undefined;
+  const restoredForReview = classifications.filter(c => c.retirement?.state === "restored_for_review").map(c => c.proposalId);
+  writeAtomic(classificationSnapshotPath(stateDir), JSON.stringify({ generatedAt: clock.iso(), ...(evidence ?? {}), states,
+    ...(displayOwners ? { displayOwners, restoredForReview } : {}) }) + "\n");
 }
 
 /** The last written classification, with when it was written; undefined when none is readable. `complete` is absent
  *  when the writer did not record it. */
-export function readClassificationSnapshot(stateDir: string): ({ generatedAt: string | null; states: Record<string, string> } & Partial<ClassificationEvidence>) | undefined {
+export function readClassificationSnapshot(stateDir: string): ({ generatedAt: string | null; states: Record<string, string>; displayOwners?: Record<string, "operator" | "fleet">; restoredForReview?: string[] } & Partial<ClassificationEvidence>) | undefined {
   const raw = readJson(classificationSnapshotPath(stateDir));
   if (!raw) return undefined;
   try {
-    const parsed = JSON.parse(raw) as { generatedAt?: unknown; states?: unknown; complete?: unknown; incompleteReason?: unknown };
+    const parsed = JSON.parse(raw) as { generatedAt?: unknown; states?: unknown; complete?: unknown; incompleteReason?: unknown; displayOwners?: unknown; restoredForReview?: unknown };
     if (!parsed.states || typeof parsed.states !== "object") return undefined;
+    let owners: Record<string, "operator" | "fleet"> | undefined;
+    if (parsed.displayOwners !== undefined) {
+      if (!parsed.displayOwners || typeof parsed.displayOwners !== "object" || Array.isArray(parsed.displayOwners) ||
+        Object.keys(parsed.displayOwners).length !== Object.keys(parsed.states).length ||
+        !Object.keys(parsed.states).every(id => Object.hasOwn(parsed.displayOwners!, id) && ["operator", "fleet"].includes((parsed.displayOwners as Record<string, string>)[id]!)) ||
+        !Array.isArray(parsed.restoredForReview) || new Set(parsed.restoredForReview).size !== parsed.restoredForReview.length ||
+        !parsed.restoredForReview.every(id => typeof id === "string" && (parsed.displayOwners as Record<string, string>)[id] === "operator")) return undefined;
+      owners = parsed.displayOwners as Record<string, "operator" | "fleet">;
+    } else if (parsed.restoredForReview !== undefined) return undefined;
     return {
       generatedAt: typeof parsed.generatedAt === "string" ? parsed.generatedAt : null, states: parsed.states as Record<string, string>,
+      ...(owners ? { displayOwners: owners, restoredForReview: parsed.restoredForReview as string[] } : {}),
       ...(typeof parsed.complete === "boolean" ? { complete: parsed.complete } : {}),
       ...(typeof parsed.incompleteReason === "string" ? { incompleteReason: parsed.incompleteReason } : {}),
     };

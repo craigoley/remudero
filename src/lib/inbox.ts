@@ -26,7 +26,7 @@ export type DraftLintViolation = RelintViolation;
 import { callSiteCandidates, MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadEvent, captureInboxInput, verifiedInboxInput, type InboxCausalScope, type InboxInputReference, type ThreadEvent, type ThreadEventKind, type ThreadMessageExtra, type ThreadStoreDeps } from "./inbox-thread.js";
-import { inboxKind } from "./inbox-owner.js";
+import { inboxKind, isAgeOnlyInboxInformation } from "./inbox-owner.js";
 import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
@@ -459,7 +459,7 @@ export interface DraftExclusion {
 
 export type DraftSelectionContext = Pick<
   ReadinessContext,
-  "isRatified" | "isDeclined" | "boardReferents" | "grepAnchorTrue" | "openProposalIds"
+  "isRatified" | "isDeclined" | "boardReferents" | "grepAnchorTrue" | "openProposalIds" | "retirement"
 >;
 
 function readDraftExclusion(check: () => DraftExclusion | undefined): DraftExclusion | undefined {
@@ -530,6 +530,16 @@ function rankDraftSelection(proposals: Proposal[], drafts: DraftCache): Proposal
  *  daemon's draft-independent exclusions; omitting it preserves the manual force. */
 export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: DraftSelectionContext): Proposal[] {
   return proposals.filter((p) => {
+    if (isAgeOnlyInboxInformation(p)) {
+      try {
+        const retirement = ctx?.retirement?.(p);
+        if (retirement && "unknown" in retirement) return true;
+        if (retirement?.state !== "restored_for_review") return false;
+      } catch {
+        // Unreadable lifecycle evidence is not authority to suppress a potentially restored human ask.
+        return true;
+      }
+    }
     if (p.lifecycleAction || p.skillFile) return false;
     if (ctx ? draftExclusionForProposal(p, ctx) : p.trigger && !p.trigger.fired) return false;
     const cached = drafts[p.id];
@@ -769,6 +779,8 @@ export interface PredicateFailure {
 export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "ratified" | "drafting" | "retired" | "declined";
 
 export interface InboxClassification {
+  /** Display ownership captured once with the producer's thread evidence; never execution permission. */
+  displayOwner?: "operator" | "fleet";
   retirement?: InboxRetirementView;
   needsTriageReason?: string;
   releaseTaskId?: string;

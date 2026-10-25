@@ -1,5 +1,6 @@
 import { inboxGardenerSource, mechanicalAskPurpose, readInboxGardenerStore, inboxOperatorIntent } from "./inbox-retirement.js";
 import { readAllThreads, inboxThreadId } from "./inbox-thread.js";
+import { captureInboxOwner } from "./inbox-owner.js";
 /**
  * The inbox's materialized side (arch Phase 4, design D5 row 3 and P4-T06): what used to happen on
  * `GET /v1/inbox` and now happens in serve's slow lane, on a cadence, whether or not anyone reads.
@@ -156,15 +157,18 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   const stores = readInboxStores(deps.inboxRoot, proposals, { plan: classified.plan, ledgerLines: classified.ledgerLines, nowMs: now });
   const sourceThreads = readAllThreads({ threadStorePath: join(stateDir, "inbox-threads.jsonl") });
   if (sourceThreads.status !== "ok") throw new Error("Inbox gardener operator intent source unavailable");
+  const byId = new Map(proposals.map(proposal => [proposal.id, proposal]));
+  const captured = { ...classified, classifications: classifications.map(row => ({ ...row,
+    displayOwner: captureInboxOwner(byId.get(row.proposalId)!, sourceThreads.threads.get(inboxThreadId(row.proposalId)) ?? [], row.retirement?.state === "restored_for_review") })) };
   const operatorIntents = new Map(proposals.map(p => [p.id, inboxOperatorIntent(sourceThreads.threads.get(inboxThreadId(p.id)) ?? [])]));
   const gardenerScope = deps.inboxSourceIdentity ?? deps.inboxAuditScope;
   const lifecycleRead = readInboxGardenerStore(stateDir, gardenerScope && { ...gardenerScope, root: deps.inboxRoot });
-  const inputs = { ...persistedContent(classified, stores), dismissalAudit: dismissalAudit(classified, deps, now),
+  const inputs = { ...persistedContent(captured, stores), dismissalAudit: dismissalAudit(captured, deps, now),
     retirementSource: lifecycleRead.state === "observed" && !gardenerScope ? "unavailable" as const : lifecycleRead.state,
     ...(gardenerScope ? { gardenerSource: inboxGardenerSource(proposals, classified.plan.byId, { ...gardenerScope, root: deps.inboxRoot }, operatorIntents) } : {}),
     snapshotScope: { ...(deps.inboxSourceIdentity ?? deps.inboxAuditScope), root: deps.inboxRoot },
     ...(deps.inboxSourceIdentity ? { sourceIdentity: deps.inboxSourceIdentity } : {}) };
-  const attentionCensus = materializeInboxAttentionCensus(deps, classified, stores, inputs, sourceThreads);
+  const attentionCensus = materializeInboxAttentionCensus(deps, captured, stores, inputs, sourceThreads);
   const scope = deps.inboxSourceIdentity ?? deps.inboxAuditScope;
   // Separate advisory history: classification facts/pages retain W1-T9288's immutable key.
   let whyMeFeedback = scope ? projectWhyMeFeedback(stateDir, scope, attentionCensus, fixedClock(now).iso()) : undefined;
@@ -174,10 +178,10 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   const changed = identity !== memo.identity;
   const written = changed || memo.writtenAtMs === undefined || now - memo.writtenAtMs >= INBOX_CLASSIFICATION_RESTAMP_MS;
   const generatedAt = fixedClock(written ? now : memo.writtenAtMs!).iso();
-  const bodies = inboxViewBodies(inboxLanes({ ...classified, stores }, deps.inboxRoot, { content, scope }), inboxStoreSource(generatedAt), content.snapshotKey);
+  const bodies = inboxViewBodies(inboxLanes({ ...captured, stores }, deps.inboxRoot, { content, scope }), inboxStoreSource(generatedAt), content.snapshotKey);
   if (written) {
     writePersistedInbox(stateDir, content, now);
-    writeClassificationSnapshot(stateDir, classifications, fixedClock(now), inboxClassificationEvidence(classified));
+    writeClassificationSnapshot(stateDir, captured.classifications, fixedClock(now), inboxClassificationEvidence(captured));
     memo.identity = identity;
     memo.writtenAtMs = now;
     memo.whyMeFeedback = whyMeFeedback;
