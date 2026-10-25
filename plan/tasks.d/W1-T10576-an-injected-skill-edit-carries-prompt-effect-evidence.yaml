@@ -1,0 +1,48 @@
+- id: W1-T10576
+  title: "An approved worker-injected skill edit carries executable prompt-effect evidence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  verify: auto
+  priority: 2.5
+  dispatch_hold: true
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "feedback-skill-surface:issue-12567-source-qualified-successor-20261024"
+  files:
+    - scripts/prompt-surface-gate.mjs
+    - src/lib/skill-workshop.ts
+    - test/a-prompt-surface-edit-carries-its-own-fixture.test.ts
+    - test/a-staged-skill-reaches-the-worker-prompt.test.ts
+  acceptance:
+    - claim: "The maintained gate uses the existing approved-skill loader/reachability contract, not a second unrelated path list: a changed opted-in skill body without admissible prompt-effect evidence refuses, and an actually non-injected operator-only macro retains W4332's exemption."
+      proof: "unit test: an approved injected skill edit without prompt-effect evidence is refused"
+    - claim: "Base and head reachability are considered: deleting, renaming or removing applies-to from a formerly injected skill cannot erase its base-side prompt effect. Unreadable or ambiguous reachability is explicitly refused, not guessed safe."
+      proof: "unit test: deleting or opting out a formerly injected skill retains its base-side prompt evidence obligation"
+    - claim: "Accepted golden evidence exercises the actual selected skill and its injected prompt effect through maintained assembly; a fixture unreachable from the edited skill cannot satisfy the obligation. Existing learning, prompt-function and macro controls remain effective."
+      proof: "unit test: injected skill evidence qualifies only the actual maintained prompt effect"
+    - claim: "Head/base discrimination and source-deletion falsifiers prove the gate change load-bearing, while selection budgets, withholding, approval rules, operator-only macro behavior and every CI/security/review check remain unchanged."
+      proof: "unit test: injected skill surface regressions preserve selection and operator-only macro behavior"
+  note: "Source-qualified successor only. Preserve rejected feedback fb-1791856366582-8d0bc9 and ruling #12675 verbatim: this filing does not restore them or override the operator-only macro decision. W10135 owns separate discovery/conformance and is not this implementation. Leave the normal machine-filing judge and every independent hold in control."
+  rationale: |
+    Issue #12567. On equal captured-main maintained gate/dependency and real skill-input blobs at f9d7f267, a synthetic body-only edit of approved .claude/skills/proof-preflight/SKILL.md with applies-to: implement returns OK with zero prompt surfaces. The learning-data positive control refuses and the actual operator-only macro control passes. This is focused source evidence, not a live worker trial or full-author result.
+    The current loader loadInjectableSkills, selection path and renderSkillsPart reach implement/fix prompt assembly. W4332 exempts operator-only settings/macros.yaml, not every approved worker-injected SKILL.md. Establish this changed source-qualified condition in the normal filing judge; do not reopen the rejected submission mechanically.
+    Reuse the existing approved loader and executable prompt-effect contract, including base-side deletion/opt-out. Do not add a parallel skill registry, change selection budgets, alter skill approval or use a broad scanner exclusion. Preserve all existing guards and fail closed on unreadable/ambiguous reachability.
+    Normal full author/CI/coverage/security/review requirements remain for implementation. Only this plan-only filing has the approved author NOT RUN/full-CI first-push exception; no new hosted attempt, production change, waiver, or independent policy release is authorized.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.75
+    reasons:
+      - "The change is scoped to a prompt-surface gate check and skill-workshop logic plus two test files, reusing the existing approved loader/reachability contract rather than introducing a new registry, parallel scanner, or policy change."
+      - "The filing explicitly preserves rejected feedback and ruling #12675 verbatim, does not override the operator-only macro decision, and leaves selection budgets, approval rules, and CI/security/review checks unchanged per its own acceptance criteria."
+      - "No mention of secrets, credentials, auth, permissions, deletion of data/branches/history, merge/deploy/infrastructure/review-policy changes, or irreversible actions in the description, files touched, or gates state."
+      - "The finding is verifiable from what is shown: unit tests are specified for each acceptance criterion, and base/head reachability discrimination with source-deletion falsifiers is explicitly designed to prove the gate change load-bearing."
+      - "Family track record (0/0/0) is neutral rather than concerning — no prior declines or failures recorded for this family, so the stricter-judging trigger is not evidenced."
+    judged_at: "2026-10-25T06:37:41.040Z"
+    pin: "34b56aa1a4f6444c6576044c94dbe8fd03ebaee1a2d53966a7d6d3ace36c8b64"

@@ -312,7 +312,7 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   "review.unwired_advisory", "review.post_refused", "review.stood_down", "acceptance.repaired", "trailer_stamp.failed",
   // capDerivation: the knowledge-budget pressure, and the cache-hit mix's call rows.
   "learnings.injected", "review.reviewer", "inbox.draft_synthesized", "triage.synthesized", "retro.synthesized",
-  "retro.preflight_repair", "fix.done", "fix.commit_line_answered", "census_push.strike", "plan.synthesized", "diagnose.worker_done",
+  "retro.preflight_repair", "fix.done", "fix.contract_hold", "fix.commit_line_answered", "census_push.strike", "plan.synthesized", "diagnose.worker_done",
   // W1-T5668: the rest that can be a worker run's first pr_url row (0 live rows on 2026-10-04, listed so a first one is read).
   "acceptance.repair.unrepresentable", "changeset_claim.repaired", "retro.pr.recovered", "pr.body_normalize.error",
 ];

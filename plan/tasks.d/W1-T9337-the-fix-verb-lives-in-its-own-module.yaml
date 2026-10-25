@@ -67,6 +67,10 @@
        three each. The clock-signature baseline may relocate only fixCommand's original Date.now() call:
        src/run-task.ts dateNow 48 -> 47 and src/cli/commands/fix.ts dateNow 0 -> 1, keeping the aggregate
        at 150. This permits restoring that original expression, with legacy and newDate counts unchanged.
+       The comment baseline may record src/cli/commands/fix.ts:1500 and lower src/run-task.ts's row
+       by the same 1500 (14750 to 13250 on today's main, or 1500 below whatever row an earlier
+       extraction left), conserving the aggregate. Where comment volume no longer blocks on the
+       adopted base (#14087), leaving the baseline untouched also satisfies this step.
        Every other entry, exclusion, population, threshold and falsifier stays unchanged.
     5. The PR body reports the moved symbol count and line count, and the host's member count. A large host is
        acceptable. Never shrink it by importing run-task.ts.
