@@ -299,7 +299,7 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
     policyVersion: input.registry.version, observedAt: input.observedAt, nextDueAt: input.nextDueAt,
     state: !input.scans.length ? "not_collected" : newerCode || pairs.some(pair => pair.scan?.state === "stale") ? "stale" : complete ? "measured" : "partial", sources, checks,
     findings: [...findings.values()].sort((a, b) => a.fingerprint.localeCompare(b.fingerprint)),
-    summary: { met, assessed, expected: checks.length, healthy: newerCode ? null : checks.some(check => check.state === "not_met") ? false : complete && met === checks.length && !findings.size ? true : null } };
+    summary: { met, assessed, expected: checks.length, healthy: newerCode ? null : checks.some(check => check.state === "not_met") ? false : complete && met === checks.length ? true : null } };
   const valid = validateCodeHealthAssessment(result);
   if (!valid.ok) throw new Error(`Code health projection refused: ${valid.reason}`);
   return result;
