@@ -18,6 +18,8 @@ import { buildReadModelViewRoutes, renderView, type ViewBodyEntry, type ViewBody
 import { fakeGitHub } from "./helpers/fake-github.js";
 import type { Proposal } from "#src/lib/inbox.js";
 import { navBadgeView } from "#src/lib/nav-badge-view.js";
+import { inboxThreadListSources, peekSlowLaneClassification } from "#src/lib/panel-graph.js";
+import { listThreadViews } from "#src/lib/inbox-responder.js";
 
 type Ctx = { after(fn: () => void | Promise<void>): void };
 function world(t: Ctx, count = 80) {
@@ -122,8 +124,10 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
   writeFileSync(light,JSON.stringify(restoredLight));unlinkSync(fullPath);
   try {
     assert.deepEqual(readClassificationSnapshot(join(w.root,"state"))?.restoredForReview,[ageId],"positive control: the owned light snapshot retains restoration");
-    const restored=await s.get("/v1/inbox/threads");assert.equal(restored.status,200);
-    assert.equal(restored.body.threads.find((item:any)=>item.threadId===threadId)?.attention,"decision","the light fallback must preserve an explicitly restored human review");
+    const restored=await s.get("/v1/inbox/threads");assert.equal(restored.status,503,"the HTTP route cannot substitute light evidence for the missing owned full snapshot");
+    const lightDeps={...w.deps,inboxFromSlowLane:true},captured=peekSlowLaneClassification(lightDeps);assert.ok(captured);
+    const projected=listThreadViews(inboxThreadListSources(lightDeps).items(captured.classified),new Map(),{});
+    assert.equal(projected.find(item=>item.threadId===threadId)?.attention,"decision","the light projection must preserve an explicitly restored human review");
     assert.equal(readFileSync(store,"utf8"),original,"restoration projection cannot manufacture correspondence");
   }finally{writeFileSync(light,heldLight);writeFileSync(fullPath,heldFull);}
   appendThreadMessage(inboxThreadIdentity(ageId),"escalation","Which existing policy should apply?",{threadStorePath:store,now:()=>w.at},{question:true});
