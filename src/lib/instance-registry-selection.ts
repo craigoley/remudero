@@ -7,6 +7,7 @@
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { isAbsolute } from "node:path";
 import { RmdError } from "./errors.js";
 import { SELECTED_INSTANCE_REGISTRY_FIELDS, parseInstanceRegistry, projectRegistry, type RegistryInstance, type RegistryProjection } from "./instance-registry.js";
@@ -42,6 +43,11 @@ export interface RegistryFileHandle {
 export interface RegistryFileIO {
   lstat(path: string): Promise<RegistryFileStamp>;
   open(path: string): Promise<RegistryFileHandle>;
+}
+interface RegistryBytes {
+  kind: "bytes";
+  bytes: Buffer;
+  identity: Readonly<RegistryFileStamp>;
 }
 const stamp = (s: Awaited<ReturnType<typeof lstat>>): RegistryFileStamp => ({
   regular: s.isFile(), size: Number(s.size), dev: Number(s.dev), ino: Number(s.ino),
@@ -99,10 +105,10 @@ function requireActive(signal: AbortSignal): void {
   if (signal.aborted) throw new ReadRefusal("cancelled");
 }
 
-async function readBounded(path: string, maxBytes: number, signal: AbortSignal, io: RegistryFileIO): Promise<{ kind: "bytes"; bytes: Buffer } | Unknown> {
+async function readBounded(path: string, maxBytes: number, signal: AbortSignal, io: RegistryFileIO): Promise<RegistryBytes | Unknown> {
   let handle: RegistryFileHandle | undefined;
   let phase: UnknownReason = "lstat_failed";
-  let result: { kind: "bytes"; bytes: Buffer } | Unknown;
+  let result: RegistryBytes | Unknown;
   try {
     requireActive(signal);
     const before = await io.lstat(path); requireFile(before, maxBytes);
@@ -125,7 +131,7 @@ async function readBounded(path: string, maxBytes: number, signal: AbortSignal, 
     const after = await handle.stat(), current = await io.lstat(path);
     requireFile(after, maxBytes); requireFile(current, maxBytes);
     if (length !== opened.size || !sameStamp(opened, after) || !sameStamp(after, current)) throw new ReadRefusal("revision_changed");
-    result = { kind: "bytes", bytes: bytes.subarray(0, length) };
+    result = { kind: "bytes", bytes: bytes.subarray(0, length), identity: Object.freeze({ ...after }) };
   } catch (error) {
     // Unknown I/O is not absence or a healthy fallback; never surface OS messages/private paths.
     result = { kind: "unknown", reason: error instanceof ReadRefusal ? error.reason
@@ -142,7 +148,7 @@ async function readBounded(path: string, maxBytes: number, signal: AbortSignal, 
   return result!;
 }
 
-async function readWithDeadline(path: string, maxBytes: number, timeoutMs: number, external: AbortSignal | undefined, io: RegistryFileIO): Promise<{ kind: "bytes"; bytes: Buffer } | Unknown> {
+async function readWithDeadline(path: string, maxBytes: number, timeoutMs: number, external: AbortSignal | undefined, io: RegistryFileIO): Promise<RegistryBytes | Unknown> {
   if (external?.aborted) return { kind: "unknown", reason: "cancelled" };
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout>;
@@ -216,5 +222,93 @@ export async function readSelectedInstanceRegistry(input: RegistrySelectionInput
       return current as Unknown | Refused;
     },
   });
+  trustedRegistryBytes.set(binding, { path, text, identity: bytes.identity, io, maxBytes, timeoutMs, contractVersion });
   return { kind: "ready", binding };
+}
+
+interface TrustedRegistryBytes {
+  readonly path: string;
+  readonly text: string;
+  readonly identity: Readonly<RegistryFileStamp>;
+  readonly io: RegistryFileIO;
+  readonly maxBytes: number;
+  readonly timeoutMs: number;
+  readonly contractVersion: number;
+}
+const trustedRegistryBytes = new WeakMap<SelectedRegistryBinding, TrustedRegistryBytes>();
+export interface InstanceRegistryRuntimeInput extends RegistrySelectionInput { instanceName?: string }
+interface InstanceRegistryRuntime {
+  readonly binding?: SelectedRegistryBinding;
+  readonly instanceName?: string;
+  active: boolean;
+}
+const runtimeRegistry = new AsyncLocalStorage<InstanceRegistryRuntime>();
+
+export class InstanceRegistryRuntimeError extends RmdError {
+  constructor(reason: string) { super("registry", 2, `selected instance registry unavailable (${reason})`, { reason }); }
+}
+
+function selectedRuntime(): InstanceRegistryRuntime | undefined {
+  const current = runtimeRegistry.getStore();
+  if (current?.binding === undefined) return undefined;
+  if (!current.active) throw new InstanceRegistryRuntimeError("invocation_closed");
+  return current;
+}
+
+/** Trusted invocation scope only. No private path or raw lifecycle bytes are serialized on a binding. */
+export async function withInstanceRegistryRuntime<T>(
+  operation: () => T | Promise<T>,
+  input: InstanceRegistryRuntimeInput = { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME },
+  io: RegistryFileIO = registryFileIO,
+): Promise<T> {
+  let snapshot: InstanceRegistryRuntimeInput, stableIO: RegistryFileIO;
+  try {
+    snapshot = { ...input, ...(input.requiredCapabilities === undefined ? {} : { requiredCapabilities: [...input.requiredCapabilities] }) };
+    const lstat = io.lstat.bind(io), open = io.open.bind(io);
+    stableIO = Object.freeze({ lstat, open: async (path: string) => {
+      const handle = await open(path);
+      return Object.freeze({ stat: handle.stat.bind(handle), read: handle.read.bind(handle), close: handle.close.bind(handle) });
+    } });
+  } catch {
+    // Unreadable input or transport cannot establish a selected runtime, never a legacy fallback.
+    throw new InstanceRegistryRuntimeError("input_unreadable");
+  }
+  if (snapshot.instanceName !== undefined && (typeof snapshot.instanceName !== "string" || !/^[A-Za-z0-9_-]+$/.test(snapshot.instanceName))) {
+    throw new InstanceRegistryRuntimeError("invalid_instance");
+  }
+  const read = await readSelectedInstanceRegistry(snapshot, stableIO);
+  if (read.kind !== "ready" && read.kind !== "legacy") throw new InstanceRegistryRuntimeError(read.reason);
+  const scope: InstanceRegistryRuntime = { active: true,
+    ...(read.kind === "ready" ? { binding: read.binding, instanceName: snapshot.instanceName } : {}) };
+  try { return await runtimeRegistry.run(scope, operation); }
+  finally { scope.active = false; }
+}
+
+export function instanceRegistryRuntimePresent(): boolean { return runtimeRegistry.getStore() !== undefined; }
+
+export function runtimeInstanceRegistryText(): string | undefined {
+  const scope = selectedRuntime();
+  return scope?.binding === undefined ? undefined : trustedRegistryBytes.get(scope.binding)!.text;
+}
+
+export function runtimeInstanceRegistryMode(ownerRepo: string): "shadow" | "live" | undefined {
+  const scope = selectedRuntime();
+  if (scope?.binding === undefined) return undefined;
+  const matches = scope.binding.instances.filter(row => row.repo.toLowerCase() === ownerRepo.toLowerCase()
+    && (scope.instanceName === undefined || row.name === scope.instanceName));
+  if (matches.length !== 1 || !matches[0]!.live) throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
+  return matches[0]!.mode ?? "live";
+}
+
+/** The initial identity is retained; equal bytes at a replacement inode are still a revised runtime input. */
+export async function assertInstanceRegistryRuntimeCurrent(): Promise<void> {
+  const scope = selectedRuntime();
+  if (scope?.binding === undefined) return;
+  const original = trustedRegistryBytes.get(scope.binding)!;
+  const read = await readSelectedInstanceRegistry({ cliPath: original.path, expectedDigest: scope.binding.digest,
+    contractVersion: original.contractVersion, maxBytes: original.maxBytes, timeoutMs: original.timeoutMs }, original.io);
+  if (read.kind !== "ready") throw new InstanceRegistryRuntimeError(read.kind === "legacy" ? "selection_missing" : read.reason);
+  const current = trustedRegistryBytes.get(read.binding)!;
+  if (!sameStamp(original.identity, current.identity)) throw new InstanceRegistryRuntimeError("revision_changed");
+  if (!scope.active) throw new InstanceRegistryRuntimeError("invocation_closed");
 }
