@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { promptFrom } from "#test/review-finding-fix-prompt.test.js";
+import { promptFrom } from "#test/helpers/review-finding-fix-prompt.js";
 
 test("W1-T10306: check:test:test/review-finding-fix-prompt.test.ts:flaky is prevented, not retried", async () => {
   const head = "a".repeat(40);
