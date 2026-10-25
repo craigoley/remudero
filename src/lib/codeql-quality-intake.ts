@@ -29,6 +29,7 @@ export interface CodeHealthImprovementOpportunity {
   uncertainty: string[];
   mayPlan: boolean;
   evidence: Array<{ fingerprint: string; sourceId: string; scanId: string; analyzedSha: string | null; observedAt: string | null; severity: string; title: string; path: string }>;
+  evidenceCount: number;
   effortMinutes: number | null;
   estimateKind: "modeled" | null;
   relatedWork: CodeHealthRelatedWork[];
@@ -46,6 +47,8 @@ export function qualityScanFromCollectedEvidence(input: {
       new Set(requiredLanguages).size !== requiredLanguages.length || requiredLanguages.some(language => !/^[a-z][a-z0-9-]{0,63}$/.test(language)) ||
       knownFindingIds.size > 1000 || [...knownFindingIds].some(id => !/^[1-9][0-9]*$/.test(id)) ||
       input.artifacts.length > 32 || input.analyses.length > 100) throw new Error("Code health configured source inventory is invalid.");
+  if (input.collectedAt !== undefined && (!Number.isFinite(Date.parse(input.collectedAt)) || fixedClock(Date.parse(input.collectedAt)).iso() !== input.collectedAt))
+    throw new Error("Code health collection observation time is invalid.");
   const artifacts = input.artifacts.map(value => validateCodeHealthProvenance(value, { repository, analyzedSha, runId, kind: "quality" }));
   if (new Set(artifacts.map(artifact => artifact.language)).size !== artifacts.length || artifacts.some(artifact => !requiredLanguages.includes(artifact.language!)))
     throw new Error("Code health source inventory repeats a language or includes an unconfigured analysis.");
@@ -53,11 +56,15 @@ export function qualityScanFromCollectedEvidence(input: {
   for (const language of requiredLanguages) {
     const artifact = artifacts.find(value => value.language === language);
     if (!artifact || artifact.state !== "complete") { reasons.add("A configured language analysis is missing or incomplete."); continue; }
+    // GitHub's indexing clock is not the original analysis clock. It must precede this collection,
+    // while the source retains its own original measurement time. Legacy pure callers stay conservative.
+    const cutoff = Date.parse(input.collectedAt ?? artifact.observedAt);
+    if (Date.parse(artifact.observedAt) > cutoff) { reasons.add("The source measurement is later than this collection."); continue; }
     const candidates = input.analyses.filter(value => value.sarifId === artifact.sarifId);
     const analysis = candidates[0];
     if (candidates.length !== 1 || !analysis || analysis.analyzedSha !== analyzedSha.toLowerCase() || analysis.category !== `/language:${language}` ||
         analysis.toolVersion !== artifact.toolVersion || !analysis.analysisKey || !/^[a-f0-9]{64}$/.test(analysis.environmentHash) ||
-        !Number.isFinite(Date.parse(analysis.createdAt)) || Date.parse(analysis.createdAt) > Date.parse(artifact.observedAt) ||
+        !Number.isFinite(Date.parse(analysis.createdAt)) || Date.parse(analysis.createdAt) > cutoff ||
         analysis.rulesCount !== artifact.ruleCount || analysis.error || analysis.warning) {
       reasons.add("A source artifact cannot be matched to its successful GitHub analysis."); continue;
     }
@@ -169,7 +176,7 @@ export function buildCodeHealthOpportunities(input: CodeHealthProjectionInput, r
         ...(!mayPlan ? ["Refresh this finding's source before starting an actionable plan."] : [])], mayPlan,
       evidence: findings.map(finding => ({ fingerprint: finding.fingerprint, sourceId: source.id, scanId: scan.scanId, analyzedSha: source.analyzedSha,
         observedAt: source.observedAt, severity: finding.severity, title: finding.title, path: finding.path })),
-      effortMinutes, estimateKind: effortMinutes === null ? null : "modeled" as const, relatedWork: scopedRelated(proposalId) };
+      evidenceCount: findings.length, effortMinutes, estimateKind: effortMinutes === null ? null : "modeled" as const, relatedWork: scopedRelated(proposalId) };
   });
 }
 

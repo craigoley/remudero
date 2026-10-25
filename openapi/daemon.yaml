@@ -9202,6 +9202,7 @@ components:
               - acceptanceIdeas
               - uncertainty
               - mayPlan
+              - evidenceCount
               - evidence
               - effortMinutes
               - estimateKind
@@ -9236,6 +9237,11 @@ components:
                 maxItems: 16
               mayPlan:
                 type: boolean
+              evidenceCount:
+                type: integer
+                minimum: 0
+                description: Total stable findings in this group; evidence entries may be paged. Effort estimates describe the
+                  whole group.
               evidence:
                 type: array
                 items:

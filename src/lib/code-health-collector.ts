@@ -221,7 +221,7 @@ export async function collectCodeHealth(opts: CollectCodeHealthOptions): Promise
     const old = previous.state === "observed" ? previous.snapshot.input : null;
     const knownFindingIds = [...new Set((old ? [...old.scans, ...(old.baseline?.scans ?? []), ...(old.retainedEvidence ?? []).map(entry => entry.scan)] : [])
       .filter(scan => scan.kind === "quality").flatMap(scan => scan.findings.map(finding => finding.id)))];
-    const quality = qualityScanFromCollectedEvidence({ ...read.quality, repository: opts.repository, source, knownFindingIds });
+    const quality = qualityScanFromCollectedEvidence({ ...read.quality, repository: opts.repository, source, knownFindingIds, collectedAt: clock.iso() });
     const coverage = readCodeHealthCoverageSource(opts.coverageStateDir ?? opts.stateDir, opts.repository);
     const scans: CodeHealthScan[] = [quality];
     if (coverage.state === "observed") {
