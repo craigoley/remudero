@@ -4,6 +4,10 @@ import { parseProposalRegistryResult } from "./inbox.js";
 import { inboxThreadId } from "./inbox-thread.js";
 import { OPPORTUNITY_EVIDENCE_FILE, OPPORTUNITY_EVIDENCE_MAX_BYTES, projectGardenerOpportunityEvidence } from "./gardener-opportunity-evidence.js";
 
+class CodeHealthInventoryNotReady extends RmdError {
+  constructor(message: string) { super("read-model", GENERIC_EXIT_CODE, message); }
+}
+
 export const CODE_HEALTH_INTERVAL_MS = 86_400_000;
 export interface CodeHealthSavedWork { repository: string; proposalId: string; taskId?: string; prUrl?: string; threadId?: string }
 import { createHash, randomUUID } from "node:crypto";
@@ -328,7 +332,7 @@ export function readCodeHealthInventory(stateDir: string): RepositoryEvidenceInv
   const raw = readCodeHealthArtifactJson(join(stateDir, "read-model", "repositories-sources.json"), 2 * 1024 * 1024) as { improvementEvidence?: RepositoryEvidenceInventory };
   const checked = validateRepositoryEvidenceInventory(raw?.improvementEvidence);
   if (!checked.ok || !checked.value.repositories.length || checked.value.repositories.length > 256 || checked.value.unresolvedInstances.length > 256 ||
-      checked.value.repositories.some(repo => !isCodeHealthRepository(repo.repository))) throw new RmdError("read-model", GENERIC_EXIT_CODE, "Code health is waiting for the configured repository list.");
+      checked.value.repositories.some(repo => !isCodeHealthRepository(repo.repository))) throw new CodeHealthInventoryNotReady("Code health is waiting for the configured repository list.");
   return checked.value;
 }
 export function readCodeHealthRelatedWork(stateDir: string, inventory: RepositoryEvidenceInventory, repository: string, now: number): {
