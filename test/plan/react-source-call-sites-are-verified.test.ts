@@ -44,6 +44,8 @@ test("React support preserves TypeScript caller and invocation controls", () => 
   const ts = task(["src/sim/world.ts"], ["grep: createWorld( in src/game/runtime.ts"]);
   assert.deepEqual(callSiteViolations(ts, { moduleExists: held("src/game/runtime.ts"), callSite: "block" }), []);
   for (const caller of ["src/App.tsx", "src/game/runtime.ts"]) {
+    const invocation = task(["src/sim/world.ts"], [`grep: createWorld( in ${caller}`]);
+    assert.deepEqual(callSiteViolations(invocation, { moduleExists: held(caller), callSite: "block" }), [], "the same caller must accept an actual invocation");
     const mention = task(["src/sim/world.ts"], [`grep: createWorld in ${caller}`]);
     assert.equal(callSiteViolations(mention, { moduleExists: held(caller), callSite: "block" }).length, 1);
   }
