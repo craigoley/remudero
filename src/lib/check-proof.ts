@@ -488,9 +488,10 @@ export function checkProofCommand(
   /**
    * W1-T1224 — WHY a zero-hit `grep:` proof read zero, as a `cause:` line alongside the unchanged
    * `verdict:`/exit code (design (iii): report, do not re-rank). Calls {@link classifyGrepZeroHit}
-   * (src/lib/grep-zero-cause.ts) — this file derives NO cause of its own, only reads the file and
-   * formats what the classifier returns. `undefined` when there is nothing to say: a non-grep
-   * proof, or a target path/pattern argv could not resolve.
+   * (src/lib/grep-zero-cause.ts) and formats its result. For an absent pattern, the existing
+   * wrapper detector can explain that its bare literal identifier is already present. This
+   * diagnostic leaves the shared filing classifier and real executor unchanged. `undefined`
+   * when there is nothing to say: a non-grep proof, or unresolved target path/pattern argv.
    */
   function grepZeroHitCauseLine(): string | undefined {
     // grepTargetPath/grepPattern are only ever set (above) when w.kind === "grep" — reading them
