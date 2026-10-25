@@ -1,0 +1,29 @@
+- id: W1-T10644
+  title: "REPAIR THE SELECTOR EDGE INTO test/a-plan-only-pr-requeues-its-cancelled-check.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/a-plan-only-pr-requeues-its-cancelled-check.test.ts"
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  note: "W1-T4439 first observed a floor miss on coverage run 40212330452 for PR #14196 at 6106f56ce20774810ad904f0ffde38d37719ddda: src/lib/sweep.ts, test/a-superseded-runs-rerun-never-overrides-the-newest-run.test.ts -> test/a-plan-only-pr-requeues-its-cancelled-check.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in test/the-affected-suite-selector-runs-in-shadow.test.ts that selects test/a-plan-only-pr-requeues-its-cancelled-check.test.ts for each edge: diff-coverage blocks an edge no test exercises."
+  acceptance:
+    - claim: "the floor selector includes test/a-plan-only-pr-requeues-its-cancelled-check.test.ts when this edge is exercised"
+      proof: "grep: test/a-plan-only-pr-requeues-its-cancelled-check\\.test\\.ts in src/lib/affected-suites.ts"
+    - claim: "a regression test selects test/a-plan-only-pr-requeues-its-cancelled-check.test.ts for each recorded edge"
+      proof: "grep: test/a-plan-only-pr-requeues-its-cancelled-check\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The description and files list show a narrow change: adding one edge to the affected-suite selector in src/lib/affected-suites.ts and a regression test in test/the-affected-suite-selector-runs-in-shadow.test.ts. Nothing in the text points to secrets, auth, deletion, merge/deploy/review policy, or irreversible actions."
+      - "The filed record gives verifiable acceptance criteria (grep checks) and cites a concrete miss (coverage run 40212330452, PR #14196). Both declared files exist at the base, so the finding can be checked from what is shown."
+      - "The selector-shadow-miss family has a strong track record (18 merged, 0 declined, Beta mean 0.95), and the change fits established practice for repairing selector edges. The task asks for no operator-only decision, and CI and review still apply."
+    judged_at: "2026-10-25T20:51:58.428Z"
+    pin: "0ecccbeaa9cd843f3b881d9fe20147a4510089c1ae817eb19e32f7cafa705c9d"

@@ -18,17 +18,21 @@
     - W1-T4657
     - W1-T4658
     - W1-T4694
+    - W1-T10572
   files:
     - src/lib/product-intent.ts
     - src/lib/product-intent-store.ts
     - src/lib/product-routes.ts
     - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/route-wiring.test.ts
     - test/infra/product-intents.test.ts
     - test/console-api/serve/product-routes.test.ts
   status: queued
   attempts: 0
-  rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required.
-  design: "Implement product-intent-v1: bounded idea, portfolio, decisions with provenance, research links, repository identity, objective revision, resource envelope and stage evidence. Use one core-owned durable store under the existing state root, atomic commit and optimistic revisions; no browser/localStorage authority and no new hosted database. Derive owner only from service verifiedActor; require the signed operator identity for reads and writes, never a browser owner field or shared-bearer substitute. Mount real GET /v1/products and POST /v1/products routes from serve. Unknown store, corrupt JSON, conflicts and unavailable identity remain explicit failures. Include Wreckterra as a fixture only, not a hard-coded user/product. Preserve ledger/history receipts. Bound keys, collections, text, request bytes and output; do not log source idea text or credentials."
+  rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required. W1-T10572 shares only the contract and generated client files to reconcile independent gardener descriptions; this task adds private product routes and DTOs, and does not supersede or duplicate that Analytics declaration work.
+  design: "Implement product-intent-v1: bounded idea, portfolio, decisions with provenance, research links, repository identity, objective revision, resource envelope and stage evidence. Use one core-owned durable store under the existing state root, atomic commit and optimistic revisions; no browser/localStorage authority and no new hosted database. Derive owner only from service verifiedActor; require the signed operator identity for reads and writes, never a browser owner field or shared-bearer substitute. Mount real GET /v1/products and POST /v1/products routes from serve. Declare both routes and their bounded request, response and error schemas in openapi/daemon.yaml; regenerate packages/api-client/src/schema.d.ts through the maintained generator. Register POST /v1/products in the actual tested route-wiring population, pointing to its assembled HTTP behavioral proof; do not add contract baselines or wiring debt. Hosted qualification of PR14208 exposed these integration requirements, so the same task scope now includes the contract, generated client and wiring inventory rather than a second implementation task. Unknown store, corrupt JSON, conflicts and unavailable identity remain explicit failures. Include Wreckterra as a fixture only, not a hard-coded user/product. Preserve ledger/history receipts. Bound keys, collections, text, request bytes and output; do not log source idea text or credentials."
   acceptance:
     - claim: product brief survives restart and rejects another principal
       proof: "unit test: W1-T10612: product brief survives restart and rejects another principal"
