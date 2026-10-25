@@ -309,6 +309,15 @@ export function instanceRegistryRuntimePresent(): boolean { return runtimeRegist
 /** Trusted harness input only: never forward this value to worker env, prompt, argv or diagnostics. */
 export function runtimeInstanceRegistryPrivateFile(): string | undefined { return selectedRuntime()?.canonicalPath; }
 
+export function assertInstanceRegistryWorkerEnvironment(env: Readonly<Record<string, string>> | undefined): void {
+  const selected = runtimeInstanceRegistryPrivateFile();
+  if (selected === undefined || env === undefined) return;
+  if (Object.entries(env).some(([key, value]) => typeof value !== "string"
+    || key.startsWith("RMD_INSTANCE_REGISTRY") || value.includes(selected))) {
+    throw new InstanceRegistryRuntimeError("worker_environment_private_source");
+  }
+}
+
 export function runtimeInstanceRegistryDigest(): string | undefined { return selectedRuntime()?.binding?.digest; }
 
 /** Explicit trusted launcher channel, never a public projection, diagnostic or untrusted worker input. */

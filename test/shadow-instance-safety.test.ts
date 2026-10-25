@@ -495,8 +495,10 @@ test("selected private denials follow scratch-backed Claude invocations without 
         if (scratch) process.env.RMD_WORKER_HOME_DIR = `${config.root}:${join(fixture.root, "scratch", "worker-homes")}`;
         else delete process.env.RMD_WORKER_HOME_DIR;
         await spawnWorker(args);
-        const policy = sink.options!.settings as { sandbox: { filesystem: { denyRead: string[] } } };
-        assert.ok(policy.sandbox.filesystem.denyRead.includes(selected), "actual SDK policy still protects the physical input under either home");
+        const policy = sink.options!.settings as { sandbox: { filesystem: { denyRead: string[]; allowRead: string[] } } };
+        assert.ok(policy.sandbox.filesystem.denyRead.includes("/"));
+        assert.ok(policy.sandbox.filesystem.allowRead.every(path => selected !== path && !selected.startsWith(path + "/")), "actual SDK positive scopes exclude the physical input under either home");
+        assert.equal(JSON.stringify(policy).includes(selected), false);
         assert.equal(readFileSync(rendered, "utf8").includes(selected), false);
       }
       assert.equal(sink.calls, 2);
@@ -573,10 +575,10 @@ test("selected Claude actual SDK transport keeps private registry paths out of c
     assert.equal(JSON.stringify(argv).includes(fixture.selected), false, "inline policy JSON is a private-path disclosure");
     assert.equal(JSON.stringify(argv).includes(args.settingsFile), false);
     assert.ok(policyPath && policy, "the child receives one opaque invocation policy path, not private policy bytes");
-    const filesystem = (policy.sandbox as { filesystem: { denyRead: string[]; denyWrite: string[] } }).filesystem;
-    for (const target of [fixture.selected, args.settingsFile, policyPath]) {
-      assert.ok(filesystem.denyRead.includes(target)); assert.ok(filesystem.denyWrite.includes(target));
-    }
+    const filesystem = (policy.sandbox as { filesystem: { denyRead: string[]; denyWrite: string[]; allowRead: string[] } }).filesystem;
+    assert.ok(filesystem.denyRead.includes("/")); assert.ok(filesystem.denyWrite.includes(policyPath), "public invocation policy cannot be rewritten to grant itself private access");
+    for (const target of [fixture.selected, args.settingsFile]) assert.equal(JSON.stringify(policy).includes(target), false);
+    assert.ok(filesystem.allowRead.every(path => fixture.selected !== path && !fixture.selected.startsWith(path + "/")));
     assert.equal(existsSync(policyPath), false, "the owned invocation policy is gone after its SDK stream closes");
   } finally { fixture.cleanup(); }
 });
@@ -591,12 +593,13 @@ test("selected Claude SDK boundary snapshots private denials across queued argum
         () => { throw new Error("forbidden external egress in private-policy fixture"); }) };
       await runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected });
       assert.equal(sink.calls, 1);
-      const settings = sink.options!.settings as { sandbox: { filesystem: { denyRead: string[]; denyWrite: string[] }; network?: Record<string, unknown> }; permissions: { deny: string[] } };
+      const settings = sink.options!.settings as { sandbox: { filesystem: { denyRead: string[]; denyWrite: string[]; allowRead: string[] }; network?: Record<string, unknown> }; permissions: { deny: string[] } };
       for (const target of [fixture.selected, originalPolicy]) {
-        assert.ok(settings.sandbox.filesystem.denyRead.includes(target));
-        assert.ok(settings.sandbox.filesystem.denyWrite.includes(target));
-        assert.ok(settings.permissions.deny.includes(`Read(/${target})`));
+        assert.equal(JSON.stringify(settings).includes(target), false, "neither policy nor permissions disclose the captured private inputs");
+        assert.ok(settings.sandbox.filesystem.allowRead.every(path => target !== path && !target.startsWith(path + "/")));
       }
+      assert.ok(settings.sandbox.filesystem.denyRead.includes("/"));
+      assert.equal(sink.options!.permissionMode, "dontAsk");
       assert.equal(settings.sandbox.filesystem.denyRead.includes(args.settingsFile), false, "queued caller mutation never retargets the invocation policy file");
       assert.equal(String(sink.prompt).includes("retargeted"), false, "queued caller mutation cannot replace the captured dispatch");
       assert.equal(JSON.stringify(sink.options!.env).includes(fixture.selected), false, "private file is not an untrusted child environment grant");
@@ -604,6 +607,31 @@ test("selected Claude SDK boundary snapshots private denials across queued argum
       if (proxy) assert.equal(typeof settings.sandbox.network!.httpProxyPort, "number", "the real egress replacement retained filesystem denials");
     } finally { fixture.cleanup(); }
   }
+});
+
+test("selected Claude scopes and worker environment refuse unknown private access before query", async () => {
+  for (const mode of ["tmp-overlap", "tmp-relative", "home-override", "unsafe-allow", "unsafe-read", "private-policy", "private-env", "selection-env"] as const) {
+    const fixture = runtimeRegistryFixture(), sink = { calls: 0 };
+    try {
+      const args = privateClaudeArgs(fixture, sink), policy = JSON.parse(readFileSync(args.settingsFile, "utf8"));
+      if (mode === "tmp-overlap") args.env!.TMPDIR = fixture.root;
+      if (mode === "tmp-relative") args.env!.TMPDIR = "relative";
+      if (mode === "home-override") args.env!.HOME = fixture.root;
+      if (mode === "unsafe-allow") policy.permissions = { allow: ["Read"] };
+      if (mode === "unsafe-read") policy.sandbox.filesystem = { allowRead: ["/"] };
+      if (mode === "private-policy") policy.sandbox.filesystem = { denyRead: [fixture.selected] };
+      if (mode === "private-env") args.env!.ARBITRARY_FIXTURE_VALUE = fixture.selected;
+      if (mode === "selection-env") args.env!.RMD_INSTANCE_REGISTRY_DIGEST = "fixture-not-a-worker-grant";
+      writeFileSync(args.settingsFile, JSON.stringify(policy));
+      await assert.rejects(runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected }), error => {
+        assert.ok(error instanceof runtimeRegistry.InstanceRegistryRuntimeError);
+        assert.equal(error.message.includes(fixture.root), false);
+        assert.match(error.message, /worker_(scope|policy|environment)_/); return true;
+      });
+      assert.equal(sink.calls, 0);
+    } finally { fixture.cleanup(); }
+  }
+  assert.doesNotThrow(() => runtimeRegistry.assertInstanceRegistryWorkerEnvironment({ RMD_INSTANCE_REGISTRY: "unchanged-legacy-caller" }));
 });
 
 test("selected Claude SDK final recheck refuses changed missing and replaced policy or registry before query", async () => {

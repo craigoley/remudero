@@ -42,7 +42,7 @@ import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { makeTempDir, withTempDir } from "./tmp.js";
-import { assertInstanceRegistryRuntimeCurrent, runtimeInstanceRegistryPrivateFile, InstanceRegistryRuntimeError } from "./instance-registry-selection.js";
+import { assertInstanceRegistryRuntimeCurrent, assertInstanceRegistryWorkerEnvironment, runtimeInstanceRegistryPrivateFile, InstanceRegistryRuntimeError } from "./instance-registry-selection.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
@@ -2897,6 +2897,7 @@ export async function spawnCodexWorker(
       throw new InstanceRegistryRuntimeError("worker_arguments_unqualified");
     }
     selection = selection && { ...selection };
+    assertInstanceRegistryWorkerEnvironment(args.env);
   }
   return withTempDir("codex-worker", (privateTmpDir) => {
     if (selected === undefined) return spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection);
