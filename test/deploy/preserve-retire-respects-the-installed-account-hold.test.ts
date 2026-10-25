@@ -18,7 +18,7 @@ function fixture() {
   return { root, home };
 }
 function probe(home: string, body: string) {
-  const code = `import importlib.util, json, os, pwd, shutil, subprocess, sys, time
+  const code = `import importlib.util, json, os, pwd, shutil, subprocess, sys, time, hashlib
 spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 home = sys.argv[2]
 authority = os.path.join(home, m.CONFIG_REL)
@@ -109,8 +109,20 @@ actions = [
     ("archive", lambda: m.save_tar(root, ["repo/README"], archive)),
     ("expire-incoming", lambda: m.expire(cfg, now)),
 ]
+def snapshot():
+    result = []
+    for top in [root, expiry]:
+        for dp, dirs, files in os.walk(top):
+            result.append((dp, os.lstat(dp).st_mode))
+            for name in sorted(files):
+                p = os.path.join(dp, name)
+                with open(p, "rb") as f: digest = hashlib.sha256(f.read()).hexdigest()
+                result.append((p, os.lstat(p).st_mode, digest))
+    return sorted(result)
 for name, action in actions:
+    before = snapshot()
     enabled(False); held(action)
+    assert snapshot() == before, (name, "held action changed fixture bytes or structure")
     enabled(True); action()
     print("authorized-positive", name)
 # The first expiry invocation above reaches incoming cleanup first; this one reaches stamped expiry.
