@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const PRODUCT_INTENT_VERSION = "product-intent-v1" as const;
-/** Storage and transport budgets; these grant no execution or provider authority. */
+/** PRIMARY CONTROL: maintained storage and transport quotas; these grant no execution or provider authority. */
 export const PRODUCT_INTENT_LIMITS = {
   requestBytes: 64 * 1024, productBytes: 24 * 1024, stateBytes: 4 * 1024 * 1024,
   products: 64, requests: 4096, history: 128,
