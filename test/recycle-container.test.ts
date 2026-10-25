@@ -1401,7 +1401,7 @@ function runInstance(extra: string[], mode = "good", opts: RunOpts = {}): Run {
   const scriptRoot = join(dirname(scriptPath), "..");
   assert.notEqual(resolve(scriptRoot), resolve(REPO_ROOT), "never write a fixture registry into the maintained checkout");
   mkdirSync(dirname(scriptPath), { recursive: true });
-  if (!opts.scriptPath) writeFileSync(scriptPath, readFileSync(SCRIPT));
+  if (!opts.scriptPath) cpSync(join(REPO_ROOT, "deploy"), dirname(scriptPath), { recursive: true });
   mkdirSync(join(scriptRoot, ".remudero"), { recursive: true });
   const registry = join(scriptRoot, ".remudero", "daemon-instances.yaml");
   const record = [
