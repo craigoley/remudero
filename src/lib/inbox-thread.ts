@@ -83,6 +83,8 @@ const OPERATOR_EVENT_KINDS: ReadonlySet<ThreadEventKind> = new Set(["reframed", 
 export interface ThreadMessageExtra {
   /** Durable write identity, independent of the caller's retry or process. */
   messageId?: string;
+  /** Saved source context; a planning comment is never an executable Inbox input. */
+  improvement?: { repository: string; instance: string; opportunityId: string; snapshotId: string; policyVersion: string; analyzedSha: string };
   event?: ThreadEvent;
   did?: { action: InboxThreadAction; undo?: string };
   suggestedAction?: InboxThreadAction;

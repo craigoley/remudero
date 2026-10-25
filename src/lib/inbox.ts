@@ -86,6 +86,9 @@ export interface ReframeRecord {
 
 /** One ACTIVE (not-yet-ratified) proposal the inbox tiers. */
 export interface Proposal {
+  /** Source-bound planning conversation. Opening or replying does not request drafting or filing. */
+  improvement?: { version: "improvement-thread-v1"; repository: string; instance: string; opportunityId: string; snapshotId: string;
+    requestId: string; threadId: string; goalDigest: string; conversationReady: boolean };
   /** Explicit mechanical producer purpose; never backfilled from human wording or verify mode. */
   automaticRetirement?: MechanicalAskPurpose;
   verificationAsk?: { producer: "verify-human-judge-v1" | "machine-filing-judge-v1"; taskId: string; proposalDigest: string };
