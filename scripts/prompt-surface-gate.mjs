@@ -74,10 +74,20 @@ function decodeGitPath(path) {
 export function parseUnifiedDiff(diffText) {
   const files = [];
   let current;
+  let ambiguousHeader = false, oldPathResolved = false, newPathResolved = false;
+  const requireResolvedPaths = () => {
+    if (ambiguousHeader && (!oldPathResolved || !newPathResolved)) {
+      throw new Error("prompt surface diff: ambiguous Git file header without authoritative paths");
+    }
+  };
   for (const line of diffText.split("\n")) {
     if (line.startsWith("diff --git ")) {
+      requireResolvedPaths();
       const fileMatch = /^diff --git ("(?:[^"\\]|\\.)*"|a\/.+) ("(?:[^"\\]|\\.)*"|b\/.+)$/.exec(line);
       if (!fileMatch) throw new Error("prompt surface diff: unparsed Git file header");
+      // Unquoted names may themselves contain " b/"; binary diffs have no ---/+++ fallback.
+      ambiguousHeader = fileMatch[1].startsWith("a/") && fileMatch[2].startsWith("b/") && line.split(" b/").length > 2;
+      oldPathResolved = newPathResolved = false;
       current = { oldPath: decodeGitPath(fileMatch[1]).replace(/^a\//, ""),
         newPath: decodeGitPath(fileMatch[2]).replace(/^b\//, ""), hunks: [], changedLines: [] };
       files.push(current);
@@ -87,19 +97,23 @@ export function parseUnifiedDiff(diffText) {
     // Rename records carry one whole path; an unquoted diff header can contain several " b/"s.
     if (line.startsWith("rename from ")) {
       current.oldPath = decodeGitPath(line.slice("rename from ".length));
+      oldPathResolved = true;
       continue;
     }
     if (line.startsWith("rename to ")) {
       current.newPath = decodeGitPath(line.slice("rename to ".length));
+      newPathResolved = true;
       continue;
     }
     if (line.startsWith("+++ ")) {
+      newPathResolved = true;
       const path = line.slice(4);
       if (path === "/dev/null") continue;
       current.newPath = decodeGitPath(path.replace(/\t$/, "")).replace(/^b\//, "");
       continue;
     }
     if (line.startsWith("--- ")) {
+      oldPathResolved = true;
       const path = line.slice(4);
       if (path === "/dev/null") continue;
       current.oldPath = decodeGitPath(path.replace(/\t$/, "")).replace(/^a\//, "");
@@ -123,6 +137,7 @@ export function parseUnifiedDiff(diffText) {
       current.changedLines.push(line);
     }
   }
+  requireResolvedPaths();
   return files;
 }
 

@@ -387,7 +387,25 @@ function effectFixture(before: string, after: string, extra: Record<string, unkn
 }
 
 test("an approved injected skill edit without prompt-effect evidence is refused", () => {
-  for (const name of ["two\tparts", 'two"parts', "two\\parts", "procédure", "two parts"]) withFixture(root => {
+  withFixture(root => {
+    const path = ".claude/skills/original b/SKILL.md";
+    write(root, path, skillSource("Original binary invariant.\0"));
+    assert.match(renderedSkillPrompt(root), /Original binary invariant/);
+    commit(root, "approved binary skill");
+    write(root, path, skillSource("Changed binary invariant.\0"));
+    assert.match(renderedSkillPrompt(root), /Changed binary invariant/);
+    commit(root, "binary skill body edit");
+    const diff = mod.readGitDiff(root, "HEAD^");
+    assert.match(diff, /Binary files .* differ/);
+    assert.doesNotMatch(diff, /^(?:--- |\+\+\+ |@@)/m, "no content paths can resolve the header");
+    assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }), /ambiguous Git file header/);
+    const errors: string[] = [];
+    assert.equal(mod.main(["--worktree-path", root, "--base", "HEAD^"], {
+      log: () => assert.fail("ambiguous binary skill edits must refuse"), error: message => errors.push(message),
+    }), 1);
+    assert.match(errors.join("\n"), /REFUSED.*ambiguous Git file header/);
+  });
+  for (const name of ["two\tparts", 'two"parts', "two\\parts", "procédure", "two parts", "original b"]) withFixture(root => {
     const path = `.claude/skills/${name}/SKILL.md`;
     write(root, path, skillSource("Original invariant."));
     assert.deepEqual(loadInjectableSkills(join(root, ".claude/skills")).map(skill => skill.name), [name]);
@@ -414,6 +432,26 @@ test("an approved injected skill edit without prompt-effect evidence is refused"
 });
 
 test("deleting or opting out a formerly injected skill retains its base-side prompt evidence obligation", () => {
+  withFixture(root => {
+    const path = ".claude/skills/original b/SKILL.md";
+    const body = "Formerly injected binary invariant.\0";
+    write(root, path, skillSource(body));
+    assert.match(renderedSkillPrompt(root), /Formerly injected binary invariant/);
+    commit(root, "approved binary skill before opt-out");
+    write(root, path, skillSource(body, "disable-model-invocation: true"));
+    write(root, "notes.txt", "An unrelated file after the ambiguous header.\n");
+    assert.equal(renderedSkillPrompt(root), "");
+    commit(root, "binary opt-out without evidence");
+    const diff = mod.readGitDiff(root, "HEAD^");
+    assert.match(diff, /Binary files .* differ/);
+    assert.doesNotMatch(diff.split("\ndiff --git ")[0], /^(?:--- |\+\+\+ |@@)/m);
+    assert.throws(() => mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }), /ambiguous Git file header/);
+    const errors: string[] = [];
+    assert.equal(mod.main(["--worktree-path", root, "--base", "HEAD^"], {
+      log: () => assert.fail("ambiguous binary opt-outs must retain their obligation"), error: message => errors.push(message),
+    }), 1);
+    assert.match(errors.join("\n"), /REFUSED.*ambiguous Git file header/);
+  });
   for (const name of ["renamed b", 'renamed"skill', "renamed\tskill"]) withFixture(root => {
     const path = ".claude/skills/original b/SKILL.md";
     const renamed = `.claude/skills/${name}/SKILL.md`;
@@ -456,6 +494,11 @@ test("deleting or opting out a formerly injected skill retains its base-side pro
     'diff --git "a/.claude/skills/procedure/SKILL.md" "b/.claude/skills/invalid\\377/SKILL.md"',
   ]) assert.throws(() => mod.evaluatePromptSurfaceDiff(header, { root: REPO_ROOT, base: "unused" }),
     /unparsed Git file header|invalid Git-quoted path|encoded data/, "unreadable paths never become an empty diff");
+  const ambiguousHeader = "diff --git a/.claude/skills/original b/SKILL.md b/.claude/skills/original b/SKILL.md\n";
+  for (const metadata of ["--- a/.claude/skills/original b/SKILL.md\n", "+++ b/.claude/skills/original b/SKILL.md\n"]) {
+    assert.throws(() => mod.evaluatePromptSurfaceDiff(ambiguousHeader + metadata, { root: REPO_ROOT, base: "unused" }),
+      /ambiguous Git file header/, "both paths must resolve before evaluating reachability");
+  }
   for (const path of [".claude", ".claude/skills", ".claude/skills/procedure"]) withFixture(root => {
     const source = path === ".claude" ? "target/skills/procedure/SKILL.md" :
       path === ".claude/skills" ? "target/procedure/SKILL.md" : "target/SKILL.md";
@@ -601,10 +644,11 @@ test("injected skill surface regressions preserve selection and operator-only ma
   }
   withFixture(root => {
     const path = '.claude/skills/operator"macro/SKILL.md';
-    write(root, path, skillSource("Old macro.", "disable-model-invocation: true"));
+    write(root, path, skillSource("Old macro.\0", "disable-model-invocation: true"));
     commit(root, "quoted operator-only macro");
-    write(root, path, skillSource("New macro.", "disable-model-invocation: true"));
+    write(root, path, skillSource("New macro.\0", "disable-model-invocation: true"));
     commit(root, "sole quoted macro edit");
+    assert.match(mod.readGitDiff(root, "HEAD^"), /Binary files .* differ/);
     assert.equal(mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" }).ok, true);
     assert.equal(renderedSkillPrompt(root), "");
     const skills = [{ name: "procedure", body: "procedure", appliesTo: ["implement"] }];
