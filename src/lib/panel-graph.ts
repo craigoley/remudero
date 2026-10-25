@@ -110,7 +110,7 @@ import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUni
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, validInboxSnapshot, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type InboxSourceIdentity, type PersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
-import { inboxOwner, inboxSender, latestInstant, type InboxSender } from "./inbox-owner.js";
+import { inboxOwner, inboxSender, isAgeOnlyInboxInformation, latestInstant, type InboxSender } from "./inbox-owner.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { mergeVerdictReceipts, proposalVerdictsWithReceipts, readVerdictReceipts, verdictReceiptOf, PROPOSAL_VERDICT_RECEIPT_STEPS, type VerdictReceipt } from "./inbox-verdict-receipts.js";
 import { judgementFamily } from "./machine-filing-judge.js";
@@ -2561,6 +2561,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   const stores = classified.stores ?? readInboxStores(inboxRoot, proposals, { plan: classified.plan, ledgerLines });
   // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
   const plainStore = stores.plainMessages;
+  const restoredForReview = new Set(classifications.filter(c => c.retirement?.state === "restored_for_review").map(c => c.proposalId));
   // W1-T8825: who sent each item and when, from stored instants only.
   const senderOf = (id: string): InboxSender => {
     const known = stores.provenance?.[id];
@@ -2568,7 +2569,8 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   };
 
   // W1-T8826: the plain message with each option's intent and, per lane, the route that performs it — attached here, never stored.
-  const servedPlain = (proposal: { id: string; summary: string }, lane: InboxOptionLane) => servePlainOptions(plainInboxMessage(proposal, plainStore), lane, proposal.id);
+  const servedPlain = (proposal: Proposal, lane: InboxOptionLane) => servePlainOptions(plainInboxMessage(proposal, plainStore), lane, proposal.id,
+    isAgeOnlyInboxInformation({ ...proposal, requiresReview: restoredForReview.has(proposal.id) }));
   // W1-T8950: an operator item's recommended decision, current for its summary and lane, with its route attached here.
   const recommended = (proposal: { id: string; summary: string }, lane: InboxOptionLane): { recommendation?: ServedRecommendation } => {
     const recommendation = recommendationFor(proposal, lane, stores.recommendations ?? {});
@@ -2652,9 +2654,9 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
   // `fleet` holds the fleet's own findings with the lane each sits in. The top-level
   // lanes retain records; only the shared projection selects the operator's asks (W1-T5340).
-  const restoredForReview = new Set(classifications.filter(c => c.retirement?.state === "restored_for_review").map(c => c.proposalId));
-  const isOperator = (item: { proposalId: string }) => restoredForReview.has(item.proposalId) || inboxOwner({ id: item.proposalId }) === "operator";
-  const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)));
+  const ownerOf = (id: string) => restoredForReview.has(id) ? "operator" as const : inboxOwner(byId.get(id) ?? { id });
+  const isOperator = (item: { proposalId: string }) => ownerOf(item.proposalId) === "operator";
+  const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)), "core", ownerOf);
   const asks = new Set(humanGates.gates.map((gate) => decodeURIComponent(gate.key.split(":")[2]!)));
   const isAsk = (item: { proposalId: string }) => asks.has(item.proposalId);
   const operatorItems = <T extends { proposalId: string }>(items: T[]) => items.filter(isOperator)
@@ -2830,8 +2832,9 @@ function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan
   for (const c of classifications) {
     const state = CLASSIFICATION_TO_THREAD_STATE[c.state];
     const proposal = proposals.find((p) => p.id === c.proposalId);
-    if (!state || !proposal || inboxOwner(proposal) !== "operator" && !c.retirement) continue;
+    if (!state || !proposal || inboxOwner(proposal) !== "operator" && !isAgeOnlyInboxInformation(proposal) && !c.retirement) continue;
     items.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), state,
+      ...(isAgeOnlyInboxInformation({ ...proposal, requiresReview: c.retirement?.state === "restored_for_review" }) ? { informational: true } : {}),
       ...((deps.inboxSourceIdentity ?? deps.inboxAuditScope) ? { causalScope: deps.inboxSourceIdentity ?? deps.inboxAuditScope } : {}),
       ...(proposal.reframeHistory ? { reframeHistory: proposal.reframeHistory } : {}),
       ...(c.retirement?.state === "restored_for_review" ? { requiresReview: true } : {}) });
@@ -3615,6 +3618,7 @@ function proposalVerdictResponse(
   respond: InboxVerbRespond,
 ): void {
   const { proposals, classifications } = classifyAllProposals(deps);
+  if (refuseInformationalProposal(proposals, classifications, input.proposalId, respond)) return;
   const found = {
     exists: proposals.some((p) => p.id === input.proposalId),
     classification: classifications.find((c) => c.proposalId === input.proposalId),
@@ -3773,6 +3777,16 @@ export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: ()
   ];
 }
 
+/** A readable age observation is not a decision or execution request, including through old options. */
+function refuseInformationalProposal(proposals: Proposal[], classifications: InboxClassification[], proposalId: string, respond: InboxVerbRespond): boolean {
+  const matches = proposals.filter(proposal => proposal.id === proposalId);
+  const classified = classifications.filter(item => item.proposalId === proposalId);
+  if (matches.length !== 1 || classified.length !== 1 || !isAgeOnlyInboxInformation({ ...matches[0]!,
+    requiresReview: classified[0]!.retirement?.state === "restored_for_review" })) return false;
+  respond(409, { error: "informational_only", detail: "This age observation is readable information, not an operator decision or work request." });
+  return true;
+}
+
 export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxCausalScope): InboxVerbActions {
   return {
     approve: validatedInboxAction(validateApproveProposal, async (input, actor, respond) => {
@@ -3793,6 +3807,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
         return;
       }
       const classification = classifications.find((c) => c.proposalId === input.proposalId);
+      if (refuseInformationalProposal(proposals, classifications, input.proposalId, respond)) return;
       if (!classification || classification.state !== "ready") {
         respond(409, {
           error: "not_ready",
@@ -3807,12 +3822,13 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       respond(200, { ok: true, proposalId: input.proposalId, started: true });
     }),
     reframe: validatedInboxAction(validateReframeProposal, (input, actor, respond) => {
-      const { proposals } = classifyAllProposals(deps);
+      const { proposals, classifications } = classifyAllProposals(deps);
       if (!proposals.some((p) => p.id === input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;
       }
       const origin = actor.origin;
+      if (refuseInformationalProposal(proposals, classifications, input.proposalId, respond)) return;
       clearInboxArchive(join(deps.inboxRoot, "state"), input.proposalId);
       appendPanelLedger(deps.ledgerPath, "panel.proposal_reframe_requested", input.proposalId, origin, { feedback: input.feedback });
       deps.ratify.reframe(input.proposalId, input.feedback);
@@ -3830,6 +3846,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       const proposal = classified.proposals.find(p => p.id === input.proposalId);
       if (!proposal) { respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` }); return; }
       const classification = classified.classifications.find(c => c.proposalId === input.proposalId);
+      if (refuseInformationalProposal(classified.proposals, classified.classifications, input.proposalId, respond)) return;
       if (!classification || classification.state === "ratified" || classification.state === "declined" || classification.state === "retired") {
         respond(409, { error: "not_decidable", detail: "The proposal is no longer awaiting a decision." }); return;
       }
@@ -3878,6 +3895,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       // message the responder will silently have no item to answer.
       const classified = await inboxRead(deps);
       if (!classified) return void respond(503, { error: "inbox_not_ready", detail: "serve's slow lane has not persisted an inbox classification yet" }, { "retry-after": "5" });
+      if (refuseInformationalProposal(classified.proposals, classified.classifications, proposalId, respond)) return;
       if (!operatorThreadItems(deps, undefined, classified).some((item) => item.proposalId === proposalId && item.state !== "retired")) {
         respond(404, { error: "not_found", detail: "operator inbox thread is unavailable" });
         return;

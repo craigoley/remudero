@@ -10,7 +10,7 @@ import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
 import { proposalVerdictsWithReceipts, readVerdictReceipts } from "./inbox-verdict-receipts.js";
 import { deriveTaskReferent, parseProposalRegistry, recordRowThreadEvents, THREAD_EVENT_STEPS, type Proposal } from "./inbox.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
-import { inboxKind, inboxOwner } from "./inbox-owner.js";
+import { inboxKind, inboxOwner, isAgeOnlyInboxInformation } from "./inbox-owner.js";
 import type { InboxClassification } from "./inbox.js";
 import type { VerifyHumanRuling } from "./verify-human-judge.js";
 import type { InboxDismissalAudit } from "./inbox-dismissal-audit.js";
@@ -58,6 +58,8 @@ import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
 /** One operator-owned inbox item, as the thread views need it. */
 export interface InboxThreadItem {
+  /** Source-qualified history membership only, never permission for an Inbox action. */
+  informational?: boolean;
   requiresReview?: boolean;
   causalScope?: InboxCausalScope;
   reframeHistory?: Proposal["reframeHistory"];
@@ -238,7 +240,7 @@ function openingMessage(item: InboxThreadItem): ThreadMessageView {
     text: `${item.plain.whatHappened} ${item.plain.whatWeNeed}`,
     ts: null,
     plain: item.plain,
-    actions: ACTIONS_BY_STATE[item.state],
+    actions: item.informational ? [] : ACTIONS_BY_STATE[item.state],
   };
 }
 
@@ -315,6 +317,7 @@ function attentionFor(item: InboxThreadItem, last: ThreadMessageView): ThreadSum
   if (item.state === "declined" && last.extra?.event) return "history";
   if (last.from === "operator") return "awaiting_daemon";
   if (last.extra?.question === true) return "reply";
+  if (item.informational) return "history";
   if (item.state === "declined") return "history";
   const kind = inboxKind(item.proposalId);
   // These kinds carry an explicit human judgement even before an Architect has a draft. A
@@ -765,7 +768,8 @@ export interface ThreadEventSync {
 /** The registry's operator-owned proposals: the only items that have a thread. */
 function operatorProposals(stateDir: string): Proposal[] {
   const path = join(stateDir, "inbox-proposals.json");
-  return parseProposalRegistry(existsSync(path) ? readFileSync(path, "utf8") : undefined).filter((p) => inboxOwner(p) === "operator");
+  return parseProposalRegistry(existsSync(path) ? readFileSync(path, "utf8") : undefined)
+    .filter((p) => inboxOwner(p) === "operator" || isAgeOnlyInboxInformation(p));
 }
 
 export function createThreadEventSync(opts: {
