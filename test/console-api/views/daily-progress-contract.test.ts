@@ -11,11 +11,15 @@ function report(): DailyProgressReport {
     version: "daily-progress-v1", scope: { kind: "repository", repository: "acme/atlas" },
     reportDate: "2026-11-01", timeZone: "America/New_York", windowStart: "2026-11-01T04:00:00.000Z", windowEnd: "2026-11-02T05:00:00.000Z",
     revision: 1, correctionReason: null, generatedAt: "2026-11-02T05:15:00.000Z", phase: "complete",
-    coverage: { state: "partial", expectedRepositories: ["acme/atlas"], includedRepositories: ["acme/atlas"], sources: [{
-      id: "atlas-prs", repository: "acme/atlas", kind: "pull_requests", required: true, state: "complete",
+    coverage: { state: "partial", expectedRepositories: ["acme/atlas"], includedRepositories: ["acme/atlas"], expectedSources: [
+      { id: "atlas-prs", repository: "acme/atlas", instanceId: null, kind: "pull_requests", required: true },
+      { id: "atlas-ledger_activity", repository: "acme/atlas", instanceId: "one", kind: "ledger_activity", required: false },
+      { id: "atlas-deployments", repository: "acme/atlas", instanceId: null, kind: "deployments", required: false },
+    ], sources: [{
+      id: "atlas-prs", repository: "acme/atlas", instanceId: null, kind: "pull_requests", required: true, state: "complete",
       lastAttemptAt: "2026-11-02T05:10:00.000Z", lastSuccessAt: "2026-11-02T05:10:00.000Z", coverageStart: "2026-11-01T04:00:00.000Z", coverageThrough: "2026-11-02T05:00:00.000Z", nextDueAt: "2026-11-02T06:00:00.000Z", reason: null,
     }, ...(["ledger_activity", "deployments"] as const).map((kind) => ({
-      id: `atlas-${kind}`, repository: "acme/atlas", kind, required: false, state: "not_collected" as const,
+      id: `atlas-${kind}`, repository: "acme/atlas", instanceId: kind === "ledger_activity" ? "one" : null, kind, required: false, state: "not_collected" as const,
       lastAttemptAt: null, lastSuccessAt: null, coverageStart: null, coverageThrough: null, nextDueAt: null, reason: "This source has not been collected",
     }))] },
     totals: { mergedChanges: { value: 0, precision: "exact" }, completedTasks: { value: 0, precision: "exact" } },
@@ -42,11 +46,17 @@ test("daily contracts preserve coverage and reject contradictory day identity", 
   for (const value of invalid) assert.equal(validateDailyProgressReport(value).ok, false, JSON.stringify(value));
   const partial = report(); partial.phase = "provisional"; partial.scope = { kind: "all" }; partial.coverage.state = "partial";
   partial.coverage.expectedRepositories.push("acme/beacon");
+  partial.coverage.expectedSources.push(
+    { id: "beacon-prs", repository: "acme/beacon", instanceId: null, kind: "pull_requests", required: true },
+    { id: "beacon-ledger", repository: "acme/beacon", instanceId: "beacon", kind: "ledger_activity", required: false },
+    { id: "beacon-deployments", repository: "acme/beacon", instanceId: null, kind: "deployments", required: false },
+  );
   partial.totals = { mergedChanges: { value: 0, precision: "at_least" }, completedTasks: { value: null, precision: "unavailable" } };
   assert.equal(validateDailyProgressReport(partial).ok, true, "missing data is retained as partial, not converted to a healthy zero");
   for (const state of ["not_collected", "partial", "stale", "unavailable", "unauthorized", "complete"] as const) {
     const r = report(); r.phase = "provisional";
-    r.coverage.sources.push({ ...r.coverage.sources[0]!, id: "second-pr-source", state,
+    r.coverage.expectedSources.push({ id: "second-pr-source", repository: "acme/atlas", instanceId: "two", kind: "pull_requests", required: true });
+    r.coverage.sources.push({ ...r.coverage.sources[0]!, id: "second-pr-source", instanceId: "two", state,
       coverageThrough: "2026-11-02T04:59:59.999Z", reason: "Second required merge source has a gap" });
     assert.equal(validateDailyProgressReport(r).ok, false, `exact totals need every required merge source: ${state}`);
     r.totals.mergedChanges.precision = "at_least";
@@ -58,14 +68,38 @@ test("daily contracts preserve coverage and reject contradictory day identity", 
     r.totals.mergedChanges.precision = "exact";
     assert.equal(validateDailyProgressReport(r).ok, true, "all required merge sources now cover the cutoff");
   }
+  const multiple = report(); multiple.phase = "provisional";
+  multiple.coverage.expectedSources.push({ id: "second-pr-source", repository: "acme/atlas", instanceId: "two", kind: "pull_requests", required: true });
+  multiple.coverage.sources.push({ ...multiple.coverage.sources[0]!, id: "second-pr-source", instanceId: "two" });
+  assert.equal(validateDailyProgressReport(multiple).ok, true, "both configured merge sources cover the cutoff");
+  multiple.coverage.sources.pop();
+  for (const total of ["mergedChanges", "completedTasks"] as const) {
+    const missing = structuredClone(multiple);
+    missing.totals = { mergedChanges: { value: 0, precision: "at_least" }, completedTasks: { value: null, precision: "unavailable" } };
+    missing.totals[total] = { value: 0, precision: "exact" };
+    assert.equal(validateDailyProgressReport(missing).ok, false, `omitting a configured source cannot make ${total} exact`);
+  }
+  multiple.totals = { mergedChanges: { value: 0, precision: "at_least" }, completedTasks: { value: null, precision: "unavailable" } };
+  assert.equal(validateDailyProgressReport(multiple).ok, true, "missing source evidence can be exposed provisionally");
+  multiple.phase = "complete";
+  assert.equal(validateDailyProgressReport(multiple).ok, false, "a finished report cannot omit a required configured source");
+  const requiredActivity = report(); requiredActivity.phase = "provisional";
+  requiredActivity.coverage.expectedSources.push({ id: "second-ledger", repository: "acme/atlas", instanceId: "two", kind: "ledger_activity", required: true });
+  assert.equal(validateDailyProgressReport(requiredActivity).ok, true, "missing activity evidence does not obscure complete merge evidence");
+  requiredActivity.phase = "complete";
+  assert.equal(validateDailyProgressReport(requiredActivity).ok, false, "required activity coverage cannot disappear at finalization");
   const complete = report(); complete.coverage.state = "complete";
-  for (const source of complete.coverage.sources) Object.assign(source, complete.coverage.sources[0], { id: source.id, kind: source.kind, required: source.required });
+  for (const source of complete.coverage.sources) Object.assign(source, complete.coverage.sources[0], { id: source.id, instanceId: source.instanceId, kind: source.kind, required: source.required });
   assert.equal(validateDailyProgressReport(complete).ok, true);
+  complete.coverage.expectedSources.push({ id: "second-ledger", repository: "acme/atlas", instanceId: "two", kind: "ledger_activity", required: false });
+  assert.equal(validateDailyProgressReport(complete).ok, false, "complete coverage cannot omit optional configured sources either");
+  complete.coverage.expectedSources.pop();
   complete.coverage.sources[1]!.coverageThrough = "2026-11-02T04:59:59.999Z";
   assert.equal(validateDailyProgressReport(complete).ok, false, "complete coverage includes optional sources through the cutoff too");
   const ongoing = report(); ongoing.phase = "provisional"; ongoing.generatedAt = "2026-11-01T12:00:00.000Z";
   Object.assign(ongoing.coverage.sources[0]!, { lastAttemptAt: ongoing.generatedAt, lastSuccessAt: ongoing.generatedAt, coverageThrough: ongoing.generatedAt });
-  ongoing.coverage.sources.push({ ...ongoing.coverage.sources[0]!, id: "second-pr-source" });
+  ongoing.coverage.expectedSources.push({ id: "second-pr-source", repository: "acme/atlas", instanceId: "two", kind: "pull_requests", required: true });
+  ongoing.coverage.sources.push({ ...ongoing.coverage.sources[0]!, id: "second-pr-source", instanceId: "two" });
   assert.equal(validateDailyProgressReport(ongoing).ok, true, "an in-progress day needs coverage through generation, not a future midnight");
   for (const patch of [
     { coverageStart: "2026-11-01T04:00:00.001Z" },
@@ -75,6 +109,45 @@ test("daily contracts preserve coverage and reject contradictory day identity", 
     const r = structuredClone(ongoing); Object.assign(r.coverage.sources.at(-1)!, patch);
     assert.equal(validateDailyProgressReport(r).ok, false, "every required source must cover the entire elapsed report window");
   }
+});
+
+test("daily source evidence must match independently declared repository and instance identities", () => {
+  const mutations: Array<(r: DailyProgressReport) => void> = [
+    (r) => { Reflect.deleteProperty(r.coverage, "expectedSources"); },
+    (r) => { r.coverage.expectedSources = []; },
+    (r) => { r.coverage.expectedSources.push(r.coverage.expectedSources[0]!); },
+    (r) => { r.coverage.expectedSources[0]!.repository = "foreign/repo"; },
+    (r) => { r.coverage.expectedSources[0]!.instanceId = ""; },
+    (r) => { r.coverage.expectedSources[0]!.kind = "deployments"; },
+    (r) => { r.coverage.expectedSources[0]!.required = false; },
+    (r) => { Reflect.set(r.coverage.expectedSources[0]!, "state", "complete"); },
+    (r) => { Reflect.deleteProperty(r.coverage.expectedSources[0]!, "instanceId"); },
+    (r) => { Reflect.set(r.coverage, "expectedSources", null); },
+    (r) => { r.coverage.sources[0]!.id = "undeclared-source"; },
+    (r) => { r.coverage.sources[0]!.required = false; },
+    (r) => { r.coverage.sources[0]!.kind = "deployments"; },
+    (r) => { r.coverage.sources[1]!.instanceId = "two"; },
+    (r) => { r.coverage.sources[1]!.instanceId = null; },
+    (r) => { Reflect.deleteProperty(r.coverage.sources[1]!, "instanceId"); },
+  ];
+  for (const mutate of mutations) { const r = report(); mutate(r); assert.equal(validateDailyProgressReport(r).ok, false, JSON.stringify(r)); }
+  const all = report(); all.scope = { kind: "all" };
+  all.coverage.expectedRepositories.push("acme/beacon"); all.coverage.includedRepositories.push("acme/beacon");
+  all.coverage.expectedSources.push(
+    { id: "beacon-prs", repository: "acme/beacon", instanceId: "beacon", kind: "pull_requests", required: true },
+    { id: "beacon-ledger", repository: "acme/beacon", instanceId: "beacon", kind: "ledger_activity", required: false },
+    { id: "beacon-deployments", repository: "acme/beacon", instanceId: null, kind: "deployments", required: false },
+  );
+  all.coverage.sources.push(...all.coverage.sources.map((s) => ({ ...s, repository: "acme/beacon", id: s.kind === "pull_requests" ? "beacon-prs" : s.kind === "ledger_activity" ? "beacon-ledger" : "beacon-deployments", instanceId: s.kind === "deployments" ? null : "beacon" })));
+  assert.equal(validateDailyProgressReport(all).ok, true, "independent inventories support multiple repositories and instances");
+  const conflict = structuredClone(all);
+  conflict.coverage.expectedSources.at(-2)!.instanceId = "one";
+  conflict.coverage.sources.at(-2)!.instanceId = "one";
+  assert.equal(validateDailyProgressReport(conflict).ok, false, "an expected instance cannot own evidence for conflicting repositories");
+  all.coverage.sources[0]!.repository = "acme/beacon";
+  assert.equal(validateDailyProgressReport(all).ok, false, "an included repository cannot substitute for another source's configured owner");
+  const canonical = report(); canonical.coverage.expectedSources[0]!.repository = "ACME/ATLAS";
+  assert.equal(validateDailyProgressReport(canonical).ok, true, "repository matching remains case insensitive");
 });
 
 test("the repositories publisher exposes expected inventory independently of observed events", async () => {

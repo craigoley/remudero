@@ -5,9 +5,13 @@ import { fixedClock } from "./clock.js";
 
 export const DAILY_PROGRESS_VERSION = "daily-progress-v1" as const;
 export type EvidenceState = "complete" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized";
-export interface SourceCoverage {
+/** Configured expectations survive missing receipts; null instanceId means repository-wide evidence. */
+export interface ExpectedDailySource {
   id: string; repository: string; kind: "pull_requests" | "ledger_activity" | "deployments";
-  required: boolean; state: EvidenceState; lastAttemptAt: string | null; lastSuccessAt: string | null;
+  instanceId: string | null; required: boolean;
+}
+export interface SourceCoverage extends ExpectedDailySource {
+  state: EvidenceState; lastAttemptAt: string | null; lastSuccessAt: string | null;
   coverageStart: string | null; coverageThrough: string | null; nextDueAt: string | null;
   reason: string | null;
 }
@@ -24,7 +28,7 @@ export interface DailyProgressReport {
   reportDate: string; timeZone: string; windowStart: string; windowEnd: string;
   revision: number; correctionReason: string | null; generatedAt: string;
   phase: "provisional" | "finalizing" | "complete" | "corrected";
-  coverage: { state: EvidenceState; expectedRepositories: string[]; includedRepositories: string[]; sources: SourceCoverage[] };
+  coverage: { state: EvidenceState; expectedRepositories: string[]; includedRepositories: string[]; expectedSources: ExpectedDailySource[]; sources: SourceCoverage[] };
   totals: { mergedChanges: MeasuredCount; completedTasks: MeasuredCount };
   events: DailyProgressEvent[];
   page: { totalEvents: number; nextCursor: string | null };
@@ -115,9 +119,14 @@ function calendarWindow(report: DailyProgressReport): ContractResult<true> {
   }
 }
 
+function sourceIdentity(v: unknown): v is ExpectedDailySource {
+  return record(v) && text(v.id) && repository(v.repository) && ["pull_requests", "ledger_activity", "deployments"].includes(String(v.kind)) &&
+    (v.instanceId === null || text(v.instanceId, 128)) && typeof v.required === "boolean";
+}
+
 function sourceShape(v: unknown, report: DailyProgressReport): v is SourceCoverage {
-  if (!record(v) || !only(v, "id repository kind required state lastAttemptAt lastSuccessAt coverageStart coverageThrough nextDueAt reason")) return false;
-  if (!text(v.id) || !repository(v.repository) || !["pull_requests", "ledger_activity", "deployments"].includes(String(v.kind)) || typeof v.required !== "boolean" || !states.includes(String(v.state))) return false;
+  if (!record(v) || !only(v, "id repository kind instanceId required state lastAttemptAt lastSuccessAt coverageStart coverageThrough nextDueAt reason")) return false;
+  if (!sourceIdentity(v) || !states.includes(String(v.state))) return false;
   if (![v.lastAttemptAt, v.lastSuccessAt, v.coverageStart, v.coverageThrough, v.nextDueAt].every((x) => x === null || instant(x)) || !(v.reason === null || text(v.reason, 2048))) return false;
   if (v.state !== "complete" && !text(v.reason, 2048)) return false;
   const t = (x: unknown) => typeof x === "string" ? Date.parse(x) : undefined;
@@ -161,28 +170,46 @@ export function validateDailyProgressReport(value: unknown): ContractResult<Dail
   if (report.phase === "corrected" && (report.revision < 2 || !text(report.correctionReason, 2048))) return fail("corrected reports need a new revision and reason");
   const scope = report.scope, c = report.coverage;
   if (!record(scope) || !(scope.kind === "all" ? only(scope, "kind") : scope.kind === "repository" && only(scope, "kind repository") && repository(scope.repository))) return fail("invalid report scope");
-  if (!record(c) || !only(c, "state expectedRepositories includedRepositories sources") || !states.includes(c.state) || !repoList(c.expectedRepositories) || !repoList(c.includedRepositories)) return fail("invalid source coverage inventory");
+  if (!record(c) || !only(c, "state expectedRepositories includedRepositories expectedSources sources") || !states.includes(c.state) || !repoList(c.expectedRepositories) || !repoList(c.includedRepositories)) return fail("invalid source coverage inventory");
   const expected = new Set(c.expectedRepositories.map(repoKey)), included = new Set(c.includedRepositories.map(repoKey));
   if ([...included].some((r) => !expected.has(r)) || (scope.kind === "repository" && (expected.size !== 1 || !expected.has(repoKey(scope.repository))))) return fail("report repositories contradict its scope");
+  if (!Array.isArray(c.expectedSources) || c.expectedSources.length > 1024 || !c.expectedSources.every((s) => record(s) && only(s, "id repository kind instanceId required") && sourceIdentity(s)) || new Set(c.expectedSources.map((s) => s.id)).size !== c.expectedSources.length) return fail("invalid or duplicate expected source identities");
+  const instanceRepositories = new Map<string, string>();
+  for (const s of c.expectedSources) {
+    if (!expected.has(repoKey(s.repository))) return fail("expected source belongs to a foreign repository");
+    if (s.instanceId !== null) {
+      const owner = instanceRepositories.get(s.instanceId);
+      if (owner !== undefined && owner !== repoKey(s.repository)) return fail("expected instance belongs to contradictory repositories");
+      instanceRepositories.set(s.instanceId, repoKey(s.repository));
+    }
+  }
+  for (const r of expected) {
+    if (!["pull_requests", "ledger_activity", "deployments"].every((kind) => c.expectedSources.some((s) => repoKey(s.repository) === r && s.kind === kind))) return fail("repository omits an expected source kind");
+  }
   if (!Array.isArray(c.sources) || c.sources.length > 1024 || !c.sources.every((s) => sourceShape(s, report)) || new Set(c.sources.map((s) => s.id)).size !== c.sources.length) return fail("invalid or duplicate source evidence");
-  if (c.sources.some((s) => !expected.has(repoKey(s.repository)))) return fail("source belongs to a foreign repository");
+  const identities = new Map(c.expectedSources.map((s) => [s.id, s]));
+  if (c.sources.some((s) => {
+    const identity = identities.get(s.id);
+    return !identity || repoKey(s.repository) !== repoKey(identity.repository) || s.kind !== identity.kind || s.instanceId !== identity.instanceId || s.required !== identity.required;
+  })) return fail("source evidence contradicts its expected identity");
   for (const r of included) {
     if (!["pull_requests", "ledger_activity", "deployments"].every((kind) => c.sources.some((s) => repoKey(s.repository) === r && s.kind === kind))) return fail("included repository omits an expected source kind");
   }
+  const sources = new Map(c.sources.map((s) => [s.id, s]));
   const fullScope = expected.size > 0 && expected.size === included.size;
-  if (c.state === "complete" && (!fullScope || !c.sources.length || c.sources.some((s) => s.state !== "complete"))) return fail("complete coverage omits expected repositories or sources");
+  if (c.state === "complete" && (!fullScope || !c.sources.length || c.expectedSources.some((s) => sources.get(s.id)?.state !== "complete"))) return fail("complete coverage omits expected repositories or sources");
   const ended = report.phase === "complete" || report.phase === "corrected";
   if (ended && Date.parse(report.generatedAt) < Date.parse(report.windowEnd)) return fail("a finished day cannot precede its ending instant");
   const through = Math.min(Date.parse(report.generatedAt), Date.parse(report.windowEnd));
   const coversWindow = (s: SourceCoverage) => s.state === "complete" && s.coverageStart !== null && s.coverageThrough !== null && Date.parse(s.coverageStart) <= Date.parse(report.windowStart) && Date.parse(s.coverageThrough) >= through;
   if (c.state === "complete" && c.sources.some((s) => !coversWindow(s))) return fail("complete coverage lacks a source window through the report cutoff");
-  const mergeSources = c.sources.filter((s) => s.kind === "pull_requests" && s.required);
-  const exactMerges = fullScope && [...included].every((r) => mergeSources.some((s) => repoKey(s.repository) === r)) && mergeSources.every(coversWindow);
-  if (ended && c.sources.some((s) => s.required && !coversWindow(s))) return fail("finished report lacks its required source window");
+  const covered = (s: ExpectedDailySource) => { const observed = sources.get(s.id); return observed !== undefined && coversWindow(observed); };
+  const mergeSources = c.expectedSources.filter((s) => s.kind === "pull_requests" && s.required);
+  const exactMerges = fullScope && [...included].every((r) => mergeSources.some((s) => repoKey(s.repository) === r)) && mergeSources.every(covered);
+  if (ended && c.expectedSources.some((s) => s.required && !covered(s))) return fail("finished report lacks its required source window");
   if (!record(report.totals) || !only(report.totals, "mergedChanges completedTasks") || !Object.values(report.totals).every(count) || !count(report.totals.mergedChanges) || !count(report.totals.completedTasks)) return fail("invalid measured totals");
   if (Object.values(report.totals).some((v) => v.precision === "exact") && !exactMerges) return fail("exact totals require complete expected merge evidence");
   if (!Array.isArray(report.events) || report.events.length > 200 || !report.events.every(eventShape) || new Set(report.events.map((e) => e.id)).size !== report.events.length) return fail("invalid or duplicate evidence page");
-  const sources = new Map(c.sources.map((s) => [s.id, s]));
   for (const e of report.events) {
     const s = sources.get(e.sourceId), kind = { merged: "pull_requests", activity: "ledger_activity", deployment: "deployments" }[e.kind];
     if (!included.has(repoKey(e.repository)) || !s || repoKey(s.repository) !== repoKey(e.repository) || s.kind !== kind) return fail("event identity contradicts its source scope");
