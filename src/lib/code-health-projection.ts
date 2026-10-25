@@ -239,7 +239,17 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
   for (const pair of pairs) for (const prior of pair.prior?.findings ?? []) {
     const fingerprint = codeHealthFindingFingerprint(repository, pair.kind, prior);
     if (prior.status === "fixed" || findings.has(fingerprint) || pair.pair === "comparable" && confirmedFindingFix(pair.current.get(fingerprint), pair.prior!.observedAt)) continue;
-    findings.set(fingerprint, { fingerprint, sourceId: sourceId(repository, pair.kind), severity: prior.severity, category: prior.category, status: "unknown",
+    const historicalId = `${sourceId(repository, pair.kind)}:history:${createHash("sha256").update(JSON.stringify([pair.prior!.scanId, pair.prior!.analyzedSha, pair.prior!.observedAt])).digest("hex")}`;
+    if (!sources.some(source => source.id === historicalId)) {
+      const historical = pair.prior!, problem = scanProblem(historical, historical.analyzedSha, input.observedAt);
+      sources.push({ id: historicalId, kind: pair.kind, required: false,
+        state: problem ? historical.state === "complete" ? "partial" : historical.state : "complete",
+        analyzedSha: shaShape.test(historical.analyzedSha) ? historical.analyzedSha : null,
+        observedAt: time(historical.observedAt) && Date.parse(historical.observedAt) <= Date.parse(input.observedAt) ? historical.observedAt : null,
+        scopeHash: historical.scopeHash, toolVersion: historical.toolVersion, rulesVersion: historical.rulesVersion, configHash: historical.configHash,
+        baseline: null, exclusions: historical.exclusions, reason: problem ?? null });
+    }
+    findings.set(fingerprint, { fingerprint, sourceId: historicalId, severity: prior.severity, category: prior.category, status: "unknown",
       path: prior.path, title: prior.title, effortMinutes: prior.effortMinutes, estimateKind: prior.effortMinutes === null ? null : "modeled" });
   }
   if (findings.size > 1000) throw new Error("Code health findings exceed the public contract bound; prior evidence must remain available.");
