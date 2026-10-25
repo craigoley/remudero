@@ -20,8 +20,9 @@ export interface CodeHealthCollection {
 }
 
 const SOURCE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+export const CODE_HEALTH_POLICY_VERSION = "code-health-existing-policy-v1";
 const registry: CodeHealthProjectionInput["registry"] = {
-  version: "code-health-existing-policy-v1",
+  version: CODE_HEALTH_POLICY_VERSION,
   checks: [
     { id: "quality-maintainability-open", sourceKind: "quality", category: "maintainability", description: "No unresolved findings in the existing CodeQL maintainability subset." },
     { id: "coverage-existing-tier", sourceKind: "coverage", category: "tests", description: "Meets this repository's existing instrumented coverage tier." },
