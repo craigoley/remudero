@@ -249,3 +249,22 @@ test("code health checks scope before cached ETags and retains off and shadow po
   assert.match((await answer("")).body, /view_disabled/); assert.equal(reads, before, "off reads no held evidence");
   mode = "shadow"; assert.match((await answer("")).body, /view_shadow/); assert.equal(reads, before);
 });
+
+
+test("code health consolidated view stays within the existing source limit without dropping repositories", async () => {
+  const { withTempDir } = await import("#src/lib/tmp.js");
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { readCodeHealthReport } = await import("#src/lib/code-health-view.js");
+  await withTempDir("code-health-portfolio", stateDir => {
+    mkdirSync(join(stateDir, "read-model"));
+    const repositories = Array.from({ length: 256 }, (_, n) => ({ repository: `acme/repo-${n}`, instanceIds: [`instance-${n}`], expectedQualitySources: ["quality", "coverage"] }));
+    writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ improvementEvidence: {
+      version: "repository-evidence-inventory-v1", measurementState: "not_collected", unresolvedInstances: [], repositories } }));
+    const report = readCodeHealthReport({ stateDir, params: new URLSearchParams(), now: Date.parse("2026-11-02T06:00:00.000Z") });
+    assert.equal(report.data.expectedRepositories.length, 256); assert.equal(report.data.repositories.length, 256);
+    assert(report.sources.length <= 32, "the existing console source limit remains unchanged");
+    assert(report.data.repositories.every(repo => repo.summary === null && repo.urgentFindings.value === null));
+    assert(Buffer.byteLength(JSON.stringify(report)) < 1024 * 1024);
+  });
+});
