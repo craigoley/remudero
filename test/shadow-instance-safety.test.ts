@@ -325,6 +325,57 @@ test("selected runtime Codex spawn denies private bytes without adding them to c
   } finally { fixture.cleanup(); }
 });
 
+test("selected Codex dispatch snapshots caller-owned arguments before its first asynchronous boundary", async () => {
+  const fixture = runtimeRegistryFixture(), codexHome = join(fixture.root, "codex-home");
+  mkdirSync(codexHome);
+  const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough();
+  const child = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
+  let prompt = "", spawns = 0;
+  stdin.on("data", chunk => { prompt += String(chunk); });
+  stdin.on("finish", () => {
+    stdout.end(JSON.stringify({ type: "turn.completed", usage: {} }) + "\n");
+    queueMicrotask(() => child.emit("exit", 0));
+  });
+  const args: Parameters<typeof spawnCodexWorker>[0] = {
+    cwd: fixture.root, workerHome: fixture.root, prompt: "original public prompt",
+    settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: ["Read", "Bash"],
+    sandboxIntent: "disposable-review", sandboxReadRoots: [fixture.root], env: { PUBLIC_CANARY: "original" },
+    containment: { spawn: options => {
+      spawns++;
+      assert.equal(options.cwd, fixture.root, "queued mutation cannot move the contained worker");
+      assert.equal(options.env.HOME, fixture.root);
+      assert.equal(options.env.PUBLIC_CANARY, "original");
+      assert.equal(options.command, "/bin/sh", "provider binary/config are part of the invocation snapshot");
+      const i = options.args.indexOf("--profile"); assert.ok(i >= 0);
+      const profile = readFileSync(join(codexHome, options.args[i + 1]! + ".config.toml"), "utf8");
+      assert.ok(profile.includes(`${JSON.stringify(fixture.root)}="read"`));
+      assert.equal(profile.includes("queued-mutant"), false);
+      assert.equal(options.args[options.args.indexOf("--model") + 1], "gpt-6-luna");
+      return { process: child as never, pid: 9876 };
+    }, teardown: () => {} },
+  };
+  const config: Config = { root: fixture.root, claudeBin: "/unused", workerProviders: {
+    enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome,
+  } };
+  try {
+    await runtimeRegistryRunner()(async () => {
+      const pending = spawnCodexWorker(args, config);
+      args.cwd = join(fixture.root, "queued-mutant"); args.workerHome = args.cwd;
+      args.prompt = fixture.selected; args.tools!.push("Edit");
+      args.sandboxReadRoots!.push(join(fixture.root, "queued-mutant"));
+      args.env!.PUBLIC_CANARY = "mutated";
+      config.workerProviders!.codexBin = "/queued-mutant";
+      config.workerProviders!.codexModel = "queued-mutant";
+      config.workerProviders!.codexHome = join(fixture.root, "queued-mutant");
+      await pending;
+    }, { envPath: fixture.selected });
+    assert.equal(spawns, 1);
+    assert.ok(prompt.includes("original public prompt"));
+    assert.equal(prompt.includes(fixture.selected), false, "late mutation cannot inject private bytes into stdin");
+    assert.deepEqual(readdirSync(codexHome), []);
+  } finally { fixture.cleanup(); }
+});
+
 test("selected runtime worker unknown and cleanup outcomes stay explicit", async () => {
   for (const mode of ["resume", "home-missing", "spawn-error", "profile-replaced", "profile-unlinked"] as const) {
     const fixture = runtimeRegistryFixture(), codexHome = join(fixture.root, "codex-home");
