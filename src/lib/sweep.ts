@@ -14907,6 +14907,7 @@ function codeScanningAlertLogTail(alert: CodeqlHeadAlert, intro: readonly string
 const FILE_SYSTEM_RACE_HINT: readonly string[] = [
   "Hint (js/file-system-race): do not test a path and then use it. Perform the operation directly and handle",
   "ENOENT/EEXIST from it (e.g. open with the 'wx' flag, or try/catch the read), or operate on one open handle.",
+  "To size or read a file, open it once and call fstatSync/readFileSync on that descriptor, never statSync(path) first.",
 ];
 
 /** W1-T5633 — the fix worker's evidence: the alerts and the judge's reason, labelled untrusted. */
