@@ -156,3 +156,13 @@ test("a held PR behind main is not refreshed; the same PR without a hold is", ()
   assert.deepEqual(openPrsBehindMain([held], behind, policy), []);
   assert.deepEqual(openPrsBehindMain([free], behind, policy).map((pr) => [pr.prNumber, pr.updateReason]), [[PR, "stale-blocked"]]);
 });
+
+test("a failed review read is an unreadable blocker, never no hold", () => {
+  const throwing = sceneFetch();
+  const { views } = producedViews((args) => {
+    if ((args[args.length - 1] ?? "").includes(`/pulls/${PR}/reviews`)) throw new Error("HTTP 502");
+    return throwing(args);
+  });
+  assert.deepEqual(views[0].scannerBlocker, { kind: "ambiguous", cause: "unreadable", detail: "the pull request review read failed" });
+  assert.notEqual(deriveDisposition(views[0], DEFAULT_SWEEP_POLICY, NOW).disposition, "mergeable");
+});
