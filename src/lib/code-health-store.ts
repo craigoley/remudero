@@ -160,4 +160,3 @@ export function publishCodeHealthSnapshot(opts: { stateDir: string; input: CodeH
   } catch { return { state: "unavailable", reason: "Code health evidence could not be saved safely; prior snapshots were retained." }; }
   finally { if (lock && owns?.()) lock.release(); }
 }
-
