@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
-  buildIssueRevalidationPrompt, conditionReobserved, evidenceNames, isAbsenceOnlyCitation, ISSUE_REVALIDATION_VERDICT_STEP,
-  productionIssueRevalidationPorts, runIssueRevalidationGarden,
-  type IssueRevalidationPorts, type RevalidationComment, type RevalidationIssue, type RevalidationVerdict,
-} from "../src/lib/issue-revalidation-garden.js";
+  buildIssueRevalidationPrompt, conditionReobserved, decideAction, evidenceNames, isAbsenceOnlyCitation, ISSUE_REVALIDATION_VERDICT_STEP,
+  parseIssueRevalidationVerdict, productionIssueRevalidationPorts, runIssueRevalidationGarden,
+  type IssueRevalidationPorts, type PriorVerdict, type RevalidationComment, type RevalidationIssue, type RevalidationVerdict,
+} from "#src/lib/issue-revalidation-garden.js";
 
 const HOUR = 3_600_000;
 const NOW = Date.UTC(2026, 9, 13, 15);
@@ -93,4 +93,58 @@ test("a zero-row step reaches the judge as absence, and the prompt says absence 
   const facts = p.evidence(listed!).facts;
   assert.ok(facts.some((f) => /^ledger step ci-friction\.garden_filing_failed: 0 row\(s\) in the last 48 h — absence only/.test(f)), facts.join("\n"));
   assert.match(buildIssueRevalidationPrompt(listed!, "escalation", { facts }), /Absence is not proof/);
+});
+
+test("an absence-only still-true judgement is unknown rather than proof of a live problem", () => {
+  for (const citation of [
+    "no origin/main commit since the issue opened names #13322 in its subject — absence only",
+    "ledger step cli.approve: 0 row(s) in the last 48 h — absence only: a misread or unwritten step reads 0 too, so this proves no fix",
+    "`frontendApiProxy` does not appear on origin/main",
+  ]) {
+    const verdict = parseIssueRevalidationVerdict(`REVALIDATION_VERDICT: still-true\nREVALIDATION_REASON: the issue has not been addressed\nREVALIDATION_CITATION: ${citation}`);
+    assert.equal(verdict.verdict, "unknown", citation);
+    assert.match(verdict.reason, /absence-only/);
+    assert.equal(verdict.citation, undefined, "absence is not retained as a deciding citation");
+  }
+  assert.equal(parseIssueRevalidationVerdict("REVALIDATION_VERDICT: still-true\nREVALIDATION_REASON: a current failure was observed\nREVALIDATION_CITATION: ledger step filing.failed: 3 row(s) in the last 48 h, newest current").verdict, "still-true");
+});
+
+test("fresh and cached absence-only revalidation cannot refresh an issue in either mode", async () => {
+  for (const mode of ["act", "shadow"] as const) for (const cached of [false, true]) {
+    const issue = blocked(13345, { body: "**Class:** GRILL\n**Task:** TRIAGE-observation\nIdentify the historical approvals before classifying them." });
+    const unsupported: RevalidationVerdict = { verdict: "still-true", reason: "no approvals were traced", citation: "ledger step cli.approve: 0 row(s) in the last 48 h — absence only" };
+    const writes: string[] = [], rows: Record<string, unknown>[] = [];
+    let judges = 0;
+    const prior: PriorVerdict = { ...unsupported, at: at(-1), issueUpdatedAt: issue.updatedAt, action: "keep", acted: false };
+    const p: IssueRevalidationPorts = {
+      policy: () => ({ mode, maxClosesPerPass: 5 }), listOpenIssues: async () => [issue], listComments: async () => [],
+      referentVerdicts: async () => new Map(), hasReferent: () => false,
+      livenessVerdict: () => ({ verdict: "unknown", reason: "not a liveness issue" }),
+      readModelVerdict: () => ({ verdict: "unknown", reason: "not a read-model issue" }),
+      evidence: () => ({ facts: [unsupported.citation!] }), judge: async () => { judges++; return unsupported; },
+      priorVerdicts: () => cached ? new Map([[issue.number, prior]]) : new Map(),
+      close: async () => { writes.push("close"); }, comment: async () => { writes.push("comment"); },
+      fileConversion: async () => { writes.push("convert"); return "unexpected"; },
+      log: (step, extra = {}) => { if (step === ISSUE_REVALIDATION_VERDICT_STEP) rows.push(extra); }, clock,
+    };
+    await runIssueRevalidationGarden(p);
+    assert.equal(judges, cached ? 0 : 1, "the normal unchanged-input cache is retained");
+    assert.deepEqual(writes, [], `${mode}, cached=${cached}: no GitHub refresh, close or conversion`);
+    assert.equal(rows.length, 1);
+    assert.deepEqual([rows[0]!.verdict, rows[0]!.action, rows[0]!.acted], ["unknown", "keep", false]);
+  }
+});
+
+test("positive still-true evidence keeps the ordinary refresh and operator protections", async () => {
+  const citation = "ledger step ci-friction.garden_filing_failed: 3 row(s) in the last 48 h, newest current";
+  const verdict = parseIssueRevalidationVerdict(`REVALIDATION_VERDICT: still-true\nREVALIDATION_REASON: three current failures\nREVALIDATION_CITATION: ${citation}`);
+  assert.equal(verdict.verdict, "still-true");
+  const prompt = buildIssueRevalidationPrompt(blocked(10269), "escalation", { facts: [citation] });
+  assert.match(prompt, /still-true.*positive current evidence/);
+  assert.match(prompt, /unknown.*absence-only/);
+  const input = { verdict, escalationClass: "BLOCKED", operatorSpokeLast: false, prior: undefined, nowMs: NOW };
+  assert.deepEqual(decideAction(input), { action: "refresh" });
+  assert.deepEqual(decideAction({ ...input, operatorSpokeLast: true }), { action: "keep", guard: "newer-operator-comment" });
+  assert.deepEqual(decideAction({ ...input, operatorSpokeLast: undefined }), { action: "keep", guard: "comments-unread" });
+  assert.deepEqual(decideAction({ ...input, verdict: { ...verdict, verdict: "resolved" }, escalationClass: "GRILL" }), { action: "refresh", guard: "operator-owned-class" });
 });

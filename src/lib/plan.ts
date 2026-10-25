@@ -1,3 +1,4 @@
+import { operatorReleaseContractChanged, qualifyReleaseEvidence, releaseContractPins } from "./operator-release.js";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
@@ -121,6 +122,7 @@ export interface TaskRiskRuling {
   /** {@link "./task-linter.js".taskRulingPin} of the record AS JUDGED — a mismatch is drift, and
    *  without it the arm is defeated by editing: earn a pass, then rewrite the record (W1-T2694). */
   pin: string;
+  operator_release_pin?: string;
 }
 
 export const TASK_TYPES = ["recon", "implement", "diagnose", "review", "manual"] as const;
@@ -337,21 +339,8 @@ export const RELEASE_LEDGER_STEP = "ratify.approved";
 
 /** Task ids released by an operator, read from {@link RELEASE_LEDGER_STEP} rows. Pure over the
  *  lines it is handed — the caller owns the read, so no dispatch path gains file I/O. */
-export function releasedTaskIds(ledgerLines: readonly string[]): Set<string> {
-  const out = new Set<string>();
-  for (const line of ledgerLines) {
-    if (!line.includes(RELEASE_LEDGER_STEP)) continue; // cheap reject before the parse
-    let row: { step?: unknown; task_id?: unknown };
-    try {
-      row = JSON.parse(line) as typeof row;
-    } catch {
-      continue; // an unparseable line releases nothing — the safe direction
-    }
-    if (row.step === RELEASE_LEDGER_STEP && typeof row.task_id === "string" && row.task_id) {
-      out.add(row.task_id);
-    }
-  }
-  return out;
+export function releasedTaskIds(ledgerLines: readonly string[], plan?: Plan): Set<string> {
+  return new Set(qualifyReleaseEvidence(ledgerLines, new Map(), releaseContractPins(plan?.tasks ?? [])).authors.keys());
 }
 
 /**
@@ -659,7 +648,11 @@ function validateRiskRulingShape(raw: unknown, sourceLabel: string, taskId: stri
     throw new PlanError(`${where}.pin must be a 64-character lowercase hexadecimal digest, got ${JSON.stringify(ruling.pin)}`);
   }
 
+  if (ruling.operator_release_pin !== undefined && (typeof ruling.operator_release_pin !== "string" || !/^[0-9a-f]{64}$/.test(ruling.operator_release_pin))) {
+    throw new PlanError(`${where}.operator_release_pin must be a 64-character lowercase hexadecimal digest`);
+  }
   return {
+    ...(ruling.operator_release_pin === undefined ? {} : { operator_release_pin: ruling.operator_release_pin as string }),
     verdict: ruling.verdict,
     action: ruling.action,
     confidence: ruling.confidence,
@@ -1421,6 +1414,7 @@ export function assertRunnable(
    *  empty means today's behaviour exactly — a `verify: human` task is refused. */
   releasedIds?: ReadonlySet<string>,
 ): void {
+  if (operatorReleaseContractChanged(task)) throw new TaskAdmissionError(`task ${task.id} requires explicit reapproval of its changed operator contract`);
   if (task.dispatch_hold === true) {
     throw new TaskAdmissionError(`task ${task.id} is on a task-scoped dispatch hold${task.note ? `: ${task.note}` : ""}`);
   }
@@ -1458,7 +1452,9 @@ export function machineFilingAdmissionViolations(
       `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
         `task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`,
     );
-  } else if (task.verify === "human" && !context.releasedIds.has(task.id) && !isParkedMachineProposal(task)) {
+  // An explicit hold permits filing, not dispatch; dependency and path guards still apply.
+  } else if (task.verify === "human" && !context.releasedIds.has(task.id) &&
+      !(task.status === "queued" && task.dispatch_hold === true) && !isParkedMachineProposal(task)) {
     reasons.push(
       `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
         `task ${task.id} is verify:human — not auto-runnable by the proto-runner`,

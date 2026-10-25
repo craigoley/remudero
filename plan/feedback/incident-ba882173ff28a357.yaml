@@ -1,0 +1,31 @@
+id: incident-ba882173ff28a357
+ts: 2026-10-24T17:01:01.727Z
+raw: >-
+  Incident ba882173ff28: intervention
+  own-red:fix-lane:rule-checks-failed-on-ci-log-fix-fix-rou
+
+  First seen: 2026-10-24T16:58:53.708Z
+
+  Last seen: 2026-10-24T17:00:58.654Z
+
+  Count: 22, burn: 22.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#11677@6cabe559c actor=cao825 cause=own-red:fix-lane:rule-checks-failed-on-ci-log-fix-fix-rou — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#12095@12278fd6b actor=cao825 cause=own-red:fix-lane:rule-checks-failed-on-ci-log-fix-fix-rou — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10785@84dcde631 actor=cao825 cause=own-red:fix-lane:rule-checks-failed-on-ci-log-fix-fix-rou — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#ba882173ff28a357c7bf5bf176c7010e9882a01fdca1a1793fe2cec8b893e672
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

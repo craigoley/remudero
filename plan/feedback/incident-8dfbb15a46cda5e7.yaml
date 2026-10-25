@@ -1,0 +1,29 @@
+id: incident-8dfbb15a46cda5e7
+ts: 2026-10-24T18:00:57.253Z
+raw: >-
+  Incident 8dfbb15a46cd: intervention
+  own-red:fix-lane:prompt-surface-gate-failed-on-ci-log-fix
+
+  First seen: 2026-10-24T17:53:23.307Z
+
+  Last seen: 2026-10-24T18:00:54.389Z
+
+  Count: 8, burn: 8.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#11973@f02ef401d actor=cao825 cause=own-red:fix-lane:prompt-surface-gate-failed-on-ci-log-fix — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#8dfbb15a46cda5e7d0591937b50af9f8fb9346fad5e3637c91e3823dec3f2faa
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

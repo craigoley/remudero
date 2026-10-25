@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -16,3 +17,13 @@
       proof: "grep: test/routing/the-console-claude-login-reaches-the-fleet-store\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/routing/the-console-claude-login-reaches-the-fleet-store.test.ts for each recorded edge"
       proof: "grep: test/routing/the-console-claude-login-reaches-the-fleet-store\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.95
+    reasons:
+      - "The filed plan limits the remedy to adding recorded suite-selection edges and regression coverage in two existing selector files."
+      - "The note identifies a specific failed coverage run, PR, SHA and candidate edges; acceptance requires selecting the missed suite for each recorded edge."
+      - "The supplied scope requests no credential, permission, deletion, deployment or review-policy change, and the family track record reports 18 merged tasks and zero declines."
+    judged_at: "2026-10-24T16:31:32.010Z"
+    pin: "5f994c9aef44bb0d03b3a02177f533113433567005a8b36cb3a0ea6ac45bbdcf"

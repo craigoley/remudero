@@ -1,0 +1,29 @@
+id: incident-1290f9405aaecc9d
+ts: 2026-10-24T17:53:25.914Z
+raw: >-
+  Incident 1290f9405aae: intervention
+  own-red:fix-lane:comment-load-ratchet-failed-on-rule-chec
+
+  First seen: 2026-10-24T17:53:23.307Z
+
+  Last seen: 2026-10-24T17:53:23.307Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10523@b70ae78d5 actor=cao825 cause=own-red:fix-lane:comment-load-ratchet-failed-on-rule-chec — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#1290f9405aaecc9ded95c24b520d300122f81bf4a45395fa6e8d391c3c4545e3
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

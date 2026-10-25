@@ -15,6 +15,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { readOperatorReleaseRecords, recordOperatorRelease } from "#src/lib/machine-filing-judge.js";
+import { operatorReleasePin } from "#src/lib/operator-release.js";
 
 import { fixedClock } from "../src/lib/clock.js";
 import type { GardenCheckout } from "../src/lib/gardener.js";
@@ -27,7 +29,6 @@ import {
 import type { Proposal } from "../src/lib/inbox.js";
 import { loadPlan } from "../src/lib/plan.js";
 import type { RiskJudgeVerdict } from "../src/lib/risk-judge.js";
-import { taskRulingPin } from "../src/lib/task-linter.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const CLOCK = fixedClock(1790980000000);
@@ -59,6 +60,8 @@ function fixture(prefix: string) {
   writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
   writeFileSync(join(root, SHARD), rulingShard("every DECISIONS.md entry carries a status"));
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}-state-`));
+  const approve = () => recordOperatorRelease(stateDir, loadPlan(join(root, "plan", "tasks.yaml")).byId.get(ID)!, CLOCK.iso());
+  approve();
   let workspaces = 0;
   const proposals: Proposal[] = [];
   const openWorkspace = (): GardenCheckout => {
@@ -74,7 +77,7 @@ function fixture(prefix: string) {
       riskJudge: async (): Promise<RiskJudgeVerdict> => assert.fail("an operator release asks no model"),
       openWorkspace,
       prState: () => "merged",
-      operatorReleases: () => new Set([ID]),
+      operatorReleases: () => readOperatorReleaseRecords(stateDir),
       stageProposal: (p) => void proposals.push(p),
       log: (step, extra) => void logs.push({ step, extra }),
       clock: CLOCK,
@@ -82,7 +85,7 @@ function fixture(prefix: string) {
     const report = await runMachineFilingJudge(ports);
     return { report, logs };
   };
-  return { root, stateDir, pass, workspaces: () => workspaces, proposals, dirs: [root, stateDir] };
+  return { root, stateDir, pass, approve, workspaces: () => workspaces, proposals, dirs: [root, stateDir] };
 }
 
 test("an operator release the linter refuses is refused once and staged as one inbox proposal", async () => {
@@ -108,7 +111,7 @@ test("an operator release the linter refuses is refused once and staged as one i
       declined?: Record<string, string>;
     };
     const task = loadPlan(join(f.root, "plan", "tasks.yaml")).byId.get(ID)!;
-    assert.equal(state.refusedReleases?.[ID], taskRulingPin(task), "settled by the pin it was refused at");
+    assert.equal(state.refusedReleases?.[ID], operatorReleasePin(task), "settled by the approved contract it was refused at");
     assert.equal(state.declined?.[ID], undefined, "a release is not recorded as a declined judge PR");
   } finally {
     for (const d of f.dirs) rmSync(d, { recursive: true, force: true });
@@ -136,14 +139,19 @@ test("an edited released record is taken again after a refusal", async () => {
   try {
     await f.pass();
     writeFileSync(join(f.root, SHARD), rulingShard("every DECISIONS.md entry carries a status, checked in CI"));
+    const stale = await f.pass();
+    assert.deepEqual(stale.report.refused, [], "the previous approval cannot authorize an edited contract");
+    assert.equal(f.workspaces(), 1, "a stale approval opens no workspace");
+    assert.ok(stale.logs.some(row => row.step === "machine_judge.reapproval_required"));
+    f.approve();
     const edited = await f.pass();
-    assert.deepEqual(edited.report.refused, [ID], "a new pin is judged again");
+    assert.deepEqual(edited.report.refused, [ID], "an explicitly reapproved contract is judged again");
     assert.equal(f.workspaces(), 2);
     const state = JSON.parse(readFileSync(join(f.stateDir, MACHINE_JUDGE_STATE_FILE), "utf8")) as {
       refusedReleases?: Record<string, string>;
     };
     const task = loadPlan(join(f.root, "plan", "tasks.yaml")).byId.get(ID)!;
-    assert.equal(state.refusedReleases?.[ID], taskRulingPin(task), "re-pinned at the edited record");
+    assert.equal(state.refusedReleases?.[ID], operatorReleasePin(task), "re-pinned at the reapproved record");
   } finally {
     for (const d of f.dirs) rmSync(d, { recursive: true, force: true });
   }
