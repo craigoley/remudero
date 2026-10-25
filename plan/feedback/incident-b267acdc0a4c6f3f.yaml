@@ -1,0 +1,30 @@
+id: incident-b267acdc0a4c6f3f
+ts: 2026-10-24T17:45:53.439Z
+raw: >-
+  Incident b267acdc0a4c: intervention
+  review-failed:fix-lane:unmet-criterion-fix-round-judge-change-a
+
+  First seen: 2026-10-24T17:19:34.446Z
+
+  Last seen: 2026-10-24T17:45:49.389Z
+
+  Count: 8, burn: 8.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#11255@242740972 actor=cao825 cause=review-failed:fix-lane:unmet-criterion-fix-round-judge-change-a — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#11515@e8df3af0f actor=cao825 cause=review-failed:fix-lane:unmet-criterion-fix-round-judge-change-a — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#b267acdc0a4c6f3fa6785e563386eca0abea0476eed57ea835f5db5a303c4a50
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

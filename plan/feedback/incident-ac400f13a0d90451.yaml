@@ -1,0 +1,28 @@
+id: incident-ac400f13a0d90451
+ts: 2026-10-24T20:35:05.620Z
+raw: >-
+  Incident ac400f13a0d9: anomaly run.running_long:plan-lint
+
+  First seen: 2026-10-24T20:27:43.979Z
+
+  Last seen: 2026-10-24T20:27:43.979Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - task W1-T10188 (run W1-T10188-1792860343556) has run 13181752ms against class "plan-lint"'s median 1563434ms (×8, n=9, excluded=3)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#ac400f13a0d904518bcf6f20e5e7049ddf0ab0bd8f0c5cc060e1ff962ac1b87c
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

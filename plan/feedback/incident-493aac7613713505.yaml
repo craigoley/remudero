@@ -1,0 +1,31 @@
+id: incident-493aac7613713505
+ts: 2026-10-24T16:57:54.737Z
+raw: >-
+  Incident 493aac761371: intervention
+  own-red:fix-lane:required-checks-red-coverage-ratchet-ref
+
+  First seen: 2026-10-24T16:52:39.577Z
+
+  Last seen: 2026-10-24T16:57:53.220Z
+
+  Count: 75, burn: 75.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10344@961681ad9 actor=cao825 cause=own-red:fix-lane:required-checks-red-coverage-ratchet-ref — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10344@3caf116ee actor=cao825 cause=own-red:fix-lane:required-checks-red-coverage-ratchet-ref — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10482@cc83cdd24 actor=cao825 cause=own-red:fix-lane:required-checks-red-coverage-ratchet-ref — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#493aac7613713505f778801c27bf1230de0a9c71b0aa90d3254e8407016f2d54
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -49,6 +49,16 @@ clean source tree. It does not start tests, take a lease, narrow selection, chan
 worker policy or authorize a gate. It is an opt-in operator diagnostic; existing
 author admission and daemon cutoffs are unchanged.
 
+Native timing profiles use format `rmd-native-author-runtime-v2`. Their bindings
+include inherited `NODE_OPTIONS` memory settings: only
+`--max-old-space-size=<positive integer>` and
+`--max-semi-space-size=<positive integer>` are modelled. Changing or removing a
+setting invalidates timing reuse; ordering and whitespace alone do not. Duplicate,
+malformed, unknown and instrumentation flags still refuse. Older v1 profiles lack
+this binding and must be recalibrated under normal admission, not upgraded by
+editing their metadata. This does not remove flags, alter memory policy, grant
+capacity or turn a sample profile into author assurance.
+
 ```sh
 node --import tsx scripts/plan-author-runtime.mjs \
   --runtime-profile coverage/rmd-native-runtime-EXAMPLE/profile.json \

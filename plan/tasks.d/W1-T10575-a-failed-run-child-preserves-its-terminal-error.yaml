@@ -1,0 +1,46 @@
+- id: W1-T10575
+  title: "A failed run child preserves a representable terminal error instead of reporting that child lost"
+  repo: remudero
+  depends_on: []
+  type: implement
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  verify: human
+  dispatch_hold: true
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "feedback-terminal-error:issue-13161-source-qualified-20261024"
+  files:
+    - src/lib/run-child-contract.ts
+    - src/lib/run-child.ts
+    - src/run-child-main.ts
+    - test/a-run-child-contract-round-trips-through-files.test.ts
+    - test/a-booting-daemon-adopts-its-live-run-children.test.ts
+  acceptance:
+    - claim: "The real bounded Git output-overflow Error crosses the production serializer, failed status file, reader and parent settler as a failed terminal Error; its available name, message, code, reason and bounded diagnostic fields survive without success or a false missing-child claim."
+      proof: "unit test: a terminal Git output overflow remains a failed error through the run-child status file"
+    - claim: "A real no-pid missing-cwd spawn failure retains its failure and available diagnostic fields through the same contract. No retry, larger output buffer, child-mode change or lane-local waiver is introduced."
+      proof: "unit test: a no-pid spawn failure remains a failed terminal error rather than an absent child"
+    - claim: "Task-admission, credential refusal, programmer-error, ordinary lane-delivery and abort consequences match their existing in-process classifications; representation does not downgrade fatal errors or clear strikes, claims or holds."
+      proof: "unit test: terminal error representation preserves the original daemon failure consequences"
+    - claim: "Missing, malformed and nonterminal statuses, done without result, PID reuse, unknown future failure classes and unknown schema majors retain their refused or lost outcomes. Mixed-version behavior is explicit and tested; no raw payload or secret is newly logged."
+      proof: "unit test: genuine lost and unknown run-child contracts are not rescued by terminal error representation"
+    - claim: "Deleting the terminal-representation fix makes the real writer-to-settler regressions fail for the intended lost-versus-error reason; restoring it passes. Tests verify physical files and full test summaries without weakening existing guards."
+      proof: "unit test: terminal error round-trip regressions exercise the real run-child writer and settler"
+  note: "Plan-only filing, not implementation or retry authority. The normal machine-filing judge must rule before dispatch. W10001 outside-kill handling and W9854 unresolved harness-module classification remain separate; reuse an actual overlapping implementation if fresh scope finds one."
+  rationale: |
+    Issue #13161. A completed maintained ledger union for October19-24 opened 161 gzip/0 plain/1 live sources with current positive controls and no reported unread or malformed rows: 200 lost events, 190 container_stop and ten unclassified terminal failures, all ten also settled rejected. Eight carry Git ENOBUFS, two no-pid spawn failures. This is not proof that a process vanished.
+    On the contract blob b9c820177c0b6878c291bcc45a9da11584dbf609, actual execFileSync Git output overflow and real spawnDetachedGroup missing-cwd controls serialize as unknown and settle as lost. Known lane-delivery and unknown-future controls distinguish the intended boundary. Recheck current source; preserve failed and incomplete diagnostics rather than transferring assurance.
+    Correct only truthful terminal failure representation. An authenticated failed terminal record is not a success and not an automatic local-lane failure. Preserve the original daemon failure policy, existing diagnostic bounds, identity and mixed-version fences. Do not treat every unknown class as representable.
+    Normal full author/CI/coverage/security/review requirements remain for implementation. Filing publication alone has the approved author NOT RUN/full-CI first-push exception; no new hosted attempt, production lifecycle action or failed-task retry is authorized.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it touches secrets, auth, tokens or permissions (\"credential\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-24T18:06:40.806Z"
+    pin: "3a6297a8b72b0d0b9dc8fa73794a86034d7956f1979846c3f8904e60b9bacbac"
