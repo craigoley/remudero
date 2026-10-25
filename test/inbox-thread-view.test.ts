@@ -20,7 +20,10 @@ import type { Proposal } from "../src/lib/inbox.js";
 import type { AddressInfo } from "node:net";
 import { createService } from "#src/lib/service.js";
 import { buildInboxThreadRoute, buildInboxVerbActions } from "#src/lib/panel-graph.js";
-import { answerThread, registryThreadItems } from "#src/lib/inbox-responder.js";
+import { answerThread, createThreadEventSync, registryThreadItems } from "#src/lib/inbox-responder.js";
+import { readThread } from "#src/lib/inbox-thread.js";
+import { appendPanelLedger } from "#src/lib/panel-actions.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const T0 = Date.parse("2026-10-02T12:00:00.000Z");
 const PROPOSAL = "ruling-w1-t1";
@@ -218,11 +221,12 @@ test("a key whose build throws answers unavailable and is logged, and the other 
 });
 
 async function classifiedFixture(t: TestCtx, count = 80) {
-  const root = makeTempDir("inbox-thread-classified");
+  const repository = gitRepo({ seedCommit: false, kind: "inbox-thread-classified" }), root = repository.dir;
   mkdirSync(join(root,"state")); mkdirSync(join(root,"plan"));
   const registryPath=join(root,"state/inbox-proposals.json"),planPath=join(root,"plan/tasks.yaml"),ledgerPath=join(root,"state/ledger.ndjson");
   const proposals: Proposal[]=Array.from({length:count},(_,i)=>({id:i===0?PROPOSAL:`ruling:other-${i}`,summary:`${"source detail ".repeat(90)}${i}`,evidenceAnchors:[]}));
   writeFileSync(planPath,"[]\n");writeFileSync(ledgerPath,"");
+  repository.git("add","plan/tasks.yaml");repository.git("commit","-qm","fixture plan");
   const write=()=>writeFileSync(registryPath,JSON.stringify({proposals}));write();
   const deps: PanelGraphDeps={root,inboxRoot:root,planPath,ledgerPath,github:{prView:()=>null},statusGithub:fakeGitHub(),
     inboxMainSha:()=>"a".repeat(40),inboxGrepAnchor:()=>true,ratify:{approve:()=>undefined,reframe:()=>undefined},
@@ -286,9 +290,9 @@ test("W1-T10431: reclassified age history remains readable without action author
     f.seed(result.bodies,true);
     assert.equal(f.build(key).data.found,true,"the complete original source cohort recovers after each refused read");
     const actions=buildInboxVerbActions(deps,{repository:"owner/core"});
-    const requests={reframe:{proposalId:id,feedback:"old option"},decline:{proposalId:id,reason:"old option"},
+    const requests={approve:{proposalId:id},reframe:{proposalId:id,feedback:"old option"},decline:{proposalId:id,reason:"old option"},
       restore:{proposalId:id,reason:"old option"},reply:{threadId,text:"old option",intentId:"stale-age-option"}};
-    for(const verb of ["reframe","decline","restore","reply"] as const){
+    for(const verb of ["approve","reframe","decline","restore","reply"] as const){
       const responses:Array<{status:number;body:unknown}>=[];
       await actions[verb](requests[verb],{origin:"test"},(status,body)=>{responses.push({status,body});});
       assert.equal(responses.length,1,verb);assert.equal(responses[0]!.status,409,verb);
@@ -310,6 +314,17 @@ test("W1-T10431: reclassified age history remains readable without action author
     assert.equal(await answerThread(threadId,{scope:{repository:"owner/core"},threadStorePath:store,ledgerPath:f.deps.ledgerPath,readItems,
       decide:()=>{decisions++;return{action:"approve",reply:"I read your answer."};},reframe:()=>{work++;}}),"question");
     assert.equal(decisions,1);assert.equal(work,0,"even a model-selected approval cannot turn information into new work");
+    appendThreadMessage(inboxThreadIdentity(id),"reply","Retain the existing policy.",{threadStorePath:store,now:()=>T0+1});
+    const legacyAnswer=await answerThread(threadId,{threadStorePath:store,ledgerPath:f.deps.ledgerPath,readItems,
+      decide:()=>{decisions++;return{action:"approve",reply:"I read your answer."};},reframe:()=>{work++;}});
+    assert.ok(legacyAnswer==="question"||legacyAnswer==="none","legacy interpretation also cannot execute an informational approval");
+    assert.equal(decisions,2);assert.equal(work,0);
+    appendPanelLedger(f.deps.ledgerPath,"panel.proposal_restored",id,"fixture-history",{reason:"Retain this historical restoration receipt."});
+    const sync=createThreadEventSync({ledgerPath:f.deps.ledgerPath,threadStorePath:store});
+    assert.ok(await sync.backfill()>0,"the real event synchronizer retains historical informational receipts");
+    const mirrored=readThread(threadId,{threadStorePath:store});assert.equal(mirrored.status,"ok");
+    assert.ok(mirrored.messages.some(message=>message.extra?.event?.kind==="restored"));
+    assert.equal(await sync.backfill(),0,"retained events cannot be duplicated by replay");
   }finally{await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
 
