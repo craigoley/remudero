@@ -132,7 +132,7 @@ export function buildCodeHealthOpportunities(input: CodeHealthProjectionInput, r
     if (finding.status !== "open" || !retained.has(fingerprint)) continue;
     const group = groups.get(finding.ruleId) ?? new Set<string>(); group.add(fingerprint); groups.set(finding.ruleId, group);
   }
-  const snapshotId = evidenceSnapshotId(input);
+  const snapshotId = codeHealthEvidenceSnapshotId(input);
   const scopedRelated = (proposalId: string): CodeHealthRelatedWork[] => {
     const rows = relatedWork.filter(work => work.repository.toLowerCase() === assessment.repository && work.proposalId === proposalId).map(work => {
       const value: CodeHealthRelatedWork = { repository: assessment.repository, proposalId };
