@@ -490,7 +490,7 @@ jobs:
             grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log" || : > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log"
             exit "$CODE"
           fi
-          ASSIGNED_COUNT="$(grep -c . assigned-plan-reading-suites.txt)"
+          ASSIGNED_COUNT="$(awk 'length { n++ } END { print n + 0 }' assigned-plan-reading-suites.txt)"
           TOTAL="$(find test -type f -name '*.test.ts' | grep -c .)"
           SUMMARY="$(grep '^test-tier-manifest: plan-reading shard summary ' plan-reading-selector.log)"
           echo "W1-T3191 fast-lane: class=${CLASS} — running ${ASSIGNED_COUNT} of ${COUNT} plan-reading candidates on shard ${{ matrix.shard }}/8 (${TOTAL} repository suites total)."

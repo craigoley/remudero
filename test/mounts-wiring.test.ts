@@ -19,7 +19,8 @@ const OFFLINE_GITHUB: GitHub = {
   prBody: () => undefined,
 };
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8") + "\n" +
+  readFileSync(fileURLToPath(new URL("../src/cli/commands/review.ts", import.meta.url)), "utf8");
 const runTaskVerbSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 

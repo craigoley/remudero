@@ -92,9 +92,9 @@ test("wiring: runReview computes the unwired section AND pushes it into the comm
   // The same source-structure idiom test/scope-guard-overrun.test.ts uses for W1-T434, because
   // the failure it guards is INVISIBLE to a renderer test: a section computed, gated on, and
   // then never appended renders perfectly in isolation and reaches no PR.
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/cli/commands/review.ts", import.meta.url), "utf8");
   const start = src.indexOf("async function runReview(");
-  const end = src.indexOf("// ── THE blocked_review FIX RUNG");
+  const end = src.indexOf("\n}\n", start) + 3;
   assert.ok(start > -1 && end > start, "could not locate runReview's body in run-task.ts");
   const runReviewSrc = src.slice(start, end);
 

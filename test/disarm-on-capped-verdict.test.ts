@@ -149,7 +149,7 @@ test("a ledgered operator override keeps a capped PR armed — the escape hatch 
 
 // ── 8: ORDERING — the withdrawal must precede the status post ───────────────────────
 test("ORDERING: runReview withdraws the arm BEFORE it posts the status — a later disarm would race GitHub", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/cli/commands/review.ts", import.meta.url), "utf8");
   const withdrawAt = src.indexOf("  withdrawArmIfVerdictRefuses(");
   const postAt = src.indexOf("  const posted = await postReviewStatusGuarded({");
 
