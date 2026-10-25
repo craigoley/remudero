@@ -174,13 +174,13 @@ jobs:
               brf: totals.brf, brh: totals.brh, skipped_records: totals.skippedRecords,
               tier: classifyCoverageTier(totals, baseline).tier, shard_test_exits: shardTestExits,
             };
-            writeFileSync("coverage/coverage-nightly-raw-summary.json", JSON.stringify(summary, null, 2) + "\n");
+            writeFileSync("coverage/coverage-nightly-summary.json", JSON.stringify(summary, null, 2) + "\n");
             console.log(JSON.stringify(summary));
           '
       - name: Bind code-health evidence to the original coverage measurement
         run: |
           node scripts/code-health-provenance.mjs \
-            --coverage-summary coverage/coverage-nightly-raw-summary.json --lcov coverage/lcov.info \
+            --coverage-summary coverage/coverage-nightly-summary.json --lcov coverage/lcov.info \
             --baseline scripts/coverage-baseline.json --workflow .github/workflows/coverage-nightly.yml \
             --output coverage-nightly-artifact/coverage-nightly-summary.json
       - name: Upload the merged lcov and the summary
