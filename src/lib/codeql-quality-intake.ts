@@ -2,6 +2,7 @@ import type { FeedbackEntry } from "./feedback.js";
 import { updateProposalRegistry, type Proposal } from "./inbox.js";
 import type { RawAlert } from "./ops.js";
 import { createHash } from "node:crypto";
+import { fixedClock } from "./clock.js";
 import { readFileSync } from "node:fs";
 import { codeHealthEvidenceSnapshotId } from "./code-health-store.js";
 import { dirname, join } from "node:path";
@@ -72,7 +73,11 @@ export function qualityScanFromCollectedEvidence(input: {
   else {
     if (!input.source.analysisInstances || input.source.analysisInstances.length !== input.source.alerts.length) reasons.add("The alert read has incomplete analysis identities.");
     for (const alert of input.source.alerts) {
-      if (alert.source !== "code-scanning" || alert.toolName?.trim().toLowerCase() !== "codeql" || !hasTag(alert, "quality") || !hasTag(alert, "maintainability")) continue;
+      if (alert.source !== "code-scanning" || alert.toolName?.trim().toLowerCase() !== "codeql") continue;
+      const maintainability = hasTag(alert, "quality") && hasTag(alert, "maintainability");
+      if (alert.severity === "unknown") reasons.add("Some CodeQL findings do not have a known severity.");
+      if (!maintainability && alert.severity !== "high" && alert.severity !== "critical") continue;
+      const category = maintainability ? "maintainability" : hasTag(alert, "security") ? "security" : "reliability";
       if (alert.state === "fixed" && !knownFindingIds.has(alert.id)) continue;
       const instance = input.source.analysisInstances?.find(value => value.alertId === alert.id);
       const analysis = [...matched.values()].find(value => value.category === instance?.category);
@@ -80,12 +85,12 @@ export function qualityScanFromCollectedEvidence(input: {
         instance.toolVersion === analysis.toolVersion && instance.analysisKey === analysis.analysisKey && instance.environmentHash === analysis.environmentHash;
       const identified = sameConfiguration && instance!.analyzedSha === analyzedSha.toLowerCase() &&
         (alert.state === "dismissed" ? ["open", "dismissed"].includes(instance!.instanceState ?? "") : instance!.instanceState === "open");
-      if (alert.state !== "fixed" && !identified) reasons.add("A maintainability finding cannot be tied to the checked code and configuration.");
+      if (alert.state !== "fixed" && !identified) reasons.add("A CodeQL finding cannot be tied to the checked code and configuration.");
       if (!alert.ruleId || !/^[1-9][0-9]*$/.test(alert.id) || alert.ruleId.length > 256 ||
           !["critical", "high", "medium", "low"].includes(alert.severity) || !["open", "dismissed", "fixed"].includes(alert.state) ||
           !alert.location?.path || alert.location.path.startsWith("/") || alert.location.path.includes("\\") || alert.location.path.length > 4096 ||
           alert.location.path.split("/").some(part => !part || part === "..") || !alert.summary || alert.summary.length > 2048) {
-        if (alert.state !== "fixed") reasons.add("Some maintainability findings have incomplete identity, severity or location evidence."); continue;
+        if (alert.state !== "fixed") reasons.add("Some CodeQL findings have incomplete identity, severity or location evidence."); continue;
       }
       if (alert.state === "fixed") {
         const artifact = artifacts.find(value => `/language:${value.language}` === instance?.category);
@@ -95,13 +100,13 @@ export function qualityScanFromCollectedEvidence(input: {
             reasons.add("A reported fix occurred after the retained analysis."); continue;
           }
           findings.push({ id: alert.id, ruleId: alert.ruleId, status: "fixed", severity: alert.severity as CodeHealthScan["findings"][number]["severity"],
-            category: "maintainability", path: alert.location.path, title: alert.summary, effortMinutes: null,
-            fixedAt: new Date(instance!.fixedAt).toISOString(), fixedSha: instance!.analyzedSha! });
+            category, path: alert.location.path, title: alert.summary, effortMinutes: null,
+            fixedAt: fixedClock(Date.parse(instance!.fixedAt)).iso(), fixedSha: instance!.analyzedSha! });
         } else if (instance?.analyzedSha === analyzedSha.toLowerCase()) reasons.add("A reported fix has no matching analysis and recorded fix time.");
         continue;
       }
       findings.push({ id: alert.id, ruleId: alert.ruleId, status: alert.state as "open" | "dismissed" | "fixed",
-        severity: alert.severity as CodeHealthScan["findings"][number]["severity"], category: "maintainability", path: alert.location.path,
+        severity: alert.severity as CodeHealthScan["findings"][number]["severity"], category, path: alert.location.path,
         title: alert.summary, effortMinutes: null });
     }
   }
@@ -118,8 +123,8 @@ export function qualityScanFromCollectedEvidence(input: {
     componentIds: ordered.map(artifact => artifact.scanId).sort(), observedAt: ordered.map(artifact => artifact.observedAt).sort()[0] ?? "", state: !input.source.ok ? "unavailable" : reasons.size ? "partial" : "complete",
     scopeHash: digest("scope"), toolVersion: versions && versions.length <= 256 ? versions : null, rulesVersion: digest("rulesVersion"), configHash: digest("configHash"),
     exclusions: [...new Set(ordered.flatMap(artifact => artifact.exclusions))].sort(), reason: reasons.size ? [...reasons].join(" ") : null,
-    checks: [{ id: "quality-maintainability-open", met: findings.every(finding => finding.status === "fixed"),
-      reason: findings.some(finding => finding.status !== "fixed") ? "Known maintainability findings have not been verified as fixed." : "No open findings in the measured maintainability subset." }], findings };
+    checks: [{ id: "quality-maintainability-open", met: findings.filter(finding => finding.category === "maintainability").every(finding => finding.status === "fixed"),
+      reason: findings.some(finding => finding.category === "maintainability" && finding.status !== "fixed") ? "Known maintainability findings have not been verified as fixed." : "No open findings in the measured maintainability subset." }], findings };
 }
 
 /** A read-only briefing over existing evidence and opportunity identities; never files or ranks. */
@@ -131,7 +136,7 @@ export function buildCodeHealthOpportunities(input: CodeHealthProjectionInput, r
   const groups = new Map<string, Set<string>>();
   for (const finding of scan.findings) {
     const fingerprint = codeHealthFindingFingerprint(assessment.repository, scan.kind, finding);
-    if (finding.status !== "open" || !retained.has(fingerprint)) continue;
+    if (finding.category !== "maintainability" || finding.status !== "open" || !retained.has(fingerprint)) continue;
     const group = groups.get(finding.ruleId) ?? new Set<string>(); group.add(fingerprint); groups.set(finding.ruleId, group);
   }
   const snapshotId = codeHealthEvidenceSnapshotId(input);
