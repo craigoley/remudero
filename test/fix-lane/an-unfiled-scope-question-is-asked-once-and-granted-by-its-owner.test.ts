@@ -107,6 +107,8 @@ test("no other answer, issue, order or PR grants an unfiled scope", () => {
     assert.equal(unfiledScopeGrant(ledger, { prNumber: PR }), undefined, JSON.stringify(ledger));
     assert.match(scopeEscalationStandDown(ledger, atHead)?.reason ?? "", /^unfiled scope decision awaits resolution at this head/);
   }
+  assert.ok(scopeEscalationStandDown([held()], atHead)?.reason.endsWith(
+    `; the repository owner grants exactly ${HELD} to this PR by answering revise-pr on that issue`), "the hold names its release");
   assert.equal(scopeEscalationStandDown([held(), answered()], atHead), undefined, "positive control: the grant releases");
   assert.match(scopeEscalationStandDown([held(), answered(), held({ round_id: "after-grant" })], atHead)?.reason ?? "",
     /^unfiled scope decision awaits resolution/, "a question asked after the grant is held again");
