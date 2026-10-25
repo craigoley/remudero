@@ -1,4 +1,3 @@
-import { CODE_HEALTH_POLICY_VERSION } from "./code-health-collector.js";
 import { parseProposalRegistryResult } from "./inbox.js";
 import { inboxThreadId } from "./inbox-thread.js";
 import { fixedClock } from "./clock.js";
@@ -125,10 +124,7 @@ export function readCodeHealthReport(opts: { stateDir: string; params: URLSearch
     report.opportunities = buildCodeHealthOpportunities(report.input!, related.work);
     const offset = input.page?.o ?? 0, findings = report.assessment.findings;
     if (offset >= findings.length && offset !== 0) throw new RangeError("Code health page is outside its saved evidence.");
-    const quality = report.input!.scans.find(scan => scan.kind === "quality"), observedAt = quality ? Date.parse(quality.observedAt) : NaN;
-    data.planningAvailable = report.isCurrentSnapshot && report.summary.collection.state === "none" && report.input!.registry.version === CODE_HEALTH_POLICY_VERSION &&
-      quality?.state === "complete" && quality.analyzedSha === report.input!.currentSha && Number.isFinite(observedAt) && observedAt <= opts.now && opts.now - observedAt <= CODE_HEALTH_INTERVAL_MS &&
-      report.opportunities.some(opportunity => opportunity.mayPlan);
+    data.planningAvailable = report.isCurrentSnapshot && report.summary.freshness === "fresh" && report.summary.collection.state === "none" && report.opportunities.some(opportunity => opportunity.mayPlan);
     if (Buffer.byteLength(JSON.stringify(data)) + 1024 > CODE_HEALTH_PAGE_BYTES) throw new CodeHealthNotReady("Code health source details exceed the response bound.");
     for (const finding of findings.slice(offset, offset + PAGE_FINDINGS)) {
       const next = [...data.assessment.findings, finding], fingerprints = new Set(next.map(value => value.fingerprint));
