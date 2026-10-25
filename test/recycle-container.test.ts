@@ -155,7 +155,7 @@ function bashCaseEchoLines(byMode: Record<string, string[]>, defaultLines: strin
 function writeStubs(dir: string): void {
   const docker = [
     "#!/usr/bin/env bash",
-    'rec() { printf "%s" "docker" >> "$STUB_REC/calls"; for a in "$@"; do printf "\\t%s" "$a" >> "$STUB_REC/calls"; done; printf "\\n" >> "$STUB_REC/calls"; }',
+    'rec() { printf "%s" "docker" >> "$STUB_REC/calls"; for a in "$@"; do a="${a//$\'\\n\'/ }"; printf "\\t%s" "$a" >> "$STUB_REC/calls"; done; printf "\\n" >> "$STUB_REC/calls"; }',
     'rec "$@"',
     'case "$1" in',
     '  context) case "$STUB_MODE" in private-remote) echo "ssh://unqualified.example.invalid" ;; *) echo "unix:///fixture/docker.sock" ;; esac; exit 0 ;;',
