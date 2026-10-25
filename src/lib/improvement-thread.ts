@@ -9,7 +9,7 @@ import { buildCodeHealthOpportunities } from "./codeql-quality-intake.js";
 import { acquireInflightLock, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
-import { inboxDraftGeneration, invalidateDraft, parseProposalRegistryResult, updateProposalRegistry, type DraftCache, type Proposal } from "./inbox.js";
+import { inboxDraftGeneration, invalidateDraft, parseProposalRegistryResult, updateProposalRegistry, type DraftCache, type DraftedCandidate, type Proposal } from "./inbox.js";
 import { bearerTokenId, jsonAction, sendJson } from "./panel-actions.js";
 import type { Route } from "./service.js";
 import { appendThreadMessageOnce, inboxThreadId, inboxThreadIdentity, readThread, type ThreadMessageExtra } from "./inbox-thread.js";
@@ -237,7 +237,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
         if (!drafts || typeof drafts !== "object" || Array.isArray(drafts)) throw new Error("The existing draft cache is unavailable.");
         if (!writeAtomic(draftsPath, JSON.stringify(invalidateDraft(drafts, intent.proposalId)), { mode: 0o600, beforeRename: owns })) throw new Error("Improvement request ownership changed.");
       }
-      const proposal: Proposal = { ...prior, id: intent.proposalId, summary: `${intent.context}\n\nOperator goal:\n${intent.goalBody}`, evidenceAnchors: prior?.evidenceAnchors ?? [],
+      const proposal: Proposal = { ...prior, id: intent.proposalId, summary: `${intent.context}\n\nOperator goal:\n${intent.goalBody}`, retainAfterRatification: true, evidenceAnchors: prior?.evidenceAnchors ?? [],
         trigger: { fired: false, description: "Choose Draft plan tasks when ready." },
         ...(prior && prior.improvement?.goalDigest !== goalDigest ? { reframeHistory: [...(prior.reframeHistory ?? []), { feedback: intent.goalBody }] } : {}),
         improvement: { version: IMPROVEMENT_THREAD_VERSION, repository: request.repository, instance: scope.instance, opportunityId: request.opportunityId,
@@ -438,6 +438,10 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
     owns = () => ownsConversation() && ownsRequest!();
     const previous = readAction(deps.stateDir, operationId), payloadHash = hash([kind, input]);
     if (previous && (previous.payloadHash !== payloadHash || previous.actorId !== deps.actorId)) return fail("conflict", "This action identity was already used for a different decision.");
+    if (previous && ["completed", "refused", "uncertain"].includes(previous.state)) {
+      if (previous.state === "uncertain" && previous.kind === "file" && deps.launchAction) deps.launchAction({ ...actionTarget(intent), operationId, stateDir: deps.stateDir });
+      return { state: "requested", operation: previous, execution: { state: "not_requested" } };
+    }
     const view = readImprovementThread(input.requestId, deps);
     if (view.state !== "saved") return view;
     if (view.currentRequestId !== input.requestId || view.goalDigest !== input.goalDigest) return fail("conflict", "The goal changed. Review the latest conversation before continuing.");
@@ -447,7 +451,7 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
     const action: ImprovementAction = previous ?? { version: "improvement-action-v1", operationId, kind, requestId: input.requestId, proposalId: intent.proposalId,
       actorId: deps.actorId, payloadHash, goalDigest: input.goalDigest, draftDigest: input.draftDigest ?? null, requestedAt: (deps.clock ?? systemClock).iso(), state: "requested", reason: null, receipt: null };
     if (!previous) { writeAction(deps.stateDir, action, owns); wrote = true; }
-    if (kind === "draft" && !previous) {
+    if (kind === "draft" && ["requested", "waiting"].includes(action.state)) {
       const registryPath = join(intent.scope.inboxStateDir, "inbox-proposals.json");
       strictRegistry(registryPath);
       updateProposalRegistry(registryPath, current => {
@@ -531,4 +535,14 @@ export async function runImprovementAction(operationId: string, deps: Improvemen
     // Preserve the pre-call uncertainty journal. The absence of a response never establishes a failed or completed filing.
     return fail("uncertain", "The action's outcome cannot currently be verified. Check its saved receipt before trying again.");
   } finally { if (lock && owns?.()) lock.release(); }
+}
+
+
+/** The ordinary approve path calls this too; a legacy CLI or cached approval cannot substitute another draft. */
+export function isReviewedImprovementDraft(proposal: Proposal, draft: DraftedCandidate | undefined,
+  reviewed: { goalDigest: string; draftDigest: string } | undefined): boolean {
+  return proposal.improvement !== undefined && proposal.improvement.conversationReady && reviewed !== undefined && draft !== undefined &&
+    proposal.improvement.goalDigest === reviewed.goalDigest && hash(draft) === reviewed.draftDigest && draft.proposalId === proposal.id &&
+    draft.completion !== undefined && draft.completion.lintClean && Array.isArray(draft.completion.violations) && draft.completion.violations.length === 0 &&
+    draft.completion.snapshot.repository === proposal.improvement.repository && draft.completion.snapshot.generation === inboxDraftGeneration(proposal);
 }

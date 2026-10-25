@@ -236,3 +236,41 @@ test("improvement planning separates conversation drafting filing and execution"
     assert.equal(existsSync(join(inboxRoot, "repos", "atlas", "plan", "tasks.yaml")), false, "the test filing callback creates no task, dispatch, merge or deployment");
   });
 });
+
+test("improvement action execution revalidates current source and refuses changed goals", async () => {
+  const { createImprovementThread, readImprovementThread, requestImprovementAction, runImprovementAction } = await planningModule();
+  await withTempDir("improvement-action-source-change", async dir => {
+    const { deps, request, input } = sourceFixture(dir);
+    const saved = await createImprovementThread(request, deps); assert(saved.state === "saved");
+    const view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
+    const pending = await requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: "source-change-draft-00001" }, { ...deps, launchAction: () => {} });
+    assert(pending.state === "requested");
+    const changed = structuredClone(input); changed.currentSha = "c".repeat(40);
+    const published = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(deps.stateDir, request.repository), input: changed, expectedSnapshotId: request.snapshotId, clock: deps.clock }); assert.equal(published.state, "published");
+    let calls = 0;
+    const refused = await runImprovementAction(pending.operation.operationId, { ...deps, draft: async () => { calls++; }, file: async () => { calls++; return undefined; }, recoverFiling: () => undefined });
+    assert("kind" in refused); assert.equal(refused.state, "refused"); assert.equal(calls, 0);
+    const historical = readImprovementThread(saved.requestId, deps); assert(historical.state === "saved"); assert.equal(historical.source.state, "stale"); assert.equal(historical.messages.length, 2);
+  });
+});
+
+test("improvement CLI handoff requires fresh owned source and records real child outcomes", async () => {
+  const { ratifyCliGateway } = await import("#src/lib/panel-graph.js");
+  await withTempDir("improvement-native-handoff", async dir => {
+    const bin = join(dir, "bin"); mkdirSync(bin);
+    const argsPath = join(dir, "child-args.json"), ledgerPath = join(dir, "ledger.ndjson");
+    const { chmodSync } = await import("node:fs");
+    writeFileSync(join(bin, "rmd"), `#!${process.execPath}\nimport('node:fs').then(fs => {fs.writeFileSync(${JSON.stringify(argsPath)},JSON.stringify(process.argv.slice(2)));process.exit(process.argv.includes('refuse')?7:0);});\n`); chmodSync(join(bin, "rmd"), 0o700);
+    assert.equal(ratifyCliGateway(dir, join(dir, "legacy-logs")).improvement, undefined, "there is no legacy detached-child fallback for this action");
+    const gateway = ratifyCliGateway(dir, join(dir, "logs"), { ledgerPath, freshTree: async run => await run({ path: dir, sha: "a".repeat(40) }) });
+    assert(gateway.improvement);
+    const target = { operationId: "d".repeat(64), stateDir: join(dir, "state"), repoRoot: join(dir, "checkout") };
+    assert.equal((await gateway.improvement(target)).outcome, "queued");
+    assert.deepEqual(JSON.parse(readFileSync(argsPath, "utf8")), ["improvement-action", target.operationId, "--state-dir", target.stateDir, "--repo-root", target.repoRoot]);
+    assert.match(readFileSync(ledgerPath, "utf8"), /ratify.cli_started/); assert.match(readFileSync(ledgerPath, "utf8"), /ratify.cli_exited/);
+    const unavailable = ratifyCliGateway(dir, join(dir, "error-logs"), { ledgerPath, freshTree: async () => { throw new Error("fresh source unavailable"); } });
+    assert(unavailable.improvement); assert.equal((await unavailable.improvement(target)).outcome, "unknown");
+    assert.match(readFileSync(ledgerPath, "utf8"), /ratify.handoff_failed/);
+    const invalid = await gateway.improvement({ ...target, operationId: "not-an-operation" }); assert.equal(invalid.outcome, "refused");
+  });
+});

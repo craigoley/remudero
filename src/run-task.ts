@@ -1,3 +1,4 @@
+import { isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
   runTask as runTaskFromModule,
@@ -35389,6 +35390,7 @@ export async function serveCommand(
       root: repoRoot,
       planPath,
       ledgerPath,
+      ratify: fleetRatifyGateway(repoRoot, join(config.root, "state", "logs"), ledgerPath, { stateRoot: config.root }),
       github: ghTraceGateway(self.owner, self.repo),
       statusGithub: boardGithub,
       // W1-T191: arm the real feedback-landing bridge for POST /v1/feedback/decision — an
@@ -42338,6 +42340,7 @@ export function buildInboxDraftHook(
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
   grepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
   legacyGrepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
+  onlyProposalId?: string,
 ): (tickRead?: TickReadFacts) => Promise<void> {
   // 2026-10-06: the sync `git grep` behind each anchor held the daemon loop up to 29 s a spawn. The
   // readiness pass stays sync, so every anchor is warmed into the cache OFF the loop first. A test
@@ -42427,7 +42430,9 @@ export function buildInboxDraftHook(
       }
 
       const draftLane = resolvedInboxDraftLane(repoRoot);
-      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftSelection, draftLane);
+      // Explicit saved-conversation drafting narrows selection; every cadence, retry, ownership and spend guard stays the same.
+      const population = onlyProposalId === undefined ? proposals : proposals.filter(proposal => proposal.id === onlyProposalId);
+      const due = draftsDueOnDaemon(population, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftSelection, draftLane);
       if (due.length === 0) return;
 
       // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
@@ -42437,7 +42442,7 @@ export function buildInboxDraftHook(
       // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
       // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
       // not silence, so the row is written unconditionally.
-      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftSelection, draftLane);
+      const eligible = draftsDueOnDaemon(population, drafts, attempts, 0, draftSelection, draftLane);
       log("inbox.draft_batch", {
         eligible: eligible.length,
         drafting: due.length,
@@ -42668,6 +42673,47 @@ export function projectionReadinessAccessors(projection: ReadonlyMap<string, Sta
  * NOTE (W1-T192): the daemon's OWN per-poll draft rung ({@link buildInboxDraftHook}) is what
  * makes a draft exist without this command ever being invoked — see that function's doc.
  */
+function improvementNativeFilingReceipt(ledgerPath: string, proposalId: string, repository: string): ImprovementPlanReceipt | undefined {
+  const rows = readLedgerLines(ledgerPath);
+  const receipt = rows.filter(row => row.task_id === proposalId && row.step === "ratify.approved").at(-1);
+  if (!receipt || typeof receipt.pr_url !== "string" || !receipt.pr_url.startsWith(`https://github.com/${repository}/pull/`) ||
+      !/\/pull\/[1-9][0-9]*$/.test(receipt.pr_url) || typeof receipt.branch !== "string" || typeof receipt.run_id !== "string") return undefined;
+  const materialized = rows.filter(row => row.run_id === receipt.run_id && row.step === "approve.id_materialized" && row.proposal_id === proposalId).at(-1);
+  const taskIds = Array.isArray(materialized?.ids) && materialized.ids.every(id => typeof id === "string" && /^[A-Za-z0-9-]{1,128}$/.test(id)) ? materialized.ids as string[] : [];
+  return { state: "plan_pr_opened", prUrl: receipt.pr_url, branch: receipt.branch, taskIds,
+    nativeReceiptId: `${receipt.run_id}|${receipt.step}|${String(receipt.ts)}` };
+}
+
+/** Only a saved, authenticated decision can reach the existing bounded draft and governed approve paths. */
+export async function improvementActionCommand(rest: string[]): Promise<number> {
+  const bad = unknownArgError("improvement-action", rest.slice(1), ["--state-dir"], []), operationId = rest[0];
+  if (bad || !operationId || !/^[a-f0-9]{64}$/.test(operationId)) { console.error("rmd improvement-action: use a saved action identity and its fleet state directory"); return 2; }
+  const config = loadConfig(), stateDir = flagValue(rest, "--state-dir");
+  if (!stateDir || resolve(stateDir) !== resolve(config.root, "state")) { console.error("rmd improvement-action: the request store must belong to this configured fleet"); return 2; }
+  const identity = resolveOwnerRepo(), repository = `${identity.owner}/${identity.repo}`.toLowerCase();
+  const checkTarget = (target: { repository: string; repoRoot: string }) => {
+    if (target.repository !== repository || resolve(target.repoRoot) !== resolve(repoRoot)) throw new Error("The saved action does not belong to the selected repository checkout.");
+  };
+  const result = await runImprovementAction(operationId, { stateDir, actorId: "owned-improvement-cli",
+    draft: async target => {
+      checkTarget(target);
+      const scopedConfig = { ...config, root: target.controlRoot }, runId = `IMPROVEMENT-DRAFT-${operationId}`;
+      const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPathFor(scopedConfig), { run_id: runId, task_id: target.proposalId, step, ...extra });
+      await buildInboxDraftHook(identity.owner, identity.repo, scopedConfig, runId, log, undefined, undefined, undefined, undefined, undefined, target.proposalId)();
+    },
+    recoverFiling: target => improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, repository),
+    file: async target => {
+      checkTarget(target);
+      const scopedConfig = { ...config, root: target.controlRoot };
+      await approveCommandMirrored([target.proposalId], { config: scopedConfig, root: target.controlRoot, planPath: target.planPath,
+        reviewedImprovement: { goalDigest: target.goalDigest, draftDigest: target.draftDigest } });
+      return improvementNativeFilingReceipt(ledgerPathFor(scopedConfig), target.proposalId, repository);
+    },
+  });
+  console.log(JSON.stringify(result));
+  return "kind" in result && ["completed", "waiting"].includes(result.state) ? 0 : 1;
+}
+
 export async function inboxCommand(rest: string[], deps: { config?: Config; github?: GitHub } = {}): Promise<number> {
   const badArg = unknownArgError("inbox", rest, [], ["--dry-run"]);
   if (badArg) {
@@ -44101,6 +44147,7 @@ export async function approveCommand(
     log?: (step: string, extra?: Record<string, unknown>) => void;
     /** The plan both branches read: the checkout's own, never `config.root` (a state root holds no plan). */
     planPath?: string;
+    reviewedImprovement?: { goalDigest: string; draftDigest: string };
   } = {},
 ): Promise<number> {
   const proposalId = rest[0];
@@ -44169,6 +44216,11 @@ export async function approveCommand(
   if (!proposal || !classification) {
     console.error(`rmd approve: unknown proposal '${proposalId}' — not in the ACTIVE registry (state/inbox-proposals.json)`);
     return 2;
+  }
+
+  if (proposal.improvement && !isReviewedImprovementDraft(proposal, parseDraftCache(readFileIfExists(join(config.root, "state", "inbox-drafts.json")))[proposal.id], deps.reviewedImprovement)) {
+    console.error("rmd approve: this improvement requires an explicit review of its current completed draft; use the saved conversation's Review and file action");
+    return 1;
   }
 
   if (classification.state === "ready" && classification.releaseTaskId) {
@@ -44751,6 +44803,10 @@ async function approveBatchCommand(
   const { owner, repo } = resolveOwnerRepo();
 
   const { found, unknown } = loadProposalsForRatify(proposalIds, plan, ledgerPath, owner, repo, config);
+  if (found.some(row => row.proposal.improvement !== undefined)) {
+    console.error("rmd approve: improvement drafts must be reviewed and filed individually through their bound saved conversation");
+    return 1;
+  }
   if (unknown.length > 0) {
     console.error(
       `rmd approve: unknown proposal(s) ${unknown.join(", ")} — not in the ACTIVE registry (state/inbox-proposals.json); ` +
@@ -49295,6 +49351,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["peek", async (rest) => await peekCommand(rest)],
   ["pr-owner", (rest) => prOwnerCommand(rest)],
   ["plan", async (rest) => await planCommand(rest)],
+  ["improvement-action", async (rest) => await improvementActionCommand(rest)],
   ["inbox", async (rest) => await inboxCommand(rest)],
   ["inbox-bakeoff", async (rest) => await inboxBakeoffCommand(rest)],
   [

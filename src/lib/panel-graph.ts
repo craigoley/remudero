@@ -25,7 +25,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { inboxBoardReferents } from "./inbox-board-referents.js";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
-import { basename, dirname, join, relative } from "node:path";
+import { isAbsolute, basename, dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
@@ -3386,6 +3386,8 @@ export function buildInboxThreadReadRoute(deps: PanelGraphDeps): Route {
  * The response confirms only a hand-off; the resulting PR surfaces via the console's own polling.
  */
 export interface RatifyCliGateway {
+  /** Available only with the owned fresh-source runner; never falls back to an unowned child. */
+  improvement?(target: { operationId: string; stateDir: string; repoRoot: string }): Promise<RatifyCliHandoff>;
   approve(proposalId: string): void;
   reframe(proposalId: string, feedback: string, input?: InboxInputReference): void;
 }
@@ -3476,6 +3478,10 @@ export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: Ratif
       });
   };
   return {
+    ...(seams ? { improvement(target: { operationId: string; stateDir: string; repoRoot: string }) {
+      if (!/^[a-f0-9]{64}$/.test(target.operationId) || !isAbsolute(target.stateDir) || !isAbsolute(target.repoRoot)) return Promise.resolve<RatifyCliHandoff>({ outcome: "refused" });
+      return handOff(seams, `improvement-action:${target.operationId}`, ["improvement-action", target.operationId, "--state-dir", target.stateDir, "--repo-root", target.repoRoot], `improvement-${target.operationId}`);
+    } } : {}),
     approve(proposalId) {
       if (seams) return handOff(seams, proposalId, ["approve", proposalId], `approve-${proposalId}`).then(() => undefined);
       spawnDetached(["approve", proposalId], `approve-${proposalId}`);
