@@ -316,8 +316,12 @@ function breLiteral(s: string): string {
   return s.replace(/[\\.*[^$]/g, "\\$&");
 }
 
+function commentCompressionSlug(file: string): string {
+  return `compress-${file.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+}
+
 export function renderCommentCompressionShard(finding: CommentCompressionFinding, taskId: string) {
-  const testFile = newTestPath(`${taskId}-comment-compression-preserves-code`, [finding.file], finding.file);
+  const testFile = newTestPath(commentCompressionSlug(finding.file), [finding.file], finding.file);
   const rendered = renderMachineShard({
     taskId, title: `Compress the ${finding.comments} comment lines in ${finding.file} without changing executable code`,
     origin: commentCompressionOrigin(finding.file), files: [finding.file, testFile],
@@ -390,7 +394,7 @@ function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], dep
     const rendered = renderDefuseShard(action, taskId);
     if (rendered.refused) throw new Error(`gate gardener: defuse shard refused (${rendered.refused})`);
     const stem = action.file.replace(/^test\//, "").replace(/\.test\.ts$/, "").replace(/[^a-zA-Z0-9-]/g, "-");
-    const path = join(resolveRepoLayout(ws.root).planDir, "tasks.d", `${taskId}-${action.edit.kind}-${stem}.yaml`);
+    const path = join(resolveRepoLayout(ws.root).planDir, "tasks.d", `${taskId}-${action.edit.kind === "compress" ? commentCompressionSlug(action.file) : `${action.edit.kind}-${stem}`}.yaml`);
     mkdirSync(join(path, ".."), { recursive: true });
     writeFileSync(path, rendered.text);
     paths.push(relative(ws.root, path));

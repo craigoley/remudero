@@ -15,9 +15,9 @@ import { ghExec } from "./github-transport.js";
 import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
 import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook } from "./ledger-union.js";
 import { readOriginMainSha } from "./inbox.js";
-import { loadPlanFromYaml, newTestPath } from "./plan.js";
+import { loadPlanFromYaml, newTestPath, type Task } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { lintTask } from "./task-linter.js";
+import { lintTask, proofResolvabilityViolations } from "./task-linter.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import {
   CI_FRICTION_REMEDIES_DOC,
@@ -26,6 +26,8 @@ import {
   ciFrictionRungOrigin,
   locateCiFrictionOwner,
   ownerSearchTerms,
+  reviewStatusWithoutMechanism,
+  coverageRefusalWithoutMechanism,
   parseCiFrictionOrigin,
   type CiFrictionCauseState,
   type CiFrictionOwner,
@@ -1339,10 +1341,12 @@ export function ciFrictionDraftRationale(draft: CiFrictionDraft, key: string): s
   return [...head, ...ciFrictionRoundLines(draft.rounds, key), ...(end < 0 ? [] : lines.slice(end))];
 }
 
-/** The title a drafted remedy's regression test must carry — task-scoped, and never containing " in ",
- *  which would split its `grep:` proof at the wrong place. */
+/** A literal regression title admitted by the real proof policy; the full cause remains in origin/evidence. */
 export function ciFrictionRemedyTestTitle(taskId: string, key: string): string {
-  return `${taskId}: ${key.replace(/ in /g, " within ")} is prevented, not retried`;
+  const title = `${taskId}: ${key.replace(/ in /g, " within ")} is prevented, not retried`;
+  const proof = { id: taskId, acceptance: [{ claim: "prevent this CI friction cause", proof: `unit test: ${title}` }] } as Task;
+  if (proofResolvabilityViolations(proof).length === 0) return title;
+  return `${taskId}: CI friction ${createHash("sha256").update(key).digest("hex").slice(0, 16)} is prevented, not retried`;
 }
 
 /** Shard and regression share a slug; cause words must not classify that regression as a rule suite.
@@ -1370,8 +1374,8 @@ export function ciFrictionShardYaml(draft: CiFrictionDraft, taskId: string, pric
     cost: price.minutes,
     costPopulation: priced.map((p) => p.minutes),
     acceptance: [
-      // A forward reference: the build writes this test, so the proof greps for its declaration.
-      { claim: `the harness no longer spends a fix round on ${key}`, proof: `grep: test("${ciFrictionRemedyTestTitle(taskId, key)}" in ${testPath}` },
+      // The build must pass the named regression; a declaration alone is not repair evidence.
+      { claim: `the harness no longer spends a fix round on ${key}`, proof: `unit test: ${ciFrictionRemedyTestTitle(taskId, key)}` },
     ],
     note: `Filed by the ci-friction gardener (W1-T4435) at rung ${rung}. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures ${key}'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung ${rung + 1}.`,
     rationale: ciFrictionDraftRationale(draft, key),
@@ -1553,7 +1557,11 @@ export function ciFrictionLadder(input: {
     }
     next = owner
       ? { price, origin, rung: s.rung, decision: { kind: "draft", owner, prior: s.prior, ...(reconsideration ? { reconsideration } : {}) } }
-      : { price, origin, rung: s.rung, decision: { kind: "escalate", why: legacyRefusal + (input.ownerSearch.workflowOwner ? "; no declared workflow job resolves it" : "")
+      : { price, origin, rung: s.rung, decision: { kind: "escalate", why: reviewStatusWithoutMechanism(key, details)
+        ? "The remudero-review status identifies a verdict producer, but these rounds supply no failure mechanism for a workflow repair; diagnosis remains UNKNOWN"
+        : coverageRefusalWithoutMechanism(key, details)
+          ? "The source coverage refusal identifies uncovered changes, not a workflow failure mechanism; diagnosis remains UNKNOWN"
+        : legacyRefusal + (input.ownerSearch.workflowOwner ? "; no declared workflow job resolves it" : "")
         + (workflowGap(input.ownerSearch, key, details) ?? "") + testAlone, prior: s.prior, holdReason: "no-owner", evidence } };
     if (!owner) line.state = "escalate";
   }

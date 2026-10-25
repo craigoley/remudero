@@ -22,7 +22,7 @@ import type { RunResult } from "./run-result.js";
 
 /** The contract's schema version. The schema only grows within a major: a reader refuses an unknown major and
  *  ignores unknown minor fields. */
-export const RUN_CHILD_SCHEMA = { major: 1, minor: 0 } as const;
+export const RUN_CHILD_SCHEMA = { major: 1, minor: 1 } as const;
 
 export interface RunChildSchema {
   major: number;
@@ -73,10 +73,11 @@ export type RunChildFailureClass =
   | "lane_delivery"
   | "contract_mismatch"
   | "aborted"
+  | "terminal_error"
   | "unknown";
 export const RUN_CHILD_FAILURE_CLASSES: readonly RunChildFailureClass[] = [
   "task_admission", "transient_gh_dispatch", "spawn_infra_blocked", "gh_lane_read", "lane_delivery",
-  "contract_mismatch", "aborted", "unknown",
+  "contract_mismatch", "aborted", "terminal_error", "unknown",
 ];
 
 /** BACKSTOP: bound on the message and stderr a failure carries. Generous on purpose: the settle loop's gh predicates match
@@ -435,7 +436,9 @@ export function toRunChildFailure(error: unknown): RunChildFailure {
   const f = fieldsOf(error);
   const tagged = (typeof error === "object" && error !== null ? error : {}) as { reasonClass?: unknown; name?: unknown; refusalClass?: unknown; operation?: unknown };
   const failure: RunChildFailure = {
-    class: cls,
+    // Representation is not policy: an actual Error remains an Error for the daemon's
+    // existing predicates. Non-Error throws and unknown wire classes remain unknown.
+    class: cls === "unknown" && error instanceof Error ? "terminal_error" : cls,
     reasonClass: typeof tagged.reasonClass === "string" ? tagged.reasonClass : cls,
     message: bounded(f.message),
   };
@@ -453,7 +456,9 @@ export function contractMismatchFailure(detail: string): RunChildFailure {
 }
 
 /** What a reader settles a failure as: a rebuilt error the daemon's predicates classify as the original, or a
- *  lost run. An `unknown` failure is lost — never a success. */
+ *  lost run. A known terminal_error represents an Error, not a lane-delivery ruling.
+ *  Old readers treat this new minor's class as unknown/lost; old unknown records are
+ *  never guessed to be Errors by new readers. */
 export type RunChildSettlement =
   | { kind: "error"; error: Error }
   | { kind: "lost"; detail: string };
@@ -473,6 +478,7 @@ export function fromRunChildFailure(failure: RunChildFailure): RunChildSettlemen
     case "lane_delivery":
     case "contract_mismatch":
     case "aborted":
+    case "terminal_error":
       return { kind: "error", error: withFields(new Error(failure.message), failure) };
     default:
       return { kind: "lost", detail: `unclassified failure: ${failure.message}` };
@@ -482,9 +488,10 @@ export function fromRunChildFailure(failure: RunChildFailure): RunChildSettlemen
 function withFields(error: Error, failure: RunChildFailure): Error {
   if (failure.name !== undefined) error.name = failure.name;
   if (failure.class === "aborted") error.name = "AbortError";
-  const extra = error as Error & { stderr?: string; code?: string; refusalClass?: string };
+  const extra = error as Error & { stderr?: string; code?: string; refusalClass?: string; reasonClass?: string };
   if (failure.stderr !== undefined) extra.stderr = failure.stderr;
   if (failure.code !== undefined) extra.code = failure.code;
   if (failure.refusalClass !== undefined) extra.refusalClass = failure.refusalClass;
+  if (failure.class === "terminal_error" && failure.reasonClass !== "unknown") extra.reasonClass = failure.reasonClass;
   return error;
 }

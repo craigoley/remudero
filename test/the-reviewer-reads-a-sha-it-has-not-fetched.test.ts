@@ -223,7 +223,10 @@ test("CRITERION 8: restoring the original ordering makes the unfetched-sha case 
 });
 
 function readSource(): string {
-  return execFileSync("cat", [join(import.meta.dirname, "..", "src", "run-task.ts")], {
+  return execFileSync("cat", [
+    join(import.meta.dirname, "..", "src", "cli", "commands", "review.ts"),
+    join(import.meta.dirname, "..", "src", "run-task.ts"),
+  ], {
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
   });

@@ -316,9 +316,9 @@ test("W1-T2722: a changed decision digest is posted normally", async () => {
 });
 
 test("W1-T2722: production claims before spawn, replays before post/comment, and handles conflicts before fixed", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../src/cli/commands/review.ts", import.meta.url), "utf8");
   const reviewStart = source.indexOf("async function runReview(");
-  const reviewEnd = source.indexOf("// ── THE blocked_review FIX RUNG", reviewStart);
+  const reviewEnd = source.indexOf("\n}\n", reviewStart) + 3;
   const reviewBody = source.slice(reviewStart, reviewEnd);
   const claimAt = reviewBody.indexOf("claimReviewDecision({");
   const replayAt = reviewBody.indexOf('decisionClaim.kind === "replay"');
