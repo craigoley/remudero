@@ -494,3 +494,21 @@ the discovery roots. An unreadable or malformed worktree listing holds the store
 Previously observed holds remain held for the pass. Unmarked stores retain their
 ordinary eligibility, activity and preservation guards. This is a fresh pre-action
 check, not an atomic lock against another process creating a marker after that check.
+
+### The installed account hold is independent of invocation policy
+
+Every maintained preserve-retire action rereads the running account's default
+`~/.local/state/remudero/preserve-retire.json` and requires its owner-private
+`enabled: true`. Account identity comes from the OS user database, not `HOME`,
+`--home` or `--config`. Those arguments cannot replace a disabled account hold.
+Missing, unsafe, malformed, oversized or unreadable hold evidence refuses action.
+Preservation output and stamps are gated too; an unfinished copy or compression
+artifact is retained if the hold activates during work. A started filesystem or
+Git operation is not interrupted; the next action rechecks the hold.
+
+Disposable tests substitute the OS account-home resolver only inside an imported
+test module. No production environment variable, CLI flag or alternate config
+unlocks that resolver. Updated maintained routes do not constrain old standalone
+copies or arbitrary same-account Python code. Keep old copies unused, both account
+holds disabled, and require separate explicit release after qualification and
+installation; code installation does not enable either account.

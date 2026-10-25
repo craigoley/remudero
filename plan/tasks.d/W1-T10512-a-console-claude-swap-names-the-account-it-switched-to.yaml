@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern, the identity a console Claude swap leaves behind (the store's oauthAccount and the redacted label); the credential write, its locks and the projection's shape are unchanged
   band_meaning: blast-radius
   priority: 1  # completes W1-T10380 (the operator's 2026-10-22 P0)
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session measurement 2026-10-23 ~18:20Z; re-verified by the filing agent the same day on origin/main a85543a73 and read-only on `ssh remudero`"
   plan_refs: [W1-T10380, W1-T10381, W1-T10511, W1-T6252, "PR #13602 (W1-T10380)", "PR #13593 (W1-T10381)"]

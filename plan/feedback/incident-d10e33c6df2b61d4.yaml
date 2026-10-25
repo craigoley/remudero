@@ -1,0 +1,29 @@
+id: incident-d10e33c6df2b61d4
+ts: 2026-10-25T08:11:48.657Z
+raw: >-
+  Incident d10e33c6df2b: flow pr-stage-stall:awaiting-review:review running past
+  its observed length
+
+  First seen: 2026-10-25T08:10:26.438Z
+
+  Last seen: 2026-10-25T08:10:26.438Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=13895 awaiting-review: review running past its observed length
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#d10e33c6df2b61d4fdc847ac18c172690ba7e5fe309d302ce72b2ce9d322471d
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
