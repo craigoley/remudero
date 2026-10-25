@@ -42341,6 +42341,7 @@ export function buildInboxDraftHook(
   grepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
   legacyGrepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
   onlyProposalId?: string,
+  planningStore?: { root: string; ledgerPath: string },
 ): (tickRead?: TickReadFacts) => Promise<void> {
   // 2026-10-06: the sync `git grep` behind each anchor held the daemon loop up to 29 s a spawn. The
   // readiness pass stays sync, so every anchor is warmed into the cache OFF the loop first. A test
@@ -42357,21 +42358,22 @@ export function buildInboxDraftHook(
   const anchorGrepCache = createAnchorGrepCache();
   // W1-T9443: the orphan prune's shard population, held for this daemon's life like the anchor cache above, so a
   // full sweep reads, off the loop, only the shard files that changed since the one before.
-  const shardReader = createProposalShardReader(proposalShardDir(join(config.root, "state", "inbox-proposals.json")), { log });
+  const inboxRoot = planningStore?.root ?? config.root;
+  const shardReader = createProposalShardReader(proposalShardDir(join(inboxRoot, "state", "inbox-proposals.json")), { log });
   return async () => {
     try {
-      const registryPath = join(config.root, "state", "inbox-proposals.json");
+      const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
       const causalScope = { repository: `${owner}/${repo}` };
-      commitInboxDraftOutcomes({ stateDir: join(config.root, "state"), scope: causalScope, snapshots: [], outcomes: [], log });
+      commitInboxDraftOutcomes({ stateDir: join(inboxRoot, "state"), scope: causalScope, snapshots: [], outcomes: [], log });
       const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
       if (proposals.length === 0) return; // no active proposals — no spend
-      const ledgerPath = ledgerPathFor(config);
+      const ledgerPath = planningStore?.ledgerPath ?? ledgerPathFor(config);
 
-      const draftsPath = join(config.root, "state", "inbox-drafts.json");
+      const draftsPath = join(inboxRoot, "state", "inbox-drafts.json");
       const pruned = await pruneOrphanedDraftsAsync(draftsPath, registryPath, shardReader);
       if (pruned && pruned.count > 0) log("inbox.drafts_pruned", { count: pruned.count, bytes_before: pruned.bytesBefore, bytes_after: pruned.bytesAfter });
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
-      const attemptsPath = join(config.root, "state", "inbox-draft-attempts.json");
+      const attemptsPath = join(inboxRoot, "state", "inbox-draft-attempts.json");
       const attempts: DraftAttemptCache = parseDraftAttemptCache(readFileIfExists(attemptsPath));
 
       // W1-T2564 MIGRATION, ONCE PER DAEMON START, BEFORE `due` IS COMPUTED. Not writing a key for
@@ -42397,7 +42399,7 @@ export function buildInboxDraftHook(
       // bound that survives the restart; the flag and the marker do different jobs.
       if (!attemptsMigrated) {
         attemptsMigrated = true;
-        const reopenedPath = join(config.root, "state", "inbox-reopened-keys.json");
+        const reopenedPath = join(inboxRoot, "state", "inbox-reopened-keys.json");
         const reopened = parseReopenedKeysCache(readFileIfExists(reopenedPath));
         // KEYED ON PROPOSAL ID, never a global "migration done" flag: an id never seen before is
         // still re-opened on FIRST SIGHT, so a freshly-provisioned host recovers with no operator
@@ -42423,7 +42425,7 @@ export function buildInboxDraftHook(
           grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-          isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
+          isDeclined: declinedWithReceipts(ledgerLines, join(inboxRoot, "state")),
         };
       } catch (e) {
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
@@ -42490,15 +42492,17 @@ export function buildInboxDraftHook(
       // poll; that left the cap as the ONLY bound on a retry storm during a live outage — the exact
       // condition that produced 494 refusals in seven hours. Bounding the retry by the account's
       // own stated window is the prerequisite, not a nicety.
+      // A repository-specific planning store cannot bypass either provider refusal window.
       const deferralPath = join(config.root, "state", "inbox-draft-deferred-until.json");
-      const deferral = decideDraftDeferral(parseDraftDeferralCache(readFileIfExists(deferralPath)), Date.now());
-      if (deferral.defer) {
-        log("inbox.draft_batch.deferred", {
-          until: new Date(deferral.untilMs).toISOString(),
-          remaining_ms: deferral.remainingMs,
-          matched: deferral.matched,
-        });
-        return;
+      const deferralPaths = [...new Set([deferralPath, join(inboxRoot, "state", "inbox-draft-deferred-until.json")])];
+      for (const path of deferralPaths) {
+        const deferral = decideDraftDeferral(parseDraftDeferralCache(readFileIfExists(path)), Date.now());
+        if (deferral.defer) {
+          log("inbox.draft_batch.deferred", {
+            until: new Date(deferral.untilMs).toISOString(), remaining_ms: deferral.remainingMs, matched: deferral.matched,
+          });
+          return;
+        }
       }
 
       const draftLockPath = join(config.root, "state", "inbox-draft.lock");
@@ -42516,7 +42520,16 @@ export function buildInboxDraftHook(
         return;
       }
       try {
-      const inflightPath = join(config.root, "state", "inbox-draft-inflight.json");
+      // Hold the fleet lock first, then the selected store's native lock. A live holder of
+      // either keeps its slot; failure to acquire the second releases only our first lock.
+      let storeLock: DrainLockHandle | undefined;
+      const storeLockPath = join(inboxRoot, "state", "inbox-draft.lock");
+      if (resolve(storeLockPath) !== resolve(draftLockPath)) {
+        try { storeLock = acquireDrainLock(storeLockPath); }
+        catch (error) { log("inbox.draft_batch.skipped", { reason: "another draft batch holds the repository lock", detail: String(error) }); return; }
+      }
+      try {
+      const inflightPath = join(inboxRoot, "state", "inbox-draft-inflight.json");
       const spawnedAt = new Date().toISOString();
       writeFileSync(inflightPath, JSON.stringify(Object.fromEntries(due.map((p) => [p.id, spawnedAt])), null, 2), "utf8");
 
@@ -42569,7 +42582,7 @@ export function buildInboxDraftHook(
       // today's behaviour: retry next poll, bounded by the batch cap.
       const nextDeferral = deferralFromOutcomes(outcomes);
       if (nextDeferral) {
-        writeFileSync(deferralPath, JSON.stringify(nextDeferral, null, 2), "utf8");
+        for (const path of deferralPaths) writeFileSync(path, JSON.stringify(nextDeferral, null, 2), "utf8");
         log("inbox.draft_deferral_recorded", {
           until: new Date(nextDeferral.deferredUntilMs).toISOString(),
           matched: nextDeferral.matched,
@@ -42578,7 +42591,8 @@ export function buildInboxDraftHook(
       // Re-read under the shared registry lock, adopt only this batch's unchanged generations,
       // and persist completion before publication. Never spread an old whole-cache snapshot
       // over unrelated writes or mark newer direction attempted when an older worker finishes.
-      commitInboxDraftOutcomes({ stateDir: join(config.root, "state"), scope: causalScope, snapshots, outcomes, lane: draftLane, log });
+      commitInboxDraftOutcomes({ stateDir: join(inboxRoot, "state"), scope: causalScope, snapshots, outcomes, lane: draftLane, log });
+      } finally { storeLock?.release(); }
       } finally {
         draftLock.release();
       }
@@ -42703,17 +42717,16 @@ export async function improvementActionCommand(rest: string[], deps: {
   const result = await runImprovementAction(operationId, { stateDir, actorId: "owned-improvement-cli", clock: deps.clock,
     draft: async target => {
       checkTarget(target);
-      const scopedConfig = { ...config, root: target.controlRoot }, runId = `IMPROVEMENT-DRAFT-${operationId}`;
-      const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPathFor(scopedConfig), { run_id: runId, task_id: target.proposalId, step, ...extra });
-      await (deps.draftHook ?? buildInboxDraftHook)(identity.owner, identity.repo, scopedConfig, runId, log, undefined, undefined, undefined, undefined, undefined, target.proposalId)();
+      const planningStore = { root: target.controlRoot, ledgerPath: target.ledgerPath }, runId = `IMPROVEMENT-DRAFT-${operationId}`;
+      const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(target.ledgerPath, { run_id: runId, task_id: target.proposalId, step, ...extra });
+      await (deps.draftHook ?? buildInboxDraftHook)(identity.owner, identity.repo, config, runId, log, undefined, undefined, undefined, undefined, undefined, target.proposalId, planningStore)();
     },
     recoverFiling: target => improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, repository),
     file: async target => {
       checkTarget(target);
-      const scopedConfig = { ...config, root: target.controlRoot };
-      await (deps.approve ?? approveCommandMirrored)([target.proposalId], { config: scopedConfig, root: target.controlRoot, planPath: target.planPath,
+      await (deps.approve ?? approveCommandMirrored)([target.proposalId], { config, inboxRoot: target.controlRoot, inboxLedgerPath: target.ledgerPath, root: target.controlRoot, planPath: target.planPath,
         reviewedImprovement: { goalDigest: target.goalDigest, draftDigest: target.draftDigest } });
-      return improvementNativeFilingReceipt(ledgerPathFor(scopedConfig), target.proposalId, repository);
+      return improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, repository);
     },
   });
   console.log(JSON.stringify(result));
@@ -42833,12 +42846,13 @@ function loadProposalForRatify(
   owner: string,
   repo: string,
   config: Config,
+  inboxRoot = config.root,
 ): { proposal: Proposal | undefined; proposals: Proposal[]; drafts: DraftCache; draftsPath: string; classification?: InboxClassification } {
-  const registryPath = join(config.root, "state", "inbox-proposals.json");
+  const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
   const proposal = proposals.find((p) => p.id === proposalId);
 
-  const draftsPath = join(config.root, "state", "inbox-drafts.json");
+  const draftsPath = join(inboxRoot, "state", "inbox-drafts.json");
   const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
 
   if (!proposal) return { proposal: undefined, proposals, drafts, draftsPath };
@@ -42855,10 +42869,10 @@ function loadProposalForRatify(
     isMerged,
     depsUnobservable,
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
-    retirement: inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root }),
+    retirement: inboxRetirementContext(join(inboxRoot, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: inboxRoot }),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-    isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
+    isDeclined: declinedWithReceipts(ledgerLines, join(inboxRoot, "state")),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -44123,12 +44137,13 @@ export async function approveCommandMirrored(rest: string[], deps: NonNullable<P
   if (ids.length === 0) return code;
   try {
     const config = deps.config ?? loadConfig();
-    const proposals = parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json")));
+    const inboxRoot = deps.inboxRoot ?? config.root;
+    const proposals = parseProposalRegistry(readFileIfExists(join(inboxRoot, "state", "inbox-proposals.json")));
     const named = new Set(ids);
-    for (const row of readLedgerLines(ledgerPathFor(config))) {
+    for (const row of readLedgerLines(deps.inboxLedgerPath ?? ledgerPathFor(config))) {
       const rowIds = [row.task_id, row.proposal_id, ...(Array.isArray(row.proposal_ids) ? row.proposal_ids : [])];
       if (typeof row.ts !== "string" || Date.parse(row.ts) < startedAt || !rowIds.some((id) => typeof id === "string" && named.has(id))) continue;
-      recordRowThreadEvents(row, proposals, { threadStorePath: inboxThreadStorePath(config.root) }, (step, extra) =>
+      recordRowThreadEvents(row, proposals, { threadStorePath: inboxThreadStorePath(inboxRoot) }, (step, extra) =>
         console.error(`rmd approve: ${step} ${JSON.stringify(extra)}`));
     }
   } catch (error) {
@@ -44153,6 +44168,9 @@ export async function approveCommand(
     log?: (step: string, extra?: Record<string, unknown>) => void;
     /** The plan both branches read: the checkout's own, never `config.root` (a state root holds no plan). */
     planPath?: string;
+    /** Metadata location only; provider, reservation, and workspace guards keep config.root. */
+    inboxRoot?: string;
+    inboxLedgerPath?: string;
     reviewedImprovement?: { goalDigest: string; draftDigest: string };
   } = {},
 ): Promise<number> {
@@ -44217,18 +44235,19 @@ export async function approveCommand(
 
   const config = deps.config ?? loadConfig();
   const plan = loadPlan(planPath);
-  const ledgerPath = ledgerPathFor(config);
-  const registryPath = join(config.root, "state", "inbox-proposals.json");
+  const inboxRoot = deps.inboxRoot ?? config.root;
+  const ledgerPath = deps.inboxLedgerPath ?? ledgerPathFor(config);
+  const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
   const { owner, repo } = resolveOwnerRepo();
   const registryIntent = selectedRegistryIntentForConfig(config);
 
-  const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
+  const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config, inboxRoot);
   if (!proposal || !classification) {
     console.error(`rmd approve: unknown proposal '${proposalId}' — not in the ACTIVE registry (state/inbox-proposals.json)`);
     return 2;
   }
 
-  if (proposal.improvement && !isReviewedImprovementDraft(proposal, parseDraftCache(readFileIfExists(join(config.root, "state", "inbox-drafts.json")))[proposal.id], deps.reviewedImprovement)) {
+  if (proposal.improvement && !isReviewedImprovementDraft(proposal, parseDraftCache(readFileIfExists(join(inboxRoot, "state", "inbox-drafts.json")))[proposal.id], deps.reviewedImprovement)) {
     console.error("rmd approve: this improvement requires an explicit review of its current completed draft; use the saved conversation's Review and file action");
     return 1;
   }
@@ -44699,7 +44718,7 @@ export async function approveCommand(
   // lib/inbox.ts's `updateProposalRegistry` doc for the lost-update/torn-file hazard
   // this guards against.
   updateProposalRegistry(registryPath, (current) => {
-    const next = current.filter((p) => p.id !== proposalId);
+    const next = current.filter((p) => p.id !== proposalId || p.retainAfterRatification);
     return next.length === current.length ? null : next;
   });
 

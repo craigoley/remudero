@@ -597,8 +597,8 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
 }
 
 export interface ImprovementActionRunnerDeps extends ImprovementThreadDeps {
-  draft: (target: { proposalId: string; repository: string; controlRoot: string; repoRoot: string; planPath: string }) => Promise<void>;
-  file: (target: { proposalId: string; repository: string; controlRoot: string; repoRoot: string; planPath: string; goalDigest: string; draftDigest: string }) => Promise<ImprovementPlanReceipt | undefined>;
+  draft: (target: { proposalId: string; repository: string; controlRoot: string; ledgerPath: string; repoRoot: string; planPath: string }) => Promise<void>;
+  file: (target: { proposalId: string; repository: string; controlRoot: string; ledgerPath: string; repoRoot: string; planPath: string; goalDigest: string; draftDigest: string }) => Promise<ImprovementPlanReceipt | undefined>;
   recoverFiling: (target: { proposalId: string; ledgerPath: string }) => ImprovementPlanReceipt | undefined;
 }
 
@@ -634,7 +634,7 @@ export async function runImprovementAction(operationId: string, deps: Improvemen
         action.kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== action.draftDigest || view.correspondence.state !== "linked" || view.correspondence.pendingInputs !== 0 || view.correspondence.pendingWork !== 0)) {
       action.state = "refused"; action.reason = "The source, goal, or reviewed draft changed before this action could run."; writeAction(deps.stateDir, action, owns); return action;
     }
-    const target = { proposalId: intent.proposalId, repository: intent.request.repository, controlRoot: dirname(scope.inboxStateDir),
+    const target = { proposalId: intent.proposalId, repository: intent.request.repository, controlRoot: dirname(scope.inboxStateDir), ledgerPath: scope.ledgerPath,
       repoRoot: actionTarget(intent).repoRoot, planPath: scope.planPath };
     // Save uncertainty BEFORE any consequential native filing call. A crash cannot look unattempted on restart.
     action.state = action.kind === "file" ? "uncertain" : "waiting"; action.reason = "Waiting for the repository workflow to confirm the result.";

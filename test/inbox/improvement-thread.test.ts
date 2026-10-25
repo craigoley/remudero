@@ -483,3 +483,30 @@ test("improvement CLI preserves fleet execution config when selecting a reposito
     assert.deepEqual(receivedContext, { root: inboxRoot, ledgerPath: join(inboxRoot, "state", "ledger.ndjson") });
   });
 });
+
+test("improvement drafting preserves occupied fleet and repository locks and both refusal windows", async () => {
+  const { createImprovementThread, readImprovementThread, requestImprovementAction } = await planningModule();
+  const { buildInboxDraftHook } = await import("#src/run-task.js");
+  const { acquireDrainLock } = await import("#src/lib/drain-lock.js");
+  for (const guard of ["fleet-lock", "repository-lock", "fleet-deferral", "repository-deferral"] as const) await withTempDir(`improvement-${guard}`, async dir => {
+    const root = join(dir, "fleet"), stateDir = join(root, "state");
+    const { deps, request, inboxRoot } = sourceFixture(dir, { stateDir });
+    const saved = await createImprovementThread(request, deps); assert(saved.state === "saved");
+    const view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
+    assert.equal((await requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: `preserve-native-${guard}` }, { ...deps, launchAction: () => {} })).state, "requested");
+    const ledgerPath = join(inboxRoot, "state", "ledger.ndjson"); writeFileSync(ledgerPath, "");
+    const guardRoot = guard.startsWith("fleet") ? root : inboxRoot;
+    const path = join(guardRoot, "state", guard.endsWith("lock") ? "inbox-draft.lock" : "inbox-draft-deferred-until.json");
+    const held = guard.endsWith("lock") ? acquireDrainLock(path) : undefined;
+    if (!held) writeFileSync(path, JSON.stringify({ deferredUntilMs: Date.now() + 3600000, matched: "existing provider refusal" }));
+    const prior = readFileSync(path, "utf8"), config = { root } as import("#src/lib/config.js").Config;
+    let batches = 0;
+    const hook = buildInboxDraftHook("acme", "atlas", config, "IMPROVEMENT-LOCK-TEST", () => {}, async (proposals, receivedConfig) => {
+      batches++; assert.equal(receivedConfig, config); return proposals.map(proposal => ({ ok: false as const, proposalId: proposal.id, error: "ordinary test failure" }));
+    }, undefined, () => "a".repeat(40), undefined, undefined, saved.proposalId, { root: inboxRoot, ledgerPath });
+    try { await hook(); assert.equal(batches, 0, `${guard} must prevent spending`); assert.equal(readFileSync(path, "utf8"), prior, "the existing holder or refusal is unchanged"); }
+    finally { if (held) held.release(); else unlinkSync(path); }
+    await hook(); assert.equal(batches, 1, "the same native selection runs once its guard permits it");
+    assert.equal(existsSync(join(root, "state", "inbox-draft.lock")), false); assert.equal(existsSync(join(inboxRoot, "state", "inbox-draft.lock")), false);
+  });
+});
