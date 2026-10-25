@@ -3,7 +3,7 @@ import {
   closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync,
   readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { RmdError, GENERIC_EXIT_CODE } from "./errors.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
@@ -47,6 +47,12 @@ function tighter(value: number | undefined, ceiling: number): number {
   return value;
 }
 
+function syncDirectory(directory: string): void {
+  const fd = openSync(directory, constants.O_RDONLY);
+  try { fsyncSync(fd); }
+  finally { closeSync(fd); }
+}
+
 /** Every mutation re-reads under an exclusive lock; one atomic file commits data and receipts together. */
 export class ProductIntentStore {
   private readonly clock: Clock;
@@ -75,7 +81,10 @@ export class ProductIntentStore {
     const root = realpathSync(this.options.root);
     if (!statSync(root).isDirectory()) throw new ProductStoreFault("unavailable");
     const paths = productStatePaths(root, actor);
-    if (create) mkdirSync(join(root, "state"), { recursive: true });
+    if (create) {
+      mkdirSync(join(root, "state"), { recursive: true });
+      syncDirectory(root);
+    }
     // The configured state directory may be a managed mount/symlink. Our own subdirectories may not.
     for (const directory of [join(root, "state", "products"), paths.directory]) {
       if (create) {
@@ -85,6 +94,8 @@ export class ProductIntentStore {
       try {
         const info = lstatSync(directory);
         if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0) throw new ProductStoreFault("unavailable");
+        // Sync ancestry even if another writer created it: our acknowledgement must not race its fsync.
+        if (create) syncDirectory(dirname(directory));
       } catch (error) {
         if (!create && errno(error, "ENOENT")) break;
         throw error;

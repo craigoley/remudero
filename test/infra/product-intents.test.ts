@@ -192,7 +192,7 @@ test("post-rename close failure remains unknown and a failed cleanup preserves o
   t.mock.method(fs, "closeSync", (fd: number) => {
     const directory = fstatSync(fd).isDirectory();
     close(fd);
-    if (directory) throw Object.assign(new Error("directory close failed"), { code: "EIO" });
+    if (directory && fs.existsSync(productStatePaths(root, ACTOR).state)) throw Object.assign(new Error("directory close failed"), { code: "EIO" });
   });
   syncBuiltinESMExports();
   try { assert.equal(new ProductIntentStore({ root }).write(ACTOR, create).code, "outcome_unknown"); }
@@ -212,6 +212,24 @@ test("post-rename close failure remains unknown and a failed cleanup preserves o
   const before = readFileSync(pending);
   assert.equal(new ProductIntentStore({ root }).write("clerk:bob", create).code, "recovery_required");
   assert.deepEqual(readFileSync(pending), before);
+});
+
+test("a first product acknowledgement syncs the new directory ancestry as well as the committed state", (t) => {
+  const root = ownedFixtureDir(t, "product-directory-durability").dir;
+  const directories = [root, join(root, "state"), join(root, "state/products"), join(root, "state/products/v1")];
+  const synced: string[] = [];
+  const fsync = fsyncSync;
+  t.mock.method(fs, "fsyncSync", (fd: number) => {
+    const info = fstatSync(fd);
+    if (info.isDirectory()) for (const directory of directories) {
+      if (fs.existsSync(directory) && statSync(directory).ino === info.ino) synced.push(directory);
+    }
+    fsync(fd);
+  });
+  syncBuiltinESMExports();
+  try { assert.ok(new ProductIntentStore({ root }).write(ACTOR, create).ok); }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  assert.deepEqual(synced, directories, "every new directory entry is durable before the saved acknowledgement");
 });
 
 test("bounded product and receipt capacity refuses new writes without losing old acknowledgments", (t) => {
