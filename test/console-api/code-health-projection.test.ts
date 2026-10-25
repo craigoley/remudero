@@ -100,3 +100,19 @@ test("code health separates fixes from changed measurement scope", () => {
   repeated.scans[0]!.analyzedSha = repeated.currentSha;
   assert.equal(compareCodeHealthEvidence(repeated).state, "insufficient_evidence", "rereading one immutable scan is not remeasurement");
 });
+
+
+test("code health does not improve when findings disappear", () => {
+  const missing = input(); missing.baseline!.scans[0]!.findings = [finding()];
+  const report = projectCodeHealth(missing);
+  assert.equal(report.findings.length, 1, "a missing finding remains known until a fix is verified");
+  assert.equal(report.findings[0]!.status, "unknown");
+  assert.equal(report.summary.met, 1, "the coverage result remains assessed without granting quality improvement");
+  assert.equal(report.summary.healthy, null);
+  assert.equal(compareCodeHealthEvidence(missing).fixedFindings.length, 0);
+  const notCollected = structuredClone(missing); notCollected.scans = [];
+  const retained = projectCodeHealth(notCollected);
+  assert.equal(retained.findings.length, 1, "an unavailable current scan cannot erase a known prior finding");
+  assert.equal(retained.findings[0]!.severity, "high");
+  assert.equal(retained.summary.assessed, 0);
+});
