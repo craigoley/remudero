@@ -92,8 +92,13 @@ export async function readOpenBacklogDecisions(root: string, ports: {
         !(typeof pr.body === "string" || pr.body === null)) {
       throw new Error("backlog gardener: open-PR ownership unreadable");
     }
-    if (!/^backlog-garden-\d+$/.test(pr.head.ref) || !pr.body?.includes("The backlog gardener (W1-T4941) proposes these plan-only changes.")) continue;
-    for (const match of pr.body.matchAll(/^- \*\*(W\d+-T\d+)\*\*: (band [234]|closed|withdrawn)\./gm)) {
+    if (!/^backlog-garden-\d+$/.test(pr.head.ref)) continue;
+    if (pr.body === null || !pr.body.includes("The backlog gardener (W1-T4941) proposes these plan-only changes.")) {
+      throw new Error("backlog gardener: open backlog decision body unreadable");
+    }
+    const matches = [...pr.body.matchAll(/^- \*\*(W\d+-T\d+)\*\*: (band [234]|closed|withdrawn)\./gm)];
+    if (matches.length === 0) throw new Error("backlog gardener: open backlog decision unreadable");
+    for (const match of matches) {
       decisions.push({ target: match[1]!, decision: match[2]!, prNumber: pr.number, headSha: pr.head.sha });
     }
   }
