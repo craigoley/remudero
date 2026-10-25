@@ -7,6 +7,9 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import * as runtimeRegistry from "#src/lib/instance-registry-selection.js";
 import { observeSelectedMode } from "#src/lib/instance-mode.js";
+import { daemonCommand } from "#src/cli/commands/daemon.js";
+import { runTask as directRunTask } from "#src/cli/commands/run-task-verb.js";
+import { main } from "#src/run-task.js";
 
 import { parseInstanceRegistry } from "../src/lib/instance-registry.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -52,6 +55,65 @@ function runtimeRegistryFixture(mode = "shadow") {
   writeFileSync(selected, registry(mode));
   return { root, selected, legacy, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
+
+test("selected runtime entry points qualify before daemon and direct task host effects", async () => {
+  const fixture = runtimeRegistryFixture(), prior = process.env.RMD_INSTANCE_REGISTRY;
+  const reachedHost = new Error("contained host boundary reached");
+  let reads = 0, observed: string | undefined;
+  const host = new Proxy({}, { get: () => {
+    reads++;
+    observed = instanceMode("owner/repo", readInstanceRegistryText(fixture.root));
+    throw reachedHost;
+  } });
+  const entries = [
+    () => daemonCommand([], {}, host as Parameters<typeof daemonCommand>[2]),
+    () => directRunTask("fixture", {}, host as Parameters<typeof directRunTask>[2]),
+  ];
+  try {
+    for (const enter of entries) {
+      process.env.RMD_INSTANCE_REGISTRY = "";
+      const before = reads;
+      await assert.rejects(enter(), /selected instance registry unavailable/);
+      assert.equal(reads, before, "explicit invalid selection must not touch the command host");
+      process.env.RMD_INSTANCE_REGISTRY = fixture.selected;
+      await assert.rejects(enter(), error => error === reachedHost);
+      assert.equal(observed, "shadow", "actual entrypoint host reads must see selected default bytes");
+      delete process.env.RMD_INSTANCE_REGISTRY;
+      await assert.rejects(enter(), error => error === reachedHost);
+      assert.equal(observed, "live", "genuine absence retains the existing legacy reader");
+    }
+  } finally {
+    if (prior === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = prior;
+    fixture.cleanup();
+  }
+});
+
+test("selected runtime CLI entry refuses invalid input without changing unselected read-only dispatch", async (t) => {
+  const fixture = runtimeRegistryFixture(), prior = process.env.RMD_INSTANCE_REGISTRY, argv = process.argv;
+  const reachedExit = new Error("contained CLI exit");
+  let code: number | string | undefined;
+  t.mock.method(process, "exit", ((value?: number | string): never => { code = value; throw reachedExit; }) as typeof process.exit);
+  t.mock.method(process.stderr, "write", (_chunk: unknown, encodingOrDone?: unknown, done?: unknown) => {
+    const callback = typeof encodingOrDone === "function" ? encodingOrDone : done;
+    if (typeof callback === "function") callback();
+    return true;
+  });
+  process.argv = [process.execPath, "rmd", "gh", "missing-separator"];
+  try {
+    process.env.RMD_INSTANCE_REGISTRY = "";
+    await assert.rejects(main(), /selected instance registry unavailable/);
+    assert.equal(code, undefined, "invalid selection stops before the actual dispatch exit");
+    for (const selected of [undefined, fixture.selected]) {
+      if (selected === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = selected;
+      await assert.rejects(main(), error => error === reachedExit);
+      assert.equal(code, 2, "the real local gh usage path keeps its existing exit result");
+    }
+  } finally {
+    process.argv = argv;
+    if (prior === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = prior;
+    fixture.cleanup();
+  }
+});
 
 test("selected runtime binding reaches the existing default mode reader", async () => {
   const fixture = runtimeRegistryFixture();
