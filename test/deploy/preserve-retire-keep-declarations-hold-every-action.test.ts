@@ -8,6 +8,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { preserveRetireFixtureArgs } from "#test/helpers/preserve-retire-fixture.js";
 
 const HELPER = join(REPO_ROOT, "deploy/mac/preserve-retire.py");
 const HOUR = 3600;
@@ -62,7 +63,7 @@ function commit(repo: string, file: string, text: string, message: string) {
 }
 
 function helper(fx: Fx, now = NOW, apply = true) {
-  return spawnSync("python3", ["-I", HELPER, "--home", fx.home, "--now", String(now), ...(apply ? ["--apply"] : [])], {
+  return spawnSync("python3", preserveRetireFixtureArgs(fx.home, HELPER, ["--home", fx.home, "--now", String(now), ...(apply ? ["--apply"] : [])]), {
     encoding: "utf8", timeout: 120_000, env: { ...GIT_ENV, PATH: `${fx.bin}:${process.env.PATH}` },
   });
 }
@@ -250,10 +251,11 @@ test("worktree prune leaves a kept or keep-scoped store's stale worktree records
     const before = [records.kept, records.shared].map(bytes);
     const probe = `import importlib.util, json, sys
 spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.account_home = lambda: sys.argv[-1]
 holder = m.Repo(sys.argv[3], "clone"); holder.store = sys.argv[3] + "/.git"; holder.scoped = "a keep marker in its working tree"
 print(json.dumps(m.prune_worktrees([sys.argv[2] + "/.git", holder.store, sys.argv[4] + "/.git"], [holder])))`;
     // -B: importing the helper must not write deploy/mac/__pycache__ into the tracked tree.
-    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, kept, shared, plain], { encoding: "utf8", env: GIT_ENV });
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, kept, shared, plain, fx.home], { encoding: "utf8", env: GIT_ENV });
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(JSON.parse(r.stdout), [join(plain, ".git")], "only the unmarked store is pruned");
     assert.equal(existsSync(records.plain), false, "an unmarked store's stale record is pruned");
@@ -297,6 +299,7 @@ test("an inspection that raises PermissionError holds the path, for every uid", 
     // The denial is injected at the os seam, so root and every other uid see the same refusal.
     const probe = `import importlib.util, json, os, sys
 spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.account_home = lambda: sys.argv[-1]
 top, inner = sys.argv[2], sys.argv[3]
 real_lstat, real_scandir = os.lstat, os.scandir
 def lstat(path, *a, **k):
@@ -317,7 +320,7 @@ out["walk"] = m.keep_scope(top)
 os.scandir = real_scandir
 out["clean"] = m.keep_scope(os.path.join(inner, "deeper"))
 print(json.dumps(out))`;
-    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, top, inner], { encoding: "utf8", env: GIT_ENV });
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, top, inner, fx.home], { encoding: "utf8", env: GIT_ENV });
     assert.equal(r.status, 0, r.stderr);
     const out = JSON.parse(r.stdout);
     assert.match(out.marker, /^keep-inspection-unknown \(\.rmd-janitor-keep: PermissionError\)/, "an unreadable marker holds its folder");

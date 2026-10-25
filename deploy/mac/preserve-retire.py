@@ -27,7 +27,7 @@ Invariants (JANITOR.md "Preserve-then-retire"):
   reference-aware seed sweeper alone.
 Usage: preserve-retire.py --home DIR [--apply] [--config PATH]
 """
-import argparse, glob, gzip, json, os, re, shlex, shutil, stat, subprocess, sys, tarfile, tempfile, time
+import argparse, glob, gzip, json, os, pwd, re, shlex, shutil, stat, subprocess, sys, tarfile, tempfile, time
 
 CONFIG_REL = ".local/state/remudero/preserve-retire.json"
 STAMP_REL = ".local/state/remudero/preserve-retire.last"
@@ -137,6 +137,34 @@ def load_config(home, path, temp_base=TEMP_BASE):
         if cfg["preserve_root"] == root or cfg["preserve_root"].startswith(root + "/") or root.startswith(cfg["preserve_root"] + "/"):
             return None, "refused: preserve_root overlaps a scan root"
     return cfg, ""
+
+
+def account_home():
+    """The running account's OS home, independent of HOME, --home and --config."""
+    return os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def require_action_authorized():
+    """The installed default config is the account's hold, not an invocation policy input.
+    Read it afresh at each action boundary; alternate config/home cannot replace it."""
+    try:
+        home = account_home()
+        path = os.path.join(home, CONFIG_REL)
+        if private_file(path, os.getuid(), home) is not True:
+            raise Hold("responsible-account-hold (default config missing or unsafe)")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            st = os.fstat(stream.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+                raise Hold("responsible-account-hold (default config unsafe)")
+            data = stream.read(65537)
+        if len(data) > 65536:
+            raise Hold("responsible-account-hold (default config oversized)")
+        raw = json.loads(data)
+        if not isinstance(raw, dict) or set(raw) - set(DEFAULTS) or raw.get("enabled") is not True:
+            raise Hold("responsible-account-hold (default config not enabled)")
+    except (OSError, ValueError, KeyError) as error:
+        raise Hold(f"responsible-account-hold (default config unreadable: {error.__class__.__name__})") from error
 
 
 def expand_roots(home, roots):
@@ -493,6 +521,7 @@ def git_reason(out):
 
 
 def save_tar(path, members, dest):
+    require_action_authorized()
     with tarfile.open(dest, "w:gz") as t:
         for rel in members:
             t.add(os.path.join(path, rel), arcname=rel, recursive=False)
@@ -504,6 +533,7 @@ def preserve(repo, published, cfg, home, now):
     rel = os.path.relpath(repo.path, home) if repo.path.startswith(home + "/") else "tmp/" + os.path.relpath(repo.path, cfg["temp_base"])
     name = rel.replace("/", "__") + "@" + stamp
     final = os.path.join(cfg["preserve_root"], name)
+    require_action_authorized()
     work = tempfile.mkdtemp(prefix=".incoming-", dir=cfg["preserve_root"])
     summary = {"path": repo.path, "kind": repo.kind, "preserved_at": now}
     try:
@@ -536,6 +566,7 @@ def preserve(repo, published, cfg, home, now):
         summary["published_base"] = excl
         if summary["unpublished_commits"]:
             bundle = os.path.join(work, "unpublished.bundle")
+            require_action_authorized()
             made = repo.git("bundle", "create", bundle, *revs)
             if made.returncode != 0:
                 raise Hold(f"bundle-create-failed ({git_reason(made)})")
@@ -546,6 +577,7 @@ def preserve(repo, published, cfg, home, now):
         refs = repo.git("for-each-ref", "--format=%(objectname) %(refname)")
         if refs.returncode != 0:
             raise Hold("refs-unreadable")
+        require_action_authorized()
         open(os.path.join(work, "refs.txt"), "wb").write(refs.stdout)
         if repo.kind == "bare":
             save_tar(repo.path, [p for p in ("config", "description", "hooks", "info", "packed-refs")
@@ -555,6 +587,7 @@ def preserve(repo, published, cfg, home, now):
             if diff.returncode != 0:
                 raise Hold("diff-failed")
             if diff.stdout:
+                require_action_authorized()
                 open(os.path.join(work, "uncommitted.patch"), "wb").write(diff.stdout)
             excl_args = [a for d in SKIP_DIRS for a in ("-x", d)]
             listing = repo.git("ls-files", "-z", "--others", *excl_args)
@@ -569,11 +602,15 @@ def preserve(repo, published, cfg, home, now):
             if members:
                 save_tar(repo.path, members, os.path.join(work, "untracked.tar.gz"))
             summary["uncommitted_bytes"], summary["untracked_files"] = len(diff.stdout), len(members)
+        require_action_authorized()
         json.dump(summary, open(os.path.join(work, "manifest.json"), "w"), indent=1)
+        require_action_authorized()
         open(os.path.join(work, "MANIFEST.txt"), "w").write(restore_text(summary, final))
+        require_action_authorized()
         os.rename(work, final)
         return final, summary
     except BaseException:
+        require_action_authorized()  # a newly held incomplete copy is retained, not cleaned up
         shutil.rmtree(work, ignore_errors=True)
         raise
 
@@ -609,6 +646,7 @@ def remove(repo, roots, protected):
     if (not os.path.isabs(p) or os.path.realpath(p) != p or os.path.islink(p) or inside(p, protected)
             or not any(p.startswith(r + "/") for r in roots)):
         raise Hold("path-guard")
+    require_action_authorized()
     if repo.kind == "worktree":
         out = run(["git", "--git-dir", repo.store, "worktree", "remove", "--force", p])
         if out.returncode != 0:
@@ -624,6 +662,7 @@ def prune_worktrees(stores, repos):
     for store in stores:
         if any(q.scoped for q in repos if q.store == store) or keep_scope(store, below=False):
             continue
+        require_action_authorized()
         run(["git", "--git-dir", store, "worktree", "prune"])
         pruned.append(store)
     return pruned
@@ -638,6 +677,7 @@ def expire(cfg, now):
         if os.path.islink(path) or not os.path.isdir(path) or keep_scope(path):
             continue
         if name.startswith(".incoming-") and os.lstat(path).st_mtime < now - 86400:
+            require_action_authorized()
             shutil.rmtree(path)  # an interrupted preservation; it never counted as a copy
             continue
         if not re.search(r"@\d{8}T\d{6}Z$", name):
@@ -647,6 +687,7 @@ def expire(cfg, now):
         except (OSError, ValueError, KeyError):
             continue  # unknown age: keep
         if when < cutoff and os.lstat(path).st_uid == os.getuid():
+            require_action_authorized()
             shutil.rmtree(path)
             say("EXPIRED", f"preserved {cfg['retain_days']}d+ ago", path)
 
@@ -678,10 +719,13 @@ def changed_after(top, cutoff):
 def rmtree_writable(path):
     """Remove a tree whose folders may be read-only (dependency clones are)."""
     def retry(func, p, _exc):
+        require_action_authorized()
         os.chmod(os.path.dirname(p), 0o700)
         if not os.path.islink(p) and os.path.isdir(p):
             os.chmod(p, 0o700)
+        require_action_authorized()
         func(p)
+    require_action_authorized()
     shutil.rmtree(path, onerror=retry)
 
 
@@ -704,6 +748,7 @@ def compress(path):
     st = os.stat(path)
     tmp = path + ".gz.incoming"
     try:
+        require_action_authorized()
         with open(path, "rb") as src, gzip.open(tmp, "wb", 6) as dst:
             shutil.copyfileobj(src, dst, 1 << 20)
         size = 0
@@ -713,11 +758,14 @@ def compress(path):
         now = os.stat(path)
         if size != st.st_size or (now.st_mtime, now.st_size) != (st.st_mtime, st.st_size):
             raise Hold("changed-while-compressing")
+        require_action_authorized()
         os.utime(tmp, (st.st_atime, st.st_mtime))
         os.rename(tmp, path + ".gz")
+        require_action_authorized()
         os.remove(path)
     finally:
         if os.path.exists(tmp):
+            require_action_authorized()
             os.remove(tmp)
 
 
@@ -740,6 +788,7 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
             continue
         if apply:
             # -l leaves borrowed objects with their lender; --keep-unreachable drops nothing.
+            require_action_authorized()
             out = run(["git", "--git-dir", store, "repack", "-a", "-d", "-l", "--keep-unreachable", "-q"],
                       timeout=cfg["repack_seconds"])
             if out.returncode != 0:
@@ -789,6 +838,7 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
             # Compression keeps the original modification time, so the age survives it.
             if st.st_mtime < expiry and last < cutoff:
                 if apply:
+                    require_action_authorized()
                     os.remove(p)
                 counts["dumps-expired"] += 1
                 say(verb("EXPIRED"), f"dump unchanged {cfg['dump_retain_days']}d+", p)
@@ -807,6 +857,7 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
         if max(st.st_mtime, st.st_ctime) >= now - days * 86400 or in_use(p, snap) or keep_scope(p, below=False):
             continue
         if apply:
+            require_action_authorized()
             os.remove(p)
         counts["codex-sessions-removed"] += 1
         say(verb("REMOVED"), f"codex session idle {days}d+", p)
@@ -827,7 +878,7 @@ def codex_sessions(home):
                     yield p
 
 
-def main():
+def main_authorized():
     ap = argparse.ArgumentParser()
     ap.add_argument("--home", required=True)
     ap.add_argument("--apply", action="store_true")
@@ -840,11 +891,13 @@ def main():
     if cfg is None:
         say(why)
         return 2 if why.startswith("refused") else 0
+    require_action_authorized()
     now = a.now or int(time.time())
     stamp_file = os.path.join(home, STAMP_REL)
     if a.apply and os.path.exists(stamp_file) and now - os.path.getmtime(stamp_file) < cfg["interval_hours"] * 3600:
         say("skip", f"ran within {cfg['interval_hours']}h")
         return 0
+    require_action_authorized()
     os.makedirs(cfg["preserve_root"], mode=0o700, exist_ok=True)
     protected = protected_paths(home, cfg)
     repos = discover(cfg, protected)
@@ -953,11 +1006,20 @@ def main():
     say("housekeeping", " ".join(f"{k}={v}" for k, v in tidy.items()) + f" apply={int(a.apply)}")
     if a.apply:
         expire(cfg, now)
+        require_action_authorized()
         os.makedirs(os.path.dirname(stamp_file), exist_ok=True)
         open(stamp_file, "w").close()
         os.utime(stamp_file, (now, now))
     say("summary", f"candidates={len(candidates)} retired={retired} held={len(keep)} apply={int(a.apply)}")
     return 0
+
+
+def main():
+    try:
+        return main_authorized()
+    except Hold as error:
+        say("HOLD", str(error))
+        return 2
 
 
 if __name__ == "__main__":

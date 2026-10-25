@@ -6,9 +6,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { preserveRetireFixtureArgs } from "#test/helpers/preserve-retire-fixture.js";
 
-const HELPER = join(process.cwd(), "deploy/mac/preserve-retire.py");
-const JANITOR = join(process.cwd(), "deploy/mac/remudero-janitor.sh");
+const HELPER = join(REPO_ROOT, "deploy/mac/preserve-retire.py");
+const JANITOR = join(REPO_ROOT, "deploy/mac/remudero-janitor.sh");
 const HOUR = 3600;
 // The helper's clock runs two days ahead, so every fixture file is idle unless a test dates it later.
 const NOW = Math.floor(Date.now() / 1000) + 48 * HOUR;
@@ -67,7 +69,7 @@ function commit(repo: string, file: string, text: string, message: string) {
 }
 
 function helper(fx: Fx, args: string[] = ["--apply"], env: Record<string, string> = {}, now = NOW) {
-  return spawnSync("python3", ["-I", HELPER, "--home", fx.home, "--now", String(now), ...args], {
+  return spawnSync("python3", preserveRetireFixtureArgs(fx.home, HELPER, ["--home", fx.home, "--now", String(now), ...args]), {
     encoding: "utf8", timeout: 120_000,
     env: { ...GIT_ENV, PATH: `${fx.bin}:${process.env.PATH}`, ...env },
   });
@@ -340,7 +342,18 @@ test("the janitor summary counts an actual preserved retirement in its total", (
     const repo = clone(fx, "Remudero/unpublished");
     commit(repo, "work.ts", "export const work = true;\n", "unpublished work");
     const native = execFileSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).trim();
-    pythonProbe(fx, `exec '${native}' "$@" --now ${NOW}`);
+    const bootstrap = join(fx.root, "fixture-preserve-retire.py");
+    writeFileSync(bootstrap, `import importlib.util, sys
+args = sys.argv[1:]
+if args[0] == "-I":
+    args.pop(0)
+helper = args.pop(0)
+spec = importlib.util.spec_from_file_location("pr", helper); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.account_home = lambda: ${JSON.stringify(fx.home)}
+sys.argv = [helper, *args, "--now", "${NOW}"]
+raise SystemExit(m.main())
+`);
+    pythonProbe(fx, `exec '${native}' -I -B '${bootstrap}' "$@"`);
     const r = janitor(fx, true);
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.equal(existsSync(repo), false, r.stdout);
