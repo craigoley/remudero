@@ -64,7 +64,9 @@ test("benchmark worker caller census catches an unclassified spawn", () => {
   const actual = sourceTexts.flatMap(({ file, text }) => sites(file, text));
   assert.ok(actual.filter((site) => site.file === "src/lib/worker.ts" && site.kind === "call").length >= 3,
     "positive control: the census sees the three known recursive provider fallbacks");
-  const orchestration = sourceTexts.map(({ text }) => text).join("\n");
+  // W1-T9339: the review lane's spawn followed reviewCommand into src/cli/commands/review.ts.
+  const orchestration = readFileSync(join(root, "src/run-task.ts"), "utf8") + "\n" +
+    sourceTexts.filter(({ file }) => file === "src/cli/commands/review.ts").map(({ text }) => text).join("\n");
   for (const lane of ["inbox-draft", "review", "triage", "risk-judge"]) {
     assert.ok(orchestration.includes(`ledgeredNonDispatchSpawn("${lane}"`)
       || orchestration.includes(`benchmarkNonDispatchSpawn("${lane}"`), `${lane} is in the worker population`);

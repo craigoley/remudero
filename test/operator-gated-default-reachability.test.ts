@@ -646,7 +646,7 @@ test("the whole census runs with no suite spawned and no clock/network touched",
   const before = process.env.NODE_TEST_CONTEXT;
   const pathBefore = process.env.PATH;
 
-  const derivation = deriveRealArmDepsPopulation(SRC_TEXT);
+  const derivation = deriveRealArmDepsPopulation(readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8") + "\n" + REVIEW_TEXT);
   const entryNames = new Set([...derivation.level1Names, ...derivation.familyFns.keys()]);
   const sites = findTestCallSites(entryNames);
 
