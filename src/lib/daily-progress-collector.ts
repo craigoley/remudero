@@ -194,7 +194,7 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
           includedRepositories: included ? [repository] : [], expectedSources: reportExpectedSources, sources },
         totals: { mergedChanges: { value: precision === "unavailable" ? null : confirmed.length, precision }, completedTasks: { value: precision === "unavailable" ? null : 0, precision } },
         events: [...events.values()], currentWork });
-      if (end <= now && complete && reportDate > closedThrough) closedThrough = reportDate;
+      if (end <= now && complete && reportDate === shiftDailyDate(closedThrough, 1)) closedThrough = reportDate;
       if (!complete) requiredFailed = true;
     }
     const catchingUp = closing < today && closedThrough >= shiftDailyDate(closing, -1);
