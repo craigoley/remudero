@@ -37,8 +37,9 @@ import { readLedgerLines } from "../../lib/status.js";
 import { isDispatchedRunBranch } from "../../lib/sweep.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib/sweep.js";
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
-import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError } from "../../lib/worker.js";
+import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, worktreeRemove } from "../../lib/worker.js";
 import { hostWorktreeGit } from "../../lib/worktree-git.js";
+import { releaseReviewWorktree } from "../../lib/review-worktree-reclaim.js";
 import { step } from "../../lib/git-push.js";
 import { acquireDrainLock, type DrainLockHandle } from "../../lib/drain-lock.js";
 import { checkReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "../../lib/self-sync.js";
@@ -72,7 +73,6 @@ export interface ReviewCommandHost {
   reviewWorkerLockId(runId: string): string;
   reviewerClockBoundMs(override?: number): number;
   reviewSubjectGit(repoDir: string, argv: string[]): string;
-  withMaterializedWorktree<T>(worktreePath: string | undefined, repoDir: string, body: () => Promise<T>, remove?: (repoDir: string, worktreePath: string) => void): Promise<T>;
 }
 
 export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId"> {
@@ -1514,7 +1514,7 @@ export interface ReviewCommandDeps {
   fetchView?: (args: string[]) => unknown;
   loadConfig?: () => Config;
   materialize?: ReviewCommandHost["materializeReviewWorktree"];
-  withMaterialized?: ReviewCommandHost["withMaterializedWorktree"];
+  withMaterialized?: typeof withMaterializedWorktree;
   buildBaseProof?: typeof buildBaseProofDir;
   runReview?: (args: Parameters<typeof runReview>[1]) => ReturnType<typeof runReview>;
   postStatus?: typeof postReviewStatusGuarded;
@@ -1681,8 +1681,44 @@ export function planTreeIsBehindMain(host: ReviewCommandHost, source: string, re
   }
 }
 
+/**
+ * Run `body` against a possibly-materialized worktree, tearing it down on
+ * EVERY exit path — `body` resolving, AND `body` throwing — never just the
+ * success path, which would reproduce the W1-T175 leak class (that task
+ * exists precisely because run worktrees already strand on disk). `undefined`
+ * `worktreePath` (materialization was skipped/unavailable) is a no-op finally,
+ * matching {@link materializeReviewWorktree}'s failure contract. Exported +
+ * injectable so the teardown-on-throw guarantee (acceptance criterion 6) is a
+ * unit fixture, independent of the real git/CLI plumbing `reviewCommand`
+ * wires this with.
+ */
+export async function withMaterializedWorktree<T>(
+  worktreePath: string | undefined,
+  repoDir: string,
+  body: () => Promise<T>,
+  remove: (repoDir: string, worktreePath: string) => void = worktreeRemove,
+): Promise<T> {
+  try {
+    return await body();
+  } finally {
+    if (worktreePath) {
+      try {
+        remove(repoDir, worktreePath);
+      } catch (e) {
+        // Best-effort teardown: a removal failure must never mask `body`'s own
+        // result or throw — the ledger/console already carry the review's
+        // outcome; a stranded worktree here is a startup-prune concern
+        // (pruneStaleRuns), never this command's job to retry.
+        console.error(`(worktree teardown failed for ${worktreePath}: ${String((e as Error)?.message ?? e)})`);
+      } finally {
+        releaseReviewWorktree(worktreePath);
+      }
+    }
+  }
+}
+
 export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
-  const { acceptedReviewAttemptId, materializeReviewWorktree, realDeps, reviewPostedDescription, withMaterializedWorktree } = host;
+  const { acceptedReviewAttemptId, materializeReviewWorktree, realDeps, reviewPostedDescription } = host;
   deps = { ...reviewOptionsFromFlags(host, rest), ...deps };
   const {
     fetchView,

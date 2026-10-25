@@ -85,7 +85,7 @@
   "scripts/unwired-gate-check.mjs": 80,
   "scripts/workflow-guard-mutation-baseline.json": 0,
   "src/cli/commands/daemon.ts": 750,
-  "src/cli/commands/review.ts": 678,
+  "src/cli/commands/review.ts": 693,
   "src/cli/commands/run-task-verb.ts": 1750,
   "src/lib/account-usage.ts": 205,
   "src/lib/alert-lane.ts": 137,
@@ -243,6 +243,6 @@
   "src/lib/worker.ts": 2000,
   "src/lib/workflow-run.ts": 24,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 14072,
+  "src/run-task.ts": 14057,
   "src/spike.ts": 18
 }

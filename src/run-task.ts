@@ -25,6 +25,7 @@ import {
 } from "./cli/commands/review.js";
 export type { ReviewPostedRecheck } from "./cli/commands/review.js";
 export type { MaterializeReviewWorktreeResult } from "./cli/commands/review.js";
+export { withMaterializedWorktree } from "./cli/commands/review.js";
 import {
   runTask as runTaskFromModule,
   runTaskBody as runTaskBodyFromModule,
@@ -562,7 +563,7 @@ import {
 } from "./lib/drain.js";
 import { daemonExitCode, readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProjection, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
 export { readRestartHistoryLines } from "./lib/daemon.js";
-import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
+import { holdReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, gitIn, readReviewerHealthRows, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
@@ -15849,42 +15850,6 @@ function cleanupMaterializedWorktree(
       `(worktree teardown failed for ${worktreePath} after a materialization failure: ` +
         `${String((e as Error)?.message ?? e)})`,
     );
-  }
-}
-
-/**
- * Run `body` against a possibly-materialized worktree, tearing it down on
- * EVERY exit path — `body` resolving, AND `body` throwing — never just the
- * success path, which would reproduce the W1-T175 leak class (that task
- * exists precisely because run worktrees already strand on disk). `undefined`
- * `worktreePath` (materialization was skipped/unavailable) is a no-op finally,
- * matching {@link materializeReviewWorktree}'s failure contract. Exported +
- * injectable so the teardown-on-throw guarantee (acceptance criterion 6) is a
- * unit fixture, independent of the real git/CLI plumbing `reviewCommand`
- * wires this with.
- */
-export async function withMaterializedWorktree<T>(
-  worktreePath: string | undefined,
-  repoDir: string,
-  body: () => Promise<T>,
-  remove: (repoDir: string, worktreePath: string) => void = worktreeRemove,
-): Promise<T> {
-  try {
-    return await body();
-  } finally {
-    if (worktreePath) {
-      try {
-        remove(repoDir, worktreePath);
-      } catch (e) {
-        // Best-effort teardown: a removal failure must never mask `body`'s own
-        // result or throw — the ledger/console already carry the review's
-        // outcome; a stranded worktree here is a startup-prune concern
-        // (pruneStaleRuns), never this command's job to retry.
-        console.error(`(worktree teardown failed for ${worktreePath}: ${String((e as Error)?.message ?? e)})`);
-      } finally {
-        releaseReviewWorktree(worktreePath);
-      }
-    }
   }
 }
 
@@ -47979,6 +47944,5 @@ function reviewCommandHost(): ReviewCommandHost {
     reviewerClockBoundMs: (reviewerClockBoundMs) => reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon,
     reviewSubjectGit: (dir, argv) =>
       execFileSync("git", ["-C", dir, ...argv], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim(),
-    withMaterializedWorktree,
   };
 }
