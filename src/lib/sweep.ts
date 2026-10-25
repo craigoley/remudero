@@ -275,6 +275,7 @@ import {
   type EscalationClass,
   type EscalationJudgeDecision,
   type EscalationJudgeVerdict,
+  escalationJudgeReceiptFields,
   type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
@@ -24860,6 +24861,8 @@ export async function runStaleEscalationRejudge(
       }
     }
 
+    // Preserve the original producer receipt before shadow/act triage replaces the verdict.
+    const judgeReceipt = escalationJudgeReceiptFields(verdict);
     const triaged = evidenceError !== undefined
       ? { kind: "deliver" as const, decidedBy: "default" as const, reason: verdict.reason }
       : triageEscalation(c.escalation, evidence, verdict);
@@ -24896,6 +24899,7 @@ export async function runStaleEscalationRejudge(
         age_ms: c.ageMs,
         judge_decision: verdict.decision,
         judge_reason: verdict.reason,
+        ...judgeReceipt,
       });
     }
 
