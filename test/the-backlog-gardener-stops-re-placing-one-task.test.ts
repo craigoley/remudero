@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import { applyBacklogActions, backlogGardenSpec, backlogInventory, readOpenBacklogDecisions, type BacklogAction, type BacklogSources } from "#src/lib/backlog-gardener.js";
 import { fixedClock } from "#src/lib/clock.js";
+import { runGardenAsync } from "#src/lib/gardener.js";
 import type { PlanInventory } from "#src/lib/plan-gardener.js";
 import type { Task } from "#src/lib/plan.js";
 
@@ -106,6 +107,7 @@ test("an open backlog decision defers the same async proposal despite a new evid
   const inventory = async () => spec.inventoryAsync ? spec.inventoryAsync() : spec.inventory();
   assert.deepEqual((await inventory()).candidates, [], "an existing open decision owns this proposal");
   assert.ok(events.some(e => e.step === "backlog.open_decision_deferred"));
+  assert.equal((await runGardenAsync(spec, deps)).prUrl, undefined, "the actual garden loop opens no duplicate workspace or PR");
   assert.equal(f.read(), `- id: ${ID}\n  title: t\n  status: queued\n`, "deferral changes no task bytes");
   open = [{ ...open[0]!, target: "W1-T99999" }];
   assert.equal((await inventory()).candidates.length, 1, "another task cannot suppress this decision");
