@@ -172,6 +172,42 @@ test("a post-rename sync failure is unknown and reconciles through the durable r
   assert.equal(listed.value.length, 1);
 });
 
+test("product replay and receipt lookup stay unknown until the renamed state directory syncs", (t) => {
+  const root = ownedFixtureDir(t, "product-replay-durability").dir;
+  let failedSyncs = 0;
+  const interrupted = new ProductIntentStore({ root, sync(fd) {
+    if (fstatSync(fd).isDirectory()) {
+      failedSyncs++;
+      throw Object.assign(new Error("directory sync remains unavailable"), { code: "EIO" });
+    }
+    fsyncSync(fd);
+  } });
+  assert.equal(interrupted.write(ACTOR, create).code, "outcome_unknown");
+  const path = productStatePaths(root, ACTOR).state;
+  const renamed = readFileSync(path);
+  assert.equal(interrupted.write(ACTOR, create).code, "outcome_unknown");
+  assert.equal(interrupted.receipt(ACTOR, create.requestId).code, "outcome_unknown");
+  assert.equal(failedSyncs, 3, "both recovery paths retry the failed directory sync");
+  let recoveredSyncs = 0;
+  const recovered = new ProductIntentStore({ root, sync(fd) {
+    assert.ok(fstatSync(fd).isDirectory(), "recovery syncs the existing directory without rewriting state");
+    recoveredSyncs++;
+    fsyncSync(fd);
+  } });
+  const receipt = recovered.receipt(ACTOR, create.requestId);
+  assert.ok(receipt.ok);
+  const replay = recovered.write(ACTOR, create);
+  assert.ok(replay.ok);
+  assert.equal(replay.value.replayed, true);
+  assert.deepEqual(replay.value.receipt, receipt.value);
+  assert.equal(recoveredSyncs, 2);
+  assert.deepEqual(readFileSync(path), renamed, "recovery preserves the original product and receipt bytes");
+  const product = recovered.read(ACTOR, receipt.value.productId);
+  assert.ok(product.ok);
+  assert.equal(product.value.revision, 1);
+  assert.equal(product.value.history.length, 1);
+});
+
 test("a pre-rename failure leaves the prior product revision intact", (t) => {
   const root = ownedFixtureDir(t, "product-uncommitted").dir;
   const normal = new ProductIntentStore({ root });

@@ -47,9 +47,9 @@ function tighter(value: number | undefined, ceiling: number): number {
   return value;
 }
 
-function syncDirectory(directory: string): void {
+function syncDirectory(directory: string, sync = fsyncSync): void {
   const fd = openSync(directory, constants.O_RDONLY);
-  try { fsyncSync(fd); }
+  try { sync(fd); }
   finally { closeSync(fd); }
 }
 
@@ -170,6 +170,12 @@ export class ProductIntentStore {
     }
   }
 
+  private durableReceipt(paths: ReturnType<typeof productStatePaths>, receipt: ProductReceipt): ProductReceipt {
+    try { syncDirectory(paths.directory, this.sync); }
+    catch (error) { throw Object.assign(new ProductStoreFault("outcome_unknown"), { cause: error }); }
+    return receipt;
+  }
+
   write(actor: string, command: unknown): ProductResult<{ receipt: ProductReceipt; replayed: boolean }> {
     return this.attempt(actor, () => {
       const parsed = productWriteSchema.safeParse(command);
@@ -183,7 +189,7 @@ export class ProductIntentStore {
         const previousReceipt = state.receipts[requestKey];
         if (previousReceipt) {
           if (previousReceipt.payloadDigest !== payloadDigest) throw new ProductStoreFault("idempotency_conflict");
-          return { receipt: previousReceipt, replayed: true };
+          return { receipt: this.durableReceipt(paths, previousReceipt), replayed: true };
         }
         const id = input.id ?? `prd_${digest(`${paths.ownerKey}:${requestKey}`).slice(0, 32)}`;
         const previous = state.products[id];
@@ -240,9 +246,10 @@ export class ProductIntentStore {
   receipt(actor: string, requestId: string): ProductResult<ProductReceipt> {
     return this.attempt(actor, () => {
       if (!productRequestIdSchema.safeParse(requestId).success) throw new ProductStoreFault("invalid_input");
-      const receipt = this.readState(this.paths(actor, false)).receipts[digest(requestId)];
+      const paths = this.paths(actor, false);
+      const receipt = this.readState(paths).receipts[digest(requestId)];
       if (!receipt) throw new ProductStoreFault("not_found");
-      return receipt;
+      return this.durableReceipt(paths, receipt);
     });
   }
 }
