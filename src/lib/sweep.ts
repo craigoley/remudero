@@ -275,6 +275,7 @@ import {
   type EscalationClass,
   type EscalationJudgeDecision,
   type EscalationJudgeVerdict,
+  escalationJudgeReceiptFields,
   type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
@@ -1927,6 +1928,16 @@ function gitBlobId(bytes: Buffer, oid: string): string {
   return createHash(oid.length === 64 ? "sha256" : "sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
 }
 
+/** Open each regular generator-copy leaf once: its type, mode and bytes share an identity. */
+function readConflictRegularFile(path: string): { mode: number; bytes: Buffer } {
+  const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new Error(`conflict generator path is not a regular file: ${path}`);
+    return { mode: stat.mode, bytes: readFileSync(fd) };
+  } finally { fs.closeSync(fd); }
+}
+
 /** W1-T9578: after the sandboxed generators exit, compare their disposable copy with the merged tree the
  *  parent cut it from, by lstat and blob id, with NO Git in the copy (its repository is the generator's to
  *  rewrite). Its `.git` and the dependency links provisioned beside tracked paths are not compared. Returns
@@ -1951,14 +1962,18 @@ export function conflictGeneratorOutputs(copy: string, manifest: ReadonlyMap<str
       seen.add(rel);
       if (permitted.has(rel)) {
         if (!entry.isFile()) { refused.add(rel); continue; }
-        const fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-        try { outputs.set(rel, readFileSync(fd)); } finally { fs.closeSync(fd); }
+        outputs.set(rel, readConflictRegularFile(abs).bytes);
         continue;
       }
-      const same = tracked !== undefined && (entry.isSymbolicLink() ? tracked.mode === "120000" &&
-          gitBlobId(Buffer.from(fs.readlinkSync(abs, { encoding: "buffer" })), tracked.oid) === tracked.oid
-        : entry.isFile() && (tracked.mode === "100755") === ((fs.lstatSync(abs).mode & 0o100) !== 0) &&
-          tracked.mode !== "120000" && gitBlobId(readFileSync(abs), tracked.oid) === tracked.oid);
+      let same = false;
+      if (tracked !== undefined && entry.isSymbolicLink()) {
+        same = tracked.mode === "120000" &&
+          gitBlobId(Buffer.from(fs.readlinkSync(abs, { encoding: "buffer" })), tracked.oid) === tracked.oid;
+      } else if (tracked !== undefined && entry.isFile() && tracked.mode !== "120000") {
+        const file = readConflictRegularFile(abs);
+        same = (tracked.mode === "100755") === ((file.mode & 0o100) !== 0) &&
+          gitBlobId(file.bytes, tracked.oid) === tracked.oid;
+      }
       if (!same) refused.add(rel);
     }
   };
@@ -24846,6 +24861,8 @@ export async function runStaleEscalationRejudge(
       }
     }
 
+    // Preserve the original producer receipt before shadow/act triage replaces the verdict.
+    const judgeReceipt = escalationJudgeReceiptFields(verdict);
     const triaged = evidenceError !== undefined
       ? { kind: "deliver" as const, decidedBy: "default" as const, reason: verdict.reason }
       : triageEscalation(c.escalation, evidence, verdict);
@@ -24882,6 +24899,7 @@ export async function runStaleEscalationRejudge(
         age_ms: c.ageMs,
         judge_decision: verdict.decision,
         judge_reason: verdict.reason,
+        ...judgeReceipt,
       });
     }
 

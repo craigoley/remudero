@@ -156,10 +156,9 @@ test("W1-T2809: the ls-files and dir-walk populations are DISJOINT at head — t
   const rawLsFiles = mentions(/ls-files/);
   const rawDirWalk = mentions(/readdirSync|globSync/);
   const overlap = rawLsFiles.filter((f) => rawDirWalk.includes(f)).sort();
-  const refused = new Set(CENSUS_POPULATION.filter((m) => m.verdict.status === "REFUSED").map((m) => m.testFile));
-  for (const f of overlap) {
-    assert.ok(refused.has(f), `${f} carries both idiom tokens as source text and is not a refused fixture/meta suite`);
-  }
+  const fixtureSuite = "test/the-tree-walk-recognizer-admits-by-what-a-suite-executes.test.ts";
+  assert.ok(overlap.includes(fixtureSuite), "control: the fixture suite mentions both idioms");
+  assert.ok(!found.some((c) => c.testFile === fixtureSuite), "fixture mentions execute neither idiom");
 });
 
 // ── (3) the stopgap is labelled, and the label cannot be silently dropped ───────────────────────
@@ -226,7 +225,7 @@ test("W1-T2809: every discovered candidate is placed or NAMED — widening never
 
 test("W1-T2809: discovered-but-unplaceable callers from BOTH idioms are reported in unknownCoverage", () => {
   const files: Record<string, string> = {
-    "test/future-dir-walk.test.ts": 'const files = readDirectory(join(root, "src/lib")); readdirSync',
+    "test/future-dir-walk.test.ts": 'const files = readdirSync(join(REPO_ROOT, "src/lib"));',
     "test/future-ls-files.test.ts": 'execFileSync("git", ["ls-files", "src/lib"])',
   };
   const report = censusSuiteMembershipFor([], "/fake/repo", listSpawn(Object.keys(files)), (p) => files[p] ?? "");
@@ -240,10 +239,10 @@ test("W1-T2809: an unreadable hit is still KEPT, tagged with the gated idiom —
   assert.deepEqual(found, [{ testFile: "test/unreadable.test.ts", idiom: "ls-files", walks: ["src/"] }]);
 });
 
-test("W1-T2809: a hit that mentions neither src/ nor an idiom token is still filtered out", () => {
+test("W1-T2809: a hit that walks no supported repository corpus is still filtered out", () => {
   const files: Record<string, string> = {
-    "test/walks-src.test.ts": 'readDirectory(join(root, "src/lib")); readdirSync',
-    "test/walks-deploy.test.ts": 'readDirectory(join(root, "deploy")); readdirSync',
+    "test/walks-src.test.ts": 'readdirSync(join(REPO_ROOT, "src/lib"));',
+    "test/walks-deploy.test.ts": 'readdirSync(join(REPO_ROOT, "deploy"));',
     "test/uses-ls-files.test.ts": 'execFileSync("git", ["ls-files", "src/*.ts"])',
   };
   const found = discoverCensusCandidates("/fake/repo", listSpawn(Object.keys(files)), (p) => files[p] ?? "");
@@ -254,6 +253,6 @@ test("W1-T2809: a hit that mentions neither src/ nor an idiom token is still fil
 });
 
 test("W1-T2809: ls-files takes precedence for a file carrying both tokens, so the gated projection is unchanged", () => {
-  const found = discoverCensusCandidates("/fake/repo", listSpawn(["test/both.test.ts"]), () => 'ls-files src/ and readdirSync("src/lib")');
+  const found = discoverCensusCandidates("/fake/repo", listSpawn(["test/both.test.ts"]), () => 'execFileSync("git", ["ls-files", "--", "src/lib"]); readdirSync("src/lib");');
   assert.deepEqual(found, [{ testFile: "test/both.test.ts", idiom: "ls-files", walks: ["src/lib"] }]);
 });
