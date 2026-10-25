@@ -40,7 +40,10 @@ test("W1-T4042: the helper still decides the empty case the same way", () => {
 });
 
 test("W1-T4042: the regime is derived in exactly one place", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  // W1-T9337: include the extracted fix implementation in the same source census.
+  const src = ["run-task.ts", "cli/commands/fix.ts"]
+    .map((owner) => readFileSync(new URL(`../src/${owner}`, import.meta.url), "utf8").replace(/\bhost\./g, ""))
+    .join("\n");
   // CORPUS CONTROL, ASSERTED BEFORE ANY COUNTING. A census over an unreadable or truncated file
   // would report 0 of everything and pass every equality below by comparing nothing — the failure
   // mode this repo treats as the most dangerous. run-task.ts is ~2.4 MB; 100 KB is a floor no

@@ -1,0 +1,37 @@
+- id: W1-T10631
+  title: "Evaluation runtime pins are validated before a prospective protocol can be registered"
+  repo: remudero
+  depends_on: []
+  plan_refs: [W1-T5341, W1-T5432, W1-T5433, W1-T5434]
+  type: implement
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  verify: human
+  dispatch_hold: true
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "evaluation-registration-order:issue-7418-source-observation-20261025"
+  files:
+    - src/lib/benchmark-aa-readiness.ts
+    - test/benchmark-aa-readiness.test.ts
+  acceptance:
+    - claim: "The maintained runBenchmarkAaReadiness path validates the prospective manifest stack against the executing runtime pins before calling the existing registration writer. Missing, unknown, malformed or disagreeing pins leave no new protocol registration or registration-owned persistent state. Failures remain named withheld/unknown outcomes, not successful empty trials."
+      proof: "unit test: runtime pin refusals leave prospective registration untouched"
+    - claim: "A valid exact-stack manifest still registers through the existing maintained protocol path. Existing registered-owner reconciliation, duplicate/conflicting protocols, opted-in roots, local registration ownership and resume-without-replay behavior remain enforced. This change cannot reset or overwrite a previously registered protocol to make it match a new runtime."
+      proof: "unit test: pre-registration pin validation preserves valid registration and registered-owner controls"
+    - claim: "The existing immediate pre-dispatch pin check remains load-bearing after pre-registration validation. Drift after registration is refused before pair dispatch, while consent, billing mode, assignment, shared pair slots, cash/reservation limits and paid-arm gates are unchanged. No automatic calibration, new evaluator service, scheduler or trial activation is introduced."
+      proof: "unit test: runtime drift after registration still withholds pair dispatch"
+    - claim: "Real private-state fixtures reach the maintained registration writer, inspect its actual protocol files/events before and after refusal, and include a valid unmarked positive control. Removing only the pre-registration ordering fix makes the intended no-write regression fail; exact restoration passes. Retain existing unknown-root, conflict, missingness and incomplete-evidence controls without skips or relaxed checks."
+      proof: "unit test: registration ordering fails without the pre-registration pin guard"
+    - claim: "Readiness gaps retain their existing named, idempotent evidence and ordinary task-producing intake. Registration refusal neither claims a completed calibration nor fabricates outcomes, cost or eligibility. The original field-trial issue stays open until its independently governed calibration and launch prerequisites are actually qualified."
+      proof: "unit test: registration pin refusals preserve truthful idempotent readiness gaps"
+  note: "Parked plan-only proposal with dispatch_hold true and test-first implementation requirements. Normal reservation, machine judgment, full CI, coverage, security and semantic review retain authority. Future implementation tests are requirements, not passing evidence from this filing; no new author allowance or field-trial permission is inferred."
+  rationale: |
+    W1-T5433 owns exclusive admission for readiness-gap sidecar appends, not prospective protocol registration. W1-T5434 owns reading a competing frozen calibration population instead of throwing on creation, not the order of runtime-pin validation before registration. Preserve both independent mechanisms and their owners; this narrower proposal neither supersedes those tasks nor changes its two declared paths to hide their shared surface.
+    Observed main96425de0e66503c6f81569d0955bd5bfbc18b52c source blob1e902d08e11682043db9cfa239b061db48fb6e17 registers with runProspectiveAa(action:register) before its runtimePinRefusals call. Existing W5341 protects dispatch; this narrowly proposes pre-registration no-write protection, not a claim that any invalid pair actually ran.
+    Registration can activate the ordinary daemon side-pair seam. Validate-before-write therefore matters separately from validate-before-dispatch. Reuse W4647/W5341/W5432 and their existing protocol/receipt/task intake rather than duplicate the evaluation framework or run a readiness command merely to inspect it.
+    Fresh advertised-head shard and inline-plan subject scope, complete open-PR FILE plus SUBJECT scope and original issue7418 remain required before reservation/publication. A captured population and positive controls establish that bounded scope only, never universal absence or runtime adoption.
+    Primary research cross-checks: Anthropic Demystifying evals for AI agents (https://www.anthropic.com/research/demystifying-evals-for-ai-agents) distinguishes final environment outcomes from agent reports; Microsoft Research Data Quality for Trustworthy A/B testing (https://www.microsoft.com/en-us/research/articles/data-quality-fundamental-building-blocks-for-trustworthy-a-b-testing-analysis/) identifies missingness, validity, joins and uniqueness as prerequisites for trustworthy conclusions. These support the design, not proof that Remudero calibration passed.
+    Craig approved author NOT RUN for this one parked plan-only filing; normal full CI/security/coverage/review remain required. Serve stays running; W7740 remains USER_HELD90, SHADOW and independent overrides are unchanged, and Foundation/Janitor retain their existing owners. No real protocol, manifest, pair, billing or production state is changed by this filing.

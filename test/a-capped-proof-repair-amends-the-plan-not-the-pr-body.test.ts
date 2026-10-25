@@ -276,7 +276,10 @@ test("the live fix rung calls the proof-amendment parent rather than granting th
   // installed file rather than trusting the diff: the wiring must survive as ordinary source.
   const { readFileSync } = await import("node:fs");
   const { join } = await import("node:path");
-  const runTaskSrc = readFileSync(join(import.meta.dirname, "..", "src", "run-task.ts"), "utf8");
+  // W1-T9337: the fix implementation moved; audit both owners through the host seam.
+  const runTaskSrc = ["run-task.ts", "cli/commands/fix.ts"]
+    .map((owner) => readFileSync(join(import.meta.dirname, "..", "src", owner), "utf8").replace(/\bhost\./g, ""))
+    .join("\n");
   assert.match(runTaskSrc, /requestProofAmendment\(/, "the fix rung must call the parent effect directly");
   assert.match(runTaskSrc, /kind:\s*"proof_amendment"/, "the durable fix.dispatch record identifies this amendment subtype");
   assert.doesNotMatch(

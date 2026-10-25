@@ -115,6 +115,12 @@
 #   RMD_CLEANUP_LOCK_FILE       shared whole-pass flock file (default: beside this script, which
 #                               both the root and the user cron run, so one path serves both)
 #   RMD_CLEANUP_FLOCK           flock command (tests may simulate an unavailable lock)
+#   RMD_CLEANUP_LOCK_WAIT_SECONDS  how long a pass waits for that lock before it skips. Default:
+#                               1800 for a full pass, 0 for RMD_CLEANUP_ONLY_TMP=1. The hourly root
+#                               tmp sweep starts at :00 and runs 6-16 min; the 6-hourly full pass
+#                               starts at :07 and, with no wait, lost the lock on every scheduled run
+#                               from 2026-10-15 to 2026-10-25. A tmp-only pass still skips at once,
+#                               so hourly sweeps never queue behind a long full pass.
 set -uo pipefail
 SEED_GUARD_DIR=$(cd "$(dirname -- "${BASH_SOURCE[0]:-}")" && pwd)
 if [ -f "$SEED_GUARD_DIR/dependency-seed-guard.sh" ]; then
@@ -255,6 +261,14 @@ case "$ONLY_TMP" in
   0|1) ;;
   *) echo "rmd-host-cleanup: FATAL RMD_CLEANUP_ONLY_TMP must be 0 or 1" >&2; exit 2 ;;
 esac
+LOCK_WAIT_SECONDS="${RMD_CLEANUP_LOCK_WAIT_SECONDS:-}"
+if [ -z "$LOCK_WAIT_SECONDS" ]; then
+  if [ "$ONLY_TMP" = 1 ]; then LOCK_WAIT_SECONDS=0; else LOCK_WAIT_SECONDS=1800; fi
+fi
+case "$LOCK_WAIT_SECONDS" in
+  *[!0-9]*|????????*) echo "rmd-host-cleanup: FATAL RMD_CLEANUP_LOCK_WAIT_SECONDS must be a non-negative integer of at most 7 digits" >&2; exit 2 ;;
+esac
+LOCK_WAIT_SECONDS=$(( 10#$LOCK_WAIT_SECONDS ))
 
 # The watch list, parsed once and refused whole before the lock: a typo must not silently unwatch a
 # disk. W_* are parallel arrays (bash 3.2 on macOS has no associative arrays).
@@ -348,6 +362,14 @@ else
   fi
   $FLOCK_CMD -n -E 73 9
   lock_status=$?
+  if [ "$lock_status" = 73 ] && [ "$LOCK_WAIT_SECONDS" -gt 0 ]; then
+    log "WAIT pass: another janitor pass holds the lock; waiting up to ${LOCK_WAIT_SECONDS} s"
+    $FLOCK_CMD -w "$LOCK_WAIT_SECONDS" -E 73 9
+    lock_status=$?
+    if [ "$lock_status" = 73 ]; then
+      log "KEEP pass: another janitor pass still holds the lock after ${LOCK_WAIT_SECONDS} s"; exit 0
+    fi
+  fi
   case "$lock_status" in
     0) ;;
     73) log "KEEP pass: another janitor pass holds the lock"; exit 0 ;;
