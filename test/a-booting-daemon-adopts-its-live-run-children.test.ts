@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { daemonBoot, runDaemon, runLanePool, type LanePoolControl } from "#src/lib/daemon.js";
 import { adoptRunChildren } from "#src/lib/run-child.js";
-import { childIdentity, readSpec, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
+import { childIdentity, readSpec, RUN_CHILD_SCHEMA, toRunChildFailure, writeSpec, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
 import { loadPlan } from "#src/lib/plan.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import { daemonCommand, ledgerPathFor, orphanSweepRunActive } from "#src/run-task.js";
@@ -95,6 +95,28 @@ test("W1-T9086: a terminal child settles once and a lost one takes the crash pat
     assert.equal(outcomes.filter((o) => o.status === "rejected").length, 1);
     assert.equal(f.rows.filter((r) => r.step === "run_child.lost").length, 1);
     assert.equal(f.rows.filter((r) => r.step === "run_child.settled").length, 2);
+    assert.deepEqual(f.adopt(), []);
+  } finally { f.cleanup(); }
+});
+
+test("terminal error round-trip regressions exercise the real run-child writer and settler", async () => {
+  const f = fixture();
+  try {
+    const original = Object.assign(new Error("spawnSync git ENOBUFS"), { code: "ENOBUFS", reasonClass: "git_output_overflow" });
+    f.add("terminal-error", { state: "failed", failure: toRunChildFailure(original) });
+    f.add("done-without-result", { state: "done" });
+    f.add("still-running-gone", { identity: { ...childIdentity(process.pid)!, startTicks: "reused" } });
+    const children = f.adopt();
+    const outcomes = await Promise.allSettled(children.map(child => child.settled));
+    const failure = outcomes[children.findIndex(child => child.runId === "terminal-error")];
+    assert.ok(failure.status === "rejected");
+    assert.equal(failure.reason.name, original.name);
+    assert.equal(failure.reason.message, original.message, "an authenticated terminal Error must not become a lost-child message");
+    assert.equal(failure.reason.code, "ENOBUFS");
+    assert.equal(failure.reason.reasonClass, "git_output_overflow");
+    assert.deepEqual(f.rows.filter(row => row.step === "run_child.lost").map(row => row.run_id).sort(), ["done-without-result", "still-running-gone"]);
+    children.forEach((child, i) => child.acknowledge!(outcomes[i]));
+    assert.equal(f.rows.filter(row => row.step === "run_child.settled").length, 3);
     assert.deepEqual(f.adopt(), []);
   } finally { f.cleanup(); }
 });
