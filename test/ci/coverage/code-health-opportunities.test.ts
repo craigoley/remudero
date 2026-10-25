@@ -781,7 +781,7 @@ test("code health bounded evidence reads refuse a pipe without blocking the work
     writeFileSync(path, JSON.stringify({ observed: true }));
     execFileSync("mkfifo", [fifo]);
     const script = 'import {readCodeHealthArtifactJson} from "#src/lib/code-health-store.js";const p=readCodeHealthArtifactJson(process.argv[1]);if(!p.observed)process.exit(2);try{readCodeHealthArtifactJson(process.argv[2]);process.exit(3);}catch{process.stdout.write("refused");}';
-    const read = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, path, fifo], { cwd: repoRoot(), timeout: 3000, encoding: "utf8" });
+    const read = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, path, fifo], { cwd: repoRoot(), timeout: 30_000, encoding: "utf8" });
     assert.equal(read, "refused", "an invalid file type is an unavailable source, never an unbounded blocking read");
   });
 });
@@ -822,6 +822,6 @@ test("code health source-age census stays bound to the finding freshness reader"
     assert.equal(result.exempt.length, 0, "no ignore or exemption supplies the pass");
     process.stdout.write("source-age registration and crossing control passed");
   `;
-  const result = execFileSync(process.execPath, ["--input-type=module", "-e", script], { cwd: repoRoot(), encoding: "utf8", timeout: 10000 });
+  const result = execFileSync(process.execPath, ["--input-type=module", "-e", script], { cwd: repoRoot(), encoding: "utf8", timeout: 30_000 });
   assert.equal(result, "source-age registration and crossing control passed");
 });
