@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { main } from "#src/run-task.js";
+import { withTempDir } from "#src/lib/tmp.js";
 import {
   assessBootHealth,
   daemonIsIdle,
@@ -17,6 +19,34 @@ import {
 } from "../src/lib/deployer.js";
 
 // ── pure decisions ──────────────────────────────────────────────────────────────
+
+test("selected runtime CLI entry refuses invalid input without changing unselected read-only dispatch", async (t) => withTempDir("selected-runtime-cli", async root => {
+  const fixture = { selected: join(root, "selected.yaml") }, prior = process.env.RMD_INSTANCE_REGISTRY, argv = process.argv;
+  writeFileSync(fixture.selected, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n");
+  const reachedExit = new Error("contained CLI exit");
+  let code: number | string | undefined;
+  t.mock.method(process, "exit", ((value?: number | string): never => { code = value; throw reachedExit; }) as typeof process.exit);
+  t.mock.method(process.stderr, "write", (_chunk: unknown, encodingOrDone?: unknown, done?: unknown) => {
+    const callback = typeof encodingOrDone === "function" ? encodingOrDone : done;
+    if (typeof callback === "function") callback();
+    return true;
+  });
+  process.argv = [process.execPath, "rmd", "daemon"];
+  try {
+    process.env.RMD_INSTANCE_REGISTRY = "";
+    await assert.rejects(main(), /selected instance registry unavailable/);
+    assert.equal(code, undefined, "invalid selection stops before the actual dispatch exit");
+    process.argv = [process.execPath, "rmd", "gh", "missing-separator"];
+    for (const selected of [undefined, fixture.selected, ""]) {
+      if (selected === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = selected;
+      await assert.rejects(main(), error => error === reachedExit);
+      assert.equal(code, 2, "read-only recovery dispatch must not become a global selected-configuration hold");
+    }
+  } finally {
+    process.argv = argv;
+    if (prior === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = prior;
+  }
+}));
 
 test("decideDeployTrigger: human-gated by default — no marker ⇒ no deploy even when behind", () => {
   const r = decideDeployTrigger({ markerPresent: false, autoMode: false, installHead: "old", originMain: "new" });
