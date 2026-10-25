@@ -1,3 +1,5 @@
+import { parseProposalRegistryResult } from "./inbox.js";
+import { inboxThreadId } from "./inbox-thread.js";
 import { fixedClock } from "./clock.js";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
@@ -5,7 +7,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { projectCodeHealth, type CodeHealthProjectionInput } from "./code-health-projection.js";
 import type { CodeHealthAssessment } from "./code-health-contract.js";
 import { buildCodeHealthOpportunities, type CodeHealthImprovementOpportunity, type CodeHealthRelatedWork } from "./codeql-quality-intake.js";
-import { codeHealthRepositoryStateDir, readCodeHealthArtifactJson, readCodeHealthCollectionFailure, readCodeHealthSnapshot, type CodeHealthCollectionFailureRead } from "./code-health-store.js";
+import { codeHealthRepositoryStateDir, improvementOutcomeStateDir, readCodeHealthArtifactJson, readCodeHealthCollectionFailure, readCodeHealthSnapshot, type CodeHealthCollectionFailureRead } from "./code-health-store.js";
 import type { RepositoryEvidenceInventory } from "./daily-progress-contract.js";
 import { readModelSidecarDir } from "./read-model-db.js";
 import type { ReadModelView } from "./read-model-worker.js";
@@ -181,30 +183,58 @@ export function readCodeHealthRelatedWork(stateDir: string, inventory: Repositor
   const work: CodeHealthRelatedWork[] = [], clocks: string[] = []; let missing = 0, invalid = 0, stale = false;
   const member = inventory.repositories.find(repo => repo.repository === repository)!;
   try {
-    const publisher = readCodeHealthArtifactJson(join(stateDir, "read-model", "repositories-sources.json"), 2 * 1024 * 1024) as { instances?: Array<{ instanceId: string; options?: { ledgerPath?: string } }> };
+    const publisher = readCodeHealthArtifactJson(join(stateDir, "read-model", "repositories-sources.json"), 2 * 1024 * 1024) as { instances?: Array<{ instanceId: string; options?: { ledgerPath?: string; controlRoot?: string } }> };
     if (publisher === null || publisher === undefined || !Array.isArray(publisher.instances) || publisher.instances.length > 256) throw new Error("Saved work scope is unavailable.");
     for (const instanceId of member.instanceIds) {
       const instances = publisher.instances.filter(instance => instance?.instanceId === instanceId), path = instances[0]?.options?.ledgerPath;
       if (instances.length !== 1 || typeof path !== "string" || path.length > 4096 || path.includes("\0") || !isAbsolute(path)) { missing++; continue; }
-      try {
-        const raw = readCodeHealthArtifactJson(join(dirname(path), OPPORTUNITY_EVIDENCE_FILE), OPPORTUNITY_EVIDENCE_MAX_BYTES);
+      const options = instances[0]!.options;
+      if (typeof options?.controlRoot === "string" && options.controlRoot.length <= 4096 && !options.controlRoot.includes("\0") && isAbsolute(options.controlRoot)) {
+        try {
+          const raw = readCodeHealthArtifactJson(join(options.controlRoot, "state", "inbox-proposals.json"), 2 * 1024 * 1024), parsed = parseProposalRegistryResult(JSON.stringify(raw));
+          if (parsed.kind !== "ok" || parsed.proposals.length > 2048) throw new Error("Saved planning links are unavailable.");
+          for (const row of parsed.proposals) {
+            const saved = (row as unknown as { improvement?: { version?: string; repository?: string; instance?: string; opportunityId?: string; snapshotId?: string; requestId?: string; goalDigest?: string; conversationReady?: boolean; threadId?: string } }).improvement;
+            if (!saved || saved.version !== "improvement-thread-v1" || saved.conversationReady !== true || saved.repository !== repository || saved.instance !== instanceId ||
+                typeof saved.opportunityId !== "string" || !saved.opportunityId.startsWith(`${repository}/codeql-quality:`) || saved.opportunityId.length > 1024 ||
+                ![saved.snapshotId, saved.requestId, saved.goalDigest].every(value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value))) continue;
+            const proposalId = saved.opportunityId.slice(repository.length + 1), expectedId = `improvement:${createHash("sha256").update(JSON.stringify([repository, instanceId, proposalId])).digest("hex")}`;
+            if (row.id === expectedId && saved.threadId === inboxThreadId(expectedId)) work.push({ repository, proposalId, threadId: saved.threadId });
+          }
+          // Existence is useful for navigation. Neither a read time nor file mtime refreshes the chat's source clock.
+        } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") missing++; else invalid++; }
+      }
+      const savedPaths = [join(dirname(path), OPPORTUNITY_EVIDENCE_FILE), join(improvementOutcomeStateDir(stateDir, repository, instanceId), OPPORTUNITY_EVIDENCE_FILE)];
+      for (const [index, savedPath] of savedPaths.entries()) try {
+        const raw = readCodeHealthArtifactJson(savedPath, OPPORTUNITY_EVIDENCE_MAX_BYTES);
         const evidence = projectGardenerOpportunityEvidence(raw, repository, fixedClock(now));
         if (evidence.state !== "reported") { invalid++; continue; }
-        if (!evidence.oldestReconciledAt) { missing++; continue; }
+        if (!evidence.oldestReconciledAt) { if (index === 0) missing++; continue; }
         clocks.push(evidence.oldestReconciledAt);
         stale ||= now - Date.parse(evidence.oldestReconciledAt) > CODE_HEALTH_INTERVAL_MS;
-        for (const row of raw as Array<{ proposalId: string; candidate: { repo: string; key: string }; task?: { repo?: string; key?: string; id?: string }; pr?: { repo?: string; taskId?: string; url?: string } }>) {
+        for (const row of raw as Array<{ proposalId: string; candidate: { repo: string; key: string }; task?: { repo?: string; key?: string; id?: string }; pr?: { repo?: string; taskId?: string; url?: string }; improvement?: { repository?: string; opportunityId?: string; threadId?: string; snapshotId?: string; taskIds?: string[]; sourceVerified?: boolean } }>) {
+          const source = row.improvement;
+          if (source && source.sourceVerified !== false && source.repository === repository && typeof source.opportunityId === "string" && source.opportunityId.startsWith(`${repository}/codeql-quality:`) && source.opportunityId.length <= 1024 &&
+              typeof source.snapshotId === "string" && /^[a-f0-9]{64}$/.test(source.snapshotId) && typeof source.threadId === "string" && /^thread:[A-Za-z0-9:._/-]{1,500}$/.test(source.threadId) &&
+              Array.isArray(source.taskIds) && source.taskIds.length <= 64 && source.taskIds.every(id => /^[A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?$/.test(id))) {
+            const proposalId = source.opportunityId.slice(repository.length + 1), tasks = source.taskIds.length ? source.taskIds : [undefined];
+            for (const taskId of tasks) work.push({ repository, proposalId, threadId: source.threadId, ...(taskId ? { taskId } : {}),
+              ...(row.pr?.repo?.toLowerCase() === repository && row.pr.taskId === taskId && typeof row.pr.url === "string" ? { prUrl: row.pr.url } : {}) });
+            continue;
+          }
           if (!row.task || row.task.repo?.toLowerCase() !== repository || row.task.key !== row.candidate.key || typeof row.task.id !== "string") continue;
           work.push({ repository, proposalId: row.proposalId, taskId: row.task.id,
             ...(row.pr?.repo?.toLowerCase() === repository && row.pr.taskId === row.task.id && typeof row.pr.url === "string" ? { prUrl: row.pr.url } : {}) });
         }
       } catch (error) {
-        // Missing saved work stays not collected; unreadable or malformed work stays unavailable.
-        // The returned state and reason preserve that distinction rather than certify no existing work.
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") missing++; else invalid++;
+        // Older publishers do not have the derived projection yet. Its absence does not erase native links.
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") { if (index === 0) missing++; } else invalid++;
       }
     }
-  } catch { return { state: "unavailable", asOf: null, work: [], reason: "The configured sources for saved work could not be read or verified." }; }
-  return { state: invalid ? clocks.length ? "partial" : "unavailable" : missing ? clocks.length ? "partial" : "not_collected" : stale ? "stale" : "reported", asOf: clocks.sort()[0] ?? null, work,
+  } catch {
+    // deliberate: failed scope reads withhold related-work completeness; they never certify no existing work.
+    return { state: "unavailable", asOf: null, work: [], reason: "The configured sources for saved work could not be read or verified." };
+  }
+  return { state: invalid ? clocks.length ? "partial" : "unavailable" : missing ? clocks.length ? "partial" : "not_collected" : stale ? "stale" : "reported", asOf: clocks.sort()[0] ?? null, work: [...new Map(work.map(row => [JSON.stringify(row), row])).values()],
     reason: invalid ? "Some saved work could not be read or verified. These links may be incomplete." : missing ? "Some saved work has not been collected. These links may be incomplete." : stale ? "Saved work links have not been checked within the daily cadence." : null };
 }
