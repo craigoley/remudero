@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { saveCodeHealthCoverageSource } from "./code-health-store.js";
 import { validateCodeHealthProvenance } from "./code-health-projection.js";
 import { readFileSync } from "node:fs";
@@ -114,6 +115,11 @@ export async function readCoverageNightlySummary(opts: {
   const stateDir = dirname(opts.ledgerPath);
   const markerPath = join(stateDir, "last-coverage-nightly-intake.json");
   const log = opts.log ?? ((line: string) => console.error(line));
+  const saveSource = (summary: Record<string, unknown>): void => {
+    if (summary.code_health === undefined) return;
+    const saved = saveCodeHealthCoverageSource({ stateDir, repository: `${opts.owner}/${opts.repo}`, provenance: summary.code_health, clock });
+    if (saved.state !== "published" && saved.state !== "duplicate") log(`Code health coverage evidence was not saved: ${saved.reason}`);
+  };
   try {
     const decision = opts.cadence.check(markerPath, clock.date());
     if (!decision.fire) return { status: "not-due", reason: decision.reason };
@@ -126,17 +132,25 @@ export async function readCoverageNightlySummary(opts: {
     const runId = String(run.id);
     const repository = `${opts.owner}/${opts.repo}`;
     let incomplete = false;
-    let duplicate = false;
+    let duplicate = false, duplicateSummary: Record<string, unknown> | undefined;
     for await (const row of openLedgerUnion(stateDir, {
       step: COVERAGE_NIGHTLY_MEASURED_STEP, dedupe: false,
       onUnreadArchive: () => { incomplete = true; },
       onUnreadLive: () => { incomplete = true; },
       onMalformedRow: () => { incomplete = true; },
     })) {
-      if (row.kind === COVERAGE_NIGHTLY_MEASURED_STEP && row.repository === repository && row.run_id === runId) duplicate = true;
+      if (row.kind === COVERAGE_NIGHTLY_MEASURED_STEP && row.repository === repository && row.run_id === runId) {
+        duplicate = true;
+        if (row.code_health !== undefined) {
+          const measured = validatedSummary(row, run, repository);
+          if (duplicateSummary !== undefined && !isDeepStrictEqual(duplicateSummary, measured)) throw new Error("coverage-nightly ledger contains conflicting source evidence for one run");
+          duplicateSummary = measured;
+        }
+      }
     }
     if (incomplete) throw new Error("coverage-nightly dedup ledger union is incomplete or malformed");
     if (duplicate) {
+      if (duplicateSummary !== undefined) saveSource(duplicateSummary);
       return { status: "duplicate", runId };
     }
     const summary = validatedSummary(await reader.summaryForRun(opts.owner, opts.repo, run), run, repository);
@@ -144,10 +158,7 @@ export async function readCoverageNightlySummary(opts: {
       ...summary, step: COVERAGE_NIGHTLY_MEASURED_STEP, task_id: "coverage-nightly",
       run_id: runId, head_sha: run.head_sha, conclusion: run.conclusion, repository,
     }, { clock });
-    if (summary.code_health !== undefined) {
-      const saved = saveCodeHealthCoverageSource({ stateDir, repository, provenance: summary.code_health, clock });
-      if (saved.state !== "published" && saved.state !== "duplicate") log(`Code health coverage evidence was not saved: ${saved.reason}`);
-    }
+    saveSource(summary);
     return { status: "appended", runId };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
