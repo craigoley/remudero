@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -173,6 +173,33 @@ test("selected runtime canonical identity lookup shares the bounded read deadlin
       { envPath: fixture.selected, timeoutMs: 10 }, io), /selected instance registry unavailable \(timeout\)/);
     assert.equal(effects, 0, "late physical identity is not permission to start a selected effect");
     await new Promise(resolve => setTimeout(resolve, 70));
+  } finally { fixture.cleanup(); }
+});
+
+test("selected runtime trusted launcher packet uses the real bounded child and immutable digest", async () => {
+  const fixture = runtimeRegistryFixture();
+  const script = 'const {pathToFileURL}=await import("node:url"); const m=await import(pathToFileURL(process.argv[1]).href); try { await m.withInstanceRegistryRuntime(()=>process.stdout.write(m.trustedInstanceRegistryLaunchPacket()), {envPath:process.env.RMD_INSTANCE_REGISTRY,instanceName:process.argv[2],expectedDigest:process.env.RMD_INSTANCE_REGISTRY_DIGEST}); } catch { process.exitCode=2; }';
+  const invoke = (digest?: string, instance = "worker") => spawnSync(process.execPath,
+    ["--import", "tsx", "--input-type=module", "-e", script, join(REPO_ROOT, "src/lib/instance-registry-selection.ts"), instance],
+    { cwd: REPO_ROOT, env: { ...process.env, RMD_INSTANCE_REGISTRY: fixture.selected,
+      ...(digest === undefined ? {} : { RMD_INSTANCE_REGISTRY_DIGEST: digest }) }, encoding: "utf8", timeout: 10000 });
+  try {
+    const first = invoke();
+    assert.equal(first.status, 0, first.stderr);
+    const packet = first.stdout.split("\n");
+    assert.equal(packet.length, 6);
+    assert.equal(packet[0], "rmd-private-registry-v1");
+    assert.equal(packet[1], fixture.selected);
+    for (const index of [2, 3, 4]) assert.match(packet[index]!, /^[a-f0-9]{64}$/);
+    assert.equal(Buffer.from(packet[5]!, "base64").toString("utf8"), registry("shadow"));
+    assert.equal(invoke(packet[2]).stdout, first.stdout, "same physical file and instance remain bound");
+    assert.equal(invoke("0".repeat(64)).status, 2, "expected bytes are checked inside the actual default reader");
+    assert.equal(invoke(undefined, "other").status, 2, "a same-repository or different-instance default is not a fallback");
+    const replacement = join(fixture.root, "same-bytes.yaml");
+    writeFileSync(replacement, readFileSync(fixture.selected)); renameSync(replacement, fixture.selected);
+    const changed = invoke(packet[2]);
+    assert.equal(changed.status, 0);
+    assert.notEqual(changed.stdout.split("\n")[3], packet[3], "equal bytes never conceal a replacement physical identity");
   } finally { fixture.cleanup(); }
 });
 
