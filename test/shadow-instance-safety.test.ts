@@ -13,10 +13,11 @@ import { observeSelectedMode } from "#src/lib/instance-mode.js";
 import { daemonCommand } from "#src/cli/commands/daemon.js";
 import { runTask as directRunTask } from "#src/cli/commands/run-task-verb.js";
 import { main } from "#src/run-task.js";
-import { spawnCodexWorker } from "#src/lib/worker-provider.js";
+import { spawnCodexWorker, spawnFoundryClaudeWorker, spawnOpenWeightWorker, type OpenWeightSpawnArgs } from "#src/lib/worker-provider.js";
 import { realDeployDeps } from "#src/lib/deployer.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, privateRegistryDenyRegions, renderWorkerSettings, spawnWorker,
+import * as workerRuntime from "#src/lib/worker.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, renderWorkerSettings, spawnWorker,
   startWorkerEgressProxy, type SpawnWorkerArgs } from "#src/lib/worker.js";
 
 import { parseInstanceRegistry } from "../src/lib/instance-registry.js";
@@ -574,6 +575,9 @@ for (const intent of ["writer", "review"] as const) {
 }
 
 test("selected private deny regions are public ancestors or fixed standard roots, never authority", () => {
+  const privateRegistryDenyRegions = Reflect.get(workerRuntime, "privateRegistryDenyRegions") as
+    (inputs: readonly string[], roots: readonly string[]) => string[];
+  assert.equal(typeof privateRegistryDenyRegions, "function", "the real policy derivation must exist; base comparison must load before failing behaviorally");
   const publicRoots = ["/private/public-fixture/checkout", "/private/public-fixture/tmp"];
   const before = publicRoots.slice();
   assert.deepEqual(privateRegistryDenyRegions(["/private/public-fixture/private.yaml", "/private/public-fixture/policy.json"], publicRoots), ["/private/public-fixture"]);
@@ -591,6 +595,42 @@ test("selected private deny regions are public ancestors or fixed standard roots
     return true;
   });
 });
+
+for (const adapter of ["foundry-direct", "cash-foundry", "cash-chat"] as const) {
+  test(`selected ${adapter} refuses private scope and revised binding before model transport`, async () => {
+    for (const mode of ["healthy", "cwd-overlap", "home-overlap", "child-env", "revised"] as const) {
+      const fixture = runtimeRegistryFixture(), cwd = join(fixture.root, "cash-checkout"), home = join(fixture.root, "cash-home");
+      mkdirSync(cwd); mkdirSync(home);
+      const model = adapter === "cash-chat" ? "gpt-oss-120b" : "claude-haiku-5-5";
+      let sent = 0;
+      const args: OpenWeightSpawnArgs = { cwd: mode === "cwd-overlap" ? fixture.root : cwd,
+        workerHome: mode === "home-overlap" ? fixture.root : home, prompt: "public synthetic provider control", tools: ["Read"],
+        env: { RMD_OPENWEIGHT_API_KEY: "synthetic", RMD_FOUNDRY_CLAUDE_API_KEY: "synthetic",
+          RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.invalid/anthropic" },
+        ...(mode === "child-env" ? { workerEnv: { PRIVATE_CANARY: fixture.selected } } : {}),
+        fetchImpl: async () => { sent++; return new Response(JSON.stringify(adapter === "cash-chat"
+          ? { id: "fixture", model, choices: [{ index: 0, message: { role: "assistant", content: "synthetic complete" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
+          : { id: "fixture", model, stop_reason: "end_turn", content: [{ type: "text", text: "synthetic complete" }], usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200 }); } };
+      const config: Config = { root: fixture.root, claudeBin: "/unused", dailyCapUsd: 25,
+        workerProviders: { cashEndpoint: "https://cash.example.invalid" } };
+      let result: Awaited<ReturnType<typeof spawnOpenWeightWorker>> | undefined, failure: unknown;
+      try {
+        try { result = await runtimeRegistryRunner()(() => {
+          if (mode === "revised") writeFileSync(fixture.selected, registry("live"));
+          return adapter === "foundry-direct" ? spawnFoundryClaudeWorker(args, config, { model, effort: "low" })
+            : spawnOpenWeightWorker(args, config, { model, effort: "low" });
+        }, { envPath: fixture.selected }); } catch (error) { failure = error; }
+        if (mode === "healthy") {
+          assert.equal(failure, undefined); assert.equal(result?.isError, false, result?.stderr); assert.equal(sent, 1, "real adapter transport is the positive control");
+        } else {
+          assert.equal(sent, 0, `${mode} must refuse before model transport, not only annotate a later tool result`);
+          assert.ok(failure instanceof runtimeRegistry.InstanceRegistryRuntimeError);
+          assert.equal(failure.message.includes(fixture.root), false);
+        }
+      } finally { fixture.cleanup(); }
+    }
+  });
+}
 
 test("selected read-only Claude scopes refuse contradictory scratch grants before query", async () => {
   for (const mode of ["temp-in-cwd", "home-in-cwd", "temp-is-review-source"] as const) {
