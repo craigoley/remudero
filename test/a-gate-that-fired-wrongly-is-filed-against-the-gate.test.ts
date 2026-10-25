@@ -66,10 +66,13 @@ test("W1-T9049: a repair that only edits the gate's own baseline is a suspected 
   for (const [gate, owned, recognizer, symbol] of [
     ["test/env-var-registry.test.ts", "src/lib/config-schema.ts", "test/env-var-registry.test.ts", "harnessEnvNamesInSource"],
     ["test/error-subclass-census.test.ts", "scripts/error-subclass-baseline.json", "test/error-subclass-census.test.ts", "census:error-subclass"],
+    // The priced-ledger gate's reasoned EXEMPT allowlist lives in its own suite, not in the registry.
+    ["test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts", "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts",
+      "src/lib/config-gardener.ts", "census:every-priced-ledger-step"],
   ]) {
     const production = productionRule(gate!);
     const evidence = await productionRepair(production.gate, owned!, "@@\n-1\n+2",
-      'const token = "RMD_EXAMPLE"; class ExampleError extends Error {}');
+      'const token = "RMD_EXAMPLE"; class ExampleError extends Error {}\nlog("example.step", { cost_usd: 1 });');
     assert.deepEqual(evidence.pair.repairFiles, [owned]);
     const events: Array<Record<string, unknown> | undefined> = [];
     const actions = gateRepairCandidates([evidence], GATE_REPAIR_RULES, [], (step, extra) => {
