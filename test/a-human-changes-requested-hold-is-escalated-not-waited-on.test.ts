@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildOpenPrViews } from "../src/run-task.js";
-import { reviewInputDigest } from "../src/lib/review.js";
-import { classifyChangesRequested, pullReviewsRestArgs } from "../src/lib/open-prs-rest.js";
+import { buildOpenPrViews } from "#src/run-task.js";
+import { reviewInputDigest } from "#src/lib/review.js";
+import { classifyChangesRequested, pullReviewsRestArgs } from "#src/lib/open-prs-rest.js";
 import {
   changesRequestedHold,
   DEFAULT_SWEEP_POLICY,
@@ -15,7 +15,7 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 /*
  * craigoley/remudero #13851, #13895 and #13952 (2026-10-25): every required context green, remudero-review
