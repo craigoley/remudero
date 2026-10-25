@@ -145,7 +145,7 @@ const sourceId = (repository: string, kind: CodeHealthScan["kind"]): string => `
 
 /** Titles, paths and observed clocks can change without creating another finding. */
 export function codeHealthFindingFingerprint(repository: string, kind: CodeHealthScan["kind"], finding: Pick<CodeHealthScanFinding, "id" | "ruleId">): string {
-  return `${sourceId(repository, kind)}:${createHash("sha256").update(JSON.stringify(finding)).digest("hex")}`;
+  return `${sourceId(repository, kind)}:${createHash("sha256").update(JSON.stringify([finding.ruleId, finding.id])).digest("hex")}`;
 }
 
 function validateInput(input: CodeHealthProjectionInput): void {
