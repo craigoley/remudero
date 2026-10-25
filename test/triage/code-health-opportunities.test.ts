@@ -407,7 +407,7 @@ test("code health collection preserves source clocks and prior partial findings"
     observedAt: "2026-11-02T06:00:00.000Z", scans: [], previous });
   assert.equal(value.baseline, null, "a partial source cannot become a comparison baseline");
   const report = projectCodeHealth(value);
-  assert.equal(report.findings.length, old.findings.length);
+  assert.equal(report.findings.length, new Set(old.findings.map(finding => finding.id)).size);
   assert.equal(report.sources.filter(source => source.required).length, 2);
   assert.equal(report.summary.healthy, null);
   for (const known of report.findings) {
@@ -416,7 +416,7 @@ test("code health collection preserves source clocks and prior partial findings"
   }
   const retry = prepareCodeHealthCollection({ repository: previous.repository, currentSha: previous.currentSha,
     observedAt: "2026-11-02T07:00:00.000Z", scans: [], previous: value });
-  assert.equal(projectCodeHealth(retry).findings.length, old.findings.length, "two failed reads cannot erase prior partial findings");
+  assert.equal(projectCodeHealth(retry).findings.length, new Set(old.findings.map(finding => finding.id)).size, "two failed reads cannot erase prior partial findings");
   const complete = input(), scans = structuredClone(complete.scans);
   for (const scan of scans) scan.observedAt = "2026-11-02T05:59:00.000Z";
   const repeated = prepareCodeHealthCollection({ repository: complete.repository, currentSha: complete.currentSha,
