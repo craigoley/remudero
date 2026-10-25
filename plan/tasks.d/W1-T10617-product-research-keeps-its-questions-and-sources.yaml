@@ -3,6 +3,7 @@
   repo: remudero
   depends_on:
     - W1-T10612
+    - W1-T10657
   priority: 1.1
   type: implement
   verify: auto
