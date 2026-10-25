@@ -302,7 +302,8 @@ test("W1-T7735: the production refresh judge has an off switch, a single flight,
     const spawn = (async (args: { prompt: string }) => {
       spawned.push(args.prompt);
       if (spawned.length === 1) await new Promise<void>((resolve) => { release = resolve; });
-      return { text: '{"verdict": "independent", "reason": "unrelated"}', costUsd: 0.01, numTurns: 1 };
+      return { text: '{"verdict": "independent", "reason": "unrelated"}', costUsd: 0.01, numTurns: 1,
+        subtype: "success", isError: false, apiError: false };
     }) as unknown as Parameters<typeof productionRefreshJudge>[0]["spawn"];
     const logs: string[] = [];
     const judge = productionRefreshJudge({ repoRoot: process.cwd(), stateDir, diff: async () => "x".repeat(50_000), spawn,
