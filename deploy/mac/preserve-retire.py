@@ -732,6 +732,7 @@ commits not in published main: {s['unpublished_commits']}
 
 Restore:
   git init <dir> && cd <dir>
+  git remote add origin {shlex.quote(upstream)}   # optional: names the upstream; restore never fetches it
   git bundle unbundle {shlex.quote(final + "/unpublished.bundle")}   # self-contained; no upstream required
   # refs.txt lists every saved ref: recreate EACH with git update-ref <ref> <sha>
   # manifest.json git_snapshot also records original symbolic HEAD; restore it if wanted
