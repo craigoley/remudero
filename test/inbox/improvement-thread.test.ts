@@ -532,3 +532,18 @@ test("improvement drafting preserves occupied fleet and repository locks and bot
     assert.equal(existsSync(join(root, "state", "inbox-draft.lock")), false); assert.equal(existsSync(join(inboxRoot, "state", "inbox-draft.lock")), false);
   });
 });
+
+test("improvement follow-up reads the source saved for the original filing request", async () => {
+  const module = await planningModule();
+  await withTempDir("improvement-original-source", async dir => {
+    const { deps, request, input } = sourceFixture(dir), first = await module.createImprovementThread(request, deps); assert(first.state === "saved");
+    const changed = structuredClone(input); changed.observedAt = "2026-11-02T05:03:00.000Z"; changed.scans = changed.scans.map(scan => ({ ...scan, observedAt: "2026-11-02T05:02:00.000Z", scanId: `${scan.scanId}:new`, componentIds: scan.componentIds?.map(id => `${id}:new`) }));
+    const newer = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(deps.stateDir, request.repository), input: changed, expectedSnapshotId: request.snapshotId, clock: deps.clock }); assert(newer.state === "published");
+    const latest = await module.createImprovementThread({ ...request, snapshotId: newer.snapshotId, idempotencyKey: "newer-source-request-00001" }, deps); assert(latest.state === "saved"); assert.equal(latest.threadId, first.threadId);
+    const read = (module as unknown as { readSavedImprovementSource?: (id: string, deps: unknown) => { state: string; snapshotId?: string; threadId?: string; goal?: string } }).readSavedImprovementSource;
+    assert.equal(typeof read, "function", "effect follow-up needs the original sealed request, not the chat's latest goal"); assert(read);
+    const original = read(first.requestId, deps); assert.equal(original.state, "observed"); assert.equal(original.snapshotId, request.snapshotId); assert.equal(original.threadId, first.threadId); assert.equal(original.goal, request.goal);
+    assert.equal(read(latest.requestId, deps).snapshotId, newer.snapshotId);
+    assert.notEqual(original.snapshotId, latest.snapshotId);
+  });
+});
