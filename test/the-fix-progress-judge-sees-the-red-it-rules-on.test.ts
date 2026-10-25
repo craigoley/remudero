@@ -8,7 +8,6 @@
  */
 import assert from "node:assert/strict";
 import { runFixRung, routeFix } from "#src/run-task.js";
-import { runDiagnoseThenRetry } from "#src/lib/classify.js";
 import type { Config } from "#src/lib/config.js";
 import type { ReviewVerdict } from "#src/lib/review.js";
 import type { FixProgressInput } from "#src/lib/fix-progress-judge.js";
@@ -211,20 +210,5 @@ test("the operator fix route preserves the held CI and semantic findings in its 
   assert.equal(captured.reviewFailureEvidence?.[0]?.reason, reason);
 });
 
-test("the retry classifier preserves the exact CI and review evidence its caller held", async () => {
-  const progressInput = buildBase(facts({ ciFailures: [{ name: "ci", logTail: TAIL }], reviewFailures: [{
-    claim: "literal", proof: "unit test: literal", met: false, proof_exec: "executed_pass", reason: "semantic diagnosis" }] }));
-  let calls = 0;
-  let captured: FixProgressInput | undefined;
-  const result = await runDiagnoseThenRetry({ progressInput,
-    attempt: async () => ({ success: false, evidence: { text: "controlled deterministic failure" } }),
-    diagnose: async () => ({ text: "controlled diagnosis" }), fixProgressJudge: async input => {
-      calls++;
-      captured = input;
-      return { verdict: "escalate", loop: "controlled test", reason: "no additional retry granted" };
-    } });
-  assert.equal(calls, 1);
-  assert.equal(result.outcome, "gave_up");
-  assert.deepEqual(captured?.failureEvidence, progressInput.failureEvidence);
-  assert.deepEqual(captured?.reviewFailureEvidence, progressInput.reviewFailureEvidence);
-});
+// The retry classifier's evidence-preservation test lives in test/classify.test.ts: importing src/lib/classify.ts
+// here would need a stryker.conf.json scope entry, which cannot ship beside a src/ change (Standing rule 25).
