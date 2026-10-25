@@ -244,6 +244,9 @@ test("improvement planning separates conversation drafting filing and execution"
     assert(filing.state === "requested"); assert.equal(fileCalls, 0, "saving the reviewed decision does not claim filing completed");
     const interrupted = await runImprovementAction(filing.operation.operationId, runner); assert.equal(interrupted.state, "uncertain"); assert.equal(fileCalls, 1);
     const uncertain = await runImprovementAction(filing.operation.operationId, runner); assert.equal(uncertain.state, "uncertain"); assert.equal(fileCalls, 1, "an ambiguous filing is not retried without a native receipt");
+    const launchesBefore = launches.length;
+    const newKey = await requestImprovementAction("file", { ...review, idempotencyKey: "different-key-while-uncertain", draftDigest: view.drafting.digest }, deps);
+    assert.equal(newKey.state, "conflict", "a different retry key cannot bypass an unresolved filing decision"); assert.equal(launches.length, launchesBefore);
     const ledgerPath = join(inboxRoot, "state", "ledger.ndjson");
     appendLedger(ledgerPath, { ts: deps.clock.iso(), run_id: "APPROVE-fixture-123", task_id: saved.proposalId, proposal_id: saved.proposalId, step: "approve.id_materialized", ids: ["W1-T99999"] });
     appendLedger(ledgerPath, { ts: deps.clock.iso(), run_id: "APPROVE-fixture-123", task_id: saved.proposalId, step: "ratify.approved", pr_url: "https://github.com/acme/atlas/pull/123", branch: "ratify-improvement-123" });
