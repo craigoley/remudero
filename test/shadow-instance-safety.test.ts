@@ -328,7 +328,7 @@ function privateClaudeArgs(fixture: ReturnType<typeof runtimeRegistryFixture>, s
   const cwd = join(fixture.root, "checkout"), settingsFile = join(fixture.root, "settings.json");
   mkdirSync(cwd);
   writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true,
-    allowUnsandboxedCommands: false, network: { allowedDomains: [] } } }));
+    allowUnsandboxedCommands: false, network: { allowedDomains: ["api.github.com"] } } }));
   return { cwd, settingsFile, prompt: "selected privacy fixture", permissionMode: "bypassPermissions",
     config: { root: fixture.root, claudeBin: "/unused" }, mountProvider: "claude", egress: { mode: "off" },
     claudeExecutable: { cache: createClaudeExecutableCache(), deps: {
@@ -347,7 +347,8 @@ test("selected Claude SDK boundary snapshots private denials across queued argum
     try {
       const args = privateClaudeArgs(fixture, sink), originalPolicy = args.settingsFile;
       args.onMemoryAdmissionEnd = () => { args.settingsFile = join(fixture.root, "other-settings.json"); args.prompt = "retargeted"; };
-      if (proxy) args.egress = { mode: "enforce", checkVersion: () => {}, startProxy: startWorkerEgressProxy };
+      if (proxy) args.egress = { mode: "enforce", checkVersion: () => {}, startProxy: settings => startWorkerEgressProxy(settings,
+        () => { throw new Error("forbidden external egress in private-policy fixture"); }) };
       await runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected });
       assert.equal(sink.calls, 1);
       const settings = sink.options!.settings as { sandbox: { filesystem: { denyRead: string[]; denyWrite: string[] }; network?: Record<string, unknown> }; permissions: { deny: string[] } };
