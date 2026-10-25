@@ -555,7 +555,7 @@ if (a[0] === "api") {
     assert.equal((await readAndScan()).state, "partial", "a later unrepresented analysis cannot be replaced by an older artifact");
     for (const mode of ["transport", "invalid-json", "truncated", "foreign-run", "expired", "oversized-artifact", "missing-analysis", "unordered-analysis", "foreign-metadata", "oversized-metadata"]) {
       process.env.RMD_CODE_HEALTH_FIXTURE_CASE = mode;
-      await assert.rejects(readAndScan, undefined, `refuse ${mode} without an empty successful scan`);
+      await assert.rejects(readAndScan, (error: unknown) => error instanceof Error, `refuse ${mode} without an empty successful scan`);
     }
   } finally {
     process.env.PATH = saved;
