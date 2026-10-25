@@ -275,7 +275,7 @@ test("selected supervisor defaults cover target refusals derived waits and neste
       const deps = realDeployDeps(options), backends = deps.restartBackends!(), launchctl = backends.find(b => b.name === "launchctl")!, recycler = backends.find(b => b.name === "recycle-container")!;
       assert.equal(launchctl.probe(), false, "selected launchctl cannot borrow compatibility from a healthy host");
       assert.throws(() => deps.kickstartConsole!(), /selected instance registry unavailable \(launcher_unsupported\)/);
-      assert.deepEqual(calls, [], "every unsupported restart and mismatched target refuses before transport");
+      assert.deepEqual(calls.map(args => args.slice()), [], "every unsupported restart and mismatched target refuses before transport");
       recycler.restart();
       assert.equal(calls.length, 1); assert.equal(calls[0]![0], "bash");
       assert.ok(calls[0]!.includes("recycle-wait"), "actual on-disk duration selects the derived-wait command arm");
