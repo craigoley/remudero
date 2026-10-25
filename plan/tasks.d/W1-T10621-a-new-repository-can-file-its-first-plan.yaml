@@ -14,7 +14,7 @@
   files:
     - src/lib/plan-base-reader.ts
     - src/run-task.ts
-    - test/infra/plan-base-reader.test.ts
+    - test/plan/plan-base-reader.test.ts
   status: queued
   attempts: 0
   rationale: The first real Wreckterra product case executed all nine filing proofs, but remudero-review refused its initial plan because lint-plan --base assumes plan/tasks.yaml already exists at the merge base. The live refusal is lint-plan exited 1 with no summary. A new-product flow must support an empty repository without weakening review or substituting a whole-plan lint for changed-record qualification.
