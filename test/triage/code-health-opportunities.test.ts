@@ -449,3 +449,19 @@ test("code health collection flags changed facts under one scan identity without
   assert(report.findings.some(finding => finding.severity === "critical" && finding.fingerprint === codeHealthFindingFingerprint(previous.repository, "quality", scans[0]!.findings[0]!)), "keep newly known urgent evidence explicit while unassessed");
   assert.equal(report.summary.healthy, null);
 });
+
+test("code health collection preserves a valid comparison when the same source evidence is read again", () => {
+  const value = input();
+  for (const scan of value.scans) {
+    scan.findings = []; scan.checks = [{ id: scan.kind === "quality" ? "quality-maintainability-open" : "coverage-existing-tier", met: true, reason: "Meets the existing repository policy." }];
+  }
+  const first = prepareCodeHealthCollection({ repository: value.repository, currentSha: value.currentSha, observedAt: value.observedAt, scans: value.scans, previous: null });
+  assert.equal(projectCodeHealth(first).summary.healthy, null, "a first measured source has no independent comparison yet");
+  const scans = first.scans.map(scan => ({ ...structuredClone(scan), scanId: `${scan.kind}:independent`, analyzedSha: "c".repeat(40), observedAt: "2026-11-02T06:00:00.000Z" }));
+  const second = prepareCodeHealthCollection({ repository: value.repository, currentSha: "c".repeat(40), observedAt: "2026-11-02T06:01:00.000Z", scans, previous: first });
+  assert.equal(projectCodeHealth(second).summary.healthy, true, "two independent complete sources confirm the existing policy checks");
+  const repeated = prepareCodeHealthCollection({ repository: value.repository, currentSha: second.currentSha, observedAt: "2026-11-02T07:01:00.000Z", scans: second.scans, previous: second });
+  assert.equal(projectCodeHealth(repeated).summary.healthy, true, "rereading evidence retains its established comparison instead of making the source its own baseline");
+  assert.deepEqual(repeated.baseline, second.baseline);
+  assert.equal(repeated.scans[0]!.observedAt, second.scans[0]!.observedAt);
+});
