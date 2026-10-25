@@ -27,8 +27,26 @@ function report(): DailyProgressReport {
   };
 }
 
+function reportDay(date: string, zone: string, start: string, end: string): DailyProgressReport {
+  const r = report();
+  Object.assign(r, { reportDate: date, timeZone: zone, windowStart: start, windowEnd: end, generatedAt: end });
+  Object.assign(r.coverage.sources[0]!, { coverageStart: start, coverageThrough: end, lastAttemptAt: end, lastSuccessAt: end, nextDueAt: null });
+  return r;
+}
+
 test("daily contracts preserve coverage and reject contradictory day identity", () => {
   assert.equal(validateDailyProgressReport(report()).ok, true, "measured merge totals and a 25-hour day are valid while other source gaps remain visible");
+  const havana = report(); havana.timeZone = "America/Havana";
+  assert.equal(validateDailyProgressReport(havana).ok, true, "Havana's day starts at the first occurrence of midnight");
+  havana.windowStart = "2026-11-01T05:00:00.000Z";
+  assert.equal(validateDailyProgressReport(havana).ok, false, "the repeated midnight omits the first hour of the report day");
+  havana.windowStart = report().windowStart;
+  havana.coverage.sources[0]!.coverageStart = "2026-11-01T05:00:00.000Z";
+  assert.equal(validateDailyProgressReport(havana).ok, false, "source coverage must include the first occurrence of midnight too");
+  const repeatedEnd = reportDay("2026-10-31", "America/Havana", "2026-10-31T04:00:00.000Z", "2026-11-01T04:00:00.000Z");
+  assert.equal(validateDailyProgressReport(repeatedEnd).ok, true, "the prior day ends at the first occurrence of the next midnight");
+  const extendedEnd = reportDay(repeatedEnd.reportDate, repeatedEnd.timeZone, repeatedEnd.windowStart, "2026-11-01T05:00:00.000Z");
+  assert.equal(validateDailyProgressReport(extendedEnd).ok, false, "even complete receipts cannot extend a report into the next day");
   const invalid = [
     { ...report(), version: "unknown" },
     { ...report(), reportDate: "2026-02-30" },
@@ -270,12 +288,25 @@ test("daily bounds use civil dates across spring daylight saving and year rollov
   for (const [date, zone, start, end] of [
     ["2026-03-08", "America/New_York", "2026-03-08T05:00:00.000Z", "2026-03-09T04:00:00.000Z"],
     ["2026-12-31", "UTC", "2026-12-31T00:00:00.000Z", "2027-01-01T00:00:00.000Z"],
-  ]) {
-    const r = report(); r.reportDate = date!; r.timeZone = zone!; r.windowStart = start!; r.windowEnd = end!; r.generatedAt = end!;
-    Object.assign(r.coverage.sources[0]!, { coverageStart: start, coverageThrough: end, lastAttemptAt: end, lastSuccessAt: end, nextDueAt: null });
-    assert.equal(validateDailyProgressReport(r).ok, true);
-    r.windowEnd = new Date(Date.parse(start!) + 24 * 60 * 60_000).toISOString();
-    if (zone !== "UTC") assert.equal(validateDailyProgressReport(r).ok, false, "24 elapsed hours is not always one civil day");
+    ["2018-11-04", "America/Sao_Paulo", "2018-11-04T03:00:00.000Z", "2018-11-05T02:00:00.000Z"],
+    ["2018-11-03", "America/Sao_Paulo", "2018-11-03T03:00:00.000Z", "2018-11-04T03:00:00.000Z"],
+    ["1987-10-25", "America/Goose_Bay", "1987-10-25T03:00:00.000Z", "1987-10-26T04:00:00.000Z"],
+    ["2026-04-05", "Australia/Lord_Howe", "2026-04-04T13:00:00.000Z", "2026-04-05T13:30:00.000Z"],
+    ["2011-12-29", "Pacific/Apia", "2011-12-29T10:00:00.000Z", "2011-12-30T10:00:00.000Z"],
+    ["2011-12-31", "Pacific/Apia", "2011-12-30T10:00:00.000Z", "2011-12-31T10:00:00.000Z"],
+  ] as const) {
+    const r = reportDay(date, zone, start, end);
+    assert.equal(validateDailyProgressReport(r).ok, true, `${date} in ${zone}`);
+    for (const boundary of ["windowStart", "windowEnd"] as const) {
+      const shifted = structuredClone(r); shifted[boundary] = new Date(Date.parse(r[boundary]) + 1).toISOString();
+      Object.assign(shifted.coverage.sources[0]!, { coverageThrough: shifted.windowEnd, lastAttemptAt: shifted.windowEnd, lastSuccessAt: shifted.windowEnd });
+      shifted.generatedAt = shifted.windowEnd;
+      assert.equal(validateDailyProgressReport(shifted).ok, false, `a one-millisecond shift of ${boundary} contradicts ${date} in ${zone}`);
+    }
+    const elapsedDay = new Date(Date.parse(start) + 24 * 60 * 60_000).toISOString();
+    if (end !== elapsedDay) assert.equal(validateDailyProgressReport(reportDay(date, zone, start, elapsedDay)).ok, false, "24 elapsed hours is not always one civil day");
   }
+  assert.equal(validateDailyProgressReport(reportDay("1987-10-25", "America/Goose_Bay", "1987-10-25T04:00:00.000Z", "1987-10-26T04:00:00.000Z")).ok, false, "returning to yesterday after the first minute does not move the day's first instant");
+  assert.equal(validateDailyProgressReport(reportDay("2011-12-30", "Pacific/Apia", "2011-12-30T10:00:00.000Z", "2011-12-31T10:00:00.000Z")).ok, false, "an entirely skipped civil date has no report window");
   assert.throws(() => buildRepositoryEvidenceInventory([{ instanceId: "", options: {} }]), /invalid configured instance/);
 });
