@@ -192,7 +192,7 @@ test("code health cached view preserves scope, pinned pages and saved source clo
   const { fixedClock } = await import("#src/lib/clock.js");
   const { publishCodeHealthSnapshot, codeHealthRepositoryStateDir } = await import("#src/lib/code-health-store.js");
   const { readCodeHealthReport } = await import("#src/lib/code-health-view.js");
-  withTempDir("code-health-view-", stateDir => {
+  await withTempDir("code-health-view-", stateDir => {
     mkdirSync(join(stateDir, "read-model"));
     writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [], improvementEvidence: {
       version: "repository-evidence-inventory-v1", measurementState: "not_collected", unresolvedInstances: ["unresolved"],
@@ -222,4 +222,30 @@ test("code health cached view preserves scope, pinned pages and saved source clo
     assert(older.data.assessment); assert.equal(older.data.assessment.observedAt, value.observedAt); assert.equal(older.data.freshness, "stale");
     assert.equal(older.data.planningAvailable, false);
   });
+});
+
+
+test("code health checks scope before cached ETags and retains off and shadow policy", async () => {
+  const { buildReadModelViewRoutes, viewEtag } = await import("#src/lib/views.js");
+  const { validateCodeHealthRequest, CODE_HEALTH_SCOPE_KEY } = await import("#src/lib/code-health-view.js");
+  const { fixedClock } = await import("#src/lib/clock.js");
+  const now = Date.parse("2026-11-02T06:00:00.000Z"), clock = fixedClock(now);
+  const data = { version: "code-health-view-v1", repository: "all", expectedRepositories: ["acme/atlas"] };
+  const entry = { view: "code-health", version: 1, key: "", etag: viewEtag("code-health", 1, false, data), body: { view: "code-health", version: 1, generatedAt: clock.iso(), asOf: clock.iso(), stale: false, sources: [{ name: "repositories:code-health-scope", asOf: clock.iso(), state: "fresh" as const }], data } };
+  let mode: "serve" | "off" | "shadow" = "serve", reads = 0, wants = 0;
+  const source = { switches: () => ({ views: { "code-health": mode } }), body: (_view: string, key?: string) => { reads++; return !key || key === CODE_HEALTH_SCOPE_KEY ? entry : undefined; }, judge: (sources: typeof entry.body.sources) => sources, want: () => { wants++; return true; } };
+  const route = buildReadModelViewRoutes({ legacy: [], readModelViews: ["code-health"], readModel: source, clock, requestValidators: { "code-health": (params, held) => validateCodeHealthRequest(params, held, now) } })[0]!;
+  assert.equal(route.scope, "read");
+  async function answer(query: string) {
+    let status = 0, body = "";
+    const req = { url: `/v1/views/code-health${query}`, headers: { "if-none-match": entry.etag } };
+    const res = { writeHead(code: number) { status = code; }, end(value?: string) { body = value ?? ""; } };
+    await route.handler(req as never, res as never, {} as never); return { status, body };
+  }
+  assert.equal((await answer("")).status, 304);
+  assert.equal((await answer("?repository=acme%2Fforeign")).status, 400, "foreign scope cannot be hidden by a matching ETag");
+  assert.equal((await answer("?repository=acme%2Fatlas")).status, 503); assert.equal(wants, 1);
+  const before = reads; mode = "off";
+  assert.match((await answer("")).body, /view_disabled/); assert.equal(reads, before, "off reads no held evidence");
+  mode = "shadow"; assert.match((await answer("")).body, /view_shadow/); assert.equal(reads, before);
 });
