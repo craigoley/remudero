@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,10 +46,10 @@ test("the census refuses a source file that opens a draft pull request", () => {
 });
 
 test("no tracked source opens a draft pull request", () => {
-  // The census's own walk: trackedFiles() is `git ls-files -- src/ scripts/ deploy/ .github/`
-  // (SCANNED_ROOTS), and every line of every file it names is asserted against DRAFT_CREATOR_PATTERNS.
-  // Stated here because censusPopulationDrift recognizes a census suite by its own text (W1-T4422).
-  const files = trackedFiles(REPO_ROOT);
+  const files = execFileSync("git", ["ls-files", "--", "src/", "scripts/", "deploy/", ".github/"], {
+    cwd: REPO_ROOT, encoding: "utf8",
+  }).split("\n").filter(Boolean);
+  assert.deepEqual(trackedFiles(REPO_ROOT), files, "the CLI helper scans the same repository population");
   assert.ok(files.length > 100, `the census must see the real tree (saw ${files.length} files)`);
   assert.deepEqual(findDraftPullRequestCreators(REPO_ROOT, files), []);
   for (const [path, reason] of EXEMPTIONS) assert.ok(String(reason).trim().length > 0, `${path}: an exemption needs a reason`);

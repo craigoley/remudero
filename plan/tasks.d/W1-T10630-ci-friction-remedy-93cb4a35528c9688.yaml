@@ -76,3 +76,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.9
+    reasons:
+      - "high-risk verdict at confidence 0.90 — on the change's description/files alone, no diff was read — The supplied excerpts show census parity assertion failures involving stale baseline entries and an uncovered suite; they do not establish the filed “flaky” diagnosis or identify a preventive remedy.; on the change's description/files alone, no diff was read — The acceptance proof checks for a test-title string, which does not verify that fix rounds are prevented. The finding therefore cannot be verified from what is shown, meeting the explicit escalation condition."
+    judged_at: "2026-10-25T16:55:16.180Z"
+    pin: "2002981592b95c4dbe1083aa814f9d97d39989ca5739dc8acd1abc80c064ceb5"
