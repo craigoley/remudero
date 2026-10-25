@@ -15175,11 +15175,18 @@ export function fixRungInputFields(inputs: Partial<FixRungInputs>): Record<strin
   };
 }
 
+/** W1-T10339 — the stand-down sites whose outcome the head, task contract and body DETERMINE: the rung answered from a
+ *  recorded handoff or a refused body proposal before any new evidence was read, so a dispatch at unchanged inputs is
+ *  certain to stand down again. Every other site also read evidence these inputs do not name — a review verdict, a CI
+ *  log, an open escalation (`rung.strike` releases when its issue closes) — which can change at one head, so it re-arms. */
+const INPUT_DETERMINED_STAND_DOWN_SITES: ReadonlySet<unknown> = new Set(["rung.needs_design", "rung.body_proof_repair"]);
+
 /** W1-T10339 — have the inputs a recorded row read moved? A row written before these fields existed has not recorded
  *  what it read, so it reads as moved (today's re-dispatch). A contract or body the caller could not read cannot show a
- *  change. `rung.strike` releases when its escalation issue closes, a different input, so it never holds here. */
+ *  change. */
 export function fixRungInputsUnchanged(row: Record<string, unknown>, current: FixRungInputs): boolean {
-  if (typeof row.read_head_sha !== "string" || row.read_head_sha !== current.headSha || row.site === "rung.strike") return false;
+  if (typeof row.read_head_sha !== "string" || row.read_head_sha !== current.headSha ||
+      !INPUT_DETERMINED_STAND_DOWN_SITES.has(row.site)) return false;
   if (typeof row.read_contract_revision === "string" && current.contractRevision !== undefined &&
       row.read_contract_revision !== current.contractRevision) return false;
   return !(typeof row.read_body_sha256 === "string" && current.bodySha256 !== undefined &&

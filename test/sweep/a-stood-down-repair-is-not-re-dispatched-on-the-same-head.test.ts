@@ -304,6 +304,8 @@ test("W1-T10339: a hold is released by a new head and a changed contract, and le
   assert.equal(read([standDown({ read_contract_revision: "contract-A" })], { ...current, contractRevision: "contract-B" })?.kind, "ended");
   assert.equal(read([standDown({ read_head_sha: undefined, read_body_sha256: undefined })])?.kind, "ended", "a row without the fields keeps today's re-dispatch");
   assert.equal(read([standDown({ site: "rung.strike" })])?.kind, "ended", "an issue-released strike stand-down is out of scope");
+  assert.equal(read([standDown({ site: "rung.empty_review_evidence" })])?.kind, "ended", "a stand-down that read new evidence re-arms");
+  assert.equal(read([standDown({ site: "rung.body_proof_repair" })])?.kind, "held", "a refused body proposal holds");
   assert.equal(read([standDown({ outcome: "handed_off", site: "rung.ci_handoff" })])?.kind, "live", "a handed_off stand-down is still a live wait");
   assert.equal(read([])?.kind, "live", "a live in-flight rung stays deduped");
   assert.equal(read([standDown(), { ...dispatchRow, ts: "2026-10-21T05:00:00.000Z" }])?.kind, "live", "a later dispatch is a live rung");
