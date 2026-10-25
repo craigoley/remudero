@@ -44,7 +44,7 @@ export interface CodeHealthStoredSnapshot {
   previousSnapshotId: string | null;
   input: CodeHealthProjectionInput;
 }
-export type CodeHealthSnapshotRead = { state: "observed"; snapshot: CodeHealthStoredSnapshot } | { state: "not_collected" | "unavailable"; reason: string };
+export type CodeHealthSnapshotRead = { state: "observed"; snapshot: CodeHealthStoredSnapshot; latestAttemptAt: string | null } | { state: "not_collected" | "unavailable"; reason: string };
 const CODE_HEALTH_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024;
 const evidenceDigest = (value: unknown): string => createHash("sha256").update(canonicalCodeHealthJson(value)).digest("hex");
 function boundedEvidenceJson(path: string, maxBytes: number): unknown {
@@ -84,7 +84,7 @@ export function readCodeHealthSnapshot(stateDir: string, repository: string, sna
     if (!snapshot || Object.keys(snapshot).sort().join(",") !== "contentHash,input,previousSnapshotId,snapshotId,version" || snapshot.version !== "code-health-snapshot-v1" ||
         snapshot.snapshotId !== id || !(snapshot.previousSnapshotId === null || /^[a-f0-9]{64}$/.test(snapshot.previousSnapshotId) && snapshot.previousSnapshotId !== id) || snapshot.input?.repository.toLowerCase() !== repository.toLowerCase() ||
         contentHash !== evidenceDigest(sealed) || evidenceSnapshotId(snapshot.input) !== id) throw new Error("Code health evidence identity or integrity does not match.");
-    return { state: "observed", snapshot };
+    return { state: "observed", snapshot, latestAttemptAt: pointer?.attemptAt ?? null };
   } catch { return { state: "unavailable", reason: "Saved code health evidence is unavailable, invalid, or belongs to another repository." }; }
 }
 
@@ -218,8 +218,9 @@ export function saveCodeHealthCoverageSource(opts: { stateDir: string; repositor
 }
 
 /** Original-output metadata uses the same bounded no-follow reader as sealed evidence. */
-export function readCodeHealthArtifactJson(path: string): unknown {
-  return boundedEvidenceJson(path, 128 * 1024);
+export function readCodeHealthArtifactJson(path: string, maxBytes = 128 * 1024): unknown {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > CODE_HEALTH_SNAPSHOT_MAX_BYTES) throw new RangeError("Invalid code health file bound.");
+  return boundedEvidenceJson(path, maxBytes);
 }
 
 export type CodeHealthCollectionFailureRead = { state: "none" }
@@ -285,4 +286,11 @@ export function recordCodeHealthCollectionFailure(opts: { stateDir: string; repo
     return { state: "recorded" };
   } catch { return { state: "unavailable", reason: "The failed refresh status could not be saved safely. Earlier evidence was retained." }; }
   finally { if (lock && owns?.()) lock.release(); }
+}
+
+/** Qualified repository identities share one fleet root without sharing a publication pointer. */
+export function codeHealthRepositoryStateDir(fleetStateDir: string, repository: string): string {
+  const qualified = repository.toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/.test(qualified) || [".", ".."].includes(qualified.split("/")[1]!)) throw new RangeError("Invalid code health repository.");
+  return join(fleetStateDir, "code-health-repositories", createHash("sha256").update(qualified).digest("hex"));
 }

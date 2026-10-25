@@ -183,3 +183,43 @@ test("code health retains unresolved urgent severity when measurement rules chan
   assert.equal(report.sources.find(source => source.id === known.sourceId)!.observedAt, value.baseline!.scans[0]!.observedAt);
   assert.equal(compareCodeHealthEvidence(value).fixedFindings.length, 0);
 });
+
+
+test("code health cached view preserves scope, pinned pages and saved source clocks", async () => {
+  const { withTempDir } = await import("#src/lib/tmp.js");
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { fixedClock } = await import("#src/lib/clock.js");
+  const { publishCodeHealthSnapshot, codeHealthRepositoryStateDir } = await import("#src/lib/code-health-store.js");
+  const { readCodeHealthReport } = await import("#src/lib/code-health-view.js");
+  withTempDir("code-health-view-", stateDir => {
+    mkdirSync(join(stateDir, "read-model"));
+    writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [], improvementEvidence: {
+      version: "repository-evidence-inventory-v1", measurementState: "not_collected", unresolvedInstances: ["unresolved"],
+      repositories: ["acme/atlas", "acme/missing"].map(repository => ({ repository, instanceIds: [repository], expectedDailySources: [], expectedQualitySources: ["quality", "coverage"] })) } }));
+    const value = input();
+    value.scans[0]!.findings = Array.from({ length: 205 }, (_, i) => ({ ...finding(), id: String(i + 1), severity: i === 204 ? "critical" : "low" }));
+    const now = Date.parse("2026-11-02T06:00:00.000Z"), clock = fixedClock(now);
+    const published = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(stateDir, value.repository), input: value, expectedSnapshotId: null, clock });
+    assert("snapshotId" in published);
+    const params = new URLSearchParams({ repository: "acme/atlas" });
+    const first = readCodeHealthReport({ stateDir, params, now });
+    assert.equal(first.data.repository, "acme/atlas");
+    assert.equal(first.data.assessment.observedAt, value.observedAt);
+    assert.equal(first.data.findingCount, 205); assert.equal(first.data.urgentFindings.value, 1);
+    assert.equal(first.data.assessment.findings.length, 100); assert(first.data.page.nextCursor);
+    const next = readCodeHealthReport({ stateDir, params: new URLSearchParams({ repository: "acme/atlas", snapshot: published.snapshotId, page: first.data.page.nextCursor }), now });
+    assert.equal(next.data.assessment.findings.length, 100); assert.equal(next.data.findingCount, 205);
+    assert.equal(new Set([...first.data.assessment.findings, ...next.data.assessment.findings].map((f: { fingerprint: string }) => f.fingerprint)).size, 200);
+    const portfolio = readCodeHealthReport({ stateDir, params: new URLSearchParams(), now });
+    assert.deepEqual(portfolio.data.expectedRepositories, ["acme/atlas", "acme/missing"]);
+    assert.equal(portfolio.data.repositories[1].state, "not_collected"); assert.equal(portfolio.data.repositories[1].summary, null);
+    assert.deepEqual(portfolio.data.unresolvedInstances, ["unresolved"]);
+    assert.throws(() => readCodeHealthReport({ stateDir, params: new URLSearchParams({ repository: "acme/missing", snapshot: published.snapshotId, page: first.data.page.nextCursor }), now }), /scope|repository/i);
+    assert.throws(() => readCodeHealthReport({ stateDir, params: new URLSearchParams("repository=acme%2Fatlas&repository=acme%2Fmissing"), now }), /repeated/i);
+    assert.throws(() => readCodeHealthReport({ stateDir, params: new URLSearchParams({ repository: "acme/foreign" }), now }), /repository/i);
+    const older = readCodeHealthReport({ stateDir, params, now: now + 2 * 86_400_000 });
+    assert.equal(older.data.assessment.observedAt, value.observedAt); assert.equal(older.data.freshness, "stale");
+    assert.equal(older.data.planningAvailable, false);
+  });
+});
