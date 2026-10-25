@@ -7,6 +7,11 @@
  * through a fake spawn.
  */
 import assert from "node:assert/strict";
+import { runFixRung, routeFix } from "#src/run-task.js";
+import { runDiagnoseThenRetry } from "#src/lib/classify.js";
+import type { Config } from "#src/lib/config.js";
+import type { ReviewVerdict } from "#src/lib/review.js";
+import type { FixProgressInput } from "#src/lib/fix-progress-judge.js";
 import { test } from "node:test";
 import { buildFixProgressInput as buildBase, failureEvidenceOf, resolveFixProgress } from "#src/lib/fix-progress-judge.js";
 import { buildFixProgressInput, productionFixProgressJudge, runSweep, type SweepDeps } from "#src/lib/sweep.js";
@@ -145,4 +150,75 @@ test("a changed semantic diagnosis cannot reuse a progress verdict behind an unc
   assert.equal(calls, 1);
   assert.equal((await resolveFixProgress(changed, rows, opts)).receipt.step, "fix.progress_judged");
   assert.equal(calls, 2, "new full evidence earns a new judgment, not an inherited continue");
+});
+
+
+test("the extracted fix rung gives its judge the current CI or semantic evidence before any worker", async (t) => {
+  for (const mode of ["ci", "review"] as const) await t.test(mode, async () => {
+    const reason = "The current semantic refusal names the unchanged approved matcher literal.";
+    const headSha = "a".repeat(40);
+    const review = { state: "failure", criteria: [{ claim: "matcher literal", met: false,
+      proof: "unit test: literal", proof_exec: "executed_pass", reason }], testTheater: false,
+      summary: "controlled semantic failure", floorDegraded: false, capped: false, keywordOnly: false,
+      planOnly: false, headSha, reviewerOutcome: "success" } as ReviewVerdict & { headSha: string; reviewerOutcome: string };
+    const mount = { model: "test-model", effort: "low" as const, maxTurns: 1, contextBudget: 10000 };
+    let captured: FixProgressInput | undefined;
+    const outcome = await runFixRung({ taskId: "W1-T9297", runId: `evidence-${mode}`,
+      task: { id: "W1-T9297", title: "current evidence", files: ["src/lib/classify.ts"] },
+      prUrl: "https://github.com/o/r/pull/9297", branch: "run-W1-T9297-1", worktreePath: process.cwd(),
+      initialSessionId: "controlled-session", mount, settingsFile: "/unused/settings", config: {} as Config,
+      budgetUsd: 1, strikeCap: 1, initialReview: review,
+      ...(mode === "ci" ? { ciFailures: [{ name: "ci", logTail: TAIL }] } : {}),
+      reviewBase: { owner: "o", repo: "r", headCheckoutDir: process.cwd(), reviewerMount: mount },
+      deps: { spawn: async () => { throw Error("no worker may run without a judgment"); },
+        waitForCiGreen: async () => { throw Error("no CI wait expected"); },
+        runReview: async () => { throw Error("no reviewer expected"); }, push: () => { throw Error("no push expected"); },
+        issues: { create: () => { throw Error("no issue expected"); } }, ledgerPath: "/unused/ledger",
+        ledgerLines: () => [], log: () => {}, say: () => {}, account: result => result,
+        fixProgressJudge: async input => { captured = input; return undefined; } } });
+    assert.equal(outcome.outcome, "handed_off");
+    assert.ok(captured, "the real rung must reach the injected judgment boundary");
+    assert.equal(captured.headSha, headSha);
+    if (mode === "ci") {
+      assert.equal(captured.failureEvidence?.supplied, true);
+      assert.match(JSON.stringify(captured.failureEvidence), /the ratchet refuses a file below its floor/);
+      assert.equal(captured.reviewFailureEvidence, undefined, "a stale initial review is not current CI evidence");
+    } else {
+      assert.equal(captured.reviewFailureEvidence?.[0]?.reason, reason);
+      assert.equal(captured.failureEvidence?.supplied, false);
+    }
+  });
+});
+
+test("the operator fix route preserves the held CI and semantic findings in its judgment", async () => {
+  const reason = "current operator-route semantic diagnosis";
+  let captured: FixProgressInput | undefined;
+  const result = await routeFix("OPEN", { prNumber: 9297, prUrl: "https://github.com/o/r/pull/9297",
+    taskId: "W1-T9297", headSha: "b".repeat(40), checksState: "red", reviewState: "failure",
+    priorStrikes: 1, autoMergeArmed: false, lastActivityAt: new Date().toISOString(),
+    ciFailures: [{ name: "ci", logTail: TAIL }], unmetCriteria: [{ claim: "literal", met: false,
+      proof: "unit test: literal", proof_exec: "executed_pass", reason }] }, {
+    dispatchFix: async () => { throw Error("no worker may run without a judgment"); },
+    escalate: async () => { throw Error("no escalation expected"); }, ledgerLines: () => [],
+    fixProgressJudge: async input => { captured = input; return undefined; } });
+  assert.equal(result.outcome, "refused");
+  assert.ok(captured);
+  assert.equal(captured.failureEvidence?.supplied, true);
+  assert.equal(captured.reviewFailureEvidence?.[0]?.reason, reason);
+});
+
+test("the retry classifier preserves the exact CI and review evidence its caller held", async () => {
+  const progressInput = buildBase(facts({ ciFailures: [{ name: "ci", logTail: TAIL }], reviewFailures: [{
+    claim: "literal", proof: "unit test: literal", met: false, proof_exec: "executed_pass", reason: "semantic diagnosis" }] }));
+  let calls = 0;
+  const result = await runDiagnoseThenRetry({ progressInput,
+    attempt: async () => ({ success: false, evidence: { text: "controlled deterministic failure" } }),
+    diagnose: async () => ({ text: "controlled diagnosis" }), fixProgressJudge: async input => {
+      calls++;
+      assert.deepEqual(input.failureEvidence, progressInput.failureEvidence);
+      assert.deepEqual(input.reviewFailureEvidence, progressInput.reviewFailureEvidence);
+      return { verdict: "escalate", loop: "controlled test", reason: "no additional retry granted" };
+    } });
+  assert.equal(calls, 1);
+  assert.equal(result.outcome, "gave_up");
 });
