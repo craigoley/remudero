@@ -7,6 +7,8 @@ import { repoRoot } from "#test/helpers/repo-root.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { buildCodeHealthOpportunities, codeqlQualityProposalId } from "#src/lib/codeql-quality-intake.js";
 import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
+import { readCoverageNightlySummary } from "#src/lib/coverage-nightly-intake.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { readCodeScanningAlerts } from "#src/lib/ops.js";
 import { ghStubPath, pathWith } from "#test/helpers/gh-stub.js";
 
@@ -190,5 +192,29 @@ test("code health binds coverage provenance to the existing measured inventory a
     const newPolicy = run(summary, lcov, { tierPassPct: 91, tierBlockPct: 85 });
     assert.notEqual(newPolicy.rulesVersion, measured.rulesVersion);
     assert.equal(newPolicy.check.met, false, "use existing policy rather than inventing a score threshold");
+  });
+});
+
+
+test("code health retains coverage provenance at the existing ledger boundary", async () => {
+  await withTempDir("code-health-intake", async dir => {
+    const at = new Date().toISOString(), sha = "a".repeat(40), ledgerPath = join(dir, "ledger.ndjson");
+    const provenance = { version: "code-health-source-v1", kind: "coverage", repository: "acme/atlas", analyzedSha: sha,
+      ref: "refs/heads/main", runId: "123", observedAt: at, scanId: "coverage-nightly:123", state: "complete", reasons: [], toolVersion: "v24.21.0",
+      rulesVersion: "b".repeat(64), configHash: "c".repeat(64), exclusions: ["test/**"], scope: { kind: "instrumented-source-lines", fileCount: 1, hash: "d".repeat(64) },
+      check: { id: "coverage-existing-tier", met: true, reason: "Instrumented branch coverage is in the existing healthy tier." } };
+    const summary = { kind: "coverage_nightly.measured", sha, ref: "refs/heads/main", run_id: "123", measured_at: at,
+      lines_pct: 100, branches_pct: 90, lf: 2, lh: 2, brf: 10, brh: 9, skipped_records: 0, tier: "healthy",
+      shard_test_exits: Object.fromEntries(Array.from({ length: 8 }, (_, n) => [String(n + 1), 0])), code_health: provenance };
+    const opts = { ledgerPath, owner: "acme", repo: "atlas", clock: fixedClock(Date.parse(at)), cadence: { check: () => ({ fire: true, reason: "due" }), record: () => {} },
+      reader: { newestCompletedRun: async () => ({ id: 123, head_sha: sha, head_branch: "main", status: "completed", conclusion: "success" }), summaryForRun: async () => summary }, log: () => {} };
+    assert.equal((await readCoverageNightlySummary(opts)).status, "appended");
+    const stored = JSON.parse(readFileSync(ledgerPath, "utf8").trim());
+    assert.deepEqual(stored.code_health, provenance, "keep allowlisted source facts in the same durable ledger");
+    const foreignDir = join(dir, "foreign"); mkdirSync(foreignDir);
+    const foreign = { ...summary, code_health: { ...provenance, repository: "acme/foreign" } };
+    const refused = await readCoverageNightlySummary({ ...opts, ledgerPath: join(foreignDir, "ledger.ndjson"),
+      reader: { ...opts.reader, summaryForRun: async () => foreign } });
+    assert.equal(refused.status, "failed", "foreign source metadata is refused before publication");
   });
 });
