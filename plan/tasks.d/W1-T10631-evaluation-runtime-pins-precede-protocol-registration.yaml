@@ -6,7 +6,8 @@
   type: implement
   principles: {tdd: strict}
   budget_usd: 12.00
-  verify: human
+  verify: auto
+  priority: 2.5
   dispatch_hold: true
   risk: low
   status: queued
@@ -35,3 +36,13 @@
     Fresh advertised-head shard and inline-plan subject scope, complete open-PR FILE plus SUBJECT scope and original issue7418 remain required before reservation/publication. A captured population and positive controls establish that bounded scope only, never universal absence or runtime adoption.
     Primary research cross-checks: Anthropic Demystifying evals for AI agents (https://www.anthropic.com/research/demystifying-evals-for-ai-agents) distinguishes final environment outcomes from agent reports; Microsoft Research Data Quality for Trustworthy A/B testing (https://www.microsoft.com/en-us/research/articles/data-quality-fundamental-building-blocks-for-trustworthy-a-b-testing-analysis/) identifies missingness, validity, joins and uniqueness as prerequisites for trustworthy conclusions. These support the design, not proof that Remudero calibration passed.
     Craig approved author NOT RUN for this one parked plan-only filing; normal full CI/security/coverage/review remain required. Serve stays running; W7740 remains USER_HELD90, SHADOW and independent overrides are unchanged, and Foundation/Janitor retain their existing owners. No real protocol, manifest, pair, billing or production state is changed by this filing.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The filed scope proposes runtime-pin validation before the existing registration writer, preserves pre-dispatch validation and registered-owner controls, and distinguishes its responsibility from the referenced tasks."
+      - "Acceptance requires real persistent-state fixtures, a valid positive control and removal-of-fix falsification; the filing explicitly treats these as future requirements rather than passing evidence."
+      - "The record retains dispatch_hold and normal CI, security, coverage and review authority, and requests no trial activation, policy waiver, destructive action or operator-only decision."
+    judged_at: "2026-10-25T17:00:56.806Z"
+    pin: "9488e59f31a64589b22af57ad30c4d1194b43af3258428c486343e64981d7e2a"
