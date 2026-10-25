@@ -326,3 +326,123 @@ print(json.dumps(out))`;
     assert.equal(out.clean, "", "with nothing denied the same folders are not held");
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
+
+
+test("a declaration arriving after discovery holds an external worktree's sibling retirement while an unmarked sibling retires", () => {
+  const fx = setup({});
+  try {
+    const held = clone(fx, "Remudero/held-main"), plain = clone(fx, "Remudero/plain-main");
+    const sibling = join(fx.home, "Remudero/aa-held-sibling"), positive = join(fx.home, "Remudero/aa-plain-sibling");
+    const external = join(fx.root, "external\nlinked-worktree");
+    git(held, "worktree", "add", "--quiet", "-b", "held-sibling", sibling);
+    git(held, "worktree", "add", "--quiet", "-b", "external", external);
+    git(plain, "worktree", "add", "--quiet", "-b", "plain-sibling", positive);
+    for (const repo of [held, plain]) utimesSync(join(repo, "README"), NOW - HOUR, NOW - HOUR);
+    const before = bytes(join(held, ".git/worktrees"));
+    const probe = `import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+original = m.process_snapshot
+external = sys.argv[3]
+calls = 0
+def snapshot():
+    global calls
+    calls += 1
+    if calls == 2:
+        open(os.path.join(external, ".rmd-janitor-keep"), "w").close()
+    return original()
+m.process_snapshot = snapshot
+home, now = sys.argv[2], sys.argv[4]
+sys.argv = [sys.argv[1], "--home", home, "--now", now, "--apply"]
+raise SystemExit(m.main())`;
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, fx.home, external, String(NOW)], {
+      encoding: "utf8", timeout: 120_000, env: { ...GIT_ENV, PATH: `${fx.bin}:${process.env.PATH}` },
+    });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(join(external, ".rmd-janitor-keep")), true, "the declaration actually arrived after discovery");
+    assert.equal(existsSync(sibling), true, "a sibling cannot rewrite the newly held common store");
+    assert.deepEqual(bytes(join(held, ".git/worktrees")), before, "held admin records remain byte-identical");
+    assert.equal(existsSync(positive), false, "the healthy unmarked worktree really retires");
+    assert.match(r.stdout, /RETIRED worktree .*aa-plain-sibling/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("late declarations in registered external worktrees hold prune while the unmarked store's stale record is pruned", () => {
+  const fx = setup({});
+  try {
+    const held = clone(fx, "Remudero/held"), plain = clone(fx, "Remudero/plain");
+    const external = join(fx.root, "external");
+    git(held, "worktree", "add", "--quiet", "-b", "external", external);
+    const stale = (repo: string, name: string) => {
+      const wt = join(fx.home, "Remudero", name);
+      git(repo, "worktree", "add", "--quiet", "-b", name, wt);
+      rmSync(wt, { recursive: true, force: true });
+      return join(repo, ".git/worktrees", name);
+    };
+    const heldRecord = stale(held, "held-stale"), plainRecord = stale(plain, "plain-stale");
+    const before = bytes(heldRecord);
+    const probe = `import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+repos = [m.Repo(p, "clone") for p in sys.argv[2:4]]
+for r in repos:
+    m.resolve_git(r)
+    r.scoped = m.keep_scope(r.path)
+assert not any(r.scoped for r in repos)
+open(os.path.join(sys.argv[4], ".rmd-janitor-keep"), "w").close()
+print(json.dumps(m.prune_worktrees([r.store for r in repos], repos)))`;
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, held, plain, external], { encoding: "utf8", env: GIT_ENV });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), [join(plain, ".git")]);
+    assert.deepEqual(bytes(heldRecord), before);
+    assert.equal(existsSync(plainRecord), false, "the unmarked stale record is actually pruned");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a declaration arriving after repack selection holds the shared store while an unmarked store is repacked", () => {
+  const fx = setup({ repack_min_packs: 1 });
+  try {
+    const held = clone(fx, "Remudero/held"), plain = clone(fx, "Remudero/plain");
+    const external = join(fx.root, "external");
+    git(held, "worktree", "add", "--quiet", "-b", "external", external);
+    for (const repo of [held, plain]) git(repo, "repack", "-a", "-d", "-q");
+    const before = bytes(join(held, ".git/objects"));
+    const probe = `import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+repos = [m.Repo(p, "clone") for p in sys.argv[2:4]]
+for r in repos:
+    m.resolve_git(r)
+    r.scoped = m.keep_scope(r.path)
+assert not any(r.scoped for r in repos)
+listing = m.os.listdir
+marked = False
+def arrive(path):
+    global marked
+    if not marked and path == os.path.join(repos[0].store, "objects", "pack"):
+        marked = True
+        open(os.path.join(sys.argv[4], ".rmd-janitor-keep"), "w").close()
+    return listing(path)
+m.os.listdir = arrive
+cfg = dict(m.DEFAULTS, roots=[sys.argv[5]], home=sys.argv[5], repack_min_packs=1)
+result = m.housekeeping(cfg, [], repos, None, 0, True)
+assert marked
+assert result["repacked"] == 1, result`;
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, held, plain, external, fx.home], { encoding: "utf8", env: GIT_ENV });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.deepEqual(bytes(join(held, ".git/objects")), before);
+    assert.match(r.stdout, /REPACKED packs=1->1 .*plain\/\.git/);
+    assert.doesNotMatch(r.stdout, /REPACKED .*held\/\.git/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("unreadable or malformed current worktree listings hold shared-store actions", () => {
+  const fx = setup({});
+  try {
+    const repo = clone(fx, "Remudero/plain");
+    const probe = `import importlib.util, subprocess, sys
+spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+for status, output in [(255, b""), (0, b""), (0, b"bad\\0\\0"), (0, b"worktree relative\\0\\0")]:
+    m.run = lambda *a, **kw: subprocess.CompletedProcess(a, status, output, b"")
+    assert "unknown" in m.store_keep_scope(sys.argv[2] + "/.git", []), (status, output)`;
+    const r = spawnSync("python3", ["-I", "-B", "-c", probe, HELPER, repo], { encoding: "utf8", env: GIT_ENV });
+    assert.equal(r.status, 0, r.stderr);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
