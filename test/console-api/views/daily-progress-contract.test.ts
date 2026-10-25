@@ -330,3 +330,23 @@ test("daily bounds use civil dates across spring daylight saving and year rollov
   assert.equal(validateDailyProgressReport(reportDay("2011-12-30", "Pacific/Apia", "2011-12-30T10:00:00.000Z", "2011-12-31T10:00:00.000Z")).ok, false, "an entirely skipped civil date has no report window");
   assert.throws(() => buildRepositoryEvidenceInventory([{ instanceId: "", options: {} }]), /invalid configured instance/);
 });
+
+
+test("daily reports refuse measured totals before the named day starts", () => {
+  const value = report(); assert.equal(validateDailyProgressReport(value).ok, true, "the complete saved day is a corpus control");
+  value.phase = "provisional"; value.generatedAt = "2026-11-01T03:59:59.000Z";
+  Object.assign(value.coverage.sources[0]!, { lastAttemptAt: value.generatedAt, lastSuccessAt: value.generatedAt, coverageStart: value.generatedAt, coverageThrough: value.generatedAt });
+  assert.equal(validateDailyProgressReport(value).ok, false, "a future local day cannot have measured zero totals");
+});
+
+test("daily totals keep task identities separate across repositories", () => {
+  const value = report(); value.scope = { kind: "all" };
+  value.coverage.expectedRepositories.push("acme/beacon"); value.coverage.includedRepositories.push("acme/beacon");
+  value.coverage.expectedSources.push(...value.coverage.expectedSources.map(source => ({ ...source, repository: "acme/beacon", id: source.id.replace("atlas", "beacon"), instanceId: source.instanceId === null ? null : `beacon-${source.instanceId}` })));
+  value.coverage.sources.push(...value.coverage.sources.map(source => ({ ...source, repository: "acme/beacon", id: source.id.replace("atlas", "beacon"), instanceId: source.instanceId === null ? null : `beacon-${source.instanceId}` })));
+  value.events = ["atlas", "beacon"].map(repository => ({ id: `${repository}:pr:1`, repository: `acme/${repository}`, kind: "merged", sourceId: `${repository}-prs`, occurredAt: value.windowStart, observedAt: value.generatedAt, fleetAttribution: "confirmed", taskIds: ["W1-T1"], title: "A merged change", url: null }));
+  value.page.totalEvents = 2; value.totals = { mergedChanges: { value: 2, precision: "exact" }, completedTasks: { value: 2, precision: "exact" } };
+  assert.equal(validateDailyProgressReport(value).ok, true, "the same task label in two repositories names two tasks");
+  value.totals.completedTasks.value = 1;
+  assert.equal(validateDailyProgressReport(value).ok, false, "a fleet total cannot collapse repository-qualified tasks");
+});

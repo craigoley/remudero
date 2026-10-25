@@ -23,8 +23,9 @@ const HELPER_IMPORT = "helpers/wall-clock-bound.js";
 // #10092 replaced the end-of-run daemon-loop test's wall-clock bound with a deterministic witness: one file, one site fewer.
 // The codex probe's app-server reap grace declares its elapsed-time assertion: one file, one site.
 // W1-T6160 declares the hung Git author probe's bound: one declaring file and one site.
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 38;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 58;
+// The janitor's bounded lock wait declares its give-up and no-queue bounds: one file, two sites.
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 39;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 60;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 

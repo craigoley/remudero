@@ -1,0 +1,49 @@
+- id: W1-T10625
+  title: "Verified hand-route feedback closure is reconciled through the existing gardener and reviewed landing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  verify: auto
+  priority: 2.5
+  dispatch_hold: true
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "feedback-hand-route-lifecycle:issue-12899-source-qualified-20261025"
+  files:
+    - src/lib/panel-graph.ts
+    - src/lib/read-model-slow-lane.ts
+    - test/panel-graph.test.ts
+    - test/the-inbox-slow-lane-is-not-a-second-github-fetcher.test.ts
+  acceptance:
+    - claim: "The actual existing feedback gardener and reviewed landing path propose accepted plus exact verified PR/source evidence for the single repository-local entry named by an explicit one-line Resolves feedback marker on an appropriate source-changing MERGED hand-route PR. The marker itself grants no authority; no live status is directly changed by a read."
+      proof: "unit test: a verified hand-route closure reaches the existing gardener and reviewed feedback landing"
+    - claim: "Foreign or ambiguous identities, malformed markers, unreadable/incomplete/truncated evidence, open or closed-unmerged PRs, absent markers and plan-only filings produce no acceptance proposal and retain a named refusal or unknown outcome. Unknown is never empty or already resolved."
+      proof: "unit test: unqualified hand-route evidence never accepts a feedback entry"
+    - claim: "Existing accepted, rejected and answered operator decisions, unanswered human decisions and proposal-driven reconciliation remain unchanged. Repeated reconciliation of the same exact feedback/PR evidence is idempotent and cannot create duplicate landing proposals or tasks."
+      proof: "unit test: hand-route reconciliation preserves operator decisions and is idempotent"
+    - claim: "The normal slow-lane snapshot/writer boundary remains the only lifecycle owner: no second GitHub fetcher, service, timer, GET-side write, prompt/routing change, automatic dispatch release or review bypass is introduced."
+      proof: "unit test: hand-route feedback reconciliation reuses the existing slow-lane snapshot and writer"
+    - claim: "A real default-path fixture exercises candidate evidence through the existing gardener and landing seam. Removing only hand-route reconciliation makes the intended regression fail; exact restoration passes while existing proposal-driven and human-decision controls stay effective. Full author, coverage, CI, security and semantic review remain required for implementation."
+      proof: "unit test: the hand-route feedback closure regression fails without the reconciliation fix"
+  note: "Parked plan-only filing; implementation remains dispatch-held. Keep the normal machine-filing judge and every independent approval in control. This records the selected gardener-reconciliation design, not implementation, product acceptance or permission to mutate production feedback. Do not borrow any consumed author/publication exception or another owner's allowance."
+  rationale: |
+    Issue #12899 has the real October24 operator-selected gardener-reconciliation answer. Original fb-1791908207465-93d619 is answered, but landed reply fb-1792859760649-99e381 remains new/proposal_pr:null at captured main12d24585. The decision exists; its actual lifecycle task and implementation do not follow merely from the answered record.
+    The maintained acceptMergedFeedback/reconcileFeedbackEntries/projectReconciledFeedback writer currently accepts proposed feedback with a merged proposal_pr. W1257/#2636 is read-time task-discharge decoration, not explicit hand-route reconciliation. Reuse the existing writer, snapshot failure/truncation contract and normal reviewed landing; no parallel closure authority.
+    Complete captured475-head object scope covers265 task-shard trees and1426 distinct subject-matched blobs, plus26 inline-plan variants and all captured open PR file lists. Exact marker/original/reply searches identify no matching lifecycle filing in that population; this is snapshot-scoped evidence, not universal absence. The private worktree advanced to d1df6a5 during normal creation; all10 relevant admission/judge/policy/CLI/writer blobs remain identical to12d24585, and its three additional paths concern a first-repository plan and an unrelated sweep repair.
+    Correctness requires exact repository-local identity, appropriate API-confirmed merged source evidence and review of the resulting lifecycle proposal. Preserve terminal operator decisions and unknown evidence; a mutable PR body marker is a candidate, never self-authorizing proof that the feedback was fixed.
+    This one plan-only publication has Craig's explicit author NOT RUN/full-CI exception. Full normal CI, coverage, security and fleet review still gate merge; implementation tests are future requirements, not results of this filing. Serve stays running, W7740 stays USER_HELD90, and foundation/Janitor ownership, SHADOW and independent holds are untouched.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.74
+    reasons:
+      - "Description and acceptance criteria state that reconciliation reuses the existing slow-lane snapshot and writer, and that the result lands through the normal reviewed landing path. They rule out new fetchers, GET-side writes, and review bypass."
+      - "The declared files (panel-graph.ts, read-model-slow-lane.ts and two tests) are consistent with the described scope. No secrets, auth, deletion, or merge/deploy policy changes are indicated."
+      - "The operator's design decision is recorded as already made (issue #12899), and the criteria are unit-test verifiable. The family's empty track record is a neutral prior, and no actual change view was supplied."
+    judged_at: "2026-10-25T15:26:43.639Z"
+    pin: "540a251c69fcde85946e00709afb161d0b6de988e51b7ffe181ac7ee99f7ea4f"
