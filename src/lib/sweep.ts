@@ -24730,7 +24730,7 @@ export function createEscalationTriageHistoryReader(
   const slice = io.slice ?? ESCALATION_TRIAGE_HISTORY_SLICE;
   const steps = [...slice.steps];
   const project = slice.project ?? ((row: Record<string, unknown>) => row);
-  const identity = { holder: slice.holder, reducerVersion: `${slice.version ?? "1"}${io.parseAll ? "-all-lines" : ""}`, project };
+  const identity = { holder: slice.holder, reducerVersion: `${slice.version ?? "1"}${io.parseAll ? "-all-record-objects-v2" : ""}`, project };
   const union = createIncrementalLedgerUnion(identity, fsDeps);
   // The digest version the union's own rotation hook reads (see createIncrementalLedgerUnion).
   const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
@@ -24742,7 +24742,12 @@ export function createEscalationTriageHistoryReader(
   };
   let loaded = new Map<string, string>();
   let lastLoad: EscalationTriageHistoryLoad = { rotations: 0, digestHits: 0, digestMisses: 0 };
-  const current = (stateDir: string): LedgerUnionRecordRead => union(stateDir, { step: steps, refuseIncomplete: true });
+  const strictUnread = new Set<string>();
+  const current = (stateDir: string): LedgerUnionRecordRead => {
+    const read = union(stateDir, { step: steps, refuseIncomplete: true });
+    if (strictUnread.size === 0) return read;
+    return { ...read, ok: false, rows: [], unread: [...new Set([...read.unread, ...strictUnread])] };
+  };
   return Object.assign(async (stateDir: string): Promise<LedgerUnionRecordRead> => {
     lastLoad = { rotations: 0, digestHits: 0, digestMisses: 0 };
     let names: string[] = [];
@@ -24766,7 +24771,7 @@ export function createEscalationTriageHistoryReader(
     }
     if (fresh.length > 0) {
       const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.includes(row.step)).map(project), {
-        holder: identity.holder, durableDigest, statKey, ...(io.parseAll ? {} : { pattern }), ...(io.readFile ? { readFile: io.readFile } : {}),
+        holder: identity.holder, durableDigest, statKey, ...(io.parseAll ? { requireObjects: true } : { pattern }), ...(io.readFile ? { readFile: io.readFile } : {}),
       });
       await memo.load(fresh);
       const { digestHits = 0, digestMisses = 0 } = memo.retention();
@@ -24775,10 +24780,15 @@ export function createEscalationTriageHistoryReader(
       for (const entry of fresh) {
         const key = stats.get(entry.path) as string;
         const read = memo.kept(entry.path, key);
-        if (read) union.seed(entry.path, key, read);
+        if (read) {
+          strictUnread.delete(entry.path);
+          union.seed(entry.path, key, read);
+        } else if (io.parseAll) strictUnread.add(entry.path);
       }
     }
+    for (const path of strictUnread) if (!stats.has(path)) strictUnread.delete(path);
     loaded = stats;
+    for (const path of strictUnread) loaded.delete(path);
     return current(stateDir);
   }, { current, lastPass: union.lastPass, lastLoad: (): EscalationTriageHistoryLoad => ({ ...lastLoad }) });
 }
