@@ -207,7 +207,10 @@ export function readSavedImprovementSource(requestId: string, deps: ImprovementT
     if ("state" in scope || hash(scope) !== hash(intent.scope)) return fail("source_unavailable", "The original planning fleet binding cannot be verified.");
     return { state: "observed", requestId, repository: intent.request.repository, instance: scope.instance, snapshotId: intent.request.snapshotId,
       opportunityId: intent.request.opportunityId, proposalId: intent.proposalId, threadId: intent.threadId, goal: intent.request.goal, constraints: intent.request.constraints ?? [] };
-  } catch { return fail("source_unavailable", "The original planning source is unavailable or damaged."); }
+  } catch {
+    // deliberate: missing, damaged, and unreadable original evidence all withhold a usable source; none permits substitute credit.
+    return fail("source_unavailable", "The original planning source is unavailable or damaged.");
+  }
 }
 
 /** Resolve server-owned evidence, save native Inbox messages, then acknowledge a durable receipt. */
