@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { ghJsonAsync } from "./github-transport.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
+import { parseOwnerRepoFromRemoteUrl } from "./onboard/inventory.js";
+
 import { openDependentFanout } from "./dispatch-value.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
@@ -54,11 +58,50 @@ export interface BacklogSources {
   clock: Clock;
   fileExists: (path: string) => boolean;
   proofsHolding: (plan: PlanInventory) => ReadonlySet<string>;
+  /** Complete OPEN backlog proposals, read only by the daemon async inventory. */
+  openDecisions?: () => Promise<readonly OpenBacklogDecision[]>;
   /** Tasks a build showed main already satisfies, from `pr.open_satisfied_by_main` rows. */
   satisfiedByMain?: () => ReadonlyMap<string, SatisfiedByMain>;
   /** Whether every acceptance proof the task filed holds on main; default {@link ownProofsHoldOnMain}. */
   ownProofsHold?: (task: Task, shard: string | undefined) => boolean;
 }
+
+export interface OpenBacklogDecision {
+  target: string;
+  decision: string;
+  prNumber: number;
+  headSha: string;
+}
+
+/** Read complete OPEN pages, never infer availability from missing or unread ownership data. */
+export async function readOpenBacklogDecisions(root: string, ports: {
+  origin?: (root: string, args: string[]) => Promise<string>;
+  pages?: (args: string[]) => Promise<unknown>;
+} = {}): Promise<OpenBacklogDecision[]> {
+  const remote = await (ports.origin ?? hostWorktreeGitAsync)(root, ["remote", "get-url", "origin"]);
+  const repo = parseOwnerRepoFromRemoteUrl(remote.trim());
+  if (!repo) throw new Error("backlog gardener: origin does not identify a GitHub repository");
+  const pages = await (ports.pages ?? ghJsonAsync)(["api", "--paginate", "--slurp", `repos/${repo.owner}/${repo.repo}/pulls?state=open&per_page=100`]);
+  if (!Array.isArray(pages) || pages.length === 0 || pages.some(page => !Array.isArray(page))) {
+    throw new Error("backlog gardener: open-PR pages unreadable");
+  }
+  const decisions: OpenBacklogDecision[] = [];
+  for (const page of pages) for (const pr of page) {
+    if (!pr || typeof pr !== "object" || !Number.isSafeInteger(pr.number) || pr.number < 1 ||
+        typeof pr.head?.ref !== "string" || typeof pr.head?.sha !== "string" || !/^[a-f0-9]{40}$/.test(pr.head.sha) ||
+        !(typeof pr.body === "string" || pr.body === null)) {
+      throw new Error("backlog gardener: open-PR ownership unreadable");
+    }
+    if (!/^backlog-garden-\d+$/.test(pr.head.ref) || !pr.body?.includes("The backlog gardener (W1-T4941) proposes these plan-only changes.")) continue;
+    for (const match of pr.body.matchAll(/^- \*\*(W\d+-T\d+)\*\*: (band [234]|closed|withdrawn)\./gm)) {
+      decisions.push({ target: match[1]!, decision: match[2]!, prNumber: pr.number, headSha: pr.head.sha });
+    }
+  }
+  return decisions;
+}
+
+const backlogDecision = (action: BacklogAction): string => action.disposition.kind === "band"
+  ? `band ${action.disposition.band}` : action.disposition.retirement;
 
 /** The newest `pr.open_satisfied_by_main` row per task. */
 export function satisfiedByMainFromRows(rows: readonly Record<string, unknown>[]): Map<string, SatisfiedByMain> {
@@ -340,6 +383,16 @@ export function backlogGardenSpec(
     landingRefusal: backlogLandingGuard(deps),
     cheapFingerprint: () => `${planCheapFingerprint(deps.repoRoot, deps.stateDir)}:${gardenLedgerBucket(deps.clock ?? systemClock)}`,
     inventory: () => backlogInventory(sources),
+    inventoryAsync: async () => {
+      const inventory = backlogInventory(sources);
+      if (inventory.candidates.length === 0) return inventory;
+      const open = await (sources.openDecisions ?? (() => readOpenBacklogDecisions(deps.repoRoot)))();
+      const deferred = inventory.candidates.flatMap(action => open.filter(pr =>
+        pr.target === action.target && pr.decision === backlogDecision(action)));
+      if (deferred.length > 0) deps.log("backlog.open_decision_deferred", { decisions: deferred });
+      return { ...inventory, candidates: inventory.candidates.filter(action => !open.some(pr =>
+        pr.target === action.target && pr.decision === backlogDecision(action))) };
+    },
     fingerprint: (i) => i.candidates.map((a) => `${a.target}:${a.evidence.signature}`).join("|") + `:${i.mergeBudget}`,
     unfinished: (i) => i.candidates.length > 0,
     candidates: (i) => i.candidates,
