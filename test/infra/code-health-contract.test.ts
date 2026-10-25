@@ -31,12 +31,22 @@ test("quality contracts reject healthy scores from incomplete or incomparable ev
     (a) => { a.summary.assessed = 1; }, (a) => { a.summary.met = 3; },
     (a) => { a.checks[0]!.sourceIds = ["missing"]; },
     (a) => { a.checks[1]!.state = "not_measured"; },
-    (a) => { a.findings.push({ fingerprint: "quality:1", sourceId: "quality", severity: "critical", category: "reliability", status: "new", path: "src/example.ts", title: "Critical issue", effortMinutes: 20, estimateKind: "modeled" }); },
   ];
   for (const mutate of mutations) { const a = assessment(); mutate(a); assert.equal(validateCodeHealthAssessment(a).ok, false, JSON.stringify(a)); }
   const unknown = assessment(); unknown.state = "partial"; unknown.summary = { met: 1, assessed: 1, expected: 2, healthy: null };
   unknown.checks[1]!.state = "not_measured"; unknown.sources[1]!.state = "not_collected"; unknown.sources[1]!.reason = "No coverage result";
   assert.equal(validateCodeHealthAssessment(unknown).ok, true, "unmeasured coverage remains an explicit gap");
+  for (const severity of ["high", "critical"] as const) {
+    const a = assessment();
+    a.findings.push({ fingerprint: "quality:1", sourceId: "quality", severity, category: "reliability", status: "new", path: "src/example.ts", title: "Urgent issue", effortMinutes: 20, estimateKind: "modeled" });
+    assert.deepEqual(validateCodeHealthAssessment(a), { ok: true, value: a }, "urgent evidence stays visible independently of the declared check-count result");
+    a.summary.healthy = false;
+    assert.equal(validateCodeHealthAssessment(a).ok, false, "severity alone cannot override the policy's passing checks");
+    a.checks[0]!.state = "not_met"; a.summary.met = 1;
+    assert.equal(validateCodeHealthAssessment(a).ok, true, "a declared failing check supports an unhealthy result");
+    a.summary.healthy = true;
+    assert.equal(validateCodeHealthAssessment(a).ok, false, "a failed check cannot become healthy");
+  }
 });
 
 test("expected code quality sources are present before any scan is observed", () => {

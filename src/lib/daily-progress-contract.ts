@@ -72,6 +72,31 @@ const repoKey = (v: string): string => v.toLowerCase();
 const repoList = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 256 && v.every(repository) && new Set(v.map(repoKey)).size === v.length;
 const states: readonly string[] = ["complete", "partial", "stale", "not_collected", "unavailable", "unauthorized"];
 
+/** Inventory describes expectations only; it cannot claim collection or duplicate instance ownership. */
+export function validateRepositoryEvidenceInventory(value: unknown): ContractResult<RepositoryEvidenceInventory> {
+  const fail = (reason: string): ContractResult<RepositoryEvidenceInventory> => ({ ok: false, reason });
+  if (!record(value) || !only(value, "version repositories unresolvedInstances measurementState") || value.version !== "repository-evidence-inventory-v1" || value.measurementState !== "not_collected") return fail("invalid inventory identity or measurement state");
+  if (!Array.isArray(value.repositories) || !Array.isArray(value.unresolvedInstances)) return fail("invalid inventory members");
+  const repos = new Set<string>(), instances = new Set<string>();
+  const expectedSources = (v: unknown, expected: readonly string[]): boolean => Array.isArray(v) && v.length === expected.length && expected.every((kind) => v.includes(kind));
+  for (const row of value.repositories) {
+    if (!record(row) || !only(row, "repository instanceIds expectedDailySources expectedQualitySources") || !repository(row.repository) || repos.has(repoKey(row.repository))) return fail("invalid or duplicate repository identity");
+    repos.add(repoKey(row.repository));
+    if (!Array.isArray(row.instanceIds) || !row.instanceIds.length || !row.instanceIds.every((id) => text(id, 128))) return fail("invalid configured instance identity");
+    if (!expectedSources(row.expectedDailySources, ["pull_requests", "ledger_activity", "deployments"]) || !expectedSources(row.expectedQualitySources, codeHealthSourceRequirements())) return fail("invalid expected source inventory");
+    for (const id of row.instanceIds) {
+      if (instances.has(id)) return fail("duplicate instance identity");
+      instances.add(id);
+    }
+  }
+  for (const id of value.unresolvedInstances) {
+    if (!text(id, 128)) return fail("invalid unresolved instance identity");
+    if (instances.has(id)) return fail("duplicate instance identity");
+    instances.add(id);
+  }
+  return { ok: true, value: value as unknown as RepositoryEvidenceInventory };
+}
+
 /** Validate exact local midnight bounds, including real 23- and 25-hour days. */
 function calendarWindow(report: DailyProgressReport): ContractResult<true> {
   if (!/^\d{4}-\d\d-\d\d$/.test(report.reportDate) || !instant(`${report.reportDate}T00:00:00.000Z`) || !/^[A-Za-z][A-Za-z0-9_+/-]*$/.test(report.timeZone)) return { ok: false, reason: "invalid calendar date or zone" };
@@ -150,7 +175,9 @@ export function validateDailyProgressReport(value: unknown): ContractResult<Dail
   if (ended && Date.parse(report.generatedAt) < Date.parse(report.windowEnd)) return fail("a finished day cannot precede its ending instant");
   const through = Math.min(Date.parse(report.generatedAt), Date.parse(report.windowEnd));
   const coversWindow = (s: SourceCoverage) => s.state === "complete" && s.coverageStart !== null && s.coverageThrough !== null && Date.parse(s.coverageStart) <= Date.parse(report.windowStart) && Date.parse(s.coverageThrough) >= through;
-  const exactMerges = fullScope && [...included].every((r) => c.sources.some((s) => repoKey(s.repository) === r && s.kind === "pull_requests" && s.required && coversWindow(s)));
+  if (c.state === "complete" && c.sources.some((s) => !coversWindow(s))) return fail("complete coverage lacks a source window through the report cutoff");
+  const mergeSources = c.sources.filter((s) => s.kind === "pull_requests" && s.required);
+  const exactMerges = fullScope && [...included].every((r) => mergeSources.some((s) => repoKey(s.repository) === r)) && mergeSources.every(coversWindow);
   if (ended && c.sources.some((s) => s.required && !coversWindow(s))) return fail("finished report lacks its required source window");
   if (!record(report.totals) || !only(report.totals, "mergedChanges completedTasks") || !Object.values(report.totals).every(count) || !count(report.totals.mergedChanges) || !count(report.totals.completedTasks)) return fail("invalid measured totals");
   if (Object.values(report.totals).some((v) => v.precision === "exact") && !exactMerges) return fail("exact totals require complete expected merge evidence");

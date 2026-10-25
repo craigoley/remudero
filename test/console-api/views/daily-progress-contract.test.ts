@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { test } from "node:test";
-import { buildRepositoryEvidenceInventory, validateDailyProgressReport, type DailyProgressReport } from "#src/lib/daily-progress-contract.js";
+import { buildRepositoryEvidenceInventory, validateDailyProgressReport, validateRepositoryEvidenceInventory, type DailyProgressReport } from "#src/lib/daily-progress-contract.js";
 import { createRepositoriesSourcePublisher, repositoriesSourcesPath, type RepositoriesSources } from "#src/lib/repositories-view.js";
 import { withTempDir } from "#src/lib/tmp.js";
 
@@ -44,6 +44,25 @@ test("daily contracts preserve coverage and reject contradictory day identity", 
   partial.coverage.expectedRepositories.push("acme/beacon");
   partial.totals = { mergedChanges: { value: 0, precision: "at_least" }, completedTasks: { value: null, precision: "unavailable" } };
   assert.equal(validateDailyProgressReport(partial).ok, true, "missing data is retained as partial, not converted to a healthy zero");
+  for (const state of ["not_collected", "partial", "stale", "unavailable", "unauthorized", "complete"] as const) {
+    const r = report(); r.phase = "provisional";
+    r.coverage.sources.push({ ...r.coverage.sources[0]!, id: "second-pr-source", state,
+      coverageThrough: "2026-11-02T04:59:59.999Z", reason: "Second required merge source has a gap" });
+    assert.equal(validateDailyProgressReport(r).ok, false, `exact totals need every required merge source: ${state}`);
+    r.totals.mergedChanges.precision = "at_least";
+    r.totals.completedTasks.precision = "unavailable"; r.totals.completedTasks.value = null;
+    assert.equal(validateDailyProgressReport(r).ok, true, "a provisional report can expose the gap with non-exact totals");
+    r.totals.completedTasks = { value: 0, precision: "exact" };
+    assert.equal(validateDailyProgressReport(r).ok, false, "exact task credit needs the same complete merge population");
+    Object.assign(r.coverage.sources.at(-1)!, { state: "complete", coverageThrough: r.windowEnd, reason: null });
+    r.totals.mergedChanges.precision = "exact";
+    assert.equal(validateDailyProgressReport(r).ok, true, "all required merge sources now cover the cutoff");
+  }
+  const complete = report(); complete.coverage.state = "complete";
+  for (const source of complete.coverage.sources) Object.assign(source, complete.coverage.sources[0], { id: source.id, kind: source.kind, required: source.required });
+  assert.equal(validateDailyProgressReport(complete).ok, true);
+  complete.coverage.sources[1]!.coverageThrough = "2026-11-02T04:59:59.999Z";
+  assert.equal(validateDailyProgressReport(complete).ok, false, "complete coverage includes optional sources through the cutoff too");
 });
 
 test("the repositories publisher exposes expected inventory independently of observed events", async () => {
@@ -60,6 +79,46 @@ test("the repositories publisher exposes expected inventory independently of obs
     assert.deepEqual(value.improvementEvidence.repositories[1].instanceIds, ["core"]);
     assert.deepEqual(value.improvementEvidence.unresolvedInstances, ["unknown"]);
     assert.equal(value.improvementEvidence.measurementState, "not_collected");
+  });
+});
+
+test("repository evidence inventory validates source expectations and unique instance ownership", () => {
+  const inventory = buildRepositoryEvidenceInventory([{ instanceId: "one", evidenceRepository: "Acme/Atlas", options: {} }, { instanceId: "unknown", options: {} }]);
+  assert.deepEqual(validateRepositoryEvidenceInventory(inventory), { ok: true, value: inventory });
+  assert.equal(validateRepositoryEvidenceInventory(buildRepositoryEvidenceInventory([])).ok, true);
+  for (const value of [null, [], {}, { ...inventory, version: "unknown" }, { ...inventory, measurementState: "complete" }, { ...inventory, scannerConfigured: true }, { ...inventory, repositories: null }, { ...inventory, unresolvedInstances: [""] }]) {
+    assert.equal(validateRepositoryEvidenceInventory(value).ok, false);
+  }
+  const mutations: Array<(v: typeof inventory) => void> = [
+    (v) => { v.repositories[0]!.repository = "acme/.."; },
+    (v) => { v.repositories.push({ ...v.repositories[0]!, repository: "ACME/ATLAS", instanceIds: ["two"] }); },
+    (v) => { v.repositories.push({ ...v.repositories[0]!, repository: "acme/beacon" }); },
+    (v) => { v.repositories[0]!.instanceIds = []; },
+    (v) => { v.repositories[0]!.instanceIds = ["one", "one"]; },
+    (v) => { v.repositories[0]!.instanceIds = [""]; },
+    (v) => { v.unresolvedInstances.push("one"); },
+    (v) => { v.unresolvedInstances.push("unknown"); },
+    (v) => { v.repositories[0]!.expectedDailySources.pop(); },
+    (v) => { v.repositories[0]!.expectedDailySources.push("pull_requests"); },
+    (v) => { v.repositories[0]!.expectedQualitySources = ["ci"]; },
+    (v) => { v.repositories[0]!.expectedQualitySources.push("scanner_configured"); },
+  ];
+  for (const mutate of mutations) { const value = structuredClone(inventory); mutate(value); assert.equal(validateRepositoryEvidenceInventory(value).ok, false, JSON.stringify(value)); }
+});
+
+test("the repositories publisher rejects invalid inventory before replacing published evidence", async () => {
+  await withTempDir("daily-contract-boundary", async (root) => {
+    const valid = [{ instanceId: "one", evidenceRepository: "acme/atlas", options: { root } }];
+    let instances: RepositoriesSources["instances"] = valid;
+    const path = repositoriesSourcesPath(root); mkdirSync(dirname(path), { recursive: true });
+    const publish = createRepositoriesSourcePublisher({ stateDir: root, instances: () => instances });
+    assert.equal(publish(), true);
+    const before = readFileSync(path, "utf8");
+    instances = [...valid, { instanceId: "one", evidenceRepository: "acme/beacon", options: { root } }];
+    assert.throws(publish, /invalid repository evidence inventory: duplicate instance identity/);
+    assert.equal(readFileSync(path, "utf8"), before, "invalid evidence must not replace the last valid publication");
+    instances = valid;
+    assert.equal(publish(), false, "a rejected inventory does not change publication clocks");
   });
 });
 
