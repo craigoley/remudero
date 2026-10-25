@@ -129,3 +129,16 @@ test("code health grants no new fix credit for a resolution predating its baseli
   assert.equal(report.findings[0]!.status, "unknown");
   assert.equal(report.summary.healthy, null);
 });
+
+test("code health binds missing known findings to their original source evidence", () => {
+  const value = input();
+  value.baseline!.scans[0]!.findings = [finding()];
+  const report = projectCodeHealth(value), known = report.findings[0]!;
+  const original = report.sources.find(source => source.id === known.sourceId)!;
+  assert.equal(original.analyzedSha, value.baseline!.scans[0]!.analyzedSha);
+  assert.equal(original.observedAt, value.baseline!.scans[0]!.observedAt);
+  assert.equal(original.required, false, "historical evidence does not change the required current source inventory");
+  assert.equal(known.status, "unknown");
+  assert.equal(report.summary.healthy, null);
+  assert.equal(report.sources.filter(source => source.required).length, 2);
+});
