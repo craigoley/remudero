@@ -1,0 +1,29 @@
+id: incident-9b94658bd9334377
+ts: 2026-10-24T17:52:25.097Z
+raw: >-
+  Incident 9b94658bd933: intervention
+  base-red:main-health:proof-discrimination-failed-on-ci-log-fi
+
+  First seen: 2026-10-24T17:19:34.446Z
+
+  Last seen: 2026-10-24T17:52:23.179Z
+
+  Count: 10, burn: 10.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=close target=pr#11096@2026-10-12T14:01:04Z actor=cao825 cause=base-red:main-health:proof-discrimination-failed-on-ci-log-fi — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#9b94658bd9334377b987adf7b3e963ab0a8ccec60ae4d1975ede64f398031a76
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

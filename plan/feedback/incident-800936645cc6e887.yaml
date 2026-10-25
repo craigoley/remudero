@@ -1,0 +1,31 @@
+id: incident-800936645cc6e887
+ts: 2026-10-24T17:17:23.076Z
+raw: >-
+  Incident 800936645cc6: intervention
+  plan-proof-unrunnable:plan-repair:plan-scoped-round-deferred
+
+  First seen: 2026-10-24T17:10:11.502Z
+
+  Last seen: 2026-10-24T17:17:21.749Z
+
+  Count: 24, burn: 24.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#10448@a0b68acbf actor=cao825 cause=plan-proof-unrunnable:plan-repair:plan-scoped-round-deferred — a hand action answered a fleet state no lane resolved
+    - surface=pr action=update-branch target=pr#10446@ab544aabf actor=cao825 cause=plan-proof-unrunnable:plan-repair:plan-scoped-round-deferred — a hand action answered a fleet state no lane resolved
+    - surface=pr action=update-branch target=pr#10488@81067ae9b actor=cao825 cause=plan-proof-unrunnable:plan-repair:plan-scoped-round-deferred — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#800936645cc6e88751920f3698dd9ce2de4c1e18b4b31345472bbde38d8bdb9a
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

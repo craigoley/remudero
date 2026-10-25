@@ -1,0 +1,37 @@
+id: fb-1792859760649-99e381
+ts: 2026-10-24T16:36:00.649Z
+raw: >-
+  [answer to feedback#fb-1791908207465-93d619] gardener-reconciliation
+
+
+  Use the existing feedback gardener and gated landing path as the single
+  lifecycle owner. A verified hand-route merge may qualify the specifically
+  named feedback entry for accepted, but the gardener must propose that change
+  through normal review rather than mutate live lifecycle state directly. Triage
+  should consume the resulting disposition instead of implementing a second
+  closure mechanism.
+
+
+  Require exact repository-local feedback identity, the explicit closure marker,
+  API-confirmed MERGED state and source-changing evidence appropriate to the
+  entry. Refuse ambiguous/foreign IDs, open or closed-unmerged PRs, plan-only
+  filing credit presented as a product fix, and unreadable evidence. Preserve
+  existing accepted/rejected/answered operator decisions and proposal-driven
+  handling. Repeated reconciliation must be idempotent and retain the exact
+  PR/source receipt.
+
+
+  This selects the recommended design and task-producing triage route under the
+  approved automation follow-through. It is not implementation credit, an
+  instruction to close this issue now, or a waiver of risk judgment, tests,
+  coverage, security or review. Record the actual resulting task ID and filing
+  PR here before claiming filing completed.
+attachments: []
+origin: issue
+status: new
+reply_to: fb-1791908207465-93d619
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: issue#12899:comment:6386537276
+thread_id: null

@@ -1,0 +1,30 @@
+id: incident-8d16d83b6a4a5b06
+ts: 2026-10-24T18:40:13.410Z
+raw: >-
+  Incident 8d16d83b6a4a: flow pr-stage-stall:plan-proof-unrunnable:plan-only PR
+  is red on task-id-existence — the code-fix lane cannot stage outside a plan
+  filing, so no fix is dispatched; the plan violation needs a plan repair
+
+  First seen: 2026-10-24T18:33:10.183Z
+
+  Last seen: 2026-10-24T18:33:10.183Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=14002 plan-proof-unrunnable: repeat: "plan-only PR is red on task-id-existence — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair" x3
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#8d16d83b6a4a5b065ace0498dde1217e3f976c31c4c45387829528eb56236223
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

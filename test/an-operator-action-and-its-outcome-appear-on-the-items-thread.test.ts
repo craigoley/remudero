@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import { captureInboxInput, causalThreadInputs } from "#src/lib/inbox-thread.js";
 import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
+import { loadPlan } from "#src/lib/plan.js";
 
 import { createDemandBook } from "../src/lib/view-demand.js";
 import { createInboxThreadView, inboxThreadViewKey, type InboxThreadViewData } from "../src/lib/inbox-thread-view.js";
@@ -128,7 +129,8 @@ test("W1-T9252: reframe, decline and restore each appear once on the thread in o
 
 test("W1-T9252: a release appears on every open ask thread for the task", async (t) => {
   const fx = await fixture(t, [{ id: HUMAN }, { id: JUDGE }, { id: "proof-debt:W1-T900" }, { id: "verify-human:W1-T901" }]);
-  const plan = { byId: new Map([["W1-T900", { id: "W1-T900", verify: "human", status: "queued" }]]) } as never;
+  writeFileSync(fx.deps.planPath, "- id: W1-T900\n  title: released task\n  repo: remudero\n  type: implement\n  depends_on: []\n  verify: human\n  status: queued\n");
+  const plan = loadPlan(fx.deps.planPath);
   const out = approveParkedTask("W1-T900", {
     plan, ledgerPath: fx.ledgerPath, runId: "APPROVE-W1-T900", ledgerLines: [],
     recordThreadRow: (row) => void recordRowThreadEvents(rowsWritten(fx).find((line) => line.step === row.step) ?? row, fx.proposals, { threadStorePath: fx.threadStorePath }),

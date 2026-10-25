@@ -1,0 +1,31 @@
+id: incident-87a0ac36d46e5f56
+ts: 2026-10-24T16:59:56.526Z
+raw: >-
+  Incident 87a0ac36d46e: intervention
+  own-red:fix-lane:ci-shard-failed-on-ci-log-fix-fix-round
+
+  First seen: 2026-10-24T16:58:53.708Z
+
+  Last seen: 2026-10-24T16:59:54.504Z
+
+  Count: 13, burn: 13.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#11852@d4eec9483 actor=cao825 cause=own-red:fix-lane:ci-shard-failed-on-ci-log-fix-fix-round — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#12095@3914b2664 actor=cao825 cause=own-red:fix-lane:ci-shard-failed-on-ci-log-fix-fix-round — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#10585@94a4cfc4c actor=cao825 cause=own-red:fix-lane:ci-shard-failed-on-ci-log-fix-fix-round — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#87a0ac36d46e5f568fe4c1f8c2333f10c21ca07feef268072eb5d0a83edad295
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

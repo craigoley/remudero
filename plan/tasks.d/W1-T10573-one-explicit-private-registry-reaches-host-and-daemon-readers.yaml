@@ -1,0 +1,163 @@
+- id: W1-T10573
+  title: An explicitly selected private registry reaches host and daemon readers without changing absent-config behavior
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  author_class: machine
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  priority: 1.5
+  status: queued
+  attempts: 0
+  origin: "Operator-approved eleven-existing-file source-only remudero-ops compatibility, 2026-10-24; no live selection or image/recycle release."
+  prompt: |
+    Implement dormant explicit private-registry configuration plumbing in only these
+    fifteen existing files for at most USD 12. Real host/container launch composition
+    and daemon default readers must agree on one validated selected file. Preserve
+    genuine absent-selection legacy behavior, supported mixed versions, independently
+    authenticated owner/admin override and opt-in SHADOW policies. Selected unknown
+    or revised evidence never silently falls back, grants permission or retargets work.
+    Do not expand worker env/mount access, disclose private data, stop/restart workers,
+    create schedules, install/select configuration live, remove public registry data,
+    loosen gates or adopt another owner's source/claim. Use the design's actual default,
+    catch, forbidden-effect, immutable-binding and deletion/restoration tests plus all
+    normal current-head author/hosted/security/proof/automated-review/ordinary-merge
+    gates. SOURCE PUBLICATION/MERGE IS HELD until actual automatic image/recycle
+    protection is qualified or the operator separately approves the exact release;
+    this task does not authorize an image/recycle release or live cutover. A necessary
+    out-of-scope source edit requires a normally merged companion amendment first.
+  plan_refs: [W1-T4227, W1-T9435, W1-T9559, W1-T9571, W1-T9572, W1-T9793, W1-T9794, W1-T9795, W1-T9796]
+  context:
+    - claim: Docker bind sources belong to the daemon host; readonly is explicit and default --mount refuses a missing source rather than creating a directory
+      src: https://docs.docker.com/engine/storage/bind-mounts/
+    - claim: The maintained default mode reader currently reads the repository-layout default and collapses unreadable legacy text to undefined
+      src: src/lib/instance-mode.ts
+  files: [src/lib/deployer.ts, src/lib/instance-mode.ts, src/lib/config-schema.ts, deploy/recycle-container.sh, deploy/serve-container.sh, test/deployer.test.ts, test/shadow-instance-safety.test.ts, test/recycle-container.test.ts, test/serve-launch-uniformity.test.ts, test/env-var-registry.test.ts, docs/instance-registry-selection-contract.md, src/lib/instance-registry-selection.ts, src/cli/commands/daemon.ts, src/cli/commands/run-task-verb.ts, src/run-task.ts]
+  rationale: |
+    The operator approved this exact eleven-existing-file scope, USD 12, high/span,
+    and four behavioral proofs for normal automated filing and dormant source work.
+    The purpose is to make a later separately approved remudero-ops deployment usable,
+    not to enlarge the observation program or modernize unrelated infrastructure.
+
+    OBSERVED at main c8b43c9fff993c98dff0971e5b83ddb0a4057af9: host installer and
+    recycler already accept RMD_INSTANCE_REGISTRY, but daemonInstanceRegistryPath
+    returns the independent repository-layout default and readInstanceRegistryText
+    reads it. Host script selection does not mount/forward the selected file into
+    the container namespace. readInstanceRegistryText currently collapses unreadable
+    legacy input to undefined and instanceMode(undefined) resolves live; forwarding
+    alone must not turn an explicitly missing private file into legacy/live fallback.
+
+    Independent disposable-copy qualification of actual pinned production scripts
+    completed 15/15 tests, and an actual default-reader probe passed its healthy
+    no-selection control but failed explicit external selection. Removing/restoring
+    explicit selection produced 1 failure/1 pass. A synthetic public example passed
+    four actual parser/rendering checks. These scoped results diagnose wiring only;
+    they are not this task's author, hosted, review, merge or runtime assurance.
+    The reviewed private data is merged in remudero-ops PR1; no live reader changed.
+
+    Fresh scope-time evidence read main and all twelve complete OPEN heads, their
+    actual subject blobs, all eleven declared existing paths, and a 5183-row retained
+    API corpus with overlap and mint-window controls. No captured open head has its
+    own diff in these eleven paths. W9435/W9559/W9571 supply existing contracts;
+    W9572/W9793 and preserved W9794-W9796 explicitly observe unchanged legacy effects
+    in opt-in SHADOW and do not implement actual configuration selection. Their
+    owners, branches, credit, acceptance and independent work remain untouched.
+    These are bounded observations, not universal absence or ownership release.
+  design: |
+    1. Reuse the existing explicit selection and bounded file/binding contracts at
+       the actual daemon path/default-reader composition and actual recycler/serve
+       launch argument assembly. Add no second generic registry loader, permissive
+       YAML grammar, inbox scanner, daemon, scheduler or blocking daemon adapter.
+       Census the real callers/catches before changing shared helpers; a fixture-only
+       port or observer does not prove the daemon uses the chosen file. A synchronous
+       seam cannot claim fresh asynchronous authority. Amend scope normally before
+       a demonstrated consequential change outside these fifteen existing paths.
+    2. Genuine absence preserves the exact legacy reader, rendered arguments and
+       supported old launcher/image behavior. Presence is not truthiness: empty,
+       relative, missing, unreadable, symlink, malformed, oversized, unsupported,
+       stale or revised explicit input stays refused/unknown for the selected target,
+       never silently replaced by healthy public bytes, cache or another instance.
+       Recheck actual file/repository/instance and host/container binding at adoption;
+       retain immutable original identity/digest through waits and argument snapshots.
+       Unknown cannot age into live, trusted or permission. If existing catch/fallback
+       callers require an undeclared change, stop for a companion scope amendment.
+    3. A host path is not a container path. Bind only the selected regular config
+       read-only at one explicit supported container location outside the mutable
+       Git checkout and forward its container selection only to trusted daemon/serve
+       readers. Use fail-on-missing bind syntax, not implicit source-directory creation;
+       qualify the Docker daemon's actual source namespace rather than assuming the
+       client path is local to it. Do not add private files to a blanket worker mount/env list, expand
+       buildWorkerEnv allowlisting, leak raw operational values/paths into prompts,
+       untrusted child arguments, logs or public projections, or treat readonly as
+       secrecy. Test actual shell argv and hostile/revised paths with recording
+       transports. Do not assume an old image supports new optional semantics.
+    4. Configuration plumbing never grants actor admission, publication, deployment
+       or release permission. Existing policies and selected observations remain
+       opt-in SHADOW ONLY. PAUSE/STOP, independently authenticated owner/admin
+       override, trusted flows, configured human/service scopes, instance-only holds
+       and every CI/security/review requirement remain independent. No live/private
+       configuration is installed or selected and no scheduler/settings/infra changes
+       belong here. Do not turn an observation timeout into a new global trusted hold.
+    5. Extend only the existing declared tests. Exercise production defaults with
+       real disposable regular files and shell children, each catch, exact no-config
+       bytes, supported mixed versions, invalid/changed binding, same-named different
+       instances and owner holds. Trap Docker/Azure/GitHub/systemctl/installer effects;
+       no live configuration, credential or worker is touched. Test that ordinary
+       worker env/prompt/argv and public projection contain no selected private path
+       or operational data. Add a usable synthetic installation example to the existing
+       public contract, preserving the complete Apache implementation and currently
+       consumed public registry. Public-data removal is a later cutover decision.
+    6. Freeze assertions, delete actual default selection/launch forwarding and final
+       binding checks independently, record real behavioral failures, restore exact
+       committed bytes, and prove all four acceptance titles resolve literally.
+       Commit before measuring; verify physical paths, explicit child tsx/tmp preload,
+       shipped host slots and source-mapped coverage for every changed source SF.
+       One ordinary author run per distinct committed repair; reproduce every actual
+       failed title on that run's unchanged pinned base before attribution/repair.
+       Retain failed/setup/capacity receipts and UNKNOWN causes. No detector exemption,
+       baseline widening, unchanged retry into unexplained green or fake full PASS.
+    7. Refresh both scope-time checks, all open-head subjects, actual main, merged
+       trailer/run-branch credit, package runnableCandidates and ordinary ownership
+       before build/publication. No competing W9794-W9796 implementation, claim
+       reclamation, extra review, auto-arm, force/admin merge or replacement SHA to
+       clear stale CI. Normal plan merge precedes source implementation; normal
+       current-head author, hosted tests/coverage/security/proof/automated review
+       and ordinary merge remain required, with GitHub STORED-body parser/proofs.
+    8. SOURCE PUBLICATION HOLD: deployer.ts and config-schema.ts trigger ACR image
+       build on main and existing supervisors may recycle for published image drift.
+       Before source publication/merge, qualify the real release hold and automatic
+       build/recycle path. If worker-affecting release is not demonstrably protected,
+       obtain the operator's separate exact release decision first; this task grants
+       no build/recycle release, worker stop/restart, hold clear or live cutover.
+       Workers continue for isolated source/tests. Any later exact-instance rollout,
+       drain, rollback and shared-writer compatibility decision require separate human
+       approval; no fleet-wide stop is requested or inferred from this source approval.
+  acceptance:
+    - claim: Actual host launch composition and daemon default readers agree on the explicitly selected private file and container namespace
+      proof: 'unit test: private registry selection reaches real host and daemon readers'
+    - claim: Absent selection preserves legacy behavior and supported mixed versions; explicit invalid or changed evidence never silently falls back or grants live authority
+      proof: 'unit test: private registry selection preserves legacy and refuses unknown selected inputs'
+    - claim: Owner holds, existing shadow policies, trusted flows and private-safe projections remain independent of configuration selection
+      proof: 'unit test: private registry selection preserves owner holds and private-safe boundaries'
+    - claim: Defaults, catches and real shell argument assembly are exercised with forbidden-effect traps and load-bearing deletion controls
+      proof: 'unit test: private registry selection defaults and falsifiers forbid live effects'
+  falsifier: |
+    The healthy unconfigured control must pass before any selection assertion. Delete
+    actual production path selection or container mount/argv forwarding: the selected
+    default-reader/launch assertion fails while legacy behavior remains unchanged.
+    Replace selected read/binding failure with undefined or a public fallback: explicit
+    missing/revised-input assertions fail, not a missing-file loader wrapper. Remove
+    immutable capture/recheck: in-flight mutation fails. Private-data leakage and
+    owner-hold cases remain independently load-bearing. Restore exact committed source
+    and complete verified-file TAP and mapped coverage; do not waive any hosted gate.
+  risk_ruling:
+    verdict: operator
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Operator explicitly approved exactly fifteen existing paths, USD 12/high/span and four behavioral proofs for dormant source-only compatibility; legacy defaults, opt-in SHADOW and owner override preserved. No live selection, automatic image/recycle release, worker stop, schedule, gate waiver or cutover is authorized."
+    judged_at: "2026-10-24T20:54:27.541Z"
+    pin: "0e4a637b20c9e6152afaef34fe63f98c1f0e62444297c1c5ae38386fa4a6fcb9"
