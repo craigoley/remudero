@@ -83,7 +83,7 @@ test("cash rate-limit accounting keeps retry estimates conservative outside veri
       if (bodies.length === 1) return new Response(null, { status: 429, headers: { "retry-after-ms": "1" } });
       return model === "gpt-6.1-sol"
         ? Response.json({ id: "conservative-response", model, status: "completed",
-          usage: { input_tokens: 10, output_tokens: 2 },
+          usage: { input_tokens: 10, output_tokens: 2, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } },
           output: [{ type: "message", content: [{ type: "output_text", text: "DONE" }] }] })
         : Response.json({ id: "conservative-chat", model, usage: { prompt_tokens: 10, completion_tokens: 2 },
           choices: [{ finish_reason: "stop", message: { content: "DONE" } }] });
