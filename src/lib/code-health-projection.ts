@@ -188,7 +188,7 @@ function validateInput(input: CodeHealthProjectionInput): void {
 function scanProblem(scan: CodeHealthScan | undefined, sha: string, observedAt: string): string | undefined {
   if (!scan) return "This required source has not been collected.";
   if (scan.state !== "complete") return text(scan.reason, 2048) ? scan.reason! : "The source has not supplied a complete scan.";
-  if (!shaShape.test(scan.analyzedSha)) return "The scan describes another code version.";
+  if (!shaShape.test(scan.analyzedSha) || scan.analyzedSha.toLowerCase() !== sha.toLowerCase()) return "The scan describes another code version.";
   if (!time(scan.observedAt) || Date.parse(scan.observedAt) > Date.parse(observedAt)) return "The scan time is invalid or later than this report.";
   if (![scan.scopeHash, scan.toolVersion, scan.rulesVersion, scan.configHash].every(value => text(value))) return "The scan has incomplete scope, tool, rules or configuration evidence.";
   return undefined;
