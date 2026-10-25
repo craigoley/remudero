@@ -14611,8 +14611,16 @@ function codeScanningAlertLogTail(alert: CodeqlHeadAlert, intro: readonly string
     `message: ${alert.message}`,
     "Change this branch's code so the finding no longer applies, within the task's existing file",
     "scope. Do not dismiss alerts or add suppression comments.",
+    ...(alert.ruleId === "js/file-system-race" ? FILE_SYSTEM_RACE_HINT : []),
   ].join("\n");
 }
+
+/** W1-T10394 — a `js/file-system-race` alert flags a check-then-use pair on one path (existsSync/statSync, then a
+ *  read or write). Naming the shape of the repair spends the first fix round on it instead of several. */
+const FILE_SYSTEM_RACE_HINT: readonly string[] = [
+  "Hint (js/file-system-race): do not test a path and then use it. Perform the operation directly and handle",
+  "ENOENT/EEXIST from it (e.g. open with the 'wx' flag, or try/catch the read), or operate on one open handle.",
+];
 
 /** W1-T5633 — the fix worker's evidence: the alerts and the judge's reason, labelled untrusted. */
 export function codeScanningFixCiFailures(alerts: readonly CodeqlHeadAlert[], reason: string): CiFailure[] {
