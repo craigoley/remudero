@@ -531,14 +531,15 @@ function rankDraftSelection(proposals: Proposal[], drafts: DraftCache): Proposal
 export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: DraftSelectionContext): Proposal[] {
   return proposals.filter((p) => {
     if (isAgeOnlyInboxInformation(p)) {
+      let informational = true;
       try {
         const retirement = ctx?.retirement?.(p);
-        if (retirement && "unknown" in retirement) return true;
-        if (retirement?.state !== "restored_for_review") return false;
+        informational = !retirement || !("unknown" in retirement) && retirement.state !== "restored_for_review";
       } catch {
         // Unreadable lifecycle evidence is not authority to suppress a potentially restored human ask.
-        return true;
+        informational = false;
       }
+      if (informational) return false;
     }
     if (p.lifecycleAction || p.skillFile) return false;
     if (ctx ? draftExclusionForProposal(p, ctx) : p.trigger && !p.trigger.fired) return false;

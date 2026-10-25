@@ -110,7 +110,7 @@ import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUni
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, validInboxSnapshot, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type InboxSourceIdentity, type PersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
-import { classifiedInboxOwner, inboxOwner, inboxSender, isAgeOnlyInboxInformation, latestInstant, type InboxSender } from "./inbox-owner.js";
+import { classifiedInboxOwner, hasUnansweredInboxQuestion, inboxOwner, inboxSender, isAgeOnlyInboxInformation, latestInstant, type InboxSender } from "./inbox-owner.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { mergeVerdictReceipts, proposalVerdictsWithReceipts, readVerdictReceipts, verdictReceiptOf, PROPOSAL_VERDICT_RECEIPT_STEPS, type VerdictReceipt } from "./inbox-verdict-receipts.js";
 import { judgementFamily } from "./machine-filing-judge.js";
@@ -3897,7 +3897,12 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       // message the responder will silently have no item to answer.
       const classified = await inboxRead(deps);
       if (!classified) return void respond(503, { error: "inbox_not_ready", detail: "serve's slow lane has not persisted an inbox classification yet" }, { "retry-after": "5" });
-      if (refuseInformationalProposal(classified.proposals, classified.classifications, proposalId, respond)) return;
+      const proposal = classified.proposals.find(p => p.id === proposalId);
+      if (proposal && isAgeOnlyInboxInformation(proposal)) {
+        const thread = readThread(input.threadId, { threadStorePath: inboxThreadStorePath(deps.inboxRoot) });
+        if (thread.status !== "ok") return void respond(503, { error: "thread_store_unreadable", detail: "The current question cannot be verified." });
+        if (!hasUnansweredInboxQuestion(thread.messages) && refuseInformationalProposal(classified.proposals, classified.classifications, proposalId, respond)) return;
+      }
       if (!operatorThreadItems(deps, undefined, classified).some((item) => item.proposalId === proposalId && item.state !== "retired")) {
         respond(404, { error: "not_found", detail: "operator inbox thread is unavailable" });
         return;
