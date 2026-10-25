@@ -20,7 +20,7 @@ import { conflictedFilePaths } from "../../lib/hot-file-gardener.js";
 import { billingMode } from "../../lib/env.js";
 import { FIX_MODE_RULES, deriveFixMode, fixScopeRegime, outOfDeclaredScopeFiles, renderFixPrompt, renderPrerequisitePrPrompt, type FixEvidence, type FixReviewFinding } from "../../lib/prompt-render.js";
 import { bakedClosureCatalogDetails } from "../../lib/baked-closure-catalog.js";
-import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, escalationContractRevision, findDuplicateEscalation, taskContractRevision, taskSemanticRevision, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
+import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalation, taskContractRevision, taskSemanticRevision, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
 import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, type GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { remedyFilesForFailingChecks, type RemedyFileForGate } from "../../lib/ci-parity.js";
 import { isInPlanScope } from "../../lib/plan-architect.js";
@@ -853,44 +853,6 @@ function unchangedTreeStandDownReason(
   };
 }
 
-function openEscalationStandDownReason(
-  headSha: string,
-  candidate: OpenIssue | undefined,
-  currentContractRevision?: string,
-  current?: { conflictEvidenceCaptured: boolean; baseSha?: string },
-  redCheckNames?: readonly string[],
-): { reason: string } | undefined {
-  if (!candidate) return undefined; // nothing open on this key — the ordinary path
-  // The sweep writes the question immediately after its clarification context paragraph.
-  const question = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]*\n\n([^\n]*)/.exec(candidate.body ?? "")?.[1];
-  if (question?.startsWith("PR stage stalled:")) return undefined;
-  const summary = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]* to BLOCKED-AMBIGUOUS: ([^\n]*)/.exec(candidate.body ?? "")?.[1];
-  const metadataChecks = /^metadata-only required checks (.+?) need title\/body repair:/.exec(summary ?? "")?.[1].split(", ");
-  if (metadataChecks && redCheckNames?.some(name => !metadataChecks.includes(name))) return undefined;
-  const candidateHead = escalationHeadSha(candidate.body);
-  // STRICTER THAN THE MATCHER (both arms): a candidate naming NO head, or naming a DIFFERENT one,
-  // never refuses a worker. The first arm is the legacy-issue case, the second is a genuinely new
-  // push whose issue has not been filed yet — in both, the failure direction of guessing wrong is
-  // "stop fixing things", so both fail open.
-  if (candidateHead === undefined || candidateHead !== headSha) return undefined;
-  const candidateRevision = escalationContractRevision(candidate.body);
-  // W1-T3579: a genuine disagreement between the RECORDED and CURRENT contract revision means the
-  // question this issue asked has since changed underneath it — re-admit rather than stand down.
-  // Either side missing (a legacy issue, or a caller with no live task to hash) says nothing, so
-  // the original head-only stand-down applies unchanged — fail toward standing down, never toward
-  // mass-retrying, on anything short of a positively OBSERVED contract change.
-  if (candidateRevision !== undefined && currentContractRevision !== undefined && candidateRevision !== currentContractRevision) {
-    return undefined;
-  }
-  if (current && clearedConflictEscalationCause(candidate.body, current) !== undefined) return undefined;
-  return {
-    reason:
-      `a needs-human escalation for this exact (task, PR, head ${headSha}, cause) is ALREADY OPEN and ` +
-      `awaiting a human (${candidate.url}) — a strike here would re-ask a question already in front of ` +
-      `someone and append to that same issue; standing down until it is closed, the head moves, or the ` +
-      `task contract changes`,
-  };
-}
 
 function resolveClearedEscalation(
   issues: IssueGateway,
@@ -982,6 +944,7 @@ async function fixRungStandDownReason(
     key: EscalationDedupKey;
     find: (key: EscalationDedupKey) => OpenIssue | undefined;
     redCheckNames?: readonly string[];
+    pendingAnswer?: { spent?: true };
     current?: { conflictEvidenceCaptured: boolean; baseSha?: string };
     resolve?: (candidate: OpenIssue, clearedCause: string) => void;
   },
@@ -1083,6 +1046,7 @@ async function fixRungStandDownReason(
       openEscalation.key.contractRevision,
       openEscalation.current,
       openEscalation.redCheckNames,
+      openEscalation.pendingAnswer,
     );
     if (alreadyAsked) {
       log("fix.contract_hold", { kind: "open-escalation", pr_url: prUrl, head_sha: openEscalation.headSha,
@@ -2102,7 +2066,9 @@ async function routeFix(
   };
 }
 
-export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0],
+export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
+  pendingAnswer?: OpenPrView["pendingAnswer"];
+},
   host: FixCommandHost,
 ): ReturnType<RunTaskCommandHost["runFixRung"]> {
   const {
@@ -2518,17 +2484,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       deps.issues.listOpen
         ? {
             headSha: review.headSha,
-            key: {
-              class: "BLOCKED" as const,
-              taskId: opts.taskId,
-              summary: `review false-block — ${opts.prUrl}`,
-              detail: "",
-              headSha: review.headSha,
-              cause: escalationCause(currentMergeConflict !== undefined, noReviewYet),
-              // W1-T3579: the 4th dedup dimension — see this function's own `openEscalation` doc.
-              contractRevision: currentContractRevision,
-            },
+            key: fixEscalationDedupKey(opts.taskId, opts.prUrl, review.headSha,
+              currentMergeConflict !== undefined, noReviewYet, currentContractRevision),
             find: (key: EscalationDedupKey) => findDuplicateEscalation(key, { issues: deps.issues }),
+            pendingAnswer: opts.pendingAnswer ?? (opts.constraint !== undefined ? {} : undefined),
             redCheckNames: noReviewYet ? currentCiFailures?.map(f => f.name) : undefined,
             current: { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha },
             resolve: (candidate: OpenIssue, clearedCause: string) =>
