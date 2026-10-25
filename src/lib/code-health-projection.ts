@@ -192,7 +192,13 @@ function scanProblem(scan: CodeHealthScan | undefined, sha: string, observedAt: 
   return undefined;
 }
 
-function confirmedFindingFix(finding: CodeHealthScanFinding | undefined, baselineAt: string): boolean {
+/** Ordering of source severity labels only; it never weights assessment counts. */
+export function codeHealthSeverityAtLeast(left: CodeHealthScanFinding["severity"], right: CodeHealthScanFinding["severity"]): boolean {
+  const order: CodeHealthScanFinding["severity"][] = ["critical", "high", "medium", "low"];
+  return order.indexOf(left) <= order.indexOf(right);
+}
+
+export function codeHealthFindingFixedAfter(finding: CodeHealthScanFinding | undefined, baselineAt: string): boolean {
   return finding?.status === "fixed" && (finding.fixedAt === undefined || Date.parse(finding.fixedAt) > Date.parse(baselineAt));
 }
 
@@ -205,7 +211,7 @@ export function independentCodeHealthScans(current: CodeHealthScan, prior: CodeH
   return current.componentIds.every(id => !previous.has(id));
 }
 
-function pairState(input: CodeHealthProjectionInput, current: CodeHealthScan | undefined, prior: CodeHealthScan | undefined): CodeHealthComparison["state"] {
+export function compareCodeHealthScanPair(input: CodeHealthProjectionInput, current: CodeHealthScan | undefined, prior: CodeHealthScan | undefined): CodeHealthComparison["state"] {
   const baseline = input.baseline;
   if (!baseline || !shaShape.test(baseline.analyzedSha) || scanProblem(current, input.analyzedSha, input.observedAt) ||
       scanProblem(prior, baseline.analyzedSha, input.observedAt)) return "insufficient_evidence";
@@ -224,17 +230,18 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
     const current = new Map((scan?.findings ?? []).map(finding => [codeHealthFindingFingerprint(repository, kind, finding), finding]));
     const unconfirmedMissing = (prior?.findings ?? []).some(finding => finding.status !== "fixed" &&
       current.get(codeHealthFindingFingerprint(repository, kind, finding))?.status !== "open" &&
-      !confirmedFindingFix(current.get(codeHealthFindingFingerprint(repository, kind, finding)), prior!.observedAt));
-    return { kind, scan, prior, current, unconfirmedMissing, problem: scanProblem(scan, input.analyzedSha, input.observedAt), pair: pairState(input, scan, prior) };
+      !codeHealthFindingFixedAfter(current.get(codeHealthFindingFingerprint(repository, kind, finding)), prior!.observedAt));
+    return { kind, scan, prior, current, unconfirmedMissing, problem: scanProblem(scan, input.analyzedSha, input.observedAt), pair: compareCodeHealthScanPair(input, scan, prior) };
   });
   const history = [...(input.baseline?.scans ?? []).map(scan => ({ policyVersion: input.baseline!.policyVersion, scan })), ...(input.retainedEvidence ?? [])]
     .sort((a, b) => b.scan.observedAt.localeCompare(a.scan.observedAt));
   const unresolvedHistory = history.flatMap(entry => {
     const pair = pairs.find(pair => pair.kind === entry.scan.kind)!;
-    const comparable = pairState({ ...input, baseline: { analyzedSha: entry.scan.analyzedSha, policyVersion: entry.policyVersion, scans: [entry.scan] } }, pair.scan, entry.scan) === "comparable";
+    const comparable = compareCodeHealthScanPair({ ...input, baseline: { analyzedSha: entry.scan.analyzedSha, policyVersion: entry.policyVersion, scans: [entry.scan] } }, pair.scan, entry.scan) === "comparable";
     return entry.scan.findings.filter(finding => finding.status !== "fixed" &&
-      pair.current.get(codeHealthFindingFingerprint(repository, pair.kind, finding))?.status !== "open" &&
-      !(comparable && confirmedFindingFix(pair.current.get(codeHealthFindingFingerprint(repository, pair.kind, finding)), entry.scan.observedAt)))
+      (pair.current.get(codeHealthFindingFingerprint(repository, pair.kind, finding))?.status !== "open" ||
+        !codeHealthSeverityAtLeast(pair.current.get(codeHealthFindingFingerprint(repository, pair.kind, finding))!.severity, finding.severity)) &&
+      !(comparable && codeHealthFindingFixedAfter(pair.current.get(codeHealthFindingFingerprint(repository, pair.kind, finding)), entry.scan.observedAt)))
       .map(finding => ({ scan: entry.scan, finding }));
   });
   const sources: CodeHealthAssessment["sources"] = pairs.map(({ kind, scan, prior, problem }) => ({
@@ -265,7 +272,8 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
   }
   for (const { scan: historical, finding: prior } of unresolvedHistory) {
     const fingerprint = codeHealthFindingFingerprint(repository, historical.kind, prior);
-    if (findings.has(fingerprint)) continue;
+    const represented = findings.get(fingerprint);
+    if (represented && codeHealthSeverityAtLeast(represented.severity, prior.severity)) continue;
     const historicalId = `${sourceId(repository, historical.kind)}:history:${createHash("sha256").update(JSON.stringify([historical.scanId, historical.analyzedSha, historical.observedAt])).digest("hex")}`;
     if (!sources.some(source => source.id === historicalId)) {
       const problem = scanProblem(historical, historical.analyzedSha, input.observedAt);
@@ -296,7 +304,7 @@ export function projectCodeHealth(input: CodeHealthProjectionInput): CodeHealthA
 
 export function compareCodeHealthEvidence(input: CodeHealthProjectionInput): CodeHealthComparison {
   validateInput(input);
-  const states = CODE_HEALTH_SOURCE_KINDS.map(kind => pairState(input, input.scans.find(scan => scan.kind === kind), input.baseline?.scans.find(scan => scan.kind === kind)));
+  const states = CODE_HEALTH_SOURCE_KINDS.map(kind => compareCodeHealthScanPair(input, input.scans.find(scan => scan.kind === kind), input.baseline?.scans.find(scan => scan.kind === kind)));
   const result: CodeHealthComparison = { state: states.includes("measurement_changed") ? "measurement_changed" : states.every(state => state === "comparable") ? "comparable" : "insufficient_evidence",
     newFindings: [], existingFindings: [], fixedFindings: [], unconfirmedMissingFindings: [], reason: "" };
   if (result.state !== "comparable") { result.reason = result.state === "measurement_changed" ? "The measurement scope, tool, rules or check policy changed." : "Independent complete scans for the same measured scope are unavailable."; return result; }
@@ -305,7 +313,7 @@ export function compareCodeHealthEvidence(input: CodeHealthProjectionInput): Cod
   for (const [id, finding] of current) if (finding.status === "open") (previous.has(id) ? result.existingFindings : result.newFindings).push(id);
   for (const [id, prior] of previous) {
     const finding = current.get(id);
-    if (confirmedFindingFix(finding, prior.observedAt)) result.fixedFindings.push(id);
+    if (codeHealthFindingFixedAfter(finding, prior.observedAt)) result.fixedFindings.push(id);
     else if (finding?.status !== "open") result.unconfirmedMissingFindings.push(id);
   }
   if (result.unconfirmedMissingFindings.length) result.state = "insufficient_evidence";

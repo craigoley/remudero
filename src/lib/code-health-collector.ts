@@ -7,7 +7,7 @@ import { readCodeHealthArtifactJson } from "./code-health-store.js";
 import { isDeepStrictEqual } from "node:util";
 import { fixedClock } from "./clock.js";
 import { CODE_HEALTH_SOURCE_KINDS } from "./code-health-contract.js";
-import { projectCodeHealth, independentCodeHealthScans, type CodeHealthProjectionInput, type CodeHealthScan } from "./code-health-projection.js";
+import { projectCodeHealth, independentCodeHealthScans, compareCodeHealthScanPair, codeHealthFindingFingerprint, codeHealthFindingFixedAfter, codeHealthSeverityAtLeast, type CodeHealthProjectionInput, type CodeHealthScan } from "./code-health-projection.js";
 
 export interface CodeHealthCollection {
   repository: string;
@@ -68,6 +68,20 @@ export function prepareCodeHealthCollection(input: CodeHealthCollection): CodeHe
   const result: CodeHealthProjectionInput = { repository: input.repository.toLowerCase(), currentSha: input.currentSha.toLowerCase(), analyzedSha: analyzedSha.toLowerCase(),
     observedAt: input.observedAt, nextDueAt: fixedClock(Date.parse(input.observedAt) + SOURCE_INTERVAL_MS).iso(), registry: structuredClone(registry), scans,
     baseline: baseline ? structuredClone(baseline) : null, retainedEvidence: [...known.values()] };
+  const completeKinds = new Set(projectCodeHealth({ ...result, retainedEvidence: [] }).sources.filter(source => source.required && source.state === "complete").map(source => source.kind));
+  result.retainedEvidence = result.retainedEvidence!.filter(entry => {
+    const current = result.scans.find(scan => scan.kind === entry.scan.kind);
+    if (!current || !completeKinds.has(entry.scan.kind)) return true;
+    const measured = new Map(current.findings.map(finding => [codeHealthFindingFingerprint(result.repository, current.kind, finding), finding]));
+    const pair = compareCodeHealthScanPair({ ...result, baseline: { analyzedSha: entry.scan.analyzedSha, policyVersion: entry.policyVersion, scans: [entry.scan] } }, current, entry.scan);
+    return entry.scan.findings.some(finding => {
+      if (finding.status === "fixed") return false;
+      const known = measured.get(codeHealthFindingFingerprint(result.repository, current.kind, finding));
+      if (known && known.status !== "fixed" && codeHealthSeverityAtLeast(known.severity, finding.severity) &&
+          (!Number.isFinite(Date.parse(entry.scan.observedAt)) || Date.parse(current.observedAt) >= Date.parse(entry.scan.observedAt))) return false;
+      return !(pair === "comparable" && codeHealthFindingFixedAfter(known, entry.scan.observedAt));
+    });
+  });
   projectCodeHealth(result); // Refuse overflow or invalid evidence without discarding the prior saved snapshot.
   return result;
 }
