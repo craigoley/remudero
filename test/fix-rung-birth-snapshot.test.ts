@@ -318,3 +318,65 @@ test("runFixRung: missing birth snapshot never manufactures a foreign-tree stand
     rmSync(worktreePath, { recursive: true, force: true });
   }
 });
+
+async function observeAdvancedEvidenceRound(mode: "published" | "local" | "unreadable" | "fresh") {
+  const { root, worktreePath, branch } = await initFixRungRepo();
+  try {
+    const before = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", worktreePath, "commit", "--allow-empty", "-qm", "a newer branch tip"], { env: GIT_ENV });
+    const advanced = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    if (mode !== "local") execFileSync("git", ["-C", worktreePath, "push", "--quiet", "origin", `HEAD:refs/heads/${branch}`], { env: GIT_ENV });
+    const birth = captureWorktreeSnapshotViaGit(worktreePath);
+    assert.ok(worktreeSnapshotIsClean(birth));
+    let spawned = 0;
+    let pushed = 0;
+    const issues = fakeIssueStore();
+    const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    const outcome = await runFixRung({ ...fixRungBaseOpts(worktreePath), branch, strikeCap: 1,
+      birthWorktreeSnapshot: birth,
+      initialReview: fakeReview("failure", [criterion({ claim: "old-head failure", met: false })], mode === "fresh" ? advanced : before),
+      deps: { spawn: async () => { spawned++; return result({ text: "NEEDS_DESIGN: missing old-head security evidence" }); },
+        waitForCiGreen: async () => "red", runReview: async () => fakeReview("failure", []), push: () => { pushed++; },
+        issues, ledgerPath: tmpLedgerPath(), log: (step, extra) => logs.push({ step, extra }), say: () => {}, account: r => r,
+        readLiveState: async () => ({ ok: true, state: "OPEN" }), captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
+        readRegisteredWorktrees: async () => [{ path: worktreePath, branch }],
+        ...(mode === "unreadable" ? { readRemoteBranchHead: async () => { throw new Error("fixture remote read unavailable"); } } : {}) },
+    });
+    return { spawned, pushed, issueCount: issues.calls.length, outcome, logs, before, advanced,
+      headAfter: execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim() };
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+test("a published head advance cannot spend a worker on its previous failure evidence", async () => {
+  const r = await observeAdvancedEvidenceRound("published");
+  assert.equal(r.spawned, 0, "the next ordinary snapshot must provide evidence for the newer head first");
+  assert.equal(r.pushed, 0);
+  assert.equal(r.issueCount, 0, "a normal branch advance is no new operator design question");
+  assert.equal(r.outcome.outcome, "stood_down");
+  assert.equal(r.outcome.strikes, 0);
+  assert.equal(r.outcome.review.headSha, r.before, "do not relabel stale evidence as evidence for the new head");
+  assert.equal(r.headAfter, r.advanced);
+  assert.ok(r.logs.some(row => row.step === "fix.evidence_head_superseded" && row.extra?.head_sha === r.before && row.extra?.current_head_sha === r.advanced));
+});
+
+test("a retained unpublished fix keeps its existing native resume route", async () => {
+  const r = await observeAdvancedEvidenceRound("local");
+  assert.equal(r.spawned, 1);
+  assert.equal(r.headAfter, r.advanced);
+  assert.equal(r.logs.some(row => row.step === "fix.evidence_head_superseded"), false);
+});
+
+test("an unreadable remote preserves the existing direction without certifying a published advance", async () => {
+  const r = await observeAdvancedEvidenceRound("unreadable");
+  assert.equal(r.spawned, 1);
+  assert.equal(r.headAfter, r.advanced);
+  assert.equal(r.logs.some(row => row.step === "fix.evidence_head_superseded"), false);
+  assert.ok(r.logs.some(row => row.step === "fix.evidence_head_unread"));
+});
+
+test("a fresh snapshot of the published tip reaches the ordinary worker", async () => {
+  const r = await observeAdvancedEvidenceRound("fresh");
+  assert.equal(r.spawned, 1);
+  assert.equal(r.headAfter, r.advanced);
+  assert.equal(r.logs.some(row => row.step === "fix.evidence_head_superseded"), false);
+});
