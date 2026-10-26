@@ -30150,7 +30150,7 @@ function preserveTrackedDirtyPatch(
   const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
   const ownerTree = ownerTreeOf ? ownerTreeOf() : temporaryIndexTree(ownerPath, localSha, (env) => {
     hostWorktreeGit(ownerPath, ["add", "-A"], { env });
-  });
+  }, resolve(ownerPath, hostWorktreeGit(ownerPath, ["rev-parse", "--git-path", "index"]).trim()));
   const patchTree = temporaryIndexTree(repoDir, localSha, (env) => {
     hostWorktreeGit(repoDir, ["apply", "--cached", "--binary", "--whitespace=nowarn"], { input: patch, env, maxBuffer: 1 << 26 });
   });
