@@ -3273,7 +3273,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         for (let page = 1; ; page++) {
           const body = (await readJsonImpl(["api", `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=50` +
             (page === 1 ? "" : `&page=${page}`)])) as { workflow_runs?: Array<{ id?: number; path?: string; status?: string }> } | undefined;
-          if (!Array.isArray(body?.workflow_runs)) throw new Error("CI workflow run listing unavailable");
+          if (body === undefined || body === null) throw new Error("CI workflow run response unavailable");
+          if (!Array.isArray(body.workflow_runs)) throw new Error("CI workflow run list malformed");
           let unread = false;
           for (const run of body.workflow_runs) {
             const id = run.id;

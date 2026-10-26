@@ -570,6 +570,8 @@ test("the refresh CI reader distinguishes complete pages from unavailable eviden
   const fullOtherPage = Array.from({ length: 50 }, (_, i) => ({ id: i + 1, path: ".github/workflows/other.yml", status: "completed" }));
   const cases: Array<{ name: string; read: (page: number) => unknown; active: boolean | undefined; pages: number }> = [
     { name: "read error", read: () => { throw new Error("API unavailable"); }, active: undefined, pages: 1 },
+    { name: "missing response", read: () => undefined, active: undefined, pages: 1 },
+    { name: "null response", read: () => null, active: undefined, pages: 1 },
     { name: "missing list", read: () => ({}), active: undefined, pages: 1 },
     { name: "missing identity", read: () => ({ workflow_runs: [{ id: 1, status: "completed" }] }), active: undefined, pages: 1 },
     { name: "missing CI status", read: () => ({ workflow_runs: [{ id: 1, path: ".github/workflows/ci.yml" }] }), active: undefined, pages: 1 },
