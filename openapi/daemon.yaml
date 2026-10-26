@@ -7258,7 +7258,7 @@ components:
           type: [integer, "null"]
         reason:
           type: [string, "null"]
-          enum: [inputs-unchanged, process-completed, process-failed, signal-or-cancelled, spawn-failed, memory-budget-shortfall, null]
+          enum: [inputs-unchanged, process-completed, process-failed, signal-or-cancelled, spawn-failed, memory-budget-shortfall, admission-rank, null]
         attempts:
           type: integer
           minimum: 0
