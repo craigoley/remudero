@@ -1153,3 +1153,20 @@ exceeded the standard's 12-line function-doc limit and was compacted with it.
   // as {@link extractCredentialExpiryMs}'s own contract.
 ```
 
+## Native addons in Codex writer tools
+
+Codex writers use the daemon user's canonical `~/.cache/remudero/swc-native` directory
+for native addons. The harness checks its ancestors and requires a private directory
+owned by the current user before granting that directory to the writer. Existing
+permissions and symlinks are never repaired automatically.
+
+The writer's HOME remains isolated. Core-only shell inheritance and credential
+exclusions remain in force; only `SWC_NATIVE_BINDING_CACHE` is explicitly set for
+tools. Read-only and disposable-review workers receive no new write grant. SWC still
+checks ownership, ancestors and addon integrity, as described in its
+[native carrier guide](https://github.com/swc-project/swc/blob/main/docs/native-addon-carriers.md).
+
+An untrusted directory stops the spawn and names the path. Inspect its ownership and
+permissions through the normal repair process. After a source repair merges, verify
+the running executable and a newly admitted worker before resuming held work.
+
