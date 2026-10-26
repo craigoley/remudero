@@ -278,3 +278,139 @@ test("bounded product and receipt capacity refuses new writes without losing old
   assert.equal(store.write(ACTOR, { ...create, id: first.value.receipt.productId, expectedRevision: 2, requestId: "fixture-over-receipts" }).code, "capacity");
   assert.ok(store.write(ACTOR, create).ok, "an acknowledged request still replays at capacity");
 });
+
+const repository = { provider: "github", id: 4242, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "private", verifiedAt: "2026-10-25T12:00:00.000Z" };
+const evidence = (id: string, objectiveRevision = 1) => ({
+  id, stage: "repository", outcome: "succeeded", objectiveRevision, observedAt: "2026-10-25T12:00:01.000Z",
+  references: [{ label: "repository", url: "https://github.com/craigoley/wreckterra" }],
+});
+const transitionFor = (productId: string, extra: Record<string, unknown> = {}) => ({
+  version: "product-intent-v1", requestId: "fixture-transition-0001", id: productId, expectedRevision: 1, expectedObjectiveRevision: 1,
+  repository, stageEvidence: [evidence("repo-adopted")], ...extra,
+});
+
+test("W1-T10657: trusted product facts survive restart in the canonical record", (t) => {
+  const root = ownedFixtureDir(t, "product-facts").dir;
+  const created = new ProductIntentStore({ root }).write(ACTOR, create);
+  assert.ok(created.ok);
+  const id = created.value.receipt.productId;
+  const moved = new ProductIntentStore({ root }).transition(ACTOR, transitionFor(id));
+  assert.ok(moved.ok);
+  assert.equal(moved.value.replayed, false);
+  assert.equal(moved.value.receipt.revision, 2);
+  assert.equal(moved.value.receipt.objectiveRevision, 1);
+  assert.match(moved.value.receipt.operationId, /^ptransition_[a-f0-9]{64}$/);
+  const restarted = new ProductIntentStore({ root }).read(ACTOR, id);
+  assert.ok(restarted.ok);
+  assert.deepEqual(restarted.value.repository, repository);
+  assert.deepEqual(restarted.value.stageEvidence, [evidence("repo-adopted")]);
+  assert.deepEqual(restarted.value.brief, brief);
+  assert.equal(restarted.value.executionAuthority, "none");
+  assert.deepEqual(restarted.value.history.map((item) => item.revision), [1, 2]);
+  assert.equal(statSync(productStatePaths(root, ACTOR).state).mode & 0o777, 0o600);
+  const research = new ProductIntentStore({ root }).transition(ACTOR, {
+    version: "product-intent-v1", requestId: "fixture-transition-0002", id, expectedRevision: 2, expectedObjectiveRevision: 1,
+    stageEvidence: [{ ...evidence("research-done"), stage: "research" }],
+  });
+  assert.ok(research.ok, "evidence alone needs no repository");
+  const after = new ProductIntentStore({ root }).read(ACTOR, id);
+  assert.ok(after.ok);
+  assert.deepEqual(after.value.repository, repository);
+  assert.deepEqual(after.value.stageEvidence.map((item) => item.id), ["repo-adopted", "research-done"]);
+});
+
+test("W1-T10657: browser brief writes cannot forge verified product facts", (t) => {
+  const root = ownedFixtureDir(t, "product-forgery").dir;
+  const store = new ProductIntentStore({ root });
+  const created = store.write(ACTOR, create);
+  assert.ok(created.ok);
+  const id = created.value.receipt.productId;
+  assert.equal(store.write(ACTOR, { ...create, requestId: "fixture-forge-0001", repository }).code, "invalid_input");
+  assert.equal(store.write(ACTOR, { ...create, requestId: "fixture-forge-0002", id, expectedRevision: 1, stageEvidence: [evidence("forged")] }).code, "invalid_input");
+  assert.equal(store.write(ACTOR, { ...create, requestId: "fixture-forge-0003", id, expectedRevision: 1, brief: { ...brief, repository, stageEvidence: [evidence("forged")] } }).code, "invalid_input");
+  assert.equal(store.write(ACTOR, { ...create, requestId: "fixture-forge-0004", id, expectedRevision: 1, brief: { ...brief, executionAuthority: "runner" } }).code, "invalid_input");
+  assert.equal(store.transition(ACTOR, { ...transitionFor(id), requestId: "fixture-forge-0005", executionAuthority: "runner" }).code, "invalid_input");
+  assert.equal(store.transition(ACTOR, { version: "product-intent-v1", requestId: "fixture-forge-0006", id, expectedRevision: 1, expectedObjectiveRevision: 1 }).code, "invalid_input");
+  assert.ok(store.transition(ACTOR, { ...transitionFor(id), requestId: "fixture-trusted-0008" }).ok);
+  const edited = store.write(ACTOR, { ...create, requestId: "fixture-edit-0009", id, expectedRevision: 2, brief: { ...brief, name: "Renamed again" } });
+  assert.ok(edited.ok);
+  const read = store.read(ACTOR, id);
+  assert.ok(read.ok);
+  assert.deepEqual(read.value.repository, repository, "a brief edit carries trusted facts forward without altering them");
+  assert.deepEqual(read.value.stageEvidence, [evidence("repo-adopted")]);
+  assert.equal(read.value.executionAuthority, "none");
+});
+
+test("W1-T10657: product fact transitions refuse another actor and stale objective revisions", (t) => {
+  const root = ownedFixtureDir(t, "product-transition-guards").dir;
+  const store = new ProductIntentStore({ root });
+  const created = store.write(ACTOR, create);
+  assert.ok(created.ok);
+  const id = created.value.receipt.productId;
+  assert.equal(store.transition("clerk:bob", transitionFor(id)).code, "not_found");
+  assert.equal(store.transition("", transitionFor(id)).code, "invalid_identity");
+  const objective = store.write(ACTOR, { ...create, requestId: "fixture-objective-0002", id, expectedRevision: 1, brief: { ...brief, objective: "A new objective" } });
+  assert.ok(objective.ok);
+  assert.equal(objective.value.receipt.objectiveRevision, 2);
+  assert.equal(store.transition(ACTOR, { ...transitionFor(id), expectedRevision: 2 }).code, "stale_revision", "evidence for objective 1 cannot land on objective 2");
+  assert.equal(store.transition(ACTOR, { ...transitionFor(id), requestId: "fixture-stale-rev-0003" }).code, "stale_revision");
+  assert.equal(store.transition(ACTOR, { ...transitionFor(id, { stageEvidence: [evidence("old-objective", 1)] }), requestId: "fixture-stale-ev-0004", expectedRevision: 2, expectedObjectiveRevision: 2 }).code, "invalid_input");
+  assert.equal(store.transition(ACTOR, { ...transitionFor(id), requestId: "fixture-missing-0005", id: `prd_${"b".repeat(32)}` }).code, "not_found");
+  const fresh = { ...transitionFor(id, { stageEvidence: [evidence("repo-adopted", 2)] }), requestId: "fixture-fresh-0006", expectedRevision: 2, expectedObjectiveRevision: 2 };
+  assert.ok(store.transition(ACTOR, fresh).ok);
+  const duplicate = { ...fresh, requestId: "fixture-duplicate-0007", expectedRevision: 3 };
+  assert.equal(store.transition(ACTOR, duplicate).code, "invalid_input", "one evidence id is recorded once");
+  assert.equal(store.transition(ACTOR, { ...duplicate, requestId: "fixture-rebind-0008", repository: { ...repository, id: 7 }, stageEvidence: [evidence("other", 2)] }).code, "invalid_input", "a bound repository cannot be silently rebound");
+  const read = store.read(ACTOR, id);
+  assert.ok(read.ok);
+  assert.equal(read.value.revision, 3);
+  assert.deepEqual(read.value.stageEvidence.map((item) => item.id), ["repo-adopted"]);
+  assert.equal(new ProductIntentStore({ root }).read("clerk:bob", id).code, "not_found");
+  const bulkRoot = ownedFixtureDir(t, "product-transition-capacity").dir;
+  const bulk = new ProductIntentStore({ root: bulkRoot });
+  const seeded = bulk.write(ACTOR, { ...create, brief: { idea: "x" } });
+  assert.ok(seeded.ok);
+  const bulkId = seeded.value.receipt.productId;
+  const tiny = (name: string) => ({ ...evidence(name), references: [] });
+  for (let batch = 0; batch < 8; batch++) {
+    const fill = bulk.transition(ACTOR, { ...transitionFor(bulkId, { stageEvidence: Array.from({ length: 16 }, (_, index) => tiny(`b${batch}-${index}`)) }), requestId: `fixture-bulk-000${batch}`, expectedRevision: batch + 1 });
+    assert.ok(fill.ok, `batch ${batch}`);
+  }
+  assert.equal(bulk.transition(ACTOR, { ...transitionFor(bulkId, { stageEvidence: [tiny("one-too-many")] }), requestId: "fixture-bulk-over", expectedRevision: 9 }).code, "capacity");
+});
+
+test("W1-T10657: trusted product transitions replay one durable revision after uncertain commit", (t) => {
+  const root = ownedFixtureDir(t, "product-transition-replay").dir;
+  const created = new ProductIntentStore({ root }).write(ACTOR, create);
+  assert.ok(created.ok);
+  const id = created.value.receipt.productId;
+  const command = transitionFor(id);
+  let failedSyncs = 0;
+  const interrupted = new ProductIntentStore({ root, sync(fd) {
+    if (fstatSync(fd).isDirectory()) {
+      failedSyncs++;
+      throw Object.assign(new Error("directory sync remains unavailable"), { code: "EIO" });
+    }
+    fsyncSync(fd);
+  } });
+  assert.equal(interrupted.transition(ACTOR, command).code, "outcome_unknown");
+  const renamed = readFileSync(productStatePaths(root, ACTOR).state);
+  assert.equal(interrupted.transition(ACTOR, command).code, "outcome_unknown", "replay stays unknown while the directory cannot sync");
+  assert.equal(interrupted.receipt(ACTOR, command.requestId).code, "outcome_unknown");
+  assert.equal(failedSyncs, 3);
+  const recovered = new ProductIntentStore({ root });
+  const receipt = recovered.receipt(ACTOR, command.requestId);
+  assert.ok(receipt.ok);
+  const replay = recovered.transition(ACTOR, command);
+  assert.ok(replay.ok);
+  assert.equal(replay.value.replayed, true);
+  assert.deepEqual(replay.value.receipt, receipt.value);
+  assert.deepEqual(readFileSync(productStatePaths(root, ACTOR).state), renamed, "replay writes no second revision");
+  assert.equal(recovered.transition(ACTOR, { ...command, stageEvidence: [evidence("different")] }).code, "idempotency_conflict");
+  assert.equal(recovered.write(ACTOR, { ...create, requestId: command.requestId }).code, "idempotency_conflict", "a brief cannot reuse a transition's request id");
+  const read = recovered.read(ACTOR, id);
+  assert.ok(read.ok);
+  assert.equal(read.value.revision, 2);
+  assert.equal(read.value.stageEvidence.length, 1);
+  assert.deepEqual(read.value.history.map((item) => item.revision), [1, 2]);
+});

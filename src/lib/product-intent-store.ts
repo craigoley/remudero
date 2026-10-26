@@ -9,9 +9,9 @@ import { RmdError, GENERIC_EXIT_CODE } from "./errors.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import {
   PRODUCT_INTENT_LIMITS, PRODUCT_INTENT_VERSION, productIdSchema, productOwnerStateSchema,
-  productRecordDigest, productRequestIdSchema, productWriteSchema, storedProductSchema,
+  productRecordDigest, productRequestIdSchema, productTransitionSchema, productWriteSchema, storedProductSchema,
   type ProductOwnerState, type ProductProjection, type ProductReceipt, type ProductResult,
-  type ProductStoreCode, type ProductSummary,
+  type ProductStoreCode, type ProductSummary, type StoredProduct,
 } from "./product-intent.js";
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -176,51 +176,87 @@ export class ProductIntentStore {
     return receipt;
   }
 
+  /** One save path for briefs and trusted transitions: lock, replay, revision guard, quota, atomic commit. */
+  private persist(
+    actor: string, input: { requestId: string; id?: string; expectedRevision: number }, payloadDigest: string,
+    operation: "pwrite" | "ptransition",
+    derive: (previous: StoredProduct | undefined, id: string, now: string) => unknown,
+  ): { receipt: ProductReceipt; replayed: boolean } {
+    const paths = this.paths(actor, true);
+    const requestKey = digest(input.requestId);
+    return withInflightLock(paths.locks, paths.ownerKey, () => {
+      const state = this.readState(paths);
+      const previousReceipt = state.receipts[requestKey];
+      if (previousReceipt) {
+        if (previousReceipt.payloadDigest !== payloadDigest) throw new ProductStoreFault("idempotency_conflict");
+        return { receipt: this.durableReceipt(paths, previousReceipt), replayed: true };
+      }
+      const id = input.id ?? `prd_${digest(`${paths.ownerKey}:${requestKey}`).slice(0, 32)}`;
+      const previous = state.products[id];
+      if (input.id && !previous) throw new ProductStoreFault("not_found");
+      if ((previous?.revision ?? 0) !== input.expectedRevision) throw new ProductStoreFault("stale_revision");
+      if ((!previous && Object.keys(state.products).length >= this.limits.products) || Object.keys(state.receipts).length >= this.limits.requests) {
+        throw new ProductStoreFault("capacity");
+      }
+      const now = this.clock.iso();
+      const product = storedProductSchema.parse(derive(previous, id, now));
+      const serialized = JSON.stringify(product);
+      if (Buffer.byteLength(serialized) > PRODUCT_INTENT_LIMITS.productBytes) throw new ProductStoreFault("invalid_input");
+      const receipt: ProductReceipt = {
+        operationId: `${operation}_${digest(`${paths.ownerKey}:${requestKey}`)}`, productId: id,
+        revision: product.revision, objectiveRevision: product.objectiveRevision,
+        savedAt: now, payloadDigest, recordDigest: productRecordDigest(product),
+      };
+      // Rebuild the records: no property write is keyed by a request-derived name.
+      this.commit(paths, {
+        ...state,
+        products: Object.fromEntries([...Object.entries(state.products).filter(([key]) => key !== id), [id, product] as const]),
+        receipts: Object.fromEntries([...Object.entries(state.receipts), [requestKey, receipt] as const]),
+      });
+      return { receipt, replayed: false };
+    }, { run_id: `product-${randomUUID()}` });
+  }
+
   write(actor: string, command: unknown): ProductResult<{ receipt: ProductReceipt; replayed: boolean }> {
     return this.attempt(actor, () => {
       const parsed = productWriteSchema.safeParse(command);
       if (!parsed.success || Buffer.byteLength(JSON.stringify(parsed.data)) > PRODUCT_INTENT_LIMITS.requestBytes) throw new ProductStoreFault("invalid_input");
       const input = parsed.data;
-      const paths = this.paths(actor, true);
-      const requestKey = digest(input.requestId);
-      const payloadDigest = digest(JSON.stringify(input));
-      return withInflightLock(paths.locks, paths.ownerKey, () => {
-        const state = this.readState(paths);
-        const previousReceipt = state.receipts[requestKey];
-        if (previousReceipt) {
-          if (previousReceipt.payloadDigest !== payloadDigest) throw new ProductStoreFault("idempotency_conflict");
-          return { receipt: this.durableReceipt(paths, previousReceipt), replayed: true };
-        }
-        const id = input.id ?? `prd_${digest(`${paths.ownerKey}:${requestKey}`).slice(0, 32)}`;
-        const previous = state.products[id];
-        if (input.id && !previous) throw new ProductStoreFault("not_found");
-        if ((previous?.revision ?? 0) !== input.expectedRevision) throw new ProductStoreFault("stale_revision");
-        if ((!previous && Object.keys(state.products).length >= this.limits.products) || Object.keys(state.receipts).length >= this.limits.requests) {
-          throw new ProductStoreFault("capacity");
-        }
-        const now = this.clock.iso();
+      return this.persist(actor, input, digest(JSON.stringify(input)), "pwrite", (previous, id, now) => {
         const changedObjective = previous && digest(JSON.stringify(previous.brief)) !== digest(JSON.stringify(input.brief));
-        const product = storedProductSchema.parse({
+        return {
           version: PRODUCT_INTENT_VERSION, id, revision: (previous?.revision ?? 0) + 1,
           objectiveRevision: previous ? previous.objectiveRevision + (changedObjective ? 1 : 0) : 1,
           createdAt: previous?.createdAt ?? now, updatedAt: now, brief: input.brief,
           repository: previous?.repository ?? null, stageEvidence: previous?.stageEvidence ?? [], executionAuthority: "none",
-        });
-        const serialized = JSON.stringify(product);
-        if (Buffer.byteLength(serialized) > PRODUCT_INTENT_LIMITS.productBytes) throw new ProductStoreFault("invalid_input");
-        const receipt: ProductReceipt = {
-          operationId: `pwrite_${digest(`${paths.ownerKey}:${requestKey}`)}`, productId: id,
-          revision: product.revision, objectiveRevision: product.objectiveRevision,
-          savedAt: now, payloadDigest, recordDigest: productRecordDigest(product),
         };
-        // Rebuild the records: no property write is keyed by a request-derived name.
-        this.commit(paths, {
-          ...state,
-          products: Object.fromEntries([...Object.entries(state.products).filter(([key]) => key !== id), [id, product] as const]),
-          receipts: Object.fromEntries([...Object.entries(state.receipts), [requestKey, receipt] as const]),
-        });
-        return { receipt, replayed: false };
-      }, { run_id: `product-${randomUUID()}` });
+      });
+    });
+  }
+
+  /**
+   * Trusted-mechanism seam: records verified repository identity and appended stage evidence in the
+   * same owner record. Never reachable from a browser request; the brief and authority stay untouched.
+   */
+  transition(actor: string, command: unknown): ProductResult<{ receipt: ProductReceipt; replayed: boolean }> {
+    return this.attempt(actor, () => {
+      const parsed = productTransitionSchema.safeParse(command);
+      if (!parsed.success || Buffer.byteLength(JSON.stringify(parsed.data)) > PRODUCT_INTENT_LIMITS.requestBytes) throw new ProductStoreFault("invalid_input");
+      const input = parsed.data;
+      return this.persist(actor, input, digest(JSON.stringify(input)), "ptransition", (previous, _id, now) => {
+        if (!previous) throw new ProductStoreFault("not_found");
+        if (previous.objectiveRevision !== input.expectedObjectiveRevision) throw new ProductStoreFault("stale_revision");
+        const added = input.stageEvidence ?? [];
+        const known = new Set(previous.stageEvidence.map((item) => item.id));
+        if (added.some((item, index) => item.objectiveRevision !== previous.objectiveRevision || known.has(item.id) ||
+          added.findIndex((other) => other.id === item.id) !== index)) throw new ProductStoreFault("invalid_input");
+        if (previous.repository && input.repository && previous.repository.id !== input.repository.id) throw new ProductStoreFault("invalid_input");
+        if (previous.stageEvidence.length + added.length > 128) throw new ProductStoreFault("capacity");
+        return {
+          ...previous, revision: previous.revision + 1, updatedAt: now,
+          repository: input.repository ?? previous.repository, stageEvidence: [...previous.stageEvidence, ...added],
+        };
+      });
     });
   }
 
