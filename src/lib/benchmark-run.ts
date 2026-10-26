@@ -15,7 +15,7 @@ import { readInflightLock, sweepStaleInflightLocks, type InflightLockInfo, type 
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
 import { workerClassOfLane } from "./host-memory-learning.js";
-import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment } from "./worker.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
 
@@ -543,6 +543,30 @@ export function attemptAssignmentJoin(assignmentId: string | undefined, threw: b
   return { selection_assignment_unavailable_reason: threw ? "spawn-threw-before-assignment" : "assignment-not-observed" };
 }
 
+/** Terminal status and reported reservation facts survive independently of fallible usage reads.
+ * These are neither a transport counter nor a second accounting authority. In particular, a
+ * budget refusal or missing price cannot establish whether the provider was invoked. */
+function nonDispatchTerminalEvidence(result: WorkerResult | undefined) {
+  if (result === undefined) return unavailable("worker-result-not-reported");
+  try {
+    const flag = (value: unknown) => typeof value === "boolean" ? { state: "observed" as const, value }
+      : unavailable(value === undefined ? "terminal-field-not-reported" : "invalid-terminal-field");
+    const amount = (value: unknown) => observedNonnegative(value,
+      value === undefined ? "terminal-field-not-reported" : "invalid-terminal-field");
+    const subtype = result.subtype;
+    return { state: "observed" as const,
+      resultSubtype: typeof subtype === "string" && /^[a-z0-9_-]{1,80}$/i.test(subtype)
+        ? { state: "observed" as const, value: subtype }
+        : unavailable(subtype === undefined || subtype === "" ? "terminal-field-not-reported" : "invalid-terminal-field"),
+      isError: flag(result.isError), apiError: flag(result.apiError),
+      invocation: result.notStarted === "admission-abandoned"
+        ? { state: "observed" as const, value: "not-started" as const, reason: "admission-abandoned" }
+        : unavailable("provider-invocation-not-reported"),
+      allowanceRefused: flag(result.budgetRefused),
+      reservedUsd: amount(result.budgetReservedUsd), settledUsd: amount(result.budgetSettledUsd) };
+  } catch { return unavailable("worker-terminal-fields-unavailable"); }
+}
+
 /** Capture an auxiliary worker call without turning telemetry into a worker or PR gate. The
  * caller's existing assignment sink remains authoritative when one is supplied. */
 export function benchmarkNonDispatchSpawn(
@@ -554,20 +578,30 @@ export function benchmarkNonDispatchSpawn(
     // W1-T4613: the caller already receipts this worker; a second pair would count it twice.
     if (callerOwnsBenchmarkReceipt(args)) return raw(args);
     let observedAssignmentId: string | undefined;
+    const observedAssignmentIds = new Set<string>();
+    const terminalAssignmentIds = new Set<string>();
+    const terminalResults = new WeakSet<WorkerResult>();
     const named = receiptIdentity(args);
     const write = (step: string, fields: Record<string, unknown>): void => {
       const path = benchmarkEvidenceLedgerPath(args.config);
       if (path === undefined) return;
+      const assignmentId = step === "worker.assignment"
+        ? (fields.worker_assignment as WorkerSelectionAssignment).id : fields.selection_assignment_id;
       appendLedger(path, {
-        run_id: args.runId ?? named.runId ?? `${lane}-${observedAssignmentId ?? "unassigned"}`,
+        run_id: args.runId ?? named.runId ?? `${lane}-${typeof assignmentId === "string" ? assignmentId : "unassigned"}`,
         task_id: args.taskId ?? named.taskId ?? lane.toUpperCase(), step, lane, ...fields,
       });
     };
-    const recordAttempt = (fields: Record<string, unknown>): void => {
+    const recordAttempt = (fields: Record<string, unknown>, result?: WorkerResult): void => {
       try {
+        const id = typeof fields.selection_assignment_id === "string" && fields.selection_assignment_id.length > 0
+          ? fields.selection_assignment_id : undefined;
+        if (id ? terminalAssignmentIds.has(id) : result !== undefined && terminalResults.has(result)) return;
         const row = { step: "worker.attempt", ...fields,
-          assignment_observed: fields.selection_assignment_id === observedAssignmentId && observedAssignmentId !== undefined };
+          assignment_observed: id !== undefined && observedAssignmentIds.has(id) };
         write("worker.attempt", { ...fields, benchmark_run: benchmarkRunAttemptReceipt(row) });
+        if (id) terminalAssignmentIds.add(id);
+        if (result !== undefined) terminalResults.add(result);
       } catch {
         // A missing sink is coverage debt, never a reason to retry or change the worker result.
         console.error(JSON.stringify({ event: "benchmark.non_dispatch_attempt_unavailable", lane, reason: "ledger-write-failed" }));
@@ -576,18 +610,19 @@ export function benchmarkNonDispatchSpawn(
     let result: WorkerResult;
     try {
       result = await raw({ ...args, onSelectionAssignment: (assignment) => {
-        const priorId = observedAssignmentId;
-        observedAssignmentId = assignment.id;
+        observedAssignmentId = undefined;
         try {
           write("worker.assignment", { worker_assignment: assignment,
             benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane), nonDispatchWorkerStack) });
+          observedAssignmentIds.add(assignment.id);
+          observedAssignmentId = assignment.id;
         } catch {
-          observedAssignmentId = priorId;
           console.error(JSON.stringify({ event: "benchmark.non_dispatch_assignment_unavailable", lane, reason: "ledger-write-failed" }));
         }
         // A failed benchmark sink must not skip the caller's existing assignment callback.
         args.onSelectionAssignment?.(assignment);
       }, onModelFallbackAttempt: (attempt) => {
+        const terminal = nonDispatchTerminalEvidence(attempt.result);
         let resources: Record<string, unknown> = {};
         try { if (attempt.result) resources = benchmarkWorkerAttemptResources(attempt.result); }
         catch (error) {
@@ -597,7 +632,10 @@ export function benchmarkNonDispatchSpawn(
             error_class: error instanceof TypeError ? "TypeError" : error instanceof Error ? "Error" : "non-error" }));
         }
         recordAttempt({ ...attemptAssignmentJoin(attempt.selectionAssignmentId, false),
-          attempted_model: attempt.model, success: false, worker_failure: attempt.reason, ...resources });
+          attempted_model: attempt.model, success: false, worker_failure: attempt.reason,
+          terminal_evidence: terminal, ...resources }, attempt.result);
+        // A successor can fail before emitting an assignment. Never attribute that failure to the departed selection.
+        if (observedAssignmentId === attempt.selectionAssignmentId) observedAssignmentId = undefined;
         try { args.onModelFallbackAttempt?.(attempt); }
         catch { console.error(JSON.stringify({ event: "benchmark.non_dispatch_fallback_hook_unavailable", lane })); }
       } });
@@ -609,6 +647,7 @@ export function benchmarkNonDispatchSpawn(
     }
     const assignmentId = result.selectionAssignmentId ?? observedAssignmentId;
     const observedEnvelope = typeof result.subtype === "string" && result.subtype.length > 0;
+    const terminal = nonDispatchTerminalEvidence(result);
     let resources: Record<string, unknown>;
     try { resources = benchmarkWorkerAttemptResources(result); }
     catch (error) {
@@ -619,7 +658,7 @@ export function benchmarkNonDispatchSpawn(
     }
     recordAttempt({ ...attemptAssignmentJoin(assignmentId, false),
       ...(result.isError || result.apiError || result.usageRefusal ? { success: false }
-        : observedEnvelope ? { success: true } : {}), ...resources });
+        : observedEnvelope ? { success: true } : {}), terminal_evidence: terminal, ...resources }, result);
     return result;
   };
 }
