@@ -858,7 +858,7 @@ const operatorShard = (id: string, over: { title?: string; files?: string[] } = 
 test("an operator verify human record is released by a proceed ruling and stays parked on an escalation", async () => {
   const root = planDir({
     "W1-T9100-x.yaml": operatorShard("W1-T9100"),
-    "W1-T9101-x.yaml": operatorShard("W1-T9101", { title: "purge every archive in state" }),
+    "W1-T9101-x.yaml": operatorShard("W1-T9101", { title: "purge every archive in state", files: ["src/lib/archiver.ts"] }),
   });
   try {
     const seen: RiskJudgeInput[] = [];

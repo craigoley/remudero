@@ -80,13 +80,13 @@ export function optionAction(intent: OptionIntent, lane: InboxOptionLane, propos
 
 /** Serve a plain message with each option's intent and, where a route is valid, its action. An option
  *  stored without an intent is served as "reply" with no action until the backfill re-writes it. */
-export function servePlainOptions(plain: PlainInboxMessage, lane: InboxOptionLane, proposalId: string): ServedPlainInboxMessage {
+export function servePlainOptions(plain: PlainInboxMessage, lane: InboxOptionLane, proposalId: string, informational = false): ServedPlainInboxMessage {
   return {
     ...plain,
     options: plain.options.map((o): ServedPlainOption => {
       const option: ServedPlainOption = { label: o.label, consequence: o.consequence, intent: o.intent ?? "reply" };
       if (o.intent === undefined) return option;
-      const action = optionAction(o.intent, lane, proposalId);
+      const action = informational ? undefined : optionAction(o.intent, lane, proposalId);
       return { ...option, ...(action ? { action } : {}) };
     }),
   };

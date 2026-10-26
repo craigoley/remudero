@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   band_meaning: blast-radius
   priority: 1.43
@@ -59,10 +59,13 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 1
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
     reasons:
-      - "deterministic backstop: it declares test/deploy/check-test-test-the-deploy-tick-runs-current-deploy-code-without-trippin.test.ts, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-10-22T13:17:04.518Z"
-    pin: "09fefe05bda5cc0e47732bb968180ae91cef5e84216de1b1eb11ebcf4d23ebe4"
+      - "The declared files are a tmp helper (src/lib/tmp.ts) and a new test file under test/deploy/. Neither the description nor the files list shows a touch on secrets, auth, permissions, merge/review policy, or data deletion."
+      - "The task is a flaky-test fix, and the failure logs name temp-directory problems (a missing file under /tmp/rmd-deploy-code-*, a module-not-found error). That is consistent with a change to a tmp helper plus a regression test."
+      - "The acceptance is a grep-verifiable test in a new file, so it can be verified. The change goes through normal CI and review, and nothing in it asks the operator for a decision."
+      - "The ci-friction family has a mixed track record (Beta mean 0.73, 58 declined), and the test name mentions \"deploy\". The test exercises the deploy tick, but the files shown do not change deploy policy or infrastructure, so this is only mild caution."
+    judged_at: "2026-10-26T09:46:54.852Z"
+    pin: "f7c700ee6db10cd71ba2bd75a1691c37705503db64b794971c574e0d5a2a455c"

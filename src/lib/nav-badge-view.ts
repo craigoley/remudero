@@ -430,11 +430,12 @@ function inboxCounts(classified: Classification, nowMs: number, sources: ViewSou
   });
   if (!classified) return { reason: "no inbox classification has been written yet" };
   let ready = 0;
-  const projection = projectProposalHumanGates(Object.entries(classified.states).map(([proposalId, state]) => ({ proposalId, state: state as InboxState })));
+  const ownerOf = (id: string) => classified.displayOwners?.[id] ?? inboxOwner({ id });
+  const projection = projectProposalHumanGates(Object.entries(classified.states).map(([proposalId, state]) => ({ proposalId, state: state as InboxState })), "core", ownerOf);
   const needsYou = projection.count.inbox.count!;
   let fleet = 0;
   for (const [proposalId, state] of Object.entries(classified.states)) {
-    if (inboxOwner({ id: proposalId }) === "fleet") {
+    if (ownerOf(proposalId) === "fleet") {
       if (state === "ready" || state === "drafting" || state === "not_ready" || state === "deferred_with_trigger") fleet += 1;
     } else if (state === "ready") ready += 1;
   }

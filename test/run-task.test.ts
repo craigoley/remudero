@@ -4495,7 +4495,13 @@ test("runFixRung: a seeded MERGED PR produces ZERO fix-rung strikes — no strik
   assert.equal(outcome.strikes, 0, "strikes never incremented — the check runs BEFORE strikes++");
   assert.match(outcome.standDownReason ?? "", /MERGED/);
   assert.equal(stoodDown.length, 1, "exactly one fix.stood_down ledger line, naming the site and the state");
-  assert.deepEqual(stoodDown[0], { site: "rung.strike", strike: 1, reason: outcome.standDownReason });
+  // W1-T10339: every stand-down row also records what it read (head sha and
+  // task-contract revision) so the sweep can tell a standing hold from an ended rung.
+  const { read_head_sha: readHead, read_contract_revision: readRevision, ...rest } =
+    stoodDown[0] as Record<string, unknown>;
+  assert.deepEqual(rest, { site: "rung.strike", strike: 1, reason: outcome.standDownReason });
+  assert.equal(readHead, "deadbeef", "the stand-down records the head sha it read");
+  assert.match(String(readRevision), /^[0-9a-f]{64}$/, "the stand-down records the contract revision it read");
 });
 
 test("runFixRung: a PR that goes MERGED mid-rung (after round 1's strike, before the exhaustion escalate()) stands down rather than filing a needs-human issue", async () => {

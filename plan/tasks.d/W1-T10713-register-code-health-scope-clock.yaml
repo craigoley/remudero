@@ -1,0 +1,55 @@
+- id: W1-T10713
+  title: Register the existing Code health scope clock in the fixture census
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: span
+  origin: "Operator-approved cockpit completion; exact-head clock census refusal on PR14394"
+  status: queued
+  attempts: 0
+  priority: 2
+  budget_usd: 14
+  depends_on:
+    - W1-T10560
+  files:
+    - scripts/expiring-fixture-census.mjs
+    - test/expiring-fixture-census.test.ts
+    - test/console-api/views/code-health-cached-view.test.ts
+  rationale: >-
+    Protected main already ages Code health repository-scope asOf readings against its unchanged
+    three-minute SCOPE_BUDGET_MS. The original inline expression is outside the census recognizer's
+    current discovery shape. PR14394's equivalent explicit parse makes this existing field visible,
+    and hosted and local checks correctly refuse it as unregistered. Register the actual main rule
+    in a standalone measurement-instrument PR before the production correction, without an exemption.
+  design: >-
+    Add one AGED_FIELDS row for asOf, anchored to the existing Code health scope validator and its
+    180000ms policy. Pin meaningful source evidence that is true for both the current inline age
+    expression and the reviewed explicit parse. Use offsetDays zero, preserving the existing conservative
+    whole-day granularity; restrict this view-specific row to the validateCodeHealthRequest consumer.
+    Do not change source production code, discovery, refusal logic, existing rows, consumers, margins,
+    population baselines, exclusions, known-uncovered entries, waiver handling or policy thresholds.
+
+    Prove that the real table covers an explicit scope parse, removing this row restores the missing
+    field refusal, a stale source anchor still refuses, a near-future fixed asOf fixture reaches its
+    actual cutoff, and an unrelated consumer is not attributed to this view-specific rule. In the
+    existing cached-view refusal test, derive its clock from Date.now once and its stale reading one
+    hour earlier. Retain all original missing-scope, stale-scope, requested-build, foreign-repository
+    and configured-roster assertions. Do not hide a fixture with an exemption or move a fixed date.
+    Run the actual census and its verified physical suites through normal admission.
+  falsifier: >-
+    Keep the tests and remove only the new asOf registration: the registration regression must fail.
+    Restore it and obtain a complete passing test summary. Do not claim this changes production
+    freshness, supplies scan measurements or grants implementation credit to W1-T10683.
+  acceptance:
+    - claim: existing Code health scope clocks have a source-pinned consumer-specific census registration
+      proof: "unit test: Code health scope clocks are registered without weakening the fixture census"
+    - claim: the cached scope refusal fixture derives its stale reading from one current clock
+      proof: 'grep: const scopeNow = Date\.now() in test/console-api/views/code-health-cached-view.test.ts'
+  note: >-
+    Reserved from the operator checkout for codex/register-code-health-scope-clock-20261026.
+    The dependency added to W1-T10683 requires this separate instrument correction to merge before
+    its final production repair qualification. All W1-T10683 criteria, file scope, budget, risk,
+    verification and original dependencies remain unchanged. No existing jobs or guards are changed.
