@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { isPaused, isSafeRepoName, isSafeTaskId, isStopped, requestKick } from "./fleet-control.js";
 import { ghTextAsync } from "./github-transport.js";
@@ -11,6 +12,7 @@ import {
   productIdSchema, productRequestIdSchema, type ProductStoreCode, type StoredProduct,
 } from "./product-intent.js";
 import { ghProductRepositoryProvider, type ProductRepositoryProvider } from "./product-repository.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 import { explainUnitTestProofRefusal } from "./review.js";
 
 export const PRODUCT_BUILD_VERSION = "product-build-v1" as const;
@@ -65,14 +67,14 @@ export interface ProductBuildTarget {
 
 export interface ProductBuildOptions {
   root?: string;
-  /** The checkout whose reviewed `.remudero/managed-repos.json` enrolls targets. */
+  /** The checkout whose reviewed managed-repository set enrolls targets. */
   repoRoot?: string;
   provider?: Pick<ProductRepositoryProvider, "read">;
   target?: ProductBuildTarget;
   store?: ProductIntentStore;
   /** The existing guarded repo-scoped kick marker; the daemon's own admission still decides. */
   kick?: (root: string, taskId: string, origin: string, repo: string) => void;
-  now?: () => string;
+  clock?: Clock;
 }
 
 class Fault extends RmdError {
@@ -90,6 +92,9 @@ export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText
   const api = async (path: string, raw = false): Promise<string> =>
     text(["api", ...(raw ? ["-H", "Accept: application/vnd.github.raw"] : []), path], limits);
   const slug = (repo: BuildRepository) => `repos/${repo.owner}/${repo.name}`;
+  // A target's shard directory is repository-relative; the one layout resolver names it, never a repeated literal.
+  const layout = resolveRepoLayout(sep, () => undefined);
+  const shardDirectory = relative(layout.root, join(layout.planDir, "tasks.d")).split(sep).join("/");
   return {
     async inspect(repo) {
       let enrolled: boolean | undefined;
@@ -115,11 +120,11 @@ export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText
     },
     async task(repo, taskId) {
       try {
-        const names = z.array(z.object({ name: z.string() })).parse(JSON.parse(await api(`${slug(repo)}/contents/plan/tasks.d?ref=${repo.defaultBranch}`)));
+        const names = z.array(z.object({ name: z.string() })).parse(JSON.parse(await api(`${slug(repo)}/contents/${shardDirectory}?ref=${repo.defaultBranch}`)));
         const shard = names.find((entry) => entry.name.startsWith(`${taskId}-`) && entry.name.endsWith(".yaml"));
         if (!shard) return { state: "absent" };
         const parsed = z.array(z.object({ id: z.string(), origin: z.string().optional(), status: z.string(), budget_usd: z.number().optional() }).passthrough())
-          .parse(parseYaml(await api(`${slug(repo)}/contents/plan/tasks.d/${shard.name}?ref=${repo.defaultBranch}`, true)));
+          .parse(parseYaml(await api(`${slug(repo)}/contents/${shardDirectory}/${shard.name}?ref=${repo.defaultBranch}`, true)));
         const task = parsed.find((entry) => entry.id === taskId);
         if (!task) return { state: "absent" };
         const claims = z.array(z.unknown()).parse(JSON.parse(await api(`${slug(repo)}/git/matching-refs/rmd-dispatch/${taskId}`)));
@@ -156,7 +161,7 @@ export class ProductBuildService {
   private readonly target: ProductBuildTarget;
   private readonly store: ProductIntentStore;
   private readonly kick: NonNullable<ProductBuildOptions["kick"]>;
-  private readonly now: () => string;
+  private readonly clock: Clock;
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: ProductBuildOptions) {
@@ -164,7 +169,7 @@ export class ProductBuildService {
     this.target = options.target ?? ghProductBuildTarget({ repoRoot: options.repoRoot });
     this.store = options.store ?? new ProductIntentStore({ root: options.root });
     this.kick = options.kick ?? ((root, taskId, origin, repo) => { requestKick(root, taskId, origin, repo); });
-    this.now = options.now ?? (() => new Date().toISOString());
+    this.clock = options.clock ?? systemClock;
   }
 
   async execute(actor: string, command: unknown): Promise<ProductBuildResult> {
@@ -271,7 +276,7 @@ export class ProductBuildService {
     const saved = this.store.transition(actor, {
       version: "product-intent-v1", requestId, id: product.id, expectedRevision: product.revision, expectedObjectiveRevision: product.objectiveRevision,
       stageEvidence: [{ id: item.id, stage: "build", outcome: item.outcome, objectiveRevision: product.objectiveRevision,
-        observedAt: this.now(), references: [{ label: "Target repository", url: item.url }] }],
+        observedAt: this.clock.iso(), references: [{ label: "Target repository", url: item.url }] }],
     });
     if (!saved.ok) throw new Fault(saved.code);
     return this.readProduct(actor, product.id);

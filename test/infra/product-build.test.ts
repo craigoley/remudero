@@ -6,6 +6,7 @@ import {
   BOOTSTRAP_CHECKS, bootstrapConfirmed, bootstrapEvidenceId, ghProductBuildTarget, productPlanOrigin, ProductBuildService,
   type BuildObservation, type BuildTask, type ProductBuildOptions, type ProductBuildTarget, type TargetInspection, type TaskRead,
 } from "#src/lib/product-build.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -55,7 +56,7 @@ function fixture(t: TestContext, over: { target?: FakeTarget; envelope?: boolean
     async read() { this.reads += 1; return this.next; },
   };
   const kicks: string[][] = [];
-  const options: ProductBuildOptions = { root, store, target, provider, now: () => "2026-10-26T01:00:00.000Z",
+  const options: ProductBuildOptions = { root, store, target, provider, clock: fixedClock(Date.parse("2026-10-26T01:00:00.000Z")),
     kick: (_root, taskId, origin, repo) => { kicks.push([taskId, origin, repo]); } };
   const service = new ProductBuildService(options);
   const command = (extra: Record<string, unknown> = {}) => ({ version: "product-build-v1", requestId: "build-request-0001", productId,
