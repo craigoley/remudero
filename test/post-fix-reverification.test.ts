@@ -700,3 +700,16 @@ test("BEHAVIORAL (W1-T977): sweepPostFixReverification's own default reader does
     process.env.PATH = savedPath;
   }
 });
+
+
+test("a merged fix already contained in the PR head never mints another CI head", async () => {
+  for (const included of [true, undefined]) {
+    const candidate = ciGateTimeoutPr({ headSha: "742a056f17595660339bec8f75572462a7eea15f" });
+    const deps = fakeDeps({ fixInHead: () => included });
+    const result = await runPostFixReverification([candidate], new Set([820]), deps);
+    assert.equal(result.redriven, 0, "already-contained or unmeasured fix ancestry cannot justify a fresh SHA");
+    assert.deepEqual(deps.redriveCalls, []);
+    assert.equal(readLedgerLines(deps.ledgerPath).some(row => row.step === "sweep.post_fix_redriven"), false,
+      "a held head receives neither a push receipt nor strike credit");
+  }
+});
