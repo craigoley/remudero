@@ -553,7 +553,8 @@ test("a throwing current-head CI read cannot press a ready refresh", async () =>
   const h = harness({ behindMainByPr: one(7336, 2), baseChangedFilesByPr: one(7336, base(["src/mine.ts"])),
     readBranchProtectionStrict: () => false,
     liveCiRunForHead: async () => { throw new Error("current-head CI unavailable"); } });
-  await assert.rejects(runLightPassReadyRefresh([ready], h.deps, POLICY), /current-head CI unavailable/);
+  assert.equal(await runLightPassReadyRefresh([ready], h.deps, POLICY), undefined);
   assert.deepEqual(h.updated, []);
-  assert.deepEqual(decided(h.rows), [], "an unread fact is not a fabricated no-CI decision");
+  assert.equal(decided(h.rows)[0]!.ci_in_flight, null, "unread is not a fabricated no-CI decision");
+  assert.match(String(decided(h.rows)[0]!.reason), /CI activity unavailable/);
 });
