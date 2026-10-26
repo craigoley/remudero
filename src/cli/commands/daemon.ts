@@ -122,7 +122,7 @@ export type HostFn = (...args: any[]) => any;
 export function daemonImprovementActionDeps(stateDir: string, gateway: RatifyCliGateway) {
   return {
     pendingImprovementActions: () => pendingImprovementActions(stateDir),
-    runImprovementAction: async (target: { operationId: string; stateDir: string; repoRoot: string }) => {
+    handOffImprovementAction: async (target: { operationId: string; stateDir: string; repoRoot: string }) => {
       if (!gateway.improvement) throw new Error("The daemon's fresh-source improvement gateway is unavailable.");
       return gateway.improvement(target);
     },

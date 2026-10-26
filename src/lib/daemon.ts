@@ -1593,7 +1593,7 @@ export interface DaemonDeps {
    * path; the HTTP writer never starts a process. */
   pendingPrActions?: () => Array<{ action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string; operator?: string }>;
   pendingImprovementActions?: () => AsyncIterable<{ operationId: string; stateDir: string; repoRoot: string }>;
-  runImprovementAction?: (target: { operationId: string; stateDir: string; repoRoot: string }) => Promise<unknown>;
+  handOffImprovementAction?: (target: { operationId: string; stateDir: string; repoRoot: string }) => Promise<unknown>;
   /** Clear the request only after its established command reaches a named terminal outcome. */
   clearPrAction?: (action: "fix" | "review", prNumber: number) => void;
   /** W1-T4087: writes plain-language messages for operator-owned inbox items that have none yet,
@@ -3332,11 +3332,11 @@ export { checkDispatchGovernors, type DispatchGovernorVerdict } from "./dispatch
  * Forensics: docs/forensics/daemon.md. */
 /** Runs saved planning requests serially without blocking dispatch or interrupting an active child. */
 export function startImprovementActionPump(
-  deps: Pick<DaemonDeps, "pendingImprovementActions" | "runImprovementAction" | "checkStop" | "checkPause">,
+  deps: Pick<DaemonDeps, "pendingImprovementActions" | "handOffImprovementAction" | "checkStop" | "checkPause">,
   intervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): { stop(): void; settled(): Promise<void>; isBusy(): boolean } {
-  const pending = deps.pendingImprovementActions, run = deps.runImprovementAction;
+  const pending = deps.pendingImprovementActions, run = deps.handOffImprovementAction;
   if (!pending || !run) return { stop() {}, settled: async () => {}, isBusy: () => false };
   let stopped = false, pass: Promise<void> | undefined;
   const tick = (): void => {
