@@ -770,6 +770,12 @@
       "grepHint": "Instance registry selection contract"
     },
     {
+      "path": "docs/investigation.md",
+      "title": "Duplicate-key shard bypass of lint-plan",
+      "summary": "Root cause identified: independently valid plan edits merged into duplicate YAML keys after their checks ran.",
+      "grepHint": "Duplicate-key shard bypass of lint-plan"
+    },
+    {
       "path": "docs/knowledge-garden-log.md",
       "title": "Knowledge garden log",
       "summary": "Each section is one pass of the knowledge gardener (W1-T4095): what it changed and how the knowledge base scored.",

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { buildProductRoutes } from "#src/lib/product-routes.js";
 import { realProductResearchProvider } from "#src/lib/product-research.js";
 import type { Config } from "#src/lib/config.js";
@@ -30,7 +31,7 @@ const identity: IdentityProvider = {
   },
 };
 
-function assembled(root: string, extra: Partial<ServeDeps> = {}) {
+function assembled(root: string, extra: Partial<ServeDeps> = {}, prefix = "/v1/products") {
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan"), { recursive: true });
   const ledgerPath = join(root, "state/ledger.ndjson");
@@ -46,9 +47,10 @@ function assembled(root: string, extra: Partial<ServeDeps> = {}) {
     ...extra,
   };
   const before = readdirSync(root, { recursive: true });
-  const routes = buildServeRoutes(deps).filter((route) => route.path === "/v1/products" || route.path === "/v1/products/research");
+  const routes = buildServeRoutes(deps).filter((route) => route.path === prefix || (prefix === "/v1/products" && route.path === "/v1/products/research"));
   assert.deepEqual(readdirSync(root, { recursive: true }), before, "assembling product routes creates no state");
-  assert.deepEqual(routes.map((route) => `${route.method} ${route.path}`).sort(), ["GET /v1/products", "POST /v1/products", "POST /v1/products/research"]);
+  assert.deepEqual(routes.map((route) => `${route.method} ${route.path}`).sort(),
+    prefix === "/v1/products" ? ["GET /v1/products", "POST /v1/products", "POST /v1/products/research"] : [`POST ${prefix}`]);
   return routes;
 }
 
@@ -276,4 +278,56 @@ test("research with no admitted per-call budget is explicitly unavailable withou
     assert.equal(reply.run.outcome, "unavailable");
     assert.equal(reply.run.summary, undefined);
   } finally { await app.close(); }
+});
+
+const WRECKTERRA_ID = 1432832754;
+const adopt = (productId: string, over: Record<string, unknown> = {}) => ({ version: "product-repository-v1", requestId: "route-adopt-000001",
+  productId, expectedRevision: 1, expectedObjectiveRevision: 1,
+  action: "adopt", owner: "craigoley", name: "wreckterra", visibility: "public", repositoryId: WRECKTERRA_ID, ...over });
+
+test("W1-T10613: the served product repository operation matches the authenticated API contract", async (t) => {
+  assert.notDeepEqual(violations("ab", { type: "string", minLength: 3 }), [], "the contract validator must enforce minLength");
+  assert.notDeepEqual(violations("abcd", { type: "string", maxLength: 3 }), [], "the contract validator must enforce maxLength");
+  assert.deepEqual(violations("a😀b", { type: "string", minLength: 3, maxLength: 3 }), [], "string lengths count Unicode code points");
+  const shim = ghShim([{ when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra",
+    owner: { login: "craigoley" }, private: false, default_branch: "main" }) }]);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  t.after(() => { process.env.PATH = originalPath; });
+  const root = ownedFixtureDir(t, "product-repository-http").dir;
+  const products = assembled(root);
+  const mounted = assembled(root, {}, "/v1/products/repository");
+  assert.equal(mounted[0]?.tier, "high", "creating a repository is a high-tier action");
+  assert.equal(mounted[0]?.scope, "write");
+  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes: [...products, ...mounted] });
+  await new Promise<void>((resolve) => instance.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(instance.address() as AddressInfo).port}`;
+  const send = async (session: "alice" | "bob" | undefined, body: unknown, raw?: string) => {
+    const result = await fetch(`${base}/v1/products/repository`, { method: "POST", headers: { authorization: "Bearer fixture-write",
+      "content-type": "application/json", ...(session ? { "x-test-session": session } : {}) }, body: raw ?? JSON.stringify(body) });
+    const reply = await result.json() as { version: string; error?: string; replayed?: boolean; receipt?: { outcome: string; repository: { id: number } } };
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/repository", "POST", result.status)), [],
+      `the real repository response (${result.status}) must match its declared contract`);
+    assert.match(result.headers.get("cache-control") ?? "", /no-store/);
+    return { status: result.status, body: reply };
+  };
+  try {
+    const saved = await request(base, "/v1/products", "alice", command);
+    const productId = saved.body.receipt!.productId;
+    assert.equal((await send(undefined, adopt(productId))).status, 403);
+    const adopted = await send("alice", adopt(productId));
+    assert.equal(adopted.status, 200);
+    assert.equal(adopted.body.receipt?.outcome, "adopted");
+    assert.equal(adopted.body.receipt?.repository.id, WRECKTERRA_ID);
+    assert.equal(adopted.body.replayed, false);
+    assert.equal((await send("alice", adopt(productId))).body.replayed, true);
+    assert.ok(!shim.calls().some((call) => call.includes("-X POST")), "adoption makes no create call over the real transport");
+    assert.equal((await send("bob", adopt(productId))).status, 404);
+    assert.equal((await send("alice", adopt(productId, { requestId: "route-adopt-000002", repositoryId: 7 }))).status, 409);
+    assert.equal((await send("alice", adopt(productId, { visibility: "private" }))).status, 409);
+    assert.equal((await send("alice", adopt(productId, { owner: "someone" }))).status, 409);
+    assert.equal((await send("alice", { ...adopt(productId), extra: true })).status, 400);
+    assert.equal((await send("alice", undefined, "{broken")).status, 400);
+    assert.equal((await send("alice", undefined, JSON.stringify({ padding: "x".repeat(5000) }))).status, 413);
+  } finally { await new Promise<void>((resolve, reject) => instance.close((error) => error ? reject(error) : resolve())); }
 });

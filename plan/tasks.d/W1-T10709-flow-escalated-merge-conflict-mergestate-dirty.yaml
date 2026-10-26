@@ -3,10 +3,12 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   priority: 1.27
-  status: queued
+  status: blocked
+  retirement: retired
+  dispatch_hold: true
   attempts: 0
   author_class: machine
   origin: "flow-blocker:escalated:merge conflict (mergeState dirty)"
@@ -24,7 +26,18 @@
     Operator approved the exact bounded recheck on 2026-10-26. Human verification, original
     priority, dependencies, author lineage and spending limits remain unchanged; no implementation
     or task credit at plan amendment.
+    Operator subsequently chose the independently merged PR14405 verified-preservation path.
+    Hold this overlapping task while native recovery is pending; do not build a second recovery policy.
+    Retire this task only after native recovery is actually confirmed, through a separate governed plan change.
+    Native recovery confirmed on 2026-10-26 at 14:53:24.535Z after immutable preservation verification.
+    The operator chose PR14405; retire this overlapping proposal without building it or claiming improvement credit.
   rationale: |
+    Retirement decision: native recovery for PR14176 reclaimed its recorded owner at 14:53:24.535Z,
+    retaining exact branch, remote head, contained local history and no-live-owner checks. The
+    preserved commit has parent 08042277282973fc3c493f52a2f74120a5ceba11 and exact tree
+    c76e1a98085723895dbf0f027bb10e87a96e63ed, independently read back from its immutable recovery ref.
+    Keep independently merged PR14405 and the existing dispatch hold. Original criteria and design
+    below remain historical proposal evidence; they are not implemented or credited by retirement.
     escalated:merge conflict (mergeState dirty) cost 6.23 PR-hours; owner NONE
     Owner NONE is absent.
     Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
@@ -32,20 +45,6 @@
     - PR #10551: 2.03 PR-hours — merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on src/lib/fix-progress-judge.ts (ours -0, theirs -3), src/lib/pr-blocker.ts (ours -0, theirs -0), src/lib/sweep.ts (ours -79, theirs -128), src/run-task.ts (ours -37, theirs -61), test/auto-merge-blocked-codeql-review-thread.test.ts (ours -8, theirs -2) — would dispatch the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head — NOT DISPATCHED this pass: fix checkout claim declined 3 times on #10551 at head 3644414 (registered worktree owner /home/node/Remudero/worktrees/sweep-W1-T7243-1791611477902, dirty_worktree) — FIX_CLAIM_DECLINE_BACKSTOP 3 reached, no further claim is attempted at this head while that worktree exists
     - PR #10829: 1.34 PR-hours — merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on learnings/ci.yaml (ours -0, theirs -0), learnings/index.json (ours -1, theirs -0) — would dispatch the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head — NOT DISPATCHED this pass: fix checkout claim declined 3 times on #10829 at head 3874a18 (registered worktree owner /home/node/Remudero/worktrees/sweep-W1-T7899-1791711829493, dirty_worktree) — FIX_CLAIM_DECLINE_BACKSTOP 3 reached, no further claim is attempted at this head while that worktree exists
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
-  risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.95
-    reasons:
-      - "high-risk verdict at confidence 0.95 — on the change's description/files alone, no diff was
-        read — The acceptance requires automatic clearance of a merge-conflict escalation, while the
-        cited cases explicitly stop further dispatch after repeated checkout-claim declines
-        involving dirty worktrees or failed preservation.; on the change's description/files alone,
-        no diff was read — The filed record does not specify a bounded remedy that preserves those
-        protections; its safe resolution cannot be verified from the supplied description, files
-        list, and gates."
-    judged_at: "2026-10-26T10:59:20.820Z"
-    pin: "5620997d960c1be17a1376f9fe3bf2233f1953071735b56da42d90568b60f391"
   band_meaning: span
   principles:
     tdd: strict
@@ -84,3 +83,13 @@
     success value. Remove the correction while retaining tests and observe failures; restore and
     obtain verified physical test summaries through normal admission. Retain all existing recovery
     and backstop suites."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The filed note records operator approval for the exact bounded recheck and leaves human verification, priority, dependencies, author lineage and spending limits unchanged."
+      - "Acceptance limits recovery to one recheck per accepted answer, requires existing live-owner and refusal guards, and requires failed-recheck recording without exposing the answer."
+      - "Declared scope is sweep.ts and one new test file; the filing-time gates report no adverse finding. Implementation and test results are not supplied."
+    judged_at: "2026-10-26T12:29:52.926Z"
+    pin: "a1c69b95ab9c89f726b974047f067dca424888ef64dac559f6078dea163d6d4e"

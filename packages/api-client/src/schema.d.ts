@@ -175,6 +175,44 @@ export interface components {
       version: "product-research-v1";
       error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "already_answered";
     };
+    /** At most 4096 raw request bytes. action adopt requires the exact provider repositoryId and never creates; action create must not carry repositoryId. owner and name must match the product's requestedRepository when it has one. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
+    ProductRepositoryCommand: {
+      version: "product-repository-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      action: "adopt" | "create";
+      owner: string;
+      name: string;
+      visibility: "public" | "private";
+      repositoryId?: number;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+    };
+    ProductRepositoryReceipt: {
+      operationId: string;
+      productId: ProductId;
+      action: "adopt" | "create";
+      outcome: "adopted" | "created";
+      repository: ProductRepositoryIdentity;
+      completedAt: string;
+      objectiveRevision: number;
+      payloadDigest: string;
+    };
+    ProductRepositoryResponse: {
+      version: "product-repository-v1";
+      receipt: ProductRepositoryReceipt;
+      replayed: boolean;
+    };
+    ProductRepositoryError: {
+      version: "product-repository-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "repository_not_found" | "repository_conflict" | "idempotency_conflict" | "creation_denied" | "capacity" | "busy" | "corrupt" | "unavailable" | "provider_unreadable" | "outcome_unknown" | "request_too_large" | "stale_revision" | "recovery_required";
+    };
+    /** The service's scope, tier or confirmation gate refused access before the repository handler. */
+    ProductRepositoryAccessError: {
+      error: "unauthorized" | "forbidden" | "confirm_nonce_required";
+      required_scope?: "write";
+      required_tier?: "high";
+    };
     /** Bounded read-only answer-v1; missing evidence is explicit and citations are dated. */
     OperatorAgentAnswer: {
       version: "answer-v1";
@@ -6076,6 +6114,20 @@ export interface paths {
           "409": ProductResearchError;
           "413": ProductResearchError;
           "503": ProductResearchError;
+        };
+    };
+  };
+  "/v1/products/repository": {
+    post: {
+      responses: {
+          "200": ProductRepositoryResponse;
+          "400": ProductRepositoryError;
+          "401": ProductRepositoryAccessError;
+          "403": (ProductRepositoryError) | (ProductRepositoryAccessError);
+          "404": ProductRepositoryError;
+          "409": ProductRepositoryError;
+          "413": ProductRepositoryError;
+          "503": ProductRepositoryError;
         };
     };
   };

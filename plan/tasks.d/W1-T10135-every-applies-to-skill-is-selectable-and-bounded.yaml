@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   principles: {tdd: strict}
   budget_usd: 60.00
   rationale: "From a read-only comparison with nanocoai/nanoclaw, whose scripts/skill-conformance.test.ts discovers
@@ -24,7 +24,7 @@
     it for every other TASK_TYPES member; (5) it passes scanSkillDraft's allowlist. Failure messages NAME the skill.
     FALSIFIER FIXTURES: the check logic is a function taking a skill directory, and the test runs it against fixture
     skills with applies-to: implemnt and with a when-paths glob matching nothing, asserting each fails naming the skill.
-    Retain the two existing hand-written tests unchanged; this task adds only the discovery test.
+    Retain the two existing hand-written tests unchanged; add only the discovery test and its required census catalog registration in src/lib/rule-suites.ts. The suite remains in normal rule checks and full CI. Register the suite in PRECHECK_PATH_TRIGGERED_SUITES in scripts/census-precheck.mjs so the existing real child executor asks it on every nonempty diff and PRECHECK_PARITY records that route; any tracked-file change can alter a when-paths witness. Update only the existing parity fixtures in test/every-ci-census-is-asked-before-the-push.test.ts to require this named skill census alongside their original structural/birth-gate assertions, and prove empty diffs start no child. Do not grow the CI-only baseline or change limits.
     Do not change selection or scan behaviour."
   acceptance:
     - claim: "the discovery test declares the new skill-conformance census"
@@ -32,12 +32,12 @@
     - claim: "the discovery test covers all five live-skill invariants and rejects typo applies-to and dead when-paths fixtures by skill name"
       kind: guard
       proof: "unit test: test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts"
-  risk: low
+  risk: high
   origin: feedback#fb-1791856366583-e5a5e9
   plan_refs: ["§7B"]
-  files: [test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts]
+  files: [test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts, src/lib/rule-suites.ts, scripts/census-precheck.mjs, test/every-ci-census-is-asked-before-the-push.test.ts]
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=27ce200e0ea1f88a
   attempts: 0
-  note: "verify:auto — pure test addition over existing exports; no src change."
+  note: "verify:human — required cross-catalog registration; normal high-risk judgment and existing dispatch hold retained; discovery test over existing exports plus required catalog and real pre-push execution registration; no selection, scanning, limit or permission change."

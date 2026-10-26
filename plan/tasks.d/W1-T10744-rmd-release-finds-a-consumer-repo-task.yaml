@@ -1,0 +1,98 @@
+- id: W1-T10744
+  title: "`rmd release` FINDS A CONSUMER-REPO TASK — releaseCommand reads only <cwd repo>/plan/tasks.yaml, so `rmd release CONSOLE-T127` run from core's checkout in the console daemon container refuses 'unknown task' and names only that one path; resolve the task across the instance's managed checkouts (or `--repo <name>`) and say where it looked"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, which plan `rmd release` resolves its task from; it spans the verb (run-task.ts) and its two reference docs, and the release row, the issue close and the breaker are unchanged
+  band_meaning: span
+  priority: 3
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-26: releasing CONSOLE-T127 (console #2147) failed from core's checkout and worked only with the container workdir set to the console checkout"
+  plan_refs: [W1-T4691, W1-T8241, W1-T10742, CONSOLE-T127]
+  files:
+    - src/run-task.ts
+    - docs/cli-reference.md
+    - docs/operator-guide.md
+    - test/daemon/rmd-release-finds-a-consumer-repo-task.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main a4d8281f6.
+
+    THE INCIDENT. On 2026-10-26, run inside the remudero-console daemon container from core's checkout,
+    `rmd release CONSOLE-T127 --reason …` printed
+    `rmd release: unknown task 'CONSOLE-T127' (not found in /home/node/Remudero/remudero/plan/tasks.yaml)`
+    and exited 2. The same command with the container workdir set to
+    `/home/node/Remudero/repos/remudero-console` released it (~17:58Z, operator-approved) and closed
+    console #2147.
+
+    THE DEFECT.
+    - src/run-task.ts:40875-40893 `releaseCommand` loads only `join(repoRoot, "plan", "tasks.yaml")`
+      (:40888-40894) and refuses any task it does not declare. Its error names only that one path.
+    - `repoRoot` (src/lib/repo-location.ts:58-80 `resolveRepoRoot`, :82) is the `--repo-root` flag,
+      else the git toplevel of cwd. So the answer depends on the operator's shell directory, not on
+      the task.
+    - The task's repo is only needed for `task.repo`, which `releaseBreaker` uses for the escalation
+      issue's repo (:40902, :40908). The release row itself goes to `ledgerPathFor(config)`, the
+      instance's ledger, wherever the plan was read from.
+    - The convention for a consumer plan already exists: src/cli/commands/fix.ts:5455-5456 reads
+      `repo === self.repo ? join(repoRoot, "plan", "tasks.yaml") : join(config.root, "repos", repo,
+      "plan", "tasks.yaml")`, and run-task-verb.ts:5629 checks a task's repo out at
+      `join(config.root, "repos", task.repo)`.
+    - A workaround exists but is undocumented here: the global `--repo-root <checkout>` flag. Neither
+      the error nor `rmd release --help` names it.
+
+    WHY IT MATTERS. A consumer instance's breaker is released in that instance's container, where the
+    natural working directory is core's checkout. W1-T10742 makes more such breakers releasable by the
+    runbook, but an operator release must still work from where the operator stands.
+  design: |
+    1. `releaseCommand` resolves the task's plan in this order:
+       a. `--repo <name>` (new flag, added to `unknownArgError`'s allowed list) reads
+          `join(config.root, "repos", <name>, "plan", "tasks.yaml")`, or `repoRoot`'s plan when
+          `<name>` is this repo's own name, the same rule as fix.ts:5455-5456. A missing task there
+          refuses, naming that path.
+       b. With no `--repo`, read `repoRoot`'s plan first, as today. If the task is absent there, read
+          every `config.root/repos/*/plan/tasks.yaml` that exists, skipping the one for this repo's
+          own name.
+          - Exactly one match: use it.
+          - More than one: refuse (exit 2) and name each repo, asking for `--repo`.
+    2. The unknown-task error names every plan path it read, and how to target a consumer repo:
+       `--repo <name>` (or `--repo-root <checkout>`). Exit 2 as today.
+    3. Update the command's `syntax`/`detail` (src/run-task.ts COMMANDS `release` entry, :41684-41688),
+       docs/cli-reference.md (:95, :917-922) and the operator-guide row (docs/operator-guide.md:108) to
+       name `--repo`.
+    4. Nothing else. The release row, `releaseBreaker`, the issue close and the breaker are unchanged.
+  prompt: |
+    Write test/daemon/rmd-release-finds-a-consumer-repo-task.test.ts first. That is the folder
+    `rmd test-place` computes for the existing release suite's imports; keep this exact path, because
+    the proofs grep it.
+    - Import through `#src/*`. Reuse the harness shape of test/an-operator-can-release-a-halted-task.test.ts
+      (`runRelease`: process.exit mocked, the gh shim, a HOME instance).
+    - The fixture's `config.root/repos/<consumer>/plan/tasks.yaml` declares a consumer task that core's
+      own plan does not.
+    - Watch every case fail at base. Restore with `git show origin/main:src/run-task.ts`, never stash.
+    - Every new test title starts with `W1-T10744: ` exactly as in the acceptance proofs.
+    - Assert the release row's `task_id` and `repo`, not only the exit code.
+    - Assert the refusal text names BOTH paths it read and the `--repo` hint, so a message naming only
+      the core path fails.
+    Run the suite, `npm run -s lint-plan:fast` and `rmd preflight --fast` on the committed tree before
+    the first push.
+  acceptance:
+    - claim: "`rmd release <consumer task>` run from core's checkout finds the task in the instance's managed consumer checkout and writes its release row with that task's repo"
+      proof: 'grep: test("W1-T10744: rmd release finds a consumer repo task from the core checkout" in test/daemon/rmd-release-finds-a-consumer-repo-task.test.ts'
+    - claim: "`rmd release <task> --repo <name>` reads that managed checkout's plan"
+      proof: 'grep: test("W1-T10744: rmd release --repo reads the named managed checkout" in test/daemon/rmd-release-finds-a-consumer-repo-task.test.ts'
+    - claim: "an unknown task's refusal names every plan path it read and how to target a consumer repo"
+      proof: 'grep: test("W1-T10744: an unknown task names every plan it read and the --repo hint" in test/daemon/rmd-release-finds-a-consumer-repo-task.test.ts'
+  falsifier: |
+    - Restore the single `repoRoot` plan read: the first case must fail with exit 2, and the second
+      must fail on `--repo` as an unexpected argument.
+    - Name only the first path in the refusal: the third case must fail.
+    GUARDS that held at base and must still hold (test/an-operator-can-release-a-halted-task.test.ts):
+    - a core task still releases from core's plan;
+    - a missing `--reason` and an unknown flag still refuse before writing;
+    - a task in no plan still refuses with exit 2 and writes no row.
+    Remove each guard's production branch in turn: its existing case must fail. Then restore it and
+    require zero failures.

@@ -173,7 +173,7 @@ function declaredReads(text: string, roots: ReadonlySet<string>, marker = CENSUS
 }
 
 /** Literal runtime imports, excluding comments, string contents and type-only declarations. */
-function runtimeSpecifiers(text: string): string[] {
+export function runtimeSpecifiers(text: string): string[] {
   const scanner = createScanner(true, undefined, text);
   const tokens: { kind: SyntaxKind; value: string }[] = [];
   const braceDepths: number[] = [];

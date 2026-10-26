@@ -1132,6 +1132,7 @@ import {
 } from "./lib/retro-open-pr-guard.js";
 import {
   AUTOMATED_RETRO_DECISION_ENV,
+  automatedRetroGatherObserver,
   decodeAutomatedRetroDecision,
   retroExitAfterPrOpened,
   runAutomatedRetroSubprocess,
@@ -1279,6 +1280,7 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { proceduresCommand, proceduresProductionInput } from "./lib/procedures-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
@@ -22795,12 +22797,15 @@ async function retroCommand(
   // from a unit test. Written as an `if` here the reporting body was unreachable in every test
   // that does not truncate, and `diff-coverage` blocked the PR naming exactly those lines.
   reportRetroLedgerTruncation(retroLedgerRead, { ledgerPath, runId: `RETRO-${retroReadStartedMs}` });
+  const observeGather = automatedRetroGatherObserver(opts.automated !== undefined && !dryRun, {
+    log: (step, fields) => appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...fields }),
+  });
   // W1-T1013: the follow-up harvest's OWN corpus — the archive∪live union, resolved
   // separately from `ledgerNdjson` above so every OTHER miner buildGather runs keeps
   // reading the single-file corpus it always has (see buildGather's `followupLedgerNdjson`
   // doc for why this must stay a second, explicit input rather than replacing `ledgerNdjson`
   // outright).
-  const followupLedgerNdjson = followupLedgerUnionNdjson(join(config.root, "state"));
+  const followupLedgerNdjson = observeGather("followup-ledger", () => followupLedgerUnionNdjson(join(config.root, "state")));
   const learningsMd = existsSync(learningsPath) ? readFileSync(learningsPath, "utf8") : "";
   // W1-T89/P18: plan/mast-mapping.yaml is DATA (Rule 2) — loaded here, never
   // touched by buildGather itself. A missing file degrades to an empty table
@@ -22830,13 +22835,14 @@ async function retroCommand(
   // a proposal's indented (a)/(b)/(c) continuation bullets). Best-effort: a read/parse
   // hiccup degrades to "no dedup source" (every followup mints) rather than aborting
   // the retro — the SAME non-fatal discipline the mast-mapping/orientation reads use.
-  let gatherPlanRead: { plan: ReturnType<typeof loadPlan> | undefined } | { error: unknown };
-  try {
-    const tasksYamlPath = join(checkoutRoot, "plan", "tasks.yaml");
-    gatherPlanRead = { plan: existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath) : undefined };
-  } catch (error) {
-    gatherPlanRead = { error: error };
-  }
+  const gatherPlanRead: { plan: ReturnType<typeof loadPlan> | undefined } | { error: unknown } = observeGather("plan-inputs", () => {
+    try {
+      const tasksYamlPath = join(checkoutRoot, "plan", "tasks.yaml");
+      return { plan: existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath) : undefined };
+    } catch (error) {
+      return { error: error };
+    }
+  });
   const readGatherPlan = (): ReturnType<typeof loadPlan> | undefined => {
     if ("error" in gatherPlanRead) throw gatherPlanRead.error;
     return gatherPlanRead.plan;
@@ -22865,7 +22871,7 @@ async function retroCommand(
   // organ. loadMounts throws on a bad/absent table — same fail-closed
   // discipline every other mounts.yaml read in this file already has.
   const mountsTable = loadMounts(mountsPath(checkoutRoot));
-  const gather = buildGather({
+  const gather = observeGather("gather", () => buildGather({
     ledgerNdjson,
     followupLedgerNdjson,
     learningsMd,
@@ -22884,7 +22890,7 @@ async function retroCommand(
     // the same tree `openTaskTitles` above already loads.
     planCoherence: readPlanCoherenceInputs(checkoutRoot),
     now: Date.now(),
-  });
+  }));
   // W1-T111 (P25 iv): the approve/reframe rate is telemetry, not decoration — the field's
   // failure mode is the rubber-stamp queue, so it rides EVERY retro (cumulative, all-time,
   // never scoped to `sinceTs` — a fatigue signal needs the whole history to be trustworthy).
@@ -22894,7 +22900,7 @@ async function retroCommand(
   // checkout (this repo's own working tree, `repoRoot` — never a PR diff). Best-effort + silent
   // on failure, the SAME non-fatal discipline `openProposalLines`/`openTaskTitles` above already
   // follow: a read/scan hiccup degrades to "nothing to advise" rather than aborting the retro.
-  const netStateAdvisorySection = netStateAdvisorySectionFor(checkoutRoot);
+  const netStateAdvisorySection = observeGather("net-state", () => netStateAdvisorySectionFor(checkoutRoot));
   // W1-T367: a single batched `projectPlan` pass over the SAME `repoRoot`/plan/tasks.yaml the
   // plan-health sweep reads below, so its "already shipped" skip is decided the SAME way the
   // dispatch path decides it — never the decorative yaml `status:` field (MEASURED: 248/359
@@ -22922,11 +22928,11 @@ async function retroCommand(
   try {
     const planHealthPlan = readGatherPlan();
     if (planHealthPlan) {
-      const planHealthProjection = projectPlan(
+      const planHealthProjection = observeGather("plan-projection", () => projectPlan(
         planHealthPlan,
         { ledgerPath, github: opts.github ?? buildBatchedGithub(owner, repo) },
         join(config.root, "state", "status.json"),
-      );
+      ));
       followupReferentRead = {
         kind: "ok",
         merged: new Set([...planHealthProjection].filter(([, v]) => v.merged).map(([id]) => id)),
@@ -22952,7 +22958,7 @@ async function retroCommand(
   // every standing rule the linter encodes — rides EVERY retro report (dry-run and real
   // alike), same as the net-state advisory section above.
   const planHealthSection = planHealthSweepSectionFor(checkoutRoot, isTaskMerged, () => readGatherPlan()?.tasks);
-  const reportWithoutPromotion =
+  const reportWithoutPromotion = observeGather("report", () =>
     [
       renderGather(gather),
       "",
@@ -22963,7 +22969,7 @@ async function retroCommand(
       retroLedgerScopeNote(retroLedgerRead),
     ].join("\n") +
     planStateTruthSection +
-    planHealthSection;
+    planHealthSection);
 
   if (dryRun) {
     console.log(reportWithoutPromotion + netStateAdvisorySection);
@@ -31767,7 +31773,7 @@ export async function sweepEscalationTriage(
  * THE W1-T474 CALL SITE for W1-T124's post-fix re-verification rung (`runPostFixReverification`,
  * src/lib/sweep.ts) — built and unit-tested (test/post-fix-reverification.test.ts) but callerless
  * until this task. For every open PR whose recorded failure matches a {@link DEFAULT_FIX_CLASSES}
- * row whose `fixPrNumber` has MERGED, mints a fresh head via the SAME `pushEmptyCommit` leaf the
+ * row whose `fixPrNumber` has MERGED and is positively absent from the PR head, mints a fresh head via the SAME `pushEmptyCommit` leaf the
  * ABSENT remedy (`repushAbsent` in {@link buildSweepEffects}) already uses — never a check
  * re-run: W1-T474's rationale (7) measured that the `pull_request` default checkout is the
  * PINNED merge ref, so re-requesting the same check-run replays the identical stale tree. Only a
@@ -31796,6 +31802,7 @@ export async function sweepPostFixReverification(
     dryRun?: boolean;
     classes?: readonly FixClass[];
     pushEmptyCommit?: typeof gitPushEmptyCommit;
+    fixInHead?: (pr: OpenPrView, cls: FixClass) => boolean | undefined | Promise<boolean | undefined>;
     isMergedByNumber?: (prNumber: number) => boolean;
     readCiFailures?: (pr: OpenPrView) => CiFailure[] | undefined | Promise<CiFailure[] | undefined>;
   } = {},
@@ -31803,6 +31810,32 @@ export async function sweepPostFixReverification(
   const classes = opts.classes ?? DEFAULT_FIX_CLASSES;
   const pushEmptyCommitImpl = opts.pushEmptyCommit ?? gitPushEmptyCommit;
   const isMergedByNumber = opts.isMergedByNumber ?? ((n) => ghLiveStateByNumber(owner, repo, n) === "MERGED");
+  const fixMergeShas = new Map<number, string | undefined>();
+  const fixInHead = opts.fixInHead ?? (async (pr: OpenPrView, cls: FixClass): Promise<boolean | undefined> => {
+    if (!/^[a-f0-9]{40}$/i.test(pr.headSha ?? "")) return undefined;
+    try {
+      if (!fixMergeShas.has(cls.fixPrNumber)) {
+        const fix = await ghJsonAsync(["pr", "view", String(cls.fixPrNumber), "--repo", `${owner}/${repo}`, "--json", "state,mergeCommit"]) as {
+          state?: string; mergeCommit?: { oid?: string };
+        };
+        const sha = fix.state === "MERGED" ? fix.mergeCommit?.oid : undefined;
+        fixMergeShas.set(cls.fixPrNumber, sha && /^[a-f0-9]{40}$/i.test(sha) ? sha : undefined);
+      }
+      const fixSha = fixMergeShas.get(cls.fixPrNumber);
+      if (!fixSha) return undefined;
+      const comparison = await ghJsonAsync(["api", `repos/${owner}/${repo}/compare/${fixSha}...${pr.headSha}?per_page=1`]) as {
+        status?: string; base_commit?: { sha?: string }; merge_base_commit?: { sha?: string };
+      };
+      const mergeBase = comparison.merge_base_commit?.sha;
+      if (comparison.base_commit?.sha !== fixSha || !mergeBase || !/^[a-f0-9]{40}$/i.test(mergeBase)) return undefined;
+      if ((comparison.status === "ahead" || comparison.status === "identical") && mergeBase === fixSha) return true;
+      if ((comparison.status === "behind" || comparison.status === "diverged") && mergeBase !== fixSha) return false;
+      return undefined;
+    } catch (error) {
+      log("sweep.post_fix_ancestry_unavailable", { pr_number: pr.prNumber, fix_pr_number: cls.fixPrNumber, error: String(error) });
+      return undefined;
+    }
+  });
   // W1-T977: the rung's own read for a PR still pending — see `PostFixReverificationDeps.
   // readCiFailures`'s own doc (sweep.ts) for why the shared `OpenPrView.ciFailures` snapshot is
   // undefined for exactly this case. Mirrors the `fetchCiFailures` dep already wired below (line
@@ -31846,6 +31879,7 @@ export async function sweepPostFixReverification(
         );
         return {};
       },
+      fixInHead,
       readCiFailures: readCiFailuresImpl,
       ledgerPath,
       runId,
@@ -41522,6 +41556,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "Phase 4 of the held-out skill eval: the production caller of runSkillEval (src/lib/skill-eval-command.ts). It SPENDS: without --confirm-spend it prints why and exits 2 having read nothing. It loads the proposal from <root>/state/inbox-proposals.json and refuses (exit 2, one skill_eval.refused ledger row) one that is absent, carries no skill file, names an unsafe skill or has no skillFileStagedAt stamp, which the skill workshop's next pass sets. A text is judged once: a proposal whose current text already carries a recorded verdict refuses as already-judged, since a second draw of the same text could only launder the first; a run that measured too few tasks judged nothing and may run again. The drafter mines every merged run in its window, so the hold-out is time: from the ledger union (every rotation form; an unread source refuses) and the plan it derives the golden corpus, excludes every task merged at or before the stamp, and draws K held-out tasks of the draft's applies-to type (a refused draw exits 1 and writes nothing). Merge credit is ledger rows only, which under-credits: a missed task is absent, never wrongly admitted. The without-skill arm gets the skills part production renders for the task today; the with-skill arm the part it would render were the draft approved, loaded from a temp tree by the same loader. A draft that part would not inject for some task refuses before any dispatch (draft-not-injected). Each task runs R trials per arm through a sealed, never-pushed paired attempt at its base on one pinned stack, only while the fleet is idle in quiet mode with measured headroom. The verdict is written to the proposal's skillEval only while its staged text is still the one evaluated; otherwise skill_eval.stale is logged and nothing is written. Exit 0 on a recorded pass, 1 on a recorded refusal or a stale run, 2 on any refusal before dispatch.",
   },
   {
+    name: "procedures",
+    syntax: "rmd procedures [--days <n>] [--json]",
+    summary: "Report which tool-call steps clean merged runs repeat, per task type, against repaired runs.",
+    detail: "A read-only procedure census (src/lib/procedure-census.ts) over the merged runs that started in the last N days (--days, an integer from 1 to 60, default 14; the window ends now). Each task type splits into CLEAN runs (zero fix rounds) and REPAIRED runs (one or more, attributed as the retro attributes them). A step is a worker tool call's tool_signature from its worker.activity row, coarsened so one file is not one step (Read:src/lib/review.ts reads as Read:src/lib/*.ts; Bash signatures and top-level paths stay verbatim), or the bare tool name on a row that carries no signature. Per type it reports each step's share of clean and repaired runs and their difference (lift), the universal steps (in at least 80% of clean runs, once a type has 5 clean runs), and the contiguous 2- and 3-step sequences at least half the clean runs share. It reports first how many tool-call rows carry a signature at all, and warns when none do, so missing signatures never read as nothing recurring. It reads the ledger union once, filtered to the steps it needs, and exits 2 naming each unread source when the union is incomplete, since an unread rotation can hide a run's fix rounds. --json prints the census object instead of the markdown report. It writes nothing of its own: no ledger row, no state file (the one cli.invoked row the dispatcher ledgers for every verb is all an invocation adds). Exit 0 on a report, 2 on a usage error or an incomplete union.",
+  },
+  {
     name: "check-acceptance",
     syntax: "rmd check-acceptance <body-file>",
     summary: "Report what the reviewer's own parser actually resolves from a PR body file.",
@@ -42593,6 +42633,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["replay-goldens", async (rest) => await replayGoldensCommand(rest)],
   ["skill-eval", async (rest) => await skillEvalCommand(rest,
     skillEvalProductionInput(repoRoot, workerBoundaryStack.harnessRevision, readUsageSnapshotPreferSdk))],
+  ["procedures", (rest) => proceduresCommand(rest, proceduresProductionInput())],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await withGhTransportFloorMode("wait", () => nextTaskIdCommand(rest))],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],

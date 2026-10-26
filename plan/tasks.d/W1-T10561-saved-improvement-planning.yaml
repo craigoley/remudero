@@ -30,6 +30,7 @@
     - src/lib/ledger.ts
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
+    - docs/operator-guide.md
     - test/**/improvement-thread.test.ts
     - test/**/improvement-thread-route.test.ts
     - test/**/improvement-action-pump.test.ts
@@ -98,3 +99,22 @@
     merged-task credit and dispatch/run claims before implementation. Reservations belong to
     codex/file-console-improvement-20261024; preserve contested claims. Reserved W1-T10561 through rmd
     next-task-id; this filing does not claim implementation or deployment.
+  amendment: |
+    Companion declaration 2026-10-26 for the daemon-owned improvement-action handoff.
+    Add one reasoned CLI_ONLY declaration and its one recorded baseline name, plus the
+    missing operator-guide command row. The HTTP draft/file routes persist requests;
+    they do not execute the admitted daemon handoff and are not action-equivalent routes.
+    No source behavior, existing mapping, original assertion, acceptance criterion,
+    falsifier, budget, admission guard or other limit changes. The three paths above
+    are the only additional companions. Normal plan/ruling qualification and protected
+    CI remain required; native repair retains ownership unless a separately bounded
+    conditional publication handoff is approved.
+
+    Standalone registration PR14468 replaces the product instrument companions.
+    It actually merged at 2026-10-26T16:51:29Z as 1e7188db5e3e9799f70fdc23f79142527e896a41.
+    Keep docs/operator-guide.md as the only remaining additional companion from the earlier declaration.
+    The earlier three-path declaration remains approval history. The two instrument paths
+    are supplied by the separately reviewed registration and are no longer in this task files list.
+    Native repair adopts that merged registration and documents the daemon-owned command through
+    existing ownership. All original product files, six criteria, budgets, source checks, admission,
+    filing, scanner and protected review guards remain unchanged; qualify the real census.

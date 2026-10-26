@@ -1,0 +1,30 @@
+id: incident-7c2eed58ba352c6f
+ts: 2026-10-26T17:50:45.304Z
+raw: >-
+  Incident 7c2eed58ba35: intervention
+  awaiting-review:review-lane:checks-green-review-orphaned-by-a-push-r
+
+  First seen: 2026-10-26T17:48:38.800Z
+
+  Last seen: 2026-10-26T17:48:38.800Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#14326@568368af5 actor=claude cause=awaiting-review:review-lane:checks-green-review-orphaned-by-a-push-r — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#14326@7ae2b8eba actor=claude cause=awaiting-review:review-lane:checks-green-review-orphaned-by-a-push-r — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#7c2eed58ba352c6f270572682e9e3ed21f169199d8b65d74df66598200a80069
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

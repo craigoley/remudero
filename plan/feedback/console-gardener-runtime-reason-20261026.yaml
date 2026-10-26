@@ -1,0 +1,67 @@
+id: console-gardener-runtime-reason-20261026
+ts: 2026-10-26T14:48:31.609Z
+raw: >-
+  Reconcile the exact gardener runtime reason contract; do not change admission
+  policy or relax the closed parser. Signed-in Core Maintenance showed real
+  cached cost/call evidence after recovery, but the runtime inventory still
+  failed contract verification and current-generation comparison stayed
+  unverified. The existing-auth /v1/i/core/gardeners response was HTTP200 under
+  stable serving source e650242cd0eeb4b19f3ba739c0a256c133bdd06b, repository
+  craigoley/remudero, with21 registered gardens. Six idle entries carried reason
+  admission-rank with null exit/execution. The current Console
+  parseGardenersProjection rejects that documented-in-runtime reason. In a
+  private diagnostic copy, changing ONLY those reason values to null lets the
+  same unmodified parser accept the response; unknown reasons, foreign
+  repository and invalid counters still reject. This copy is a causal
+  diagnostic, NOT a proposed production transformation.
+
+
+  Core src/lib/gardener-runtime.ts explicitly includes admission-rank, but Core
+  OpenAPI GardenerRuntimeEntry's closed enum and Console
+  lib/gardener-contract.ts omit it. Fresh Console
+  origin/main967b112b2a3d3a5b6cc7c107e86bed029d377417 has no intervening
+  parser/status/view changes. The existing Plan console insights and fleet view
+  owner explicitly acknowledged no unpublished gardener reason-enum/contract
+  consumer overlap. This is separate from that owner's
+  opportunityEvidence.improvementEffects work and from this chat's CONSOLE-T152
+  source-clock refresh.
+
+
+  Prepare the smallest coordinated producer-declaration and consumer repair
+  after current-main/all-open-head subject, native ruling, source-credit and
+  ownership checks. Keep Core OpenAPI and generated types aligned with the
+  existing runtime value, and preserve the Console's verified producer pins if
+  regeneration is required. Accept ONLY the supported reason, render its actual
+  deferred-priority meaning rather than Inputs unchanged, and retain the
+  whole-inventory refusal for unknown/invalid/foreign evidence. Reconcile
+  status/view exhaustiveness and existing real tests; do not silently filter
+  gardens, replace reasons with null in production, fabricate zero calls/cost,
+  infer child execution, or weaken source clock/generation/count guards. Prove
+  the actual runtime fixture becomes readable, malformed/unknown/foreign
+  controls still refuse, truthful deferred wording renders, and removing only
+  the compatibility repair fails. Retain all normal task, author, coverage,
+  stored acceptance, semantic review, hosted CI and protected-merge gates.
+
+
+  A separate naturally completed current-generation issue-revalidation pass
+  has10 exact assignment-attempt joins and10 canonical reported-price receipts,
+  subtotal0.00548745; its same-generation cached API aggregate and signed-in
+  cost/call panel were verified. That does not establish runtime verification,
+  complete total spend, invoice cost, restart durability or benefit. Other
+  unpriced/unlinked evidence stays unknown. No induced pass/model call,
+  admission-ranking or memory-policy change, provider/budget/permission change,
+  service action, restart or deployment is authorized by this finding. CI
+  infrastructure and Azure memory remain with other owners.
+attachments:
+  - https://github.com/craigoley/remudero/blob/e650242cd0eeb4b19f3ba739c0a256c133bdd06b/src/lib/gardener-runtime.ts
+  - https://github.com/craigoley/remudero/blob/e650242cd0eeb4b19f3ba739c0a256c133bdd06b/openapi/daemon.yaml
+  - https://github.com/craigoley/remudero-console/blob/967b112b2a3d3a5b6cc7c107e86bed029d377417/lib/gardener-contract.ts
+origin: repair#console-gardener-runtime-reason
+status: grilling
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: console-followup:283f4420-d19f-4a86-b3d3-a4a9a219e519
+thread_id: null
+answered_by: null
