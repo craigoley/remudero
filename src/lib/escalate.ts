@@ -1801,7 +1801,7 @@ function* tryEscalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>,
 }
 
 /** {@link EscalateDeps} plus the one extra dependency {@link escalateWithSummary} needs. */
-export interface EscalateWithSummaryDeps extends EscalateDeps, SummarizeDeps {}
+export interface EscalateWithSummaryDeps extends EscalateDeps<AsyncIssueGateway>, SummarizeDeps {}
 
 /** THE CHOKE POINT (W1-T348) — compose {@link summarizeEscalation} and {@link escalate} into the ONE
  *  call an await-capable producer makes, for the same reason dedup lives inside `escalate()`: a

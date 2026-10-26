@@ -1,0 +1,62 @@
+- id: W1-T10761
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/census-discovery-is-blind-to-a-second-idiom.test.ts cost 37.6 PR minute(s) across 10 round(s) on 7 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.13
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/census-discovery-is-blind-to-a-second-idiom.test.ts"
+  files:
+    - src/lib/ci-parity.ts
+    - test/ci/parity/ci-friction-remedy-9c840bdb656d60e8.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/census-discovery-is-blind-to-a-second-idiom.test.ts"
+      proof: "unit test: W1-T10761: check:test:test/census-discovery-is-blind-to-a-second-idiom.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/census-discovery-is-blind-to-a-second-idiom.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/census-discovery-is-blind-to-a-second-idiom.test.ts cost 37.6 PR minute(s) (seven-day half-life) across 10 fix round(s) on 7 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ci-parity.ts: test/census-discovery-is-blind-to-a-second-idiom.test.ts imports it
+    - test/census-discovery-is-blind-to-a-second-idiom.test.ts: named by the failing check
+    - the rounds name a failing test: test/census-discovery-is-blind-to-a-second-idiom.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #14013 (https://github.com/craigoley/remudero/pull/14013) at 2026-10-25T13:31:16.646Z: ci-log round — rule-checks: test/census-discovery-is-blind-to-a-second-idiom.test.ts; coverage-shard (1/8): WN-TN: censusPopulationDrift still gates on the ls-files projection alone — widening the rep
+        failing tests: W1-T2809: censusPopulationDrift still gates on the ls-files projection alone — widening the report moved no gate; every census-shaped suite this recognizer can find already has a CENSUS_POPULATION entry"]; censusPopulationDrift: the live, unmocked tree today reports zero unknown coverage — every census-shaped suite this recognizer can find already has a CENSUS_POPULATION entry
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/census-discovery-is-blind-to-a-second-idiom.test.ts:1:6692
+          | ✖ W1-T2809: censusPopulationDrift still gates on the ls-files projection alone — widening the report moved no gate (91.277212ms)
+          |   AssertionError [ERR_ASSERTION]: no undisclosed ls-files census suite
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts'
+          |   + ]
+          |   - []
+          | 
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/census-discovery-is-blind-to-a-second-idiom.test.ts:202:10)
+    - PR #14007 (https://github.com/craigoley/remudero/pull/14007) at 2026-10-25T02:26:52.522Z: ci-log round — rule-checks: test/census-discovery-is-blind-to-a-second-idiom.test.ts; coverage-shard (7/8): WN-TN: census drift resolves moved roster paths with the shared resolver, WN-TN: census drif
+        failing tests: W1-T2809: the ls-files and dir-walk populations are DISJOINT at head — the blindness is structural; W1-T2809: censusPopulationDrift still gates on the ls-files projection alone — widening the report moved no gate; W1-T9877: census drift resolves moved roster paths with the shared resolver, W1-T9877: census drift uses its default resolver for exact roster paths; W1-T9708: a test the census recognizer names but the registry does not is a census too; censusPopulationDrift: a discovered src-filtering caller with no population entry is named in `unknown` by path — UNCLASSIFIED, never dropped, never merged into the members
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/census-discovery-is-blind-to-a-second-idiom.test.ts:1:3596
+          | ✖ W1-T2809: the ls-files and dir-walk populations are DISJOINT at head — the blindness is structural (3742.328808ms)
+          |   AssertionError [ERR_ASSERTION]: test/the-tree-walk-recognizer-admits-by-what-a-suite-executes.test.ts carries both idiom tokens as source text and is not a refused fixture/meta suite
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/census-discovery-is-blind-to-a-second-idiom.test.ts:161:12)
+          |       at Test.runInAsyncScope (node:async_hooks:227:14)
+          |       at Test.run
+    - PR #12384 at 2026-10-16T18:17:08Z: hand fix PR #12384: scripts/security-merge-producer.mjs, src/lib/arm-auto-merge.ts, src/lib/ci-parity.ts, src/lib/code-scanning-merge-adapter.mjs, src/lib/security-merge-admission.ts, src/lib/security
+    - PR #10787 at 2026-10-11T07:45:20.182Z: ci-log round — rule-checks: test/the-gate-admission-population-is-checked-from-one-scan.test.ts; ci-shard (1/8): test/the-gate-admission-population-is-checked-from-one-scan.test.ts; test-slow-shard (1
+    - PR #10384 at 2026-10-09T15:19:43.110Z: ci-log round — rule-checks: test/census-discovery-is-blind-to-a-second-idiom.test.ts
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

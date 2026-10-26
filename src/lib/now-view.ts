@@ -35,6 +35,7 @@ import {
 } from "./board.js";
 import { boardSweepRepeat, createBoardProjection, rowsNamingTasksBefore, type BoardProjection, type BoardProjectionOptions, type Row } from "./board-projection.js";
 import { boardOpenSnapshotPath, boardSnapshotPath, createBoardSnapshotReader, OPEN_SNAPSHOT_RESAVE_MS, readOpenBoardSnapshot, type SharedBoardSnapshotRows } from "./board-snapshot-cache.js";
+import { changedFilesCachePath, createChangedFilesCache } from "./changed-files-cache.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./daemon-health.js";
 import { deployAutoPath, deployImageManualPath, deployMarkerPath } from "./deployer.js";
@@ -604,12 +605,13 @@ export function snapshotGithub(
   // An incomplete snapshot read as complete would say no PR ever merged; refused, the gateway reads failed instead.
   const unavailable = !opts.refuseIncomplete ? undefined : !open.ok ? open.reason : half.present ? undefined : "the board snapshot holds no closed pull requests";
   const content = createHash("sha1").update(`${JSON.stringify(openRows)}\n${half.digest}`).digest("hex").slice(0, 16);
-  const key = `${owner}/${repo}\n${content}\n${unavailable ?? ""}`;
+  const key = `${root}\n${owner}/${repo}\n${content}\n${snapshotFileIdentity(changedFilesCachePath(root, owner, repo))}\n${unavailable ?? ""}`;
   if (half.gateway?.key !== key) {
     const openNumbers = new Set(openRows.map((r) => r.number));
     const all = [...openRows, ...half.closed.filter((r) => !openNumbers.has(r.number))];
     const github = buildBatchedGithub(owner, repo, {
       ttlMs: Number.MAX_SAFE_INTEGER, pacer: NO_PACER,
+      changedFilesCache: createChangedFilesCache(root, owner, repo, { clock, readOnly: true }),
       fetchAll: () => {
         if (unavailable !== undefined) throw new NowViewError(`github snapshot unavailable: ${unavailable}`);
         return all;
@@ -637,16 +639,18 @@ export function snapshotSource(savedAt: string | null, reason: string | undefine
   return ageMs > NOW_GITHUB_STALE_MS ? { asOf: savedAt, state: "stale", reason: `open pull requests last saved ${Math.round(ageMs / 1000)} s ago` } : { asOf: savedAt, state: "fresh" };
 }
 
+function snapshotFileIdentity(path: string): string {
+  try {
+    const st = statSync(path);
+    return `${st.ino}:${st.mtimeMs}:${st.ctimeMs}:${st.size}`;
+  } catch {
+    // Missing/unreadable is an identity, not fresh evidence; snapshotGithub names the refusal.
+    return "-";
+  }
+}
+
 export function snapshotGeneration(root: string, owner: string, repo: string): string {
-  return [boardSnapshotPath(root, owner, repo), boardOpenSnapshotPath(root, owner, repo)].map((path) => {
-    try {
-      const st = statSync(path);
-      return `${st.ino}:${st.mtimeMs}:${st.size}`;
-    } catch {
-      // Missing/unreadable is an identity, not fresh evidence; snapshotGithub names the refusal.
-      return "-";
-    }
-  }).join(":");
+  return [boardSnapshotPath(root, owner, repo), boardOpenSnapshotPath(root, owner, repo), changedFilesCachePath(root, owner, repo)].map(snapshotFileIdentity).join(":");
 }
 
 export interface NowViewOptions {

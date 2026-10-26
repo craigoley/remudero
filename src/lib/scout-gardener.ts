@@ -11,7 +11,7 @@ import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter, type
 import { readMainHistory } from "./hot-file-gardener.js";
 import { ghTextAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
-import { machineShardLandingGuard, renderMachineShard, withoutRulingBlock } from "./machine-filing.js";
+import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard, withoutRulingBlock } from "./machine-filing.js";
 import { planCheapFingerprint, planInventory, type PlanInventory } from "./plan-gardener.js";
 import { parseOwnerRepoFromRemoteUrl } from "./onboard/inventory.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -179,6 +179,7 @@ function requireScoutRuns(sources: ScoutSources): ReadonlySet<string> {
 
 function isTestOnlyScout(t: Task): boolean {
   return t.status === "queued" && t.attempts === 0 && !t.retirement &&
+    t.risk_ruling?.verdict !== "operator" && t.risk_ruling?.operator_release_pin === undefined &&
     t.author_class === "machine" && t.origin?.startsWith("scout:") === true && t.files?.length === 1 &&
     /^test\/(?:[\w-]+\/){0,2}scout-[\w.-]+\.test\.ts$/.test(t.files[0]!);
 }
@@ -450,6 +451,14 @@ export function scoutGardenSpec(
         const text = withoutRulingBlock(original.trimEnd().split("\n")).join("\n")
           .replace(/^  verify:.*$/m, "  verify: human")
           .replace(/^  files:\s*\n(?:    -[^\n]*\n?)*/m, `  files:\n${draft.files.map((f) => `    - ${f}`).join("\n")}\n`);
+        const refused = machineShardFilingRefusal(text, draft.path, {
+          pathExists: path => existsSync(join(ws.root, path)),
+          pathExistsAtBase: path => existsSync(join(deps.repoRoot, path)),
+        });
+        if (refused !== undefined) {
+          deps.log("scout.record_refused", { step: draft.step, task_id: draft.id, reason: refused });
+          continue;
+        }
         writeFileSync(path, text + "\n");
         written.push({ rel: draft.path, step: draft.step, origin: draft.origin });
       }
