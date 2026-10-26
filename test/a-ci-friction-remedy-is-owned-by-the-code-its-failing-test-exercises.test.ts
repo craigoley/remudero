@@ -154,7 +154,7 @@ test("a runtime test failure never assigns its remedy to a type-only or quoted i
     'import type { Config } from "#src/lib/config.js";',
     'import { type Config } from "#src/lib/config.js";',
     '// import { config } from "#src/lib/config.js";',
-    'const example = 'import { config } from "#src/lib/config.js";';',
+    `const example = 'import { config } from "#src/lib/config.js";';`,
   ]) {
     f.put(TEST, inert + '\nimport { govern } from "#src/lib/dispatch-governor.js";\n');
     f.commit();
