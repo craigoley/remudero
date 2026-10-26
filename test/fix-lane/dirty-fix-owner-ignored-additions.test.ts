@@ -79,3 +79,32 @@ for (const merging of [false, true]) {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 }
+
+test("dirty fix-owner preservation still refuses an ignored working copy hidden by a staged deletion", () => {
+  const root = tmp();
+  try {
+    const upstream = seedUpstream(root), repoDir = join(root, "repo"), ownerPath = join(root, "owner");
+    cloneOf(upstream, repoDir);
+    const git = (path: string, args: string[]) => execFileSync("git", ["-C", path, ...args], { encoding: "utf8" });
+    writeFileSync(join(repoDir, ".gitignore"), "coverage/\n");
+    mkdirSync(join(repoDir, "coverage"));
+    const path = "coverage/staged.txt";
+    writeFileSync(join(repoDir, path), "recorded\n");
+    git(repoDir, ["add", ".gitignore"]);
+    git(repoDir, ["add", "--force", path]);
+    git(repoDir, ["commit", "--quiet", "-m", "chore: tracked ignored fixture"]);
+    const branch = "run-W1-T3822-1789876999001";
+    git(repoDir, ["branch", branch]);
+    git(repoDir, ["worktree", "add", "--quiet", ownerPath, branch]);
+    git(ownerPath, ["rm", "--cached", path]);
+    writeFileSync(join(ownerPath, path), "unpublished working bytes\n");
+    const localSha = sha(ownerPath, "HEAD");
+    const indexPath = git(ownerPath, ["rev-parse", "--path-format=absolute", "--git-path", "index"]).trim();
+    const status = git(ownerPath, ["status", "--porcelain=v1"]), index = readFileSync(indexPath);
+    assert.throws(() => preserveTrackedDirtyFixOwner(repoDir, ownerPath, branch, localSha), /dirty recovery patch tree .* does not match owner tree/);
+    assert.equal(readFileSync(join(ownerPath, path), "utf8"), "unpublished working bytes\n");
+    assert.equal(git(ownerPath, ["status", "--porcelain=v1"]), status);
+    assert.deepEqual(readFileSync(indexPath), index);
+    assert.equal(git(repoDir, ["for-each-ref", "--format=%(refname)", "refs/rmd-recovery/fix-dirty"]), "");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
