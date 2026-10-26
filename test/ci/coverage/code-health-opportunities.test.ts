@@ -848,7 +848,7 @@ test("code health bounded evidence reads refuse a pipe without blocking the work
 });
 
 test("code health resolves configured CodeQL languages from a language matrix or the analysis init step", async () => {
-  const sha = "a".repeat(40), uses = (action: string) => `      - uses: github/codeql-action/${action}@${"f".repeat(40)}\n`;
+  const sha = "a".repeat(40), uses = (action: string) => `      - uses: github/${action}@${"f".repeat(40)}\n`;
   const read = async (workflow: string) => {
     const downloads: string[] = [];
     const result = readCodeHealthQualityEvidence("acme/atlas", async (args) => {
@@ -868,12 +868,12 @@ test("code health resolves configured CodeQL languages from a language matrix or
     return downloads;
   };
   const both = ["code-health-quality-actions", "code-health-quality-python"];
-  assert.deepEqual(await read(`jobs:\n  analyze:\n    strategy:\n      matrix:\n        language: [python, actions]\n    steps:\n${uses("analyze")}`), both,
+  assert.deepEqual(await read(`jobs:\n  analyze:\n    strategy:\n      matrix:\n        language: [python, actions]\n    steps:\n${uses("codeql-action/analyze")}`), both,
     "a plain language matrix names the configured analyses");
-  assert.deepEqual(await read(`jobs:\n  analyze:\n    steps:\n${uses("init")}        with:\n          languages: python, actions\n${uses("analyze")}`), both,
+  assert.deepEqual(await read(`jobs:\n  analyze:\n    steps:\n${uses("codeql-action/init")}        with:\n          languages: python, actions\n${uses("codeql-action/analyze")}`), both,
     "without a matrix, the init step's literal language list names them");
   for (const languages of ["${{ matrix.language }}", ""]) {
-    const workflow = `jobs:\n  analyze:\n    steps:\n${uses("init")}        with:\n          languages: "${languages}"\n${uses("analyze")}`;
+    const workflow = `jobs:\n  analyze:\n    steps:\n${uses("codeql-action/init")}        with:\n          languages: "${languages}"\n${uses("codeql-action/analyze")}`;
     await assert.rejects(readCodeHealthQualityEvidence("acme/atlas", async (args) => {
       const route = args[1] ?? "";
       if (route.endsWith("/commits/main")) return JSON.stringify({ sha });
