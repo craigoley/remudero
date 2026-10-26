@@ -352,7 +352,7 @@ export function scannerWarningWithoutMechanism(key: string, details: readonly st
 
 /** A census growth finding identifies a refused branch, not a defect in the aggregate reporter. */
 export function censusRefusalWithoutMechanism(key: string, details: readonly string[]): boolean {
-  return key === "fix_refusal:census-precheck" && details.some(detail =>
+  return key === "fix_refusal:census-precheck" && details.length > 0 && details.every(detail =>
     /\bcensus-precheck: this branch grows \d+ census count\(s\) CI will refuse:/.test(detail));
 }
 
@@ -362,7 +362,11 @@ export function censusRefusalWithoutMechanism(key: string, details: readonly str
  * nothing can be located — the cause then goes to a person, never to a docs-only record.
  */
 export function locateCiFrictionOwner(key: string, details: readonly string[], search: OwnerSearch): CiFrictionOwner | undefined {
-  if (scannerWarningWithoutMechanism(key, details) || censusRefusalWithoutMechanism(key, details)) return undefined;
+  if (scannerWarningWithoutMechanism(key, details)) return undefined;
+  if (key === "fix_refusal:census-precheck") {
+    details = details.filter(detail => !censusRefusalWithoutMechanism(key, [detail]));
+    if (details.length === 0) return undefined;
+  }
   if (key.startsWith("hand_fix:")) {
     const file = key.slice("hand_fix:".length);
     return /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes("..") && search.fileExists(file)
