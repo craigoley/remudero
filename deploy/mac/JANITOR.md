@@ -345,6 +345,29 @@ every `~/Downloads/remudero-*` folder and `~/.local/share/remudero/source-recove
 other `Developer` or `Downloads` content or protected roots), at most once every
 `interval_hours` (default 6). A `roots` entry with `*` names every folder it matches.
 
+Agents keep creating checkouts in new places, which a fixed root list never reaches. On
+2026-10-25 `~/Developer/console-cockpit-20261024` held 8.9 GB of Remudero worktrees, and
+worktrees registered inside a store's `.git` folder
+(`.../ops-compat-operator/.git/operator-plan-workspaces/*`) were invisible because discovery
+skips `.git`. So discovery also:
+
+- walks the whole home, eight levels deep, for checkouts and bare repositories with at least one
+  remote URL containing a `managed_remotes` entry (default `["github.com/craigoley/remudero"]`,
+  a substring, so remudero-console and remudero-site match too). It never enters `Library`,
+  `Documents`, `Desktop`, `Pictures`, `Music`, `Movies`, `Applications`, `.Trash`,
+  `node_modules`, `.git`, a symlinked folder, a protected path, the preserve root or the shared
+  object pools in `~/.local/share/remudero/git-pools` and `repositories`. A repository with no
+  managed remote outside the roots is never a candidate, however idle: personal projects stay.
+- adds every worktree a discovered clone or bare store has registered (`worktrees/*/gitdir`)
+  that exists inside the home, is not a symlink and is not protected, even inside a `.git` folder
+  or outside every root. A locked one is held as `worktree-locked`.
+
+Everything downstream (keep declarations, owner, liveness, idle age, borrower census,
+preserve-first, account hold) applies unchanged. Removal accepts a path under a root, or one
+found by these two rules inside the home; any other path holds as `path-guard`. Loose-folder
+housekeeping and repacking stay limited to the roots. On the real home (about 44k folders outside
+`Library`) the extra walk took about 6 s.
+
 `temp_roots` (default none) adds folders under `/private/tmp`, for example
 `["remudero-*", "rmd*"]`. macOS on this host has no periodic `/tmp` cleaner, so agent scratch
 there lasts until a reboot: on 2026-10-23 one `remudero-pr-queue-*` folder held 7.9 GiB, 5.6 GiB

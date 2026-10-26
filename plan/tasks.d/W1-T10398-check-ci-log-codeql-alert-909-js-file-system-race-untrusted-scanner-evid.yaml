@@ -6,7 +6,8 @@
   verify: auto
   risk: low
   priority: 1.27
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:codeql-alert-909-js-file-system-race:untrusted-scanner-evidence-the-codeql-check-failed-at-this-p"
@@ -51,3 +52,16 @@
       - "The evidence is somewhat loose: the cited round concerns alert #910 and unrelated flaky tests, and the family's record is mixed (39 merged, 58 declined). This lowers confidence but does not meet the HIGH criteria."
     judged_at: "2026-10-22T06:16:23.683Z"
     pin: "485c48b991c26762df430f9e6c92bca5746d3a88f6986404337bedfa0217700f"
+  amendment: |
+    Disposition proposal: withdraw this unsupported scanner-reporter owner contract; no remedy credit.
+    Preserve every original criterion, proof, scope, priced observation and ruling as history.
+    The retained 2026-10-21T13:42:07.911Z dispatch includes three distinct failures: the
+    image-recycle coverage caller and CodeQL alerts #909/#910 in state-backup-engine-links.ts.
+    The current owner lookup at 67f331bc97b94ecccffe743568d6b36ba898cb07 still selects sweep.ts
+    solely because it emits the scanner warning; that does not establish a sweep defect.
+    PR #13317 actually merged on 2026-10-22; both alerts report their latest instance fixed.
+    The warning itself must remain, and the hint-only patch in #14271 is not a behavioral remedy.
+    Required semantic review and the native NEEDS_DESIGN outcome correctly retain the hold.
+    Withdraw this contract rather than invent credit or weaken scanner/security/review protections.
+    Any future automation remedy needs its own bounded diagnosis and discriminating control;
+    this disposition does not claim that the gardener's reporter-attribution root is fixed.
