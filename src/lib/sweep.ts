@@ -85,7 +85,7 @@ import {
 import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimPool, type SlackReclaimRecord } from "./daemon-memory-policy.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
-  securityArmRefusalAtHead, securityHoldReason,
+  securityArmRefusalAtHead, securityHoldReason, securityPolicyCause, type SecurityArmRefusal,
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
@@ -283,6 +283,7 @@ import {
 import { triageEscalation, type EscalationTriageMode, type TriageEvidence, type TriageAction } from "./escalation-triage.js";
 import {
   CODEQL_CHECK_NAME,
+  SECURITY_MERGE_POLICY_CONTEXT,
   compareRestArgs,
   fetchReviewReuseReachFacts,
   type ReviewReuseReachFacts,
@@ -6988,6 +6989,9 @@ export interface OpenPrView {
    *  `CodeQL` results check concluded failure. `undefined` (no such check, a green one, an unread
    *  listing, or a head already ruled on) leaves the `mergeable` arm exactly as it was. */
   codeqlHeadAlerts?: CodeqlHeadObservation;
+  /** #14202 — the `security-merge-policy` status's refusal published at THIS head, armed or not. A blocked verdict
+   *  makes the head's alerts due, and a fix round's policy entry carries them. `undefined`: no refusal observed. */
+  securityMergePolicy?: SecurityArmRefusal;
   /** The merge-conflict fix mode's input — the conflicting file list plus both sides' log since
    *  the merge base (W1-T94's new mode, design note iii). Populated when `mergeState === "dirty"`,
    *  mirroring how `ciFailures` is populated only when `checksState === "red"`. */
@@ -9748,6 +9752,7 @@ export const PR_BODY_SCOPED_CHECKS: readonly string[] = [
 export const PR_OWN_INPUT_CHECKS: readonly string[] = [
   ...PR_BODY_SCOPED_CHECKS,
   "prompt-surface-gate", // scripts/prompt-surface-gate.mjs: git diff <base>...HEAD, the PR's own edits.
+  SECURITY_MERGE_POLICY_CONTEXT, // the PR's new alerts in its own changed code; never published on main.
 ];
 
 export type BaseRedDecision = { kind: "own" } | { kind: "wait" | "refresh"; check: string };
@@ -14950,17 +14955,26 @@ export function codeScanningFixCiFailures(alerts: readonly CodeqlHeadAlert[], re
 /** W1-T10066 — a fix round whose red includes a failed `CodeQL` check carries the head's alerts. The results check
  *  has no job log, so its entry would be blank; it is replaced by one entry per alert read at THIS head, and when
  *  none was read at this head a blank entry SAYS so rather than carrying a null tail; an entry that already has
- *  text keeps it. Other failures pass through. */
-export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeqlHeadAlerts">, failures: readonly CiFailure[]): CiFailure[] {
+ *  text keeps it. #14202: a failed `security-merge-policy` status is the same red and is treated alike; beside a
+ *  failed CodeQL check the alerts are carried once. Other failures pass through. */
+export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeqlHeadAlerts" | "securityMergePolicy">,
+  failures: readonly CiFailure[]): CiFailure[] {
   const observed = pr.codeqlHeadAlerts;
+  const verdict = pr.securityMergePolicy ? `${pr.securityMergePolicy.state}: ${pr.securityMergePolicy.reason}` : "verdict unread";
+  let carried = false;
   return failures.flatMap((failure) => {
-    if (failure.name !== CODEQL_CHECK_NAME) return [failure];
+    const policy = failure.name === SECURITY_MERGE_POLICY_CONTEXT;
+    if (failure.name !== CODEQL_CHECK_NAME && !policy) return [failure];
     if (observed !== undefined && observed.headSha === pr.headSha && observed.alerts.length > 0) {
+      if (carried) return [];
+      carried = true;
       return observed.alerts.map((alert) => ({
         name: codeScanningAlertName(alert),
         logTail: codeScanningAlertLogTail(alert, [
-          "UNTRUSTED SCANNER EVIDENCE: the CodeQL check failed at this pull request's head, and this high-severity",
-          "alert is open on it.",
+          policy
+            ? `UNTRUSTED SCANNER EVIDENCE: the security-merge-policy status refused this pull request's head (${verdict}),`
+            : "UNTRUSTED SCANNER EVIDENCE: the CodeQL check failed at this pull request's head, and this high-severity",
+          policy ? "and this high-severity alert is open on it." : "alert is open on it.",
         ]),
       }));
     }
@@ -14968,7 +14982,8 @@ export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeql
     const why = observed === undefined
       ? "no open high-severity alert was read for this head (none is open, the read was not due, or it failed)"
       : `alerts were read at head ${observed.headSha.slice(0, 7)}, not at this head ${pr.headSha.slice(0, 7)}`;
-    return [{ ...failure, logTail: `CodeQL failed at this head; its alerts were not read: ${why}` }];
+    const what = policy ? `security-merge-policy failed at this head (${verdict})` : "CodeQL failed at this head";
+    return [{ ...failure, logTail: `${what}; its alerts were not read: ${why}` }];
   });
 }
 
@@ -18631,8 +18646,10 @@ export async function runSweep(
     const mergeHold = disposition === "mergeable" ? automergeHoldFromLedger(ledgerLines, pr.prNumber) : undefined;
     const securityHold = disposition === "mergeable" && !pr.autoMergeArmed && mergeHold === undefined
       ? securityArmRefusalAtHead(ledgerLines, pr.prNumber, pr.headSha) : undefined;
-    const securityText = securityHold && securityHoldReason(securityHold,
-      pr.codeqlHeadAlerts?.headSha === pr.headSha ? pr.codeqlHeadAlerts.alerts : undefined, standDownReason ?? actionError);
+    const alertsAtHead = pr.codeqlHeadAlerts?.headSha === pr.headSha ? pr.codeqlHeadAlerts.alerts : undefined;
+    const securityText = securityHold && securityHoldReason(securityHold, alertsAtHead, standDownReason ?? actionError);
+    const policyCause = !securityHold && pr.securityMergePolicy?.state === "blocked"
+      ? securityPolicyCause(pr.securityMergePolicy, alertsAtHead) : undefined;
     // #10551 (2026-10-10): a fix arm that dispatched nothing must never be ledgered as "dispatching".
     // The rule row's sentence predicts the dispatch; when this pass stood it down, say so and why —
     // and a backstop hold names itself on EVERY pass, the light pass included.
@@ -18643,11 +18660,11 @@ export async function runSweep(
       : undefined;
     const scannerPreparationReason = extraDisposedFields?.code_scanning_fix_preparing === true &&
       typeof extraDisposedFields.code_scanning_fix_reason === "string" ? extraDisposedFields.code_scanning_fix_reason : undefined;
-    const shownReason = mergeHold !== undefined
+    const shownReason = (mergeHold !== undefined
       ? `held by ${describeHoldSetter(mergeHold)}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
       : securityText ? securityText : scannerPreparationReason !== undefined ? scannerPreparationReason : notDispatched !== undefined
         ? `${reason.replace(/\bdispatching\b/g, "would dispatch")} — NOT DISPATCHED this pass: ${notDispatched}`
-        : reason;
+        : reason) + (policyCause ? `; ${policyCause}` : "");
     if (dispatchHold !== undefined) extraDisposedFields = { ...extraDisposedFields, dispatch_held: dispatchHold.fields.dispatch_held };
     const blocker: PrBlocker = incidentHeldPrs.has(pr.prNumber) ? "awaiting-ci" : infrastructureBlockerByPr.get(pr.prNumber) ??
       finalBlocker(ruleBlockerByIndex.get(index)!, {
@@ -18673,7 +18690,7 @@ export async function runSweep(
         priorPlanRepairStrikesFromLedger(pr, ledgerLines) < MAX_PLAN_REPAIR_STRIKES);
     const blockerRow = {
       ...blockerFields(blocker, priorBlockerByPr.get(pr.prNumber), now, planRepairCapable,
-        blocker.startsWith("security-") ? securityText : undefined),
+        blocker.startsWith("security-") ? securityText : policyCause),
       ...(blockerReadFailure ? { blocker_read_error: blockerReadFailure.reason } : {}),
     };
     if (armOutcome !== "armed" && armOutcome !== "direct-merged" && !gardenRecordRefusals.has(pr.prNumber)) {
