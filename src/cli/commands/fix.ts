@@ -7,7 +7,7 @@ import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, r
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
 import { fixRoundBaseHead } from "../../lib/fix-round-base.js";
 import { admittedFixTestPaths } from "../../lib/fix-test-scope.js";
-import { fixRungInputFields, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, requeuedCheckKeysFromLedger, type JobRequeueOutcome } from "../../lib/sweep.js";
+import { CONFLICT_REPAIR_HANDOFF_REASON, fixRungInputFields, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, requeuedCheckKeysFromLedger, type JobRequeueOutcome } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync } from "../../lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -992,10 +992,7 @@ async function fixRungStandDownReason(
     }
     if (facts?.mergeable === "CONFLICTING") {
       return {
-        reason:
-          "merge state is dirty (mergeable === false or mergeable_state === \"dirty\") — a conflicted PR " +
-          "registers no new check runs, so a strike buys no information; standing down for the sweep's own " +
-          "conflicted disposition rather than retrying blindly",
+        reason: CONFLICT_REPAIR_HANDOFF_REASON,
       };
     }
   }
