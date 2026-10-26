@@ -17,17 +17,17 @@ const rounds = [
 const search = { filesContaining: (term: string) => term === "worker changed nothing" ? [{ file: "src/worker.ts", hits: 1 }] : [], fileExists: () => true };
 const fix = { pr: 9, at: "2026-10-02T10:00:00Z", files: ["src/worker.ts"] };
 
-test("W1-T5300: a hand fix touching a cause's owning code is attached to that cause as evidence", () => {
-  const added = ciFrictionHandFixRounds([fix, fix], rounds, priceCiFrictionCauses(rounds), search);
-  assert.equal(added.length, 1);
-  assert.equal(added[0]!.cause.name, "changed-nothing");
+test("W1-T5300: manual changes retain their own file observations instead of claiming another cause", () => {
+  const added = ciFrictionHandFixRounds([fix, fix, { ...fix, pr: 10 }], rounds, priceCiFrictionCauses(rounds), search);
+  assert.equal(added.length, 2);
+  assert.equal(added[0]!.cause.name, "src/worker.ts");
   assert.equal(added[0]!.minutes, 5);
-  const evidence = ciFrictionEvidence(added.map((r) => ({ ...r, causeKey: `${r.cause.kind}:${r.cause.name}` })), "fix_refusal:changed-nothing");
+  const evidence = ciFrictionEvidence(added.map((r) => ({ ...r, causeKey: `${r.cause.kind}:${r.cause.name}` })), "hand_fix:src/worker.ts");
   assert.equal(evidence[0]!.pr, 9);
   assert.match(evidence[0]!.detail, /median proxy/);
-  assert.match(ciFrictionRemedyRationale({ key: "fix_refusal:changed-nothing", minutes: 5, rounds: 1, prs: 1,
+  assert.match(ciFrictionRemedyRationale({ key: "hand_fix:src/worker.ts", minutes: 5, rounds: 1, prs: 1,
     owner: { files: ["src/worker.ts"], why: [] }, evidence,
-    prior: { task: { id: "W1-T1", origin: "ci-friction:fix_refusal:changed-nothing", status: "merged", retired: false, files: ["src/worker.ts"] } },
+    prior: { task: { id: "W1-T1", origin: "ci-friction:hand_fix:src/worker.ts", status: "merged", retired: false, files: ["src/worker.ts"] } },
   }).join("\n"), /PR #9.*hand fix/);
 });
 
@@ -148,10 +148,10 @@ test("a hand fix merged before a cause's first observed round is not that cause'
   // The same file repaired twice before the cause was ever seen is a repeated hand fix of that file instead.
   const repeated = ciFrictionHandFixRounds([early, { ...early, pr: 8 }], rounds, priced, search);
   assert.deepEqual(repeated.map((r) => [r.pr, r.cause]), [[7, { kind: "hand_fix", name: "src/worker.ts" }], [8, { kind: "hand_fix", name: "src/worker.ts" }]]);
-  // At or after the first observed round the owner match still holds, and an undated round dates its cause from always.
-  assert.deepEqual(ciFrictionHandFixRounds([{ ...early, at: rounds[0]!.at }], rounds, priced, search).map((r) => r.cause.name), ["changed-nothing"]);
+  // Later or undated observations still cannot prove that a manual change repaired this cause.
+  assert.deepEqual(ciFrictionHandFixRounds([{ ...early, at: rounds[0]!.at }], rounds, priced, search).map((r) => r.cause.name), []);
   const undated = [{ ...rounds[0]!, at: undefined }, rounds[1]!];
-  assert.deepEqual(ciFrictionHandFixRounds([early], undated, priceCiFrictionCauses(undated), search).map((r) => r.cause.name), ["changed-nothing"]);
+  assert.deepEqual(ciFrictionHandFixRounds([early], undated, priceCiFrictionCauses(undated), search).map((r) => r.cause.name), []);
 });
 
 test("manual file overlap never fabricates a named failing-check observation", () => {
