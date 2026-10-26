@@ -124,3 +124,38 @@ test("real rotation preserves the exact old-head recovery and its uncertain-owne
     assert.equal(fixSeedRead(after, pr, CURRENT)?.kind, uncertain ? "live" : "orphaned");
   }
 });
+
+function completedEarlierRound(): Row[] {
+  const rows = history();
+  rows[0] = { ...rows[0], head_sha: pr.headSha, round_id: "prior-round" };
+  rows.splice(1, 1, { step: "fix.done", task_id: pr.taskId, run_id: PRIOR,
+    head_sha: pr.headSha, round_id: "prior-round", fix_outcome: "NEEDS_SCOPE" });
+  rows.splice(4, 0, { step: "fix.dispatch", task_id: pr.taskId, run_id: OWNER,
+    head_sha: pr.headSha, round_id: "seed-round" });
+  return rows;
+}
+
+test("a completed earlier round at the same head cannot keep a dead seed owner live", () => {
+  assert.deepEqual(fixSeedRead(completedEarlierRound(), pr, CURRENT), {
+    kind: "orphaned", seed: { runId: OWNER }, orphanReason: "owner-run-ended",
+  });
+});
+
+test("settled-round recovery requires exact terminal identities before the seed's dispatch", () => {
+  for (const field of ["round_id", "run_id", "task_id", "head_sha"]) {
+    for (const value of [undefined, "foreign"]) {
+      const rows = completedEarlierRound();
+      rows[1] = { ...rows[1], [field]: value };
+      assert.equal(fixSeedRead(rows, pr, CURRENT)?.kind, "live", `${field}=${String(value)}`);
+    }
+  }
+  const late = completedEarlierRound();
+  const [done] = late.splice(1, 1);
+  late.push(done!);
+  assert.equal(fixSeedRead(late, pr, CURRENT)?.kind, "live", "a terminal after the newer dispatch cannot settle its prior ownership window");
+  for (const field of ["live", "adopted", "unreadable", "misidentified"]) {
+    const rows = completedEarlierRound();
+    rows.find(row => row.step === "run_child.adoption_pass")![field] = 1;
+    assert.equal(fixSeedRead(rows, pr, CURRENT)?.kind, "live", field);
+  }
+});
