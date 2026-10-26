@@ -178,7 +178,7 @@ export const REFRESH_CLEARANCE_STEP = "refresh.clearance";
 export type RefreshArm = "fix-rung" | "base-fixed" | "base-red" | "stalled-stage";
 export type RefreshHistorySource = "live" | "union" | "unreadable";
 /** Which evidence decided: main's delta (`prefilter`), a refresh that already left this red
- *  (`repeat`), the trial-merge probe, or why today's refresh is kept (`partial`, `unrunnable`, `fileless`). */
+ *  (`repeat`), the trial-merge probe (`partial` included), or an unprobed red (`unrunnable`, `fileless`). */
 export type RefreshEvidence = "prefilter" | "repeat" | "merged-probe" | "partial" | "unrunnable" | "fileless";
 
 export interface RefreshClearance {
@@ -233,7 +233,7 @@ export function mainPathsReachingRed(input: {
 
 /** W1-T8396 — whether merging main may clear this red. Rule 3 first: a refresh that already left the same
  *  red is never repeated until main changes a counted path. Then step 1a, the path pre-filter, and step 1b,
- *  the trial-merge probe. Red on the merged tree refuses; clear refreshes. Partial, unrunnable or fileless
+ *  the trial-merge probe. Reproduced or partial refuses; clear refreshes. Unrunnable or fileless
  *  keeps today's refresh only with readable history that shows no refresh already left this red: a repeat
  *  needs a trial merge that clears it. #12703 took four main merges on its own census red and no worker.
  *  So does a red the PR's OWN diff reaches (`ownReach`): a test passing on main says nothing of a change only
@@ -292,13 +292,17 @@ async function decideRefreshClearance(
   if (mergedVerdict === "reproduced") {
     return { refresh: false, evidence: "merged-probe", ...merged, reason: "every failing test file still fails on a trial merge with main" };
   }
+  if (mergedVerdict === "partial") {
+    const stillFailing = mergedFiles.filter((probe) => probe.outcome === "fails").map((probe) => probe.file);
+    return { refresh: false, evidence: "partial", ...merged,
+      reason: `${unproven === undefined ? "" : `${unproven} and `}the trial merge is partial; still-failing test files: ${stillFailing.join(", ")}` };
+  }
   if (mergedVerdict === "clear") return { refresh: true, evidence: "merged-probe", ...merged, reason: "the failing test files pass on a trial merge with main" };
   const why = probed.setup_error ?? probed.reason;
   if (unproven !== undefined) return { refresh: false, evidence: mergedVerdict, ...merged,
     reason: `${unproven} and the trial merge is ${mergedVerdict}${why === undefined ? "" : ` (${boundedBaseProbeReason(why)})`}` };
-  return { refresh: true, evidence: mergedVerdict, ...merged, reason: mergedVerdict === "partial"
-    ? "some failing test files still fail on the trial merge; keeping today's refresh"
-    : `the trial merge is unrunnable${why === undefined ? "" : ` (${boundedBaseProbeReason(why)})`}; keeping today's refresh` };
+  return { refresh: true, evidence: mergedVerdict, ...merged,
+    reason: `the trial merge is unrunnable${why === undefined ? "" : ` (${boundedBaseProbeReason(why)})`}; keeping today's refresh` };
 }
 
 /** One refresh that merged main into a red head: the checks it was red on, and its failing test files
@@ -328,14 +332,14 @@ export function refreshRecordsFromLedger(lines: readonly Row[]): Map<number, Ref
   return records;
 }
 
-/** The same red: a shared check, and failing test files the record already named — a fileless record
+/** The same red: a shared check and at least one shared failing test file — a fileless record
  *  saw less than any later red on its check, so it matches whatever that red names. */
 export function refreshedOnSameRed(
   records: ReadonlyMap<number, readonly RefreshRecord[]>, prNumber: number, checks: readonly string[], testFiles: readonly string[],
 ): boolean {
   return (records.get(prNumber) ?? []).some((record) =>
     (record.checks === undefined || record.checks.some((check) => checks.includes(check))) &&
-    (record.testFiles.length === 0 || (testFiles.length > 0 && testFiles.every((file) => record.testFiles.includes(file)))));
+    (record.testFiles.length === 0 || testFiles.some((file) => record.testFiles.includes(file))));
 }
 
 /** One decision's memo key: the same head, main and failing files decide the same way on a later pass. */
