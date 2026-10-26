@@ -199,7 +199,7 @@ test("the review-materialization site is a NAMED row in the real registry, not a
 
 test("the fix rung's raw materialization is ALSO a named row, not an absence", () => {
   const fixRung = WORKTREE_SITE_REGISTRY.find(
-    (r) => r.file === "src/run-task.ts" && r.site === "createFixRungWorktree" && r.disposition.kind === "exempt",
+    (r) => r.file === "src/cli/commands/sweep.ts" && r.site === "createFixRungWorktree" && r.disposition.kind === "exempt",
   );
   assert.ok(fixRung, "createFixRungWorktree must be a named exempt row");
   assert.ok(fixRung!.disposition.kind === "exempt" && fixRung!.disposition.because.trim().length > 0);
@@ -231,6 +231,7 @@ test("the real registry declares EXACTLY the five exempt raw sites — the two t
   // W1-T9077 moves it 10 -> 11: a run child's engine tree is cut DETACHED at the daemon's own pinned sha.
   // W1-T9578 moves it 11 -> 12: artifact conflicts are resolved in a leased tree at the PR's head.
   assert.deepEqual(exempt, [
+    "src/cli/commands/sweep.ts::createFixRungWorktree",
     "src/lib/check-proof.ts::buildBaseProofDir",
     "src/lib/composition-root.ts::addWorktree",
     "src/lib/engine-tree.ts::buildEngine",
@@ -241,7 +242,6 @@ test("the real registry declares EXACTLY the five exempt raw sites — the two t
     "src/lib/serve-slots.ts::createSlotPreparer",
     "src/lib/sweep.ts::rebaseDirtyFleetBranchViaGit",
     "src/lib/sweep.ts::regenerateConflictViaGit",
-    "src/run-task.ts::createFixRungWorktree",
     "src/run-task.ts::defaultNodePinSyncIo",
   ]);
 });
@@ -324,7 +324,7 @@ test("findRawWorktreeAddSites finds every real raw site, including both canonica
       "src/lib/worker.ts::worktreeAdd",
       "src/lib/worker.ts::worktreeAddAsync",
       "src/lib/check-proof.ts::buildBaseProofDir", // R-11: the merge-base worktree the staleness check re-runs proofs in
-      "src/run-task.ts::createFixRungWorktree",
+      "src/cli/commands/sweep.ts::createFixRungWorktree",
       "src/run-task.ts::defaultNodePinSyncIo",
     ].sort(),
   );

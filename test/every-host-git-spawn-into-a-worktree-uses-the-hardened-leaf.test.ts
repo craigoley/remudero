@@ -111,6 +111,10 @@ const RAW_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: stri
  * resolved every caller-chosen tree at its callers. Exact in both directions, so it only shrinks.
  */
 export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: string }>> = {
+  "src/cli/commands/sweep.ts": {
+    count: 4,
+    reason: "CHECKOUT (W1-T9338): registeredFixWorktreeOwner (1) and preserveFixHead (3) moved verbatim; the managed clone sites remain classed in RUN_TASK_WIDENED_SITES in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts",
+  },
   "src/cli/commands/daemon.ts": {
     count: 3,
     reason:
@@ -250,7 +254,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
     reason: "CHECKOUT (W1-T6135): refreshManagedCheckout moved unchanged from run-task.ts; its git helper reads the managed repoDir, still classed in RUN_TASK_WIDENED_SITES in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts",
   },
   "src/run-task.ts": {
-    count: 65,
+    count: 61,
     reason:
       "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
       "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",

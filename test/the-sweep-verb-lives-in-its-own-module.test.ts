@@ -1,27 +1,8 @@
 import assert from "node:assert/strict";
-import childProcess from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
-import os from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { test, type TestContext } from "node:test";
+import { test } from "node:test";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import { ghShim } from "#test/helpers/gh-shim.js";
-import { configPath } from "#src/lib/config.js";
-import { automaticBranchReapStateFileName, readAutomaticBranchReapState } from "#src/lib/branch-reaper.js";
-import type { Config } from "#src/lib/config.js";
-import type { Plan } from "#src/lib/plan.js";
-import type { GitHub } from "#src/lib/status.js";
-import type { OpenPrView, SweepDeps, BuildSweepEffectsDeps } from "#src/lib/sweep.js";
-import type { SweepCommandHost, LightPassReadPorts } from "#src/cli/commands/sweep.js";
-import { systemClock } from "#src/lib/clock.js";
-
-// Avoid the argv module's checkout discovery: these fixtures do not need a git executable.
-const savedArgv = [...process.argv];
-process.argv.push("--repo-root", REPO_ROOT);
-const { buildSweepEffects, buildSweepHook, buildSweepLightHook, sweepCommand } =
-  await import("#src/cli/commands/sweep.js");
-process.argv.splice(0, process.argv.length, ...savedArgv);
 
 // @source-text-subject: this extraction's subject is declaration ownership and import direction.
 const runTaskSrc = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
@@ -56,6 +37,207 @@ test("W1-T9338: sweepCommand is defined in its module and src/run-task.ts only d
     assert.match(runTaskSrc, new RegExp(`${name} as ${name}FromModule`));
     assert.equal(runTaskSrc.match(new RegExp(`^${declaration} ${name}\\(`, "gm"))?.length, 1);
   }
+  // Reference census at base 566f9f91f24cd9c0337f82653c134006882e5660:
+  // 1,313 top-level declarations; retain symbols with references outside the reachable set.
+  // Its fixed point contains 111 declarations, including types and module state.
+  const helpers = [
+    "codeScanningJudgeDeps",
+    "handedOffHeadRiskJudge",
+    "updatedForWorkflowFromLedger",
+    "createPlanFilingClassificationTelemetry",
+    "buildOpenPrViews",
+    "runOneShotSweep",
+    "renderEscalationReconcileSummary",
+    "sweepEscalationReconcile",
+    "sweepEscalationTriage",
+    "sweepPostFixReverification",
+    "runAutomaticBranchReapRung",
+    "spawnRmdReviewForFreshTree",
+    "buildReviewerCodeFreshnessGate",
+    "buildReviewerHealthRoute",
+    "readyDraftViaGh",
+    "buildRequiredFixReviewRunner",
+    "runPlanScopedFixRound",
+    "dispatchFixPreflightStandDown",
+    "materializePlanRoundWorktree",
+    "buildFixRungDispatchArgs",
+    "registeredFixWorktreeOwner",
+    "boundedWorktreeOwnerPath",
+    "decideRegisteredFixOwnerRecovery",
+    "captureRegisteredFixOwnerSnapshot",
+    "removeAbandonedFixWorktreeOwner",
+    "preserveOrDiscardFixOwnerResidue",
+    "preserveStagedFixOwnerResidue",
+    "resetTrackedDirtyFixOwner",
+    "preserveAndClearUntrackedFixOwner",
+    "preserveStaleDirtyFixOwner",
+    "clearStaleDirtyFixOwner",
+    "preserveAbandonedFixOwnerDivergence",
+    "createFixRungWorktreeWithToolchain",
+    "fixBranchClaimKey",
+    "captureRepairFeedbackWithPriorVerdict",
+    "refreshEscalationTriageEvidence",
+    "gitCredentialFixSpawn",
+    "sweepPrTerminalRung",
+    "tickReadReverificationDeps",
+    "buildRereadPrAtAct",
+    "runMountRecommenderRung",
+    "runWorkerStallDetectorRung",
+    "lightPassActionable",
+    "blockedFixableIsRequeueOnly",
+    "fixRungAllowedBesideInFlight",
+    "inFlightTaskIdsFrom",
+    "reviewOnlyLightPassDeps",
+    "changeViewAsync",
+    "fetchOpenPrsWithPostedIds",
+    "retireRecoveredHeadroomEscalations",
+    "buildEscalationCloser",
+    "automaticBranchReapSteps",
+    "reviewOptionFlags",
+    "assigningIssueGateway",
+    "reviewerRevertLane",
+    "reviewerFreshnessForPublication",
+    "ownStartFreshness",
+    "untouchedPlanCriterion",
+    "runPlanScopedConflictRound",
+    "feedbackFixConstraint",
+    "unchangedTreeStandDownReason",
+    "withPlanClaims",
+    "isManagedFixOwnerWorktreeName",
+    "pathIsAtOrBelow",
+    "readBoundedProcessCwdCensus",
+    "readRegisteredFixOwnerClaim",
+    "readOwnerHasTrackedWork",
+    "readFixOwnerResidue",
+    "preserveFixHead",
+    "createFixRungWorktree",
+    "latestPriorVerdictSuppresses",
+    "mountRecommenderCadenceMarkerPath",
+    "mountRecommenderNextFireMs",
+    "findStalledWorkers",
+    "readWorkerTailBestEffort",
+    "runIsAwaitingExternal",
+    "buildHeadroomRecoveryCandidates",
+    "renderHeadroomRecoveryCloseComment",
+    "gitStatusResult",
+    "branchAuthorshipStandDownReason",
+    "checkoutFixHeadRef",
+    "fixHeadHeldByWorktree"
+  ];
+  const hostStart = sweepSrc.indexOf("export interface SweepCommandHost");
+  const hostInterface = sweepSrc.slice(hostStart, sweepSrc.indexOf("\n}\n", hostStart));
+  for (const name of helpers) {
+    assert.match(sweepSrc, new RegExp(`^(?:async )?function\\*? ${name}\\(`, "m"),
+      `${name} has its implementation in the module`);
+    assert.doesNotMatch(hostInterface, new RegExp(`^  (?:readonly )?${name}[(:?]`, "m"),
+      `${name} belongs to the closure, not the host`);
+  }
+  for (const name of [
+    "FixRungCheckoutRefusedError",
+    "DEFAULT_WORKER_STALL_MS",
+    "SweepEscalationReconcileSummary",
+    "automaticBranchReapsInFlight",
+    "FRESH_TREE_STDERR_HOLD_CHARS",
+    "RegisteredFixOwnerSnapshot",
+    "RegisteredFixOwnerRecoveryDecision",
+    "FixHeadRecovery",
+    "repairFilingSuppressionsLogged",
+    "MOUNT_RECOMMENDER_CADENCE_POLICY",
+    "WORKER_STALLED_LEDGER_STEP",
+    "WORKER_STALL_TAIL_ATTACH_MAX_LINES",
+    "WORKER_STALL_TAIL_ATTACH_MAX_BYTES",
+    "RegisteredFixOwnerSignal",
+    "managedFixOwnerWorktreePrefixes",
+    "ProcessCwdCensusDeps",
+    "FIX_OWNER_PROC_ENTRY_BOUND",
+    "FIX_OWNER_PROC_WALL_MS",
+    "FIX_OWNER_OPERATION_MARKERS",
+    "FIX_OWNER_RESIDUE_PATH_BOUND",
+    "CheckoutFixHeadRefDeps",
+    "WorkerStallCandidate",
+    "HeadroomRecoveryCandidate"
+  ]) {
+    assert.match(sweepSrc, new RegExp(`^(?:export )?(?:const|class|interface|type) ${name}\\b`, "m"));
+    assert.doesNotMatch(runTaskSrc, new RegExp(`^(?:export )?(?:const|class|interface|type) ${name}\\b`, "m"));
+  }
+  for (const name of [
+    "codeScanningJudgeDeps",
+    "handedOffHeadRiskJudge",
+    "updatedForWorkflowFromLedger",
+    "createPlanFilingClassificationTelemetry",
+    "buildOpenPrViews",
+    "runOneShotSweep",
+    "renderEscalationReconcileSummary",
+    "sweepEscalationReconcile",
+    "sweepEscalationTriage",
+    "sweepPostFixReverification",
+    "runAutomaticBranchReapRung",
+    "spawnRmdReviewForFreshTree",
+    "buildReviewerCodeFreshnessGate",
+    "buildReviewerHealthRoute",
+    "readyDraftViaGh",
+    "buildRequiredFixReviewRunner",
+    "runPlanScopedFixRound",
+    "dispatchFixPreflightStandDown",
+    "materializePlanRoundWorktree",
+    "buildFixRungDispatchArgs",
+    "registeredFixWorktreeOwner",
+    "decideRegisteredFixOwnerRecovery",
+    "captureRegisteredFixOwnerSnapshot",
+    "removeAbandonedFixWorktreeOwner",
+    "preserveOrDiscardFixOwnerResidue",
+    "preserveStagedFixOwnerResidue",
+    "resetTrackedDirtyFixOwner",
+    "preserveAndClearUntrackedFixOwner",
+    "preserveStaleDirtyFixOwner",
+    "clearStaleDirtyFixOwner",
+    "preserveAbandonedFixOwnerDivergence",
+    "createFixRungWorktreeWithToolchain",
+    "fixBranchClaimKey",
+    "captureRepairFeedbackWithPriorVerdict",
+    "refreshEscalationTriageEvidence",
+    "gitCredentialFixSpawn",
+    "sweepPrTerminalRung",
+    "tickReadReverificationDeps",
+    "buildRereadPrAtAct",
+    "runMountRecommenderRung",
+    "runWorkerStallDetectorRung",
+    "lightPassActionable",
+    "blockedFixableIsRequeueOnly",
+    "fixRungAllowedBesideInFlight",
+    "inFlightTaskIdsFrom",
+    "reviewOnlyLightPassDeps",
+    "changeViewAsync",
+    "fetchOpenPrsWithPostedIds",
+    "retireRecoveredHeadroomEscalations",
+    "buildEscalationCloser",
+    "reviewOptionFlags",
+    "assigningIssueGateway",
+    "reviewerRevertLane",
+    "reviewerFreshnessForPublication",
+    "ownStartFreshness",
+    "feedbackFixConstraint",
+    "unchangedTreeStandDownReason",
+    "withPlanClaims",
+    "readBoundedProcessCwdCensus",
+    "readRegisteredFixOwnerClaim",
+    "createFixRungWorktree",
+    "latestPriorVerdictSuppresses",
+    "findStalledWorkers",
+    "runIsAwaitingExternal",
+    "buildHeadroomRecoveryCandidates",
+    "renderHeadroomRecoveryCloseComment",
+    "branchAuthorshipStandDownReason",
+    "checkoutFixHeadRef"
+  ]) {
+    const header = new RegExp(`^export (?:async )?function ${name}\\(`, "m").exec(runTaskSrc)?.[0];
+    assert.ok(header, `${name} keeps its exported signature`);
+    const wrapper = topLevelFunction(runTaskSrc, header);
+    const body = wrapper.slice(wrapper.lastIndexOf(" {\n") + 3).trim();
+    assert.match(body, new RegExp(`^return sweepCommandHelpers\\(sweepCommandHost\\(\\)\\)\\.${name}\\([^;]*;\\s*\\}$`),
+      `${name} only delegates to the module`);
+  }
+
 });
 
 test("W1-T9338: the sweep module imports nothing from src/run-task.ts", () => {
@@ -63,219 +245,4 @@ test("W1-T9338: the sweep module imports nothing from src/run-task.ts", () => {
     .map((match) => match[1]!);
   assert.ok(specifiers.length > 10, "the module's imports were read");
   assert.deepEqual(specifiers.filter((specifier) => /(^|\/)run-task(?:\.[jt]s)?$/.test(specifier)), []);
-});
-
-function sweepFixture(t: TestContext) {
-  const root = mkdtempSync(join(os.tmpdir(), "rmd-sweep-module-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const config = { root, claudeBin: "/bin/true" } as Config;
-  const ledgerPath = join(root, "state", "ledger.ndjson");
-  const plan: Plan = { tasks: [], byId: new Map() };
-  const logs: Array<{ step: string; [key: string]: unknown }> = [];
-  const log = (step: string, extra = {}) => { logs.push({ step, ...extra }); };
-  const calls: Array<{ name: string; args: any[] }> = [];
-  const record = <T = undefined>(name: string, result?: T) => (...args: any[]): T => {
-    calls.push({ name, args });
-    return result as T;
-  };
-  const effects = {
-    arm: record("arm"), close: record("close"), dispatchFix: record("dispatchFix"),
-    escalate: record("escalate"), reviewerCodeStaleThisPass: () => undefined,
-    readLedger: () => [], appendLine: (_path: string, row: any) => { logs.push(row); },
-    readOpenEscalations: () => [],
-  };
-  const host = {
-    USAGE: "sweep fixture usage", DEFAULT_WORKER_STALL_MS: 9123,
-    buildSweepEffects: record("effects", effects),
-    buildInboxDraftHook: () => record("draft"),
-    createPlanFilingClassificationTelemetry: () => record("classification"),
-    buildEscalationTriageRuntime: record("triageRuntime"),
-    refreshEscalationTriageEvidence: record("refreshEvidence"),
-    sweepPostFixReverification: record("reverify", { results: [], total: 0, redriven: 0 }),
-    tickReadReverificationDeps: record("reverificationDeps", {}),
-    gitCredentialFixSpawn: record("credentialSpawn", () => assert.fail("no fix spawn expected")),
-    updatedForWorkflowFromLedger: record("workflow", () => false),
-    buildRereadPrAtAct: record("reread", undefined),
-    handedOffHeadRiskJudge: record("judge", undefined), codeScanningJudgeDeps: record("codeScanning", {}),
-    sweepEscalationReconcile: record("reconcile", {}), sweepEscalationTriage: record("triage"),
-    sweepPrTerminalRung: record("terminal"), runAutomaticBranchReapRung: record("branchReap"),
-    runTmpSweepRung: record("tmp"), runWorkerTailSweepRung: record("tails"),
-    runInflightLockSweepRung: record("locks"), runWorkerStallDetectorRung: record("stalls"),
-    runMountRecommenderRung: record("mounts"),
-    fixRungAllowedBesideInFlight: record("fixAllowed", true), inFlightTaskIdsFrom: () => [],
-    blockedFixableIsRequeueOnly: () => false, lightPassActionable: () => false,
-    reviewOnlyLightPassDeps: () => ({}),
-  } as unknown as SweepCommandHost;
-  return { root, config, ledgerPath, plan, logs, log, calls, host, effects };
-}
-
-function pr(over: Partial<OpenPrView> = {}): OpenPrView {
-  return {
-    prNumber: 9338, prUrl: "https://github.com/acme/fixture/pull/9338", headSha: "a".repeat(40),
-    headRefName: "run-W1-T9338-1", taskId: "W1-T9338", reviewState: "success",
-    checksState: "green", unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false,
-    lastActivityAt: new Date().toISOString(), ...over,
-  };
-}
-
-test("W1-T9338: the extracted effects adapter returns executable library effects", async (t) => {
-  const f = sweepFixture(t);
-  let freshnessRead: (() => unknown) | undefined;
-  const gateCalls: unknown[][] = [];
-  const host = {
-    ...f.host, freshTreeGit: () => assert.fail("no fresh worktree requested"),
-    realDeps: () => ({ reviewWorktree: { addWorktree: () => assert.fail("no review worktree requested") } }),
-    buildFreshTreeReviewRunner: () => () => assert.fail("no fresh review requested"),
-    buildReviewerCodeFreshnessGate: (read: () => unknown) => {
-      freshnessRead = read;
-      return { call: (...args: unknown[]) => { gateCalls.push(args); return 17; },
-        staleThisPass: () => ({ oldSha: "old", newSha: "new" }) };
-    },
-    buildBaseReproductionProbe: () => () => ({ reproduced: false }),
-    buildImportClosureRead: () => () => [], buildRequiredFixReviewRunner: () => () => 0,
-    readyDraftViaGh: () => () => {},
-  } as unknown as SweepCommandHost & Required<Pick<SweepCommandHost, "freshTreeGit">>;
-  const deps: BuildSweepEffectsDeps = {
-    owner: "acme", repo: "fixture", localRepoName: "fixture", config: f.config,
-    ledgerPath: f.ledgerPath, runId: "SWEEP-MODULE", plan: f.plan, log: f.log,
-  };
-  const effects = buildSweepEffects(host, {
-    ...deps, reviewerCodeFreshnessImpl: () => ({ status: "unreadable", reason: "fixture" }) as never,
-    instanceRegistryTextImpl: () => undefined,
-  });
-  assert.equal(typeof effects.arm, "function");
-  assert.deepEqual(effects.reviewerCodeStaleThisPass(), { oldSha: "old", newSha: "new" });
-  assert.deepEqual(freshnessRead!(), { status: "unreadable", reason: "fixture" });
-  await effects.postReview!(pr(), { kind: "full-review" });
-  assert.equal(gateCalls.length, 1);
-  assert.deepEqual(gateCalls[0]!.slice(0, 2), ["9338", ["--repo", "fixture"]]);
-});
-
-test("W1-T9338: full hook runs maintenance with the tick snapshot and persists branch cadence", async (t) => {
-  const f = sweepFixture(t);
-  const stale = { oldSha: "old", newSha: "new" };
-  f.effects.reviewerCodeStaleThisPass = () => stale as never;
-  const state = { lastRunAtMs: 1234 };
-  const host = { ...f.host, runAutomaticBranchReapRung: (...args: any[]) => {
-    f.calls.push({ name: "branchReap", args });
-    Object.assign(args[6], state);
-  } };
-  const tick = { openPrViews: [], plan: f.plan, staleGateWorkflowsByPr: new Map(),
-    behindMainByPr: new Map(), baseChangedFilesByPr: new Map(), creditCandidates: [] };
-  const github = {} as GitHub;
-  const hook = buildSweepHook(host, "acme", "fixture", f.config, f.ledgerPath, "HOOK", f.plan,
-    f.log, 321, github, undefined, 456, undefined, undefined, undefined, undefined, undefined,
-    f.root, undefined, undefined, "/fixture/socket", async () => tick as never);
-  const outcome = await hook();
-  assert.deepEqual(outcome, { reviewerCodeStale: stale, planOnlyRunBranchReceipts: [], reviewInputViews: [] });
-  assert.deepEqual(f.logs.filter((row) => row.step === "sweep.error"), []);
-  for (const name of ["reverify", "reconcile", "terminal", "branchReap", "tmp", "tails", "locks", "stalls", "mounts", "draft"]) {
-    assert.equal(f.calls.filter((c) => c.name === name).length, 1, `${name} runs once`);
-  }
-  assert.equal(f.calls.find((c) => c.name === "tmp")!.args[1].maxAgeMs, 321);
-  assert.equal(f.calls.find((c) => c.name === "stalls")!.args[5], 456);
-  assert.equal(f.calls.find((c) => c.name === "effects")!.args[0].spawnImpl instanceof Function, true);
-  const persisted = readAutomaticBranchReapState(join(f.root, "state", automaticBranchReapStateFileName("fixture")));
-  assert.deepEqual(persisted, state);
-});
-
-test("W1-T9338: full hook reports failures and still runs its draft rung", async (t) => {
-  const f = sweepFixture(t);
-  const hook = buildSweepHook(f.host, "acme", "fixture", f.config, f.ledgerPath, "HOOK", f.plan,
-    f.log, undefined, {} as GitHub, undefined, undefined, undefined, undefined,
-    undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-    async () => ({ openPrError: "snapshot unavailable" }) as never);
-  assert.equal(await hook(), undefined);
-  assert.equal(f.logs.find((row) => row.step === "sweep.error")?.error, "snapshot unavailable");
-  assert.equal(f.calls.filter((c) => c.name === "draft").length, 1);
-  assert.equal(f.calls.some((c) => c.name === "effects"), false);
-});
-
-test("W1-T9338: light hook compares ready heads through its default subprocess reader", async (t) => {
-  const f = sweepFixture(t);
-  const shim = ghShim([{ when: "compare/", stdout: JSON.stringify({ ahead_by: 0, files: [] }) }]);
-  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
-  const oldPath = process.env.PATH;
-  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
-  t.after(() => { process.env.PATH = oldPath; });
-  const views = [pr()];
-  const io: LightPassReadPorts = { openPrViews: async () => views,
-    effects: (deps) => {
-      assert.deepEqual([deps.owner, deps.repo, deps.config, deps.plan, deps.ledgerPath, deps.runId],
-        ["acme", "fixture", f.config, f.plan, f.ledgerPath, "LIGHT"]);
-      return { ...f.effects, ledgerPath: f.ledgerPath, runId: "LIGHT", readMainTip: async () => "main-sha" };
-    } };
-  const hook = buildSweepLightHook(f.host, "acme", "fixture", f.config, f.ledgerPath, "LIGHT", f.plan,
-    f.log, undefined, undefined, undefined, undefined, undefined, io);
-  await hook();
-  await hook();
-  assert.deepEqual(shim.calls(), [`api repos/acme/fixture/compare/${views[0].headSha}...main-sha`]);
-  const timings = f.logs.filter((row) => row.step === "sweep_light.pre_review_timing");
-  assert.equal(timings.length, 2);
-  assert.deepEqual(f.logs.filter((row) => row.step === "sweep_light.error"), []);
-});
-
-test("W1-T9338: light hook keeps the main-tip failure reason and uses symbolic main", async (t) => {
-  const f = sweepFixture(t);
-  const reads: string[][] = [];
-  let mainReads = 0;
-  const io: LightPassReadPorts = { openPrViews: async () => [pr()],
-    effects: () => ({ ...f.effects, ledgerPath: f.ledgerPath, runId: "LIGHT",
-      readMainTip: async () => { if (mainReads++ === 0) throw new Error("main unavailable"); return "main-sha"; } }),
-    readCompare: async (args) => { reads.push(args); return { ahead_by: 0, files: [] }; } };
-  await buildSweepLightHook(f.host, "acme", "fixture", f.config, f.ledgerPath, "LIGHT", f.plan,
-    f.log, undefined, undefined, undefined, undefined, undefined, io)();
-  assert.deepEqual(reads, [["api", `repos/acme/fixture/compare/${pr().headSha}...main`]]);
-  assert.equal(f.logs.find((row) => row.step === "sweep_light.main_tip_unreadable")?.error, "Error: main unavailable");
-  assert.deepEqual(f.logs.filter((row) => row.step === "sweep_light.error"), []);
-});
-
-test("W1-T9338: command rejects invalid arguments before reading configuration", async (t) => {
-  const f = sweepFixture(t);
-  const errors: string[] = [];
-  t.mock.method(console, "error", (s: string) => errors.push(s));
-  assert.equal(await sweepCommand({ ...f.host, commandViews: () => assert.fail("invalid args reached enumeration") }, ["--bogus"]), 2);
-  assert.match(errors.join("\n"), /sweep fixture usage/);
-  assert.deepEqual(f.calls, []);
-});
-
-test("W1-T9338: command composes a dry-run summary and contains enumeration failure", async (t) => {
-  const f = sweepFixture(t);
-  // Native mocks keep the real config reader and owner parser, with no git process or host config.
-  t.mock.method(os, "homedir", () => f.root);
-  t.mock.method(childProcess, "execFileSync", (file: string, args: string[]) => {
-    assert.equal(file, "git");
-    if (args.includes("remote.origin.url")) return "https://github.com/acme/fixture.git\n";
-    throw new Error("fixture has no git history");
-  });
-  syncBuiltinESMExports();
-  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-  const path = configPath();
-  mkdirSync(join(path, ".."), { recursive: true });
-  writeFileSync(path, JSON.stringify(f.config));
-  const output: string[] = [];
-  const errors: string[] = [];
-  t.mock.method(systemClock, "now", () => 9338000);
-  t.mock.method(console, "log", (s: string) => output.push(s));
-  t.mock.method(console, "error", (s: string) => errors.push(s));
-  const host = { ...f.host, commandViews: () => [],
-    runOneShotSweep: async (run: any) => run(undefined),
-    renderEscalationReconcileSummary: () => "escalations: fixture summary" };
-  assert.equal(await sweepCommand(host, ["--repo", "other", "--dry-run"]), 0);
-  assert.match(output.join("\n"), /rmd sweep --dry-run — acme\/other/);
-  assert.match(output.join("\n"), /post-fix re-verification: 0 open PR\(s\) checked/);
-  assert.match(output.join("\n"), /credit backfill: 0 candidate\(s\) reconciled/);
-  assert.match(output.join("\n"), /escalations: fixture summary/);
-  assert.match(output.join("\n"), /worktree reap: 0 worktree\(s\) reaped/);
-  const effectDeps = f.calls.find((c) => c.name === "effects")!.args[0];
-  assert.deepEqual([effectDeps.owner, effectDeps.repo, effectDeps.runId, effectDeps.config],
-    ["acme", "other", "SWEEP-9338000", f.config]);
-  assert.deepEqual(f.calls.find((c) => c.name === "reverify")!.args.slice(0, 2), ["acme", "other"]);
-  assert.equal(f.calls.find((c) => c.name === "reconcile")!.args[6].dryRun, true);
-  const triage = f.calls.find((c) => c.name === "triage")!;
-  assert.deepEqual([triage.args[0].owner, triage.args[0].repo, triage.args[1], triage.args[3].dryRun],
-    ["acme", "other", [], true]);
-  assert.equal(f.calls.find((c) => c.name === "branchReap")!.args[7].prune, false);
-  assert.equal(await sweepCommand({ ...host, commandViews: () => { throw new Error("enumeration unavailable"); } }, ["--repo", "other"]), 1);
-  assert.match(errors.join("\n"), /could not list open PRs for acme\/other: enumeration unavailable/);
 });

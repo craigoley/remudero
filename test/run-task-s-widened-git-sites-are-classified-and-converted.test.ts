@@ -37,6 +37,8 @@ import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
 import { functionBody, widenedGitSites, WIDENED_SITE_EXCEPTIONS } from "./every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js";
 
 const FILE = "src/run-task.ts";
+const SWEEP_FILE = "src/cli/commands/sweep.ts";
+const SWEEP_SOURCE = fileURLToPath(new URL(`../${SWEEP_FILE}`, import.meta.url));
 const EXTRACTED_FILE = "src/cli/commands/run-task-verb.ts";
 const EXTRACTED_SOURCE = fileURLToPath(new URL(`../${EXTRACTED_FILE}`, import.meta.url));
 const SOURCE = fileURLToPath(new URL(`../${FILE}`, import.meta.url));
@@ -124,7 +126,7 @@ const sorted = (r: Record<string, number>): Record<string, number> =>
   Object.fromEntries(Object.entries(r).sort(([a], [b]) => a.localeCompare(b)));
 
 describe("W1-T6135: every widened git site left in run-task.ts is a classed CHECKOUT site", () => {
-  const text = `${readFileSync(fileURLToPath(new URL("../src/cli/commands/review.ts", import.meta.url)), "utf8")}\n${readFileSync(SOURCE, "utf8")}\n${readFileSync(MOVED_SOURCE, "utf8")}\n${readFileSync(DAEMON_SOURCE, "utf8")}\n${readFileSync(EXTRACTED_SOURCE, "utf8")}`;
+  const text = `${readFileSync(SWEEP_SOURCE, "utf8")}\n${readFileSync(fileURLToPath(new URL("../src/cli/commands/review.ts", import.meta.url)), "utf8")}\n${readFileSync(SOURCE, "utf8")}\n${readFileSync(MOVED_SOURCE, "utf8")}\n${readFileSync(DAEMON_SOURCE, "utf8")}\n${readFileSync(EXTRACTED_SOURCE, "utf8")}`;
   const actual = widenedByFunction(text);
 
   it("the census sees the file: a positive control on the widened pattern", () => {
@@ -149,11 +151,13 @@ describe("W1-T6135: every widened git site left in run-task.ts is a classed CHEC
     const moved = WIDENED_SITE_EXCEPTIONS[MOVED_FILE];
     const daemon = WIDENED_SITE_EXCEPTIONS[DAEMON_FILE];
     const extracted = WIDENED_SITE_EXCEPTIONS[EXTRACTED_FILE];
-    assert.ok(entry && moved && daemon && extracted, `${FILE}, ${MOVED_FILE} and ${DAEMON_FILE} have widened exceptions`);
-    assert.equal(entry.count + moved.count + daemon.count + extracted.count, sum);
+    const sweep = WIDENED_SITE_EXCEPTIONS[SWEEP_FILE];
+    assert.ok(entry && moved && daemon && extracted && sweep, `${FILE}, ${MOVED_FILE} and ${DAEMON_FILE} have widened exceptions`);
+    assert.equal(entry.count + moved.count + daemon.count + extracted.count + sweep.count, sum);
     assert.match(moved.reason, /RUN_TASK_WIDENED_SITES/);
     assert.match(daemon.reason, /RUN_TASK_WIDENED_SITES/);
     assert.match(extracted.reason, /RUN_TASK_WIDENED_SITES/);
+    assert.match(sweep.reason, /RUN_TASK_WIDENED_SITES/);
     assert.match(entry.reason, /^CHECKOUT\b/);
     assert.match(entry.reason, /RUN_TASK_WIDENED_SITES/);
     assert.match(entry.reason, /run-task-s-widened-git-sites-are-classified-and-converted\.test\.ts/);

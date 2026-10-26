@@ -254,7 +254,7 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
     },
   },
   {
-    file: "src/run-task.ts",
+    file: "src/cli/commands/sweep.ts",
     site: "createFixRungWorktree",
     creates: "a throwaway worktree materialized at a PR's OWN fix branch, for the fix rung to commit/push from",
     disposition: {
