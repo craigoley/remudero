@@ -898,7 +898,8 @@ test("code health records unreadable saved coverage as an unavailable source", a
     assert.equal(result.state, "published");
     const saved = readCodeHealthSnapshot(stateDir, repository); assert(saved.state === "observed");
     const coverage = saved.snapshot.input.scans.find(scan => scan.kind === "coverage");
-    assert.deepEqual([coverage?.state, coverage?.scanId, coverage?.reason], ["unavailable", "unavailable:coverage", readCodeHealthCoverageSource(stateDir, repository).reason],
+    const cached = readCodeHealthCoverageSource(stateDir, repository); assert(cached.state === "unavailable", "control: the saved coverage source reads as unavailable");
+    assert.deepEqual([coverage?.state, coverage?.scanId, coverage?.reason], ["unavailable", "unavailable:coverage", cached.reason],
       "a broken saved coverage source is named unavailable, never silently treated as not collected");
   });
 });
