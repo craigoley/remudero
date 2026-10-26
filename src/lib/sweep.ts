@@ -15631,9 +15631,11 @@ export function fixSeedRead(
         return index < dispatchAt && window[dispatchAt].run_id === seed.runId &&
           typeof line.run_id === "string" && line.run_id.length > 0 &&
           typeof line.round_id === "string" && line.round_id.length > 0 &&
+          typeof line.worker_run_id === "string" && line.worker_run_id.length > 0 &&
           window.slice(index + 1, dispatchAt).some(done => done.step === "fix.done" &&
             done.task_id === taskId && done.run_id === line.run_id &&
-            done.round_id === line.round_id && done.head_sha === pr.headSha && line.head_sha === pr.headSha);
+            done.round_id === line.round_id && done.worker_run_id === line.worker_run_id &&
+            done.head_sha === pr.headSha && line.head_sha === pr.headSha);
       })) {
     return { kind: "orphaned", seed, orphanReason: "owner-run-ended" };
   }

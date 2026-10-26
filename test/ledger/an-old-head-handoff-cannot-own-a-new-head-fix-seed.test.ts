@@ -127,9 +127,9 @@ test("real rotation preserves the exact old-head recovery and its uncertain-owne
 
 function completedEarlierRound(): Row[] {
   const rows = history();
-  rows[0] = { ...rows[0], head_sha: pr.headSha, round_id: "prior-round" };
+  rows[0] = { ...rows[0], head_sha: pr.headSha, round_id: "prior-round", worker_run_id: "prior-worker" };
   rows.splice(1, 1, { step: "fix.done", task_id: pr.taskId, run_id: PRIOR,
-    head_sha: pr.headSha, round_id: "prior-round", fix_outcome: "NEEDS_SCOPE" });
+    head_sha: pr.headSha, round_id: "prior-round", worker_run_id: "prior-worker", fix_outcome: "NEEDS_SCOPE" });
   rows.splice(4, 0, { step: "fix.dispatch", task_id: pr.taskId, run_id: OWNER,
     head_sha: pr.headSha, round_id: "seed-round" });
   return rows;
@@ -142,7 +142,7 @@ test("a completed earlier round at the same head cannot keep a dead seed owner l
 });
 
 test("settled-round recovery requires exact terminal identities before the seed's dispatch", () => {
-  for (const field of ["round_id", "run_id", "task_id", "head_sha"]) {
+  for (const field of ["round_id", "run_id", "task_id", "head_sha", "worker_run_id"]) {
     for (const value of [undefined, "foreign"]) {
       const rows = completedEarlierRound();
       rows[1] = { ...rows[1], [field]: value };
