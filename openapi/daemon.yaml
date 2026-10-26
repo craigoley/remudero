@@ -313,6 +313,99 @@ components:
         required_scope: { type: string, enum: [read, write] }
         required_tier: { type: string, enum: [middle] }
         required_sensitivity: { type: string, enum: [sensitive] }
+    ProductResearchRequest:
+      type: object
+      additionalProperties: false
+      required: [version, requestId, productId, expectedObjectiveRevision]
+      properties:
+        version: { type: string, enum: [product-research-v1] }
+        requestId: { $ref: "#/components/schemas/ProductRequestId" }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        expectedObjectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        answers:
+          type: array
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            required: [questionId, answer]
+            properties:
+              questionId: { type: string, minLength: 2, maxLength: 64, pattern: '^[a-z][a-z0-9_]{1,63}$' }
+              answer: { type: string, minLength: 1, maxLength: 2000 }
+    ProductResearchRun:
+      type: object
+      additionalProperties: false
+      description: One durable research run. executionAuthority is always none; provider is the configured one or null.
+      required: [id, objectiveRevision, productRevision, outcome, provider, budgetUsd, spendUsd, sources, executionAuthority, startedAt, finishedAt]
+      properties:
+        id: { type: string, pattern: '^prun_[a-f0-9]{32}$' }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        productRevision: { $ref: "#/components/schemas/ProductRevision" }
+        outcome: { type: string, enum: [completed, unavailable, failed] }
+        failure: { type: string, enum: [provider_error, invalid_output, over_budget] }
+        provider: { type: [string, "null"], maxLength: 120 }
+        budgetUsd: { type: number, minimum: 0 }
+        spendUsd: { type: number, minimum: 0 }
+        sources:
+          type: array
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            required: [label, url, disposition]
+            properties:
+              label: { type: string, minLength: 1, maxLength: 120 }
+              url: { type: string, maxLength: 2048 }
+              disposition: { type: string, enum: [data] }
+        summary: { type: string, minLength: 1, maxLength: 4000 }
+        executionAuthority: { type: string, enum: [none] }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+    ProductResearchResponse:
+      type: object
+      additionalProperties: false
+      required: [version, productId, objectiveRevision, replayed, run, open, accepted]
+      properties:
+        version: { type: string, enum: [product-research-v1] }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        replayed: { type: boolean }
+        run:
+          oneOf:
+            - { $ref: "#/components/schemas/ProductResearchRun" }
+            - { type: "null" }
+        open:
+          type: array
+          maxItems: 72
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, text, origin]
+            properties:
+              id: { type: string, minLength: 2, maxLength: 64 }
+              text: { type: string, minLength: 1, maxLength: 500 }
+              origin: { type: string, enum: [catalog, provider] }
+        accepted:
+          type: array
+          maxItems: 72
+          items:
+            type: object
+            additionalProperties: false
+            required: [questionId, text, answer, answeredAt]
+            properties:
+              questionId: { type: string, minLength: 2, maxLength: 64 }
+              text: { type: string, minLength: 1, maxLength: 500 }
+              answer: { type: string, minLength: 1, maxLength: 2000 }
+              answeredAt: { type: string, format: date-time }
+    ProductResearchError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-research-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, request_too_large, already_answered]
     OperatorAgentAnswer:
       type: object
       description: Bounded read-only answer-v1; missing evidence is explicit and citations are dated.
@@ -14513,6 +14606,78 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductError" }
+  /v1/products/research:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Ownership comes only from that verified
+          identity; owner fields, actor headers and shared bearers cannot substitute for it.
+        schema: { type: string, minLength: 1 }
+    post:
+      summary: Run bounded research and clarification for the operator's own product with durable evidence.
+      description: >
+        Requires the verified operator and middle write tier. At most 65536 raw request bytes. The
+        request names an existing product and the objectiveRevision the operator last saw, plus up to
+        16 answers. Sources come only from the saved brief and are recorded as data; their text is
+        never an instruction. The run uses only the operator-configured provider and per-run ceiling:
+        no request, source or provider text can select a provider or raise spending. A missing
+        provider records an unavailable run, never a fabricated report. At most one completed run
+        exists per objective revision. An answer stays accepted while the brief fields it depends on
+        are unchanged, so it is not asked again after resume; changing those fields invalidates only
+        the affected answers and keeps them as history. Reusing requestId with the same command
+        replays; a changed command conflicts. The run is also recorded as research stage evidence in
+        the product's durable record. Responses use Cache-Control private, no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductResearchRequest" }
+      responses:
+        "200":
+          description: The current research view (latest run for this objective revision, open questions and accepted answers).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductResearchResponse" }
+        "400":
+          description: Malformed JSON, unknown question, duplicate answer or forbidden fields.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductResearchError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAccessError" }
+        "403":
+          description: The verified operator identity or required write grant is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductResearchError"
+                  - $ref: "#/components/schemas/ProductAccessError"
+        "404":
+          description: The product does not exist for this operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductResearchError" }
+        "409":
+          description: stale_revision, idempotency_conflict, already_answered or a bounded capacity is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductResearchError" }
+        "413":
+          description: The raw request exceeds 65536 bytes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductResearchError" }
+        "503":
+          description: busy, corrupt, unavailable, outcome_unknown or recovery_required; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductResearchError" }
   /v1/analytics:
     get:
       summary: Read the internal benchmark evidence-quality or routing-pool projection.

@@ -27,7 +27,7 @@ const identity: IdentityProvider = {
   },
 };
 
-function assembled(root: string) {
+function assembled(root: string, extra: Partial<ServeDeps> = {}) {
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan"), { recursive: true });
   const ledgerPath = join(root, "state/ledger.ndjson");
@@ -40,18 +40,19 @@ function assembled(root: string) {
       ratify: { approve: () => {}, reframe: () => {} } },
     ledgerPath, issues: { close: () => {} }, fleetControlRoot: root, questionsRoot: root,
     tokens: { read: "fixture-read", write: "fixture-write" },
+    ...extra,
   };
   const before = readdirSync(root, { recursive: true });
-  const routes = buildServeRoutes(deps).filter((route) => route.path === "/v1/products");
+  const routes = buildServeRoutes(deps).filter((route) => route.path === "/v1/products" || route.path === "/v1/products/research");
   assert.deepEqual(readdirSync(root, { recursive: true }), before, "assembling product routes creates no state");
-  assert.deepEqual(routes.map((route) => `${route.method} ${route.path}`).sort(), ["GET /v1/products", "POST /v1/products"]);
+  assert.deepEqual(routes.map((route) => `${route.method} ${route.path}`).sort(), ["GET /v1/products", "POST /v1/products", "POST /v1/products/research"]);
   return routes;
 }
 
-async function server(t: TestContext, options: { mount?: boolean; missingRoot?: boolean; enforcement?: boolean } = {}) {
+async function server(t: TestContext, options: { mount?: boolean; missingRoot?: boolean; enforcement?: boolean; deps?: Partial<ServeDeps> } = {}) {
   const root = ownedFixtureDir(t, "product-http").dir;
   const log: unknown[] = [];
-  const routes = options.mount ? assembled(root) : buildProductRoutes({ root: options.missingRoot ? undefined : root });
+  const routes = options.mount ? assembled(root, options.deps) : buildProductRoutes({ root: options.missingRoot ? undefined : root });
   const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity,
     routes, enforceWriteTiers: options.enforcement, enforceReadSensitivity: options.enforcement,
     log: (step, extra) => { log.push({ step, extra }); } });
@@ -126,4 +127,62 @@ test("production tier and sensitivity enforcement keep bearer credentials below 
     assert.equal((await request(app.url, "/v1/products", "alice", command)).status, 200);
     assert.equal((await request(app.url, "/v1/products", "alice")).status, 200);
   } finally { await app.close(); }
+});
+
+test("W1-T10617: the served product research operation matches the authenticated API contract", async (t) => {
+  const inputs: unknown[] = [];
+  const productResearchProvider = { id: "fixture-research", async research(input: unknown) {
+    inputs.push(input);
+    return { summary: "Public map data covers Central Park.", spendUsd: 0, questions: [{ text: "Which zones are in scope?" }] };
+  } };
+  const app = await server(t, { mount: true });
+  try {
+    const saved = await request(app.url, "/v1/products", "alice", command);
+    assert.ok(saved.body.receipt);
+    const productId = saved.body.receipt.productId;
+    const post = async (session: "alice" | "bob" | undefined, body: unknown, raw?: string) => {
+      const result = await fetch(app.url + "/v1/products/research", { method: "POST",
+        headers: { authorization: "Bearer fixture-write", ...(session ? { "x-test-session": session } : { "x-rmd-actor": "clerk:alice" }), "content-type": "application/json" },
+        body: raw ?? JSON.stringify(body) });
+      const reply = await result.json() as { error?: string; run?: { outcome: string; provider: string; executionAuthority: string; sources: unknown[] }; open?: { id: string }[]; accepted?: { questionId: string }[]; replayed?: boolean };
+      assert.deepEqual(violations(reply, declaredBody("/v1/products/research", "POST", result.status)), [],
+        "the real research HTTP response must match its declared contract");
+      return { status: result.status, cache: result.headers.get("cache-control"), body: reply };
+    };
+    const body = { version: "product-research-v1", requestId: "research-http-0001", productId, expectedObjectiveRevision: 1,
+      answers: [{ questionId: "q_audience", answer: "commuters" }] };
+    assert.equal((await post(undefined, body)).status, 403, "an actor header or shared bearer is not a verified operator");
+    const first = await post("alice", body);
+    assert.equal(first.status, 200);
+    assert.match(first.cache ?? "", /no-store/);
+    assert.deepEqual([first.body.run?.outcome, first.body.run?.provider, first.body.run?.executionAuthority], ["unavailable", null, "none"],
+      "the served default carries no configured provider, so it is unavailable rather than fabricated");
+    assert.deepEqual(first.body.accepted?.map((item) => item.questionId), ["q_audience"]);
+    assert.equal(first.body.run?.sources.length, 1);
+    assert.equal(inputs.length, 0, "an unavailable run never reaches a provider");
+    const replay = await post("alice", body);
+    assert.deepEqual([replay.status, replay.body.replayed], [200, true]);
+    assert.equal((await post("alice", { ...body, answers: [] })).status, 409);
+    assert.equal((await post("alice", { ...body, requestId: "research-http-0002", expectedObjectiveRevision: 2 })).status, 409);
+    assert.equal((await post("bob", { ...body, requestId: "research-http-0003" })).status, 404);
+    assert.equal((await post("alice", { ...body, requestId: "research-http-0004", owner: "clerk:bob" })).status, 400);
+    assert.equal((await post("alice", body, "{broken")).status, 400);
+    assert.equal((await post("alice", { ...body, requestId: "research-http-0005", answers: [{ questionId: "q_audience", answer: "x".repeat(70_000) }] })).status, 413);
+    const stored = await request(app.url, `/v1/products?id=${productId}`, "alice");
+    assert.equal(stored.status, 200);
+    assert.ok(!JSON.stringify(app.log).includes(command.brief.idea), "service diagnostics never log source idea text");
+  } finally { await app.close(); }
+
+  const configured = await server(t, { mount: true, deps: { productResearchProvider, productResearchBudgetUsd: 1 } });
+  try {
+    const saved = await request(configured.url, "/v1/products", "alice", command);
+    assert.ok(saved.body.receipt);
+    const result = await fetch(configured.url + "/v1/products/research", { method: "POST",
+      headers: { "x-test-session": "alice", "content-type": "application/json" },
+      body: JSON.stringify({ version: "product-research-v1", requestId: "research-http-0006", productId: saved.body.receipt.productId, expectedObjectiveRevision: 1 }) });
+    const reply = await result.json() as { run: { outcome: string; provider: string } };
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/research", "POST", result.status)), []);
+    assert.deepEqual([result.status, reply.run.outcome, reply.run.provider], [200, "completed", "fixture-research"]);
+    assert.equal(inputs.length, 1);
+  } finally { await configured.close(); }
 });

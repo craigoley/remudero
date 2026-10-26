@@ -306,6 +306,8 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
 const COVERED: ReadonlySet<string> = new Set([
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts, W1-T10612 identity/mount test.
   "POST /v1/products",
+  // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts, W1-T10617 research contract test.
+  "POST /v1/products/research",
   "POST /v1/control/assistant-action",
   "POST /v1/control/stop",
   "POST /v1/control/resume",
@@ -514,6 +516,24 @@ test("POST /v1/products persists only the verified operator's brief under the fl
     assert.ok(existsSync(join(h.fleetRoot, "state/products/v1")));
     assert.ok(!existsSync(join(h.questionsRoot, "state/products")));
     assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "saving a draft preserves the ledger");
+  }, true);
+});
+
+test("POST /v1/products/research records research evidence for the verified operator under the fleet root", async () => {
+  await withProductionServer(async (h) => {
+    const headers = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json",
+      [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+    const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify({
+      version: "product-intent-v1", requestId: "wiring-research-0001", expectedRevision: 0, brief: { idea: "private research wiring fixture" } }) });
+    const { receipt } = await saved.json() as { receipt: { productId: string } };
+    const command = { version: "product-research-v1", requestId: "wiring-research-0002", productId: receipt.productId, expectedObjectiveRevision: 1 };
+    assert.equal((await post(h.base, "/v1/products/research", command)).status, 403);
+    const run = await fetch(`${h.base}/v1/products/research`, { method: "POST", headers, body: JSON.stringify(command) });
+    assert.equal(run.status, 200);
+    assert.equal((await run.json()).run.outcome, "unavailable");
+    assert.ok(existsSync(join(h.fleetRoot, "state/products/v1/research")));
+    assert.ok(!existsSync(join(h.questionsRoot, "state/products")));
+    assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "research evidence preserves the ledger");
   }, true);
 });
 
