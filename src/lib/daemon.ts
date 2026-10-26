@@ -4240,7 +4240,7 @@ export async function runDaemon(
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;
-  const improvementActionPump = startImprovementActionPump(deps, pollIntervalMs, log);
+  const improvementActionPump = { stop: () => {}, isBusy: () => false };
   improvementActionPumpRef.stop = improvementActionPump.stop;
   improvementActionPumpRef.isBusy = improvementActionPump.isBusy;
   // W1-T5720 — THE BOOT GATE. Tick 1 runs a light pass at once, then holds its cadences until the first full
