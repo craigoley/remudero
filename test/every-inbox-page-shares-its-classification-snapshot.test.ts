@@ -20,6 +20,7 @@ import type { Proposal } from "#src/lib/inbox.js";
 import { navBadgeView } from "#src/lib/nav-badge-view.js";
 import { inboxThreadListSources, peekSlowLaneClassification } from "#src/lib/panel-graph.js";
 import { listThreadViews } from "#src/lib/inbox-responder.js";
+import { backfillRecommendations, readRecommendationStore, recommendationFor, recommendationStorePath } from "#src/lib/inbox-recommendation.js";
 
 type Ctx = { after(fn: () => void | Promise<void>): void };
 function world(t: Ctx, count = 80) {
@@ -92,6 +93,13 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
   const store=join(w.root,"state/inbox-threads.jsonl");
   appendThreadMessage(inboxThreadIdentity(ageId),"escalation","The earlier age observation is retained.",{threadStorePath:store,now:()=>w.at-1000});
   const original=readFileSync(store,"utf8"),first=await w.refresh(),s=await served(t,w,first,{withWrites:true});
+  const recommendationCalls: string[] = [];
+  const recommend = () => backfillRecommendations({ stateDir: join(w.root, "state"), readProposals: () => [w.proposals[0]!],
+    evidence: { shards: async () => new Map(), shardText: async () => undefined, taskHistory: async () => [], resolve: async () => undefined },
+    summarize: async ({ context }) => { recommendationCalls.push(context); return { action: "reply", text: "Which policy should apply?",
+      why: "The age finding now carries an unanswered policy question.", evidence: [], obsolete: false }; } }, 1);
+  assert.equal((await recommend()).written, 0);
+  assert.equal(recommendationCalls.length, 0, "a captured age observation cannot request recommendation work");
   const badge=()=>navBadgeView({inboxRoot:w.root,scopes:()=>[],clock:fixedClock(w.at)}).compute(new URLSearchParams());
   const initialBadge=await badge();assert.ok(!("error" in initialBadge));
   const needs=await s.get("/v1/views/inbox?section=needsYou"),fleet=await s.get("/v1/views/inbox?section=fleet");
@@ -134,12 +142,29 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
   const sourceQuestion=readThread(threadId,{threadStorePath:store});assert.equal(sourceQuestion.status,"ok");
   assert.equal(sourceQuestion.messages.at(-1)?.extra?.question,true,"positive control: the real append API retained the question marker");
   const questioned=await w.refresh();s.put(questioned);
+  assert.equal((await recommend()).written, 1, "the writer uses captured operator ownership for the unanswered question");
+  assert.equal(recommendationCalls.length, 1);
+  const recommendationStore = readRecommendationStore(recommendationStorePath(join(w.root, "state")));
+  const capturedQuestion = readPersistedInbox(join(w.root, "state"))!.classifications.find(c => c.proposalId === ageId)!;
+  assert.equal(recommendationFor(w.proposals[0]!, "notReady", recommendationStore, capturedQuestion)?.action, "reply");
+  s.put(await w.refresh());
   const current=await s.get("/v1/views/inbox?section=needsYou"),afterBadge=await badge();assert.ok(!("error" in afterBadge));
   assert.equal(current.status,200);
   assert.deepEqual(new Set(ids(current.body.data.items)),new Set([ageId,"ruling:real-human-ask"]),"a genuine unanswered question stays visible as an operator ask");
   assert.equal(afterBadge.data.inbox.needsYou,current.body.data.items.length);
+  assert.equal(current.body.data.items.find((item: any) => item.proposalId === ageId)?.recommendation?.action, "reply",
+    "the served lane retains the recommendation for its captured human ask");
+  const recommendedLegacy = await s.get("/v1/inbox?section=needsYou");
+  assert.equal(recommendedLegacy.body.needsYou.notReady.find((item: any) => item.proposalId === ageId)?.recommendation?.action, "reply");
   const threads=await s.get("/v1/inbox/threads");assert.equal(threads.status,200);
   assert.equal(threads.body.threads.find((item:any)=>item.threadId===threadId)?.attention,"reply");
+  appendThreadMessage(inboxThreadIdentity(ageId), "reply", "Use the existing policy.", { threadStorePath: store, now: () => w.at + 1 });
+  s.put(await w.refresh());
+  const answered = await s.get("/v1/views/inbox?section=fleet");
+  assert.equal(answered.body.data.items.find((item: any) => item.proposalId === ageId)?.recommendation, undefined,
+    "a stored recommendation does not grant authority after the question is answered");
+  assert.equal((await recommend()).written, 0);
+  assert.equal(recommendationCalls.length, 1);
   assert.equal(s.reads(),0,"neither lanes nor history can reclassify mutable inputs on the request");
 });
 

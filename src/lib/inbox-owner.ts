@@ -83,8 +83,8 @@ export function captureInboxOwner(proposal: InboxOwnershipEvidence, messages: re
 }
 
 /** A missing capture cannot move an age finding out of the human lane. Unknown kinds never inherit fleet ownership. */
-export function classifiedInboxOwner(proposal: InboxOwnershipEvidence, classification: { displayOwner?: "operator" | "fleet"; retirement?: { state?: string } }): "operator" | "fleet" {
-  if (classification.retirement?.state === "restored_for_review" || classification.displayOwner === "operator") return "operator";
+export function classifiedInboxOwner(proposal: InboxOwnershipEvidence, classification: { displayOwner?: "operator" | "fleet"; retirement?: { state?: string }; requiresReview?: boolean }): "operator" | "fleet" {
+  if (classification.requiresReview || classification.retirement?.state === "restored_for_review" || classification.displayOwner === "operator") return "operator";
   if (classification.displayOwner === "fleet" && (fleetExecutionEligible(proposal) || isAgeOnlyInboxInformation(proposal))) return "fleet";
   return inboxOwner({ id: proposal.id });
 }

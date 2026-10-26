@@ -782,6 +782,7 @@ export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "rati
 export interface InboxClassification {
   /** Display ownership captured once with the producer's thread evidence; never execution permission. */
   displayOwner?: "operator" | "fleet";
+  requiresReview?: true;
   retirement?: InboxRetirementView;
   needsTriageReason?: string;
   releaseTaskId?: string;
@@ -1397,7 +1398,8 @@ export function classifyProposal(
   if (held) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: current task dispatch hold requires operator review" }], needsTriageReason: "Current security or dispatch hold preserves this ask for operator review" };
 
   if (lifecycle && !held) {
-    if ("unknown" in lifecycle) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: lifecycle evidence unavailable" }], needsTriageReason: lifecycle.unknown };
+    if ("unknown" in lifecycle) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: lifecycle evidence unavailable" }], needsTriageReason: lifecycle.unknown,
+      ...(isAgeOnlyInboxInformation(proposal) ? { requiresReview: true as const } : {}) };
     if (lifecycle.state === "retired" && lifecycle.proofKind === "merged-task" &&
       (!lifecycle.scope.taskId || !ctx.plan.byId.has(lifecycle.scope.taskId) || ctx.depsUnobservable?.(lifecycle.scope.taskId) !== undefined || !ctx.isMerged(ctx.plan.byId.get(lifecycle.scope.taskId)!))) {
       return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "deps_observable", detail: "needs-triage: current merge credit no longer confirms the retirement" }],
