@@ -352,6 +352,11 @@ test("W1-T10657: product fact transitions refuse another actor and stale objecti
   const objective = store.write(ACTOR, { ...create, requestId: "fixture-objective-0002", id, expectedRevision: 1, brief: { ...brief, objective: "A new objective" } });
   assert.ok(objective.ok);
   assert.equal(objective.value.receipt.objectiveRevision, 2);
+  const bindingOnly = { version: "product-intent-v1", id, repository };
+  assert.equal(store.transition(ACTOR, { ...bindingOnly, requestId: "fixture-stale-binding-objective", expectedRevision: 2, expectedObjectiveRevision: 1 }).code,
+    "stale_revision", "a repository-only fact cannot bind against an old objective");
+  assert.equal(store.transition(ACTOR, { ...bindingOnly, requestId: "fixture-stale-binding-record", expectedRevision: 1, expectedObjectiveRevision: 2 }).code,
+    "stale_revision", "a current objective does not authorize an old product revision");
   assert.equal(store.transition(ACTOR, { ...transitionFor(id), expectedRevision: 2 }).code, "stale_revision", "evidence for objective 1 cannot land on objective 2");
   assert.equal(store.transition(ACTOR, { ...transitionFor(id), requestId: "fixture-stale-rev-0003" }).code, "stale_revision");
   assert.equal(store.transition(ACTOR, { ...transitionFor(id, { stageEvidence: [evidence("old-objective", 1)] }), requestId: "fixture-stale-ev-0004", expectedRevision: 2, expectedObjectiveRevision: 2 }).code, "invalid_input");
