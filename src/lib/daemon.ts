@@ -7299,7 +7299,7 @@ export async function runDaemon(
       if (freshness.stale && decideFreshness(freshness, true) === "restart") decideRestart(freshness);
       wakeParkedLanes();
     };
-    const onDispatchTick = checkFreshness || deps.reloadPlan ? (): void | Promise<void> => {
+    const onDispatchTick = checkFreshness || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
       wakeParkedLanes();
       if (inFlightTasks.size === 0 || deps.checkPause?.()) return;
       // The light sweep reads this live binding; admitted workers retain their captured planForBatch.
