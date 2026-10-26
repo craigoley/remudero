@@ -153,3 +153,21 @@ test("a hand fix merged before a cause's first observed round is not that cause'
   const undated = [{ ...rounds[0]!, at: undefined }, rounds[1]!];
   assert.deepEqual(ciFrictionHandFixRounds([early], undated, priceCiFrictionCauses(undated), search).map((r) => r.cause.name), ["changed-nothing"]);
 });
+
+test("manual file overlap never fabricates a named failing-check observation", () => {
+  const fixes = [fix, { ...fix, pr: 10 }];
+  const before = structuredClone({ fixes, rounds });
+  const added = ciFrictionHandFixRounds(fixes, rounds, priceCiFrictionCauses(rounds), search);
+  assert.equal(added.length, 2, "the two actual manual changes remain observations");
+  assert.ok(added.every(row => row.cause.kind === "hand_fix" && row.cause.name === "src/worker.ts"));
+  assert.ok(added.every(row => row.pricing === "median-proxy" && row.minutes === 5));
+  assert.deepEqual({ fixes, rounds }, before, "historical inputs and measured costs remain untouched");
+});
+
+test("a manual change with an actual priced failure does not receive a second proxy cost", () => {
+  const added = ciFrictionHandFixRounds([{ ...fix, pr: 2 }, fix, { ...fix, pr: 10 }],
+    rounds, priceCiFrictionCauses(rounds), search);
+  assert.equal(added.some(row => row.pr === 2), false, "PR2's actual coverage failure already carries its measured cost");
+  assert.deepEqual(added.map(row => row.pr), [9, 10]);
+  assert.ok(added.every(row => row.cause.kind === "hand_fix"));
+});
