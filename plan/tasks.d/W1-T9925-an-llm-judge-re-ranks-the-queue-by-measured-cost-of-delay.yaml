@@ -14,7 +14,8 @@
     - src/lib/queue-judge-gardener.ts
     - src/lib/garden-registry.ts
     - src/run-task.ts
-    - test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts
+    - src/lib/config-gardener.ts
+    - test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts
   status: queued
   priority: 1  # operator-2026-10-16: priority has lost its meaning; protective P1s waited 15+ h behind 81 other plain P1s
   attempts: 0
