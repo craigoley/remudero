@@ -8,6 +8,7 @@ import { inboxThreadId } from "#src/lib/inbox-thread.js";
 import { fixedClock } from "#src/lib/clock.js";
 import { createReadModelWorker } from "#src/lib/read-model-worker.js";
 import { viewEtag, type ViewBodyEntry, type ViewSource } from "#src/lib/views.js";
+import { judgeSource } from "#src/lib/view-freshness.js";
 import { CODE_HEALTH_SCOPE_KEY, CODE_HEALTH_VIEW_NAME, createCodeHealthView, readCodeHealthInventory, readCodeHealthRelatedWork, validateCodeHealthRequest } from "#src/lib/code-health-view.js";
 import * as store from "#src/lib/code-health-store.js";
 
@@ -156,7 +157,9 @@ test("code health related work is unavailable when its saved sources cannot be r
 test("code health answers not ready until the configured repository list is held, and builds nothing it cannot read", async () => {
   await withTempDir("code-health-not-ready", dir => {
     const wanted: Array<[string, string]> = [];
-    const source = (body?: unknown) => ({ body: () => body as never, want: (view: string, key: string) => void wanted.push([view, key]) });
+    const source = (body?: unknown) => ({ body: () => body as never,
+      judge: (sources: readonly ViewSource[], now: number) => sources.map(value => judgeSource(value, now)),
+      want: (view: string, key: string) => void wanted.push([view, key]) });
     const notReady = { error: "view_not_ready", status: 503, detail: "Code health is waiting for the configured repository list." };
     assert.deepEqual(validateCodeHealthRequest(new URLSearchParams(""), source(undefined) as never, Date.parse("2026-11-02T12:00:00.000Z")), notReady);
     const staleScope = { body: { data: { version: "code-health-view-v1", repository: "all", expectedRepositories: ["acme/atlas"] },
