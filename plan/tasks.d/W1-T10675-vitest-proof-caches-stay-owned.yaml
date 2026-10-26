@@ -1,0 +1,39 @@
+- id: W1-T10675
+  title: Keep shared-install Vitest proof caches writable and bound to their proof
+  repo: remudero
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: operator-request#wreckterra-console-product-2026-10-25
+  status: queued
+  attempts: 0
+  depends_on:
+    - W1-T10614
+  plan_refs:
+    - W1-T10614
+    - W1-T10612
+  files:
+    - src/lib/proof-cache.ts
+    - src/lib/review.ts
+    - src/lib/check-proof.ts
+    - test/review/vitest-proof-cache.test.ts
+    - test/review/vitest-shared-install-config.test.ts
+    - test/review/vitest-ordinary-install-config.test.ts
+    - test/check-proof-vitest-registered-root.test.ts
+  rationale: CONSOLE-T147 run CONSOLE-T147-1792981752145 published source d59e8ec899b450b2804ab81fd12b1a3ded79eab3, then its native preopen gate invoked Core-only commitlint/tool paths and console-parity/command-registry/deps-interface checks inside the Console checkout. PR opening then refused a real Vitest test-load error at node_modules/.vitest-cache. These are observed execution failures, not failed game or Console acceptance. The subject sweep inspected all 14 open head trees against e9271652611dd473c0a8540bdb5d3945a0392add with 144 main matches and zero added subject lines in every head; no competing repair was observed. Keep active jobs, existing claims, all budgets, admission, source/receipt identity and actual quality gates. No source PR may be opened merely by suppressing an error. Existing shared-install support only adds native config loading; it does not relocate the separate Vitest 5 filesystem module cache. This extends the actual proof executor, not the product API or task acceptance. New proof-cache imports map to review; compute actual placement before adding tests.
+  design: "Use a proof-owned writable scratch cache for shared-install Vitest filesystem module transforms, wired through createProofCache at the real synchronous and asynchronous proof execution boundary, including check-proof/head/base discrimination and prepared-argv paths. Consult the installed pinned runner version/capability and the primary Vitest 5 fsModuleCachePath contract (https://vitest.dev/config/fsmodulecachepath): its CLI option is --fsModuleCachePath=<path>, distinct from the Vite config cacheDir. Preserve native config loading, target-specific pinned CLI/config, literal name filtering, suite-root restrictions, TAP leaf counts, timeout, no-match/fail/exec_error distinctions and Core Node/grep argv. Keep ordinary dependency installations compatible and never pass an unsupported version flag blindly; unavailable runner metadata/capability remains explicit. Isolate head/base/revision/proof cache identities, retain lockfile invalidation and bounded resource guards, and remove only the completed invocation owned cache after child settlement, including errors and timeout. Never write/chmod/reinstall/clear shared dependency seeds, mutate the consumer lockfile/config, weaken acceptance or coverage, add exclusions, disable result validation, or count an import failure as a discriminating base failure. Exercise the real default child/filesystem path and both executors, not only injected spawners. Independently qualify the preserved Console head with its actual pinned Vitest 5 installation and the real native head/base checker after source deployment; keep that measurement distinct from fixture CI. No consumer source or budget changes."
+  acceptance:
+    - claim: shared-install Vitest proofs use owned writable caches on both executors
+      proof: "unit test: W1-T10675: shared-install Vitest proofs use owned writable caches on both executors"
+    - claim: head and base proof caches cannot reuse another revision state
+      proof: "unit test: W1-T10675: head and base proof caches cannot reuse another revision state"
+    - claim: cache failures preserve proof errors and release only owned scratch
+      proof: "unit test: W1-T10675: cache failures preserve proof errors and release only owned scratch"
+    - claim: the real proof executor creates the owned cache
+      proof: "grep: createProofCache( in src/lib/review.ts"
+  falsifier: "Remove writable-cache routing, identity isolation and error/cleanup handling independently; each matching proof must fail against the same fixture then pass restored. Include a real default child process with a read-only linked dependency payload, successful positive control, real child nonzero, no-match, import error and timeout; verify donor/source hashes unchanged and genuine nonzero TAP counts. A fake Vitest shim alone does not establish actual Vitest 5 compatibility: retain a separate admitted installed-runner head/base qualification receipt. Preserve active jobs, failed receipts and normal publication guards."
