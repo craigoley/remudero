@@ -282,3 +282,63 @@ acquireTestSlot("child-waiter", { ...opts, sleep: () => {
   assert.deepEqual(readFileSync(join(testSlotQueueDir(dir), "hold-history.ndjson"), "utf8").split("\n").filter(Boolean)
     .map(line => (JSON.parse(line) as { label: string }).label), ["holder", "A"], "only the two holds that were released recorded one");
 });
+
+test("W1-T9950: a queue that cannot be used degrades to unqueued polling and says why", t => {
+  const time = fakeClock(), alive = new Set(Object.values(PID));
+  const opts = (dir: string): Partial<TestSlotOptions> => ({ dir, slots: 1, load: IDLE, hostname, bootId: () => "boot-1", pidNamespace: () => "ns-1",
+    isPidAlive: pid => alive.has(pid), waitBoundMs: 60 * MIN });
+  // (1) The queue path is a FILE: listing it fails, so the waiter polls unqueued and names why.
+  const listed = slotDir(t, "queue-file");
+  writeFileSync(testSlotQueueDir(listed), "not a directory");
+  const held = acquireTestSlot("holder", { ...opts(listed), clock: time.clock, pid: PID.holder, log: () => {}, say: () => {} });
+  const s = scheduler(t, time, opts(listed));
+  const a = s.arrive(0, "A", { pid: PID.a, pollMs: 1_000 });
+  s.runUntil(0);
+  const unavailable = rows(a.lines, "test_slot.queue_unavailable");
+  assert.equal(unavailable.length, 1, a.lines.join("\n"));
+  assert.match(String(unavailable[0]!.error), /ENOTDIR/);
+  assert.equal(reports(a.lines).length, 0, "an unqueued waiter claims no position");
+  held.release();
+  s.runUntil(1_000);
+  assert.equal(a.lease?.outcome, "acquired", "an unusable queue never blocks admission");
+  assert.equal(rows(a.lines, "test_slot.acquired")[0]!.ticketed, false);
+  a.lease!.release();
+  // (2) The queue cannot be CREATED (its parent is read-only): joining fails the same named way. Root ignores
+  // mode bits, so this arm is driven only where they bind.
+  if (process.getuid?.() !== 0) {
+    const parent = slotDir(t, "ro-parent"), dir = join(parent, "slots");
+    mkdirSync(dir);
+    const holder = acquireTestSlot("holder", { ...opts(dir), clock: time.clock, pid: PID.holder, log: () => {}, say: () => {} });
+    const lines: string[] = [];
+    chmodSync(parent, 0o555);
+    let lease: TestSlotLease;
+    try { lease = acquireTestSlot("B", { ...opts(dir), clock: time.clock, pid: PID.b, waitBoundMs: 0, log: line => lines.push(line), say: () => {} }); }
+    finally { chmodSync(parent, 0o755); }
+    assert.equal(lease.outcome, "wait_bound_exceeded");
+    assert.match(String(rows(lines, "test_slot.queue_unavailable")[0]?.error), /EACCES|EPERM|EROFS/, lines.join("\n"));
+    holder.release();
+  }
+  // (3) Unparseable ticket bytes are reaped by name; an unreadable history is an unknown ETA, and a release
+  // that cannot record its hold logs it.
+  const broken = slotDir(t, "broken");
+  const owner = acquireTestSlot("holder", { ...opts(broken), clock: time.clock, pid: PID.holder, log: () => {}, say: () => {} });
+  const garbage = writeTicket(broken, time.now - 1_000, { pid: PID.x });
+  writeFileSync(join(testSlotQueueDir(broken), garbage), "{torn");
+  mkdirSync(join(testSlotQueueDir(broken), "hold-history.ndjson"));
+  const c = s.arrive(time.now - time.start, "C", { ...opts(broken), pid: PID.x, pollMs: 1_000 });
+  s.runUntil(time.now - time.start);
+  const reaped = rows(c.lines, "test_slot.ticket_reaped")[0]!;
+  assert.equal(reaped.ticket, garbage);
+  assert.equal(reaped.reason, "unreadable ticket");
+  assert.match(String(reports(c.lines)[0]!.etaBasis), /^ETA unknown: hold history unreadable \(.*EISDIR/);
+  // Ending C's acquisition runs its finally: the ticket goes, so D is not queued behind a waiter nobody steps.
+  c.gen.return(undefined as never);
+  c.lease = { outcome: "acquired" } as TestSlotLease;
+  assert.deepEqual(tickets(broken).filter(name => name.endsWith(".json")), []);
+  const releaseLines: string[] = [];
+  owner.release();
+  const d = acquireTestSlot("D", { ...opts(broken), clock: time.clock, pid: PID.w, log: line => releaseLines.push(line), say: () => {} });
+  assert.equal(d.outcome, "acquired");
+  d.release();
+  assert.match(String(rows(releaseLines, "test_slot.hold_history_failed")[0]?.error), /EISDIR/, releaseLines.join("\n"));
+});

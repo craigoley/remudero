@@ -1189,7 +1189,10 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     try {
       ticket = takeTestSlotTicket(dir, { pid: opts.pid ?? process.pid, host: host(), bootId: bootId(), pidNs: pidNamespace(), processStart,
         label, arrivedAt: startedIso, heartbeatAt: clock.iso(), heartbeatIntervalMs: pollMs });
-    } catch (error) { queueFailed(error); }
+    } catch (error) {
+      // Collapses "cannot queue" into today's unqueued polling — never a refusal; queueFailed logs the reason.
+      queueFailed(error);
+    }
   };
   /** The live tickets ahead of this waiter (dead ones reaped on the way); joins the line when anyone is in it. */
   const queueAhead = (): QueuedTicket[] => {
@@ -1200,7 +1203,11 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
       if (!ticket && live.length > 0) joinQueue();
       const own = ticket?.name;
       return own === undefined ? live : live.filter(t => t.name < own);
-    } catch (error) { queueFailed(error); return []; }
+    } catch (error) {
+      // Nobody ahead is NOT claimed: queueFailed logs queue_unavailable and stops queueing for this waiter.
+      queueFailed(error);
+      return [];
+    }
   };
   /** Read-only view of each slot's holder: never creates, reclaims or guards a slot file. */
   const slotView = (judgeOpen: boolean): { open: number; holders: QueueHolderView[]; privateSeen: boolean; unproven: boolean } => {
@@ -1216,6 +1223,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
         // Only a cadence-less dead holder counts as open here; anything needing exact-tree evidence waits for the head.
         if (judgeOpen && held && !view.unproven && testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace })) view.open += 1;
       } catch (error) {
+        // Absent is open; any other failure is a holder we cannot read, reported by name and never counted open.
         if ((error as NodeJS.ErrnoException).code === "ENOENT") view.open += 1;
         else view.holders.push({ slot: i, label: `unreadable: ${(error as NodeJS.ErrnoException).code ?? String(error)}` });
       }
@@ -1233,7 +1241,10 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     try {
       history = readHoldHistory(dir);
       eta = estimateQueueEta({ slots, holders: holding, ahead: ahead.map(t => ({ label: t.ticket.label })), history });
-    } catch (error) { eta = { basis: `ETA unknown: hold history unreadable (${String(error)})` }; }
+    } catch (error) {
+      // An unreadable history is an unknown ETA that names why, never a guessed number.
+      eta = { basis: `ETA unknown: hold history unreadable (${String(error)})` };
+    }
     const position = ahead.length + 1, aheadOf = ahead.map(t => ({ label: t.ticket.label, pid: t.ticket.pid }));
     const message = describeQueuePosition(position, aheadOf, holding, eta);
     return { fields: { position, ahead: aheadOf, holding, etaMs: eta.etaMs, etaBasis: eta.basis, message }, message };
