@@ -75,14 +75,6 @@ export const STALE_DAYS_OFFSET = "sweep.staleDays";
  */
 export const AGED_FIELDS = [
   {
-    field: "asOf",
-    threshold: "Code health repository-scope freshness (three minutes)",
-    source: "src/lib/code-health-view.ts",
-    evidence: ["const SCOPE_BUDGET_MS = 180_000;", "Date.parse(value.asOf)", "<= SCOPE_BUDGET_MS"],
-    offsetDays: 0,
-    consumers: ["validateCodeHealthRequest"],
-  },
-  {
     field: "observedAt",
     threshold: "code health finding-source freshness (24 hours)",
     source: "src/lib/codeql-quality-intake.ts",
