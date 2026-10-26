@@ -15,6 +15,7 @@ import * as tickRead from "#src/lib/tick-read-worker.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 // @ts-expect-error — pure ESM producer constant; tsconfig includes TS only.
 import { SECURITY_MERGE_CONTEXT } from "#src/lib/code-scanning-merge-adapter.mjs";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 import * as sweep from "#test/helpers/sweep-test.js";
 import type { CiFailure, OpenPrView, SweepDeps } from "#test/helpers/sweep-test.js";
 
@@ -40,45 +41,41 @@ function alert(number: number, rule: string, severity: string, securityLevel: st
   };
 }
 
-/** #14202's GitHub as REST serves it: a red required ci-gate over a failed shard, a CodeQL check that did NOT fail, and the policy's status. */
-function github(seen: string[], policy: Record<string, unknown> | undefined) {
-  return async (args: string[]): Promise<unknown> => {
-    const path = args.find((arg) => arg.startsWith("repos/")) ?? "";
-    seen.push(path);
-    if (path.includes("/pulls?") && path.includes("state=open")) {
-      return [{ number: PR, html_url: PR_URL, state: "open", draft: false, title: "fix(code-health): provenance inputs",
-        body: `Remudero-Task: ${TASK}`, updated_at: AT, created_at: AT, head: { ref: `run-${TASK}-1792883946004`, sha: HEAD } }];
-    }
-    if (path.includes("/check-runs")) {
-      return { total_count: 3, check_runs: [
-        { id: 500, name: "ci-gate", status: "completed", conclusion: "failure", head_sha: HEAD, started_at: AT, completed_at: AT,
-          details_url: `https://github.com/${OWNER}/${REPO}/actions/runs/78/job/9000` },
-        { id: 501, name: SHARD, status: "completed", conclusion: "failure", head_sha: HEAD, started_at: AT, completed_at: AT,
-          details_url: `https://github.com/${OWNER}/${REPO}/actions/runs/77/job/9001` },
-        { id: 502, name: "CodeQL", status: "completed", conclusion: "success", head_sha: HEAD, started_at: AT, completed_at: AT,
-          app: { slug: "github-advanced-security", id: 57789, owner: { login: "github" } } },
-      ] };
-    }
-    if (path.endsWith("/status")) {
-      return { statuses: policy === undefined ? [] : [{ context: SECURITY_MERGE_CONTEXT, created_at: AT, updated_at: AT, ...policy }] };
-    }
-    if (path === ALERTS_PATH) {
-      return [alert(611, "js/file-system-race", "warning", "high", RACE.line),
-        alert(612, "js/unused-local-variable", "note", null, 12), alert(613, "js/unused-local-variable", "note", null, 40)];
-    }
-    if (path.includes("/files")) return [{ filename: RACE.path, status: "modified" }];
-    if (/\/pulls\/\d+$/.test(path)) return { mergeable: true, mergeable_state: "blocked" };
-    return {};
-  };
+/** #14202's GitHub as REST serves it, through the shared PATH shim and the real async transport: a red required
+ *  ci-gate over a failed shard, a CodeQL check that did NOT fail, and the policy's status. First matching route wins. */
+function routes(policy: Record<string, unknown> | undefined): GhShimRoute[] {
+  const json = (value: unknown) => JSON.stringify(value);
+  return [
+    { when: "code-scanning/alerts", stdout: json([alert(611, "js/file-system-race", "warning", "high", RACE.line),
+      alert(612, "js/unused-local-variable", "note", null, 12), alert(613, "js/unused-local-variable", "note", null, 40)]) },
+    { when: "check-runs", stdout: json({ total_count: 3, check_runs: [
+      { id: 500, name: "ci-gate", status: "completed", conclusion: "failure", head_sha: HEAD, started_at: AT, completed_at: AT,
+        details_url: `https://github.com/${OWNER}/${REPO}/actions/runs/78/job/9000` },
+      { id: 501, name: SHARD, status: "completed", conclusion: "failure", head_sha: HEAD, started_at: AT, completed_at: AT,
+        details_url: `https://github.com/${OWNER}/${REPO}/actions/runs/77/job/9001` },
+      { id: 502, name: "CodeQL", status: "completed", conclusion: "success", head_sha: HEAD, started_at: AT, completed_at: AT,
+        app: { slug: "github-advanced-security", id: 57789, owner: { login: "github" } } },
+    ] }) },
+    { when: `/commits/${HEAD}/status`, stdout: json({ statuses: policy === undefined ? []
+      : [{ context: SECURITY_MERGE_CONTEXT, created_at: AT, updated_at: AT, ...policy }] }) },
+    { when: "state=open", stdout: json([{ number: PR, html_url: PR_URL, state: "open", draft: false,
+      title: "fix(code-health): provenance inputs", body: `Remudero-Task: ${TASK}`, updated_at: AT, created_at: AT,
+      head: { ref: `run-${TASK}-1792883946004`, sha: HEAD } }]) },
+    { when: `/pulls/${PR}/files`, stdout: json([{ filename: RACE.path, status: "modified" }]) },
+    { when: `/pulls/${PR}`, stdout: json({ mergeable: true, mergeable_state: "blocked" }) },
+    { when: "", stdout: "{}" },
+  ];
 }
 
 async function views(policy: Record<string, unknown> | undefined, seen: string[] = []): Promise<OpenPrView> {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}pr-14202-`));
+  const shim = ghShim(routes(policy), { kind: "pr-14202-security" });
+  const previous = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${previous}`;
   try {
     const ledgerPath = join(dir, "ledger.ndjson");
     writeFileSync(ledgerPath, "");
     const built = await tickRead.buildOpenPrViewsAsync(OWNER, REPO, ledgerPath, {
-      fetchAsync: github(seen, policy),
       requiredContexts: () => ["ci-gate"],
       readCiGateRequired: () => [],
       readMainPlan: () => ({ tasks: [], byId: new Map() }),
@@ -86,10 +83,14 @@ async function views(policy: Record<string, unknown> | undefined, seen: string[]
         fetchAnnotations: async () => [], fetchJobLog: async () => "not ok 7 - code-health intake reads one descriptor\n",
       }),
     });
+    seen.push(...shim.calls().flatMap((call) => call.split(" ").filter((arg) => arg.startsWith("repos/"))));
+    assert.ok(seen.some((path) => path.includes("state=open")), "positive control: the list was read through the shimmed transport");
     assert.equal(built.length, 1, "positive control: the one open PR was built");
     return built[0]!;
   } finally {
+    process.env.PATH = previous;
     rmSync(dir, { recursive: true, force: true });
+    rmSync(shim.dir, { recursive: true, force: true });
   }
 }
 
