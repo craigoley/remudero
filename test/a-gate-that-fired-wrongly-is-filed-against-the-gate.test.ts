@@ -432,3 +432,64 @@ test("W1-T9049: async inventory uses the default transport to read open PRs", as
   assert.deepEqual(spec.metric!(inv, "false-positive"), { trials: 1, successes: 0 });
   assert.equal(f.rows[0].extra?.classification, "token-dodge");
 });
+
+function omittedRepairPatchFixture(file: Record<string, unknown>, readFullDiff: () => string | Promise<string>) {
+  const reads: string[][] = [];
+  const ghJson = async (args: string[]): Promise<unknown> => {
+    const path = args[1] ?? "";
+    if (args[0] === "repo") return { nameWithOwner: "o/r" };
+    if (path.includes("/pulls?")) return [{ number: 5, base: { sha: "base" } }];
+    if (path.endsWith("/pulls/5/commits?per_page=100")) return [{ sha: "red" }, { sha: "green" }];
+    if (path.includes("/check-runs")) return { check_runs: [{ id: 7, name: "census", status: "completed",
+      conclusion: path.includes("/commits/red/") ? "failure" : "success" }] };
+    if (path.endsWith("/status")) return { statuses: [] };
+    if (path.includes("/compare/red...green")) return { files: [file] };
+    if (path.includes("/compare/base...red")) return { merge_base_commit: { sha: "base" }, files: [] };
+    throw new Error(`unexpected repair evidence read: ${args.join(" ")}`);
+  };
+  return { reads, run: () => loadGateRepairObservations([rule], { ghJson, ghText: async args => {
+    reads.push(args);
+    assert.deepEqual(args, ["api", "repos/o/r/compare/red...green", "-H", "Accept: application/vnd.github.diff"]);
+    return readFullDiff();
+  } }) };
+}
+
+const fullRepairHunk = "@@ -1,2 +1,2 @@\n shared\n-old\n+new\n\\ No newline at end of file\n";
+const fullRepairDiff = `diff --git a/${baseline} b/${baseline}\nindex old..new 100644\n--- a/${baseline}\n+++ b/${baseline}\n${fullRepairHunk}`;
+
+test("a JSON-omitted repair patch is recovered only from complete same-pair full-diff evidence", async () => {
+  const missing = { filename: baseline, additions: 1, deletions: 1 };
+  const f = omittedRepairPatchFixture(missing, () => fullRepairDiff);
+  const observations = await f.run();
+  assert.equal(observations.length, 1);
+  assert.deepEqual(observations[0]!.pair.repairFiles, [baseline]);
+  assert.equal(observations[0]!.repairDiff, `diff --git a/${baseline} b/${baseline}\n${fullRepairHunk}`);
+  assert.equal(classifyGateRepair(observations[0]!.pair, observations[0]!.repairDiff, rule.ownFiles, rule.gateRegex), "baseline-only");
+  assert.equal(f.reads.length, 1);
+  const complete = omittedRepairPatchFixture({ ...missing, patch: fullRepairHunk }, () => { throw new Error("no fallback for complete JSON"); });
+  assert.deepEqual(await complete.run(), observations);
+  assert.equal(complete.reads.length, 0);
+});
+
+test("an incomplete full-diff repair remains unavailable rather than an empty or genuine repair", async () => {
+  const missing = { filename: baseline, additions: 1, deletions: 1 };
+  const controls: Array<{ name: string; file?: Record<string, unknown>; raw: string }> = [
+    { name: "no response", raw: "" },
+    { name: "wrong file", raw: fullRepairDiff.replaceAll(baseline, "other.ts") },
+    { name: "duplicate file", raw: fullRepairDiff + fullRepairDiff },
+    { name: "unfinished hunk", raw: fullRepairDiff.slice(0, fullRepairDiff.indexOf("+new")) },
+    { name: "hunk overrun", raw: fullRepairDiff.replace("+new", "+new\n+extra") },
+    { name: "incorrect totals", file: { ...missing, additions: 2 }, raw: fullRepairDiff },
+    { name: "missing totals", file: { filename: baseline }, raw: fullRepairDiff },
+    { name: "negative totals", file: { ...missing, additions: -1 }, raw: fullRepairDiff },
+    { name: "noninteger totals", file: { ...missing, deletions: 0.5 }, raw: fullRepairDiff },
+    { name: "binary response", raw: `diff --git a/${baseline} b/${baseline}\nGIT binary patch\n${fullRepairHunk}` },
+    { name: "unexpected hunk body", raw: fullRepairDiff.replace(" shared", "unprefixed") },
+    { name: "wrong old path", raw: fullRepairDiff.replace(`a/${baseline}`, "a/other.ts") },
+  ];
+  for (const control of controls) {
+    await assert.rejects(omittedRepairPatchFixture(control.file ?? missing, () => control.raw).run(), /repair diff unreadable/, control.name);
+  }
+  const unavailable = new Error("full-diff API unavailable");
+  await assert.rejects(omittedRepairPatchFixture(missing, () => { throw unavailable; }).run(), error => error === unavailable);
+});
