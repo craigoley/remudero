@@ -750,20 +750,26 @@ test("skill conformance preserves denied and unknown worker contexts", () => {
 });
 
 test("real skill staging retains scanner and operator approval boundaries", () => {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}context-stage-`)), registry = join(dir, "inbox.json"), settingsPath = join(dir, "worker.json");
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}context-stage-`)), registry = join(dir, "inbox.json"), settingsPath = join(dir, "settings", "worker.json");
+  mkdirSync(join(dir, "settings"));
   writeFileSync(settingsPath, JSON.stringify(contextSettings()));
-  const config = { root: dir, workerProviders: { enabled: ["claude"] } } as Config;
+  const config = { root: dir, installRoot: dir, workerProviders: { enabled: ["claude"] } } as Config;
   const rows: Array<Record<string, unknown>> = [];
   const valid = contextDraft();
-  stageSkillDrafts(registry, [valid], d => skillDraftWorkerAllowlist(config, d, settingsPath), describeSkillInjectionReachability, (_step, extra) => rows.push(extra ?? {}));
+  stageSkillDrafts(registry, [valid], d => skillDraftWorkerAllowlist(config, d), describeSkillInjectionReachability, (_step, extra) => rows.push(extra ?? {}));
   assert.equal(rows.at(-1)?.staged, true);
   assert.equal(loadProposalRegistry(registry).length, 1);
   assert.deepEqual(loadInjectableSkills(join(dir, ".claude", "skills")), [], "staging cannot inject or ratify a skill");
   const before = readFileSync(registry, "utf8");
   const unknown = { ...contextDraft("Read the source.", "future-lane"), procedureKey: "unknown-context" };
-  stageSkillDrafts(registry, [unknown], d => skillDraftWorkerAllowlist(config, d, settingsPath), describeSkillInjectionReachability, (_step, extra) => rows.push(extra ?? {}));
+  stageSkillDrafts(registry, [unknown], d => skillDraftWorkerAllowlist(config, d), describeSkillInjectionReachability, (_step, extra) => rows.push(extra ?? {}));
   assert.equal(rows.at(-1)?.refused, true);
   assert.equal(readFileSync(registry, "utf8"), before);
+  renameSync(settingsPath, settingsPath + ".held");
+  stageSkillDrafts(registry, [valid], d => skillDraftWorkerAllowlist(config, d), describeSkillInjectionReachability, (_step, extra) => rows.push(extra ?? {}));
+  assert.match(String(rows.at(-1)?.error), /ENOENT/, "the real default settings reader refuses an unavailable policy");
+  assert.equal(readFileSync(registry, "utf8"), before);
+  renameSync(settingsPath + ".held", settingsPath);
 });
 
 test("skill conformance names the real eligible execution context", () => {
