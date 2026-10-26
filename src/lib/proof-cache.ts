@@ -106,7 +106,11 @@ export function createProofCache(input: ProofCacheInput, deps: Partial<Pick<type
             const info = fstatSync(fd);
             if (!info.isFile() || info.uid !== owner.uid || info.nlink !== 1 || info.size > 1024 || length !== info.size || bytes.toString("utf8", 0, length) !== marker) throw new Error("cache owner marker changed");
           } finally { closeSync(fd); }
-        } catch (error) { markerError = error; }
+        } catch (error) {
+          // Not erased: retained and rethrown below once the directory identity is judged, so the
+          // outer catch reports it as a failed release instead of removing an unowned directory.
+          markerError = error;
+        }
       }
       const current = lstatSync(path, { throwIfNoEntry: false });
       if (current === undefined) return { released: true };
