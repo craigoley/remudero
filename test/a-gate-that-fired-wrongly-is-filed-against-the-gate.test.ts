@@ -469,6 +469,13 @@ test("a JSON-omitted repair patch is recovered only from complete same-pair full
   const complete = omittedRepairPatchFixture({ ...missing, patch: fullRepairHunk }, () => { throw new Error("no fallback for complete JSON"); });
   assert.deepEqual(await complete.run(), observations);
   assert.equal(complete.reads.length, 0);
+  const multipleHunks = "@@ -1 +1 @@\n-old\n+new\n@@ -3 +3 @@\n-before\n+after\n";
+  const multiple = omittedRepairPatchFixture({ ...missing, additions: 2, deletions: 2 },
+    () => fullRepairDiff.replace(fullRepairHunk, multipleHunks));
+  assert.equal((await multiple.run())[0]!.repairDiff, `diff --git a/${baseline} b/${baseline}\n${multipleHunks}`);
+  const renamed = omittedRepairPatchFixture({ ...missing, previous_filename: "old-baseline.json" },
+    () => fullRepairDiff.replaceAll(`a/${baseline}`, "a/old-baseline.json"));
+  assert.deepEqual(await renamed.run(), observations);
 });
 
 test("an incomplete full-diff repair remains unavailable rather than an empty or genuine repair", async () => {
@@ -479,6 +486,9 @@ test("an incomplete full-diff repair remains unavailable rather than an empty or
     { name: "duplicate file", raw: fullRepairDiff + fullRepairDiff },
     { name: "unfinished hunk", raw: fullRepairDiff.slice(0, fullRepairDiff.indexOf("+new")) },
     { name: "hunk overrun", raw: fullRepairDiff.replace("+new", "+new\n+extra") },
+    { name: "invalid hunk size", raw: fullRepairDiff.replace("@@ -1,2 +1,2", "@@ -1,9007199254740993 +1,2") },
+    { name: "metadata without hunks", raw: fullRepairDiff.slice(0, fullRepairDiff.indexOf("@@")) },
+    { name: "no textual changes", file: { ...missing, additions: 0, deletions: 0 }, raw: fullRepairDiff.replace(fullRepairHunk, "@@ -1 +1 @@\n shared\n") },
     { name: "incorrect totals", file: { ...missing, additions: 2 }, raw: fullRepairDiff },
     { name: "missing totals", file: { filename: baseline }, raw: fullRepairDiff },
     { name: "negative totals", file: { ...missing, additions: -1 }, raw: fullRepairDiff },
