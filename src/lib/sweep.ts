@@ -9443,7 +9443,11 @@ export interface MainLatestRun {
   ruleChecks?: { state: "red" | "green"; suites: readonly string[] };
   /** W1-T7848: main's CI reading, present only when a rule-suite probe turned `state` red. */
   ciState?: string;
+  /** W1-T9930: a red decided below the head, re-judged at the head by its own failing tests run there. */
+  headReproduction?: "pending" | "cleared" | "held" | "unrunnable";
 }
+
+const HEAD_REPRODUCTIONS = new Set(["pending", "cleared", "held", "unrunnable"]);
 
 /** W1-T7848 — a base-reproduction probe of the suites a `rule-checks` red names, at one main sha: `red` when
  *  every one fails there, `green` when every one passes. One row per main sha and suite set. */
@@ -9483,6 +9487,9 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
       state: line.state, failingChecks: failing,
       ...(Array.isArray(line.observed_checks)
         ? { observedChecks: line.observed_checks.filter((n): n is string => typeof n === "string") }
+        : {}),
+      ...(HEAD_REPRODUCTIONS.has(String(line.head_reproduction))
+        ? { headReproduction: line.head_reproduction as NonNullable<MainLatestRun["headReproduction"]> }
         : {}),
     };
   }
@@ -9818,7 +9825,8 @@ export function decideBaseRed(
     // A known passing check is this diff's red, even beside an inherited failure.
     if (names.some((name) => main.observedChecks!.includes(name) && !main.failingChecks.includes(name))) return { kind: "own" };
     // W1-T7848: a red only a rule-suite probe saw names its one check; no other absent check is inherited from it.
-    const absent = main.ciState !== undefined ? undefined
+    // W1-T9930: nor from a run decided below the head, which never observed the head; a probe at the head names it.
+    const absent = main.ciState !== undefined || main.decidedBySha !== main.sha ? undefined
       : names.find((name) => !main.observedChecks!.includes(name) && !PR_OWN_INPUT_CHECKS.includes(name));
     if (absent !== undefined) return { kind: "wait", check: absent };
   }
@@ -9827,7 +9835,9 @@ export function decideBaseRed(
   const key = `${pr.prNumber}@${pr.headSha}`;
   const recorded = history.stoodDown.get(key);
   if (history.refreshed.has(key)) return { kind: "own" };
-  if (recorded !== undefined && names.includes(recorded) && !PR_OWN_INPUT_CHECKS.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
+  // W1-T9930: a red cleared at the head by its own failing tests releases the holds it caused, as green does.
+  const released = main?.state === "green" || (main?.state === "undetermined" && main.headReproduction === "cleared");
+  if (recorded !== undefined && names.includes(recorded) && !PR_OWN_INPUT_CHECKS.includes(recorded)) return { kind: released ? "refresh" : "wait", check: recorded };
   // W1-T6024: a head whose failing tests a probe reproduced on main is main's red, whatever its check is called.
   const named = names[0];
   return main?.state === "green" && named !== undefined && history.reproducedBeforeGreen.has(key) ? { kind: "refresh", check: named } : { kind: "own" };
