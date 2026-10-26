@@ -306,7 +306,7 @@ export class ProductRepositoryService {
     const key = digest(input.requestId);
     let journal = this.read(paths);
     let operation = journal.operations[key];
-    if (!operation?.receipt || operation.receipt.operationId !== receipt.operationId) throw new Fault("corrupt");
+    if (operation === undefined || operation.receipt === undefined || operation.receipt.operationId !== receipt.operationId) throw new Fault("corrupt");
     let transition = operation.canonicalTransition;
     if (!transition) {
       const product = this.intents.read(actor, input.productId);
@@ -336,7 +336,7 @@ export class ProductRepositoryService {
           requestId: `prepo_${digest(`${receipt.operationId}:${latest.value.revision}`)}` };
         journal = this.read(paths);
         operation = journal.operations[key];
-        if (!operation?.receipt) throw new Fault("corrupt");
+        if (operation === undefined || operation.receipt === undefined) throw new Fault("corrupt");
         this.persist(paths, journal, key, { ...operation, canonicalTransition: revised });
         saved = this.intents.transition(actor, revised);
       }
