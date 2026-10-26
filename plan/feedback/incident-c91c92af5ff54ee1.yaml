@@ -1,0 +1,33 @@
+id: incident-c91c92af5ff54ee1
+ts: 2026-10-26T20:38:42.660Z
+raw: >-
+  Incident c91c92af5ff5: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix stood down at rung.unfiled_scope and nothing it read has changed
+  (head <sha>, task contract, PR body) — no worker is dispatched until one does:
+  unfiled scope need escalated
+
+  First seen: 2026-10-26T20:36:38.207Z
+
+  Last seen: 2026-10-26T20:36:48.931Z
+
+  Count: 4, burn: 4.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=14530 escalated: already escalated (reason unreadable: no escalation of this PR at head 44f55be is in the ledger); this pass: fix stood down at rung.unfiled_scope and nothing it read has changed (head 44f55be, task contract, PR body) — no worker is dispatched until one does: unfiled scope need escalated
+    - pr=14522 escalated: already escalated (reason unreadable: no escalation of this PR at head c35591b is in the ledger); this pass: fix stood down at rung.unfiled_scope and nothing it read has changed (head c35591b, task contract, PR body) — no worker is dispatched until one does: unfiled scope need escalated
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#c91c92af5ff54ee1309abed1af8514778aea18eb12cab331299b192c236a30f7
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

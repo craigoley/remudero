@@ -1,0 +1,30 @@
+- id: W1-T10734
+  title: A target checkout with no plan/policy.yaml triages its escalations in shadow instead of failing every pass
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10
+  risk: low
+  band_meaning: blast-radius
+  origin: operator-request#vm-resize-health-review-2026-10-26
+  plan_refs:
+    - W1-T8868
+    - W1-T3982
+  files:
+    - src/run-task.ts
+    - test/inbox/a-target-without-a-policy-file-triages-in-shadow.test.ts
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: run-W1-T10733-1793034305807 -> run-unfiled-1793035320662
+  rationale: "OBSERVED: the site instance's escalation triage has failed on every sweep pass since 2026-10-14 (306 `sweep.escalation_triage.failed` rows to 2026-10-26 15:50Z, 17 more after the 10-26 VM resize), each with `ENOENT: open '/home/node/Remudero/repos/remudero-site/plan/policy.yaml'`. buildEscalationTriageRuntime's default reader (src/run-task.ts) called readFileSync(policyPath(root)) unguarded, while parseEscalationTriagePolicy already documents 'Absent -> shadow'. remudero-site ships no policy file, so the site has run no escalation triage at all for twelve days. Every existing triage test injects `readPolicy`, so the real default reader was never exercised. Swept origin/main and open PRs for this subject: no existing task or PR."
+  design: "Add readEscalationTriagePolicySource(root) beside buildEscalationTriageRuntime and use it as the default `readPolicy`. ENOENT, and only ENOENT, returns undefined, so the parser answers its documented shadow default; any other read error (EISDIR, EACCES) or a YAML parse error still throws, so a broken policy fails loud and never runs quietly in shadow. Never fall back to core's or the installation's policy: a satellite must not inherit core's `act` mode (W1-T3982's authority-drift rule). escalation-triage.ts stays pure (no I/O). Proofs run the REAL default reader with no injected `readPolicy`."
+  acceptance:
+    - claim: a target checkout with no plan/policy.yaml triages in shadow instead of failing, a target's own escalationTriage block still governs its triage, and a policy file that exists but cannot be read or parsed still fails the pass
+      proof: "unit test: test/inbox/a-target-without-a-policy-file-triages-in-shadow.test.ts"
+    - claim: the production triage runtime reads its policy through the absence-tolerant reader
+      proof: "grep: () => readEscalationTriagePolicySource(root)) in src/run-task.ts"
