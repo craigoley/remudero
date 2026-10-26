@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execWhitelistedProof, execWhitelistedProofAsync, parseWhitelistedProof } from "#src/lib/review.js";
+import { execWhitelistedProof, execWhitelistedProofAsync, parseWhitelistedProof, registerReviewerCheckout, refreshProofToolchain, refreshProofToolchainAsync } from "#src/lib/review.js";
 import {
   createProofCache, hasSharedInstall, proofCacheIdentity, vitestCacheCapability,
   PROOF_CACHE_DIR_PREFIX, PROOF_CACHE_OWNER_FILE, ProofCacheUnavailableError,
@@ -283,4 +283,26 @@ test("cache cleanup failure cannot turn a passing child into acknowledged succes
     assert.equal(failed.proofCacheRelease?.released, false);
     await assert.rejects(execWhitelistedProofAsync(pureProof(), f.cwd, 1000, async (_c, args) => { tamper(args); throw boom; }, noBrowsers), error => error === boom);
   } finally { dispose(f); }
+});
+
+test("shared generation load-error recovery never reinstalls or swaps a borrowed seed", async () => {
+  for (const asynchronous of [false, true]) {
+    const f = fixture("plain");
+    try {
+      registerReviewerCheckout(f.cwd);
+      // A normal seed's node_modules link resolves one level below its immutable metadata.
+      for (const name of ["package.json", "package-lock.json"]) writeFileSync(join(f.root, name), readFileSync(join(f.cwd, name)));
+      writeFileSync(join(f.root, "ready.json"), JSON.stringify({ version: 1, key: "owned-seed-fixture" }));
+      const before = readdirSync(f.root).sort();
+      let installs = 0;
+      if (asynchronous) {
+        assert.equal(await refreshProofToolchainAsync(f.cwd, { install: async () => { installs++; throw new Error("must not install"); } }), false);
+      } else {
+        assert.equal(refreshProofToolchain(f.cwd, () => { installs++; throw new Error("must not install"); }), false);
+      }
+      assert.equal(installs, 0, "a broken import cannot trigger package installation in borrowed seed state");
+      assert.deepEqual(readdirSync(f.root).sort(), before, "no staging, backup, marker rewrite or dependency swap");
+      assert.equal(readFileSync(join(f.install, "vitest", "vitest.mjs"), "utf8"), shim("plain"));
+    } finally { dispose(f); }
+  }
 });

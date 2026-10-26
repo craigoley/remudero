@@ -2493,6 +2493,8 @@ export function refreshProofToolchain(
     // Only a missing install can be created; an unreadable install is a separate failure.
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
   }
+  // Immutable dependency generations are borrowed state; only the maintained seed provisioner may replace them.
+  if (linked && existsSync(join(installRoot, "ready.json"))) return false;
   if (!existsSync(join(installRoot, "package-lock.json"))) return false;
   const installHash = hashInstallInputs(installRoot);
   const marker = installHashMarkerPath(installRoot);
@@ -2583,6 +2585,8 @@ export async function refreshProofToolchainAsync(
     // Only a missing install can be created; an unreadable install is a separate failure.
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
   }
+  // Keep asynchronous load-error recovery from reinstalling or swapping a borrowed dependency generation.
+  if (linked && existsSync(join(installRoot, "ready.json"))) return false;
   if (!existsSync(join(installRoot, "package-lock.json"))) return false;
   const installHash = hashInstallInputs(installRoot);
   const marker = installHashMarkerPath(installRoot);
