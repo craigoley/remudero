@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { filingDatesFromPlanHistory, openDependentFanout } from "./dispatch-value.js";
 import type { Escalation } from "./escalate.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import {
   gardenEffectsPath, gardenStatePath, initialGardenState, readGardenEffects, readGardenState, writeGardenEffects,
@@ -18,8 +19,9 @@ import { reparkStaleRuling } from "./machine-filing.js";
 import { backlogCitedSteps, backlogLandingGuard } from "./backlog-gardener.js";
 import { streakRefusal } from "./non-worker-verdict.js";
 import { planInventory, planShards, type PlanInventory } from "./plan-gardener.js";
+import { loadCreditStore } from "./status.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 import type { Task } from "./plan.js";
-import { spawnSync } from "node:child_process";
 
 /**
  * W1-T9925: an LLM judge re-ranks the queue by measured cost of delay, and is judged on its own predictions.
@@ -124,10 +126,12 @@ export interface QueueJudgeSources {
   incidents: () => readonly IncidentLifecycleRecord[];
   openPrNumbers: () => ReadonlySet<number>;
   /** Task id → filing time (ms), from first-parent plan history. */
-  filingDates: () => ReadonlyMap<string, number>;
+  filingDates: () => ReadonlyMap<string, number> | Promise<ReadonlyMap<string, number>>;
   history: (sinceIso: string) => readonly MainCommit[];
-  /** Distinct tasks filed, merged, retired or re-prioritized on main's first-parent plan history since `sinceSha`. */
-  churn: (sinceSha: string | undefined) => { head: string; changed: number };
+  /** Distinct tasks filed, merged, retired or re-prioritized since a ranking: a read of the checkout's files, never a spawn. */
+  churn: (since: ChurnSince | undefined) => number;
+  /** How many tasks the merge-credit store holds, the merged half of the churn count. */
+  credited: () => number;
   /** One tool-less judge spawn. */
   judgeText: (prompt: string) => Promise<string>;
   /** Tasks with a run in flight and the files they declare, for the file-overlap holder. */
@@ -492,7 +496,7 @@ export interface ScoreContext {
   incidents: readonly IncidentLifecycleRecord[];
   openPrs: ReadonlySet<number>;
   holderNow: (taskId: string) => string | undefined;
-  churnSince: (sha: string | undefined) => number;
+  churnSince: (sinceMs: number) => number;
 }
 
 /** One open prediction, scored once its task resolved or the queue turned over twice past its predicted start. */
@@ -502,7 +506,7 @@ export function scorePrediction(p: Row, ctx: ScoreContext): ScoredOutcome | unde
   const deadline = predMs + startsWithin * HOUR_MS;
   const resolved = !ctx.openIds.has(id);
   const threshold = typeof p.churn_threshold === "number" ? p.churn_threshold : 1;
-  const expired = ctx.now.getTime() > deadline && ctx.churnSince(typeof p.main_sha === "string" ? p.main_sha : undefined) >= 2 * threshold;
+  const expired = ctx.now.getTime() > deadline && ctx.churnSince(predMs) >= 2 * threshold;
   if (!resolved && !expired) return undefined;
   const base = { task_id: id, prediction_ts: String(p.ts), class: cls };
   const holder = (typeof p.held_by === "string" ? p.held_by : undefined) ?? (resolved ? undefined : ctx.holderNow(id));
@@ -543,7 +547,7 @@ export function deliverEffects(stateDir: string, outcomes: readonly ScoredOutcom
 
 // ── the ranking record and cadence ───────────────────────────────────────────────────────────────────────────────
 
-export interface RankingRecord { at: string; mainSha: string; threshold: number; startsPerHour: number | null; openToMergeMinutes: number | null }
+export interface RankingRecord { at: string; credited: number; threshold: number; startsPerHour: number | null; openToMergeMinutes: number | null }
 
 export function rankingPath(stateDir: string): string { return join(stateDir, "queue-judge-ranking.json"); }
 
@@ -553,32 +557,34 @@ export function readRanking(stateDir: string): RankingRecord | undefined {
   let parsed: Partial<RankingRecord>;
   try { parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<RankingRecord>; }
   catch (e) { throw new Error(`queue judge: ranking record ${path} is unreadable: ${String((e as Error).message)}`, { cause: e }); }
-  if (typeof parsed.mainSha !== "string" || typeof parsed.at !== "string" || typeof parsed.threshold !== "number") throw new Error(`queue judge: ranking record ${path} is malformed`);
+  if (typeof parsed.credited !== "number" || typeof parsed.at !== "string" || typeof parsed.threshold !== "number") throw new Error(`queue judge: ranking record ${path} is malformed`);
   return parsed as RankingRecord;
 }
 
-/** First-parent plan history since `sinceSha`: distinct tasks whose shard changed or whose merge trailer landed. */
-export function gitChurn(repoRoot: string, sinceSha: string | undefined): { head: string; changed: number } {
-  const git = (args: string[]) => spawnSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
-  const ref = git(["rev-parse", "--verify", "--quiet", "origin/main"]).status === 0 ? "origin/main" : "HEAD";
-  const head = git(["rev-parse", ref]);
-  if (head.status !== 0) throw new Error(`queue judge: cannot resolve ${ref}: ${String(head.stderr).trim()}`);
-  const sha = String(head.stdout).trim();
-  if (sinceSha === undefined || sinceSha === sha) return { head: sha, changed: 0 };
-  const log = git(["log", "--first-parent", "--format=%x01%B%x02", "--name-only", `${sinceSha}..${ref}`, "--", "plan"]);
-  if (log.status !== 0) throw new Error(`queue judge: git log ${sinceSha}..${ref} failed: ${String(log.stderr).trim()}`);
-  const ids = new Set<string>();
-  for (const m of String(log.stdout).matchAll(/plan\/tasks\.d\/([A-Z][A-Z0-9]*-T\d+)-/g)) ids.add(m[1]!);
-  const trailers = git(["log", "--first-parent", "--format=%B", `${sinceSha}..${ref}`]);
-  if (trailers.status === 0) for (const m of String(trailers.stdout).matchAll(/^Remudero-Task:[ \t]+([A-Z][A-Z0-9]*-T\d+)[ \t]*$/gm)) ids.add(m[1]!);
-  return { head: sha, changed: ids.size };
+export interface ChurnSince { atMs: number; credited?: number }
+
+/** How many tasks the merge-credit store holds: its growth since a ranking counts the tasks that merged. */
+export function creditedCount(stateDir: string): number {
+  return Object.keys(loadCreditStore(join(stateDir, "merge-credit.json"))).length;
+}
+
+/**
+ * Tasks the queue turned over since `since`, read from the checkout's files alone so the due probe never spawns:
+ * shard files written after it (a task filed, retired or re-prioritized) plus the merge-credit store's growth.
+ */
+export function fsChurn(repoRoot: string, stateDir: string, since: ChurnSince | undefined): number {
+  if (since === undefined) return 0;
+  const dir = join(repoRoot, "plan", "tasks.d");
+  const changed = existsSync(dir)
+    ? readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile() && /\.ya?ml$/.test(e.name) && statSync(join(dir, e.name)).mtimeMs > since.atMs).length
+    : 0;
+  return changed + (since.credited === undefined ? 0 : Math.max(0, creditedCount(stateDir) - since.credited));
 }
 
 /** Task id → filing time from main's first-parent plan history, the way dispatch dates a task. */
-export function gitFilingDates(repoRoot: string): Map<string, number> {
-  const out = spawnSync("git", ["-C", repoRoot, "log", "--first-parent", "--reverse", "--format=filing:%ct", "--no-renames", "-p", "--unified=0", "HEAD", "--", "plan"], { encoding: "utf8", maxBuffer: 1 << 27 });
-  if (out.status !== 0) throw new Error(`queue judge: cannot read filing history: ${String(out.stderr).trim() || String(out.error?.message ?? "git failed")}`);
-  return filingDatesFromPlanHistory(String(out.stdout));
+export async function gitFilingDates(repoRoot: string): Promise<Map<string, number>> {
+  const out = await hostWorktreeGitAsync(repoRoot, ["log", "--first-parent", "--reverse", "--format=filing:%ct", "--no-renames", "-p", "--unified=0", "HEAD", "--", "plan"], { maxBuffer: 1 << 27 });
+  return filingDatesFromPlanHistory(out);
 }
 
 // ── prompt ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -622,16 +628,15 @@ export interface QueueJudgeInventory {
   scored: ScoredOutcome[];
   bound?: BoundReport;
   records: ClassRecordReport[];
-  mainSha?: string;
   signature: string;
 }
 
 const emptyInventory = (skipped: NonNullable<QueueJudgeInventory["skipped"]>, open: number): QueueJudgeInventory =>
   ({ skipped, open, asked: false, moves: [], deferred: [], shadowed: [], escalated: [], refused: [], scored: [], records: [], signature: skipped });
 
-export class QueueJudgeUnavailableError extends Error {
+export class QueueJudgeUnavailableError extends RmdError {
   constructor(readonly reason: string) {
-    super(`queue judge unavailable: ${reason}`);
+    super("gardener", GENERIC_EXIT_CODE, `queue judge unavailable: ${reason}`, { reason });
     this.name = "QueueJudgeUnavailableError";
   }
 }
@@ -656,7 +661,7 @@ export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick
   if (plan.open.length === 0) return emptyInventory("empty-queue", 0);
   const now = sources.clock.date();
   const ranking = readRanking(sources.stateDir);
-  if (ranking !== undefined && sources.churn(ranking.mainSha).changed < ranking.threshold) return emptyInventory("not-due", plan.open.length);
+  if (ranking !== undefined && sources.churn({ atMs: Date.parse(ranking.at), credited: ranking.credited }) < ranking.threshold) return emptyInventory("not-due", plan.open.length);
 
   const since = clockFromMillisFn(() => now.getTime() - EVIDENCE_WINDOW_MS).iso();
   const own = sources.ledger(OWN_STEPS);
@@ -668,13 +673,13 @@ export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick
   const inFlight = (sources.inFlight ?? ((r: readonly Row[]) => inFlightTasks(r, plan.all)))(recent);
   const holderNow = (id: string): string | undefined => { const t = plan.open.find((x) => x.id === id); return t ? heldBy(t, openIds, now, inFlight) : undefined; };
   const history = sources.history(since);
-  const filed = sources.filingDates();
+  const filed = await sources.filingDates();
 
   // 1. Score every open prediction first, so this pass's authority reflects its record.
   const predictions = own.filter((r) => r.step === QUEUE_JUDGE_PREDICTION_STEP && typeof r.task_id === "string");
   const priorOutcomes = own.filter((r) => r.step === QUEUE_JUDGE_OUTCOME_STEP);
   const scoredKeys = new Set(priorOutcomes.map((o) => `${String(o.task_id)}@${String(o.prediction_ts)}`));
-  const scoreCtx: ScoreContext = { rows: recent, now, openIds, incidents, openPrs, holderNow, churnSince: (sha) => sources.churn(sha).changed };
+  const scoreCtx: ScoreContext = { rows: recent, now, openIds, incidents, openPrs, holderNow, churnSince: (sinceMs) => sources.churn({ atMs: sinceMs }) };
   const scored = predictions.filter((p) => !scoredKeys.has(`${String(p.task_id)}@${String(p.ts)}`))
     .flatMap((p) => { const s = scorePrediction(p, scoreCtx); return s ? [s] : []; });
   if (scored.length > 0) {
@@ -738,8 +743,7 @@ export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick
     moves.push(...bounded.selected);
     deferred.push(...bounded.deferred);
   }
-  const mainSha = sources.churn(undefined).head;
-  for (const a of shadowed) deps.log(QUEUE_JUDGE_PREDICTION_STEP, predictionRow(a, bound, mainSha, undefined, true));
+  for (const a of shadowed) deps.log(QUEUE_JUDGE_PREDICTION_STEP, predictionRow(a, bound, undefined, true));
 
   // 5. A proposal to move a pinned priority to a larger number is ONE escalation, never a write.
   const escalated: string[] = [];
@@ -753,15 +757,15 @@ export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick
   }
 
   // 6. The queue's ranking now covers this head: the next pass is due once the queue turns over by what it predicted.
-  writeAtomic(rankingPath(sources.stateDir), JSON.stringify({ at: now.toISOString(), mainSha, threshold: bound.churnThreshold, startsPerHour: bound.startsPerHour, openToMergeMinutes: bound.openToMergeMinutes } satisfies RankingRecord, null, 2) + "\n");
-  return { open: plan.open.length, asked: true, plan, moves, deferred, shadowed, escalated, refused: checked.refused, scored, bound, records, mainSha, signature: evidenceHash(moves.map((m) => [m.target, m.to, m.signature])) };
+  writeAtomic(rankingPath(sources.stateDir), JSON.stringify({ at: now.toISOString(), credited: sources.credited(), threshold: bound.churnThreshold, startsPerHour: bound.startsPerHour, openToMergeMinutes: bound.openToMergeMinutes } satisfies RankingRecord, null, 2) + "\n");
+  return { open: plan.open.length, asked: true, plan, moves, deferred, shadowed, escalated, refused: checked.refused, scored, bound, records, signature: evidenceHash(moves.map((m) => [m.target, m.to, m.signature])) };
 }
 
-function predictionRow(a: QueueJudgeAction, bound: BoundReport, mainSha: string | undefined, prUrl: string | undefined, shadow: boolean): Record<string, unknown> {
+function predictionRow(a: QueueJudgeAction, bound: BoundReport, prUrl: string | undefined, shadow: boolean): Record<string, unknown> {
   return {
     task_id: a.target, class: a.class, from: a.from, to: a.to, reason: a.reason, evidence: a.evidence, evidence_signature: a.signature,
     expected_cost_of_delay: a.expectedCostOfDelay, expected_outcome: a.expectedOutcome, starts_within_hours: a.expectedOutcome.starts_within,
-    churn_threshold: bound.churnThreshold, main_sha: mainSha ?? null, held_by: a.heldBy ?? null, pr_url: prUrl ?? null, shadow,
+    churn_threshold: bound.churnThreshold, held_by: a.heldBy ?? null, pr_url: prUrl ?? null, shadow,
   };
 }
 
@@ -821,7 +825,8 @@ export function buildQueueJudgeSources(deps: GardenerDeps, overrides: Partial<Qu
     openPrNumbers: () => { throw new Error("the queue judge's open-PR read is not wired"); },
     filingDates: () => gitFilingDates(deps.repoRoot),
     history: (since) => readMainHistory(deps.repoRoot, since),
-    churn: (sha) => gitChurn(deps.repoRoot, sha),
+    churn: (since) => fsChurn(deps.repoRoot, deps.stateDir, since),
+    credited: () => creditedCount(deps.stateDir),
     judgeText: () => Promise.reject(new Error("the queue judge's spawn is not wired")),
     ...overrides,
   };
@@ -843,8 +848,8 @@ export function queueJudgeGardenSpec(
     cheapFingerprint: () => {
       const ranking = readRanking(deps.stateDir);
       if (ranking === undefined) return "first";
-      const { head, changed } = sources.churn(ranking.mainSha);
-      return changed >= ranking.threshold ? `due:${head}` : `quiet:${ranking.mainSha}`;
+      const changed = sources.churn({ atMs: Date.parse(ranking.at), credited: ranking.credited });
+      return changed >= ranking.threshold ? `due:${changed}` : `quiet:${ranking.at}`;
     },
     inventory: () => { throw new Error("the queue judge asks its judge asynchronously: drive it with runGardenAsync"); },
     inventoryAsync: () => queueJudgeInventory(sources, deps),
@@ -856,7 +861,7 @@ export function queueJudgeGardenSpec(
         open: i.open, asked: i.asked, skipped: i.skipped ?? null, moves: i.moves.length, shadowed: i.shadowed.map((a) => a.target), escalated: i.escalated,
         refused: i.refused.length, scored: i.scored.map((o) => `${o.task_id}:${o.verdict}`), acting: plan.acting,
         deferred: i.deferred.map((a) => ({ task_id: a.target, class: a.class, expected_cost_of_delay: a.expectedCostOfDelay })),
-        bound: i.bound ?? null, records: i.records, main_sha: i.mainSha ?? null,
+        bound: i.bound ?? null, records: i.records,
       };
       if (i.asked) deps.log("queue_judge.scorecard", card);
       return card;
@@ -868,9 +873,8 @@ export function queueJudgeGardenSpec(
       const landed = plan.actions.filter((a) => paths.includes(shards.get(a.target) ?? ""));
       // The predictions are ledgered once the PR has a URL, and the pass lands through `ws.land`, so name them there.
       const bound = scorecard.bound as BoundReport;
-      const mainSha = scorecard.main_sha as string | undefined;
       const record = (url: string | undefined): void => {
-        if (url !== undefined) for (const a of landed) deps.log(QUEUE_JUDGE_PREDICTION_STEP, predictionRow(a, bound, mainSha, url, false));
+        if (url !== undefined) for (const a of landed) deps.log(QUEUE_JUDGE_PREDICTION_STEP, predictionRow(a, bound, url, false));
       };
       const land = ws.land.bind(ws);
       ws.land = ((opts: Parameters<GardenCheckout["land"]>[0]) => {

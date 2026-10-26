@@ -12,7 +12,7 @@ import type { MainCommit } from "#src/lib/hot-file-gardener.js";
 import type { PlanInventory } from "#src/lib/plan-gardener.js";
 import { parseTasksFromYaml, type Task } from "#src/lib/plan.js";
 import {
-  buildQueueJudgeSources, classRecords, QUEUE_JUDGE_CLASSES, queueJudgeGardenSpec, queueJudgeInventory, QueueJudgeUnavailableError, rankingPath,
+  buildQueueJudgeSources, classRecords, QUEUE_JUDGE_CLASSES, queueJudgeGardenSpec, queueJudgeInventory, QueueJudgeUnavailableError, rankingPath, type QueueJudgeSources,
 } from "#src/lib/queue-judge-gardener.js";
 
 const NOW = Date.parse("2026-10-26T12:00:00.000Z");
@@ -64,10 +64,10 @@ function world(t: { after: (fn: () => void) => void }, opts: WorldOpts) {
   const rows: Row[] = [...(opts.rows ?? [])];
   const logs: Array<{ step: string; extra: Row }> = [];
   const escalations: Escalation[] = [];
-  const calls = { judge: 0, ledger: 0, workspace: 0, churn: [] as Array<string | undefined> };
+  const calls = { judge: 0, ledger: 0, workspace: 0, churn: 0 };
   const prompts: string[] = [];
   const answers = [...(opts.answers ?? [])];
-  const churn = { changed: 0, head: "b".repeat(40) };
+  const churn = { changed: 0 };
   const stateDir = join(root, "state");
   const sources: Partial<QueueJudgeSources> = {
     clock,
@@ -78,7 +78,8 @@ function world(t: { after: (fn: () => void) => void }, opts: WorldOpts) {
     openPrNumbers: () => new Set(opts.openPrs ?? []),
     filingDates: () => new Map(Object.entries(opts.filed ?? {})),
     history: () => opts.history ?? [],
-    churn: (sha) => { calls.churn.push(sha); return { head: churn.head, changed: churn.changed }; },
+    churn: () => { calls.churn++; return churn.changed; },
+    credited: () => 0,
     judgeText: async (prompt) => { calls.judge++; prompts.push(prompt); return answers.shift() ?? '{"moves":[]}'; },
   };
   const landed: Array<{ paths: string[]; title: string; body: string }> = [];
@@ -330,7 +331,7 @@ test("W1-T9925: cadence follows measured churn and each diff is bounded by measu
 test("W1-T9925: predictions are scored against outcomes and the record sets the allowance", async (t) => {
   const predAt = NOW - 6 * HOUR;
   const prediction = (task: string, cls: "raise" | "lower", extra: Row = {}): Row => ({
-    step: "queue_judge.prediction", task_id: task, class: cls, from: 2, to: 1, starts_within_hours: 2, churn_threshold: 1, main_sha: "a".repeat(40),
+    step: "queue_judge.prediction", task_id: task, class: cls, from: 2, to: 1, starts_within_hours: 2, churn_threshold: 1,
     expected_outcome: { unblocks_tasks: [], ends_incidents: [], unsticks_prs: [], starts_within: 2 }, pr_url: "https://example.test/pull/10", ts: iso(predAt), ...extra,
   });
   const w = world(t, {

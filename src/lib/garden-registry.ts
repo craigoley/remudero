@@ -58,8 +58,6 @@ export const REGISTERED_GARDEN_NAMES = [
   "hot-file",
   "host-resource",
   "backlog",
-  // W1-T9925: an LLM judge re-ranks queued tasks by measured cost of delay and is scored on its own predictions.
-  "queue-judge",
   // W1-T5454: the scout files the recurring failure-shaped ledger step no task or scorecard covers.
   "scout",
   // W1-T5904: the daily flow report, which files a PR stage that slowed past its baseline.
@@ -73,6 +71,8 @@ export const REGISTERED_GARDEN_NAMES = [
   "issue-revalidation",
   "inbox",
   "review-replay",
+  // W1-T9925: an LLM judge re-ranks queued tasks by measured cost of delay and is scored on its own predictions.
+  "queue-judge",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];
