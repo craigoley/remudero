@@ -130,3 +130,37 @@ test("only an unacted exact semantic admission refusal is fleet-withheld time", 
   assert.equal(fleetWithheldStageMs([{ ...row, stand_down_reason: admission + "; unreadable" }], now), 0);
   assert.equal(fleetWithheldStageMs([{ ...row, stand_down_reason: "not admitted this pass: semantic post-review admission bound UNKNOWN" }], now), 0);
 });
+
+test("unstarted scheduler-held reviews exclude only positively recorded admission waits", () => {
+  // These exact producer decisions occurred on 2026-10-26; an already-running review is different.
+  const holds = [
+    "overtaken by a repair queued before it — this review keeps its place in the queue, re-derived next pass",
+    "review lanes taken by repairs queued before their reviews — re-derived next pass",
+    "not admitted this pass: at most 3 plan-filing post-review admissions per light pass",
+    "not admitted this pass: at most 0 plan-filing post-review admissions available across light passes",
+    "not admitted this pass: restart latched, and the review would outlast its drain",
+  ];
+  for (const hold of holds) {
+    const row = { step: "sweep.disposed", ts: ago(10), acted: false, stand_down_reason: hold };
+    assert.equal(fleetWithheldStageMs([row], now), 10 * 60_000, hold);
+    assert.equal(fleetWithheldStageMs([{ ...row, acted: true }], now), 0);
+    assert.equal(fleetWithheldStageMs([{ ...row, acted: undefined }], now), 0);
+    assert.equal(fleetWithheldStageMs([{ ...row, stand_down_reason: undefined, reason: hold }], now), 0);
+    assert.equal(fleetWithheldStageMs([{ ...row, stand_down_reason: hold + "; unreadable" }], now), 0);
+  }
+  for (const hold of [
+    "review already in flight for this head (admitted by an overlapping light pass)",
+    "checks green, remudero-review pending 7m (< 60m ceiling) — a review is already in flight, waiting",
+    "not admitted this pass: at most UNKNOWN plan-filing post-review admissions per light pass",
+    "review admissions stopped — re-derived next pass",
+  ]) assert.equal(fleetWithheldStageMs([{ step: "sweep.disposed", ts: ago(10), acted: false,
+    stand_down_reason: hold }], now), 0, hold);
+});
+
+test("fleet-withheld stage intervals never include time after the sweep clock", () => {
+  const row = { step: "sweep.disposed", ts: ago(20), acted: false, stand_down_reason: PAUSE };
+  const futureFree = { ...row, ts: ago(-10), acted: true };
+  assert.equal(fleetWithheldStageMs([row, futureFree], now), 20 * 60_000);
+  assert.equal(fleetWithheldStageMs([{ ...row, ts: ago(-10) }, { ...row, ts: ago(-15) }], now), 0);
+  assert.equal(fleetWithheldStageMs([{ ...row, ts: ago(5), acted: true }, row, futureFree], now), 15 * 60_000);
+});

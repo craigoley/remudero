@@ -1,0 +1,44 @@
+- id: W1-T10680
+  title: "Record bounded attempt/outcome evidence for gardener outcome reconciliation and explain stale refresh in the Console"
+  repo: remudero
+  depends_on: [W1-T4950]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 18.00
+  risk: high
+  origin: "feedback#console-gardener-outcome-refresh-evidence-20261020"
+  plan_refs: [W1-T4950]
+  files: [src/lib/opportunity-outcomes.ts, src/lib/gardener-opportunity-evidence.ts, src/lib/gardeners-route.ts, src/lib/daemon.ts, test/gardener-outcome-refresh-evidence.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    The saved outcome registry can be much older than the observed intake cadence. The cadence
+    marker is recorded before workspace acquisition, so it cannot certify that outcome
+    reconciliation succeeded, and a skipped daily intake does not prove health. The Console
+    needs to show why the registry is stale or unavailable without implying fresh benefit.
+    Duplicate check: no open task or head owns refresh-lifecycle evidence; W1-T4950 (merged)
+    built the outcome join and classifications only. Implementer must re-check open heads and
+    active ownership of the shared daemon/analytics/read-model paths before editing them.
+  design: |
+    Inside the EXISTING admitted reconciliation only, record a local bounded private-store
+    status: attempted/finished phase, allowlisted success/failure/skip reason, and last
+    successful registry reconciliation identity/time, scoped to the exact repository.
+    Workspace, source-read or persist failures never restamp the old registry as current and
+    never erase its last success. A later-starting pass is never overwritten by an older
+    completion. Legacy metadata without attempt fields stays explicitly unknown. Keep atomic
+    writes, stable bounded reads and private-store conventions; no raw errors, candidates,
+    prompts, outputs, credentials or host topology. Extend the typed read contract and Console
+    to show the stale/unavailable reason and that the next try awaits the existing cadence.
+    Reported classification counts stay separate from refresh health, deployment verification
+    and measured causal benefit. No change to cadence, admission, holds, retries, model,
+    spend, permissions, auth, gardener mode or CI gates; no new GitHub query, model call,
+    polling, timer or history scan. Never run a default reconciliation as a diagnostic.
+  acceptance:
+    - claim: "attempt/outcome evidence is recorded through the real private-store composition, covering workspace, source and save failures, success, unknown legacy metadata, foreign repository, malformed/oversized/torn reads, and overlapping completions"
+      proof: "unit test: test/gardener-outcome-refresh-evidence.test.ts"
+  falsifier: |
+    Remove the status write: a failed workspace acquisition leaves no attempt evidence and the
+    test fails. Make a failure restamp the registry time: the old last-success assertion fails.
+    Restore the write and both pass.

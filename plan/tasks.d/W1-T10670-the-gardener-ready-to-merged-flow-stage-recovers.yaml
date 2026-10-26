@@ -22,3 +22,11 @@
     Last 24 h: n 15, p50 12.1, p90 22 min.
     Slowest PRs: #14082 (30.7 min), #14253 (22 min), #14257 (19 min).
     Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.7) — on the change's description/files alone, no diff was read — The declared files are src/lib/sweep.ts and a new test file. Neither the description nor the files list indicates secrets, auth, permissions, data deletion, or deploy/merge/review policy changes.; on the change's description/files alone, no diff was read — The task is a flow-latency regression fix of type implement with verify auto. It will pass through CI and review, and nothing in the description shows an irreversible action or an operator-only decision.; on the change's description/files alone, no diff was read — The rationale leaves the root cause open (\"find what these PRs share before changing a bound\"), and the family record is mixed (2 approved, 2 declined). These lower my confidence but do not meet the HIGH criteria as stated."
+    judged_at: "2026-10-26T03:12:37.490Z"
+    pin: "19b48f48dffa845b4ddb8ee0ec3187198e04ff1cf3382150e4b55f965f52ab01"

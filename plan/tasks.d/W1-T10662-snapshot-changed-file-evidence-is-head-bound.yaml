@@ -6,7 +6,8 @@
   type: implement
   principles: {tdd: strict}
   budget_usd: 12.00
-  verify: human
+  verify: auto
+  priority: 2.5
   dispatch_hold: true
   risk: high
   band_meaning: span
@@ -38,3 +39,13 @@
     The complete captured subject sweep covers 470 advertised heads, 267 distinct shard trees and 26 inline-plan variants, with W10625 and plan-task positive controls. Its two cache source variants differ only by the maintained loop-bounded child migration. W6259 owns the existing async cache; W9651 owns bounded transport. Neither provides this head-bound persisted snapshot evidence. Fresh open-PR subject/file scope and source checks are required again before publication.
     PR14176 owns daily-progress reporting and overlaps status.ts but does not own this cache-to-snapshot evidence concern; do not edit that branch or duplicate its collector. Source implementation is not authorized by this parked filing. Five necessary files span cache, gateway and snapshot boundaries, so high/span sizing is honest and any advisory is disclosed rather than hidden with a scanner or lint exception.
     No new GitHub fetcher, normal fetch schedule, policy, actual permissions, dispatch decision, feedback status mutation, trial registration, billing or runtime operation is approved. Serve and workers remain running, W7740 USER_HELD90 and SHADOW/independent holds remain. Foundation and Janitor retain their existing owners. Failure/refusal receipts and all original backlog identities stay retained.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The description and files show a read-only evidence-exposure change in the cache, status, and now-view source files plus two tests. They show no secrets, auth, deletion, deploy, or merge-policy effects."
+      - "The acceptance criteria explicitly forbid a new fetcher, a network path, feedback or Inbox writes, and any change to the cache owner's cadence. All of these are checkable by the named unit tests."
+      - "The family has no track record (0 merged, Beta mean 0.50), and the hold caveats in the note are enforced by separate gates. Normal CI and review still apply, so the change does not need operator escalation."
+    judged_at: "2026-10-26T03:08:59.839Z"
+    pin: "d823ba9a26aef8827c24529cdfc275082a9b32789f1852edcea419d06d69af90"

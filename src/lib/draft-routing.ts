@@ -110,6 +110,10 @@ export function draftStatsFromRows(rows: readonly Record<string, unknown>[], lan
   const cost = (row: Record<string, unknown>) => typeof row.cost_usd === "number" && Number.isFinite(row.cost_usd) && row.cost_usd >= 0 ? row.cost_usd : 0;
   for (const row of rows) {
     if (row.step === "draft.routing.outcome" && row.lane === lane && typeof row.deployment === "string") {
+      // Keep its identity in recordedAttempts so a legacy copy cannot resurrect this refusal.
+      // Unmarked history and contradictory markers retain their original interpretation.
+      if (row.quality_sample === "not-invoked-budget-refusal" && row.draft_cost_usd === 0 &&
+          row.clean === false && row.contract_failed === false) continue;
       const measured = arm(row.deployment);
       measured.attempts++;
       measured.costUsd += cost({ cost_usd: row.draft_cost_usd });
