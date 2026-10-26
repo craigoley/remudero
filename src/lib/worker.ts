@@ -1266,12 +1266,13 @@ export interface SpawnWorkerArgs {
     readStats?: () => DraftStats;
     random?: () => number;
   };
-  /** One failed cash-ladder rung that was actually called, before trying its successor. The
-   * final rung remains the caller's ordinary worker result; a sink failure never changes flow. */
+  /** A departing cash-ladder rung or outer fallback selection, before its successor. A routing
+   * refusal does not establish invocation; the result retains the actual terminal evidence.
+   * The final rung remains the ordinary worker result; a sink failure never changes flow. */
   onModelFallbackAttempt?: (attempt: {
     selectionAssignmentId?: string;
     model: string;
-    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract";
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "cash-sonnet-refused";
     result?: WorkerResult;
   }) => void;
   /** Injectable seam: override the process-group spawn and teardown. Omitted means the real
@@ -3151,6 +3152,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             : result.openWeightDeploymentAbsent ? "deployment absent" : "refused before transport",
           next: "cash-fallback",
         }));
+        try { args.onModelFallbackAttempt?.({ selectionAssignmentId, model: result.routedModel ?? openWeight.model,
+          reason: "cash-sonnet-refused", result }); }
+        catch { console.error(JSON.stringify({ event: "worker.outer_fallback_telemetry_unavailable", reason: "sink-failed" })); }
         stopCashWatchdog?.();
         return await spawnWorker({
           ...args,

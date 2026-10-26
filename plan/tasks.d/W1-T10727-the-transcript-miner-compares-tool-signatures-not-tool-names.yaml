@@ -1,0 +1,61 @@
+- id: W1-T10727
+  title: "THE TRANSCRIPT MINER COMPARES BARE TOOL NAMES, WHICH EVERY RUN SHARES — `toolStepsForRun` reads `tool_name` (`Bash`, `Read`, `Edit`), so a clean run and a repaired run almost never differ and design clause (iii) mines nothing; read the normalized `tool_signature` steps `rmd procedures` already counts (`Bash:git push`, `Edit:test/ci/*.test.ts`), held until the census on the host shows a step that separates them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: low  # Rule 19: one concern — the miner's step unit changes; the drafting and eval path is untouched
+  band_meaning: blast-radius
+  dispatch_hold: true
+  origin: "operator ask 2026-10-26: review the codebase against the backlog and scan Swamp for ideas, leaning into automation and self-improvement (MASTER-PLAN §4H)"
+  plan_refs: [W1-T4668]
+  files: [src/lib/workflow-mining.ts, test/learning/the-transcript-miner-compares-tool-signatures-not-tool-names.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ at origin/main 8c1ad448e (2026-10-26).
+    - The transcript miner (W1-T4668, src/lib/workflow-mining.ts) feeds `skill-workshop.ts` the steps that every
+      first-attempt-success run of a task type took and that no repaired run took. `toolStepsForRun` reads each
+      `worker.activity` row's bare `tool_name`. Every implement run calls `Bash`, `Read` and `Edit`, so the
+      repaired side holds every name the clean side does. The distinguishing set is then empty, and design clause
+      (iii) correctly mines nothing.
+    - Since 2026-10-13 each tool-call row also carries `tool_signature` (src/lib/tool-step-signature.ts):
+      `Bash:<program> [<subcommand>]`, `<FileTool>:<repo-relative path>`, `<outside>` or the bare name.
+    - #14473 added `rmd procedures` (src/lib/procedure-census.ts) and put its step reader in workflow-mining.ts,
+      beside `toolStepsForRun`. `normalizeProcedureStep` coarsens a signature so that one file is not one step
+      (`Read:src/lib/review.ts` becomes `Read:src/lib/*.ts`), and `procedureStepsForRun` reads a run's steps that
+      way, falling back to the bare name on rows from before 2026-10-13. The census reports per-type step shares
+      and the lift of clean over repaired. It compiles and drafts nothing.
+    THE HOLD IS THE MEASUREMENT. Lift dispatch only once `rmd procedures --since <30 days>` on the host shows (a)
+    signature coverage above 90% of tool rows, and (b) at least one task type with a clean-run share of 0.8 or more
+    on a step whose repaired share is 0, the same all-or-nothing test the miner applies. If no type shows one, this
+    change would still mine nothing. Record that in the plan and close the task instead.
+  design: |
+    1. `toolStepsForRun` returns `procedureStepsForRun(records, runId)`, which already lives in the same module.
+       `mineTranscriptWorkflows`' rules (threshold, at least one repaired run, and clause (iii)) are unchanged; only
+       the step unit changes. No other module changes, and the census keeps reading the same function.
+    2. `renderTranscriptWorkflowSteps` already prints each step in backticks. A normalized step reads as what it
+       is, for example "- Call `Bash:git push` — observed in every first-attempt-success transcript…". No wording
+       change is needed. Prove the rendered line with a test.
+    New tests go in test/learning/the-transcript-miner-compares-tool-signatures-not-tool-names.test.ts (folder from
+    `rmd test-place`). Import through `#src/*`, and use `test(` titles exactly as in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/learning/the-transcript-miner-compares-tool-signatures-not-tool-names.test.ts"
+    - claim: "two runs that share every tool name but differ in one signature yield a distinguishing step"
+      proof: 'grep: test("W1-T10727: two runs that share every tool name but differ in one signature yield a distinguishing step" in test/learning/the-transcript-miner-compares-tool-signatures-not-tool-names.test.ts'
+    - claim: "a row with no signature falls back to its bare tool name"
+      proof: 'grep: test("W1-T10727: a row with no signature falls back to its bare tool name" in test/learning/the-transcript-miner-compares-tool-signatures-not-tool-names.test.ts'
+  falsifier: |
+    Restore `toolStepsForRun` to the bare `tool_name`. The first test then mines nothing, because both runs share
+    `Bash` and `Edit`.
+  note: |
+    reservation hand-off: plan-swamp-scan-20261026 -> run-unfiled-1793034725000
+
+    #14473 MUST MERGE FIRST: `procedureStepsForRun` does not exist on main before it, which is a second reason for
+    the hold.
+    Workers run with the plan's text, never this session's. The census verb is `rmd procedures` (see
+    docs/cli-reference.md once #14473 merges).

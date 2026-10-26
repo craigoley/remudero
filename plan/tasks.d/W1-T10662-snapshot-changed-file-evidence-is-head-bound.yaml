@@ -2,9 +2,9 @@
   title: "The existing read-only snapshot gateway exposes qualified head-bound changed-file evidence before feedback can claim a merged source repair"
   repo: remudero
   depends_on: []
-  plan_refs: [W1-T10625, W1-T6259, W1-T9651]
+  plan_refs: [ W1-T10625, W1-T6259, W1-T9651 ]
   type: implement
-  principles: {tdd: strict}
+  principles: { tdd: strict }
   budget_usd: 12.00
   verify: auto
   priority: 2.5
@@ -21,6 +21,7 @@
     - src/lib/now-view.ts
     - test/changed-files-cache.test.ts
     - test/now-view.test.ts
+    - "src/lib/tick-read-worker.ts"
   acceptance:
     - claim: "The existing changed-files cache and gateway can report evidence bound to the repository, PR number, immutable observed head and merged-state observation, with source identity and completeness. A URL, CLOSED state, ledger marker or an old list alone never qualifies a merged source repair. Preserve compatibility for existing changedFiles callers without upgrading unbound legacy results into qualified evidence."
       proof: "unit test: changed file evidence binds repository pull request merged state and immutable head"
@@ -42,10 +43,10 @@
   risk_ruling:
     verdict: "low"
     action: proceed
-    confidence: 0.72
+    confidence: 0.9
     reasons:
-      - "The description and files show a read-only evidence-exposure change in the cache, status, and now-view source files plus two tests. They show no secrets, auth, deletion, deploy, or merge-policy effects."
-      - "The acceptance criteria explicitly forbid a new fetcher, a network path, feedback or Inbox writes, and any change to the cache owner's cadence. All of these are checkable by the named unit tests."
-      - "The family has no track record (0 merged, Beta mean 0.50), and the hold caveats in the note are enforced by separate gates. Normal CI and review still apply, so the change does not need operator escalation."
-    judged_at: "2026-10-26T03:08:59.839Z"
-    pin: "d823ba9a26aef8827c24529cdfc275082a9b32789f1852edcea419d06d69af90"
+      - "The filed acceptance criteria scope the remedy to qualified read-only evidence through the existing cache and gateway, preserving legacy caller compatibility and existing fetch ownership and limits."
+      - "The record requires default-route fixtures, positive and negative controls, and guard-removal regression proof while retaining normal CI, security, review and merge gates."
+      - "The filing explicitly preserves independent holds and excludes feedback mutation, W10625 release, new network paths and production operation authority; this ruling does not authorize implementation or release those holds."
+    judged_at: "2026-10-26T18:03:26.738Z"
+    pin: "c67ea8fb63d14576ed6bbe164e477e443d3c376014e99ffcd2aa574e73a582cc"

@@ -1,0 +1,69 @@
+id: console-read-model-contention-20261026
+ts: 2026-10-26T13:08:34.226Z
+raw: >-
+  Investigate the actual source-reported Core read-model write contention
+  independently of the Console ETag consumer repair and Inbox read-mark
+  classifier path. The human explicitly retained Inbox/read-model follow-ups in
+  this chat; CI infrastructure, Azure memory and services remain separate
+  owners.
+
+
+  OBSERVED signed-in repository portfolio source
+  generated2026-10-26T12:55:57.982Z: ledger:core was stale/failed and explicitly
+  reported database is locked at operation exec.begin-immediate. Other
+  repository and ledger sources had their own clocks/states. An independent page
+  generated12:58:35.345Z then reported all sources current; a later12:58:59.376Z
+  revision showed only Core11s behind. This demonstrates intermittent source
+  failure/recovery, not persistent corruption, a dead writer or a memory
+  root-cause diagnosis. The older tab retaining metadata is the distinct
+  approved CONSOLE-T152 consumer task, currently owned by its native builder.
+
+
+  PRIOR WORK is not automatically a fix for this recurrence: reconcile the
+  earlier counter-only fail-fast and projector/fence/ownership work against the
+  exact loaded source and existing open-head implementations. The existing
+  main-thread Inbox read-mark finding console-inbox-read-mark-snapshot-20261026
+  remains separate and must not be filed or built twice. Source-owned evidence,
+  not recurrence alone, must establish the transaction/process/connection
+  boundary.
+
+
+  Research: SQLite permits only one simultaneous writer, and BEGIN IMMEDIATE can
+  refuse when another write transaction is already active, including WAL. Review
+  actual transaction lifetimes and exception/finally rollback/close behavior,
+  bounded observer writes, checkpoint interactions and current owner fences.
+  Prefer a private real-SQLite deterministic reproducer and read-only existing
+  diagnostics. No live SQL write, PRAGMA/busy-timeout/durability/fairness/fence
+  change, profiler, forced claim release, signal, restart, deployment or
+  memory/CI-policy change is authorized.
+
+
+  Prepare the smallest causal task through normal current-main/all-open-head
+  subject checks, native scope/risk judgment and exclusive ownership, retaining
+  every review/CI gate. Preserve explicit unavailable/stale output, committed
+  evidence, unknown counts and readiness refusal on failed writes. Do not turn
+  failed saves into verified health or infer an absent provider/cash
+  configuration from a not-collected section. Existing internal diagnostic
+  paths/PIDs shown by the UI are not needed in a public task; this finding
+  intentionally retains only the error class and operation.
+
+
+  Acceptance should drive the real database boundary with private fixtures:
+  reproduce the actual overlapping writer or leaked-transaction cause,
+  demonstrate post-failure release and a later normal pass, retain
+  foreign-owner/lease and corruption controls, and remove only the fix to
+  falsify the causal assertion. A source-reported error disappearing once or a
+  successful view read is not proof of repair. Merge, source adoption and
+  signed-in data recovery remain separate.
+attachments:
+  - https://sqlite.org/lang_transaction.html#deferred_immediate_and_exclusive_transactions
+  - https://sqlite.org/wal.html
+  - https://github.com/craigoley/remudero/blob/7983162fd418fa9a3ff404b919eecafa1448d9f7/src/lib/read-model-worker.ts
+origin: repair#console-read-model-contention
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: console-followup:2f22bcbf-f704-4c5b-ad93-0ddc78267da1
+thread_id: null

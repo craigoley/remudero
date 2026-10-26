@@ -3574,8 +3574,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixOwnerReclaimableAtHold: (pr, decline) => {
       const { worktree_path: ownerPath, branch, task_id: taskId } = decline;
       if (typeof ownerPath !== "string" || typeof branch !== "string" || typeof taskId !== "string") return false;
-      if (decline.owner_recovery_reason === "owner_dirty_recovery_preserve_failed" &&
-          (branch !== pr.headRefName || taskId !== fixLedgerTaskIdFor(pr))) return false;
+      const failed = revalidatedOwnerPreservation(decline.owner_recovery_reason);
+      if (failed && (branch !== pr.headRefName || taskId !== fixLedgerTaskIdFor(pr))) return false;
       try {
         const snapshot = registeredOwnerRecovery.capture({
           repoDir, worktreesRoot: worktreesDir(config), ownerPath, taskId, branch,
@@ -3585,15 +3585,35 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath), spawnWallClockBoundMs), // ledger-read-intent: live
         });
         const decision = decideRegisteredFixOwnerRecovery(snapshot);
-        if (decline.owner_recovery_reason !== "owner_dirty_recovery_preserve_failed") return decision.kind !== "keep";
-        if (decision.kind !== "preserve-tracked-dirty" || typeof snapshot.localSha !== "string") return false;
-        // The ordinary preservation helper proves parent and exact-tree identity before returning
-        // this immutable ref. Revalidation never clears the index, removes the owner or starts work.
-        const ref = registeredOwnerRecovery.preserveTrackedDirty?.(repoDir, ownerPath, branch, snapshot.localSha);
-        const prefix = `refs/rmd-recovery/fix-dirty/${branch}/${snapshot.localSha}/`;
+        if (!failed) return decision.kind !== "keep";
+        const localSha = snapshot.localSha;
+        if (decision.kind !== failed.kind || typeof localSha !== "string") return false;
+        // Each arm re-runs the claim path's own preservation helper, which proves what it saved before
+        // returning. Revalidation never resets, clears the index, removes the owner or starts work.
+        if (failed.helper === "preserveStaleDirty") {
+          // The helper re-reads every file it saves byte for byte; its result is the directory it made.
+          const saved = registeredOwnerRecovery.preserveStaleDirty?.(config.root, repoDir, ownerPath, branch, localSha);
+          if (typeof saved !== "string" || dirname(saved) !== join(config.root, "recovery", "fix-owner", branch) ||
+              !basename(saved).startsWith(`${localSha}-`)) return false;
+          log("sweep.fix.checkout_owner_stale_dirty_preserved", { pr_number: pr.prNumber, task_id: taskId, branch,
+            worktree_path: snapshot.path, local_sha_prefix: localSha.slice(0, 12), head_sha: pr.headSha,
+            at_current_head: localSha === snapshot.remoteSha, preserved_path: saved, from_backstop_revalidation: true });
+          return true;
+        }
+        // Both ref helpers prove parent and exact-tree identity before returning this immutable ref.
+        const ref = registeredOwnerRecovery[failed.helper]?.(repoDir, ownerPath, branch, localSha);
+        const prefix = `refs/rmd-recovery/fix-dirty/${branch}/${localSha}/`;
         if (typeof ref !== "string" || !ref.startsWith(prefix) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref.slice(prefix.length))) return false;
-        log("sweep.fix.checkout_owner_dirty_preserved", { pr_number: pr.prNumber, task_id: taskId, branch,
-          local_sha_prefix: snapshot.localSha.slice(0, 12), recovery_ref: ref.slice(0, 512), from_backstop_revalidation: true });
+        if (failed.helper === "preserveTrackedDirty") {
+          log("sweep.fix.checkout_owner_dirty_preserved", { pr_number: pr.prNumber, task_id: taskId, branch,
+            local_sha_prefix: localSha.slice(0, 12), recovery_ref: ref.slice(0, 512), from_backstop_revalidation: true });
+          return true;
+        }
+        // The claim path's own receipt choice for a preserved staged residue.
+        const superseded = snapshot.remoteSha !== null && snapshot.remoteSha !== localSha && snapshot.historyState === "contained";
+        log(superseded ? "sweep.fix.checkout_owner_dirty_preserved" : "sweep.fix.owner_residue_preserved", {
+          pr_number: pr.prNumber, task_id: taskId, branch, head_sha: pr.headSha, local_sha_prefix: localSha.slice(0, 12),
+          recovery_ref: ref.slice(0, 512), staged_only: true, from_backstop_revalidation: true });
         return true;
       } catch {
         // An unreadable owner has the remedy a kept one has: the hold and its single escalation stand.
@@ -9443,7 +9463,11 @@ export interface MainLatestRun {
   ruleChecks?: { state: "red" | "green"; suites: readonly string[] };
   /** W1-T7848: main's CI reading, present only when a rule-suite probe turned `state` red. */
   ciState?: string;
+  /** W1-T9930: a red decided below the head, re-judged at the head by its own failing tests run there. */
+  headReproduction?: "pending" | "cleared" | "held" | "unrunnable";
 }
+
+const HEAD_REPRODUCTIONS = new Set(["pending", "cleared", "held", "unrunnable"]);
 
 /** W1-T7848 — a base-reproduction probe of the suites a `rule-checks` red names, at one main sha: `red` when
  *  every one fails there, `green` when every one passes. One row per main sha and suite set. */
@@ -9483,6 +9507,9 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
       state: line.state, failingChecks: failing,
       ...(Array.isArray(line.observed_checks)
         ? { observedChecks: line.observed_checks.filter((n): n is string => typeof n === "string") }
+        : {}),
+      ...(HEAD_REPRODUCTIONS.has(String(line.head_reproduction))
+        ? { headReproduction: line.head_reproduction as NonNullable<MainLatestRun["headReproduction"]> }
         : {}),
     };
   }
@@ -9818,7 +9845,8 @@ export function decideBaseRed(
     // A known passing check is this diff's red, even beside an inherited failure.
     if (names.some((name) => main.observedChecks!.includes(name) && !main.failingChecks.includes(name))) return { kind: "own" };
     // W1-T7848: a red only a rule-suite probe saw names its one check; no other absent check is inherited from it.
-    const absent = main.ciState !== undefined ? undefined
+    // W1-T9930: nor from a run decided below the head, which never observed the head; a probe at the head names it.
+    const absent = main.ciState !== undefined || main.decidedBySha !== main.sha ? undefined
       : names.find((name) => !main.observedChecks!.includes(name) && !PR_OWN_INPUT_CHECKS.includes(name));
     if (absent !== undefined) return { kind: "wait", check: absent };
   }
@@ -9827,7 +9855,9 @@ export function decideBaseRed(
   const key = `${pr.prNumber}@${pr.headSha}`;
   const recorded = history.stoodDown.get(key);
   if (history.refreshed.has(key)) return { kind: "own" };
-  if (recorded !== undefined && names.includes(recorded) && !PR_OWN_INPUT_CHECKS.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
+  // W1-T9930: a red cleared at the head by its own failing tests releases the holds it caused, as green does.
+  const released = main?.state === "green" || (main?.state === "undetermined" && main.headReproduction === "cleared");
+  if (recorded !== undefined && names.includes(recorded) && !PR_OWN_INPUT_CHECKS.includes(recorded)) return { kind: released ? "refresh" : "wait", check: recorded };
   // W1-T6024: a head whose failing tests a probe reproduced on main is main's red, whatever its check is called.
   const named = names[0];
   return main?.state === "green" && named !== undefined && history.reproducedBeforeGreen.has(key) ? { kind: "refresh", check: named } : { kind: "own" };
@@ -9846,7 +9876,7 @@ export const PLAN_REPAIR_STEP = "sweep.plan_repair";
  *  A session's head (`run-unfiled-*`, `run-W1-T*`, `codex/*`) never matches, whoever pushed it.
  *  Exported so a fixture drives its refusing arm directly (W1-T2317's negative-reachability ratchet). */
 export const MACHINE_LANE_HEAD_RE = new RegExp(
-  "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay)-garden-\\d+" +
+  "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay|queue-judge)-garden-\\d+" +
     "|(?:feedback|decisions|plan-reconcile|ci-learning)-landing(?:-[a-z0-9-]+)?" +
     "|run-(?:TRIAGE|APPROVE)-.+|run-RETRO(?:-.+)?)$",
 );
@@ -9888,7 +9918,7 @@ export interface PlanRepairFacts {
   gardenRecordRefusal?: string;
 }
 
-const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay)-garden-\d+$/;
+const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay|queue-judge)-garden-\d+$/;
 
 function gardenRecordRefusalCandidate(pr: OpenPrView): boolean {
   const names = [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map(f => f.name)]
@@ -13699,6 +13729,24 @@ export const FIX_DISPATCH_FAILED_BACKSTOP = 3;
  *  three is the first attempt plus two retries, time for an exiting owner to clear. */
 export const FIX_CLAIM_DECLINE_BACKSTOP = 3;
 
+/** PR 14405 and its follow-up: each failed owner recovery `declineClaim` names, keyed to the decision
+ *  that must still admit it and the ordinary helper whose verified result lifts its backstop hold.
+ *  A failed stale-dirty RESET re-proves only its preservation: the claim path then redoes both. */
+const REVALIDATED_OWNER_PRESERVATIONS: Readonly<Record<string, {
+  kind: "preserve-tracked-dirty" | "preserve-stale-dirty";
+  helper: "preserveTrackedDirty" | "preserveStagedResidue" | "preserveStaleDirty";
+}>> = {
+  owner_dirty_recovery_preserve_failed: { kind: "preserve-tracked-dirty", helper: "preserveTrackedDirty" },
+  owner_staged_residue_preserve_failed: { kind: "preserve-tracked-dirty", helper: "preserveStagedResidue" },
+  owner_stale_dirty_preserve_failed: { kind: "preserve-stale-dirty", helper: "preserveStaleDirty" },
+  owner_stale_dirty_reset_failed: { kind: "preserve-stale-dirty", helper: "preserveStaleDirty" },
+};
+
+function revalidatedOwnerPreservation(reason: unknown) {
+  return typeof reason === "string" && Object.hasOwn(REVALIDATED_OWNER_PRESERVATIONS, reason)
+    ? REVALIDATED_OWNER_PRESERVATIONS[reason] : undefined;
+}
+
 /** A fix dispatch the backstop holds at this head, read from the ledger alone so EVERY pass (the light
  *  pass included, which never reaches the action arm) classifies it the same way. */
 export interface FixDispatchHold {
@@ -13707,12 +13755,46 @@ export interface FixDispatchHold {
   escalated: boolean;
 }
 
+/** The newest escalation this PR's own lanes delivered at this head, read back off its `sweep.disposed` rows. */
+export interface OwnEscalationAtHead {
+  ts: string | undefined;
+  /** The sentence that escalation carried; undefined when its row holds none. */
+  reason: string | undefined;
+}
+
+/** PR 14326 (issue 14390): an `escalated` stage is a PR some lane ALREADY escalated — a filed blocked-ambiguous
+ *  or refused-escalate disposition, a progress-judge stop, or a dispatch backstop. The stall report reads that
+ *  escalation back here so it can name it instead of "unknown signature". Each latch's FIRST row is the one that
+ *  escalated; its later rows only repeat "already escalated". Only rows at this exact head count, since a new
+ *  head re-earns its own escalation. Undefined when no such row is in `rows`. */
+export function ownEscalationAtHead(
+  rows: ReadonlyArray<Record<string, unknown>>, pr: Pick<OpenPrView, "prNumber" | "headSha">,
+): OwnEscalationAtHead | undefined {
+  const latched = new Set<string>();
+  let found: Record<string, unknown> | undefined;
+  for (const row of rows) {
+    if (row.step !== "sweep.disposed" || row.pr_number !== pr.prNumber || row.head_sha !== pr.headSha) continue;
+    const filed = row.acted === true && (row.disposition === "blocked-ambiguous" || row.disposition === "refused-escalate");
+    const latch = typeof row.progress_escalated_key === "string" ? `progress\u0000${row.progress_escalated_key}`
+      : typeof row.fix_claim_decline_escalated === "string" ? `claim\u0000${row.fix_claim_decline_escalated}`
+        : row.fix_dispatch_failed_escalated === true ? "dispatch-failed" : undefined;
+    const firstOfLatch = latch !== undefined && !latched.has(latch);
+    if (latch !== undefined) latched.add(latch);
+    if (filed || firstOfLatch || row.stand_down_escalation_outcome === "delivered") found = row;
+  }
+  if (found === undefined) return undefined;
+  const said = [found.acted === true ? found.reason : found.stand_down_reason, found.reason]
+    .find((text): text is string => typeof text === "string" && text.trim() !== "");
+  return { ts: typeof found.ts === "string" ? found.ts : undefined, reason: said };
+}
+
 /** W1-T5919 + W1-T5932 — the backstop holds, pure. The claim-decline hold stands only while the
  *  declined owner worktree still exists: once an operator or the janitor removes it, the next pass
  *  re-attempts the claim, so clearing the cause never also needs a hand-pushed head (#10551, 2026-10-10:
  *  a dirty `sweep-` owner held a conflicted PR at one head with nothing able to lift it). A decline
  *  that named no path cannot be re-probed and keeps holding. W1-T7998: a decline the owner DECISION
- *  kept is re-asked through `ownerReclaimable`; once it admits recovery the hold lifts this pass. */
+ *  kept is re-asked through `ownerReclaimable`; once it admits recovery the hold lifts this pass.
+ *  A failed recovery in {@link REVALIDATED_OWNER_PRESERVATIONS} lifts only on a re-verified preservation. */
 export function fixDispatchHoldAtHead(
   pr: OpenPrView,
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -13722,9 +13804,15 @@ export function fixDispatchHoldAtHead(
   const declines = lines.filter((l) => isOwnerClaimDecline(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
   const last = declines[declines.length - 1];
   const ownerPath = typeof last?.worktree_path === "string" ? last.worktree_path : undefined;
+  // Revalidation re-proves a failed RESET's preservation but never tries the reset, so a reset that keeps
+  // failing would lift and re-decline forever with no escalation. It is re-asked once per head: after a
+  // revalidation lifted this head, a reset that fails again holds and escalates.
+  const resetRelifted = last?.owner_recovery_reason === "owner_stale_dirty_reset_failed" &&
+    lines.slice(0, lines.lastIndexOf(last)).some((l) => l.from_backstop_revalidation === true &&
+      l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
   if (declines.length >= FIX_CLAIM_DECLINE_BACKSTOP && (ownerPath === undefined || ownerWorktreeExists(ownerPath)) &&
-      !(ownerPath !== undefined && (last.owner_recovery_decision === "keep" ||
-        last.owner_recovery_reason === "owner_dirty_recovery_preserve_failed") && ownerReclaimable?.(pr, last) === true)) {
+      !(ownerPath !== undefined && !resetRelifted && (last.owner_recovery_decision === "keep" ||
+        revalidatedOwnerPreservation(last.owner_recovery_reason) !== undefined) && ownerReclaimable?.(pr, last) === true)) {
     const why = String(last.owner_recovery_reason);
     // W1-T5974: a staged-only refusal names the paths an operator must inspect before clearing it.
     const staged = Array.isArray(last.staged_paths) && last.staged_paths.length > 0
@@ -15523,6 +15611,9 @@ function readFixRungEnd(lines: Array<Record<string, unknown>>, taskId: string | 
 /** W1-T10339 — WHAT A STAND-DOWN READ. Each `fix.stood_down` and `fix.needs_design` row names the head, the task-contract
  *  revision and (for a PR with no task trailer, whose BODY is the authoritative Acceptance) the body digest it worked on. */
 export interface FixRungInputs { headSha: string; contractRevision?: string; bodySha256?: string }
+
+/** The non-conflict rung defers a dirty PR to the existing conflict repair route. */
+export const CONFLICT_REPAIR_HANDOFF_REASON = "merge state is dirty (mergeable === false or mergeable_state === \"dirty\") — a conflicted PR registers no new check runs, so a strike buys no information; standing down for the sweep's own conflicted disposition rather than retrying blindly";
 
 /** sha256 of a PR body as both the sweep and the fix rung read it — trimmed, so a trailing newline is not an edit. */
 export function prBodyDigest(body: string | undefined): string | undefined {
@@ -17328,7 +17419,7 @@ export async function runSweep(
     if (row.step === "pr.stuck.resolved") resolvedStages.add(stageKey(row));
   }
   const reportStuckStage = async (pr: OpenPrView, fields: ReturnType<typeof blockerFields>, repairStarted: boolean,
-    standDownReason: string | undefined, escalationHandled: boolean): Promise<void> => {
+    standDownReason: string | undefined, escalationHandled: boolean, blockerReason?: string): Promise<void> => {
     if (deps.dryRun) return;
     const key = stageKey({ pr_number: pr.prNumber, ...fields });
     const record = (step: string, extra: Record<string, unknown>) => appendLine(deps.ledgerPath, {
@@ -17504,13 +17595,35 @@ export async function runSweep(
         other.taskId === pr.taskId && isDispatchedRunBranch(other.headRefName) && other.headRefName !== pr.headRefName)) {
       diagnoses.push("duplicate build");
     }
+    // PR 14326 (issue 14390): an ownerless `escalated` stage reports on its first pass, so a light pass that deferred
+    // the disposition re-escalated a PR whose progress-judge escalation was still open, as "unknown signature".
+    // The report still escalates -- the original may never have reached a person, or been closed unanswered, and a
+    // stall nobody is told about is the defect this report exists for -- but it names the escalation it found.
+    let originalEscalationOpen = false;
+    let escalationFields: Record<string, unknown> = {};
+    if (fields.blocker === "escalated") {
+      const original = ownEscalationAtHead(currentRows, pr);
+      const answered = pr.pendingAnswer !== undefined && pr.pendingAnswer.spent !== true;
+      const at = original?.ts === undefined ? "" : ` at ${original.ts}`;
+      originalEscalationOpen = original?.reason !== undefined && !answered;
+      diagnoses.push(original === undefined
+        ? `already escalated (reason unreadable: no escalation of this PR at head ${pr.headSha.slice(0, 7)} is in the ledger)` +
+          (blockerReason ? `; this pass: ${blockerReason}` : "")
+        : original.reason === undefined ? `already escalated${at} (reason unreadable)`
+          : answered ? `already escalated${at} and answered, yet still stalled: ${original.reason}`
+            : `already escalated${at}, still awaiting an operator: ${original.reason}`);
+      escalationFields = {
+        original_escalation: originalEscalationOpen ? "open" : answered && original?.reason !== undefined ? "answered" : "unreadable",
+        ...(original?.ts === undefined ? {} : { original_escalation_at: original.ts }),
+      };
+    }
     const diagnosis = diagnoses.length ? diagnoses.join("; ") : "unknown signature";
     const reason = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — ${fields.blocker} for ` +
       `${Math.floor(fields.blocker_age_ms / 60_000)} minutes ` +
       `${ownerless ? "(owner: none)" : `(BACKSTOP ${bound?.minutes})`}; since ${fields.blocker_since}; DIAGNOSIS: ${diagnosis}` +
       (heldMs > 0 ? `; the fleet itself withheld the repair for ${Math.floor(heldMs / 60_000)} of those minutes` : "");
     const row = { pr_number: pr.prNumber, ...fields, diagnosis, ...boundFields,
-      held_ms: heldMs };
+      held_ms: heldMs, ...escalationFields };
     recordStuck(row);
     if (escalationHandled) return;
     try {
@@ -18842,7 +18955,7 @@ export async function runSweep(
         (blockerRow.blocker_owner === "NONE" && (acted || deduped || actionError !== undefined || disposition === "wait" ||
           (standDownReason !== undefined && (deps.actionable?.(disposition) ?? true))));
       const stageStandDown = disposition === "stale" && acted ? "CLOSED" : standDownReason;
-      await reportStuckStage(pr, blockerRow, repairStarted, stageStandDown, escalationHandled);
+      await reportStuckStage(pr, blockerRow, repairStarted, stageStandDown, escalationHandled, shownReason);
     }
     // A real pass's `sweep.disposed` row below carries every field of these two rows, and on the
     // fleet each was an exact duplicate of it (1,454 of 14,089 core rows, 2026-09-24): write them only
@@ -19689,7 +19802,9 @@ export async function runSweep(
       catch (error) { readable = false; deps.log?.("sweep.stand_down_hold.unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) }); }
       const held = readable ? fixSeedRead(ledgerLines, pr, deps.runId,
         { headSha: pr.headSha, contractRevision, bodySha256: standDownBodySha }) : undefined;
-      if (held?.kind === "held" && held.hold !== undefined) {
+      const conflictHandoff = disposition === "conflicted" && hasCapturedMergeConflictEvidence(pr.mergeConflict) &&
+        held?.hold?.site === "rung.strike" && held.hold.reason === CONFLICT_REPAIR_HANDOFF_REASON;
+      if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff) {
         standDownHold = held.hold;
         disposition = "refused-escalate";
         reason = `fix stood down at ${held.hold.site} and nothing it read has changed (head ${pr.headSha.slice(0, 7)}, task contract` +
@@ -25479,6 +25594,8 @@ export interface PostFixReverificationDeps {
    *  the check-run in place or pushing a refresh commit is the effect's own decision; this module
    *  never calls gh or git directly. */
   redrive: (pr: OpenPrView, fixClass: FixClass) => RedriveResult | Promise<RedriveResult>;
+  /** Only a positively absent fix permits a new head. Unknown ancestry holds this rung. */
+  fixInHead?: (pr: OpenPrView, fixClass: FixClass) => boolean | undefined | Promise<boolean | undefined>;
   ledgerPath: string;
   runId: string;
   readLedger?: (path: string) => Array<Record<string, unknown>>;
@@ -25497,7 +25614,7 @@ export interface PostFixReverificationDeps {
 export interface PostFixReverificationResult {
   prNumber: number;
   taskId?: string;
-  outcome: "redriven" | "unmatched" | "already-redriven" | "redrive-failed";
+  outcome: "redriven" | "unmatched" | "already-redriven" | "redrive-failed" | "fix-already-in-head" | "fix-presence-unknown";
   fixClassId?: string;
   /** Present only when outcome === "redriven" AND the redrive returned a fresh, settled view
    *  (design note ii — "re-dispose on the fresh result"). */
@@ -25561,6 +25678,19 @@ export async function runPostFixReverification(
     const already = lines.some((l) => l.step === "sweep.post_fix_redriven" && l.redrive_key === redriveKey);
     if (already) {
       results.push({ prNumber: pr.prNumber, taskId: pr.taskId, outcome: "already-redriven", fixClassId: cls.id });
+      continue;
+    }
+
+    let fixInHead: boolean | undefined;
+    try {
+      fixInHead = await deps.fixInHead?.(pr, cls);
+    } catch (error) {
+      log("sweep.post_fix_ancestry_unavailable", { pr_number: pr.prNumber, fix_pr_number: cls.fixPrNumber, error: String(error) });
+    }
+    if (fixInHead !== false) {
+      const outcome = fixInHead === true ? "fix-already-in-head" : "fix-presence-unknown";
+      log("sweep.post_fix_held", { pr_number: pr.prNumber, fix_pr_number: cls.fixPrNumber, outcome });
+      results.push({ prNumber: pr.prNumber, taskId: pr.taskId, outcome, fixClassId: cls.id });
       continue;
     }
 
