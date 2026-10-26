@@ -8713,7 +8713,8 @@ function asyncFixRungOptions(opts: Parameters<RunTaskCommandHost["runFixRung"]>[
     ...(opts.deps.readRoundCommits === readFixRoundCommitsViaGit
       ? { readRoundCommits: (wt: string, since: string) => readFixRoundCommitsViaGitAsync(wt, since, git) } : {}),
   };
-  return { ...opts, deps };
+  // Keep the live options: a worker can update worktreePath while its round is awaiting it.
+  return Object.assign(opts, { deps });
 }
 
 /**
@@ -10911,7 +10912,7 @@ export function checkFixCensusSnapshot(
 
 /** W1-T7744 — the census check with both children awaited, for the fix rung and the census-push repair, which the
  *  daemon runs on its own loop (up to 5.9 s held, 2026-10-10). The same steps as the sync form, so the refusal, the
- *  unmeasured reading and the 60 s child bounds cannot drift between them. */
+ *  unmeasured reading and the child bounds cannot drift between them. */
 export async function checkFixCensusSnapshotAsync(
   root: string,
   path: string | undefined,
@@ -10938,6 +10939,10 @@ export function spawnCensusChild(file: string, args: string[], options: SpawnSyn
   });
 }
 
+// The precheck runs bounded suite children serially, including base retries; allow their own
+// backstops to report before the outer process bound fires. The reach child stays at 60 s.
+const CENSUS_PRECHECK_TIME_BOUND_MS = 8 * 60_000;
+
 function* fixCensusSnapshotSteps(
   root: string,
   path: string | undefined,
@@ -10950,7 +10955,7 @@ function* fixCensusSnapshotSteps(
   env[CENSUS_SNAPSHOT_ENV] = path;
   const scriptsRoot = repoRoot;
   const precheck = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--root", root],
-    { cwd: scriptsRoot, env, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 }));
+    { cwd: scriptsRoot, env, encoding: "utf8", timeout: CENSUS_PRECHECK_TIME_BOUND_MS, maxBuffer: 64 * 1024 * 1024 }));
   const text = `${precheck.stdout ?? ""}${precheck.stderr ?? ""}`;
   let refusal = censusPushRefusal(text);
   let unmeasured = precheck.status === 2 ? text.trim() : undefined;

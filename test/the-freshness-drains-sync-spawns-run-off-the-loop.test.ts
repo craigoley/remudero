@@ -11,7 +11,7 @@ import { ghTextAsync } from "#src/lib/github-transport.js";
 import { realDeployDeps, realDeploySensorsAsync, type RealDeployOpts } from "#src/lib/deployer.js";
 import { applyPlanProposalCommitAsync } from "#src/lib/plan-architect.js";
 import { buildBehindMainByPrAsync, buildEscalationReconcileCandidatesAsync } from "#src/lib/tick-read-worker.js";
-import { buildEscalationCloserAsync, ghLiveStateAsync, readFixRoundCommitsViaGit, readFixRoundCommitsViaGitAsync, updateBranchViaGh } from "#src/run-task.js";
+import { buildEscalationCloserAsync, checkFixCensusSnapshotAsync, ghLiveStateAsync, readFixRoundCommitsViaGit, readFixRoundCommitsViaGitAsync, updateBranchViaGh, type CensusChildRunner, type CensusChildResult } from "#test/helpers/run-task-test.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import type { Config } from "#src/lib/config.js";
 import type { Plan } from "#src/lib/plan.js";
@@ -31,6 +31,30 @@ async function withoutSyncSpawn<T>(run: () => T | Promise<T>): Promise<T> {
     telemetry.stop();
   }
 }
+
+test("the census precheck can report its serial child backstops before the parent kills it", async () => {
+  const calls: string[][] = [];
+  const events: string[] = [];
+  const run: CensusChildRunner<Promise<CensusChildResult>> = async (_file, args, options) => {
+    calls.push(args);
+    if (args[0]?.endsWith("census-precheck.mjs")) {
+      const serialChildElapsedMs = 3 * 60_000;
+      if ((options.timeout ?? 0) <= serialChildElapsedMs) {
+        return { status: null, signal: "SIGTERM", stdout: "", stderr: "" };
+      }
+      return { status: 2, signal: null, stdout: "census suites NOT MEASURED (time bound)", stderr: "" };
+    }
+    assert.equal(options.timeout, 60_000, "the standalone reach suite keeps its own bound");
+    return { status: 0, signal: null, stdout: "# tests 1\n# fail 0\n", stderr: "" };
+  };
+  const result = await checkFixCensusSnapshotAsync("/fixture", "/fixture/snapshot.json", (_step, fields) => {
+    events.push(String(fields?.outcome));
+  }, run);
+  assert.equal(result?.refusal, undefined);
+  assert.match(result?.unmeasured ?? "", /NOT MEASURED \(time bound\)/);
+  assert.equal(calls.length, 2, "an unmeasured precheck still runs the standalone reach suite");
+  assert.deepEqual(events, ["partially-measured"]);
+});
 
 test("W1-T10075: the escalation reconcile closes issues without a sync spawn on the daemon path", async () => {
   const events: string[] = [];
