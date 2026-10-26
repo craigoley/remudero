@@ -303,7 +303,7 @@ test("snapshot gateway consumes qualified changed file evidence without fetching
   type SpawnLeaf = { spawn(options: { file: string }): number };
   const prototype = ChildProcess.prototype as unknown as SpawnLeaf, originalSpawn = prototype.spawn;
   const spawns: string[] = [];
-  t.mock.method(prototype, "spawn", function(this: SpawnLeaf, options) {
+  t.mock.method(prototype, "spawn", function(this: SpawnLeaf, options: { file: string }) {
     spawns.push(options.file);
     return originalSpawn.call(this, options);
   });

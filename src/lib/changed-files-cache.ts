@@ -20,7 +20,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS } from "./github-transport.js";
 
 const SCHEMA = 2;
-/** kind: protocol -- GitHub's paginated pull-files endpoint returns at most 3,000 files.
+/** PRIMARY CONTROL: GitHub's paginated pull-files endpoint returns at most 3,000 files.
  * At the ceiling completeness is unknowable, including an exactly-3,000-file PR. */
 const PULL_FILES_RESPONSE_LIMIT = 3_000;
 const DEFAULT_MAX_ENTRIES = 5_000;
@@ -74,6 +74,11 @@ const isImmutableState = (state: string | undefined): boolean => state === "MERG
 
 function isFileList(v: unknown): v is string[] {
   return Array.isArray(v) && v.length > 0 && v.every((f) => typeof f === "string" && f.length > 0);
+}
+
+function isEvidenceFileList(v: unknown): v is string[] {
+  return isFileList(v) && v.length < PULL_FILES_RESPONSE_LIMIT && new Set(v).size === v.length &&
+    v.every(file => !file.includes("\0") && file.split("/").every(part => part !== "" && part !== "." && part !== ".."));
 }
 
 export function createChangedFilesCache(
@@ -251,8 +256,7 @@ export function createChangedFilesCache(
       const binding = hit.evidence as Record<string, unknown>;
       if (binding.repository !== repository || binding.prNumber !== Number(number[2]) || binding.prState !== "MERGED" ||
           binding.source !== "github_rest_pull_files_paginated" || binding.complete !== true ||
-          !Number.isFinite(hit.at) || hit.at < 0 || hit.at > clock.now() || !isFileList(hit.files) ||
-          hit.files.length >= PULL_FILES_RESPONSE_LIMIT || new Set(hit.files).size !== hit.files.length) return unknown("invalid_or_incomplete_evidence");
+          !Number.isFinite(hit.at) || hit.at < 0 || hit.at > clock.now() || !isEvidenceFileList(hit.files)) return unknown("invalid_or_incomplete_evidence");
       if (binding.headRefOid !== headRefOid) return unknown("head_mismatch");
       return { status: "complete", repository, prNumber: Number(number[2]), headRefOid, prState: "MERGED",
         source: "github_rest_pull_files_paginated", complete: true, observedAt: hit.at,
