@@ -13717,6 +13717,39 @@ export interface FixDispatchHold {
   escalated: boolean;
 }
 
+/** The newest escalation this PR's own lanes delivered at this head, read back off its `sweep.disposed` rows. */
+export interface OwnEscalationAtHead {
+  ts: string | undefined;
+  /** The sentence that escalation carried; undefined when its row holds none. */
+  reason: string | undefined;
+}
+
+/** PR 14326 (issue 14390): an `escalated` stage is a PR some lane ALREADY escalated — a filed blocked-ambiguous
+ *  or refused-escalate disposition, a progress-judge stop, or a dispatch backstop. The stall report reads that
+ *  escalation back here so it can name it instead of "unknown signature". Each latch's FIRST row is the one that
+ *  escalated; its later rows only repeat "already escalated". Only rows at this exact head count, since a new
+ *  head re-earns its own escalation. Undefined when no such row is in `rows`. */
+export function ownEscalationAtHead(
+  rows: ReadonlyArray<Record<string, unknown>>, pr: Pick<OpenPrView, "prNumber" | "headSha">,
+): OwnEscalationAtHead | undefined {
+  const latched = new Set<string>();
+  let found: Record<string, unknown> | undefined;
+  for (const row of rows) {
+    if (row.step !== "sweep.disposed" || row.pr_number !== pr.prNumber || row.head_sha !== pr.headSha) continue;
+    const filed = row.acted === true && (row.disposition === "blocked-ambiguous" || row.disposition === "refused-escalate");
+    const latch = typeof row.progress_escalated_key === "string" ? `progress\u0000${row.progress_escalated_key}`
+      : typeof row.fix_claim_decline_escalated === "string" ? `claim\u0000${row.fix_claim_decline_escalated}`
+        : row.fix_dispatch_failed_escalated === true ? "dispatch-failed" : undefined;
+    const firstOfLatch = latch !== undefined && !latched.has(latch);
+    if (latch !== undefined) latched.add(latch);
+    if (filed || firstOfLatch || row.stand_down_escalation_outcome === "delivered") found = row;
+  }
+  if (found === undefined) return undefined;
+  const said = [found.acted === true ? found.reason : found.stand_down_reason, found.reason]
+    .find((text): text is string => typeof text === "string" && text.trim() !== "");
+  return { ts: typeof found.ts === "string" ? found.ts : undefined, reason: said };
+}
+
 /** W1-T5919 + W1-T5932 — the backstop holds, pure. The claim-decline hold stands only while the
  *  declined owner worktree still exists: once an operator or the janitor removes it, the next pass
  *  re-attempts the claim, so clearing the cause never also needs a hand-pushed head (#10551, 2026-10-10:
@@ -17338,7 +17371,7 @@ export async function runSweep(
     if (row.step === "pr.stuck.resolved") resolvedStages.add(stageKey(row));
   }
   const reportStuckStage = async (pr: OpenPrView, fields: ReturnType<typeof blockerFields>, repairStarted: boolean,
-    standDownReason: string | undefined, escalationHandled: boolean): Promise<void> => {
+    standDownReason: string | undefined, escalationHandled: boolean, blockerReason?: string): Promise<void> => {
     if (deps.dryRun) return;
     const key = stageKey({ pr_number: pr.prNumber, ...fields });
     const record = (step: string, extra: Record<string, unknown>) => appendLine(deps.ledgerPath, {
@@ -17514,13 +17547,35 @@ export async function runSweep(
         other.taskId === pr.taskId && isDispatchedRunBranch(other.headRefName) && other.headRefName !== pr.headRefName)) {
       diagnoses.push("duplicate build");
     }
+    // PR 14326 (issue 14390): an ownerless `escalated` stage reports on its first pass, so a light pass that deferred
+    // the disposition re-escalated a PR whose progress-judge escalation was still open, as "unknown signature".
+    // The report still escalates -- the original may never have reached a person, or been closed unanswered, and a
+    // stall nobody is told about is the defect this report exists for -- but it names the escalation it found.
+    let originalEscalationOpen = false;
+    let escalationFields: Record<string, unknown> = {};
+    if (fields.blocker === "escalated") {
+      const original = ownEscalationAtHead(currentRows, pr);
+      const answered = pr.pendingAnswer !== undefined && pr.pendingAnswer.spent !== true;
+      const at = original?.ts === undefined ? "" : ` at ${original.ts}`;
+      originalEscalationOpen = original?.reason !== undefined && !answered;
+      diagnoses.push(original === undefined
+        ? `already escalated (reason unreadable: no escalation of this PR at head ${pr.headSha.slice(0, 7)} is in the ledger)` +
+          (blockerReason ? `; this pass: ${blockerReason}` : "")
+        : original.reason === undefined ? `already escalated${at} (reason unreadable)`
+          : answered ? `already escalated${at} and answered, yet still stalled: ${original.reason}`
+            : `already escalated${at}, still awaiting an operator: ${original.reason}`);
+      escalationFields = {
+        original_escalation: originalEscalationOpen ? "open" : answered && original?.reason !== undefined ? "answered" : "unreadable",
+        ...(original?.ts === undefined ? {} : { original_escalation_at: original.ts }),
+      };
+    }
     const diagnosis = diagnoses.length ? diagnoses.join("; ") : "unknown signature";
     const reason = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — ${fields.blocker} for ` +
       `${Math.floor(fields.blocker_age_ms / 60_000)} minutes ` +
       `${ownerless ? "(owner: none)" : `(BACKSTOP ${bound?.minutes})`}; since ${fields.blocker_since}; DIAGNOSIS: ${diagnosis}` +
       (heldMs > 0 ? `; the fleet itself withheld the repair for ${Math.floor(heldMs / 60_000)} of those minutes` : "");
     const row = { pr_number: pr.prNumber, ...fields, diagnosis, ...boundFields,
-      held_ms: heldMs };
+      held_ms: heldMs, ...escalationFields };
     recordStuck(row);
     if (escalationHandled) return;
     try {
@@ -18852,7 +18907,7 @@ export async function runSweep(
         (blockerRow.blocker_owner === "NONE" && (acted || deduped || actionError !== undefined || disposition === "wait" ||
           (standDownReason !== undefined && (deps.actionable?.(disposition) ?? true))));
       const stageStandDown = disposition === "stale" && acted ? "CLOSED" : standDownReason;
-      await reportStuckStage(pr, blockerRow, repairStarted, stageStandDown, escalationHandled);
+      await reportStuckStage(pr, blockerRow, repairStarted, stageStandDown, escalationHandled, shownReason);
     }
     // A real pass's `sweep.disposed` row below carries every field of these two rows, and on the
     // fleet each was an exact duplicate of it (1,454 of 14,089 core rows, 2026-09-24): write them only
