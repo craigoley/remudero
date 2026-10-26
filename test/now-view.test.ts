@@ -335,11 +335,13 @@ test("snapshot changed file evidence guards are load bearing", async (t) => {
   truncated.entries[0].evidence.complete = false;
   writeFileSync(fixture.path, JSON.stringify(truncated));
   assert.equal(snapshotEvidence(snapshotGithub(fixture.root, "o", "r", fixture.clock).github, 901).status, "unknown", "incomplete list cannot prove repair");
-  writeFileSync(fixture.path, original);
-  fixture.board.commitClosed([{ ...fixture.row, headRefOid: "d".repeat(40) }]);
+  const wrongHead = JSON.parse(original);
+  wrongHead.entries[0].evidence.headRefOid = "d".repeat(40);
+  writeFileSync(fixture.path, JSON.stringify(wrongHead));
   assert.equal(snapshotEvidence(snapshotGithub(fixture.root, "o", "r", fixture.clock).github, 901).status, "unknown", "wrong head cannot prove repair");
-  fixture.board.commitClosed([{ ...fixture.row, state: "CLOSED" }]);
-  assert.equal(snapshotEvidence(snapshotGithub(fixture.root, "o", "r", fixture.clock).github, 901).status, "unknown", "CLOSED is not MERGED");
+  writeFileSync(fixture.path, original);
+  fixture.board.commitOpen!([{ ...fixture.row, state: "OPEN" }], fixture.clock.now());
+  assert.equal(snapshotEvidence(snapshotGithub(fixture.root, "o", "r", fixture.clock).github, 901).status, "unknown", "a reopened PR cannot retain merged evidence");
 });
 
 test("the now view shows open pull requests from the persisted snapshot", (t) => {
