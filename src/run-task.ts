@@ -35695,13 +35695,16 @@ export function buildInboxDraftHook(
         }
       }
 
-      let draftSelection: DraftSelectionContext | undefined;
+      const lifecycleContext = inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root });
+      let draftSelection: DraftSelectionContext = { retirement: lifecycleContext, isRatified: () => false,
+        grepAnchorTrue: () => true, openProposalIds: new Set(proposals.map(p => p.id)) };
       try {
         const ledgerLines = readLedgerLines(ledgerPath);
         const sha = mainSha();
         const anchors = proposals.flatMap((p) => p.evidenceAnchors);
         const grepFailures = await warmAnchorGrepCache(anchorGrepCache, sha, anchors, grepAnchorWarm);
         draftSelection = {
+          retirement: lifecycleContext,
           grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
@@ -35953,7 +35956,7 @@ export function projectionReadinessAccessors(projection: ReadonlyMap<string, Sta
  * NOTE (W1-T192): the daemon's OWN per-poll draft rung ({@link buildInboxDraftHook}) is what
  * makes a draft exist without this command ever being invoked — see that function's doc.
  */
-export async function inboxCommand(rest: string[], deps: { config?: Config; github?: GitHub } = {}): Promise<number> {
+export async function inboxCommand(rest: string[], deps: { config?: Config; github?: GitHub; draftBatch?: typeof draftProposalBatch } = {}): Promise<number> {
   const badArg = unknownArgError("inbox", rest, [], ["--dry-run"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -35979,7 +35982,10 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   // UNTHROTTLED (see this command's doc) — `rmd inbox` is the manual FORCE, so it always
   // attempts every proposal `proposalsNeedingDraft` names, never consulting the daemon-only
   // DraftAttemptCache.
-  const needsDraft = proposalsNeedingDraft(proposals, drafts);
+  const lifecycleContext = inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root });
+  // Manual force retains its existing conflict behavior while observing lifecycle uncertainty.
+  const needsDraft = proposalsNeedingDraft(proposals, drafts, { retirement: lifecycleContext,
+    isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set() });
 
   const runId = `INBOX-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "inbox", step, lane: "inbox", ...extra });
@@ -35989,7 +35995,8 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   if (needsDraft.length > 0 && !dryRun) {
     const causalScope = { repository: `${owner}/${repo}` };
     const snapshots = needsDraft.map(proposal => captureInboxDraftSnapshot(proposal, causalScope));
-    const outcomes = await draftProposalBatch(needsDraft, config, owner, repo, runId, log);
+    const outcomes = deps.draftBatch ? await deps.draftBatch(needsDraft, config, owner, repo, runId, log)
+      : await draftProposalBatch(needsDraft, config, owner, repo, runId, log);
     commitInboxDraftOutcomes({ stateDir: join(config.root, "state"), scope: causalScope, snapshots, outcomes, log });
     Object.assign(drafts, parseDraftCache(readFileIfExists(draftsPath)));
   }
@@ -36002,7 +36009,6 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   // ratified even if the registry entry itself drifted (the P19 incident).
   const ledgerLinesForRatify = readLedgerLines(ledgerPath);
 
-  const lifecycleContext = inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root });
   const classifications = proposals.map((p) =>
     classifyProposal(p, drafts[p.id], {
       retirement: lifecycleContext,
