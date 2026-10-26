@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, fstatSync, fsyncSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
   ghProductRepositoryProvider, ProductRepositoryService, ProviderDenied,
   type ProductRepositoryProvider, type ProviderRead, type ProviderRepository,
 } from "#src/lib/product-repository.js";
-import { ProductIntentStore } from "#src/lib/product-intent-store.js";
+import { ProductIntentStore, productStatePaths } from "#src/lib/product-intent-store.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
@@ -46,11 +46,21 @@ function fixture(t: TestContext) {
     brief: { idea: "private idea", name: "Wreckterra", requestedRepository: { owner: "craigoley", name: "wreckterra" } } });
   assert.ok(saved.ok);
   const productId = saved.value.receipt.productId;
-  const command = (over: Record<string, unknown> = {}) => ({ version: "product-repository-v1", requestId: "repo-request-0000001", productId,
-    action: "create", owner: "craigoley", name: "wreckterra", visibility: "public", ...over });
+  const command = (over: Record<string, unknown> = {}) => {
+    const current = intents.read(actor, productId); assert.ok(current.ok);
+    return { version: "product-repository-v1", requestId: "repo-request-0000001", productId,
+      expectedRevision: current.value.revision, expectedObjectiveRevision: current.value.objectiveRevision,
+      action: "create", owner: "craigoley", name: "wreckterra", visibility: "public", ...over };
+  };
   const journalFiles = () => existsSync(join(root, "state/products/v1/repositories"))
     ? readdirSync(join(root, "state/products/v1/repositories")).filter((file) => file.endsWith(".json")) : [];
   return { root, productId, command, journalFiles, service: (provider: ProductRepositoryProvider, extra: object = {}) => new ProductRepositoryService({ root, provider, ...extra }) };
+}
+
+function replaceJournalMode(file: string, mode: number): void {
+  const body = readFileSync(file, "utf8"), mask = process.umask(0);
+  try { unlinkSync(file); writeFileSync(file, body, { mode }); }
+  finally { process.umask(mask); }
 }
 
 test("W1-T10613: adopting Wreckterra never creates a repository", async (t) => {
@@ -74,6 +84,63 @@ test("W1-T10613: adopting Wreckterra never creates a repository", async (t) => {
   // A different repository ID for the same name is a conflict, never an adoption.
   const wrongId = await f.service(provider).execute(actor, f.command({ requestId: "repo-request-0000002", action: "adopt", repositoryId: WRECKTERRA_ID + 1 }));
   assert.deepEqual(wrongId, { ok: false, code: "repository_conflict" });
+  assert.deepEqual(provider.creates(), []);
+});
+
+test("product repository adoption reaches the canonical product identity and stage evidence", async (t) => {
+  const f = fixture(t);
+  const provider = new FakeProvider();
+  provider.repos.set("craigoley/wreckterra", { id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" });
+  const result = await f.service(provider).execute(actor, f.command({ action: "adopt", repositoryId: WRECKTERRA_ID }));
+  assert.ok(result.ok);
+  const saved = new ProductIntentStore({ root: f.root }).read(actor, f.productId);
+  assert.ok(saved.ok);
+  assert.deepEqual(saved.value.repository, result.value.receipt.repository);
+  assert.equal(saved.value.stageEvidence.filter((entry) => entry.stage === "repository" && entry.outcome === "succeeded" && entry.objectiveRevision === saved.value.objectiveRevision).length, 1);
+  assert.equal(saved.value.executionAuthority, "none");
+  assert.deepEqual(provider.creates(), []);
+});
+
+test("a journaled unknown create is never submitted again when reconciliation reads absent", async (t) => {
+  const f = fixture(t);
+  const provider = new FakeProvider();
+  provider.create = async (spec) => { provider.calls.push(`create ${spec.owner}/${spec.name}`); throw Error("unknown response; read-back may lag"); };
+  const request = f.command();
+  assert.deepEqual(await f.service(provider).execute(actor, request), { ok: false, code: "outcome_unknown" });
+  assert.equal(provider.creates().length, 1);
+  assert.deepEqual(await f.service(provider).execute(actor, request), { ok: false, code: "outcome_unknown" });
+  assert.equal(provider.creates().length, 1, "a 404 does not prove that the earlier POST was never accepted");
+});
+
+test("repository adoption refuses stale product scope before any provider call", async (t) => {
+  const f = fixture(t), provider = new FakeProvider();
+  const request = f.command({ action: "adopt", repositoryId: WRECKTERRA_ID });
+  const store = new ProductIntentStore({ root: f.root });
+  const product = store.read(actor, f.productId); assert.ok(product.ok);
+  assert.ok(store.write(actor, { version: "product-intent-v1", requestId: "changed-objective-0001", id: f.productId,
+    expectedRevision: product.value.revision, brief: { ...product.value.brief, idea: "A changed objective" } }).ok);
+  assert.deepEqual(await f.service(provider).execute(actor, request), { ok: false, code: "stale_revision" });
+  assert.deepEqual(provider.calls, []);
+  assert.deepEqual(f.journalFiles(), []);
+});
+
+test("repository adoption replays the canonical durability barrier after an unknown acknowledgement", async (t) => {
+  const f = fixture(t), provider = new FakeProvider();
+  provider.repos.set("craigoley/wreckterra", { id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" });
+  const state = productStatePaths(f.root, actor).state;
+  const broken = new ProductIntentStore({ root: f.root, sync: (fd) => {
+    if (fstatSync(fd).isDirectory() && JSON.parse(readFileSync(state, "utf8")).products[f.productId].stageEvidence.length > 0) throw Error("canonical directory sync failed");
+    fsyncSync(fd);
+  } });
+  const request = f.command({ action: "adopt", repositoryId: WRECKTERRA_ID });
+  const service = f.service(provider, { store: broken });
+  assert.deepEqual(await service.execute(actor, request), { ok: false, code: "outcome_unknown" });
+  assert.deepEqual(await service.execute(actor, request), { ok: false, code: "outcome_unknown" });
+  const healed = await f.service(provider).execute(actor, request); assert.ok(healed.ok);
+  assert.equal(healed.value.replayed, true);
+  const product = new ProductIntentStore({ root: f.root }).read(actor, f.productId); assert.ok(product.ok);
+  assert.equal(product.value.repository?.id, WRECKTERRA_ID);
+  assert.equal(product.value.stageEvidence.length, 1);
   assert.deepEqual(provider.creates(), []);
 });
 
@@ -181,9 +248,9 @@ test("product repository journal durability: sync failures, corruption and unsaf
   budget = Infinity;
   assert.ok(service);
   const file = join(f.root, "state/products/v1/repositories", f.journalFiles()[0]!);
-  chmodSync(file, 0o644);
+  replaceJournalMode(file, 0o644);
   assert.deepEqual(await f.service(adopted).execute(actor, f.command({ action: "adopt", repositoryId: 7 })), { ok: false, code: "unavailable" });
-  chmodSync(file, 0o600);
+  replaceJournalMode(file, 0o600);
   writeFileSync(file, "{not json");
   assert.deepEqual(await f.service(adopted).execute(actor, f.command({ action: "adopt", repositoryId: 7 })), { ok: false, code: "corrupt" });
   writeFileSync(file, JSON.stringify({ version: "product-repository-v1", ownerKey: "0".repeat(64), operations: {} }));

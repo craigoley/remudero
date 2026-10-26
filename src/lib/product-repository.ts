@@ -6,10 +6,11 @@ import {
 import { dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { systemClock, type Clock } from "./clock.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghTextAsync } from "./github-transport.js";
 import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
 import { ProductIntentStore } from "./product-intent-store.js";
-import { productIdSchema, productRequestIdSchema } from "./product-intent.js";
+import { productIdSchema, productRequestIdSchema, productTransitionSchema, type ProductStoreCode } from "./product-intent.js";
 
 export const PRODUCT_REPOSITORY_VERSION = "product-repository-v1" as const;
 /** PRIMARY CONTROL: maintained quotas; none of them grants a provider or execution authority. */
@@ -27,6 +28,8 @@ export const productRepositoryCommandSchema = z.object({
   version: z.literal(PRODUCT_REPOSITORY_VERSION), requestId: productRequestIdSchema, productId: productIdSchema,
   action: z.enum(["adopt", "create"]), owner: repositoryOwner, name: repositoryName, visibility,
   repositoryId: repositoryId.optional(),
+  expectedRevision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+  expectedObjectiveRevision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
 }).strict().refine((value) => (value.action === "adopt") === (value.repositoryId !== undefined));
 
 const identitySchema = z.object({
@@ -37,11 +40,13 @@ export const productRepositoryReceiptSchema = z.object({
   operationId: z.string().regex(/^prepo_[a-f0-9]{64}$/), productId: productIdSchema,
   action: z.enum(["adopt", "create"]), outcome: z.enum(["adopted", "created"]),
   repository: identitySchema, completedAt: instant, payloadDigest: digestSchema,
+  objectiveRevision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
 }).strict();
 const operationSchema = z.object({
   operationId: z.string().regex(/^prepo_[a-f0-9]{64}$/), payloadDigest: digestSchema, productId: productIdSchema,
   action: z.enum(["adopt", "create"]), owner: repositoryOwner, name: repositoryName, visibility,
   phase: z.enum(["intent", "complete"]), recordedAt: instant, receipt: productRepositoryReceiptSchema.optional(),
+  canonicalTransition: productTransitionSchema.optional(),
 }).strict().refine((value) => (value.phase === "complete") === (value.receipt !== undefined));
 const journalSchema = z.object({
   version: z.literal(PRODUCT_REPOSITORY_VERSION), ownerKey: digestSchema, operations: z.record(digestSchema, operationSchema),
@@ -51,8 +56,8 @@ export type ProductRepositoryCommand = z.infer<typeof productRepositoryCommandSc
 export type ProductRepositoryReceipt = z.infer<typeof productRepositoryReceiptSchema>;
 type Operation = z.infer<typeof operationSchema>;
 type Journal = z.infer<typeof journalSchema>;
-export type ProductRepositoryCode =
-  | "invalid_identity" | "invalid_input" | "not_found" | "repository_not_found" | "repository_conflict"
+export type ProductRepositoryCode = ProductStoreCode
+  | "repository_not_found" | "repository_conflict"
   | "idempotency_conflict" | "creation_denied" | "capacity" | "busy" | "corrupt" | "unavailable"
   | "provider_unreadable" | "outcome_unknown";
 export type ProductRepositoryResult =
@@ -69,7 +74,9 @@ export interface ProductRepositoryProvider {
   create(spec: { owner: string; name: string; visibility: "public" | "private"; scope: "user" | "org" }): Promise<void>;
 }
 /** Thrown by a provider that was told, unambiguously, that creation is not permitted. */
-export class ProviderDenied extends Error {}
+export class ProviderDenied extends RmdError {
+  constructor(message: string) { super("github", GENERIC_EXIT_CODE, message); }
+}
 
 type GhText = (args: string[], opts?: { maxBuffer?: number; timeout?: number }) => Promise<string>;
 const httpStatus = (error: unknown): number | undefined => {
@@ -133,8 +140,8 @@ export function ghProductRepositoryProvider(text: GhText = ghTextAsync): Product
   };
 }
 
-class Fault extends Error {
-  constructor(readonly code: ProductRepositoryCode) { super(`product repository: ${code}`); }
+class Fault extends RmdError {
+  constructor(readonly code: ProductRepositoryCode) { super("usage", GENERIC_EXIT_CODE, `product repository: ${code}`); }
 }
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const errno = (error: unknown, code: string) => (error as NodeJS.ErrnoException | undefined)?.code === code;
@@ -144,6 +151,7 @@ export interface ProductRepositoryOptions {
   provider?: ProductRepositoryProvider;
   clock?: Clock;
   sync?: (fd: number) => void;
+  store?: ProductIntentStore;
 }
 
 const chains = new Map<string, Promise<unknown>>();
@@ -171,7 +179,7 @@ export class ProductRepositoryService {
     this.provider = options.provider ?? ghProductRepositoryProvider();
     this.clock = options.clock ?? systemClock;
     this.sync = options.sync ?? fsyncSync;
-    this.intents = new ProductIntentStore({ root: options.root });
+    this.intents = options.store ?? new ProductIntentStore({ root: options.root });
   }
 
   async execute(actor: string, command: unknown): Promise<ProductRepositoryResult> {
@@ -181,7 +189,7 @@ export class ProductRepositoryService {
       if (!parsed.success || Buffer.byteLength(JSON.stringify(parsed.data)) > PRODUCT_REPOSITORY_LIMITS.requestBytes) throw new Fault("invalid_input");
       const input = parsed.data;
       const product = this.intents.read(actor, input.productId);
-      if (!product.ok) throw new Fault(product.code === "not_found" ? "not_found" : product.code === "invalid_identity" ? "invalid_identity" : product.code === "corrupt" ? "corrupt" : "unavailable");
+      if (!product.ok) throw new Fault(product.code);
       const requested = product.value.brief.requestedRepository;
       if (requested && (requested.owner.toLowerCase() !== input.owner.toLowerCase() || requested.name.toLowerCase() !== input.name.toLowerCase())) {
         throw new Fault("repository_conflict");
@@ -190,7 +198,11 @@ export class ProductRepositoryService {
       return await serialized(paths.ownerKey, async () => {
         this.ensureDirectory(paths);
         const handle = this.lock(paths);
-        try { return { ok: true as const, value: await this.run(paths, input) }; }
+        try {
+          const value = await this.run(paths, input, actor);
+          this.recordCanonical(paths, input, value.receipt, actor);
+          return { ok: true as const, value };
+        }
         finally { handle.release(); }
       });
     } catch (error) {
@@ -289,7 +301,50 @@ export class ProductRepositoryService {
     return next;
   }
 
-  private async run(paths: ReturnType<ProductRepositoryService["paths"]>, input: ProductRepositoryCommand): Promise<{ receipt: ProductRepositoryReceipt; replayed: boolean }> {
+  /** Journal the exact canonical input before applying it, so an unknown acknowledgement replays durably. */
+  private recordCanonical(paths: ReturnType<ProductRepositoryService["paths"]>, input: ProductRepositoryCommand, receipt: ProductRepositoryReceipt, actor: string): void {
+    const key = digest(input.requestId);
+    let journal = this.read(paths);
+    let operation = journal.operations[key];
+    if (!operation?.receipt || operation.receipt.operationId !== receipt.operationId) throw new Fault("corrupt");
+    let transition = operation.canonicalTransition;
+    if (!transition) {
+      const product = this.intents.read(actor, input.productId);
+      if (!product.ok) throw new Fault(product.code);
+      if (product.value.objectiveRevision !== receipt.objectiveRevision) throw new Fault("stale_revision");
+      if (product.value.repository && product.value.repository.id !== receipt.repository.id) throw new Fault("repository_conflict");
+      if (product.value.stageEvidence.some((item) => item.id === receipt.operationId)) throw new Fault("recovery_required");
+      transition = {
+        version: "product-intent-v1", requestId: `prepo_${digest(`canonical:${receipt.operationId}`)}`, id: input.productId,
+        expectedRevision: product.value.revision, expectedObjectiveRevision: receipt.objectiveRevision,
+        repository: receipt.repository,
+        stageEvidence: [{ id: receipt.operationId, stage: "repository", outcome: "succeeded",
+          objectiveRevision: receipt.objectiveRevision, observedAt: receipt.completedAt,
+          references: [{ label: "GitHub repository", url: `https://github.com/${receipt.repository.owner}/${receipt.repository.name}` }] }],
+      };
+      operation = { ...operation, canonicalTransition: transition };
+      journal = this.persist(paths, journal, key, operation);
+    }
+    let saved = this.intents.transition(actor, transition);
+    // A stale result wrote nothing. One refresh may reconcile another trusted stage, never a changed objective.
+    if (!saved.ok && saved.code === "stale_revision") {
+      const latest = this.intents.read(actor, input.productId);
+      if (!latest.ok) throw new Fault(latest.code);
+      if (latest.value.objectiveRevision === receipt.objectiveRevision && !latest.value.stageEvidence.some((item) => item.id === receipt.operationId)) {
+        if (latest.value.repository && latest.value.repository.id !== receipt.repository.id) throw new Fault("repository_conflict");
+        const revised = { ...transition, expectedRevision: latest.value.revision,
+          requestId: `prepo_${digest(`${receipt.operationId}:${latest.value.revision}`)}` };
+        journal = this.read(paths);
+        operation = journal.operations[key];
+        if (!operation?.receipt) throw new Fault("corrupt");
+        this.persist(paths, journal, key, { ...operation, canonicalTransition: revised });
+        saved = this.intents.transition(actor, revised);
+      }
+    }
+    if (!saved.ok) throw new Fault(saved.code);
+  }
+
+  private async run(paths: ReturnType<ProductRepositoryService["paths"]>, input: ProductRepositoryCommand, actor: string): Promise<{ receipt: ProductRepositoryReceipt; replayed: boolean }> {
     let journal = this.read(paths);
     const requestKey = digest(input.requestId);
     const payloadDigest = digest(JSON.stringify(input));
@@ -299,6 +354,13 @@ export class ProductRepositoryService {
     if (existing?.receipt) {
       try { this.syncDirectory(paths.directory); } catch { throw new Fault("outcome_unknown"); }
       return { receipt: existing.receipt, replayed: true };
+    }
+    if (!existing) {
+      const product = this.intents.read(actor, input.productId);
+      if (!product.ok) throw new Fault(product.code);
+      if (product.value.revision !== input.expectedRevision || product.value.objectiveRevision !== input.expectedObjectiveRevision) throw new Fault("stale_revision");
+      const requested = product.value.brief.requestedRepository;
+      if (requested && (requested.owner.toLowerCase() !== input.owner.toLowerCase() || requested.name.toLowerCase() !== input.name.toLowerCase())) throw new Fault("repository_conflict");
     }
     const sameProduct = Object.entries(journal.operations).filter(([key]) => key !== requestKey).map(([, operation]) => operation)
       .filter((operation) => operation.productId === input.productId);
@@ -314,6 +376,7 @@ export class ProductRepositoryService {
       const now = this.clock.iso();
       const receipt = productRepositoryReceiptSchema.parse({
         operationId, productId: input.productId, action: input.action, outcome, completedAt: now, payloadDigest,
+        objectiveRevision: input.expectedObjectiveRevision,
         repository: { provider: "github", id: found.id, owner: found.owner, name: found.name, defaultBranch: found.defaultBranch, visibility: found.visibility, verifiedAt: now },
       });
       journal = this.persist(paths, journal, requestKey, { operationId, payloadDigest, productId: input.productId, action: input.action,
@@ -334,6 +397,8 @@ export class ProductRepositoryService {
       if (!existing || !matches(before.repository)) throw new Fault("repository_conflict");
       return complete(before.repository, "created");
     }
+    // A 404 may lag a successful POST. A durable intent can only be reconciled, never posted again.
+    if (existing) throw new Fault("outcome_unknown");
     const scope = await this.provider.capability(input.owner);
     if (scope === "denied") throw new Fault("creation_denied");
     if (scope === "unknown") throw new Fault(existing ? "outcome_unknown" : "provider_unreadable");

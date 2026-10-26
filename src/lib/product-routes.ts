@@ -61,6 +61,7 @@ const repositoryStatus: Record<ProductRepositoryCode, number> = {
   invalid_identity: 403, invalid_input: 400, not_found: 404, repository_not_found: 404, repository_conflict: 409,
   idempotency_conflict: 409, creation_denied: 403, capacity: 409, busy: 503, corrupt: 503, unavailable: 503,
   provider_unreadable: 503, outcome_unknown: 503,
+  stale_revision: 409, recovery_required: 503,
 };
 
 /** Exact create-or-adopt of the product repository. HIGH tier: it may create a real GitHub repository. */

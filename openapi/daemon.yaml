@@ -321,7 +321,7 @@ components:
         never creates; action create must not carry repositoryId. owner and name must match the
         product's requestedRepository when it has one. Reusing requestId with the same command
         replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor.
-      required: [version, requestId, productId, action, owner, name, visibility]
+      required: [version, requestId, productId, action, owner, name, visibility, expectedRevision, expectedObjectiveRevision]
       properties:
         version: { type: string, enum: [product-repository-v1] }
         requestId: { $ref: "#/components/schemas/ProductRequestId" }
@@ -331,10 +331,12 @@ components:
         name: { type: string, minLength: 1, maxLength: 100, pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$' }
         visibility: { type: string, enum: [public, private] }
         repositoryId: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        expectedRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        expectedObjectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
     ProductRepositoryReceipt:
       type: object
       additionalProperties: false
-      required: [operationId, productId, action, outcome, repository, completedAt, payloadDigest]
+      required: [operationId, productId, action, outcome, repository, completedAt, payloadDigest, objectiveRevision]
       properties:
         operationId: { type: string, minLength: 71, maxLength: 71, pattern: '^prepo_[a-f0-9]{64}$' }
         productId: { $ref: "#/components/schemas/ProductId" }
@@ -342,6 +344,7 @@ components:
         outcome: { type: string, enum: [adopted, created] }
         repository: { $ref: "#/components/schemas/ProductRepositoryIdentity" }
         completedAt: { type: string, format: date-time }
+        objectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
         payloadDigest: { type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$' }
     ProductRepositoryResponse:
       type: object
@@ -359,7 +362,7 @@ components:
         version: { type: string, enum: [product-repository-v1] }
         error:
           type: string
-          enum: [invalid_identity, invalid_input, not_found, repository_not_found, repository_conflict, idempotency_conflict, creation_denied, capacity, busy, corrupt, unavailable, provider_unreadable, outcome_unknown, request_too_large]
+          enum: [invalid_identity, invalid_input, not_found, repository_not_found, repository_conflict, idempotency_conflict, creation_denied, capacity, busy, corrupt, unavailable, provider_unreadable, outcome_unknown, request_too_large, stale_revision, recovery_required]
     ProductRepositoryAccessError:
       type: object
       additionalProperties: false
@@ -14628,7 +14631,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ProductRepositoryError" }
         "409":
-          description: repository_conflict, idempotency_conflict or the operation journal capacity is exhausted.
+          description: repository_conflict, idempotency_conflict, stale_revision or the operation journal capacity is exhausted.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductRepositoryError" }
@@ -14638,7 +14641,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ProductRepositoryError" }
         "503":
-          description: busy, corrupt, unavailable, provider_unreadable or outcome_unknown; no success is fabricated.
+          description: busy, corrupt, unavailable, provider_unreadable, outcome_unknown or recovery_required; no success is fabricated.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductRepositoryError" }

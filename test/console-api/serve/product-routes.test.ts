@@ -132,7 +132,8 @@ test("production tier and sensitivity enforcement keep bearer credentials below 
 
 const WRECKTERRA_ID = 1432832754;
 const adopt = (productId: string, over: Record<string, unknown> = {}) => ({ version: "product-repository-v1", requestId: "route-adopt-000001",
-  productId, action: "adopt", owner: "craigoley", name: "wreckterra", visibility: "public", repositoryId: WRECKTERRA_ID, ...over });
+  productId, expectedRevision: 1, expectedObjectiveRevision: 1,
+  action: "adopt", owner: "craigoley", name: "wreckterra", visibility: "public", repositoryId: WRECKTERRA_ID, ...over });
 
 test("W1-T10613: the served product repository operation matches the authenticated API contract", async (t) => {
   const shim = ghShim([{ when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra",

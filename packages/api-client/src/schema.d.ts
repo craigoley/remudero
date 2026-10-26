@@ -133,6 +133,8 @@ export interface components {
       name: string;
       visibility: "public" | "private";
       repositoryId?: number;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
     };
     ProductRepositoryReceipt: {
       operationId: string;
@@ -141,6 +143,7 @@ export interface components {
       outcome: "adopted" | "created";
       repository: ProductRepositoryIdentity;
       completedAt: string;
+      objectiveRevision: number;
       payloadDigest: string;
     };
     ProductRepositoryResponse: {
@@ -150,7 +153,7 @@ export interface components {
     };
     ProductRepositoryError: {
       version: "product-repository-v1";
-      error: "invalid_identity" | "invalid_input" | "not_found" | "repository_not_found" | "repository_conflict" | "idempotency_conflict" | "creation_denied" | "capacity" | "busy" | "corrupt" | "unavailable" | "provider_unreadable" | "outcome_unknown" | "request_too_large";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "repository_not_found" | "repository_conflict" | "idempotency_conflict" | "creation_denied" | "capacity" | "busy" | "corrupt" | "unavailable" | "provider_unreadable" | "outcome_unknown" | "request_too_large" | "stale_revision" | "recovery_required";
     };
     /** The service's scope, tier or confirmation gate refused access before the repository handler. */
     ProductRepositoryAccessError: {
