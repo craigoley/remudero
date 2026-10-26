@@ -1222,22 +1222,21 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     }
     return view;
   };
-  /** One `test_slot.queued` row (and one human line) each time this waiter's position or the holder set changes. */
-  const reportQueue = (ahead: readonly QueuedTicket[]): void => {
-    if (!ticket) return;
-    const holders = slotView(false).holders.filter(h => h.label !== undefined || h.pid !== undefined || h.elapsedMs === undefined);
-    const key = JSON.stringify([ahead.map(t => t.name), holders.map(h => [h.slot, h.pid, h.label])]);
-    if (key === lastQueued) return;
+  /** Where this waiter stands, only when its position or the holder set changed since its last report. */
+  const queueReport = (ahead: readonly QueuedTicket[]): { fields: Record<string, unknown>; message: string } | undefined => {
+    if (!ticket) return undefined;
+    const holding = slotView(false).holders;
+    const key = JSON.stringify([ahead.map(t => t.name), holding.map(h => [h.slot, h.pid, h.label])]);
+    if (key === lastQueued) return undefined;
     lastQueued = key;
     let eta: QueueEta, history: HoldRecord[] = [];
     try {
       history = readHoldHistory(dir);
-      eta = estimateQueueEta({ slots, holders, ahead: ahead.map(t => ({ label: t.ticket.label })), history });
+      eta = estimateQueueEta({ slots, holders: holding, ahead: ahead.map(t => ({ label: t.ticket.label })), history });
     } catch (error) { eta = { basis: `ETA unknown: hold history unreadable (${String(error)})` }; }
     const position = ahead.length + 1, aheadOf = ahead.map(t => ({ label: t.ticket.label, pid: t.ticket.pid }));
-    const message = describeQueuePosition(position, aheadOf, holders, eta);
-    log(JSON.stringify({ step: "test_slot.queued", label, position, ahead: aheadOf, holders, etaMs: eta.etaMs, etaBasis: eta.basis, message }));
-    say?.(message);
+    const message = describeQueuePosition(position, aheadOf, holding, eta);
+    return { fields: { position, ahead: aheadOf, holding, etaMs: eta.etaMs, etaBasis: eta.basis, message }, message };
   };
   const recordHold = (acquiredAt: number, held: number): void => {
     if (parentPolicy) return;
@@ -1535,11 +1534,13 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
         return unslotted("wait_bound_exceeded", 1,
           `test slot WAIT BOUND EXCEEDED after ${Math.round(waitedMs / 1000)}s (${holders.join("; ")}); ran UNSLOTTED at --test-concurrency=1`);
       }
+      // The first report rides on the one `waiting` row; each later change is its own `test_slot.queued` row.
+      const report = queueReport(ahead);
       if (!announced) {
         announced = true;
-        log(JSON.stringify({ step: "test_slot.waiting", label, dir, holders }));
-      }
-      reportQueue(ahead);
+        log(JSON.stringify({ step: "test_slot.waiting", label, dir, holders, ...report?.fields }));
+      } else if (report) log(JSON.stringify({ step: "test_slot.queued", label, ...report.fields }));
+      if (report) say?.(report.message);
       yield Math.min(pollMs, Math.max(0, waitBoundMs - waitedMs));
     }
   }

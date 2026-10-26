@@ -242,11 +242,17 @@ export function holdRetention(slots: number): number {
 /**
  * Append one released hold, keeping the newest {@link holdRetention} holds of each label. Rewritten through a
  * temp file and an atomic rename; two releases racing can lose one sample — the history is an estimate's
- * input, never a lock.
+ * input, never a lock. Recorded only once the queue dir EXISTS (a slot dir's first contention made it): an
+ * uncontended dir has nobody to give an ETA to, and a fixture's slot dir inside a work tree stays clean.
+ * Returns whether the hold was recorded.
  */
-export function recordTestSlotHold(slotDir: string, hold: HoldRecord, slots: number): void {
+export function recordTestSlotHold(slotDir: string, hold: HoldRecord, slots: number): boolean {
   const queueDir = testSlotQueueDir(slotDir);
-  mkdirSync(queueDir, { recursive: true, mode: 0o777 });
+  try { if (!statSync(queueDir).isDirectory()) return false; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
   const keep = holdRetention(slots), all = [...readHoldHistory(slotDir), hold], kept: HoldRecord[] = [];
   const seen = new Map<string, number>();
   for (let i = all.length - 1; i >= 0; i -= 1) {
@@ -258,6 +264,7 @@ export function recordTestSlotHold(slotDir: string, hold: HoldRecord, slots: num
   writeFileSync(temp, kept.map(r => JSON.stringify(r)).join("\n") + "\n", { mode: 0o666 });
   chmodSync(temp, 0o666);
   renameSync(temp, join(queueDir, TEST_SLOT_HOLD_HISTORY));
+  return true;
 }
 
 /** The median of `label`'s measured holds — the lower middle, so it is always one real hold — or undefined. */
