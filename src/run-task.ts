@@ -1173,6 +1173,8 @@ import {
 import {
   findTaskShard,
   parseProofAmendmentProposal,
+  type ProofAmendmentValidationInput,
+  validateProofAmendmentProposal,
   requestProofAmendment,
   requestScopeAmendment,
   isUngrantableInstrumentPath,
@@ -1665,7 +1667,8 @@ import {
 } from "./lib/proof-queue-audit.js";
 // W1-T3506: the pure write-boundary refusal (W1-T3389) `runFixRung`'s acceptance-gate body repair
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
-import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
+import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects, replaceBodyProofs } from "./lib/body-repair.js";
+import { fixRungInputFields, prBodyDigest } from "./lib/sweep.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
@@ -8672,6 +8675,8 @@ export function formerBoundStandIn(reached: () => boolean,
 
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   pendingAnswer?: OpenPrView["pendingAnswer"];
+  /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
+  prBodySha256?: string;
 }): ReturnType<RunTaskCommandHost["runFixRung"]> {
   return runFixRungFromModule(opts, fixCommandHost());
 }
@@ -8971,6 +8976,71 @@ export function dispatchProofAmendmentWrite(
   } = {},
 ): void {
   return fixCommandHelpers(fixCommandHost()).dispatchProofAmendmentWrite(params, io);
+}
+
+export type BodyProofRepairOutcome = { kind: "written"; newBodySha256: string } | { kind: "refused"; reason: string };
+
+/**
+ * W1-T10339: THE PARENT-OWNED BODY REPAIR for a capped proof on a PR that carries no task trailer. Its body's Acceptance block is
+ * what review judges, so a validated replacement is written THERE — through the same validator the plan-amendment writer runs
+ * ({@link validateProofAmendmentProposal}: identical claim, parseable proof, a hit at head, no comment-only head match, a miss at
+ * the merge base), then {@link repairedProofsAreSafeToPush} over the rewritten criteria — and never to a plan shard. It replaces
+ * the named proof lines and nothing else, and ledgers `fix.body_proof_repaired` with both body digests. A refused or empty
+ * proposal, or any throw, writes nothing and comes back `refused` with its reason; the caller ends the round on it.
+ */
+export async function dispatchBodyProofRepair(
+  params: {
+    prUrl: string;
+    reviewBase: { owner: string; repo: string; headCheckoutDir: string };
+    evidence: ProofDiscriminationEvidence;
+    transcriptText: string;
+    priorHeadSha: string;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    fetchPrBody: (prUrl: string) => Promise<string>;
+    updatePrBody: (prUrl: string, body: string) => Promise<void>;
+    execProof?: NonNullable<Parameters<typeof diagnoseUnrunnableProofs>[1]>["execProof"];
+  },
+  io: {
+    buildBaseProofDirFn?: typeof buildBaseProofDir;
+    removeBaseWorktreeFn?: (repoDir: string, worktreePath: string) => void;
+    execAtHead?: ProofAmendmentValidationInput["execAtHead"];
+    execAtBase?: ProofAmendmentValidationInput["execAtBase"];
+  } = {},
+): Promise<BodyProofRepairOutcome> {
+  let baseProof: BaseProofDir | undefined;
+  const refuse = (reason: string, detail?: string): BodyProofRepairOutcome => {
+    params.log("fix.body_proof_repair_refused", { head_sha: params.priorHeadSha, reason, ...(detail === undefined ? {} : { detail }) });
+    return { kind: "refused", reason: detail === undefined ? reason : `${reason} (${detail})` };
+  };
+  try {
+    const proposal = parseProofAmendmentProposal(params.transcriptText);
+    if (proposal.length === 0) return refuse("no-proposal", "the worker's report carried no PROOF_AMENDMENT proposal");
+    const { headCheckoutDir } = params.reviewBase;
+    baseProof = (io.buildBaseProofDirFn ?? buildBaseProofDir)(proposal.map((p) => ({ proof: p.newProof })), headCheckoutDir);
+    const validation = validateProofAmendmentProposal(proposal, params.evidence, {
+      headCwd: headCheckoutDir,
+      baseCwd: baseProof.baseIsCheckout || baseProof.baseIsGrepTree ? baseProof.baseCheckoutDir : undefined,
+      execAtHead: io.execAtHead, execAtBase: io.execAtBase,
+      currentHeadSha: params.priorHeadSha, pinnedHeadSha: params.priorHeadSha, planShardPaths: new Set<string>(),
+    });
+    if (!validation.ok) return refuse(validation.refusal.reason, validation.refusal.detail);
+    const body = await params.fetchPrBody(params.prUrl);
+    const repairedBody = replaceBodyProofs(body, validation.validated.map((e) => ({ oldProof: e.oldProof, newProof: e.newProof })));
+    if (repairedBody === undefined) return refuse("body-drifted", "the live body no longer carries each old proof on exactly one bullet");
+    const unsafe = diagnoseUnrunnableProofs(parseAcceptanceBlock(repairedBody), { execProof: params.execProof });
+    if (unsafe.length > 0) return refuse("proof-unsafe-to-push", renderBodyDefects(unsafe));
+    await params.updatePrBody(params.prUrl, repairedBody);
+    const newBodySha256 = prBodyDigest(repairedBody)!;
+    params.log("fix.body_proof_repaired", { head_sha: params.priorHeadSha, old_body_sha256: prBodyDigest(body),
+      new_body_sha256: newBodySha256, claims: validation.validated.map((e) => e.claim) });
+    return { kind: "written", newBodySha256 };
+  } catch (error) {
+    const message = String((error as Error)?.message ?? error);
+    params.log("fix.body_proof_repair_error", { head_sha: params.priorHeadSha, error: message });
+    return { kind: "refused", reason: `error (${message})` };
+  } finally {
+    releaseBaseProofDir(params.reviewBase.headCheckoutDir, baseProof, io.removeBaseWorktreeFn);
+  }
 }
 
 /** The verdict + ledger payload a worker's ERROR envelope maps to. */
@@ -29472,6 +29542,8 @@ export function buildFixRungDispatchArgs(args: {
     headSha: string;
     reviewInputDigest?: string;
     reviewSummary?: string;
+    /** W1-T10339: the live PR body; only a taskless PR's digest rides the rung, as an input its stand-downs record. */
+    body?: string;
     pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; spent?: true; contributions?: unknown[] };
     checksState?: OpenPrView["checksState"];
     redRequiredChecks?: readonly string[];
@@ -29576,6 +29648,7 @@ export function buildFixRungDispatchArgs(args: {
     strikeCap: args.strikeCap,
     initialReview,
     progressReviewInputDigest: pr.reviewInputDigest,
+    ...(/^PR-\d+$/.test(args.task.id) && prBodyDigest(pr.body) !== undefined ? { prBodySha256: prBodyDigest(pr.body) } : {}),
     initialCriterionIndices,
     constraint: feedbackFixConstraint(pr.pendingAnswer),
     pendingAnswer: pr.pendingAnswer,
@@ -43135,6 +43208,7 @@ function fixCommandHost(): FixCommandHost {
     get diffAnchoredFallback() { return diffAnchoredFallback; },
     get diffSinceMergeBase() { return diffSinceMergeBase; },
     get fetchPrBodyViaGh() { return fetchPrBodyViaGh; },
+    get dispatchBodyProofRepair() { return dispatchBodyProofRepair; },
     get fetchPrDiffFilesViaGh() { return fetchPrDiffFilesViaGh; },
     get fixCensusAppliesToRepo() { return fixCensusAppliesToRepo; },
     get fixRoundGitOwnership() { return fixRoundGitOwnership; },
