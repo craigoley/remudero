@@ -14,7 +14,7 @@
  * A ticket carries NO authority over any slot record; it orders waiters and nothing else.
  */
 import { randomUUID } from "node:crypto";
-import { chmodSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, fchmodSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
@@ -158,9 +158,24 @@ export interface OwnTicket {
   drop(): void;
 }
 
+/**
+ * Create `path` exclusively (O_EXCL, never through a symlink) at owner-only 0o600, write `body`, and only then
+ * widen it to `finalMode` through the open descriptor — the legacy slot writer's own sequence. The bytes are
+ * never readable or writable by another uid before they are whole, and a pre-planted entry at `path` is refused
+ * rather than followed. A leftover of our own earlier failed write is removed first.
+ */
+function createWhole(path: string, body: string, finalMode: number): void {
+  try { unlinkSync(path); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    writeSync(fd, body);
+    fchmodSync(fd, finalMode);
+  } finally { closeSync(fd); }
+}
+
 function writeWhole(path: string, body: string): void {
-  writeFileSync(path, body, { mode: 0o644 });
-  chmodSync(path, 0o644); // The legacy slot record's mode: every peer, of any uid, reads it.
+  createWhole(path, body, 0o644); // The legacy slot record's mode: every peer, of any uid, reads it.
 }
 
 /**
@@ -285,8 +300,7 @@ export function recordTestSlotHold(slotDir: string, hold: HoldRecord, slots: num
     if (n <= keep) kept.unshift(all[i]!);
   }
   const temp = join(queueDir, `.hold-${randomUUID()}.tmp`);
-  writeFileSync(temp, kept.map(r => JSON.stringify(r)).join("\n") + "\n", { mode: 0o666 });
-  chmodSync(temp, 0o666);
+  createWhole(temp, kept.map(r => JSON.stringify(r)).join("\n") + "\n", 0o666);
   renameSync(temp, join(queueDir, TEST_SLOT_HOLD_HISTORY));
   return true;
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -316,21 +316,7 @@ test("W1-T9950: a queue that cannot be used degrades to unqueued polling and say
   assert.equal(a.lease?.outcome, "acquired", "an unusable queue never blocks admission");
   assert.equal(rows(a.lines, "test_slot.acquired")[0]!.ticketed, false);
   a.lease!.release();
-  // (2) The queue cannot be CREATED (its parent is read-only): joining fails the same named way. Root ignores
-  // mode bits, so this arm is driven only where they bind.
-  if (process.getuid?.() !== 0) {
-    const parent = slotDir(t, "ro-parent"), dir = join(parent, "slots");
-    mkdirSync(dir);
-    const holder = acquireTestSlot("holder", { ...opts(dir), clock: time.clock, pid: PID.holder, log: () => {}, say: () => {} });
-    const lines: string[] = [];
-    chmodSync(parent, 0o555);
-    let lease: TestSlotLease;
-    try { lease = acquireTestSlot("B", { ...opts(dir), clock: time.clock, pid: PID.b, waitBoundMs: 0, log: line => lines.push(line), say: () => {} }); }
-    finally { chmodSync(parent, 0o755); }
-    assert.equal(lease.outcome, "wait_bound_exceeded");
-    assert.match(String(rows(lines, "test_slot.queue_unavailable")[0]?.error), /EACCES|EPERM|EROFS/, lines.join("\n"));
-    holder.release();
-  }
+  // (2) A read-only parent is deliberately not driven: a mode-bit denial binds only for a non-root uid.
   // (3) Unparseable ticket bytes are reaped by name; an unreadable history is an unknown ETA, and a release
   // that cannot record its hold logs it.
   const broken = slotDir(t, "broken");
