@@ -35,9 +35,33 @@ const SENSITIVE_SURFACE = new RegExp(
   "i",
 );
 
-/** The honest band for a machine-filed record: `high` only when it declares a sensitive path. */
+/** Locations that are privileged whatever else the path says (W1-T10350): CI, worker settings, every
+ *  Dockerfile, and the operator's own policy and rulings. A test or prose location never overrides these. */
+const PRIVILEGED_LOCATION = /(^|\/)\.github\/|(^|\/)\.claude\/|(^|\/)settings\/|Dockerfile|^plan\/policy\.yaml$|^(DECISIONS|CLAUDE)\.md$/i;
+/** A test file: under test/, or named *.test.* / *.spec.*. */
+const TEST_LOCATION = /^test\/|\.(test|spec)\.[^/]+$/i;
+/** Prose: everything under docs/ and markdown under plan/ (plan YAML, policy and rulings are not prose). */
+const PROSE_LOCATION = /^docs\/|^plan\/.*\.md$/i;
+
+/** Where a declared path sits. `privileged` escalates; `test` and `prose` are never escalated for a word
+ *  in their name; `other` is source or config, read by the segment-word rules as before. */
+export type PathClass = "privileged" | "test" | "prose" | "other";
+
+const MERGE_POLICY_PATH = /(^|\/)[^/]*(auto-?merge|merge-queue|branch-protection|rulesets?)[^/]*$/i;
+
+/** The ONE path classifier (W1-T10350): the risk band, the backstop and the judge's concern all read it.
+ *  A path is classed by WHERE it sits before any word in it is read. */
+export function pathClass(path: string): PathClass {
+  const p = path.replaceAll("\\", "/").replace(/^\.\//, "");
+  if (PRIVILEGED_LOCATION.test(p)) return "privileged";
+  if (TEST_LOCATION.test(p)) return "test";
+  if (PROSE_LOCATION.test(p)) return "prose";
+  return SENSITIVE_SURFACE.test(p) || MERGE_POLICY_PATH.test(p) ? "privileged" : "other";
+}
+
+/** The honest band for a machine-filed record: `high` only when it declares a privileged path. */
 export function machineShardRisk(files: readonly string[]): TaskRisk {
-  return files.some((f) => SENSITIVE_SURFACE.test(f)) ? "high" : "low";
+  return files.some((f) => pathClass(f) === "privileged") ? "high" : "low";
 }
 
 /** The operator's own priority band: machine work competes inside it, never behind it (2026-09-30:
@@ -235,15 +259,16 @@ export function machineShardLandingRefusal(
 // ledger-archive deletion and haiku released "delete every merged branch". A wrong release there
 // cannot be undone by closing a PR, so no confidence score may carry it past a person.
 
-const MERGE_POLICY_PATH = /(^|\/)[^/]*(auto-?merge|merge-queue|branch-protection|rulesets?)[^/]*$/i;
-const BACKSTOP_TEXT: readonly [string, RegExp][] = [
+/** `soft` rules are handed to the risk judge as a named concern, not escalated, for a record that declares
+ *  only tests or prose: its diff cannot delete data or change merge policy (W1-T10350). */
+const BACKSTOP_TEXT: readonly (readonly [why: string, re: RegExp, soft?: true])[] = [
   ["deletes data, branches, archives or ledgers",
-    /\b(delet\w*|remov\w*|truncat\w*|purg\w*|prun\w*|drop\w*|wipe\w*|eras\w*|reap\w*|overwrit\w*)\b[^.;\n]{0,80}?\b(branch(es)?|archives?|ledgers?|data|history|rows?|databases?|backups?|proposals?|tags?|refs?|state|records?)\b/i],
+    /\b(delet\w*|remov\w*|truncat\w*|purg\w*|prun\w*|drop\w*|wipe\w*|eras\w*|reap\w*|overwrit\w*)\b[^.;\n]{0,80}?\b(branch(es)?|archives?|ledgers?|data|history|rows?|databases?|backups?|proposals?|tags?|refs?|state|records?)\b/i, true],
   ["takes an irreversible action", /\b(force[- ]push\w*|rewrite (git )?history|reset --hard|irreversibl\w*|permanently)\b/i],
   ["touches secrets, auth, tokens or permissions",
     /\b(secrets?|credentials?|api[ _-]?keys?|passwords?|private keys?|tokens?|permissions?|oauth|auth|authenticat\w*|authoriz\w*)\b/i],
   ["changes merge, deploy or branch-protection policy",
-    /\b(auto-?merge|branch[- ]protection|merge[- ]queue|required (status )?checks?|rulesets?|(merge|deploy(ment)?|review) policy|(bypass\w*|disabl\w*)\b[^.;\n]{0,40}\b(reviews?|gates?|checks?))\b/i],
+    /\b(auto-?merge|branch[- ]protection|merge[- ]queue|required (status )?checks?|rulesets?|(merge|deploy(ment)?|review) policy|(bypass\w*|disabl\w*)\b[^.;\n]{0,40}\b(reviews?|gates?|checks?))\b/i, true],
 ];
 
 /** A machine filing's text with its own `origin:` cause key masked out. A filer quotes the key it measured
@@ -257,9 +282,20 @@ function withoutOwnCauseKey(text: string, task: { origin?: string; author_class?
   return keys.reduce((t, k) => t.replace(new RegExp(k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "<cause key>"), text);
 }
 
+/** True when the record declares paths and every one is a test or prose file. */
+function declaresOnlyTestsOrProse(files: readonly string[] | undefined): boolean {
+  return (files ?? []).length > 0 && (files ?? []).every((f) => ["test", "prose"].includes(pathClass(f)));
+}
+
+function backstopText(task: { title: string; prompt?: string; acceptance?: readonly { claim?: string }[]; origin?: string; author_class?: string }): string {
+  return withoutOwnCauseKey([task.title, task.prompt ?? "", ...(task.acceptance ?? []).map((c) => c.claim ?? "")].join("\n"), task);
+}
+
 /** Why a record must go to a person whatever a judge would say, or undefined. Reads what the record
  *  will DO — title, prompt, acceptance claims and declared paths — never its narrative note, nor the
- *  cause key a machine filer quotes from its `origin:`. The path rules read every declared path. */
+ *  cause key a machine filer quotes from its `origin:`. The path rules read every declared path by its
+ *  {@link pathClass}; the deletion and merge-policy text rules stand down for a record that declares only
+ *  tests or prose, which {@link backstopConcern} hands to the judge instead. */
 export function deterministicEscalation(task: {
   title: string;
   prompt?: string;
@@ -268,12 +304,27 @@ export function deterministicEscalation(task: {
   origin?: string;
   author_class?: string;
 }): string | undefined {
-  const path = (task.files ?? []).find((f) => SENSITIVE_SURFACE.test(f) || MERGE_POLICY_PATH.test(f));
+  const path = (task.files ?? []).find((f) => pathClass(f) === "privileged");
   if (path) return `it declares ${path}, a secrets, auth, CI, deploy, merge-policy or ruling path`;
-  const text = withoutOwnCauseKey([task.title, task.prompt ?? "", ...(task.acceptance ?? []).map((c) => c.claim ?? "")].join("\n"), task);
-  for (const [why, re] of BACKSTOP_TEXT) {
+  const text = backstopText(task);
+  const proseOnly = declaresOnlyTestsOrProse(task.files);
+  for (const [why, re, soft] of BACKSTOP_TEXT) {
+    if (soft === true && proseOnly) continue;
     const hit = re.exec(text);
     if (hit) return `it ${why} ("${hit[0].trim()}")`;
+  }
+  return undefined;
+}
+
+/** A named concern for the risk judge (W1-T10350): a deletion or merge-policy word in a record that declares
+ *  only tests or prose, which {@link deterministicEscalation} no longer escalates on its own. The judge still
+ *  applies the operator's escalation rule. Undefined when nothing was handed over. */
+export function backstopConcern(task: Parameters<typeof deterministicEscalation>[0]): string | undefined {
+  if (!declaresOnlyTestsOrProse(task.files) || deterministicEscalation(task) !== undefined) return undefined;
+  const text = backstopText(task);
+  for (const [why, re, soft] of BACKSTOP_TEXT) {
+    const hit = soft === true ? re.exec(text) : null;
+    if (hit) return `CONCERN: the record's text ${why} ("${hit[0].trim()}"), but it declares only test or prose paths, so its diff cannot do that; rule on whether the work itself does.`;
   }
   return undefined;
 }
