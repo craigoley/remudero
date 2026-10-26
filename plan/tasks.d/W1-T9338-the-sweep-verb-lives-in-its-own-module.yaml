@@ -11,6 +11,9 @@
   origin: "operator approval 2026-10-13: the run-task.ts serialization finding; one step of the split, in measured-churn order W1-T9332 (run-task), W1-T9333 (daemon), W1-T9337 (fix), W1-T9338 (sweep) and W1-T9339 (review)"
   plan_refs: [W1-T9331, W1-T2893, W1-T2883, W1-T2892, W1-T2894, W1-T2325, W1-T3138, W1-T8502]
   files: [src/run-task.ts, src/cli/commands/sweep.ts, test/the-sweep-verb-lives-in-its-own-module.test.ts]
+  # refusal-amendment (W1-T9338, run DAEMON-1793004859639@bd1bee9288e82a86e43c04c613c04425dcbd6282, 2026-10-26T12:16:13.668Z): the worker refused criterion 2 [contradicts-another-criterion] — proposed re-scope-criteria: reconcile the contradicting criteria — re-scope one so both can hold at once
+  #   worker evidence: Complete helper extraction requires changing existing census tests, which design constraint 4 forbids.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 1
   attempts: 0
