@@ -223,6 +223,9 @@ test("W1-T10675: cache failures preserve proof errors and release only owned scr
 
     const ordinary = mkdtempSync(join(tmpdir(), "rmd-proof-cache-ordinary-"));
     try {
+      writeFileSync(join(ordinary, "node_modules"), "not a dependency directory");
+      assert.deepEqual(createProofCache({ cwd: ordinary, identity: [] }), { kind: "unavailable", reason: "node_modules is not a directory or shared link" });
+      rmSync(join(ordinary, "node_modules"));
       mkdirSync(join(ordinary, "node_modules"));
       assert.equal(createProofCache({ cwd: ordinary, identity: [] }).kind, "ordinary");
       assert.equal(vitestCacheCapability(ordinary).supported, false);
