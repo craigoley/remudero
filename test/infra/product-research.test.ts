@@ -4,7 +4,11 @@ import { test, type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { ProductIntentStore, productStatePaths } from "#src/lib/product-intent-store.js";
-import { ProductResearchService, type ProductResearchProvider, type ProductResearchView } from "#src/lib/product-research.js";
+import { createProductResearchProvider, ProductResearchService, type ProductResearchProvider, type ProductResearchView } from "#src/lib/product-research.js";
+import { CodexToolchainBlockedError, ProviderCapacityBlockedError } from "#src/lib/worker-provider.js";
+import { ClaudeToolchainBlockedError, SubscriptionOnlyRefusedError, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { HumanGatedModelError } from "#src/lib/model-gate.js";
+import { WorkerKeychainError } from "#src/lib/worker-home.js";
 import { declaredBody, violations } from "#test/helpers/openapi-strict.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
@@ -375,4 +379,82 @@ test("canonical research can reconcile a competing trusted stage at the same obj
   const replayed = store.read(ACTOR, id); assert.ok(replayed.ok);
   assert.equal(replayed.value.revision, product.value.revision);
   assert.equal(inputs.length, 1);
+});
+
+test("the product intake adapter preserves admission refusals and bounds the existing transport", async (t) => {
+  for (const [name, result, error, outcome, failure] of [
+    ["capacity", {}, new ProviderCapacityBlockedError([]), "unavailable", undefined],
+    ["subscription", {}, new SubscriptionOnlyRefusedError("sonnet"), "unavailable", undefined],
+    ["claude-toolchain", {}, new ClaudeToolchainBlockedError([]), "unavailable", undefined],
+    ["codex-toolchain", {}, new CodexToolchainBlockedError("absent fixture"), "unavailable", undefined],
+    ["credentials", {}, new WorkerKeychainError("credential-file-unreadable", "fixture credential absent"), "unavailable", undefined],
+    ["model-approval", {}, new HumanGatedModelError("gpt-6-astra", "astra"), "unavailable", undefined],
+    ["not-started", { notStarted: "admission-abandoned" }, undefined, "unavailable", undefined],
+    ["usage", { usageRefusal: { matched: "quota" } }, undefined, "unavailable", undefined],
+    ["transport-error", {}, new Error("private provider diagnostic"), "failed", "provider_error"],
+    ["api-error", { apiError: true }, undefined, "failed", "provider_error"],
+    ["error-envelope", { isError: true }, undefined, "failed", "provider_error"],
+    ["missing-envelope", { subtype: "" }, undefined, "failed", "provider_error"],
+    ["json", { text: "not JSON" }, undefined, "failed", "invalid_output"],
+    ["shape", { text: '{"questions":[]}' }, undefined, "failed", "invalid_output"],
+    ["transport-cost", { costUsd: 4 }, undefined, "failed", "over_budget"],
+  ] as const) await t.test(name, async t => {
+    const { root, store, id } = seed(t);
+    const calls: SpawnWorkerArgs[] = [];
+    const config = { root, claudeBin: "/unused" };
+    const adapter = createProductResearchProvider({
+      mount: { model: "sonnet", effort: "low", maxTurns: 2, contextBudget: 1000 },
+      cwd: root, settingsFile: `${root}/settings.json`, budgetUsd: 5, config, tools: ["WebSearch"],
+      spawn: async args => {
+        calls.push(args);
+        if (error) throw error;
+        return { subtype: "success", isError: false, apiError: false, costUsd: 0,
+          text: '{"summary":"Observed fixture evidence"}', ...result } as WorkerResult;
+      },
+    });
+    const service = new ProductResearchService({ root, store, provider: adapter, budgetUsd: 3, clock });
+    const view = await ok(service, command(id, 1));
+    assert.deepEqual([view.run?.outcome, view.run?.failure, view.run?.summary], [outcome, failure, undefined]);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].maxBudgetUsd, 3);
+    assert.equal(calls[0].maxTurns, 2);
+    assert.deepEqual(calls[0].tools, ["WebSearch"]);
+    assert.equal(calls[0].config, config);
+    assert.equal(calls[0].cashTools, undefined, "the adapter adds no cash diversion surface");
+    assert.equal(calls[0].routingFallback, undefined, "the ordinary admission owns fallback policy");
+    assert.equal(calls[0].signal?.aborted, false);
+  });
+});
+
+test("a research adapter with no resolved budget is unavailable without spawning", async (t) => {
+  const { root, store, id } = seed(t);
+  let calls = 0;
+  const provider = createProductResearchProvider({
+    mount: { model: "sonnet", effort: "low", maxTurns: 2, contextBudget: 1000 },
+    cwd: root, settingsFile: `${root}/settings.json`, budgetUsd: 5,
+    config: { root, claudeBin: "/unused" }, tools: ["WebSearch"],
+    spawn: async () => { calls++; throw new Error("must not spawn"); },
+  });
+  const view = await ok(new ProductResearchService({ root, store, provider, clock }), command(id, 1));
+  assert.equal(view.run?.outcome, "unavailable");
+  assert.equal(view.run?.summary, undefined);
+  assert.equal(calls, 0);
+});
+
+test("research cancellation reaches the intake transport's existing signal", async (t) => {
+  const { root, store, id } = seed(t);
+  let observed: AbortSignal | undefined;
+  const provider = createProductResearchProvider({
+    mount: { model: "sonnet", effort: "low", maxTurns: 2, contextBudget: 1000 },
+    cwd: root, settingsFile: `${root}/settings.json`, budgetUsd: 5,
+    config: { root, claudeBin: "/unused" }, tools: ["WebSearch"],
+    spawn: async args => {
+      observed = args.signal;
+      return await new Promise<WorkerResult>((_resolve, reject) => args.signal!.addEventListener("abort", () => reject(new Error("transport aborted")), { once: true }));
+    },
+  });
+  const view = await ok(new ProductResearchService({ root, store, provider, clock, budgetUsd: 1, timeoutMs: 10 }), command(id, 1));
+  assert.equal(observed?.aborted, true);
+  assert.equal(view.run?.outcome, "failed");
+  assert.equal(view.run?.failure, "provider_error");
 });

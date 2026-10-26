@@ -848,6 +848,8 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
+import { createProductResearchProvider } from "./lib/product-research.js";
+import type { ServeDeps } from "./lib/serve.js";
 import { inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
@@ -28760,6 +28762,37 @@ export function boardColdStartGate(boardPath: string, clock: Clock = systemClock
   };
 }
 
+/** Resolve research from triage's configured mount, budget and ledgered transport. */
+export function resolveServeProductResearch(
+  config: Config, cwd: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  readMounts: typeof loadMounts = loadMounts,
+): Pick<ServeDeps, "productResearchProvider" | "productResearchBudgetUsd"> {
+  try {
+    const mount = readMounts(mountsPath(cwd)).synthesis.triage;
+    if (mount.provider && !enabledWorkerProviders(config).includes(mount.provider)) {
+      throw new Error("configured triage provider is not enabled");
+    }
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", "serve-product-research-settings.json"),
+    });
+    validateWorkerSettingsFile(settingsFile);
+    return {
+      productResearchBudgetUsd: DEFAULT_BUDGET_USD,
+      productResearchProvider: createProductResearchProvider({
+        mount, cwd, settingsFile, config, budgetUsd: DEFAULT_BUDGET_USD,
+        spawn: ledgeredNonDispatchSpawn("triage"),
+        tools: TRIAGE_WORKER_TOOLS.filter((tool) => tool === "WebSearch"),
+      }),
+    };
+  } catch (error) {
+    log("serve.product_research_unavailable", { reason: String(error) });
+    return {};
+  }
+}
+
 // ── rmd serve — the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B) ──
 //
 // Real business logic lives entirely in the four already-proven modules lib/serve.ts
@@ -29067,6 +29100,7 @@ export async function serveCommand(
     // differ: fleet-control flag files must match what `rmd daemon`/`rmd drain` check
     // (config.root); plan/questions.ndjson must match where `appendQuestion` writes (repoRoot).
     fleetControlRoot: config.root,
+    ...resolveServeProductResearch(config, repoRoot, log, deps.loadMounts),
     assistantRepository: `${self.owner}/${self.repo}`,
     questionsRoot: repoRoot,
     tokens,
