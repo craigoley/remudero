@@ -3191,6 +3191,26 @@ function realDeps(): ComposedRealGraph {
 }
 
 /**
+ * W1-T10734 — the triage's `plan/policy.yaml`, read from the target checkout `root`. A target that
+ * ships no policy file at all (remudero-site) has STATED no `escalationTriage:` block, so ENOENT reads
+ * as `undefined` and {@link parseEscalationTriagePolicy} answers its documented shadow default. Before
+ * this, every site pass died on the ENOENT (306 `sweep.escalation_triage.failed` rows, 10-14..10-26).
+ * Only ENOENT collapses: a file that exists but cannot be read or parsed still throws, so the pass
+ * fails loud instead of quietly running shadow. Never falls back to another repository's policy —
+ * a satellite never inherits core's `act` (the W1-T3982 authority-drift rule).
+ */
+export function readEscalationTriagePolicySource(root: string): unknown {
+  let text: string;
+  try {
+    text = readFileSync(policyPath(root), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return undefined;
+    throw error;
+  }
+  return parseYaml(text);
+}
+
+/**
  * Bind the closed executors to existing write ports. One factory owns one pass's budget.
  *
  * W1-T9406: `evidence` reads the {@link ESCALATION_TRIAGE_EVIDENCE_SLICE} through W1-T9390's incremental
@@ -3249,7 +3269,7 @@ export function buildEscalationTriageRuntime(
   };
   const refresh = async (ledgerPath: string): Promise<void> => void (await evidenceHistory(dirname(ledgerPath)));
   return Object.assign((deps: EscalateDeps<AsyncIssueGateway>): EscalateTriageSettings => {
-    const policy = parseEscalationTriagePolicy((io.readPolicy ?? (() => parseYaml(readFileSync(policyPath(root), "utf8"))))());
+    const policy = parseEscalationTriagePolicy((io.readPolicy ?? (() => readEscalationTriagePolicySource(root)))());
     pass ??= newTriagePass(policy.maxAutoResolvesPerPass);
     const receipts = new Map<string, string>();
     return {
