@@ -1,0 +1,22 @@
+id: incident-e06d7ce82c6614af
+ts: 2026-10-26T17:29:45.507Z
+raw: |-
+  Incident e06d7ce82c66: flow pr-stage-stall:awaiting-review:unknown signature
+  First seen: 2026-10-26T16:36:07.187Z
+  Last seen: 2026-10-26T16:36:07.187Z
+  Count: 1, burn: 1.00/hr
+  Deploy sha(s): unknown
+  Instance(s): core
+  Sample events:
+    - pr=14468 awaiting-review: unknown signature
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#e06d7ce82c6614af00af947874fcd18a45d49fcf96dac33835d4e1667b84ccc7
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
