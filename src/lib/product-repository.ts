@@ -373,6 +373,9 @@ export class ProductRepositoryService {
       found.name.toLowerCase() === input.name.toLowerCase() && found.visibility === input.visibility &&
       (input.repositoryId === undefined || found.id === input.repositoryId);
     const complete = (found: ProviderRepository, outcome: "adopted" | "created"): { receipt: ProductRepositoryReceipt; replayed: boolean } => {
+      const product = this.intents.read(actor, input.productId);
+      if (!product.ok) throw new Fault(product.code);
+      if (product.value.repository && product.value.repository.id !== found.id) throw new Fault("repository_conflict");
       const now = this.clock.iso();
       const receipt = productRepositoryReceiptSchema.parse({
         operationId, productId: input.productId, action: input.action, outcome, completedAt: now, payloadDigest,

@@ -338,7 +338,7 @@ components:
       additionalProperties: false
       required: [operationId, productId, action, outcome, repository, completedAt, payloadDigest, objectiveRevision]
       properties:
-        operationId: { type: string, minLength: 71, maxLength: 71, pattern: '^prepo_[a-f0-9]{64}$' }
+        operationId: { type: string, minLength: 70, maxLength: 70, pattern: '^prepo_[a-f0-9]{64}$' }
         productId: { $ref: "#/components/schemas/ProductId" }
         action: { type: string, enum: [adopt, create] }
         outcome: { type: string, enum: [adopted, created] }

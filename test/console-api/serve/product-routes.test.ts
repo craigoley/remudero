@@ -136,6 +136,9 @@ const adopt = (productId: string, over: Record<string, unknown> = {}) => ({ vers
   action: "adopt", owner: "craigoley", name: "wreckterra", visibility: "public", repositoryId: WRECKTERRA_ID, ...over });
 
 test("W1-T10613: the served product repository operation matches the authenticated API contract", async (t) => {
+  assert.notDeepEqual(violations("ab", { type: "string", minLength: 3 }), [], "the contract validator must enforce minLength");
+  assert.notDeepEqual(violations("abcd", { type: "string", maxLength: 3 }), [], "the contract validator must enforce maxLength");
+  assert.deepEqual(violations("a😀b", { type: "string", minLength: 3, maxLength: 3 }), [], "string lengths count Unicode code points");
   const shim = ghShim([{ when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra",
     owner: { login: "craigoley" }, private: false, default_branch: "main" }) }]);
   const originalPath = process.env.PATH;

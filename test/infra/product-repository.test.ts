@@ -201,6 +201,27 @@ test("W1-T10613: denied or conflicting repository ownership writes nothing", asy
   const other = fixture(t);
   assert.deepEqual(await other.service(provider).execute("clerk:bob", other.command()), { ok: false, code: "not_found" });
   assert.deepEqual(other.journalFiles(), []);
+  // A recreated repository can keep its name while its provider ID changes. Refuse it before journaling.
+  const bound = fixture(t);
+  provider.repos.set("craigoley/wreckterra", { id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" });
+  const original = bound.command({ action: "adopt", repositoryId: WRECKTERRA_ID });
+  assert.ok((await bound.service(provider).execute(actor, original)).ok);
+  const journalPath = join(bound.root, "state/products/v1/repositories", bound.journalFiles()[0]!);
+  const productPath = productStatePaths(bound.root, actor).state;
+  const beforeJournal = readFileSync(journalPath, "utf8");
+  const beforeProduct = readFileSync(productPath, "utf8");
+  provider.repos.set("craigoley/wreckterra", { id: WRECKTERRA_ID + 1, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" });
+  const replacement = bound.command({ requestId: "repo-replacement-0001", action: "adopt", repositoryId: WRECKTERRA_ID + 1 });
+  for (let retry = 0; retry < 2; retry++) {
+    assert.deepEqual(await bound.service(provider).execute(actor, replacement), { ok: false, code: "repository_conflict" });
+    assert.equal(readFileSync(journalPath, "utf8"), beforeJournal, "a replacement ID must leave the journal byte-for-byte unchanged, including after restart");
+    assert.equal(readFileSync(productPath, "utf8"), beforeProduct, "a refused replacement must preserve canonical identity and evidence");
+  }
+  const replay = await bound.service(provider).execute(actor, original);
+  assert.ok(replay.ok);
+  assert.equal(replay.value.receipt.repository.id, WRECKTERRA_ID);
+  assert.equal(replay.value.replayed, true);
+  assert.deepEqual(provider.creates(), []);
 });
 
 test("product repository refuses malformed commands, mixed actions, identity gaps and unreadable providers", async (t) => {
