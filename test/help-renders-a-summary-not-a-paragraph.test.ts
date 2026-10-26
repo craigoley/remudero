@@ -145,7 +145,7 @@ const BASELINE_COMMAND_NAMES = [
   "gh-broker",
   "knowledge",
   "learnings", "ledger-compact", "ledger-grep", "lint-plan", "live-edits", "memory-lint", "merge-hold", "mcp", "next-task-id", "note", "notify", "onboard", "ops", "pause",
-  "peek", "plan", "plan-reconcile", "preflight", "progress-watchdog", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
+  "peek", "plan", "plan-reconcile", "preflight", "procedures", "progress-watchdog", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
   "pr-checks",
   "pr-owner",
   "read-model",
@@ -191,6 +191,7 @@ const BASELINE_COMMAND_NAMES = [
 // W1-T10270: `review-replay` refreshes the checked-in sample from retained real review inputs.
 // W1-T10079: `reply`, `archive`, `snooze` and `keep` — the console's inbox verbs from one verb table — join the registry.
 // W1-T10561: `improvement-action` resumes a saved planning request through the daemon-owned workflow.
+// `procedures` — a read-only census of the tool-call steps clean merged runs repeat, per task type — joins the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // The reviewed edit is the NAME added to the list above, beside its line of provenance. No count
   // literal rides with it: two PRs each adding a verb raise the same number from the same base, git

@@ -42,7 +42,6 @@
     "hand-worktree",
     "host-alert",
     "impossible-canary",
-    "improvement-action",
     "inbox-bakeoff",
     "init",
     "install-checkout",
@@ -65,6 +64,7 @@
     "pr-checks",
     "pr-owner",
     "preflight",
+    "procedures",
     "progress-watchdog",
     "project",
     "proof-queue-audit",
@@ -95,6 +95,7 @@
     "up",
     "verdict-calibration",
     "verify-human-sweep",
-    "wipe-test"
+    "wipe-test",
+    "improvement-action"
   ]
 }

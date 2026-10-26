@@ -65,6 +65,7 @@ usage:
   rmd autonomy-rate   # Report the zero-touch merge rate over every Remudero-Task-trailer merge.
   rmd replay-goldens --confirm-spend --ledger <path> [--limit N]   # Replay the seeded goldens and record what the retro's Self-Harness leg reads.
   rmd skill-eval <proposal-id> --confirm-spend   # Attempt a staged skill draft with and without it on held-out tasks; record the verdict.
+  rmd procedures [--days <n>] [--json]   # Report which tool-call steps clean merged runs repeat, per task type, against repaired runs.
   rmd check-acceptance <body-file>   # Report what the reviewer's own parser actually resolves from a PR body file.
   rmd retro [--dry-run]   # Sync the plan from the ledger (Architect retro).
   rmd drain [--until <id>] [--max <n>] [--repo <name>] [--curated <path>] [--dry-run] [--allow-stale]   # Drain the task DAG through run-task, dispatching from the plan blob.
@@ -644,6 +645,16 @@ rmd skill-eval <proposal-id> --confirm-spend
 ```
 
 Phase 4 of the held-out skill eval: the production caller of runSkillEval (src/lib/skill-eval-command.ts). It SPENDS: without --confirm-spend it prints why and exits 2 having read nothing. It loads the proposal from <root>/state/inbox-proposals.json and refuses (exit 2, one skill_eval.refused ledger row) one that is absent, carries no skill file, names an unsafe skill or has no skillFileStagedAt stamp, which the skill workshop's next pass sets. A text is judged once: a proposal whose current text already carries a recorded verdict refuses as already-judged, since a second draw of the same text could only launder the first; a run that measured too few tasks judged nothing and may run again. The drafter mines every merged run in its window, so the hold-out is time: from the ledger union (every rotation form; an unread source refuses) and the plan it derives the golden corpus, excludes every task merged at or before the stamp, and draws K held-out tasks of the draft's applies-to type (a refused draw exits 1 and writes nothing). Merge credit is ledger rows only, which under-credits: a missed task is absent, never wrongly admitted. The without-skill arm gets the skills part production renders for the task today; the with-skill arm the part it would render were the draft approved, loaded from a temp tree by the same loader. A draft that part would not inject for some task refuses before any dispatch (draft-not-injected). Each task runs R trials per arm through a sealed, never-pushed paired attempt at its base on one pinned stack, only while the fleet is idle in quiet mode with measured headroom. The verdict is written to the proposal's skillEval only while its staged text is still the one evaluated; otherwise skill_eval.stale is logged and nothing is written. Exit 0 on a recorded pass, 1 on a recorded refusal or a stale run, 2 on any refusal before dispatch.
+
+### `rmd procedures`
+
+Report which tool-call steps clean merged runs repeat, per task type, against repaired runs.
+
+```
+rmd procedures [--days <n>] [--json]
+```
+
+A read-only procedure census (src/lib/procedure-census.ts) over the merged runs that started in the last N days (--days, an integer from 1 to 60, default 14; the window ends now). Each task type splits into CLEAN runs (zero fix rounds) and REPAIRED runs (one or more, attributed as the retro attributes them). A step is a worker tool call's tool_signature from its worker.activity row, coarsened so one file is not one step (Read:src/lib/review.ts reads as Read:src/lib/*.ts; Bash signatures and top-level paths stay verbatim), or the bare tool name on a row that carries no signature. Per type it reports each step's share of clean and repaired runs and their difference (lift), the universal steps (in at least 80% of clean runs, once a type has 5 clean runs), and the contiguous 2- and 3-step sequences at least half the clean runs share. It reports first how many tool-call rows carry a signature at all, and warns when none do, so missing signatures never read as nothing recurring. It reads the ledger union once, filtered to the steps it needs, and exits 2 naming each unread source when the union is incomplete, since an unread rotation can hide a run's fix rounds. --json prints the census object instead of the markdown report. It writes nothing of its own: no ledger row, no state file (the one cli.invoked row the dispatcher ledgers for every verb is all an invocation adds). Exit 0 on a report, 2 on a usage error or an incomplete union.
 
 ### `rmd check-acceptance`
 

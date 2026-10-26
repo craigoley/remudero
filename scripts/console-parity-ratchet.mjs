@@ -82,11 +82,7 @@ function reasons(names, reason) {
  *  entry present here but ABSENT from {@link BASELINE_PATH} is a verb added to this table without
  *  recording it, and is refused for that reason alone, never for the reason text's content. */
 export const CLI_ONLY = {
-  "improvement-action":
-    "daemon-owned saved-action CLI: rmd improvement-action <operationId> --state-dir <dir> " +
-    "executes a persisted request only after daemon ownership, repository identity and ordinary " +
-    "admission checks; HTTP draft/file routes persist requests, " +
-    "they do not execute the handoff and are not action-equivalent console routes",
+  "improvement-action": "daemon-owned internal worker: executes an already persisted improvement operation only after daemon ownership, repository identity and ordinary admission checks; console routes save requests rather than executing this worker",
   "review-replay": "Refreshes a checked-in sample in the caller's local git checkout from its complete retained ledger and seeded reviewer-health projection; the remote console cannot write that checkout.",
   ...reasons(
     [
@@ -152,6 +148,8 @@ export const CLI_ONLY = {
       // A held-out skill eval: spawns sealed paired attempts on the daemon host and writes its proposal registry there;
       // a spend the operator confirms per invocation, not a console action.
       "skill-eval",
+      // A read-only procedure census over the ledger union on the daemon host; it writes nothing and routes nothing.
+      "procedures",
       "benchmark-aa",
       "benchmark-paid-pilot",
       // W1-T4098: lints the operator's OWN Claude Code memory directory on the operator's machine —
