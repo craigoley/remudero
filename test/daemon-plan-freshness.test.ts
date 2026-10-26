@@ -770,3 +770,56 @@ test("W1-T343 REACHABILITY: daemonCommand hands the SAME sweep.dispatchLanes/wip
   assert.equal(typeof capturedDeps!.openPrCount, "function", "the lane budget's other input (openPrCount) is wired too, never a second GitHub read path");
   rmSync(home, { recursive: true, force: true });
 });
+
+
+test("an amended on-disk contract reaches the live review plan while the dispatched worker keeps running", async () => {
+  const p = planOnDisk(["A"]);
+  writeFileSync(p.file, taskYaml(["A"]) + "  files: [src/original.ts]\n");
+  const original = p.plan();
+  let visible = original;
+  let last = "";
+  let active = false;
+  let sleeps = 0;
+  let release: () => void = () => {};
+  const worker = new Promise<void>(resolve => { release = resolve; });
+  const seenDuringWorker: string[][] = [];
+  const ran: string[] = [];
+  try {
+    await runDaemon(original, {
+      refreshMerged: () => NONE_MERGED,
+      reloadPlan: async () => {
+        const fresh = p.plan();
+        const signature = JSON.stringify(fresh.tasks);
+        if (signature === last) return null;
+        last = signature;
+        return fresh;
+      },
+      onPlanReload: fresh => { visible = fresh; },
+      runOne: async id => {
+        ran.push(id);
+        active = true;
+        writeFileSync(p.file, taskYaml(["A"]) + "  files: [src/original.ts, scripts/approved-companion.mjs]\n");
+        await worker;
+        active = false;
+        return okResult(id);
+      },
+      sweepLight: async () => {
+        if (!active) return;
+        const files = [...(visible.byId.get("A")?.files ?? [])];
+        seenDuringWorker.push(files);
+        if (files.includes("scripts/approved-companion.mjs")) release();
+      },
+      sleep: async () => {
+        await new Promise<void>(resolve => setImmediate(resolve));
+        if (active && ++sleeps >= 6) release();
+      },
+    } as unknown as DaemonDeps, { max: 1, pollIntervalMs: 1 });
+    assert.deepEqual(ran, ["A"], "refreshing review metadata starts no second worker");
+    assert.ok(seenDuringWorker.some(files => files.includes("scripts/approved-companion.mjs")),
+      `the light pass must observe the amended contract before the existing worker settles: ${JSON.stringify(seenDuringWorker)}`);
+    assert.deepEqual(original.byId.get("A")?.files, ["src/original.ts"], "the admitted plan object remains immutable");
+  } finally {
+    release();
+    p.cleanup();
+  }
+});
