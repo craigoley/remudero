@@ -250,8 +250,8 @@ test("the no-evidence conflict escalation records its reason code and the base i
 
   const ciIssues = issueStore();
   const ciPr = dirtyPr({ mergeState: undefined, mergeableState: undefined, checksState: "red" });
-  effectsFor(ciIssues, BASE_AT_ESCALATION).escalate(ciPr, "checks red", renderClarificationQuestion(ciPr, "checks red"));
-  assert.equal(ciIssues.created.length, 1, "a non-conflict escalation files synchronously, as before");
+  await effectsFor(ciIssues, BASE_AT_ESCALATION).escalate(ciPr, "checks red", renderClarificationQuestion(ciPr, "checks red"));
+  assert.equal(ciIssues.created.length, 1, "a non-conflict escalation finishes filing before it returns");
   assert.equal(RAISED_BY_LINE_RE.test(ciIssues.created[0]!.body), false, "and carries no conflict context");
 
   assert.match(conflictEscalationContext({ mergeConflict: EVIDENCE }, undefined), /^\*\*Raised-by:\*\* conflict-not-admitted\n\n$/);

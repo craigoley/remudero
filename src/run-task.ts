@@ -358,6 +358,7 @@ import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPor
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
+import { queueJudgeGardenSpec, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
 import { scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
@@ -460,7 +461,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout", "review-replay"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout", "review-replay", "queue-judge"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -951,6 +952,7 @@ import {
 import { releaseTaskIdReservation, releaseTaskIdReservationAsync, type HeldTaskIdReservation } from "./lib/task-id-release.js";
 import {
   applyPlanProposalCommit,
+  applyPlanProposalCommitAsync,
   buildPlanGrillEscalation,
   decidePlanArchitect,
   unreservedFiledIds,
@@ -1279,6 +1281,7 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { proceduresCommand, proceduresProductionInput } from "./lib/procedures-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
@@ -2869,7 +2872,7 @@ export function buildSweepEffects(
     },
     depReviewCommandImpl: (pr, rest) => depReviewCommand(pr, rest, { root: repoRoot, landingStateRoot: feedbackLandingStateRoot }),
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown,
-    ghLiveStateImpl: ghLiveState,
+    ghLiveStateImpl: ghLiveStateAsync,
     fixRungTaskForImpl: fixRungTaskFor,
     resolveTaskContractAtHeadImpl: resolveFixRungTaskContractAtHeadAsync,
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
@@ -2902,7 +2905,7 @@ export function buildSweepEffects(
     redBaseRefreshFactsImpl: redBaseRefreshFactsFromRest,
     ghUpdateBranchImpl: ghUpdateBranch,
     readyDraftImpl: readyDraftViaGh(deps.owner, deps.repo, deps.log),
-    readFixRoundCommitsImpl: readFixRoundCommitsViaGit,
+    readFixRoundCommitsImpl: readFixRoundCommitsViaGitAsync,
     runNpmScriptImpl: runNpmScriptViaSpawn,
     commitGeneratorOutputImpl: commitGeneratorOutputViaGit,
     readPackageScriptsImpl: readPackageScriptsFor,
@@ -5527,7 +5530,7 @@ export async function updateBranchViaGh(pr: ArmedStalledPr, record?: BranchUpdat
   const fields = { repo: `${ownerRepo.owner}/${ownerRepo.repo}`, prNumber: pr.prNumber,
     via: `sweep:${pr.updateReason ?? "refresh"}`, expectedHeadSha: pr.headSha };
   try {
-    ghExec(ghUpdateBranchArgv(ownerRepo.owner, ownerRepo.repo, pr.prNumber, pr.headSha), { stdio: "pipe" });
+    await ghTextAsync(ghUpdateBranchArgv(ownerRepo.owner, ownerRepo.repo, pr.prNumber, pr.headSha));
     recordBranchUpdate({ ...fields, outcome: "updated" }, record);
     return "updated";
   } catch (e) {
@@ -7757,10 +7760,18 @@ function ciEvidenceDisagreementObservation(args: {
  * catch-and-fail-open contract.
  */
 function ghLiveState(prUrl: string): LiveStateResult {
+  return runStepsSync(liveStateSteps(prUrl, ghJson));
+}
+
+export function ghLiveStateAsync(prUrl: string): Promise<LiveStateResult> {
+  return runStepsAsync(liveStateSteps(prUrl, args => ghJsonAsync(args)));
+}
+
+function* liveStateSteps(prUrl: string, read: GhApiFetcher): Steps<LiveStateResult> {
   const target = prUrlTarget(prUrl);
   if (!target) return { ok: false };
   try {
-    const row = ghJson(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow;
+    const row = (yield* step(() => read(singlePrRestArgs(target.owner, target.repo, target.number)))) as RestPullRow;
     const state = prStateFromRest(row);
     const headSha = row.head?.sha;
     return state ? { ok: true, state, ...(typeof headSha === "string" ? { headSha } : {}) } : { ok: false };
@@ -8558,21 +8569,33 @@ export function isRetriggerShapedCommit(commit: FixRoundCommit): boolean {
  * invoke this with a real, previously-observed head sha.
  */
 export function readFixRoundCommitsViaGit(worktreePath: string, sinceSha: string): FixRoundCommit[] {
-  const shas = hostWorktreeGit(worktreePath, ["rev-list", "--reverse", `${sinceSha}..HEAD`])
+  return runStepsSync(fixRoundCommitSteps(worktreePath, sinceSha, hostWorktreeGit));
+}
+
+export function readFixRoundCommitsViaGitAsync(
+  worktreePath: string, sinceSha: string, git: typeof hostWorktreeGitAsync = hostWorktreeGitAsync,
+): Promise<FixRoundCommit[]> {
+  return runStepsAsync(fixRoundCommitSteps(worktreePath, sinceSha, git));
+}
+
+function* fixRoundCommitSteps(worktreePath: string, sinceSha: string, git: typeof hostWorktreeGit | typeof hostWorktreeGitAsync): Steps<FixRoundCommit[]> {
+  const shas = (yield* step(() => git(worktreePath, ["rev-list", "--reverse", `${sinceSha}..HEAD`])))
     .split("\n")
     .map((s) => s.trim())
     .filter(Boolean);
-  return shas.map((sha) => {
-    const subject = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%s", sha]).trim();
-    const changedFiles = hostWorktreeGit(worktreePath, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha])
+  const commits: FixRoundCommit[] = [];
+  for (const sha of shas) {
+    const subject = (yield* step(() => git(worktreePath, ["log", "-1", "--format=%s", sha]))).trim();
+    const changedFiles = (yield* step(() => git(worktreePath, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha])))
       .split("\n")
       .map((s) => s.trim())
       .filter(Boolean).length;
-    const patch = hostWorktreeGit(worktreePath, ["show", "--format=", "--stat", "--patch", sha]);
+    const patch = (yield* step(() => git(worktreePath, ["show", "--format=", "--stat", "--patch", sha])));
     const diffAt = patch.indexOf("diff --git ");
-    return { subject, changedFiles, diffStat: diffAt < 0 ? patch.trim() : patch.slice(0, diffAt).trim(),
-      diffDigest: createHash("sha256").update(diffAt < 0 ? "" : patch.slice(diffAt)).digest("hex") };
-  });
+    commits.push({ subject, changedFiles, diffStat: diffAt < 0 ? patch.trim() : patch.slice(0, diffAt).trim(),
+      diffDigest: createHash("sha256").update(diffAt < 0 ? "" : patch.slice(diffAt)).digest("hex") });
+  }
+  return commits;
 }
 
 /**
@@ -8700,7 +8723,21 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
   prBodySha256?: string;
 }): ReturnType<RunTaskCommandHost["runFixRung"]> {
-  return runFixRungFromModule(opts, fixCommandHost());
+  return runFixRungFromModule(asyncFixRungOptions(opts, hostWorktreeGitAsync), fixCommandHost());
+}
+
+function asyncFixRungOptions(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0], git: typeof hostWorktreeGitAsync) {
+  // Upgrade the extracted run verb's production readers while preserving injected readers.
+  const daemonReaders = opts.deps.readLiveState === ghLiveState;
+  const deps: typeof opts.deps = {
+    ...opts.deps,
+    ...(daemonReaders ? { readLiveState: ghLiveStateAsync,
+      readPrerequisiteState: (n: number) => ghLiveStateAsync(new URL(String(n), opts.prUrl).href) } : {}),
+    ...(opts.deps.readRoundCommits === readFixRoundCommitsViaGit
+      ? { readRoundCommits: (wt: string, since: string) => readFixRoundCommitsViaGitAsync(wt, since, git) } : {}),
+  };
+  // Keep the live options: a worker can update worktreePath while its round is awaiting it.
+  return Object.assign(opts, { deps });
 }
 
 /**
@@ -10898,7 +10935,7 @@ export function checkFixCensusSnapshot(
 
 /** W1-T7744 — the census check with both children awaited, for the fix rung and the census-push repair, which the
  *  daemon runs on its own loop (up to 5.9 s held, 2026-10-10). The same steps as the sync form, so the refusal, the
- *  unmeasured reading and the 60 s child bounds cannot drift between them. */
+ *  unmeasured reading and the child bounds cannot drift between them. */
 export async function checkFixCensusSnapshotAsync(
   root: string,
   path: string | undefined,
@@ -10925,6 +10962,10 @@ export function spawnCensusChild(file: string, args: string[], options: SpawnSyn
   });
 }
 
+// The precheck runs bounded suite children serially, including base retries; allow their own
+// backstops to report before the outer process bound fires. The reach child stays at 60 s.
+const CENSUS_PRECHECK_TIME_BOUND_MS = 8 * 60_000;
+
 function* fixCensusSnapshotSteps(
   root: string,
   path: string | undefined,
@@ -10937,7 +10978,7 @@ function* fixCensusSnapshotSteps(
   env[CENSUS_SNAPSHOT_ENV] = path;
   const scriptsRoot = repoRoot;
   const precheck = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--root", root],
-    { cwd: scriptsRoot, env, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 }));
+    { cwd: scriptsRoot, env, encoding: "utf8", timeout: CENSUS_PRECHECK_TIME_BOUND_MS, maxBuffer: 64 * 1024 * 1024 }));
   const text = `${precheck.stdout ?? ""}${precheck.stderr ?? ""}`;
   let refusal = censusPushRefusal(text);
   let unmeasured = precheck.status === 2 ? text.trim() : undefined;
@@ -24107,12 +24148,12 @@ export function renderHeadroomRecoveryCloseComment(c: HeadroomRecoveryCandidate)
 export async function retireRecoveredHeadroomEscalations(
   ledgerPath: string,
   runId: string,
-  ctx: { issues: IssueGateway; log?: (step: string, extra?: Record<string, unknown>) => void; dryRun?: boolean },
+  ctx: { issues: AsyncIssueGateway; log?: (step: string, extra?: Record<string, unknown>) => void; dryRun?: boolean },
 ): Promise<{ retired: number }> {
   const log = ctx.log ?? (() => {});
   let open: OpenIssue[];
   try {
-    open = listRetirableEscalationIssues(ctx.issues);
+    open = await listRetirableEscalationIssuesAsync(ctx.issues);
   } catch (e) {
     log("sweep.headroom_recovery.list_failed", { error: String((e as Error)?.message ?? e) });
     return { retired: 0 };
@@ -24128,7 +24169,7 @@ export async function retireRecoveredHeadroomEscalations(
     }
     try {
       if (!ctx.issues.closeWithComment) throw new Error("issue gateway cannot close issues");
-      ctx.issues.closeWithComment(c.issueUrl, renderHeadroomRecoveryCloseComment(c));
+      await ctx.issues.closeWithComment(c.issueUrl, renderHeadroomRecoveryCloseComment(c));
     } catch (e) {
       log("sweep.headroom_recovery.close_failed", { issue_url: c.issueUrl, error: String((e as Error)?.message ?? e) });
       continue;
@@ -27339,6 +27380,25 @@ export function issueRevalidationRunTaskPorts(
   };
 }
 
+/** W1-T9925: the queue judge's ports that live here: its judge is the escalation judge's tool-less spawn (one per pass,
+ *  on the mount the issue-revalidation garden already uses), and its open-PR set is the daemon's persisted board, a file
+ *  read with no remote call. `seams` stand in for the spawn and the board read in tests. */
+export function queueJudgeRunTaskPorts(
+  ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; root: string; log: (step: string, extra?: Record<string, unknown>) => void },
+  seams: { spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"]; openBoard?: typeof readOpenBoardSnapshot } = {},
+): Pick<QueueJudgeSources, "judgeText" | "openPrNumbers"> {
+  const { owner, repo, repoRoot, stateDir, root, log } = ctx;
+  const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }, { spawn: seams.spawn });
+  return {
+    judgeText: (prompt) => judge.judgeText(prompt, 0),
+    openPrNumbers: () => {
+      const open = (seams.openBoard ?? readOpenBoardSnapshot)(root, owner, repo);
+      if (!open.ok) throw new Error(`queue judge: the open-PR snapshot is unavailable (${open.reason})`);
+      return new Set(open.snapshot.rows.map((row) => row.number));
+    },
+  };
+}
+
 /** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
 
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
@@ -27409,6 +27469,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       // A filing streak escalates once (gardener.ts), so a refused change reaches a person rather than looping.
       const d = deps("backlog", raiseDuplicate);
       return gardenPass(backlogGardenSpec(d), d);
+    }
+    // W1-T9925: the queue judge re-ranks queued tasks by measured cost of delay through its own reviewed plan PR.
+    case "queue-judge": {
+      const d = deps("queue-judge", raiseDuplicate);
+      return gardenPass(queueJudgeGardenSpec(d, queueJudgeRunTaskPorts({ owner, repo, repoRoot, stateDir, root: config.root, log })), d);
     }
     // W1-T5454: the scout looks for work nobody asked for -- a recurring failure-shaped ledger step no task
     // or scorecard covers is filed through the machine-filing path, bounded by the queue and the day's merges.
@@ -31576,6 +31641,17 @@ export function buildEscalationCloser(
   };
 }
 
+export function buildEscalationCloserAsync(
+  owner: string,
+  repo: string,
+  issues: AsyncIssueGateway = ghIssueGatewayAsync(owner, repo),
+): (url: string, comment: string) => Promise<void> {
+  return async (url, comment) => {
+    if (!issues.closeWithComment) throw new Error("issue gateway cannot close issues");
+    await issues.closeWithComment(url, comment);
+  };
+}
+
 /**
  * The escalation-lifecycle reconciler rung (fb-1784756088300-6a481e), shared verbatim by
  * `rmd sweep` and the daemon's sweep hook: list open needs-human issues, derive each referent's
@@ -31645,7 +31721,7 @@ export async function sweepEscalationReconcile(
     tickRead?: Pick<TickReadFacts, "escalationCandidates" | "escalationIntake"> } = {},
 ): Promise<SweepEscalationReconcileSummary> {
   let intake: EscalationIntake | undefined;
-  const candidates = opts.tickRead?.escalationCandidates ?? buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
+  const candidates = opts.tickRead?.escalationCandidates ?? await buildEscalationReconcileCandidatesAsync(owner, repo, plan, ledgerPath, log, {
     issues: opts.issues,
     github: opts.github,
     onIntake: (i) => {
@@ -31655,7 +31731,7 @@ export async function sweepEscalationReconcile(
   if (opts.tickRead) intake = opts.tickRead.escalationIntake;
   const summary = await runEscalationReconcile(candidates, {
     intake,
-    closeIssue: buildEscalationCloser(owner, repo, opts.issues),
+    closeIssue: buildEscalationCloserAsync(owner, repo, opts.issues),
     ledgerPath,
     runId,
     log,
@@ -31669,7 +31745,7 @@ export async function sweepEscalationReconcile(
   // must never take out the task-referent reconciler's own summary above.
   try {
     await retireRecoveredHeadroomEscalations(ledgerPath, runId, {
-      issues: opts.issues ?? ghIssueGateway(owner, repo),
+      issues: opts.issues ?? ghIssueGatewayAsync(owner, repo),
       log,
       dryRun: opts.dryRun,
     });
@@ -32908,7 +32984,7 @@ export function buildSweepHook(
       const updatedForWorkflow = await prelude.time("updated_for_workflow", () => updatedForWorkflowFromLedger(ledgerPath));
       const freshBaseChangedFiles = new Map<number, BaseChangedFiles>();
       const behindMainByPr = await prelude.time("behind_main", () => tickRead?.behindMainByPr
-        ?? buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles));
+        ?? buildBehindMainByPrAsync(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles));
       const baseChangedFilesByPr = tickRead?.baseChangedFilesByPr ?? freshBaseChangedFiles;
       applyMergeProbeEvidence(prsForFixRung, await prelude.time("merge_probes", () =>
         probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr })));
@@ -34767,7 +34843,7 @@ async function triageCommandLocked(
       // with a validated decisionSummary when the summarizer succeeds, and degrades to exactly
       // today's raw-body issue (fail-open) on any summarizer failure.
       grillIssueUrl = await escalateWithSummary(buildGrillEscalation({ entry, decision, taskId, runId }), {
-        issues: ghIssueGateway(owner, repo),
+        issues: ghIssueGatewayAsync(owner, repo),
         ledgerPath,
         runId,
         ...summarizeDeps,
@@ -34833,7 +34909,8 @@ async function triageCommandLocked(
     // `plan/ MASTER-PLAN.md` pathspec stages the amendment; the section index is derived from
     // MASTER-PLAN.md whenever a runtime reader needs it.
     // W1-T4203: a refused commit leaves the entry at `status: new`; the row below is what stops the rung re-picking it.
-    commitTriageOrRecordRefusal(() => applyPlanProposalCommit(worktreePath, commitMessage, log), feedbackId, log);
+    await applyPlanProposalCommitAsync(worktreePath, commitMessage, log).catch(error =>
+      commitTriageOrRecordRefusal(() => { throw error; }, feedbackId, log));
 
     // OUTPUT VALIDATION (W1-T2326 Q2) — the PORT of `planCommand`'s `unreservedFiledIds` +
     // `plan.id_check`. Reserving ids is half the mint-and-reserve contract; this is the other half,
@@ -35278,7 +35355,7 @@ export async function planCommand(
       say(formatPlanVerdictLine(mode, decision));
       try {
         const issueUrl = await escalateWithSummary(buildPlanGrillEscalation({ decision, mode, brief, taskId, runId }), {
-          issues: ghIssueGateway(owner, repo),
+          issues: ghIssueGatewayAsync(owner, repo),
           ledgerPath,
           runId,
           summarize: realDecisionSummarizer({
@@ -41549,6 +41626,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "Phase 4 of the held-out skill eval: the production caller of runSkillEval (src/lib/skill-eval-command.ts). It SPENDS: without --confirm-spend it prints why and exits 2 having read nothing. It loads the proposal from <root>/state/inbox-proposals.json and refuses (exit 2, one skill_eval.refused ledger row) one that is absent, carries no skill file, names an unsafe skill or has no skillFileStagedAt stamp, which the skill workshop's next pass sets. A text is judged once: a proposal whose current text already carries a recorded verdict refuses as already-judged, since a second draw of the same text could only launder the first; a run that measured too few tasks judged nothing and may run again. The drafter mines every merged run in its window, so the hold-out is time: from the ledger union (every rotation form; an unread source refuses) and the plan it derives the golden corpus, excludes every task merged at or before the stamp, and draws K held-out tasks of the draft's applies-to type (a refused draw exits 1 and writes nothing). Merge credit is ledger rows only, which under-credits: a missed task is absent, never wrongly admitted. The without-skill arm gets the skills part production renders for the task today; the with-skill arm the part it would render were the draft approved, loaded from a temp tree by the same loader. A draft that part would not inject for some task refuses before any dispatch (draft-not-injected). Each task runs R trials per arm through a sealed, never-pushed paired attempt at its base on one pinned stack, only while the fleet is idle in quiet mode with measured headroom. The verdict is written to the proposal's skillEval only while its staged text is still the one evaluated; otherwise skill_eval.stale is logged and nothing is written. Exit 0 on a recorded pass, 1 on a recorded refusal or a stale run, 2 on any refusal before dispatch.",
   },
   {
+    name: "procedures",
+    syntax: "rmd procedures [--days <n>] [--json]",
+    summary: "Report which tool-call steps clean merged runs repeat, per task type, against repaired runs.",
+    detail: "A read-only procedure census (src/lib/procedure-census.ts) over the merged runs that started in the last N days (--days, an integer from 1 to 60, default 14; the window ends now). Each task type splits into CLEAN runs (zero fix rounds) and REPAIRED runs (one or more, attributed as the retro attributes them). A step is a worker tool call's tool_signature from its worker.activity row, coarsened so one file is not one step (Read:src/lib/review.ts reads as Read:src/lib/*.ts; Bash signatures and top-level paths stay verbatim), or the bare tool name on a row that carries no signature. Per type it reports each step's share of clean and repaired runs and their difference (lift), the universal steps (in at least 80% of clean runs, once a type has 5 clean runs), and the contiguous 2- and 3-step sequences at least half the clean runs share. It reports first how many tool-call rows carry a signature at all, and warns when none do, so missing signatures never read as nothing recurring. It reads the ledger union once, filtered to the steps it needs, and exits 2 naming each unread source when the union is incomplete, since an unread rotation can hide a run's fix rounds. --json prints the census object instead of the markdown report. It writes nothing of its own: no ledger row, no state file (the one cli.invoked row the dispatcher ledgers for every verb is all an invocation adds). Exit 0 on a report, 2 on a usage error or an incomplete union.",
+  },
+  {
     name: "check-acceptance",
     syntax: "rmd check-acceptance <body-file>",
     summary: "Report what the reviewer's own parser actually resolves from a PR body file.",
@@ -42007,7 +42090,7 @@ import {
   escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
 } from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
-import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildCreditCandidates, buildEscalationReconcileCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
+import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildBehindMainByPrAsync, buildCreditCandidates, buildEscalationReconcileCandidates, buildEscalationReconcileCandidatesAsync, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
@@ -42620,6 +42703,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["replay-goldens", async (rest) => await replayGoldensCommand(rest)],
   ["skill-eval", async (rest) => await skillEvalCommand(rest,
     skillEvalProductionInput(repoRoot, workerBoundaryStack.harnessRevision, readUsageSnapshotPreferSdk))],
+  ["procedures", (rest) => proceduresCommand(rest, proceduresProductionInput())],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await withGhTransportFloorMode("wait", () => nextTaskIdCommand(rest))],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],

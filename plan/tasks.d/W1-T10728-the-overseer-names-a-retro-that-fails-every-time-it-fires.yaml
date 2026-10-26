@@ -1,0 +1,67 @@
+- id: W1-T10728
+  title: "THE RETRO CAN FAIL EVERY TIME IT FIRES AND NOTHING SAYS SO — the gardener overseer reads no retro outcome row and W1-T9119 names only a persisting DEFERRAL; read `retro.error` and `retro_aborted_integrity` as the retro's failures and `retro.synthesized`/`retro.no_op` as its passes through the overseer's NOTICE/HEAL/ESCALATE ladder, failures only, so a quiet retro is never judged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: low  # Rule 19: one concern — the overseer gains one watched loop; no gardener's judgment changes
+  band_meaning: blast-radius
+  origin: "operator ask 2026-10-26: review the codebase against the backlog and scan Swamp for ideas, leaning into automation and self-improvement (MASTER-PLAN §4H)"
+  plan_refs: [W1-T4802, W1-T9119]
+  files: [src/lib/gardener-overseer.ts, test/gardeners/the-overseer-names-a-retro-that-fails-every-time-it-fires.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ at origin/main 8c1ad448e (2026-10-26).
+    - The retro is the loop that turns merged runs into learnings and skills. When it fires, the daemon writes
+      `retro_triggered` (src/lib/daemon.ts, `retroCadence`), then the retro writes `retro.synthesized` or `retro.no_op`
+      on success and `retro.error` on failure; run-task.ts writes `retro_aborted_integrity` when the merge count does
+      not match.
+    - The gardener overseer (W1-T4802, src/lib/gardener-overseer.ts) is the one reader of loop liveness.
+      `classifyGardenerStep` knows the `.scorecard`, `.gardener_failed`, `.garden_filing_failed`,
+      `.garden_filing_escalated` and `.gardener_judged` suffixes plus a few named steps. `retro.error` ends in
+      `.error`, so it returns undefined, and `OVERSEER_STEP_PATTERN` never reads it.
+    - W1-T9119's `noteRetroDeferral` names an episode only while the retro is DEFERRED for read cost. Every tick that
+      is not deferred sets `retroDeferral = undefined`, so a retro that fires and fails on every fire is never named.
+    - src/lib/status.ts lists `retro.error` in `LANE_TERMINAL_STEPS` only to close a run.
+    - `retro.preflight_failed` already has its own strike cap and escalation (`retro.publication.escalated`,
+      src/lib/retro.ts), so it stays out of this rule and nothing is escalated twice.
+    So a retro that errors on every fire leaves rows that nothing reads, and the fleet stops learning in silence.
+    SILENCE IS LEFT OUT ON PURPOSE. The retro is quiet whenever the spend gates close or merges stop. That is a
+    healthy condition (doctrine/investigation-discipline/healthy-condition-bound.md), and W1-T9119 already owns the
+    deferral case.
+  design: |
+    1. `classifyGardenerStep` returns `{ name: "retro", kind: "pass" }` for `retro.synthesized` and `retro.no_op`, and
+       `{ name: "retro", kind: "failed" }` for `retro.error` and `retro_aborted_integrity`. `OVERSEER_STEP_PATTERN`
+       grows to match exactly those four steps. `retro.skipped_open_pr` and `retro.skipped_in_flight` stay
+       unclassified: a skip is neither a pass nor a failure.
+    2. A new `FAILURE_ONLY_LOOPS` set holds `"retro"`. `judgeHealth` never opens a silence episode for a name in it.
+    3. The ladder is unchanged. HEAL on `retro` finds no state/retro-gardener.json, so `healGardener` clears nothing
+       and must not throw (prove it). ESCALATE follows as for any gardener. `livenessEscalation` must name the
+       retro's own rows (`retro.error`, `retro_aborted_integrity`) and must not offer a `state/RETRO_OFF-<class>`
+       switch that nothing reads. Name the real one, or offer none.
+    4. REPLAY BEFORE MERGE (doctrine/investigation-discipline/replay-then-audit.md). On the host, run
+       `rmd ledger-grep 'retro\.error|retro_aborted_integrity|retro\.synthesized|retro\.no_op'` over the last 30 days.
+       Report in the PR body how many failure episodes the rule would have opened, and the longest one. An escalation
+       in a month the operator calls healthy is a defect: stop and report it rather than merge.
+    New tests go in test/gardeners/the-overseer-names-a-retro-that-fails-every-time-it-fires.test.ts (folder from
+    `rmd test-place`). Import through `#src/*`, and use `test(` titles exactly as in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/gardeners/the-overseer-names-a-retro-that-fails-every-time-it-fires.test.ts"
+    - claim: "a retro that errors on every fire opens a failure episode and escalates once after the heal"
+      proof: 'grep: test("W1-T10728: a retro that errors on every fire opens a failure episode and escalates once after the heal" in test/gardeners/the-overseer-names-a-retro-that-fails-every-time-it-fires.test.ts'
+    - claim: "a retro pass closes the failure episode"
+      proof: 'grep: test("W1-T10728: a retro pass closes the failure episode" in test/gardeners/the-overseer-names-a-retro-that-fails-every-time-it-fires.test.ts'
+    - claim: "a quiet retro opens no silence episode"
+      proof: 'grep: test("W1-T10728: a quiet retro opens no silence episode" in test/gardeners/the-overseer-names-a-retro-that-fails-every-time-it-fires.test.ts'
+  falsifier: |
+    Remove the four retro steps from `classifyGardenerStep`. The first test then finds no episode and no escalation.
+  note: |
+    reservation hand-off: plan-swamp-scan-20261026 -> run-unfiled-1793034725000
+
+    THE TESTS FEED ROWS through the overseer's `readRows` port, as test/gardener-overseer.test.ts does. No test reads
+    the live ledger.

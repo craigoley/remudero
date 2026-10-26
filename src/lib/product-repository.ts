@@ -369,6 +369,8 @@ export class ProductRepositoryService {
       if (product.value.revision !== input.expectedRevision || product.value.objectiveRevision !== input.expectedObjectiveRevision) throw new Fault("stale_revision");
       const requested = product.value.brief.requestedRepository;
       if (requested && (requested.owner.toLowerCase() !== input.owner.toLowerCase() || requested.name.toLowerCase() !== input.name.toLowerCase())) throw new Fault("repository_conflict");
+      // A bound product never creates again: refuse before any provider read, capability lookup or intent write.
+      if (input.action === "create" && product.value.repository) throw new Fault("repository_conflict");
     }
     const sameProduct = Object.entries(journal.operations).filter(([key]) => key !== requestKey).map(([, operation]) => operation)
       .filter((operation) => operation.productId === input.productId);

@@ -1,0 +1,30 @@
+id: incident-9bbaf99ecb676d34
+ts: 2026-10-26T17:49:40.217Z
+raw: >-
+  Incident 9bbaf99ecb67: intervention
+  escalated:none:fix-needs-design-at-this-exact-head-full
+
+  First seen: 2026-10-26T17:48:38.800Z
+
+  Last seen: 2026-10-26T17:48:38.800Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#14326@f5d999733 actor=claude cause=escalated:none:fix-needs-design-at-this-exact-head-full — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#14326@e2994ab24 actor=claude cause=escalated:none:fix-needs-design-at-this-exact-head-full — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#9bbaf99ecb676d34467c373f133732d0e455eede26f37e51d9ad249115d43814
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

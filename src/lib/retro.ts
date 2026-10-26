@@ -404,6 +404,19 @@ function ledgerCreditFor(
   return undefined;
 }
 
+/** The ledger steps {@link gatherRuns} reads: the steps it names, then every step that can carry a run's
+ *  first `pr_url` row, which it falls back to with no `pr.opened` or verdict line. A step-filtered union
+ *  read that feeds `gatherRuns` spreads this list rather than copying it. */
+export const GATHER_RUNS_LEDGER_STEPS: readonly string[] = [
+  // gatherRuns, by name.
+  "run.start", "verdict", "verdict.merged", "recon.done", "implement.done", "implement.resumed", "implement.continued", "implement.preopen_continued", "pr.opened", "correction.provenance",
+  // gatherRuns' pr_url fallback.
+  "report.followups", "pr.head_provider", "dispatch.blocked_independent", "automerge.armed", "automerge.arm_skipped",
+  "automerge.arm_failed", "automerge.clean_status_direct_merge", "review.posted", "review.pending_posted",
+  "review.semantic_setup_refused", "review.semantic_incomplete", "review.replay_input",
+  "review.unwired_advisory", "review.post_refused", "review.stood_down", "acceptance.repaired", "trailer_stamp.failed",
+];
+
 /** Reduce ledger lines into per-run summaries, keyed by run_id (deterministic). */
 export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
   const credits = ledgerCreditIndex(records);

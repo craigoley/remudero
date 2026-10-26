@@ -1,0 +1,29 @@
+- id: W1-T10732
+  title: Refuse fresh repository creation for an already bound product before provider work
+  repo: remudero
+  depends_on:
+    - W1-T10613
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10
+  risk: medium
+  origin: operator-request#wreckterra-console-product-2026-10-25
+  plan_refs:
+    - W1-T10613
+    - W1-T10726
+    - W1-T10619
+  files:
+    - src/lib/product-repository.ts
+    - test/infra/product-repository.test.ts
+  status: queued
+  dispatch_hold: false
+  attempts: 0
+  rationale: PR14383 merged unchanged a5c408246f05517104ab932cd6b050f217f1fc79 as 660c7ae32f9f6bb7bf9ff5245a6f3d71b2a897c4 despite a reproduced functional counterexample. Adopt a repository, make its provider read absent, then submit a fresh create request for the same owner/name and current product revisions. The existing service returns repository_conflict only after a provider create call and journal mutation. The canonical repository ID stays unchanged, so its late identity check does not prevent that external action. The merged source and original test hashes are identical to the measured A5 source. In a private QA archive, the maintained fourteen-test suite with an added regression gives one failure on unchanged A5, zero with the one-line early rejection, one after deleting only that rejection, and zero after exact restoration. These are private functional fixtures, not author, hosted or live qualification. Main and all eleven open PR head trees were swept with twenty-four positive plan/serve controls and no competing correction found. This is a new post-merge correction, not an amendment or renewed credit for the merged task. W1-T10726 shares the repository module for its read-only preview; this task fixes the existing create mutation and does not duplicate or supersede that preview. Existing maintenance holds, normal admission and spending caps remain unchanged. The operator directly confirmed on 2026-10-26 that the VM resize and storage migration finished and approved releasing only this correction after its normal plan gates. This one-task clearance leaves all other task holds, checks, caps and service configuration unchanged.
+  design: In ProductRepositoryService's existing new-operation branch, after the current product and expected revision checks and before any provider read, capability lookup or intent write, reject action=create when the canonical product already has a repository. Reuse repository_conflict; no API schema, permission or transport change is needed. Keep successful original-request receipt replay before this new-operation check and preserve pending-create reconciliation. Add a separately named regression to the existing test/infra/product-repository.test.ts, reusing its real ProductIntentStore and durable journal plus the stateful provider fixture. First adopt the fixture repository, capture exact product and journal bytes, then remove its provider entry. Attempt a fresh create request twice through fresh service instances using current revisions. Assert repository_conflict, zero provider calls of any kind and byte-identical product/journal after both attempts; successful replay of the original adoption must still return the original repository identity without creation. Retain and run the existing unknown-create and lost-response reconciliation cases. Confirm existing suite placement through rmd test-place and preserve its subpath imports. No live provider call, automatic deletion, source push to the already merged branch, task hold release or gameplay dispatch is part of this correction. Source work must use this new task's normal selector, claim, admission, review and publication flow after the maintenance owner permits it.
+  acceptance:
+    - claim: a bound product refuses a fresh create before provider work
+      proof: "unit test: W1-T10732: a bound product refuses a fresh create before provider work"
+  falsifier: After the new regression passes with the fix, delete only the early bound-product rejection and run that same physical test file to observe the named failure; restore the exact source and require zero failures. Keep the real provider-call assertions and durable file comparisons. Preserve the failed receipt, current source SHA and nonzero test summaries, and keep private fixtures, full author checks, hosted qualification, merge and runtime adoption as separate evidence.
