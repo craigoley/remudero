@@ -72,6 +72,11 @@ function scheduler(t: TestContext, time: ReturnType<typeof fakeClock>, base: Par
   };
 }
 
+/** Read through a call, so an `assert.equal(..., undefined)` does not narrow the waiter's lease for good. */
+function leaseOf(w: Waiter): TestSlotLease | undefined {
+  return w.lease;
+}
+
 function rows(lines: readonly string[], step: string): Record<string, unknown>[] {
   return lines.map(line => JSON.parse(line) as Record<string, unknown>).filter(row => row.step === step);
 }
@@ -120,7 +125,7 @@ test("W1-T9950: the first waiter to arrive is the first admitted", t => {
   holder.release();
   // B polls 7 times between the release and A's next poll; every one of them must yield to A.
   s.runUntil(7_599);
-  assert.equal(b.lease, undefined, "B, whose polls land first after the release, must not take A's turn");
+  assert.equal(leaseOf(b), undefined, "B, whose polls land first after the release, must not take A's turn");
   s.runUntil(7_600);
   assert.equal(a.lease?.outcome, "acquired", "A, the first arrival, takes the slot at its own next poll");
   assert.equal(a.acquiredAt, 7_600);
@@ -131,7 +136,7 @@ test("W1-T9950: the first waiter to arrive is the first admitted", t => {
   assert.ok(second, `B logs its place behind A: ${b.lines.join("\n")}`);
   assert.deepEqual(second.ahead, [{ label: "A", pid: PID.a }]);
   s.runUntil(9_000);
-  assert.equal(b.lease, undefined, "B still waits while A holds");
+  assert.equal(leaseOf(b), undefined, "B still waits while A holds");
   assert.equal(reports(b.lines).at(-1)!.position, 1, "A's admission moves B to the head");
   a.lease!.release();
   s.runUntil(9_200);
