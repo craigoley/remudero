@@ -60,7 +60,11 @@ export function automatedRetroGatherObserver(automated: boolean, ctx: {
           external_bytes: memory.external, array_buffers_bytes: memory.arrayBuffers });
       } catch {
         // Diagnostic failure must not mask a read's original error or cause the read to run twice.
-        (ctx.warn ?? ((message: string) => console.error(message)))("### [retro] gather phase observation unavailable");
+        try {
+          (ctx.warn ?? ((message: string) => console.error(message)))("### [retro] gather phase observation unavailable");
+        } catch {
+          // Even an unavailable diagnostic sink leaves the original operation's contract intact.
+        }
       }
     };
     observe("entered");
