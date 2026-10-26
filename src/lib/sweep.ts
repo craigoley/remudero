@@ -13761,8 +13761,14 @@ export function fixDispatchHoldAtHead(
   const declines = lines.filter((l) => isOwnerClaimDecline(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
   const last = declines[declines.length - 1];
   const ownerPath = typeof last?.worktree_path === "string" ? last.worktree_path : undefined;
+  // Revalidation re-proves a failed RESET's preservation but never tries the reset, so a reset that keeps
+  // failing would lift and re-decline forever with no escalation. It is re-asked once per head: after a
+  // revalidation lifted this head, a reset that fails again holds and escalates.
+  const resetRelifted = last?.owner_recovery_reason === "owner_stale_dirty_reset_failed" &&
+    lines.slice(0, lines.lastIndexOf(last)).some((l) => l.from_backstop_revalidation === true &&
+      l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
   if (declines.length >= FIX_CLAIM_DECLINE_BACKSTOP && (ownerPath === undefined || ownerWorktreeExists(ownerPath)) &&
-      !(ownerPath !== undefined && (last.owner_recovery_decision === "keep" ||
+      !(ownerPath !== undefined && !resetRelifted && (last.owner_recovery_decision === "keep" ||
         revalidatedOwnerPreservation(last.owner_recovery_reason) !== undefined) && ownerReclaimable?.(pr, last) === true)) {
     const why = String(last.owner_recovery_reason);
     // W1-T5974: a staged-only refusal names the paths an operator must inspect before clearing it.

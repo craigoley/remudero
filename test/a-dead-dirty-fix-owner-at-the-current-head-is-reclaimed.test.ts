@@ -467,3 +467,26 @@ test("every failed-owner revalidation keeps the hold on a live owner, an error o
   }
   assert.equal(checked, 33);
 });
+
+test("a failed stale-dirty reset that fails again after its revalidation holds and escalates", () => {
+  const f = fixture();
+  try {
+    const pr = prView(f), reason = { owner_recovery_reason: "owner_stale_dirty_reset_failed" };
+    const reclaimable = () => true;
+    const first = keptDeclines(f, reason);
+    assert.equal(fixDispatchHoldAtHead(pr, first, existsSync, reclaimable), undefined, "the first revalidation lifts the hold");
+    const lifted = { step: "sweep.fix.checkout_owner_stale_dirty_preserved", pr_number: PR, head_sha: f.head,
+      branch: BRANCH, from_backstop_revalidation: true };
+    const again = [...first, lifted, ...keptDeclines(f, reason)];
+    const held = fixDispatchHoldAtHead(pr, again, existsSync, reclaimable);
+    assert.ok(held, "a reset that fails again after a lift is not re-asked, so it cannot loop silently");
+    assert.equal(held.fields.fix_claim_decline_escalated, "owner_stale_dirty_reset_failed");
+    assert.equal(held.escalated, false, "the hold escalates once on the next disposition");
+    const otherHead = [...first, { ...lifted, head_sha: "f".repeat(40) }, ...keptDeclines(f, reason)];
+    assert.equal(fixDispatchHoldAtHead(pr, otherHead, existsSync, reclaimable), undefined,
+      "a lift recorded at another head does not count against this one");
+    const staged = { owner_recovery_reason: "owner_staged_residue_preserve_failed" };
+    assert.equal(fixDispatchHoldAtHead(pr, [...keptDeclines(f, staged), lifted, ...keptDeclines(f, staged)], existsSync, reclaimable),
+      undefined, "the once-per-head bound applies to the reset arm alone");
+  } finally { f.cleanup(); }
+});
