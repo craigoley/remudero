@@ -361,7 +361,8 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       commitClosed: (rows) => { closedRows = rows; return snapshotCache.commitClosed(rows); },
       commitOpen: (rows) => snapshotCache.commitOpen?.(rows, systemClock.now()) ?? false,
     }, changedFilesCache: {
-      lookup: (url, state) => (state === "MERGED" || state === "CLOSED" ? files : openFiles).lookup(url, state),
+      lookup: (url, state, headRefOid) => (state === "MERGED" || state === "CLOSED" ? files : openFiles).lookup(url, state, headRefOid),
+      evidence: (url, state, headRefOid) => (state === "MERGED" || state === "CLOSED" ? files : openFiles).evidence!(url, state, headRefOid),
       settle: async () => { await files.settle(); await openFiles.settle(); },
     },
     // A logical tick clock expires each half once per generation, independent of read duration.
