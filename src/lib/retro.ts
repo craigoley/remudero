@@ -415,6 +415,7 @@ export const GATHER_RUNS_LEDGER_STEPS: readonly string[] = [
   "automerge.arm_failed", "automerge.clean_status_direct_merge", "review.posted", "review.pending_posted",
   "review.semantic_setup_refused", "review.semantic_incomplete", "review.replay_input",
   "review.unwired_advisory", "review.post_refused", "review.stood_down", "acceptance.repaired", "trailer_stamp.failed",
+  "trailer_stamp.raced",
 ];
 
 /** Reduce ledger lines into per-run summaries, keyed by run_id (deterministic). */

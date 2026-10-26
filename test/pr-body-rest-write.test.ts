@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { ensureTaskTrailer, prBodyRestArgs, repairRetroAcceptanceBlock, updatePrBodyViaGh, writePrBodyRest } from "../src/run-task.js";
+import { ensureTaskTrailer, prBodyRestArgs, recordBakedClosureCatalog, repairRetroAcceptanceBlock, updatePrBodyViaGh, writePrBodyRest } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const PR_URL = "https://github.com/o/r/pull/1216";
@@ -198,4 +198,36 @@ test("W1-T2948: the change adds no worker dispatch, commit, merge, provider-sele
     assert.ok(!calls[0].includes(forbidden), `no ${forbidden} action: ${JSON.stringify(calls[0])}`);
   }
   assert.equal(calls[0][0], "api", "the only verb is a REST call");
+});
+
+// ── a read-modify-write never lands over an edit made after its read (2026-10-13, #11216) ────
+
+test("the trailer stamp leaves a body edited after its read untouched", () => {
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const written: string[][] = [];
+  const reads = ["an existing body", "an existing body\n\nA line the operator added after the stamp read it."];
+  ensureTaskTrailer(
+    PR_URL,
+    "W1-T2948",
+    (step, extra) => logs.push({ step, extra }),
+    () => ({ body: reads.shift() ?? reads.at(-1) }),
+    (args) => {
+      written.push(args);
+      return undefined;
+    },
+  );
+  assert.deepEqual(written, [], "no PATCH: writing the trailer onto the stale read would erase the operator's line");
+  assert.equal(logs.find((l) => l.step === "trailer_stamp.raced")?.extra?.task_id, "W1-T2948");
+});
+
+test("the baked-closure catalog leaves a body edited after its read untouched", () => {
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const edits: string[] = [];
+  const reads = ["prose\n\nRemudero-Task: W1-T2948\n", "prose, edited by a person\n\nRemudero-Task: W1-T2948\n"];
+  recordBakedClosureCatalog(PR_URL, ["scripts/a.mjs"], (step, extra) => logs.push({ step, extra }), {
+    fetchBody: () => reads.shift() ?? reads.at(-1)!,
+    editBody: (_url, body) => edits.push(body),
+  });
+  assert.deepEqual(edits, []);
+  assert.equal(logs.at(-1)?.step, "pr.body_normalize.raced");
 });
