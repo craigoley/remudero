@@ -16,7 +16,7 @@ function pumpFunction() {
   return fn as (deps: { pendingImprovementActions: () => AsyncIterable<ReturnType<typeof target>>; handOffImprovementAction: (request: ReturnType<typeof target>) => Promise<unknown>; checkStop?: () => string | undefined; checkPause?: () => string | undefined }, interval: number, log: (step: string) => void) => { stop(): void; settled(): Promise<void>; isBusy(): boolean };
 }
 
-test("saved improvement actions start only through the daemon-owned handoff", async () => {
+test("saved improvement pump preserves one active handoff during shutdown", async () => {
   const start = pumpFunction();
   let release!: () => void, active = 0, peak = 0, stopped = false;
   const barrier = new Promise<void>(resolve => { release = resolve; });
@@ -46,7 +46,7 @@ test("saved improvement pump preserves pause stop and unreadable discovery", asy
   stop.stop(); await stop.settled();
 });
 
-test("saved improvement production wiring reaches the fresh gateway from the daemon loop", async () => {
+test("saved improvement actions start only through the daemon-owned handoff: daemon loop", async () => {
   const wire = (daemonCli as unknown as Record<string, unknown>).daemonImprovementActionDeps;
   assert.equal(typeof wire, "function", "the daemon CLI must supply the real saved-action discovery and handoff");
   const wired = (wire as (state: string, gateway: unknown) => { pendingImprovementActions(): AsyncIterable<ReturnType<typeof target>>; handOffImprovementAction(request: ReturnType<typeof target>): Promise<unknown> })("/fleet/state", { improvement: async (request: ReturnType<typeof target>) => { handed.push(request); return { outcome: "queued" }; } });
@@ -59,7 +59,7 @@ test("saved improvement production wiring reaches the fresh gateway from the dae
 });
 
 
-test("saved improvement daemon command supplies durable discovery and the owned handoff", async () => {
+test("saved improvement actions start only through the daemon-owned handoff: command wiring", async () => {
   await withTempDir("improvement-command-wiring", async home => {
     const root = join(home, "Remudero"), planPath = join(home, "tasks.yaml");
     mkdirSync(join(home, ".config", "remudero"), { recursive: true }); mkdirSync(join(root, "state"), { recursive: true });

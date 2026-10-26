@@ -557,7 +557,7 @@ test("improvement planning preserves a qualified finding when another check is m
   });
 });
 
-test("saved improvement decisions remain queued across process restart without a browser handoff", async () => {
+test("saved improvement actions start only through the daemon-owned handoff: durable restart recovery", async () => {
   const planning = await planningModule();
   await withTempDir("improvement-daemon-queue", async dir => {
     const { deps, request } = sourceFixture(dir);
