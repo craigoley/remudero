@@ -502,6 +502,8 @@ export async function inspectProductRepository(
     const { id, owner, name, defaultBranch, visibility } = before.repository;
     const found = { provider: "github" as const, id, owner, name, defaultBranch, visibility };
     if (input.action === "create") return outcome("conflict", ["repository_exists"], found, creation);
+    // Metadata for a different canonical repository is never the exact target; the mutation refuses it too.
+    if (!same(owner, name)) return outcome("conflict", ["requested_repository_mismatch"], found, creation);
     if (bound && bound.id !== id) return outcome("conflict", ["bound_repository_mismatch"], found, creation);
     // Adoption needs the exact existing repository; creation capability alone never gates it.
     return outcome("ready", [], found, creation);

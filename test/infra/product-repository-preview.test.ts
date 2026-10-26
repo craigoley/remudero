@@ -87,6 +87,14 @@ test("W1-T10726: preview observes the exact repository without mutation", async 
     assert.equal(again.creation, capability);
   }
 
+  // Adoption is ready only for the exact repository: a different canonical owner or name never is.
+  provider.capabilityResult = "user";
+  for (const returned of [{ owner: "someone-else" }, { name: "other-repo" }]) {
+    provider.repo = { ...found, ...returned };
+    const drifted = await f.inspect(provider);
+    assert.deepEqual([drifted.state, drifted.reasons], ["conflict", ["requested_repository_mismatch"]]);
+  }
+
   // Creation is ready only for an absent target with available capability, in both namespace scopes.
   provider.repo = undefined;
   for (const capability of ["user", "org"] as const) {
@@ -145,6 +153,28 @@ test("W1-T10726: unavailable and conflicting metadata never reads ready", async 
   assert.equal(exists.state, "conflict");
   assert.deepEqual(exists.reasons, ["repository_exists"]);
   assert.equal(exists.repository?.id, WRECKTERRA_ID, "the conflicting repository identity is shown, not hidden");
+
+  // Valid metadata for a different canonical repository is not the exact target: the returned owner and
+  // name are each compared independently, and creation capability never rescues the mismatch.
+  for (const capability of ["user", "denied", "unknown"] as const) {
+    for (const returned of [{ owner: "someone-else" }, { name: "other-repo" }, { owner: "someone-else", name: "other-repo" }]) {
+      const drifted = new FakeProvider();
+      drifted.capabilityResult = capability;
+      drifted.repo = { ...found, ...returned };
+      const mismatch = await f.inspect(drifted);
+      assert.equal(mismatch.state, "conflict", `returned ${JSON.stringify(returned)} with capability ${capability}`);
+      assert.deepEqual(mismatch.reasons, ["requested_repository_mismatch"]);
+      assert.ok(!ready(mismatch));
+      assert.equal(mismatch.repository?.id, WRECKTERRA_ID, "the repository the provider actually returned is shown");
+      assert.equal(mismatch.repository?.owner, returned.owner ?? found.owner);
+      assert.equal(mismatch.repository?.name, returned.name ?? found.name);
+      assert.deepEqual(drifted.mutations(), []);
+    }
+  }
+  // Canonical casing differences are the same repository, not a mismatch.
+  const recased = new FakeProvider();
+  recased.repo = { ...found, owner: "CraigOley", name: "WreckTerra" };
+  assert.equal((await f.inspect(recased)).state, "ready", "owner and name compare case-insensitively");
 
   // A different owner or name than the product requested is a conflict decided before any provider read.
   const untouched = new FakeProvider();
