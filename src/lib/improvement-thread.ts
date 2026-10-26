@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync, readSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
+import { opendir } from "node:fs/promises";
 import { systemClock, type Clock } from "./clock.js";
 import { CODE_HEALTH_POLICY_VERSION } from "./code-health-collector.js";
 import { codeHealthRepositoryStateDir, readCodeHealthArtifactJson, readCodeHealthCollectionFailure, readCodeHealthSnapshot } from "./code-health-store.js";
@@ -430,7 +431,7 @@ function resultStatus(result: { state: string }): number {
 }
 
 /** Every write uses the service's existing authentication and tier admission. No client supplies a store path. */
-export function buildImprovementThreadRoutes(options: { stateDir: string; clock?: Clock; launchAction?: ImprovementActionDeps["launchAction"] }): Route[] {
+export function buildImprovementThreadRoutes(options: { stateDir: string; clock?: Clock }): Route[] {
   return [
     { method: "POST", path: "/v1/improvements/threads", scope: "write", tier: "low", handler: jsonAction(
       body => { const request = requestInput(body); return request ?? { error: "Choose a saved repository finding, a goal, constraints, and a request identity." }; },
@@ -484,8 +485,6 @@ export interface ImprovementAction {
   receipt: ImprovementPlanReceipt | null;
 }
 export interface ImprovementActionDeps extends ImprovementThreadDeps {
-  /** Starts only the owned fresh-source CLI handoff. A request receipt is not a completed action. */
-  launchAction?: (target: { operationId: string; stateDir: string; repoRoot: string }) => void;
   /** Decision-write interruption seam; never accepted in an API request. */
   afterActionPersist?: (stage: "prepared" | "indexed" | "requested") => void;
 }
@@ -538,7 +537,7 @@ function actionTarget(intent: Intent): { operationId: string; stateDir: string; 
   return { operationId: "", stateDir: "", repoRoot: dirname(dirname(intent.scope.planPath)) };
 }
 
-/** Save the explicit decision before requesting an owned CLI handoff. Filing binds the exact reviewed draft. */
+/** Save a sealed decision for the daemon. Filing binds the exact reviewed draft. */
 export async function requestImprovementAction(kind: ImprovementAction["kind"], value: unknown, deps: ImprovementActionDeps): Promise<ImprovementActionResult> {
   const input = actionInput(value, kind);
   if (!input || !text(deps.actorId, 256)) return fail("invalid_request", "Use this conversation's current goal and an explicit request identity.");
@@ -561,7 +560,6 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
     const previous = readAction(deps.stateDir, operationId), payloadHash = hash([kind, input]);
     if (previous && (previous.payloadHash !== payloadHash || previous.actorId !== deps.actorId)) return fail("conflict", "This action identity was already used for a different decision.");
     if (previous && ["completed", "refused", "uncertain"].includes(previous.state)) {
-      if (previous.state === "uncertain" && previous.kind === "file" && deps.launchAction) deps.launchAction({ ...actionTarget(intent), operationId, stateDir: deps.stateDir });
       return { state: "requested", operation: previous, execution: { state: "not_requested" } };
     }
     if (kind === "file" && (!previous || previous.state === "prepared")) {
@@ -588,7 +586,6 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
     }
     if (kind === "file" && (view.correspondence.state !== "linked" || view.correspondence.pendingInputs !== 0 || view.correspondence.pendingWork !== 0)) return fail("conflict", "A newer chat message has not been resolved. Review its answer and the current draft before filing.");
     if (kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== input.draftDigest)) return fail("conflict", "Review the current completed draft before requesting filing.");
-    if (deps.launchAction === undefined) return fail("source_unavailable", "This repository cannot start plan drafting or filing right now. No action was requested.");
     const action: ImprovementAction = previous ?? { version: "improvement-action-v1", operationId, kind, requestId: input.requestId, proposalId: intent.proposalId,
       actorId: deps.actorId, payloadHash, goalDigest: input.goalDigest, draftDigest: input.draftDigest ?? null, requestedAt: (deps.clock ?? systemClock).iso(), state: "prepared", reason: null, receipt: null };
     if (!previous || action.state === "prepared") {
@@ -611,9 +608,7 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
       syncProposalRegistryEntry(registryPath, intent.proposalId);
     }
     if (!owns()) return fail("uncertain", "The decision was saved, but its writer changed before handoff.");
-    // The worker independently takes the same conversation lock and revalidates source, goal and draft.
-    // Only pending work is re-handed off; completed or ambiguous filing is never blindly repeated.
-    if (["requested", "waiting"].includes(action.state)) deps.launchAction({ ...actionTarget(intent), operationId, stateDir: deps.stateDir });
+    // The daemon discovers this durable request without a browser or a service-side launcher.
     return { state: "requested", operation: action, execution: { state: "not_requested" } };
   } catch {
     // A saved decision can precede a failed handoff. Recovery must inspect the operation, not invent success.
@@ -622,6 +617,27 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
     // Losing the request lease refuses every write; it does not transfer our separate resource lease.
     if (lock && ownsResource?.()) lock.release();
     if (requestOwner && ownsRequest?.()) requestOwner.release();
+  }
+}
+
+/** Stream the complete population; a damaged queue is reported rather than interpreted as empty. */
+export async function* pendingImprovementActions(stateDir: string): AsyncGenerator<{ operationId: string; stateDir: string; repoRoot: string }> {
+  let directory: Awaited<ReturnType<typeof opendir>>;
+  try { directory = await opendir(join(stateDir, "improvement-threads", "actions")); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+  let visited = 0;
+  for await (const entry of directory) {
+    if (++visited % 32 === 0) await new Promise<void>(resolve => setImmediate(resolve));
+    if (!/^[a-f0-9]{64}\.json$/.test(entry.name)) continue;
+    if (!entry.isFile()) throw new Error("A saved action is not a regular file.");
+    const operationId = entry.name.slice(0, -5), action = readAction(stateDir, operationId);
+    if (!action) throw new Error("A saved action disappeared during discovery.");
+    if (!["requested", "waiting"].includes(action.state) && !(action.state === "uncertain" && action.kind === "file")) continue;
+    const intent = readIntent(join(stateDir, "improvement-threads", `${action.requestId}.json`));
+    if (!intent || intent.stage !== "saved" || intent.proposalId !== action.proposalId) throw new Error("The queued action's saved conversation cannot be verified.");
+    const scope = scopeFor(intent.request, stateDir);
+    if ("state" in scope || hash(scope) !== hash(intent.scope)) throw new Error("The queued action's registered repository store changed.");
+    yield { ...actionTarget(intent), operationId, stateDir };
   }
 }
 

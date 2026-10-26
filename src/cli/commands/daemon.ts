@@ -1,4 +1,6 @@
 import type { LifetimeIndexFailure } from "../../lib/lifetime-identity-index.js";
+import { pendingImprovementActions } from "../../lib/improvement-thread.js";
+import type { RatifyCliGateway } from "../../lib/panel-graph.js";
 /**
  * W1-T9333 — the `daemon` verb's handler, moved out of `src/run-task.ts` (decomposition: one verb per module).
  * `daemonCommand` is the unchanged body; the run-task.ts symbols it reaches arrive through {@link DaemonCommandHost}
@@ -116,6 +118,16 @@ import { type TickReadOptions, startTickReadWorker, tickReadWorkerUrl, fetchCiFa
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type HostFn = (...args: any[]) => any;
+
+export function daemonImprovementActionDeps(stateDir: string, gateway: RatifyCliGateway) {
+  return {
+    pendingImprovementActions: () => pendingImprovementActions(stateDir),
+    runImprovementAction: async (target: { operationId: string; stateDir: string; repoRoot: string }) => {
+      if (!gateway.improvement) throw new Error("The daemon's fresh-source improvement gateway is unavailable.");
+      return gateway.improvement(target);
+    },
+  };
+}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type HostValue = any;
 export interface DaemonCommandHost {
@@ -1621,6 +1633,7 @@ export async function daemonCommand(
         // commands. Their own disposition, strike, worktree and review-lock gates remain the
         // authority -- an action request is never a bypass.
         pendingPrActions: () => pendingPrActions(config.root),
+        ...daemonImprovementActionDeps(join(config.root, "state"), fleetRatify),
         livenessPulse: true,
         ...(target.isSelf
           ? {

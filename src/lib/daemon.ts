@@ -1592,6 +1592,8 @@ export interface DaemonDeps {
    * consumes at most one per poll and keeps final fix/review authority in its established command
    * path; the HTTP writer never starts a process. */
   pendingPrActions?: () => Array<{ action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string; operator?: string }>;
+  pendingImprovementActions?: () => AsyncIterable<{ operationId: string; stateDir: string; repoRoot: string }>;
+  runImprovementAction?: (target: { operationId: string; stateDir: string; repoRoot: string }) => Promise<unknown>;
   /** Clear the request only after its established command reaches a named terminal outcome. */
   clearPrAction?: (action: "fix" | "review", prNumber: number) => void;
   /** W1-T4087: writes plain-language messages for operator-owned inbox items that have none yet,
@@ -3338,6 +3340,34 @@ export { checkDispatchGovernors, type DispatchGovernorVerdict } from "./dispatch
  * (action, PR). The marker is cleared when its run settles, exactly as before, so an unfinished request survives a
  * restart and is picked up again.
  */
+export function startImprovementActionPump(
+  deps: Pick<DaemonDeps, "pendingImprovementActions" | "runImprovementAction" | "checkStop" | "checkPause">,
+  intervalMs: number,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): { stop(): void; settled(): Promise<void>; isBusy(): boolean } {
+  const pending = deps.pendingImprovementActions, run = deps.runImprovementAction;
+  if (!pending || !run) return { stop() {}, settled: async () => {}, isBusy: () => false };
+  let stopped = false, pass: Promise<void> | undefined;
+  const tick = (): void => {
+    if (stopped || pass) return;
+    pass = (async () => {
+      if (resolveFleetControlHold(deps)) return;
+      for await (const target of pending()) {
+        if (stopped || resolveFleetControlHold(deps)) break;
+        log("improvement.action_started", { operation_id: target.operationId });
+        try {
+          const result = await run(target);
+          log("improvement.action_handoff_settled", { operation_id: target.operationId, result });
+        } catch (error) {
+          log("improvement.action_handoff_failed", { operation_id: target.operationId, error: String(error) });
+        }
+      }
+    })().catch(error => { log("improvement.action_read_failed", { error: String(error) }); }).finally(() => { pass = undefined; });
+  };
+  const timer = setInterval(tick, Math.max(1, intervalMs)); timer.unref?.(); tick();
+  return { stop: () => { stopped = true; clearInterval(timer); }, settled: async () => { await pass; }, isBusy: () => pass !== undefined };
+}
+
 export function startPrActionPump(
   deps: Pick<DaemonDeps, "pendingPrActions" | "runPrAction" | "clearPrAction">,
   intervalMs: number,
@@ -4123,6 +4153,7 @@ export async function runDaemon(
 
   // W1-T4077: stopped by `summary`, which every exit path of this function returns through.
   const prActionPumpRef: { stop: () => void; isBusy: () => boolean } = { stop: () => {}, isBusy: () => false };
+  const improvementActionPumpRef = { stop: () => {}, isBusy: () => false };
   // W1-T4087: its own timer, so a main loop busy for many minutes never delays a plain message.
   const plainBackfill = deps.plainBackfill ? startPlainBackfill(deps.plainBackfill, pollIntervalMs, log) : undefined;
   const recommendationBackfill = deps.recommendationBackfill ? startRecommendationBackfill(deps.recommendationBackfill, pollIntervalMs, log) : undefined;
@@ -4165,7 +4196,7 @@ export async function runDaemon(
     try { if (pauseReview.clock) await stopPauseReviewClock(report); }
     catch (reason) { /* Retained in the cleanup AggregateError, after every other stop is attempted. */ failures.push(reason); }
     for (const stop of [
-      () => prActionPumpRef.stop(), () => plainBackfill?.stop(), () => recommendationBackfill?.stop(), () => fleetLane?.stop(),
+      () => prActionPumpRef.stop(), () => improvementActionPumpRef.stop(), () => plainBackfill?.stop(), () => recommendationBackfill?.stop(), () => fleetLane?.stop(),
       () => inboxResponder?.stop(), () => gardenerRef.stop(), () => livenessPulse?.stop(),
     ]) {
       try { stop(); }
@@ -4208,6 +4239,9 @@ export async function runDaemon(
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;
+  const improvementActionPump = startImprovementActionPump(deps, pollIntervalMs, log);
+  improvementActionPumpRef.stop = improvementActionPump.stop;
+  improvementActionPumpRef.isBusy = improvementActionPump.isBusy;
   // W1-T5720 — THE BOOT GATE. Tick 1 runs a light pass at once, then holds its cadences until the first full
   // pass returns or the BACKSTOP passes (10-05: first `sweep.pass` 6.7-15.8 min after `daemon.boot`). It holds
   // only what is wired: with nothing to defer, tick 1's admission keeps W1-T4998's no-wait contract.
@@ -6863,7 +6897,7 @@ export async function runDaemon(
               }
             });
             if (!hasUnblockedTask && !(await stopInterphaseReviewClock()) &&
-              !prActionPumpRef.isBusy() && (!plainBackfill || !plainBackfill.isBusy()) && (!recommendationBackfill || !recommendationBackfill.isBusy()) &&
+              !prActionPumpRef.isBusy() && !improvementActionPumpRef.isBusy() && (!plainBackfill || !plainBackfill.isBusy()) && (!recommendationBackfill || !recommendationBackfill.isBusy()) &&
               (!inboxResponder || !inboxResponder.isBusy()) &&
               !deps.pendingKicks?.().length && !deps.pendingPrActions?.().length) {
               log("daemon.idle_starved.enter", { repo: deps.targetRepo, open_prs: 0, plan_tasks: planForBatch.tasks.length });

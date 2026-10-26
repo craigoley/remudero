@@ -3094,7 +3094,7 @@ import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { memoryStoreReadFailure, readMemoryLedger } from "./lib/host-memory-ledger.js";
 import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold, type MemoryReadSource, type MemoryReadTracker } from "./lib/dispatch-governor.js";
 import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
-import { withSyncChildReservation } from "./lib/host-memory-learning.js";
+import { daemonOwnedProcess, withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
 import { installStarvationAlertSink } from "./lib/host-memory-admission.js";
 import { buildYieldsToRepair } from "./lib/repair-memory-demand.js";
@@ -35953,9 +35953,11 @@ export async function improvementActionCommand(rest: string[], deps: {
   clock?: Clock;
   draftHook?: typeof buildInboxDraftHook;
   approve?: typeof approveCommandMirrored;
+  isDaemonOwned?: () => boolean;
 } = {}): Promise<number> {
   const bad = unknownArgError("improvement-action", rest.slice(1), ["--state-dir"], []), operationId = rest[0];
   if (bad || !operationId || !/^[a-f0-9]{64}$/.test(operationId)) { console.error("rmd improvement-action: use a saved action identity and its fleet state directory"); return 2; }
+  if (!(deps.isDaemonOwned ?? daemonOwnedProcess)()) { console.error("rmd improvement-action: saved actions run only through the daemon's admitted workflow"); return 1; }
   const config = deps.config ?? loadConfig(), stateDir = flagValue(rest, "--state-dir");
   if (!stateDir || resolve(stateDir) !== resolve(config.root, "state")) { console.error("rmd improvement-action: the request store must belong to this configured fleet"); return 2; }
   const identity = resolveOwnerRepo(), repository = `${identity.owner}/${identity.repo}`.toLowerCase();
