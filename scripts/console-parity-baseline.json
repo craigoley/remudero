@@ -94,6 +94,7 @@
     "up",
     "verdict-calibration",
     "verify-human-sweep",
-    "wipe-test"
+    "wipe-test",
+    "improvement-action"
   ]
 }
