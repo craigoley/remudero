@@ -14,6 +14,33 @@ import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { inboxThreadIdentity, readThread, appendThreadMessage } from "#src/lib/inbox-thread.js";
 
+test("improvement filing receipts retain task identities across ledger rotation", async () => {
+  const { appendLedger, rotateLedger } = await import("#src/lib/ledger.js");
+  const { readLedgerLines } = await import("#src/lib/status.js");
+  const { improvementNativeFilingReceipt } = await import("#src/run-task.js");
+  await withTempDir("improvement-filing-rotation", dir => {
+    const ledgerPath = join(dir, "ledger.ndjson"), clock = fixedClock(Date.now());
+    const proposalId = "improvement-rotation", run_id = "APPROVE-rotation-receipt";
+    const taskIds = ["W1-T99998", "W1-T99999"];
+    appendLedger(ledgerPath, { ts: clock.iso(), run_id, task_id: proposalId, proposal_id: proposalId,
+      step: "approve.id_materialized", ids: taskIds });
+    appendLedger(ledgerPath, { ts: clock.iso(), run_id, task_id: proposalId, step: "ratify.approved",
+      pr_url: "https://github.com/acme/atlas/pull/123", branch: "ratify-improvement-rotation" });
+    const before = improvementNativeFilingReceipt(ledgerPath, proposalId, "acme/atlas", clock);
+    assert.equal(before?.taskIdsState, "observed"); assert.deepEqual(before?.taskIds, taskIds);
+    for (let n = 0; n < 250; n++) appendLedger(ledgerPath, { ts: clock.iso(), run_id: `noise-${n}`,
+      task_id: "ANALYTICS", step: "ci.polling", detail: "x".repeat(64) });
+    const rotation = rotateLedger(ledgerPath, { ceilingBytes: 2000 });
+    assert.equal(rotation.rotated, true, "the fixture must actually rotate its populated ledger");
+    const live = readLedgerLines(ledgerPath);
+    assert(live.some(row => row.step === "ratify.approved"), "the native approval must remain readable");
+    assert.equal(live.some(row => row.step === "ci.polling"), false, "display-only noise must leave the live deciding corpus");
+    const recovered = improvementNativeFilingReceipt(ledgerPath, proposalId, "acme/atlas", clock);
+    assert.equal(recovered?.taskIdsState, "observed"); assert.deepEqual(recovered?.taskIds, taskIds);
+    assert.deepEqual(recovered, before, "rotation must preserve the complete native filing receipt");
+  });
+});
+
 test("improvement conversation messages are saved once through the native thread store", async () => {
   const { appendThreadMessageOnce } = await import("#src/lib/inbox-thread.js");
   assert.equal(typeof appendThreadMessageOnce, "function", "the durable native writer must exist");
