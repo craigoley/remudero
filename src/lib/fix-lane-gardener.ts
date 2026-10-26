@@ -402,10 +402,15 @@ export function defectEventsOf(records: readonly LedgerRecord[], now: number, so
       const reason = String(r.reason ?? "");
       if (site === "rung.empty_ci_failures") add(r, "red-no-actionable-test", `required checks red with no failing test extractable from the CI log: ${reason}`);
       else add(r, `stood-down:${site}:${reasonClass(reason)}`, reason);
-    } else if (r.step === "sweep.disposed" && r.blocker === "own-red" && typeof r.head_sha === "string" && pushed.has(r.head_sha)) {
+    } else if (r.step === "sweep.disposed" && typeof r.head_sha === "string" && pushed.has(r.head_sha)) {
       const fixed = pushed.get(r.head_sha)!;
-      pushed.delete(r.head_sha);
-      add(r, "fixed-still-red", `a FIXED push ${r.head_sha.slice(0, 9)} is still red on the next sweep${quote(fixed.done.worker_tail)}`, pr || fixed.pr);
+      if (pr > 0 && fixed.pr > 0 && pr !== fixed.pr) continue;
+      // A pending sweep says nothing about the repair. A mergeable head has cleared it; a later
+      // rerun going red must not resurrect the old FIXED round as a failed repair.
+      if (r.blocker === "own-red") {
+        pushed.delete(r.head_sha);
+        add(r, "fixed-still-red", `a FIXED push ${r.head_sha.slice(0, 9)} is still red on the next sweep${quote(fixed.done.worker_tail)}`, pr || fixed.pr);
+      } else if (["awaiting-arm", "armed-idle", "operator-hold"].includes(String(r.blocker))) pushed.delete(r.head_sha);
     } else if (r.step === "automerge.arm_skipped" && pr > 0) {
       const armed = [...rows].reverse().find(d => d.step === "sweep.disposed" && d.disposition === "mergeable" && d.acted === true &&
         Number(d.pr_number) === pr && tsOf(d) <= tsOf(r) && tsOf(r) - tsOf(d) <= 10 * 60_000);

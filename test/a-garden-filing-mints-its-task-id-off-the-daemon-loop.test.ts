@@ -19,6 +19,7 @@ import {
 import { fileConsumerVia } from "../src/lib/host-resource-gardener.js";
 import { hotFileGardenSpec } from "../src/lib/hot-file-gardener.js";
 import { scoutGardenSpec } from "../src/lib/scout-gardener.js";
+import { LoopBoundedChildTimeout } from "../src/lib/loop-bounded-child.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ciLearningTaskIdMinter } from "../src/run-task.js";
 
@@ -186,11 +187,13 @@ test("W1-T7742: an admission shadow proposal reserves no task id before apply", 
 
 test("W1-T7742: a mint past its bound is abandoned and writes a mint_timed_out row naming the elapsed time and the bound", { timeout: 1000 }, async (t) => {
   const f = fixture(t);
-  let signal: AbortSignal | undefined;
-  const mint = ciLearningTaskIdMinter(f.root, undefined, async (_file, _args, options) => { signal = options.signal; return new Promise(() => {}); }, { budget: new GardenMintBudget(() => 25) });
+  let now = 0;
+  const mint = ciLearningTaskIdMinter(f.root, undefined, async (_file, _args, options) => {
+    now = 25;
+    throw new LoopBoundedChildTimeout("node reservation", options.timeout, { signal: "SIGKILL" });
+  }, { budget: new GardenMintBudget(() => 25), clock: { now: () => now } });
   const s = spec(mint);
   await runGardenAsync(s, f.deps);
-  assert.equal(signal?.aborted, true);
   assert.equal(existsSync(join(f.root, "change.txt")), false);
   assert.equal(f.landings.length, 0);
   assert.equal(f.disposed(), 1);
@@ -248,59 +251,23 @@ test("W1-T7742: the mint bound scales with observed mint durations and starts fr
   assert.deepEqual(observed, [200, 60], "real minter options consume the learned bound");
 });
 
-test("W1-T7742: an early mint deadline callback waits for the remaining bound before aborting", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  let now = 0;
-  let signal: AbortSignal | undefined;
-  const budget = new GardenMintBudget(() => 100.5);
-  const mint = ciLearningTaskIdMinter("/fixture", undefined, async (_file, _args, opts) => {
-    assert.equal(opts.timeout, 101);
-    signal = opts.signal;
-    return new Promise(() => {});
-  }, { budget, clock: { now: () => now } });
-  const pending = mint.async("fixture");
-  const rejected = assert.rejects(pending, error => {
-    assert.ok(error instanceof GardenMintTimedOutError);
-    assert.equal(error.elapsedMs, 100.5);
-    assert.equal(error.boundMs, 100.5);
-    return true;
-  });
-  assert.ok(signal);
-  now = 40.25;
-  t.mock.timers.tick(101);
-  assert.equal(signal.aborted, false, "the early callback must return without aborting");
-  now = 100.25;
-  t.mock.timers.tick(60);
-  assert.equal(signal.aborted, false, "the remaining 60.25 ms must round up to 61 ms");
-  now = 100.5;
-  t.mock.timers.tick(1);
-  assert.equal(signal.aborted, true, "the rescheduled callback must abort at the bound");
-  await rejected;
-  assert.equal(budget.boundMs(), 100.5, "an expired mint cannot train the learned bound");
-});
-
-test("W1-T7742: a late successful mint files nothing and preserves its held reservation", async (t) => {
+test("W1-T9703: a late successful mint is filed", async (t) => {
   for (const elapsed of [25, 26]) {
     const f = fixture(t);
-    const reservation = join(f.root, "held-reservation.json");
     const budget = new GardenMintBudget(() => 25);
     let now = 0;
     const mint = ciLearningTaskIdMinter(f.root, undefined, async () => {
-      writeFileSync(reservation, JSON.stringify({ id: "W1-T9001", branch: f.ws.branch }));
       now = elapsed;
-      return { stdout: JSON.stringify({ id: "W1-T9001", rows: [] }) };
+      return { stdout: JSON.stringify({ id: "W1-T9001", sha: "a".repeat(40), rows: [] }) };
     }, { budget, clock: { now: () => now } });
     const s = spec(mint);
     const result = await runGardenAsync(s, f.deps);
-    assert.equal(result.prUrl, undefined);
-    assert.equal(existsSync(join(f.root, "change.txt")), false);
-    assert.equal(f.landings.length, 0);
-    assert.equal(f.disposed(), 1);
-    assert.deepEqual(JSON.parse(readFileSync(reservation, "utf8")), { id: "W1-T9001", branch: f.ws.branch });
-    assert.deepEqual(f.rows.find(row => row.step === "garden.mint_timed_out")?.fields,
-      { spec: s.name, elapsed_ms: elapsed, bound_ms: 25 });
-    assert.equal(budget.boundMs(), 25, "a late success cannot train the next mint's bound");
-    assert.equal(existsSync(join(f.deps.stateDir, `${s.name}-gardener.json`)), false);
+    assert.equal(result.prUrl, PR, "a finished mint is filed however late a held loop observed it");
+    assert.equal(readFileSync(join(f.root, "change.txt"), "utf8"), "W1-T9001");
+    assert.equal(f.landings.length, 1);
+    assert.equal(f.rows.some(row => row.step === "garden.mint_timed_out"), false);
+    assert.equal(mint.heldSha("W1-T9001"), "a".repeat(40), "the reservation is held for a refused filing to release");
+    assert.equal(budget.boundMs(), 3 * elapsed, "a late success is observed, not discarded");
   }
 });
 

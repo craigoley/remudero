@@ -1,0 +1,60 @@
+- id: W1-T10649
+  title: Verify real React source call sites under the existing task-linter guard
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 15
+  risk: medium
+  origin: operator-request#wreckterra-console-product-2026-10-25
+  plan_refs:
+    - W1-T9307
+    - W1-T10614
+  files:
+    - src/lib/task-linter.ts
+    - test/plan/react-source-call-sites-are-verified.test.ts
+  status: queued
+  attempts: 0
+  rationale: >-
+    The authorized React/Vite Wreckterra starter is merged and provides real
+    src/App.tsx and src/game/VehicleScene.tsx callers. Its held six-task plan
+    passes the maintained plan-only predicate at be3eed1 but changed-plan lint
+    blocks five production call-site proofs because callSiteViolations only
+    accepts paths ending in .ts. This is a language-extension gap in the existing
+    guard, not permission to invent a .ts caller or waive reachability. A fresh
+    subject sweep of all 18 open PR head trees against main
+    b4ecac14532406a2a9c4514913a54a88a26d230e had 54 positive matches and found
+    no implementation recognizing TSX in that function. Existing route, ownership,
+    budget, admission and gameplay holds remain in force.
+  design: >-
+    Extend the existing source-path classification in callSiteViolations to
+    include TypeScript React .tsx alongside .ts, for both declared new source
+    modules and held production caller proof targets. Reuse the maintained
+    proof parser, require the invocation open parenthesis, an actual existing
+    src file and a caller distinct from the created module. Preserve .ts
+    behavior, test-only and missing callers, self proofs, wildcard refusal
+    and added-export discrimination. Newly created TSX modules must be checked
+    by the same guard; do not exempt them, lower severity, manufacture a caller,
+    add a baseline, or loosen another proof family. Add behavioral cases through
+    the real pure function, including the observed App.tsx caller, missing and
+    test-only TSX callers, a newly created TSX module with no consumer, valid
+    .ts callers and mention-only proofs. Keep actual JSX component usage valid;
+    do not call React components as plain functions to satisfy a regex. The own
+    falsifier path was computed from its task-linter import: plan, high confidence.
+  acceptance:
+    - claim: An existing React production caller satisfies the same call-site guard as TypeScript
+      proof: 'unit test: real React source callers satisfy the production call-site guard'
+    - claim: Missing test-only and self TSX callers remain refused
+      proof: 'unit test: React call-site proofs still require an existing distinct production caller'
+    - claim: A newly created React module must prove production reachability
+      proof: 'unit test: new React source modules cannot evade the call-site guard'
+    - claim: Existing TypeScript callers and invocation discrimination are preserved
+      proof: 'unit test: React support preserves TypeScript caller and invocation controls'
+  falsifier: >-
+    Restore the .ts-only caller check and prove the real App.tsx case fails.
+    Separately restore .ts-only declared-source classification and prove the
+    new unconsumed TSX module escapes the guard, failing its test. Restore the
+    implementation and require a genuine nonzero test summary with zero failures.

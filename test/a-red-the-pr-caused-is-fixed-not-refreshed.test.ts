@@ -533,3 +533,41 @@ test("W1-T8396: the trial merge really merges the head through the hardened leaf
   assert.deepEqual(seen, ["base.txt", "head.txt"], "the probe ran on a tree holding both main's and the head's commits");
   assert.equal(existsSync(join(root, "worktrees", `base-repro-${main.slice(0, 12)}-merge-${head.slice(0, 12)}`)), false, "the probe tree is removed");
 });
+
+
+test("a trial-merge refusal prevents the ordinary refresh judge from replacing the same red head", async () => {
+  const h = harness([mainHealth()], { baseChanged: ["src/lib/sweep.ts"], merged: "fails" });
+  h.deps.behindMainByPr = new Map([[PR, 50]]);
+  h.deps.baseChangedFilesByPr = new Map([[PR, { files: [], truncated: true }]]);
+  h.deps.readBranchProtectionStrict = () => false;
+  let judgments = 0;
+  h.deps.refreshJudge = async () => { judgments++; return "overlap"; };
+  await runSweep([redPr({ lastActivityAt: ago(60) }), peer()], h.deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(clearances(h.rows)[0]?.refresh, false, "the real trial merge refuses this head and main");
+  assert.equal(clearances(h.rows)[0]?.merged_verdict, "reproduced");
+  assert.deepEqual(h.merges, [`${HEAD}+${MAIN}`]);
+  assert.deepEqual(h.fixed, [PR], "the original repair route retains the PR's own red");
+  assert.deepEqual(h.refreshed, [], "ordinary overlap cannot overrule the measured failure");
+  assert.equal(judgments, 0, "a recorded refusal needs no overlap model call");
+});
+
+
+test("a recorded refresh refusal stays bound to its exact red head and main", async () => {
+  for (const control of ["same", "other-head", "other-main", "green", "unread-main"] as const) {
+    const refusal = { step: "refresh.clearance", pr_number: PR,
+      head_sha: control === "other-head" ? "prior-head" : HEAD,
+      main_sha: control === "other-main" ? "prior-main" : MAIN,
+      refresh: false, evidence: "merged-probe", merged_verdict: "reproduced", test_files: [FILE], checks: [CHECK] };
+    const h = harness([mainHealth(), refusal], {});
+    h.deps.behindMainByPr = new Map([[PR, 50]]);
+    h.deps.baseChangedFilesByPr = new Map([[PR, { files: [], truncated: true }]]);
+    h.deps.readBranchProtectionStrict = () => false;
+    if (control === "unread-main") h.deps.readMainTip = () => undefined;
+    let judgments = 0;
+    h.deps.refreshJudge = async () => { judgments++; return "overlap"; };
+    await runSweep([redPr({ checksState: control === "green" ? "green" : "red", ciFailures: [], lastActivityAt: ago(60) }), peer()], h.deps, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(h.refreshed, control === "same" ? [] : [PR], control);
+    assert.equal(judgments, control === "same" ? 0 : 1, control);
+    assert.deepEqual(h.merges, [], "recorded evidence introduces no new probe");
+  }
+});

@@ -19,6 +19,9 @@
     - src/lib/daily-progress-calendar.ts
     - scripts/expiring-fixture-census.mjs
     - test/view-etags-are-deterministic.test.ts
+    - test/a-view-lane-constructs-only-the-views-it-owns.test.ts
+    - test/every-view-body-matches-its-schema.test.ts
+    - test/read-model-worker.test.ts
     - src/lib/daily-progress-store.ts
     - src/lib/daily-progress-collector.ts
     - src/lib/daily-progress-view.ts

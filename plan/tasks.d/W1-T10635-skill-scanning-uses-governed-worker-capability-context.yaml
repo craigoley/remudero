@@ -10,7 +10,10 @@
   dispatch_hold: true
   risk: high
   band_meaning: blast-radius
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=f501bc985e1299ea
+  # backlog gardener: placed=2026-10-25T20:57:31.291Z
   attempts: 0
   author_class: machine
   origin: "skill-conformance-context:W1-T10135-scanner-observation-20261025"
@@ -45,5 +48,5 @@
     confidence: 1
     reasons:
       - "deterministic backstop: it touches secrets, auth, tokens or permissions (\"permissions\") — irreversible or privileged work goes to a person"
-    judged_at: "2026-10-25T18:50:06.720Z"
-    pin: "895f329d885b8bf5f6c47f653a2d0c1a41e7c38fcfa4877a07b27db0f9a8c4b6"
+    judged_at: "2026-10-25T21:43:33.728Z"
+    pin: "b4c3e42d1bf1ca8e7d7a0d77e9114d0e4612d248af24693e48083c85ef275b37"
