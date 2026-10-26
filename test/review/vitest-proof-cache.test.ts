@@ -227,7 +227,7 @@ test("W1-T10675: cache failures preserve proof errors and release only owned scr
     symlinkSync(outside, markerFile);
     const symlinked = (swapped as { release(): { released: boolean; error?: string } }).release();
     assert.equal(symlinked.released, false, "a marker swapped for a symlink is never followed");
-    assert.ok(existsSync(swappedPath));
+    assert.deepEqual(readdirSync(swappedPath), [PROOF_CACHE_OWNER_FILE], "the refused directory and its swapped marker are kept");
     rmSync(swappedPath, { recursive: true, force: true });
     rmSync(outside, { force: true });
 

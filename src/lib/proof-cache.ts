@@ -1,6 +1,6 @@
 /** Proof-owned Vitest 5 module caches. Every invocation starts empty; shared installs stay untouched. */
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, type Stats } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync, type Stats } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
@@ -94,15 +94,17 @@ export function createProofCache(input: ProofCacheInput, deps: Partial<Pick<type
     if (owner === undefined) return { released: false, error: "cache scratch ownership was not established" };
     try {
       if (dirname(path) !== cwd || !basename(path).startsWith(PROOF_CACHE_DIR_PREFIX + identity + "-")) throw new Error("cache directory ownership changed");
-      // Open directly (no prior stat of the path) and judge everything on that one no-follow handle;
-      // a missing entry surfaces as ENOENT from the open itself rather than from a test-then-use gap.
+      // Open directly (no prior stat of the path) and judge everything on that one no-follow, non-blocking
+      // handle: a bounded read first, then fstat of the same descriptor, so no check precedes a use.
       let markerError: unknown;
       if (markerWritten) {
         try {
-          const fd = openSync(join(path, PROOF_CACHE_OWNER_FILE), constants.O_RDONLY | constants.O_NOFOLLOW);
+          const fd = openSync(join(path, PROOF_CACHE_OWNER_FILE), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
           try {
+            const bytes = Buffer.alloc(1025);
+            const length = readSync(fd, bytes, 0, bytes.length, 0);
             const info = fstatSync(fd);
-            if (!info.isFile() || info.uid !== owner.uid || info.nlink !== 1 || info.size > 1024 || readFileSync(fd, "utf8") !== marker) throw new Error("cache owner marker changed");
+            if (!info.isFile() || info.uid !== owner.uid || info.nlink !== 1 || info.size > 1024 || length !== info.size || bytes.toString("utf8", 0, length) !== marker) throw new Error("cache owner marker changed");
           } finally { closeSync(fd); }
         } catch (error) { markerError = error; }
       }
