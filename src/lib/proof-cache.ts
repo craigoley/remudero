@@ -55,12 +55,6 @@ export interface ProofCacheInput {
   /** Actual scoped proof argv and label; source root, runner bytes and lockfile are bound below. */
   identity: readonly string[];
 }
-export interface ProofCacheDeps {
-  mkdtemp?: (prefix: string) => string;
-  remove?: (path: string) => void;
-  writeMarker?: (path: string, value: string) => void;
-  capability?: (cwd: string) => ProofCacheCapability;
-}
 
 export class ProofCacheUnavailableError extends RmdError {
   constructor(reason: string) { super("usage", GENERIC_EXIT_CODE, "proof cache unavailable: " + reason); }
@@ -76,7 +70,7 @@ export function proofCacheIdentity(identity: readonly string[]): string {
 const sameDirectory = (a: Stats, b: Stats): boolean => b.isDirectory() && !b.isSymbolicLink() && a.dev === b.dev && a.ino === b.ino && a.uid === b.uid;
 
 /** Never merge a failed shared-cache preparation into the ordinary-install path. */
-export function createProofCache(input: ProofCacheInput, deps: ProofCacheDeps = {}): ProofCachePreparation {
+export function createProofCache(input: ProofCacheInput, deps: Partial<Pick<typeof import("node:fs"), "mkdtempSync" | "rmSync" | "writeFileSync">> = {}): ProofCachePreparation {
   let cwd: string;
   let capability: ProofCacheCapability;
   try {
@@ -84,14 +78,14 @@ export function createProofCache(input: ProofCacheInput, deps: ProofCacheDeps = 
     if (!modules.isDirectory() && !modules.isSymbolicLink()) return { kind: "unavailable", reason: "node_modules is not a directory or shared link" };
     if (!hasSharedInstall(input.cwd)) return { kind: "ordinary", reason: "ordinary install keeps its own cache" };
     cwd = realpathSync(input.cwd);
-    capability = (deps.capability ?? vitestCacheCapability)(input.cwd);
+    capability = vitestCacheCapability(input.cwd);
   } catch (error) {
     return { kind: "unavailable", reason: "shared install cannot be inspected (" + errorCode(error) + ")" };
   }
   if (!capability.supported) return capability.required ? { kind: "unavailable", reason: capability.reason } : { kind: "ordinary", reason: capability.reason };
   const identity = proofCacheIdentity([cwd, capability.version, capability.installIdentity, ...input.identity]);
   const marker = JSON.stringify({ token: randomBytes(12).toString("hex"), identity, version: capability.version });
-  const remove = deps.remove ?? ((path: string) => rmSync(path, { recursive: true, force: true }));
+  const remove = (path: string) => (deps.rmSync ?? rmSync)(path, { recursive: true, force: true });
   let path: string | undefined;
   let owner: Stats | undefined;
   let markerWritten = false;
@@ -112,12 +106,12 @@ export function createProofCache(input: ProofCacheInput, deps: ProofCacheDeps = 
     } catch (error) { return { released: false, error: errorCode(error) }; }
   };
   try {
-    path = (deps.mkdtemp ?? mkdtempSync)(join(cwd, PROOF_CACHE_DIR_PREFIX + identity + "-"));
+    path = (deps.mkdtempSync ?? mkdtempSync)(join(cwd, PROOF_CACHE_DIR_PREFIX + identity + "-"));
     if (dirname(path) !== cwd || !basename(path).startsWith(PROOF_CACHE_DIR_PREFIX + identity + "-")) throw new Error("cache scratch is outside the owned checkout");
     const created = lstatSync(path);
     if (!created.isDirectory() || created.isSymbolicLink() || (created.mode & 0o077) !== 0 || (process.getuid !== undefined && created.uid !== process.getuid()) || readdirSync(path).length !== 0) throw new Error("cache scratch is not a fresh private directory");
     owner = created;
-    (deps.writeMarker ?? ((path, value) => writeFileSync(path, value, { mode: 0o600, flag: "wx" })))(join(path, PROOF_CACHE_OWNER_FILE), marker);
+    (deps.writeFileSync ?? writeFileSync)(join(path, PROOF_CACHE_OWNER_FILE), marker, { mode: 0o600, flag: "wx" });
     markerWritten = true;
   } catch (error) {
     return { kind: "unavailable", reason: "proof cache scratch unavailable (" + errorCode(error) + ")", cleanup: release() };

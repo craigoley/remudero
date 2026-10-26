@@ -195,13 +195,13 @@ test("W1-T10675: cache failures preserve proof errors and release only owned scr
   const f = fixture("plain");
   try {
     const creationFailure = createProofCache({ cwd: f.cwd, identity: [] }, {
-      mkdtemp: () => { throw Object.assign(new Error("read-only"), { code: "EROFS" }); },
+      mkdtempSync: () => { throw Object.assign(new Error("read-only"), { code: "EROFS" }); },
     });
     assert.deepEqual(creationFailure, { kind: "unavailable", reason: "proof cache scratch unavailable (EROFS)", cleanup: { released: true } });
     // A later independent preparation can succeed; the failed preparation itself is never success.
     assert.equal(execWhitelistedProof(pureProof(), f.cwd, 20_000, undefined, noBrowsers), "pass");
 
-    const failing = createProofCache({ cwd: f.cwd, identity: [] }, { remove: () => { throw new Error("EBUSY: locked"); } });
+    const failing = createProofCache({ cwd: f.cwd, identity: [] }, { rmSync: () => { throw new Error("EBUSY: locked"); } });
     assert.equal(failing.kind, "owned");
     const first = (failing as { release(): { released: boolean; error?: string } }).release();
     assert.equal(first.released, false);
@@ -253,7 +253,7 @@ test("shared cache pins, prepared argv and failed marker writes remain explicit"
       assert.equal(spawned, false);
     }
     const failed = createProofCache({ cwd: prepared.cwd, identity: ["marker-failure"] }, {
-      writeMarker: () => { throw Object.assign(Error("marker refused"), { code: "EIO" }); },
+      writeFileSync: () => { throw Object.assign(Error("marker refused"), { code: "EIO" }); },
     });
     assert.equal(failed.kind, "unavailable");
     if (failed.kind === "unavailable") assert.deepEqual(failed.cleanup, { released: true });
