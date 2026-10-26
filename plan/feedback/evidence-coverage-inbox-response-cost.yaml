@@ -18,8 +18,27 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/14279
+summary:
+  headline: Cost evidence for inbox-response lane covers only 55% of calls
+  what_happened: Only 26 of 47 worker calls in the last 7 days recorded cost data,
+    well below the 90% floor. The gap has persisted since October 14 and will
+    keep being flagged until it is fixed or explained.
+  decision: Choose whether to restore the cost field at the inbox-response ledger
+    write site or document why this lane legitimately lacks it.
+  options:
+    - label: Restore cost field
+      consequence: Fix the ledger write in src/lib/benchmark-evidence.ts so every
+        inbox-response call records cost.
+      intent: approve
+    - label: Record exemption
+      consequence: Document that inbox-response legitimately lacks cost data, so the
+        gap is explained rather than fixed.
+      intent: reframe
+    - label: Defer
+      consequence: Leave the gap open; the gardener keeps this entry updated in place
+        and it stays unresolved.
+      intent: decline
 expansion: null
 submission_key: null
 thread_id: null
