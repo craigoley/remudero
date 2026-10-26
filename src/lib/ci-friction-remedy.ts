@@ -394,7 +394,7 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
     return workflow ? { ...workflow, ...(testPath ? { failingTest: testPath } : {}) } : undefined;
   }
   if (testPath && search.fileExists(testPath)) {
-    const source = testSourcePaths(testPath, search.readSource?.(testPath), { runtimeOnly: true })
+    const source = testSourcePaths(testPath, search.readSource?.(testPath))
       .find(file => /^(src|scripts)\//.test(file) && !file.split("/").includes("..") && search.fileExists(file));
     return {
       files: source ? [source, testPath] : [testPath],
