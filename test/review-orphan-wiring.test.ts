@@ -451,7 +451,7 @@ function effectsWith(gw: IssueGateway, ledgerPath: string, runId: string) {
   });
 }
 
-test("W1-T983: a capped green review-orphaned PR escalates at the reaching class", () => {
+test("W1-T983: a capped green review-orphaned PR escalates at the reaching class", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t983-"));
   try {
     const { opened, gw } = recordingGateway();
@@ -466,7 +466,7 @@ test("W1-T983: a capped green review-orphaned PR escalates at the reaching class
     assert.equal(isCappedReviewOrphanEscalation(pr, DEFAULT_SWEEP_POLICY), true);
 
     const effects = effectsWith(gw, join(dir, "ledger.ndjson"), "SWEEP-W1-T983-A");
-    effects.escalate(pr, "review orphaned by a push, again — cap reached", question());
+    await effects.escalate(pr, "review orphaned by a push, again — cap reached", question());
 
     assert.equal(opened.length, 1, "exactly one issue opened, no dedup interference");
     assert.match(opened[0]!.title, /^\[MANUAL\]/, "the capped-green-orphan disposition reaches MANUAL, not BLOCKED");
@@ -475,7 +475,7 @@ test("W1-T983: a capped green review-orphaned PR escalates at the reaching class
   }
 });
 
-test("W1-T983: an ordinary blocked-ambiguous escalation keeps its class", () => {
+test("W1-T983: an ordinary blocked-ambiguous escalation keeps its class", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t983-"));
   try {
     const { opened, gw } = recordingGateway();
@@ -491,7 +491,7 @@ test("W1-T983: an ordinary blocked-ambiguous escalation keeps its class", () => 
     assert.equal(isCappedReviewOrphanEscalation(pr, DEFAULT_SWEEP_POLICY), false);
 
     const effects = effectsWith(gw, join(dir, "ledger.ndjson"), "SWEEP-W1-T983-B");
-    effects.escalate(pr, "checks are red with no single nameable unmet criterion", question());
+    await effects.escalate(pr, "checks are red with no single nameable unmet criterion", question());
 
     assert.equal(opened.length, 1);
     assert.match(opened[0]!.title, /^\[BLOCKED\]/, "an ordinary blocked-ambiguous escalation is UNCHANGED");

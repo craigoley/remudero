@@ -20,7 +20,7 @@ import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, realDeployDeps } from "./deployer.js";
+import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, realDeploySensorsAsync, type AsyncDeploySensors } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
 import { probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
 import {
@@ -264,7 +264,9 @@ import {
   CONFLICT_EVIDENCE_MISSING_REASON_CODE,
   CONFLICT_NOT_ADMITTED_REASON_CODE,
   escalate,
+  escalateAsync,
   ghIssueGateway,
+  ghIssueGatewayAsync,
   isEscalationJudgeExempt,
   taskContractRevision,
   taskSemanticRevision,
@@ -1543,6 +1545,41 @@ export type PlanScopedFixRoundInput = {
     updateMetadata: (metadata: { title: string; body: string }) => Promise<void>;
   };
 };
+
+/** Build the deploy rows with asynchronous sensors; latch reconciliation remains synchronous. */
+export async function deployStateRowsOffLoop(
+  reader: Omit<DeployStateReader, "deploy"> & { deploy: DeployStateReader["deploy"] | AsyncDeploySensors },
+  history: readonly Record<string, unknown>[],
+  onUnreadableLatch?: (error: unknown) => void,
+): Promise<FleetStateRow[]> {
+  const deploy = reader.deploy;
+  const rows: FleetStateRow[] = [];
+  const baked = await deploy.newestBakedSha?.();
+  if (baked) {
+    rows.push({
+      pipeline: "image", target: baked, desired: `published image containing ${baked}`,
+      observe: () => deploy.imagePublished?.(baked),
+      inFlight: () => deploy.imageBuildInFlight?.(),
+      repair: async () => {
+        if (!deploy.dispatchImageBuild) throw new Error("image build dispatch unavailable");
+        await deploy.dispatchImageBuild();
+      },
+    }, {
+      pipeline: "deploy", target: baked, desired: `healthy deployed image containing ${baked}`,
+      observe: async () => {
+        const behind = await deploy.imageBakedCommitsBehind?.();
+        return behind === undefined ? undefined : behind === 0;
+      },
+      inFlight: async () => {
+        if (deploy.imageRecycleManual?.() === true) return true;
+        const published = await deploy.imagePublished?.(baked);
+        return published === true ? false : published === false ? true : undefined;
+      },
+      repair: () => { if (!reader.deployRequested()) reader.requestDeploy(); },
+    });
+  }
+  return [...rows, ...deployStateRows({ ...reader, deploy: {} }, history, onUnreadableLatch)];
+}
 
 export interface BuildSweepEffectsDeps {
   selectedModeFileIO?: RegistryFileIO;
@@ -3646,7 +3683,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // the thing") — a capped, green, unreviewable PR needs an operator to look at it and either
       // override the cap or merge it by hand; nothing downstream can move it further on its own.
       const cls: EscalationClass = reason.startsWith("PR stage stalled:") || isCappedReviewOrphanEscalation(pr, policy) ? "MANUAL" : "BLOCKED";
-      const file = (context: string): void => { escalate(
+      const file = async (context: string): Promise<void> => { await escalateAsync(
         {
           class: cls,
           // See {@link escalationTaskIdFor} — pure and separately tested, so the mint that makes
@@ -3674,7 +3711,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           options: question.resolutions.map((r) => ({ label: r.label, detail: r.detail })),
           recommendation: question.resolutions[0].label,
         },
-        { issues, ledgerPath, runId },
+        { issues: issuesImpl ?? ghIssueGatewayAsync(owner, repo), ledgerPath, runId },
       ); };
       if (pr.mergeState !== "dirty") return file("");
       return readMainCommit().then((main) => file(conflictEscalationContext(pr, main?.sha)));
@@ -4586,7 +4623,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 signal,
                 intervalMs: fixSupersededPollMsOverride ?? DEFAULT_POLL_INTERVAL_MS,
                 read: async () => {
-                  const v = ghJsonForBuild(["pr", "view", pr.prUrl, "--json", "headRefOid,statusCheckRollup"]) as {
+                  const v = await (deps.ghJsonImpl ?? readJsonImpl)(["pr", "view", pr.prUrl, "--json", "headRefOid,statusCheckRollup"]) as {
                     headRefOid?: string;
                     statusCheckRollup?: RollupCheck[];
                   };
@@ -4921,11 +4958,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           }
         };
         const reader = deps.fleetDeployStateImpl ?? {
-          deploy: deps.fleetDeploySensorsImpl ?? realDeployDeps({
+          deploy: deps.fleetDeploySensorsImpl ?? realDeploySensorsAsync({
             installPath: resolveInstallRoot(config), stateRoot: config.root, ledgerPath,
             daemonLabel: "com.remudero.daemon", serveLabel: "com.remudero.serve",
             servePort: config.serve?.port ?? 4317, uid: process.getuid?.() ?? 0, log,
-          }),
+          }, ghTextAsync),
           requestDeploy: () => {
             mkdirSync(join(config.root, "state"), { recursive: true });
             writeFileSync(deployMarkerPath(config.root), "W1-T4840: published image awaits deploy\n", { flag: "wx" });
@@ -4941,7 +4978,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             }
           },
         };
-        rows.push(...deployStateRows(reader, history, (error) => {
+        rows.push(...await deployStateRowsOffLoop(reader, history, (error) => {
           log("reconcile.unreadable", { pipeline: "failure-latch", reason: String((error as Error)?.message ?? error) });
         }));
       } catch (error) {
@@ -5721,6 +5758,8 @@ export function isReviewLaneDisposition(disposition: Disposition): boolean { // 
 export interface CiFailure {
   name: string;
   logTail: string;
+  /** Commit-status description observed in the rollup; separate from an Actions log or test result. */
+  statusDescription?: string;
   /** The check run's posted title, where the read carries it. A bundled check (W1-T3720) keeps its
    *  required NAME and titles itself by the gate(s) that refused — see {@link refusingGatesOf}. */
   title?: string;
@@ -24772,7 +24811,7 @@ export const RETIRABLE_ESCALATION_LABELS: readonly string[] = [NEEDS_HUMAN_LABEL
 /** List every OPEN issue across {@link RETIRABLE_ESCALATION_LABELS}, deduped by issue number. Same
  *  fail-soft contract as a single listing: a read failure on ANY label aborts the WHOLE list, never
  *  a partial result a caller could mistake for "nothing else is open". */
-export function listRetirableEscalationIssues(issues: IssueGateway): OpenIssue[] {
+export function listRetirableEscalationIssues(issues: Pick<IssueGateway, "listOpen">): OpenIssue[] {
   const seen = new Map<number, OpenIssue>();
   for (const label of RETIRABLE_ESCALATION_LABELS) {
     for (const issue of issues.listOpen?.(label) ?? []) {
@@ -24835,7 +24874,7 @@ export interface EscalationReconcileSummary {
 
 export interface EscalationReconcileDeps {
   /** Close one issue, posting the citation comment. Wraps `gh issue close --comment` in prod. */
-  closeIssue: (url: string, comment: string) => void;
+  closeIssue: (url: string, comment: string) => unknown;
   ledgerPath: string;
   runId: string;
   appendLine?: typeof appendLedger;
@@ -24937,7 +24976,7 @@ export async function runEscalationReconcile(
     // Action-typed and untyped (the legacy pre-W1-T346 corpus) issues keep today's comment.
     const comment = c.askType === "question" ? renderMootedCloseComment(c) : renderReconcileCloseComment(c);
     try {
-      deps.closeIssue(c.issueUrl, comment);
+      await deps.closeIssue(c.issueUrl, comment);
     } catch (e) {
       // PER-ISSUE THROW CONTAINMENT (W1-T99): one failed close never strands the rest, and an
       // uncounted failure retries next cycle rather than consuming a cap slot forever.

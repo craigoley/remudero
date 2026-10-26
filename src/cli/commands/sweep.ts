@@ -29,7 +29,7 @@ import { applyMergeProbeEvidence, probeOpenPrMerges } from "../../lib/merge-prob
 import type { ComposedRealGraph } from "../../lib/composition-root.js";
 import type { EscalationAnswerGateway } from "../../lib/escalation-answers.js";
 import { readEscalationAnswers } from "../../lib/escalation-answers.js";
-import { buildBehindMainByPr, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
+import { buildBehindMainByPr, buildBehindMainByPrAsync, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
 import { DEFAULT_SWEEP_POLICY, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, type BuildSweepEffectsDeps, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
 import { missingReviewReuseFact, priorPostedReviewRow, reviewLedgerKeyFor, REVIEW_ENGINE_REVISION, REVIEW_CONTEXT, reviewEvidenceStrength, type ProofExecutor, type ReviewVerdict } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
@@ -72,7 +72,7 @@ export interface SweepCommandHost {
   readonly resetTrackedDirtyFixOwner: HostFn;
   readonly depReviewCommand: HostFn;
   readonly dispatchFixPreflightStandDown: HostFn;
-  readonly ghLiveState: HostFn;
+  readonly ghLiveStateAsync: HostFn;
   readonly resolveFixRungTaskContractAtHeadAsync: HostFn;
   readonly createFixRungWorktreeWithToolchain: HostFn;
   readonly captureWorktreeSnapshotViaGit: HostFn;
@@ -93,7 +93,7 @@ export interface SweepCommandHost {
   readonly fetchPrDiffFilesViaGh: HostFn;
   readonly redBaseRefreshFactsFromRest: HostFn;
   readonly readyDraftViaGh: HostFn;
-  readonly readFixRoundCommitsViaGit: HostFn;
+  readonly readFixRoundCommitsViaGitAsync: HostFn;
   readonly runNpmScriptViaSpawn: HostFn;
   readonly commitGeneratorOutputViaGit: HostFn;
   readonly readPackageScriptsFor: HostFn;
@@ -219,13 +219,13 @@ export function buildSweepEffects(
     removeAbandonedFixWorktreeOwner, publishAbandonedFixOwnerAhead, preserveAbandonedFixOwnerDivergence,
     preserveOrDiscardFixOwnerResidue, preserveStagedFixOwnerResidue, preserveAndClearUntrackedFixOwner,
     preserveStaleDirtyFixOwner, clearStaleDirtyFixOwner, resetTrackedDirtyFixOwner,
-    depReviewCommand, dispatchFixPreflightStandDown, ghLiveState, resolveFixRungTaskContractAtHeadAsync,
+    depReviewCommand, dispatchFixPreflightStandDown, ghLiveStateAsync, resolveFixRungTaskContractAtHeadAsync,
     createFixRungWorktreeWithToolchain, captureWorktreeSnapshotViaGit, writeFixCensusSnapshotAsync,
     runPlanScopedFixRound, materializePlanRoundWorktree, pushSweepFixRound,
     buildFixRungDispatchArgs, openTaskIdsFromPlan, waitForCiGreen, restRollupFor,
     buildRequiredFixReviewRunner, fetchPrBodyViaGh, updatePrBodyViaGh, repairPrMetadata,
     ghLiveHead, fetchPrDiffFilesViaGh, redBaseRefreshFactsFromRest,
-    readyDraftViaGh, readFixRoundCommitsViaGit, runNpmScriptViaSpawn,
+    readyDraftViaGh, readFixRoundCommitsViaGitAsync, runNpmScriptViaSpawn,
     commitGeneratorOutputViaGit, readPackageScriptsFor, fixBranchClaimKey, boundedWorktreeOwnerPath,
     decideRegisteredFixOwnerRecovery, FixRungCheckoutRefusedError, DEFAULT_BUDGET_USD,
   } = host;
@@ -521,7 +521,7 @@ export function buildSweepEffects(
     },
     depReviewCommandImpl: (pr, rest) => depReviewCommand(pr, rest, { root: repoRoot, landingStateRoot: feedbackLandingStateRoot }),
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown,
-    ghLiveStateImpl: ghLiveState,
+    ghLiveStateImpl: ghLiveStateAsync,
     fixRungTaskForImpl: fixRungTaskFor,
     resolveTaskContractAtHeadImpl: resolveFixRungTaskContractAtHeadAsync,
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
@@ -554,7 +554,7 @@ export function buildSweepEffects(
     redBaseRefreshFactsImpl: redBaseRefreshFactsFromRest,
     ghUpdateBranchImpl: ghUpdateBranch,
     readyDraftImpl: readyDraftViaGh(deps.owner, deps.repo, deps.log),
-    readFixRoundCommitsImpl: readFixRoundCommitsViaGit,
+    readFixRoundCommitsImpl: readFixRoundCommitsViaGitAsync,
     runNpmScriptImpl: runNpmScriptViaSpawn,
     commitGeneratorOutputImpl: commitGeneratorOutputViaGit,
     readPackageScriptsImpl: readPackageScriptsFor,
@@ -960,7 +960,7 @@ export function buildSweepHook(
       const updatedForWorkflow = await prelude.time("updated_for_workflow", () => updatedForWorkflowFromLedger(ledgerPath));
       const freshBaseChangedFiles = new Map<number, BaseChangedFiles>();
       const behindMainByPr = await prelude.time("behind_main", () => tickRead?.behindMainByPr
-        ?? buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles));
+        ?? buildBehindMainByPrAsync(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles));
       const baseChangedFilesByPr = tickRead?.baseChangedFilesByPr ?? freshBaseChangedFiles;
       applyMergeProbeEvidence(prsForFixRung, await prelude.time("merge_probes", () =>
         probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr })));

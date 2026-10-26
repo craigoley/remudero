@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { importsModule } from "./helpers/import-sweep.js";
 
 // ── W1-T96: mutation-testing ratchet gate (MASTER-PLAN §5 TIER 2, quality gate 2/4) ──
@@ -48,6 +49,27 @@ const SCRIPT = join(__dirname, "..", "scripts", "mutation-ratchet.mjs");
 const RELEVANT_PATHS_FILE = join(__dirname, "..", "scripts", "mutation-relevant-paths.json");
 const FIXTURES = join(__dirname, "fixtures", "mutation-ratchet");
 const BASELINE = join(FIXTURES, "baseline.json");
+
+/** Keep generated CLI inputs and outputs in the supplied scratch, with test-owned cleanup. */
+function scratchFile(t: TestContext, name: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-mutation-ratchet-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return join(dir, name);
+}
+
+test("mutation-ratchet scratch outputs use supplied temporary storage without changing inputs", (t) => {
+  const input = join(FIXTURES, "changed-files-classify.txt");
+  const before = readFileSync(input, "utf8");
+  const output = scratchFile(t, "github-output.txt");
+  assert.equal(dirname(dirname(output)), resolve(tmpdir()), "the CLI output belongs to supplied temporary storage");
+  assert.notEqual(dirname(output), FIXTURES, "the input-fixture directory is never output storage");
+  const result = spawnSync(process.execPath, [SCRIPT, "--changed-files", input], {
+    env: { ...process.env, GITHUB_OUTPUT: output },
+  });
+  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(readFileSync(output, "utf8"), /^matched=true$/m);
+  assert.equal(readFileSync(input, "utf8"), before, "the real CLI leaves its fixture input intact");
+});
 
 function runRatchet(reportFixture: string, baseline: string = BASELINE) {
   return spawnSync(process.execPath, [
@@ -195,8 +217,8 @@ test("mutation-ratchet CLI --changed-files: a classify.ts-touching fixture -> ru
   assert.match(result.stdout.toString(), /diff touches src\/lib\/classify\.ts/);
 });
 
-test("mutation-ratchet CLI --changed-files: writes matched=true|false to $GITHUB_OUTPUT for the workflow's `if:` gate to read", () => {
-  const outFile = join(FIXTURES, ".github-output-scratch-run.txt");
+test("mutation-ratchet CLI --changed-files: writes matched=true|false to $GITHUB_OUTPUT for the workflow's `if:` gate to read", (t) => {
+  const outFile = scratchFile(t, "github-output-run.txt");
   spawnSync(process.execPath, [SCRIPT, "--changed-files", join(FIXTURES, "changed-files-classify.txt")], {
     env: { ...process.env, GITHUB_OUTPUT: outFile },
   });
@@ -204,7 +226,7 @@ test("mutation-ratchet CLI --changed-files: writes matched=true|false to $GITHUB
   rmSync(outFile);
   assert.match(runOutput, /^matched=true$/m);
 
-  const outFile2 = join(FIXTURES, ".github-output-scratch-skip.txt");
+  const outFile2 = scratchFile(t, "github-output-skip.txt");
   spawnSync(process.execPath, [SCRIPT, "--changed-files", join(FIXTURES, "changed-files-plan-only.txt")], {
     env: { ...process.env, GITHUB_OUTPUT: outFile2 },
   });
@@ -228,7 +250,7 @@ test("mutation-ratchet CLI --changed-files --relevant-paths: the paths list is D
   assert.match(after.stdout.toString(), /diff touches fixtures\/seeded-mutation-scope\.ts/);
 });
 
-test("mutation-ratchet CLI --changed-files (NO --relevant-paths, i.e. production default): the matched path is read from scripts/mutation-relevant-paths.json's live content, not a literal baked into mutation-ratchet.mjs", () => {
+test("mutation-ratchet CLI --changed-files (NO --relevant-paths, i.e. production default): the matched path is read from scripts/mutation-relevant-paths.json's live content, not a literal baked into mutation-ratchet.mjs", (t) => {
   // This test never hardcodes an entry from the paths list -- it reads scripts/mutation-
   // relevant-paths.json itself at test time and asserts the CLI's DEFAULT (no --relevant-paths
   // flag at all) names exactly the row it read. If the production list were an array literal
@@ -241,7 +263,7 @@ test("mutation-ratchet CLI --changed-files (NO --relevant-paths, i.e. production
   assert.ok(relevantPaths.length > 0, "scripts/mutation-relevant-paths.json must not be empty");
   const [firstRelevantPath] = relevantPaths;
 
-  const scratchChangedFiles = join(FIXTURES, ".changed-files-default-list-scratch.txt");
+  const scratchChangedFiles = scratchFile(t, "changed-files-default-list.txt");
   writeFileSync(scratchChangedFiles, `README.md\n${firstRelevantPath}\n`);
   try {
     const result = spawnSync(process.execPath, [SCRIPT, "--changed-files", scratchChangedFiles]);
@@ -402,12 +424,12 @@ test("resolve-scope: neither the PR scope nor the nightly scope ever matches a t
   assert.ok(candidates.some((p) => p.startsWith("test/")), "fixture must include at least one test/** path to prove exclusion, not mere absence");
 });
 
-test("resolve-scope: a `?` glob segment (globToRegExp's single-char wildcard branch) matches exactly one non-slash character, over the REAL candidate list", () => {
+test("resolve-scope: a `?` glob segment (globToRegExp's single-char wildcard branch) matches exactly one non-slash character, over the REAL candidate list", (t) => {
   // `mutation-nightly-scope.json` never happens to use `?`, so this drives globToRegExp's `?`
   // branch (re += '[^/]') directly through a scratch config: "src/lib/classify.t?" must match
   // "src/lib/classify.ts" (the trailing `?` standing in for the single char "s") but must NOT
   // match a path with a different number of trailing characters.
-  const questionMarkScope = join(FIXTURES, ".resolve-scope-question-mark-scratch.json");
+  const questionMarkScope = scratchFile(t, "resolve-scope-question-mark.json");
   writeFileSync(questionMarkScope, JSON.stringify({ mutate: ["src/lib/classify.t?"] }));
   try {
     const matched = resolveScope(questionMarkScope);
@@ -417,8 +439,8 @@ test("resolve-scope: a `?` glob segment (globToRegExp's single-char wildcard bra
   }
 });
 
-test("resolve-scope: a nightly scope config MISCONFIGURED to include test/** still yields zero test/** matches -- resolveMutateScope()'s hard exclusion cannot be bypassed by data", () => {
-  const misconfiguredScope = join(FIXTURES, ".nightly-scope-config-misconfigured-scratch.json");
+test("resolve-scope: a nightly scope config MISCONFIGURED to include test/** still yields zero test/** matches -- resolveMutateScope()'s hard exclusion cannot be bypassed by data", (t) => {
+  const misconfiguredScope = scratchFile(t, "nightly-scope-config-misconfigured.json");
   writeFileSync(misconfiguredScope, JSON.stringify({ mutate: ["src/**/*.ts", "test/**"], fileCap: 50 }));
   try {
     const matched = resolveScope(misconfiguredScope);
@@ -484,8 +506,8 @@ test("mutation-ratchet CLI --nightly-scope: rotating night-index over a full cyc
   assert.deepEqual(wrapped, groups[0]);
 });
 
-test("mutation-ratchet CLI --nightly-scope: a scope config matching ZERO candidates -> sampleForNight's empty-input branch, empty sample, groupCount 0, still exit 0 (no crash, no false REQUIRED)", () => {
-  const emptyScope = join(FIXTURES, ".nightly-scope-config-empty-match-scratch.json");
+test("mutation-ratchet CLI --nightly-scope: a scope config matching ZERO candidates -> sampleForNight's empty-input branch, empty sample, groupCount 0, still exit 0 (no crash, no false REQUIRED)", (t) => {
+  const emptyScope = scratchFile(t, "nightly-scope-config-empty-match.json");
   writeFileSync(emptyScope, JSON.stringify({ mutate: ["nonexistent-dir/**"], fileCap: 2 }));
   try {
     const result = spawnSync(process.execPath, [
@@ -511,8 +533,8 @@ test("mutation-ratchet CLI --nightly-scope: a scope config matching ZERO candida
   }
 });
 
-test("mutation-ratchet CLI --nightly-scope: writes the sample to $GITHUB_OUTPUT `mutate=...` for the workflow's `npx stryker run --mutate` step", () => {
-  const outFile = join(FIXTURES, ".github-output-nightly-scope-scratch.txt");
+test("mutation-ratchet CLI --nightly-scope: writes the sample to $GITHUB_OUTPUT `mutate=...` for the workflow's `npx stryker run --mutate` step", (t) => {
+  const outFile = scratchFile(t, "github-output-nightly-scope.txt");
   spawnSync(process.execPath, [
     SCRIPT,
     "--nightly-scope",

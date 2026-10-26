@@ -21,7 +21,8 @@ const savedArgv = [...process.argv];
 process.argv.push("--repo-root", REPO_ROOT);
 const { buildSweepEffects, buildSweepHook, sweepCommand } =
   await import("#src/cli/commands/sweep.js");
-const { buildSweepLightHook: buildSweepLightHookFromEntrypoint } = await import("#src/run-task.js");
+const { buildSweepLightHook: buildSweepLightHookFromEntrypoint,
+  buildSweepEffects: buildSweepEffectsFromEntrypoint } = await import("#src/run-task.js");
 process.argv.splice(0, process.argv.length, ...savedArgv);
 type LightPassReadPorts = NonNullable<Parameters<typeof buildSweepLightHookFromEntrypoint>[12]>;
 
@@ -196,6 +197,46 @@ test("W1-T9338: full hook reports failures and still runs its draft rung", async
   assert.equal(f.logs.find((row) => row.step === "sweep.error")?.error, "snapshot unavailable");
   assert.equal(f.calls.filter((c) => c.name === "draft").length, 1);
   assert.equal(f.calls.some((c) => c.name === "effects"), false);
+});
+
+test("W1-T9338: the resolved sweep keeps live-state and full-hook compare reads asynchronous", async (t) => {
+  const f = sweepFixture(t);
+  const shim = ghShim([
+    { when: "pulls/9338", stdout: JSON.stringify({ state: "open", head: { sha: pr().headSha } }) },
+    { when: "compare/", stdout: JSON.stringify({ ahead_by: 4, files: [{ filename: "src/example.ts" }] }) },
+  ]);
+  const savedPath = process.env.PATH;
+  const savedCache = process.env.XDG_CACHE_HOME;
+  process.env.PATH = `${shim.dir}:${savedPath ?? ""}`;
+  process.env.XDG_CACHE_HOME = shim.dir;
+  t.after(() => {
+    if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+    if (savedCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = savedCache;
+    rmSync(shim.dir, { recursive: true, force: true });
+  });
+  const effects = buildSweepEffectsFromEntrypoint({
+    owner: "acme", repo: "fixture", localRepoName: "fixture", config: f.config,
+    ledgerPath: f.ledgerPath, runId: "ASYNC", plan: f.plan, log: f.log,
+    reviewerCodeFreshnessImpl: () => ({ status: "unreadable", reason: "fixture" }) as never,
+    instanceRegistryTextImpl: () => undefined,
+  });
+  const live = effects.readLiveState!(pr());
+  assert.ok(live instanceof Promise, "the entrypoint supplies the async live-state reader");
+  assert.deepEqual(await live, { ok: true, state: "OPEN", headSha: pr().headSha });
+
+  const tick = { openPrViews: [pr({ checksState: "pending", reviewState: "none" })],
+    plan: f.plan, staleGateWorkflowsByPr: new Map(), creditCandidates: [] };
+  // No compare facts in this tick: the full hook must await its production fallback reader.
+  t.mock.method(childProcess, "execFileSync", () => assert.fail("the full-hook compare blocked the event loop"));
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  await buildSweepHook(f.host, "acme", "fixture", f.config, f.ledgerPath, "ASYNC", f.plan,
+    f.log, undefined, {} as GitHub, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    async () => tick as never)();
+  assert.ok(shim.calls().includes(`api repos/acme/fixture/compare/${pr().headSha}...main`));
+  assert.deepEqual(f.logs.filter((row) => row.step === "sweep.error"), []);
+  assert.equal(f.calls.filter((call) => call.name === "draft").length, 1);
 });
 
 test("W1-T9338: light hook compares ready heads through its default subprocess reader", async (t) => {
