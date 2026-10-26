@@ -306,6 +306,18 @@ test("changed file evidence refuses stale foreign incomplete and reopened heads"
   for (const invalid of ["{", body.slice(0, -10)]) {
     writeFileSync(path, invalid); assert.equal(read().status, "unknown");
   }
+  for (const malformed of [{ files: [] }, { files: null }, { files: "src/invalid.ts" }, { files: undefined }, { at: "invalid" }, { at: undefined }]) {
+    for (const reverse of [false, true]) {
+      const doc = JSON.parse(body);
+      doc.entries.push({ ...doc.entries[0], ...malformed });
+      if (reverse) doc.entries.reverse();
+      writeFileSync(path, JSON.stringify(doc));
+      const cache = createChangedFilesCache(root, "o", "r", { readOnly: true, fetch: async () => assert.fail("read-only evidence cannot fetch") });
+      assert.deepEqual(readEvidence(boardGateway(rows, cache, [])), { status: "unknown", reason: "ambiguous_cache_entries" },
+        `malformed duplicate cannot qualify in either order: ${JSON.stringify(malformed)}, reverse=${reverse}`);
+      assert.deepEqual(cache.lookup(url(31), "MERGED"), ["src/fix.ts"], "legacy callers retain the valid list");
+    }
+  }
   writeFileSync(path, body);
   const foreign = boardGateway(rows, createChangedFilesCache(root, "o", "r"), []);
   const evidence = (foreign as EvidenceGateway).changedFileEvidence!("https://github.com/other/r/pull/31");
@@ -329,15 +341,22 @@ test("changed file evidence keeps duplicate ambiguity across unrelated durable w
   const root = makeTempDir("changed-file-evidence"), path = changedFilesCachePath(root, "o", "r");
   const cache = createChangedFilesCache(root, "o", "r", { fetch: async () => ["src/fix.ts"] });
   cache.lookup(url(31), "MERGED", evidenceHead); await cache.settle();
-  const original = JSON.parse(readFileSync(path, "utf8"));
-  original.entries.push({ ...original.entries[0], files: ["src/conflicting.ts"] });
-  writeFileSync(path, JSON.stringify(original));
-  const loaded = createChangedFilesCache(root, "o", "r", { fetch: async () => ["src/unrelated.ts"] });
-  assert.deepEqual(loaded.evidence!(url(31), "MERGED", evidenceHead), { status: "unknown", reason: "ambiguous_cache_entries" });
-  loaded.lookup(url(32), "MERGED", evidenceHead); await loaded.settle();
-  assert.equal(loaded.evidence!(url(32), "MERGED", evidenceHead).status, "complete", "unrelated valid entry remains qualified");
-  const restarted = createChangedFilesCache(root, "o", "r", { readOnly: true, fetch: async () => assert.fail("read-only reload cannot fetch") });
-  assert.deepEqual(restarted.evidence!(url(31), "MERGED", evidenceHead), { status: "unknown", reason: "ambiguous_cache_entries" });
-  assert.deepEqual(restarted.lookup(url(31), "MERGED"), ["src/conflicting.ts"], "legacy file access retains its contract");
-  assert.equal(restarted.evidence!(url(32), "MERGED", evidenceHead).status, "complete");
+  const body = readFileSync(path, "utf8");
+  for (const duplicate of [{ files: ["src/conflicting.ts"] }, { files: [] }, { files: null }, { files: undefined }, { at: "invalid" }, { at: undefined }]) {
+    for (const reverse of [false, true]) {
+      const original = JSON.parse(body);
+      original.entries.push({ ...original.entries[0], ...duplicate });
+      if (reverse) original.entries.reverse();
+      writeFileSync(path, JSON.stringify(original));
+      const loaded = createChangedFilesCache(root, "o", "r", { fetch: async () => ["src/unrelated.ts"] });
+      assert.deepEqual(loaded.evidence!(url(31), "MERGED", evidenceHead), { status: "unknown", reason: "ambiguous_cache_entries" });
+      const legacyFiles = loaded.lookup(url(31), "MERGED");
+      loaded.lookup(url(32), "MERGED", evidenceHead); await loaded.settle();
+      assert.equal(loaded.evidence!(url(32), "MERGED", evidenceHead).status, "complete", "unrelated valid entry remains qualified");
+      const restarted = createChangedFilesCache(root, "o", "r", { readOnly: true, fetch: async () => assert.fail("read-only reload cannot fetch") });
+      assert.deepEqual(restarted.evidence!(url(31), "MERGED", evidenceHead), { status: "unknown", reason: "ambiguous_cache_entries" });
+      assert.deepEqual(restarted.lookup(url(31), "MERGED"), legacyFiles, "legacy file access retains its contract");
+      assert.equal(restarted.evidence!(url(32), "MERGED", evidenceHead).status, "complete");
+    }
+  }
 });

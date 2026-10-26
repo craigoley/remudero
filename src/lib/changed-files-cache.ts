@@ -154,9 +154,12 @@ export function createChangedFilesCache(
       log("changed_files_cache.load_refused", { repository, reason: "invalid_schema" });
       return;
     }
+    const seenUrls = new Set<string>();
     for (const e of doc.entries as Array<{ url?: unknown; files?: unknown; at?: unknown; evidence?: unknown; ambiguous?: unknown }>) {
-      if (typeof e?.url === "string" && isFileList(e.files) && typeof e.at === "number") {
-        if (entries.has(e.url) || e.ambiguous === true) ambiguous.add(e.url);
+      if (typeof e?.url !== "string") continue;
+      if (seenUrls.has(e.url) || e.ambiguous === true) ambiguous.add(e.url);
+      seenUrls.add(e.url);
+      if (isFileList(e.files) && typeof e.at === "number") {
         entries.set(e.url, { files: e.files, at: e.at, immutable: true, evidence: e.evidence });
       }
     }

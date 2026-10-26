@@ -351,6 +351,18 @@ test("snapshot changed file evidence guards are load bearing", async (t) => {
   wrongHead.entries[0].evidence.headRefOid = "d".repeat(40);
   writeFileSync(fixture.path, JSON.stringify(wrongHead));
   assert.equal(snapshotEvidence(snapshotGithub(fixture.root, "o", "r", fixture.clock).github, 901).status, "unknown", "wrong head cannot prove repair");
+  for (const malformed of [{ files: [] }, { files: null }, { files: undefined }, { at: "invalid" }, { at: undefined }]) {
+    for (const reverse of [false, true]) {
+      const duplicate = JSON.parse(original);
+      duplicate.entries.push({ ...duplicate.entries[0], ...malformed });
+      if (reverse) duplicate.entries.reverse();
+      const body = JSON.stringify(duplicate);
+      writeFileSync(fixture.path, body);
+      assert.deepEqual(snapshotEvidence(snapshotGithub(fixture.root, "o", "r", fixture.clock).github, 901),
+        { status: "unknown", reason: "ambiguous_cache_entries" }, "malformed duplicate cannot prove repair in either order");
+      assert.equal(readFileSync(fixture.path, "utf8"), body, "snapshot refusal does not rewrite evidence");
+    }
+  }
   writeFileSync(fixture.path, original);
   fixture.board.commitOpen!([{ ...fixture.row, state: "OPEN" }], fixture.clock.now());
   assert.equal(snapshotEvidence(snapshotGithub(fixture.root, "o", "r", fixture.clock).github, 901).status, "unknown", "a reopened PR cannot retain merged evidence");
