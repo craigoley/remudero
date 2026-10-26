@@ -162,7 +162,7 @@ test("improvement requests recover after each durable stage and keep comments ou
   const { createImprovementThread } = await planningModule();
   for (const stage of ["intent", "proposal", "messages", "receipt"] as const) await withTempDir(`improvement-recover-${stage}`, async dir => {
     const { deps, request, inboxRoot } = sourceFixture(dir);
-    const interrupted = await createImprovementThread(request, { ...deps, afterPersist: at => { if (at === stage) throw new Error("simulated caller loss after durable persistence"); } });
+    const interrupted = await createImprovementThread(request, deps, at => { if (at === stage) throw new Error("simulated caller loss after durable persistence"); });
     assert.equal(interrupted.state, "uncertain");
     // A genuinely fresh process reloads disk state, rather than retaining service objects in memory.
     const script = 'import {createImprovementThread} from "#src/lib/improvement-thread.js";import {fixedClock} from "#src/lib/clock.js"; const [request,deps]=JSON.parse(process.argv[1]);deps.clock=fixedClock(deps.now);process.stdout.write(JSON.stringify(await createImprovementThread(request,deps)));';
@@ -225,7 +225,7 @@ test("improvement planning separates conversation drafting filing and execution"
         fileCalls++; throw new Error("the caller lost contact after native filing started");
       }, recoverFiling: (target: { proposalId: string; ledgerPath: string }) => improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, request.repository, deps.clock),
     };
-    const drafted = await runImprovementAction(requested.operation.operationId, runner); assert("kind" in drafted); assert.equal(drafted.state, "completed"); assert.equal(draftCalls, 1); assert.equal(fileCalls, 0);
+    const drafted = await runImprovementAction(requested.operation.operationId, runner, runner.draft, runner.file, runner.recoverFiling); assert("kind" in drafted); assert.equal(drafted.state, "completed"); assert.equal(draftCalls, 1); assert.equal(fileCalls, 0);
     view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved"); assert.equal(view.drafting.state, "ready"); assert(view.drafting.digest);
     const { appendThreadReplyOnce, captureInboxInput } = await import("#src/lib/inbox-thread.js");
     const { answerThread } = await import("#src/lib/inbox-responder.js");
@@ -242,16 +242,16 @@ test("improvement planning separates conversation drafting filing and execution"
     const answered = readImprovementThread(saved.requestId, deps); assert(answered.state === "saved"); assert.equal(answered.correspondence.pendingInputs, 0);
     const filing = await requestImprovementAction("file", { ...review, idempotencyKey: "explicit-reviewed-file-0001", draftDigest: view.drafting.digest }, deps);
     assert(filing.state === "requested"); assert.equal(fileCalls, 0, "saving the reviewed decision does not claim filing completed");
-    const interrupted = await runImprovementAction(filing.operation.operationId, runner); assert.equal(interrupted.state, "uncertain"); assert.equal(fileCalls, 1);
-    const uncertain = await runImprovementAction(filing.operation.operationId, runner); assert.equal(uncertain.state, "uncertain"); assert.equal(fileCalls, 1, "an ambiguous filing is not retried without a native receipt");
+    const interrupted = await runImprovementAction(filing.operation.operationId, runner, runner.draft, runner.file, runner.recoverFiling); assert.equal(interrupted.state, "uncertain"); assert.equal(fileCalls, 1);
+    const uncertain = await runImprovementAction(filing.operation.operationId, runner, runner.draft, runner.file, runner.recoverFiling); assert.equal(uncertain.state, "uncertain"); assert.equal(fileCalls, 1, "an ambiguous filing is not retried without a native receipt");
     const newKey = await requestImprovementAction("file", { ...review, idempotencyKey: "different-key-while-uncertain", draftDigest: view.drafting.digest }, deps);
     assert.equal(newKey.state, "conflict", "a different retry key cannot bypass an unresolved filing decision");
     const ledgerPath = join(inboxRoot, "state", "ledger.ndjson");
     appendLedger(ledgerPath, { ts: deps.clock.iso(), run_id: "APPROVE-fixture-123", task_id: saved.proposalId, proposal_id: saved.proposalId, step: "approve.id_materialized", ids: ["W1-T99999"] });
     appendLedger(ledgerPath, { ts: deps.clock.iso(), run_id: "APPROVE-fixture-123", task_id: saved.proposalId, step: "ratify.approved", pr_url: "https://github.com/acme/atlas/pull/123", branch: "ratify-improvement-123" });
-    const filed = await runImprovementAction(filing.operation.operationId, runner); assert("kind" in filed); assert.equal(filed.state, "completed"); assert.equal(filed.receipt?.state, "plan_pr_opened"); assert.equal(fileCalls, 1);
+    const filed = await runImprovementAction(filing.operation.operationId, runner, runner.draft, runner.file, runner.recoverFiling); assert("kind" in filed); assert.equal(filed.state, "completed"); assert.equal(filed.receipt?.state, "plan_pr_opened"); assert.equal(fileCalls, 1);
     assert.equal(filed.receipt?.taskIdsState, "observed"); assert.deepEqual(filed.receipt?.taskIds, ["W1-T99999"]);
-    const replay = await runImprovementAction(filing.operation.operationId, runner); assert("kind" in replay); assert.deepEqual(replay, filed); assert.equal(fileCalls, 1);
+    const replay = await runImprovementAction(filing.operation.operationId, runner, runner.draft, runner.file, runner.recoverFiling); assert("kind" in replay); assert.deepEqual(replay, filed); assert.equal(fileCalls, 1);
     assert.equal(filing.execution.state, "not_requested");
     assert.equal(existsSync(join(inboxRoot, "repos", "atlas", "plan", "tasks.yaml")), false, "the test filing callback creates no task, dispatch, merge or deployment");
   });
@@ -268,7 +268,7 @@ test("improvement action execution revalidates current source and refuses change
     const changed = structuredClone(input); changed.currentSha = "c".repeat(40);
     const published = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(deps.stateDir, request.repository), input: changed, expectedSnapshotId: request.snapshotId, clock: deps.clock }); assert.equal(published.state, "published");
     let calls = 0;
-    const refused = await runImprovementAction(pending.operation.operationId, { ...deps, draft: async () => { calls++; }, file: async () => { calls++; return undefined; }, recoverFiling: () => undefined });
+    const refused = await runImprovementAction(pending.operation.operationId, deps, async () => { calls++; }, async () => { calls++; return undefined; }, () => undefined);
     assert("kind" in refused); assert.equal(refused.state, "refused"); assert.equal(calls, 0);
     const historical = readImprovementThread(saved.requestId, deps); assert(historical.state === "saved"); assert.equal(historical.source.state, "stale"); assert.equal(historical.messages.length, 2);
   });
@@ -392,7 +392,7 @@ test("improvement decisions recover sealed intent across each publication gap", 
     const { deps, request } = sourceFixture(dir), saved = await createImprovementThread(request, deps); assert(saved.state === "saved");
     const view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
     const input = { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: `durable-decision-${stage}-0001` };
-    const interrupted = await requestImprovementAction("draft", input, { ...deps, afterActionPersist: at => { if (at === stage) throw new Error("simulated response loss"); } });
+    const interrupted = await requestImprovementAction("draft", input, deps, at => { if (at === stage) throw new Error("simulated response loss"); });
     assert.equal(interrupted.state, "uncertain");
     const changed = await requestImprovementAction("draft", { ...input, goalDigest: "f".repeat(64) }, { ...deps }); assert.equal(changed.state, "conflict", "a sealed decision identity cannot be reused with changed bytes");
     const script = 'import {requestImprovementAction} from "#src/lib/improvement-thread.js";import {fixedClock} from "#src/lib/clock.js";const [input,deps]=JSON.parse(process.argv[1]);deps.clock=fixedClock(deps.now);const result=await requestImprovementAction("draft",input,deps);process.stdout.write(JSON.stringify({result}));';
@@ -415,14 +415,14 @@ test("improvement saves release their own resource lease after a separate reques
       replaced = join(lockDir, matching[0]!); unlinkSync(replaced); writeFileSync(replaced, '{"replacement":"preserve unknown holder"}');
     };
     if (operation === "conversation") {
-      const lost = await createImprovementThread(request, { ...deps, afterPersist: stage => { if (stage === "intent") replace("request-"); } }); assert.equal(lost.state, "uncertain");
+      const lost = await createImprovementThread(request, deps, stage => { if (stage === "intent") replace("request-"); }); assert.equal(lost.state, "uncertain");
       assert.equal(existsSync(join(inboxRoot, "state", "inbox-threads.jsonl")), false, "lost request ownership cannot acknowledge or append a chat");
       const later = await createImprovementThread({ ...request, idempotencyKey: "new-conversation-request-after-loss" }, deps);
       assert.equal(later.state, "saved", "the independently owned conversation lease must be released on refusal");
     } else {
       const saved = await createImprovementThread(request, deps); assert(saved.state === "saved"); const view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
       const input = { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: "decision-with-lost-request-lease" };
-      const lost = await requestImprovementAction("draft", input, { ...deps, afterActionPersist: stage => { if (stage === "prepared") replace("action-"); } }); assert.equal(lost.state, "uncertain");
+      const lost = await requestImprovementAction("draft", input, deps, stage => { if (stage === "prepared") replace("action-"); }); assert.equal(lost.state, "uncertain");
       const later = await requestImprovementAction("draft", { ...input, idempotencyKey: "new-decision-request-after-loss" }, { ...deps });
       assert.equal(later.state, "requested", "loss of a request lease does not strand our separate conversation lease");
     }
@@ -473,7 +473,7 @@ test("improvement CLI preserves fleet execution config when selecting a reposito
     const operation = await requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: "preserve-execution-config-01" }, { ...deps }); assert(operation.state === "requested");
     const config = { root, claudeBin: "unreachable-test-worker", workerProviders: { fleetCashAllowancePath: join(root, "shared-allowance.json") } } as import("#src/lib/config.js").Config;
     let receivedConfig: unknown, receivedContext: unknown, called = 0;
-    const code = await improvementActionCommand([operation.operation.operationId, "--state-dir", stateDir], { config, clock: deps.clock, isDaemonOwned: () => true,
+    const code = await improvementActionCommand([operation.operation.operationId, "--state-dir", stateDir], { readConfig: () => config, clock: deps.clock, isDaemonOwned: () => true,
       draftHook: (...args) => { called++; receivedConfig = args[2]; receivedContext = args[11]; return async () => {
         const { captureInboxDraftSnapshot, commitInboxDraftOutcomes } = await import("#src/lib/inbox.js");
         const proposal = JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-proposals.json"), "utf8")).proposals.find((p: { id: string }) => p.id === saved.proposalId);
@@ -487,7 +487,7 @@ test("improvement CLI preserves fleet execution config when selecting a reposito
     const ready = readImprovementThread(saved.requestId, deps); assert(ready.state === "saved"); assert(ready.drafting.digest);
     const filing = await requestImprovementAction("file", { requestId: saved.requestId, goalDigest: ready.goalDigest, draftDigest: ready.drafting.digest, idempotencyKey: "preserve-filing-config-001" }, { ...deps }); assert(filing.state === "requested");
     let filingCalls = 0;
-    const filedCode = await improvementActionCommand([filing.operation.operationId, "--state-dir", stateDir], { config, clock: deps.clock, isDaemonOwned: () => true,
+    const filedCode = await improvementActionCommand([filing.operation.operationId, "--state-dir", stateDir], { readConfig: () => config, clock: deps.clock, isDaemonOwned: () => true,
       approve: async (ids, options) => {
         assert(options);
         filingCalls++; assert.deepEqual(ids, [saved.proposalId]); assert.equal(options.config, config);
@@ -602,7 +602,6 @@ test("saved improvement discovery visits the full action population and reports 
 
 test("saved improvement CLI refuses an unowned default before reading execution config", async () => {
   const { improvementActionCommand } = await import("#src/run-task.js");
-  const config = {} as import("#src/lib/config.js").Config;
-  Object.defineProperty(config, "root", { get() { assert.fail("an unowned CLI must not inspect stores or invoke workers"); } });
-  assert.equal(await improvementActionCommand(["a".repeat(64), "--state-dir", "/unreachable/state"], { config }), 1);
+  const readConfig = () => { assert.fail("an unowned CLI must not inspect stores or invoke workers"); };
+  assert.equal(await improvementActionCommand(["a".repeat(64), "--state-dir", "/unreachable/state"], { readConfig }), 1);
 });

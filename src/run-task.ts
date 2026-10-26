@@ -35947,38 +35947,35 @@ export function improvementNativeFilingReceipt(ledgerPath: string, proposalId: s
     nativeReceiptId: `${receipt.run_id}|${receipt.step}|${String(receipt.ts)}` };
 }
 
+const IMPROVEMENT_ACTION_RUNTIME = { readConfig: loadConfig, clock: systemClock, draftHook: buildInboxDraftHook,
+  approve: approveCommandMirrored, isDaemonOwned: daemonOwnedProcess };
+
 /** Only a saved, authenticated decision can reach the existing bounded draft and governed approve paths. */
-export async function improvementActionCommand(rest: string[], deps: {
-  config?: Config;
-  clock?: Clock;
-  draftHook?: typeof buildInboxDraftHook;
-  approve?: typeof approveCommandMirrored;
-  isDaemonOwned?: () => boolean;
-} = {}): Promise<number> {
+export async function improvementActionCommand(rest: string[], deps: Partial<typeof IMPROVEMENT_ACTION_RUNTIME> = {}): Promise<number> {
   const bad = unknownArgError("improvement-action", rest.slice(1), ["--state-dir"], []), operationId = rest[0];
   if (bad || !operationId || !/^[a-f0-9]{64}$/.test(operationId)) { console.error("rmd improvement-action: use a saved action identity and its fleet state directory"); return 2; }
-  if (!(deps.isDaemonOwned ?? daemonOwnedProcess)()) { console.error("rmd improvement-action: saved actions run only through the daemon's admitted workflow"); return 1; }
-  const config = deps.config ?? loadConfig(), stateDir = flagValue(rest, "--state-dir");
+  const runtime = { ...IMPROVEMENT_ACTION_RUNTIME, ...deps };
+  if (!runtime.isDaemonOwned()) { console.error("rmd improvement-action: saved actions run only through the daemon's admitted workflow"); return 1; }
+  const config = runtime.readConfig(), stateDir = flagValue(rest, "--state-dir");
   if (!stateDir || resolve(stateDir) !== resolve(config.root, "state")) { console.error("rmd improvement-action: the request store must belong to this configured fleet"); return 2; }
   const identity = resolveOwnerRepo(), repository = `${identity.owner}/${identity.repo}`.toLowerCase();
   const checkTarget = (target: { repository: string; repoRoot: string }) => {
     if (target.repository !== repository || resolve(target.repoRoot) !== resolve(repoRoot)) throw new Error("The saved action does not belong to the selected repository checkout.");
   };
-  const result = await runImprovementAction(operationId, { stateDir, actorId: "owned-improvement-cli", clock: deps.clock,
-    draft: async target => {
-      checkTarget(target);
-      const planningStore = { root: target.controlRoot, ledgerPath: target.ledgerPath }, runId = `IMPROVEMENT-DRAFT-${operationId}`;
-      const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(target.ledgerPath, { run_id: runId, task_id: target.proposalId, step, ...extra });
-      await (deps.draftHook ?? buildInboxDraftHook)(identity.owner, identity.repo, config, runId, log, undefined, undefined, undefined, undefined, undefined, target.proposalId, planningStore)();
-    },
-    recoverFiling: target => improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, repository, deps.clock),
-    file: async target => {
-      checkTarget(target);
-      await (deps.approve ?? approveCommandMirrored)([target.proposalId], { config, inboxRoot: target.controlRoot, inboxLedgerPath: target.ledgerPath, root: target.controlRoot, planPath: target.planPath,
-        reviewedImprovement: { goalDigest: target.goalDigest, draftDigest: target.draftDigest } });
-      return improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, repository, deps.clock);
-    },
-  });
+  const draft: Parameters<typeof runImprovementAction>[2] = async target => {
+    checkTarget(target);
+    const planningStore = { root: target.controlRoot, ledgerPath: target.ledgerPath }, runId = `IMPROVEMENT-DRAFT-${operationId}`;
+    const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(target.ledgerPath, { run_id: runId, task_id: target.proposalId, step, ...extra });
+    await runtime.draftHook(identity.owner, identity.repo, config, runId, log, undefined, undefined, undefined, undefined, undefined, target.proposalId, planningStore)();
+  };
+  const file: Parameters<typeof runImprovementAction>[3] = async target => {
+    checkTarget(target);
+    await runtime.approve([target.proposalId], { config, inboxRoot: target.controlRoot, inboxLedgerPath: target.ledgerPath, root: target.controlRoot, planPath: target.planPath,
+      reviewedImprovement: { goalDigest: target.goalDigest, draftDigest: target.draftDigest } });
+    return improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, repository, runtime.clock);
+  };
+  const result = await runImprovementAction(operationId, { stateDir, actorId: "owned-improvement-cli", clock: runtime.clock }, draft, file,
+    target => improvementNativeFilingReceipt(target.ledgerPath, target.proposalId, repository, runtime.clock));
   console.log(JSON.stringify(result));
   return "kind" in result && ["completed", "waiting"].includes(result.state) ? 0 : 1;
 }

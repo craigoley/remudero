@@ -3,6 +3,7 @@ import { closeSync, constants, fsyncSync, fstatSync, lstatSync, mkdirSync, openS
 import { dirname, isAbsolute, join } from "node:path";
 import { opendir } from "node:fs/promises";
 import { systemClock, type Clock } from "./clock.js";
+import type { publishCodeHealthSnapshot } from "./code-health-store.js";
 import { CODE_HEALTH_POLICY_VERSION } from "./code-health-collector.js";
 import { codeHealthRepositoryStateDir, readCodeHealthArtifactJson, readCodeHealthCollectionFailure, readCodeHealthSnapshot } from "./code-health-store.js";
 import { readCodeHealthInventory, readCodeHealthRelatedWork } from "./code-health-store.js";
@@ -23,11 +24,8 @@ export interface ImprovementThreadRequest {
   repository: string; opportunityId: string; snapshotId: string; goal: string; constraints?: string[];
   idempotencyKey: string; instance?: string;
 }
-export interface ImprovementThreadDeps {
-  stateDir: string; actorId: string; clock?: Clock;
-  /** Persistence interruption seam; never accepted from a browser request. */
-  afterPersist?: (stage: "intent" | "proposal" | "messages" | "receipt") => void;
-}
+export type ImprovementThreadContext = Pick<Parameters<typeof publishCodeHealthSnapshot>[0], "stateDir" | "clock"> & Pick<Intent, "actorId">;
+
 export type ImprovementThreadResult = {
   state: "saved"; version: typeof IMPROVEMENT_THREAD_VERSION; requestId: string; threadId: string; proposalId: string;
   repository: string; instance: string; snapshotId: string; opportunityId: string; reused: boolean;
@@ -101,7 +99,7 @@ function scopeFor(request: ImprovementThreadRequest, stateDir: string): Scope | 
     return fail("source_unavailable", "Saved planning is not available for this fleet yet.");
   return { instance, inboxStateDir: join(options.controlRoot!, "state"), ledgerPath: options.ledgerPath!, planPath: options.planPath! };
 }
-function sourceFor(request: ImprovementThreadRequest, scope: Scope, deps: ImprovementThreadDeps): { binding: Binding; context: string; sourceProposalId: string } | Failure {
+function sourceFor(request: ImprovementThreadRequest, scope: Scope, deps: ImprovementThreadContext): { binding: Binding; context: string; sourceProposalId: string } | Failure {
   const now = (deps.clock ?? systemClock).now(), repoState = codeHealthRepositoryStateDir(deps.stateDir, request.repository);
   const latest = readCodeHealthSnapshot(repoState, request.repository);
   if (latest.state !== "observed") return fail("source_unavailable", "Refresh Code health before opening this improvement.");
@@ -205,7 +203,7 @@ function messagesMatch(intent: Intent): boolean {
 
 /** The source sealed with one explicit goal. A later goal never substitutes its baseline.
  * SHIPS-UNWIRED: W1-T10562 consumes this read in the existing outcome reconciler. */
-export function readSavedImprovementSource(requestId: string, deps: ImprovementThreadDeps): Failure | {
+export function readSavedImprovementSource(requestId: string, deps: ImprovementThreadContext): Failure | {
   state: "observed"; requestId: string; repository: string; instance: string; snapshotId: string; opportunityId: string;
   proposalId: string; threadId: string; goal: string; constraints: string[];
 } {
@@ -224,7 +222,7 @@ export function readSavedImprovementSource(requestId: string, deps: ImprovementT
 }
 
 /** Resolve server-owned evidence, save native Inbox messages, then acknowledge a durable receipt. */
-export async function createImprovementThread(value: unknown, deps: ImprovementThreadDeps): Promise<ImprovementThreadResult> {
+export async function createImprovementThread(value: unknown, deps: ImprovementThreadContext, afterPersist?: (stage: "intent" | "proposal" | "messages" | "receipt") => void): Promise<ImprovementThreadResult> {
   const request = requestInput(value);
   if (!request || !text(deps.actorId, 256)) return fail("invalid_request", "Choose a repository finding and provide a goal and request identity.");
   const requestId = hash([deps.actorId, request.idempotencyKey]), payloadHash = hash(request), root = join(deps.stateDir, "improvement-threads"), path = join(root, `${requestId}.json`);
@@ -272,7 +270,7 @@ export async function createImprovementThread(value: unknown, deps: ImprovementT
       if (Buffer.byteLength(serialized) > IMPROVEMENT_INTENT_MAX_BYTES) throw new Error("The conversation cannot fit its recovery record.");
       mayHaveWritten = true; mkdirSync(root, { recursive: true });
       if (!writeAtomic(path, serialized, { mode: 0o600, beforeRename: owns })) throw new Error("Improvement request ownership changed.");
-      syncPath(root, true); syncPath(deps.stateDir, true); deps.afterPersist?.(stage === "saved" ? "receipt" : stage);
+      syncPath(root, true); syncPath(deps.stateDir, true); afterPersist?.(stage === "saved" ? "receipt" : stage);
     };
     if (!previous) persist("intent");
     if (!readActionIndex(deps.stateDir, intent.proposalId)) writeActionIndex(deps.stateDir, { version: "improvement-actions-v1", proposalId: intent.proposalId, draft: null, file: null }, owns);
@@ -343,7 +341,7 @@ export type ImprovementThreadView = Failure | {
 };
 
 /** A saved chat remains readable when its source ages; new actions still require current evidence. */
-export function readImprovementThread(requestId: string, deps: ImprovementThreadDeps, beforeSeq?: number): ImprovementThreadView {
+export function readImprovementThread(requestId: string, deps: ImprovementThreadContext, beforeSeq?: number): ImprovementThreadView {
   if (!/^[a-f0-9]{64}$/.test(requestId) || beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1)) return fail("invalid_request", "Use the saved conversation's request identity and a valid message position.");
   try {
     const root = join(deps.stateDir, "improvement-threads"), savedRequest = readIntent(join(root, `${requestId}.json`));
@@ -484,10 +482,6 @@ export interface ImprovementAction {
   state: "prepared" | "requested" | "waiting" | "completed" | "refused" | "uncertain"; reason: string | null;
   receipt: ImprovementPlanReceipt | null;
 }
-export interface ImprovementActionDeps extends ImprovementThreadDeps {
-  /** Decision-write interruption seam; never accepted in an API request. */
-  afterActionPersist?: (stage: "prepared" | "indexed" | "requested") => void;
-}
 export type ImprovementActionResult = Failure | { state: "requested"; operation: ImprovementAction; execution: { state: "not_requested" } };
 function actionInput(value: unknown, kind: ImprovementAction["kind"]): ImprovementActionRequest | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -538,7 +532,7 @@ function actionTarget(intent: Intent): { operationId: string; stateDir: string; 
 }
 
 /** Save a sealed decision for the daemon. Filing binds the exact reviewed draft. */
-export async function requestImprovementAction(kind: ImprovementAction["kind"], value: unknown, deps: ImprovementActionDeps): Promise<ImprovementActionResult> {
+export async function requestImprovementAction(kind: ImprovementAction["kind"], value: unknown, deps: ImprovementThreadContext, afterActionPersist?: (stage: "prepared" | "indexed" | "requested") => void): Promise<ImprovementActionResult> {
   const input = actionInput(value, kind);
   if (!input || !text(deps.actorId, 256)) return fail("invalid_request", "Use this conversation's current goal and an explicit request identity.");
   const operationId = hash([deps.actorId, "improvement-action", input.idempotencyKey]);
@@ -590,11 +584,11 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
       actorId: deps.actorId, payloadHash, goalDigest: input.goalDigest, draftDigest: input.draftDigest ?? null, requestedAt: (deps.clock ?? systemClock).iso(), state: "prepared", reason: null, receipt: null };
     if (!previous || action.state === "prepared") {
       // Seal the full decision before publishing its pointer. A partial save can be retried only with identical bytes.
-      if (!previous) { writeAction(deps.stateDir, action, owns); wrote = true; deps.afterActionPersist?.("prepared"); }
+      if (!previous) { writeAction(deps.stateDir, action, owns); wrote = true; afterActionPersist?.("prepared"); }
       const index = readActionIndex(deps.stateDir, intent.proposalId);
       if (!index) throw new Error("The saved action index is unavailable.");
-      writeActionIndex(deps.stateDir, { ...index, [kind]: operationId }, owns); wrote = true; deps.afterActionPersist?.("indexed");
-      action.state = "requested"; writeAction(deps.stateDir, action, owns); deps.afterActionPersist?.("requested");
+      writeActionIndex(deps.stateDir, { ...index, [kind]: operationId }, owns); wrote = true; afterActionPersist?.("indexed");
+      action.state = "requested"; writeAction(deps.stateDir, action, owns); afterActionPersist?.("requested");
     }
     if (kind === "draft" && ["requested", "waiting"].includes(action.state)) {
       const registryPath = join(intent.scope.inboxStateDir, "inbox-proposals.json");
@@ -641,14 +635,16 @@ export async function* pendingImprovementActions(stateDir: string): AsyncGenerat
   }
 }
 
-export interface ImprovementActionRunnerDeps extends ImprovementThreadDeps {
-  draft: (target: { proposalId: string; repository: string; controlRoot: string; ledgerPath: string; repoRoot: string; planPath: string }) => Promise<void>;
-  file: (target: { proposalId: string; repository: string; controlRoot: string; ledgerPath: string; repoRoot: string; planPath: string; goalDigest: string; draftDigest: string }) => Promise<ImprovementPlanReceipt | undefined>;
-  recoverFiling: (target: { proposalId: string; ledgerPath: string }) => ImprovementPlanReceipt | undefined;
+function actionExecutionTarget(intent: Intent, scope: Scope) {
+  return { proposalId: intent.proposalId, repository: intent.request.repository, controlRoot: dirname(scope.inboxStateDir), ledgerPath: scope.ledgerPath,
+    repoRoot: actionTarget(intent).repoRoot, planPath: scope.planPath };
 }
 
 /** Owned CLI worker: no caller-provided paths, commands, routing changes, force-draft, or admission exemptions. */
-export async function runImprovementAction(operationId: string, deps: ImprovementActionRunnerDeps): Promise<ImprovementAction | Failure> {
+export async function runImprovementAction(operationId: string, deps: ImprovementThreadContext,
+  draft: (target: ReturnType<typeof actionExecutionTarget>) => Promise<void>,
+  file: (target: ReturnType<typeof actionExecutionTarget> & Required<Pick<ImprovementActionRequest, "goalDigest" | "draftDigest">>) => Promise<ImprovementPlanReceipt | undefined>,
+  recoverFiling: (target: Pick<Scope, "ledgerPath"> & Pick<Intent, "proposalId">) => ImprovementPlanReceipt | undefined): Promise<ImprovementAction | Failure> {
   let lock: InflightLockHandle | undefined, owns: (() => boolean) | undefined;
   let action: ImprovementAction | undefined;
   try {
@@ -669,7 +665,7 @@ export async function runImprovementAction(operationId: string, deps: Improvemen
     if (action.state === "prepared") return fail("uncertain", "This decision was not fully saved. Retry the same request before it can run.");
     // The native ratification receipt is the recovery authority, including after source or goal changes.
     if (action.kind === "file") {
-      const recovered = deps.recoverFiling({ proposalId: intent.proposalId, ledgerPath: scope.ledgerPath });
+      const recovered = recoverFiling({ proposalId: intent.proposalId, ledgerPath: scope.ledgerPath });
       if (recovered) { action.state = "completed"; action.receipt = recovered; action.reason = null; writeAction(deps.stateDir, action, owns); return action; }
       if (action.state === "uncertain") return action; // Do not repeat ambiguous consequential work without its native receipt.
     }
@@ -679,20 +675,19 @@ export async function runImprovementAction(operationId: string, deps: Improvemen
         action.kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== action.draftDigest || view.correspondence.state !== "linked" || view.correspondence.pendingInputs !== 0 || view.correspondence.pendingWork !== 0)) {
       action.state = "refused"; action.reason = "The source, goal, or reviewed draft changed before this action could run."; writeAction(deps.stateDir, action, owns); return action;
     }
-    const target = { proposalId: intent.proposalId, repository: intent.request.repository, controlRoot: dirname(scope.inboxStateDir), ledgerPath: scope.ledgerPath,
-      repoRoot: actionTarget(intent).repoRoot, planPath: scope.planPath };
+    const target = actionExecutionTarget(intent, scope);
     // Save uncertainty BEFORE any consequential native filing call. A crash cannot look unattempted on restart.
     action.state = action.kind === "file" ? "uncertain" : "waiting"; action.reason = "Waiting for the repository workflow to confirm the result.";
     writeAction(deps.stateDir, action, owns);
     if (!owns()) return fail("uncertain", "The action writer changed before execution.");
     if (action.kind === "draft") {
-      await deps.draft(target);
+      await draft(target);
       if (!owns()) return fail("uncertain", "The draft writer changed before acknowledgement.");
       const after = readImprovementThread(action.requestId, deps);
       action.state = after.state === "saved" && after.drafting.state === "ready" ? "completed" : "waiting";
       action.reason = action.state === "completed" ? null : "Plan drafting has not finished. Normal checks and retry limits still apply.";
     } else {
-      const receipt = await deps.file({ ...target, goalDigest: action.goalDigest, draftDigest: action.draftDigest! });
+      const receipt = await file({ ...target, goalDigest: action.goalDigest, draftDigest: action.draftDigest! });
       if (!owns()) return fail("uncertain", "The filing writer changed before acknowledgement. Inspect the native receipt.");
       action.receipt = receipt ?? null; action.state = receipt ? "completed" : "uncertain";
       action.reason = receipt ? null : "A plan pull request could not be confirmed. Check the saved result before retrying.";
