@@ -435,3 +435,79 @@ export class ProductRepositoryService {
     throw new Fault("outcome_unknown");
   }
 }
+
+export const PRODUCT_REPOSITORY_PREVIEW_VERSION = "product-repository-preview-v1" as const;
+export type ProductRepositoryPreviewState = "ready" | "absent" | "conflict" | "stale" | "denied" | "unavailable";
+export type ProductRepositoryPreviewReason =
+  | "stale_revision" | "requested_repository_mismatch" | "product_already_bound" | "bound_repository_mismatch"
+  | "repository_exists" | "repository_absent" | "provider_unreadable" | "creation_denied" | "creation_unknown";
+/** What the provider said about creating in the owner's namespace; "not_checked" means no read got that far. */
+export type ProductRepositoryPreviewCreation = ProviderCapability | "not_checked";
+
+export const productRepositoryPreviewQuerySchema = z.object({
+  id: productIdSchema, action: z.enum(["adopt", "create"]), owner: repositoryOwner, name: repositoryName,
+  expectedRevision: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+  expectedObjectiveRevision: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+}).strict();
+
+export interface ProductRepositoryPreview {
+  version: typeof PRODUCT_REPOSITORY_PREVIEW_VERSION; productId: string; revision: number; objectiveRevision: number;
+  action: "adopt" | "create"; target: { owner: string; name: string };
+  state: ProductRepositoryPreviewState; reasons: ProductRepositoryPreviewReason[];
+  repository: Omit<z.infer<typeof identitySchema>, "verifiedAt"> | null;
+  creation: ProductRepositoryPreviewCreation; observedAt: string;
+}
+export type ProductRepositoryPreviewResult =
+  | { ok: true; value: ProductRepositoryPreview; code?: never } | { ok: false; code: ProductRepositoryCode; value?: never };
+
+/**
+ * Read-only observation of the exact repository a create or adopt would act on. It reads the product and
+ * the provider and writes nothing: no journal, no product record, no create call. Preview is informational;
+ * the mutation rechecks every prerequisite itself, so a "ready" here authorizes nothing.
+ */
+export async function inspectProductRepository(
+  deps: { store: ProductIntentStore; provider: ProductRepositoryProvider; clock?: Clock },
+  actor: string, query: unknown,
+): Promise<ProductRepositoryPreviewResult> {
+  if (typeof actor !== "string" || !actor.trim() || actor.length > 512) return { ok: false, code: "invalid_identity" };
+  const parsed = productRepositoryPreviewQuerySchema.safeParse(query);
+  if (!parsed.success) return { ok: false, code: "invalid_input" };
+  const input = parsed.data;
+  const product = deps.store.read(actor, input.id);
+  if (!product.ok) return { ok: false, code: product.code };
+  const { revision, objectiveRevision, repository: bound } = product.value;
+  const requested = product.value.brief.requestedRepository;
+  const same = (owner: string, name: string) => owner.toLowerCase() === input.owner.toLowerCase() && name.toLowerCase() === input.name.toLowerCase();
+  const observedAt = (deps.clock ?? systemClock).iso();
+  const outcome = (state: ProductRepositoryPreviewState, reasons: ProductRepositoryPreviewReason[],
+    repository: ProductRepositoryPreview["repository"] = null, creation: ProductRepositoryPreviewCreation = "not_checked"): ProductRepositoryPreviewResult => ({
+    ok: true, value: { version: PRODUCT_REPOSITORY_PREVIEW_VERSION, productId: input.id, revision, objectiveRevision, action: input.action,
+      target: { owner: input.owner, name: input.name }, state, reasons, repository, creation, observedAt },
+  });
+  if ((input.expectedRevision !== undefined && input.expectedRevision !== revision) ||
+    (input.expectedObjectiveRevision !== undefined && input.expectedObjectiveRevision !== objectiveRevision)) return outcome("stale", ["stale_revision"]);
+  if (requested && !same(requested.owner, requested.name)) return outcome("conflict", ["requested_repository_mismatch"]);
+  // A bound product never becomes a fresh create candidate; no provider read is spent on it.
+  if (bound && input.action === "create") return outcome("conflict", ["product_already_bound"]);
+  if (bound && input.action === "adopt" && !same(bound.owner, bound.name)) return outcome("conflict", ["bound_repository_mismatch"]);
+
+  let before: ProviderRead;
+  try { before = await deps.provider.read(input.owner, input.name); }
+  catch { before = { state: "unreadable" }; /* a throwing provider is unreadable, never absent and never ready */ }
+  if (before.state === "unreadable") return outcome("unavailable", ["provider_unreadable"]);
+  let creation: ProductRepositoryPreviewCreation;
+  try { creation = await deps.provider.capability(input.owner); }
+  catch { creation = "unknown"; /* an unreadable capability is unknown, never a denial */ }
+  if (before.state === "found") {
+    const { id, owner, name, defaultBranch, visibility } = before.repository;
+    const found = { provider: "github" as const, id, owner, name, defaultBranch, visibility };
+    if (input.action === "create") return outcome("conflict", ["repository_exists"], found, creation);
+    if (bound && bound.id !== id) return outcome("conflict", ["bound_repository_mismatch"], found, creation);
+    // Adoption needs the exact existing repository; creation capability alone never gates it.
+    return outcome("ready", [], found, creation);
+  }
+  if (input.action === "adopt") return outcome("absent", ["repository_absent"], null, creation);
+  if (creation === "denied") return outcome("denied", ["repository_absent", "creation_denied"], null, creation);
+  if (creation === "unknown") return outcome("unavailable", ["repository_absent", "creation_unknown"], null, creation);
+  return outcome("ready", ["repository_absent"], null, creation);
+}

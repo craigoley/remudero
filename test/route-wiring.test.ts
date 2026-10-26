@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -550,6 +550,35 @@ test("W1-T10613: POST /v1/products/repository is high tier, confirmed, and journ
       assert.ok(!shim.calls().some((call) => call.includes("-X POST")), "adopting makes no create call");
       assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "adoption preserves the ledger");
     }, true, true);
+  } finally { process.env.PATH = originalPath; }
+});
+
+test("W1-T10726: GET /v1/products/repository-preview is verified-operator read-only over the fleet root", async () => {
+  const shim = ghShim([{ when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: 1432832754, name: "wreckterra",
+    owner: { login: "craigoley" }, private: false, default_branch: "main" }) }, { when: "api user", stdout: JSON.stringify({ login: "craigoley" }) }]);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  try {
+    await withProductionServer(async (h) => {
+      const headers: Record<string, string> = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json",
+        [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+      const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify({ version: "product-intent-v1",
+        requestId: "wiring-preview-0001", expectedRevision: 0, brief: { idea: "private preview wiring fixture" } }) });
+      const { receipt } = await saved.json() as { receipt: { productId: string } };
+      const url = `${h.base}/v1/products/repository-preview?id=${receipt.productId}&action=adopt&owner=craigoley&name=wreckterra`;
+      const anonymous = await fetch(url, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+      assert.equal(anonymous.status, 403, "a read grant without a verified operator previews nothing");
+      const before = readdirSync(h.fleetRoot, { recursive: true }).sort();
+      const preview = await fetch(url, { headers: { authorization: `Bearer ${READ_TOKEN}`, [OPERATOR_SESSION_HEADER]: h.operatorSession! } });
+      assert.equal(preview.status, 200);
+      assert.equal(preview.headers.get("cache-control"), "private, no-store");
+      const body = await preview.json() as { state: string; repository: { id: number } };
+      assert.equal(body.state, "ready");
+      assert.equal(body.repository.id, 1432832754);
+      assert.deepEqual(readdirSync(h.fleetRoot, { recursive: true }).sort(), before, "preview writes nothing under the fleet root");
+      assert.ok(!shim.calls().some((call) => call.includes("-X POST")), "preview makes no create call");
+      assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "preview preserves the ledger");
+    }, true);
   } finally { process.env.PATH = originalPath; }
 });
 
