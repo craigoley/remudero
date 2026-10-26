@@ -161,7 +161,8 @@ test("native cache rejects symlink and foreign-owner ancestors before granting a
 });
 
 test("native cache refuses when process ownership cannot be measured", posix, t => {
-  t.mock.method(process, "geteuid", () => undefined as never);
+  const ownerPort = process as unknown as { geteuid(): number | undefined };
+  t.mock.method(ownerPort, "geteuid", () => undefined);
   cacheFixture(home => assert.throws(() => prepareWorkerNativeCache(home), /ownership cannot be verified/));
 });
 
