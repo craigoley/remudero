@@ -10,6 +10,8 @@ import { TICK_READ_MAX_AGE_MS } from "./read-plane.js";
 import { checkRunsRestArgs, combinedStatusRestArgs, jobsForRunRestArgs, rollupFromRest, runsForHeadRestArgs, singlePrRestArgs, type GhApiFetcher } from "./open-prs-rest.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { planNodePin } from "../../scripts/node-pin-follows-the-image.mjs";
+// @ts-expect-error — pure ESM companion shared with the dependency-free producer; tsconfig includes TS only.
+import { SECURITY_MERGE_CONTEXT as SECURITY_MERGE_CONTEXT_MJS } from "./code-scanning-merge-adapter.mjs";
 
 /**
  * The dependency-PR review lane (W1-T54, MASTER-PLAN §5D item 1).
@@ -649,6 +651,9 @@ export interface DepReviewCheck {
    * re-run of this lane against a PR that already carries one must read this field,
    * not just `conclusion`. */
   state?: string;
+  /** A commit STATUS's one-line verdict, which the PR view's StatusContext carries (for example
+   *  security-merge-policy's `blocked: <reason>`). A CheckRun has none. */
+  description?: string;
 }
 
 export interface DepReviewSelectedHead {
@@ -793,6 +798,45 @@ export function splitRedChecks(checks: DepReviewCheck[], required?: DepReviewReq
   if (required?.kind !== "required") return { holding: red, advisory: [] };
   const names = new Set(required.names);
   return { holding: red.filter((name) => names.has(name)), advisory: [...new Set(red.filter((name) => !names.has(name)))].sort() };
+}
+
+/** One red check or status on a head, as an owned-build proposal or an operator ask must name it. */
+export interface DepReviewRedEvidence {
+  name: string;
+  state: string;
+  /** In the required set the lane judges against ({@link splitRedChecks}' `holding`). */
+  holding: boolean;
+  description?: string;
+}
+
+/** Every red check and status on the head, holding AND advisory, with each status's own verdict
+ *  text. The advisory half is not optional evidence: security-merge-policy is outside the required
+ *  set (#14094 listed only head-identity-gate, ci and ci-gate), yet arm-auto-merge.ts enforces the
+ *  same decision through securityMergeHead. */
+export function redCheckEvidence(checks: readonly DepReviewCheck[], result: Pick<DepReviewResult, "redChecks">): DepReviewRedEvidence[] {
+  const out = new Map<string, DepReviewRedEvidence>();
+  for (const c of checks) {
+    const state = String(c.conclusion ?? c.state ?? "").toUpperCase();
+    const name = c.name ?? c.context ?? "unknown";
+    if (!RED_CONCLUSIONS.has(state) || name === LANE_OWNED_STATUS_CONTEXT || out.has(name)) continue;
+    const description = typeof c.description === "string" && c.description.trim() ? c.description.trim() : undefined;
+    out.set(name, { name, state, holding: result.redChecks.includes(name), ...(description ? { description } : {}) });
+  }
+  return [...out.values()];
+}
+
+/** The status the security merge policy publishes; its FAILURE state is `blocked:`, never `unknown:`. */
+export const SECURITY_MERGE_POLICY_CONTEXT: string = SECURITY_MERGE_CONTEXT_MJS;
+
+/** Red verdicts that refuse the VERSION MOVE itself rather than the branch it rides: the security
+ *  merge policy's `blocked` state (FAILURE). Its `unknown` state (ERROR) is missing evidence, not a
+ *  refusal, so it never counts here. An owned build cannot clear one without loosening that gate. */
+export function versionRefusingVerdicts(evidence: readonly DepReviewRedEvidence[]): DepReviewRedEvidence[] {
+  return evidence.filter((e) => e.name === SECURITY_MERGE_POLICY_CONTEXT && e.state === "FAILURE");
+}
+
+function redEvidenceLine(e: DepReviewRedEvidence): string {
+  return `- ${e.name} (${e.holding ? "required" : "advisory"}): ${e.state}${e.description ? ` — ${e.description}` : ""}`;
 }
 
 export function depReviewRequiredSet( // W1-T9929: protection's contexts ∪ ci-gate's REQUIRED; unreadable ⇒ every check
@@ -1779,7 +1823,12 @@ export function renderDepReviewOwnRedFeedback(args: {
   redChecks: readonly string[];
   siblings: ReadonlyArray<{ prNumber: number; bumps: readonly DependabotOwnRedBump[] }>;
   offendingFiles?: readonly string[];
+  /** Every red check and status on the head ({@link redCheckEvidence}); absent renders none. */
+  evidence?: readonly DepReviewRedEvidence[];
+  /** The operator ask a version-refusing verdict opened ({@link buildDepReviewRefusedPathEscalation}). */
+  escalationUrl?: string;
 }): string {
+  const refusing = versionRefusingVerdicts(args.evidence ?? []);
   return [
     `Land the dependency bump(s) of Dependabot PR #${args.prNumber}, whose red is its own: ${args.title}`,
     "",
@@ -1788,10 +1837,23 @@ export function renderDepReviewOwnRedFeedback(args: {
       : args.basis === "outside-allowlist"
         ? `Dependabot edited dependency file(s) outside the lane's allowlist: ${(args.offendingFiles ?? []).join(", ")}.`
         : "Dependabot proposed a minor/patch update whose red survived a requested Dependabot refresh.",
-    "A companion edit cannot ride the Dependabot branch (dep-review refuses any file outside the manifest",
-    "allowlist), so rmd must land the SAME version moves plus the companion edits on an owned task branch:",
-    "tests that pin the old version or action SHA literal, derived pins (the image CLI must equal the locked",
-    "SDK's claudeCodeVersion), and the bumps of every sibling Dependabot PR named below that the fix needs.",
+    ...(args.basis === "outside-allowlist" ? [
+      "The lane excludes these paths on purpose: its manifest predicate is shared with head-identity-gate",
+      "(W1-T3707) and is not widened for a bump (W1-T9797), so this head cannot merge as Dependabot opened it.",
+    ] : []),
+    ...(refusing.length > 0 ? [
+      "This PR's own checks refuse the version move itself, so do NOT land the same version moves:",
+      ...refusing.map(redEvidenceLine),
+      "Never loosen, skip or edit that gate, its scanner or its runtime audit to clear it. An owned build may",
+      "land only a move that passes the same verdict on its own head; if none can, make no version move and",
+      "report REFUSED: with class premise-rotted, naming the verdict. The decision is the operator's:",
+      `${args.escalationUrl ?? "(operator escalation not recorded)"}.`,
+    ] : [
+      "A companion edit cannot ride the Dependabot branch (dep-review refuses any file outside the manifest",
+      "allowlist), so rmd must land the SAME version moves plus the companion edits on an owned task branch:",
+      "tests that pin the old version or action SHA literal, derived pins (the image CLI must equal the locked",
+      "SDK's claudeCodeVersion), and the bumps of every sibling Dependabot PR named below that the fix needs.",
+    ]),
     "Do not edit or close the Dependabot PRs: the superseded-by row closes them once the owned PR carries",
     "their hunks, or Dependabot does once main carries the versions.",
     "",
@@ -1799,6 +1861,7 @@ export function renderDepReviewOwnRedFeedback(args: {
     `Head: ${args.headSha}`,
     `Bumps: ${args.bumps.map(ownRedBumpText).join(", ")}`,
     `Red checks: ${args.redChecks.join(", ")}`,
+    ...(args.evidence?.length ? ["Red checks and statuses on this head, required and advisory:", ...args.evidence.map(redEvidenceLine)] : []),
     `Sibling Dependabot PRs folded in: ${args.siblings.length === 0 ? "none"
       : args.siblings.map((s) => `#${s.prNumber} (${s.bumps.map(ownRedBumpText).join(", ")})`).join("; ")}`,
     "",
@@ -1930,6 +1993,48 @@ export function reconcileDependabotOwnRed(args: {
 
 export type DependabotRefusedPathOutcome = "not-proposed" | "captured" | "folded" | "failed";
 
+/**
+ * The operator ask for a refused Dependabot path whose OWN checks refuse the version move (#14094:
+ * security-merge-policy `blocked: semgrep-runtime-incompatible-or-install-failed`). The owned-build
+ * proposal alone left such a PR to a FIFO triage queue days deep, and no build can clear the verdict
+ * without loosening the gate, so the decision is named here, as an aged hold's already is.
+ * One issue per head: escalate()'s (taskId, PR, headSha, cause) dedup.
+ */
+export function buildDepReviewRefusedPathEscalation(args: {
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  headSha: string;
+  offendingFiles: readonly string[];
+  verdicts: readonly DepReviewRedEvidence[];
+  evidence: readonly DepReviewRedEvidence[];
+}): Escalation {
+  return {
+    class: "BLOCKED",
+    taskId: `dep-review-refused-PR${args.prNumber}`,
+    headSha: args.headSha,
+    cause: "ci",
+    summary: `Dependabot PR #${args.prNumber} is refused by its own security verdict: ${args.title}`,
+    detail: [
+      `Dependabot PR ${args.prUrl} is refused on head ${args.headSha}.`,
+      `It edits dependency file(s) dep-review keeps outside its allowlist on purpose: ${args.offendingFiles.join(", ")}.`,
+      `Blocker, the PR's own verdict on the version move: ${args.verdicts.map((v) => `${v.name}: ${v.description ?? v.state}`).join("; ")}.`,
+      "Red checks and statuses on this head:",
+      ...args.evidence.map(redEvidenceLine),
+      "Owner: repository operator. No fleet build can land this move without loosening that gate.",
+      "Decide whether to wait for an upstream release the verdict accepts, ignore this version through",
+      "Dependabot, or land a compatible subset through the owned-build proposal. Do not override the verdict.",
+    ].join("\n"),
+    options: [{
+      label: "decide the bump",
+      detail: "repository operator: wait for a compatible upstream release, ignore this version through Dependabot, or land a compatible subset; never loosen the verdict",
+      kind: { type: "operator-only" },
+    }],
+    recommendation: "decide the bump",
+    consequence: "The Dependabot PR stays refused and unmerged while its own security verdict blocks the version move.",
+  };
+}
+
 export function reconcileDependabotRefusedPath(args: {
   registryDir: string;
   owner: string;
@@ -1945,8 +2050,14 @@ export function reconcileDependabotRefusedPath(args: {
   capture: (args: { raw: string; submissionKey: string }) => { id: string };
   nowMs: number;
   log: (step: string, extra: Record<string, unknown>) => void;
+  /** The head's checks and statuses as the decision read them; absent means none to name. */
+  checks?: readonly DepReviewCheck[];
+  /** Opens the operator ask; returns its URL, or "" when it was not delivered. */
+  escalate?: (escalation: Escalation) => string;
 }): DependabotRefusedPathOutcome {
   const facts = { pr_number: args.prNumber, head_sha: args.headSha, offending_files: args.result.offendingFiles };
+  const evidence = redCheckEvidence(args.checks ?? [], args.result);
+  const verdicts = versionRefusingVerdicts(evidence);
   const bumps = parseDependabotBumpFacts(args.title, args.body)
     .map((b) => ({ dependency: b.dependency, fromVersion: b.fromVersion, toVersion: b.toVersion }));
   const reason = !isDependabotAuthor(args.author) ? "non-dependabot-author"
@@ -1960,12 +2071,36 @@ export function reconcileDependabotRefusedPath(args: {
   const submissionKey = depReviewOwnRedSubmissionKey(args.owner, args.repo, bumps);
   try {
     const proposals = readOwnRedProposals(registryPath);
-    const bindRepair = (feedbackId: string) => {
-      const statePath = join(args.registryDir, `PR${args.prNumber}.json`);
-      const state = readRefreshState(statePath, args.headSha) as DepReviewHoldState & { refusedPathRepair?: unknown };
+    const statePath = join(args.registryDir, `PR${args.prNumber}.json`);
+    const readRepairState = () => {
+      const state = readRefreshState(statePath, args.headSha) as DepReviewHoldState & { refusedPathRepair?: unknown; refusedPathAsk?: unknown };
       if (!state || typeof state.headSha !== "string" || !Array.isArray(state.asks)) {
         throw new Error("invalid refused-path repair state; refusing to overwrite it");
       }
+      return state;
+    };
+    // A verdict refusing the version move itself is the operator's decision, asked once per head and
+    // BEFORE the proposal is filed, so the proposal can name the ask instead of prescribing the move.
+    let escalationUrl: string | undefined;
+    if (verdicts.length > 0) {
+      const state = readRepairState();
+      const prior = state.refusedPathAsk as { headSha?: unknown; issueUrl?: unknown } | undefined;
+      if (prior?.headSha === args.headSha && typeof prior.issueUrl === "string" && prior.issueUrl) {
+        escalationUrl = prior.issueUrl;
+      } else {
+        if (args.escalate === undefined) throw new Error("refused-path operator ask has no issue gateway");
+        const url = args.escalate(buildDepReviewRefusedPathEscalation({ prUrl: args.prUrl, prNumber: args.prNumber, title: args.title,
+          headSha: args.headSha, offendingFiles: args.result.offendingFiles, verdicts, evidence }));
+        if (!url) throw new Error("refused-path operator ask not delivered; retry after the issue read recovers");
+        state.refusedPathAsk = { headSha: args.headSha, issueUrl: url };
+        writeAtomic(statePath, `${JSON.stringify(state)}\n`);
+        args.log("dep-review.refused_path.escalated", { ...facts, issue_url: url,
+          verdicts: verdicts.map((v) => `${v.name}: ${v.description ?? v.state}`) });
+        escalationUrl = url;
+      }
+    }
+    const bindRepair = (feedbackId: string) => {
+      const state = readRepairState();
       const prior = state.refusedPathRepair;
       if (prior !== undefined && !isOwnRedRecord(prior)) throw new Error("invalid refused-path repair binding");
       if (isOwnRedRecord(prior) && prior.headSha === args.headSha && prior.feedbackId !== undefined && prior.feedbackId !== feedbackId) {
@@ -1989,7 +2124,7 @@ export function reconcileDependabotRefusedPath(args: {
       return "folded";
     }
     const raw = renderDepReviewOwnRedFeedback({ ...args, basis: "outside-allowlist", bumps, redChecks: args.result.redChecks,
-      siblings: [], offendingFiles: args.result.offendingFiles });
+      siblings: [], offendingFiles: args.result.offendingFiles, evidence, escalationUrl });
     const entry = args.capture({ raw, submissionKey });
     writeAtomic(registryPath, `${JSON.stringify({ proposals: [...proposals, {
       feedbackId: entry.id, submissionKey, bumps: [...new Set(mine)].sort(), prNumbers: [args.prNumber], filedAtMs: args.nowMs,

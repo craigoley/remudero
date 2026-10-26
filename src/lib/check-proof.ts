@@ -146,7 +146,9 @@ export function buildBaseProofDir(
       pendingCheckout: run(detachedArgs(path, revision)),
     };
   }
-  const mergeBase = deps.mergeBase ?? ((cwd: string) => hostWorktreeGit(cwd, ["merge-base", "origin/main", "HEAD"]).trim());
+  // W1-T10407: the base reads must not vary with the host's git config (e.g. `diff.renames`).
+  const hermetic = { env: { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } };
+  const mergeBase = deps.mergeBase ?? ((cwd: string) => hostWorktreeGit(cwd, ["merge-base", "origin/main", "HEAD"], hermetic).trim());
   const showBlob =
     deps.showBlob ??
     ((cwd: string, rev: string, rel: string) =>
@@ -157,7 +159,7 @@ export function buildBaseProofDir(
       // absence-vs-read-failure classification `baseBlobErrorIsAbsence` keys on (`status: 128` vs a
       // Node `code`) was MEASURED with stderr already piped, and is locked by
       // test/base-blob-read-failure.test.ts Group 0.
-      hostWorktreeGit(cwd, ["show", `${rev}:${rel}`], { maxBuffer: 1 << 26 }));
+      hostWorktreeGit(cwd, ["show", `${rev}:${rel}`], { maxBuffer: 1 << 26, ...hermetic }));
   const addWorktree =
     deps.addWorktree ??
     ((repoDir: string, worktreePath: string, revision: string) =>
@@ -190,7 +192,7 @@ export function buildBaseProofDir(
   const changedTestFiles =
     deps.changedTestFiles ??
     ((headDir: string, base: string) =>
-      hostWorktreeGit(headDir, ["diff", "--name-only", "--diff-filter=A", base, "HEAD", "--", "test/"])
+      hostWorktreeGit(headDir, ["diff", "--name-only", "--diff-filter=A", base, "HEAD", "--", "test/"], hermetic)
         .split("\n")
         .map((l) => l.trim())
         .filter(Boolean));

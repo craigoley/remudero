@@ -260,10 +260,12 @@ const ROSTER_BASENAMES = new Set(CENSUS_POPULATION.map((member) => basename(memb
  * suite by what it EXECUTES rather than by the `ls-files`/`src/` text it mentions. The recognizer no
  * longer counts them as tree-walk candidates, so censusPopulationDrift would call their rows stale,
  * but rule-checks ran every one of them through the roster and must keep running them: no rule suite
- * stops running because its census row left. Exactly the 26 the row removals dropped from
- * listRuleSuites (129 on main before the change, 103 after without this list).
+ * stops running because its census row left. The original 26 row removals dropped listRuleSuites
+ * from 129 to 103. W1-T9049's concurrent repair-classification suite also only mentions the walk
+ * token in fixtures; retain its rule-checks enrollment without a stale census row.
  */
 export const RETAINED_RULE_SUITES: readonly string[] = [
+  "test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts",
   "test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts",
   "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts",
   "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",

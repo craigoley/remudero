@@ -1,0 +1,25 @@
+- id: W1-T10658
+  title: "The inbox-response lane's worker calls record cost in only 55.3% of joined calls (26/47, 7-day window) — restore costUsd at the inbox-response ledger write site or record why the lane legitimately lacks it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "evidence-coverage-v1 over benchmark-quality-v1 reports lane `inbox-response`, field `cost`: 26/47 joined worker calls (55.3%) against the field's 90.0% floor, first seen 2026-10-14T05:59:56.253Z. A reading under the floor is a chronic gap no baseline excuses (W1-T4640). The inbox responder spawns via benchmarkNonDispatchSpawn(\"inbox-response\") in src/lib/inbox-responder.ts; src/lib/benchmark-evidence.ts names what cost reads (terminal.costUsd, classified by billingMode). Sibling gaps: W1-T9387 (review cost), W1-T9109 (ci-judge cost), W1-T10272 (inbox-response servedModel audit, same lane)."
+  design: |
+    DIAGNOSE FIRST. Do not infer the cause from 26/47 alone. Using the complete ledger union, state the audited window and freshness, and classify joined inbox-response attempts: cost reported, provider legitimately reports no cost (named billingMode/reason), failed or thrown attempts whose terminal row skips accounting, and unexplained omissions. Include a positive control with a reported cost.
+    THEN EITHER restore: thread the worker's costUsd into the inbox-response terminal row at the benchmarkNonDispatchSpawn boundary; OR, where the provider legitimately reports no cost, record that named reason so the lane is excused honestly rather than counted missing. Never invent a cost.
+    Rule 19 merits test: one integration test must drive the inbox responder through benchmarkNonDispatchSpawn into the evidence reader and prove cost (or its named reason) survives, including a failed attempt.
+    NOT IN SCOPE: lowering the 90% floor, editing the gardener, other lanes, or inbox-response servedModel (W1-T10272).
+  acceptance:
+    - claim: "a test drives the inbox responder's production spawn path, including a failed attempt, into the benchmark evidence reader: a reported costUsd is retained and counted observed, while a legitimately cost-less call retains a named reason and is excused rather than missing"
+      proof: "unit test: test/inbox/inbox-responder-cost.test.ts"
+  risk: high
+  band_meaning: span
+  origin: feedback#evidence-coverage-inbox-response-cost
+  plan_refs: ["§7B", "W1-T9387", "W1-T10272"]
+  files: [src/lib/inbox-responder.ts, src/lib/benchmark-evidence.ts, test/inbox/inbox-responder-cost.test.ts]
+  priority: 4
+  status: queued
+  attempts: 0

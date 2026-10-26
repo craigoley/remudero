@@ -24,11 +24,14 @@
     - src/lib/opportunity-intake.ts
     - src/lib/panel-graph.ts
     - src/lib/serve.ts
+    - src/lib/daemon.ts
+    - src/cli/commands/daemon.ts
     - src/run-task.ts
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
     - test/**/improvement-thread.test.ts
     - test/**/improvement-thread-route.test.ts
+    - test/**/improvement-action-pump.test.ts
   rationale: Native Ask turns are temporary and read-only, existing Inbox routes only read/reply to existing
     conversations, and the intent-plan gateway is explicitly unserved. The approved Plan this improvement
     action needs durable core creation and subsequent reviewed task drafting, not a capture-only success
@@ -51,6 +54,19 @@
     approval, desktop Codex bridge, tool permission, hidden execution, gate weakening or arbitrary
     browser-provided commands. Pin the real read/write contract for the dependent console consumer; an
     unserved stub or feedback capture alone does not satisfy the task.
+
+
+    Daemon-owned saved planning actions: the standalone service persists sealed draft/file requests only.
+    It must not start model or filing work through a service-owned CLI handoff. Reuse the real daemon's
+    fresh-source gateway and normal admission, budget, ownership, provider-refusal and OFF/latch guards;
+    the service must not assign a daemon marker or override an admission predicate. Add a bounded native
+    pump with at most one active handoff. Retain pending requests durably without truncating discovery,
+    and recover them after restart without a browser or a second operator decision. Revalidate the
+    original repository, source, goal, reviewed draft and exact request identity before each handoff.
+    Preserve existing jobs and normal daemon shutdown/freshness behavior. Completed or ambiguous filing
+    is never repeated without its native recovery receipt. A saved or queued request is not worker
+    admission, a completed draft, a filed task, a merge or deployment. The named regression must refuse
+    direct service execution and fail if production daemon-pump wiring or recovery is removed.
   falsifier: Remove idempotency, source/scope validation and action boundary separately; repeated creation,
     cross-repository substitution and no-dispatch assertions must fail. Exercise actual persistence
     interruption and restart. A local React conversation or feedback-only ID cannot pass the saved-thread
@@ -64,6 +80,8 @@
       proof: "unit test: improvement planning separates conversation drafting filing and execution"
     - claim: the evidence mechanism is reached by its production caller
       proof: "grep: buildImprovementThreadRoutes( in src/lib/serve.ts"
+    - claim: saved planning actions use daemon-owned execution and normal admission with durable recovery
+      proof: "unit test: saved improvement actions start only through the daemon-owned handoff"
   note: Reviewed core c18e7e4c48cee7cb19d2fc96fa93273ef63d85a5 and console
     c57646ea3636341cc1fad8847df8b144e169d3f1. Before filing, all 10 open core PR heads and main were compared
     by subject; each head had the same subject counts as main, with more than 4,370 plan shards as corpus

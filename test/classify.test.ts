@@ -756,3 +756,31 @@ test("classifyFailure: a bare gh HTTP 503 is transient without a server-error ph
     assert.equal(classifyFailure({ text }), "strike", text);
   }
 });
+
+// W1-T9297: moved here from the-fix-progress-judge-sees-the-red-it-rules-on.test.ts so the importer of
+// src/lib/classify.ts is one stryker's commandRunner already runs (its assertions kill classify mutants).
+test("the retry classifier preserves the exact CI and review evidence its caller held", async () => {
+  const ciTail = [
+    "2026-10-13T19:04:01.000Z # Subtest: coverage floor",
+    "2026-10-13T19:04:01.100Z not ok 3 - the ratchet refuses a file below its floor",
+    "2026-10-13T19:04:01.200Z   at test/coverage-ratchet.test.ts:44:3",
+    "2026-10-13T19:04:01.300Z # fail 1",
+  ].join("\n");
+  const progressInput = buildFixProgressInput({
+    taskId: "W1-T9057", prNumber: 11444, headSha: "d0dd658", currentRed: ["coverage-shard (5/8)"], ledger: [],
+    ciFailures: [{ name: "ci", logTail: ciTail }], reviewFailures: [{
+      claim: "literal", proof: "unit test: literal", met: false, proof_exec: "executed_pass", reason: "semantic diagnosis" }] });
+  let calls = 0;
+  let captured: FixProgressInput | undefined;
+  const result = await runDiagnoseThenRetry({ progressInput,
+    attempt: async () => ({ success: false, evidence: { text: "controlled deterministic failure" } }),
+    diagnose: async () => ({ text: "controlled diagnosis" }), fixProgressJudge: async input => {
+      calls++;
+      captured = input;
+      return { verdict: "escalate", loop: "controlled test", reason: "no additional retry granted" };
+    } });
+  assert.equal(calls, 1);
+  assert.equal(result.outcome, "gave_up");
+  assert.deepEqual(captured?.failureEvidence, progressInput.failureEvidence);
+  assert.deepEqual(captured?.reviewFailureEvidence, progressInput.reviewFailureEvidence);
+});
