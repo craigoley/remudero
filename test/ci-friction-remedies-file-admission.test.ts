@@ -97,7 +97,7 @@ test("a census remedy proves its diagnosed mechanism while retaining healthy ref
   const price = { cause, minutes: 6, rounds: 2, prs: 2 };
   const details = ["census-precheck: this branch grows 1 census count(s) CI will refuse: fixture-copy: real branch finding",
     "census-precheck: census snapshot reader crashed"];
-  const rounds = details.map((detail, index) => ({ pr: 13000 + index, cause, minutes: 3,
+  const rounds = details.map((detail, index) => ({ pr: 13000 + index, causeKey: key, minutes: 3,
     at: "2026-10-26T12:00:00Z", detail }));
   const retained = JSON.stringify({ price, rounds });
   const yaml = ciFrictionShardYaml({ price, rung: 1, owner: { files: [owner], why: ["concrete runner signature"] }, rounds }, "W1-T99989");
