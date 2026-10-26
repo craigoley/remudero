@@ -14,7 +14,7 @@
  * A ticket carries NO authority over any slot record; it orders waiters and nothing else.
  */
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, fchmodSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, fchmodSync, fstatSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
@@ -179,6 +179,18 @@ function writeWhole(path: string, body: string): void {
 }
 
 /**
+ * Widen a queue dir WE own to 0o777 through one open descriptor, so the mode is judged and changed on the
+ * same inode: a path swapped between a stat and a chmod is never widened, and a symlink is refused, not followed.
+ */
+function widenOwnDir(dir: string): void {
+  const fd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const st = fstatSync(fd);
+    if ((st.mode & 0o777) !== 0o777 && st.uid === process.getuid?.()) fchmodSync(fd, 0o777);
+  } finally { closeSync(fd); }
+}
+
+/**
  * Run `write` inside the queue dir, created world-writable like the slot dir. The last waiter to leave removes
  * the dir while it is EMPTY, so a peer's rmdir can land between our mkdir and our write: that one ENOENT is
  * retried once, and after `write` our own entry keeps the dir non-empty.
@@ -186,7 +198,7 @@ function writeWhole(path: string, body: string): void {
 function inQueueDir(queueDir: string, write: () => void): void {
   for (let attempt = 0; ; attempt += 1) {
     mkdirSync(queueDir, { recursive: true, mode: 0o777 });
-    if ((statSync(queueDir).mode & 0o777) !== 0o777 && statSync(queueDir).uid === process.getuid?.()) chmodSync(queueDir, 0o777);
+    widenOwnDir(queueDir);
     try { write(); return; }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT" || attempt > 0) throw error;
@@ -287,9 +299,12 @@ export function holdRetention(slots: number): number {
  */
 export function recordTestSlotHold(slotDir: string, hold: HoldRecord, slots: number): boolean {
   const queueDir = testSlotQueueDir(slotDir);
-  try { if (!statSync(queueDir).isDirectory()) return false; }
+  // Opened as a directory, not stat'd; the temp file below is created O_EXCL|O_NOFOLLOW, so a dir that
+  // changes after this check fails the write rather than redirecting it.
+  try { closeSync(openSync(queueDir, constants.O_RDONLY | constants.O_DIRECTORY)); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return false;
     throw error;
   }
   const keep = holdRetention(slots), all = [...readHoldHistory(slotDir), hold], kept: HoldRecord[] = [];
