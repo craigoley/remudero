@@ -127,3 +127,42 @@ test("a concrete scanner runner defect remains owned even beside another alert's
     "only this cause's own signature can identify its diagnosis");
   assert.equal(ladder(key, details, f.search()).next?.decision.kind, "draft");
 });
+
+test("a census growth refusal retains its observations without assigning the reporter as a repair owner", t => {
+  const f = fixture(t);
+  mkdirSync(join(f.repo.dir, "scripts"));
+  const diagnostic = "census-precheck: this branch grows";
+  writeFileSync(join(f.repo.dir, "scripts/census-precheck.mjs"), `export const message = ${JSON.stringify(diagnostic)};\n`);
+  f.repo.git("add", "."); f.repo.git("commit", "-qm", "record the census refusal producer");
+  f.repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const search = f.search();
+  assert.deepEqual(search.filesContaining(diagnostic).map(hit => hit.file), ["scripts/census-precheck.mjs"]);
+  const details = [
+    `${diagnostic} 1 census count(s) CI will refuse: census-suite: test/the-affected-suite-reach-ratchet.test.ts fails — importerCount: 934 > 933`,
+    `${diagnostic} 1 census count(s) CI will refuse: comment-load: src/lib/repo-location.ts has 60 comment lines > ceiling 57`,
+    `${diagnostic} 3 census count(s) CI will refuse: fixture-copy: gitInitSites 224 > baseline 223`,
+  ];
+  const cause = { kind: "fix_refusal" as const, name: "census-precheck" };
+  const rounds: CiFrictionRound[] = details.map((detail, index) => ({ pr: 12700 + index, cause, minutes: 6.4,
+    at: new Date(NOW).toISOString(), detail }));
+  const retained = JSON.stringify(rounds);
+  assert.equal(locateCiFrictionOwner("fix_refusal:census-precheck", details, search), undefined);
+  const result = ciFrictionLadder({ priced: [{ cause, minutes: 19.2, rounds: 3, prs: 3 }], rounds,
+    tasks: [], receipts: new Set(), escalated: new Set(), ownerSearch: search, nowMs: NOW });
+  assert.equal(result.next?.decision.kind, "escalate");
+  assert.equal(result.next?.price.minutes, 19.2);
+  assert.equal(result.next?.price.rounds, 3);
+  assert.equal(JSON.stringify(rounds), retained);
+  assert.equal(result.next?.decision.kind === "escalate" && result.next.decision.holdReason, "no-owner");
+  assert.match(result.next?.decision.kind === "escalate" ? result.next.decision.why : "", /census.*mechanism.*UNKNOWN/i);
+});
+
+test("a concrete census runner failure still identifies its source rather than suppressing the class", t => {
+  const f = fixture(t);
+  mkdirSync(join(f.repo.dir, "scripts"));
+  writeFileSync(join(f.repo.dir, "scripts/census-precheck.mjs"), 'throw new Error("census snapshot reader crashed");\n');
+  f.repo.git("add", "."); f.repo.git("commit", "-qm", "record a concrete census runner defect");
+  f.repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  assert.deepEqual(locateCiFrictionOwner("fix_refusal:census-precheck", ["census snapshot reader crashed"], f.search())?.files,
+    ["scripts/census-precheck.mjs"]);
+});
