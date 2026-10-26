@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 // @ts-ignore executable census module has no declaration file.
-import { affectedReachBaselinePatch, measureAffectedReach, reportAffectedReachExactBaseline } from "#scripts/census-precheck.mjs";
+import { affectedReachBaselinePatch, affectedReachGrowth,measureAffectedReach, reportAffectedReachExactBaseline } from "#scripts/census-precheck.mjs";
 
 /**
  * W1-T10191: fix_refusal:census-precheck cost 19.2 PR-minute(s) across 10 round(s) on 9 PRs. Two of the
@@ -35,22 +35,23 @@ test("W1-T10191: fix_refusal:census-precheck is prevented, not retried", () => {
   assert.ok(measured.importerCount > baseline.importerCount, "the fixture must reproduce genuine growth");
 
   const recorded = { _comment: "measured ceiling", ...baseline };
-  const patch = affectedReachBaselinePatch(measured, recorded);
-  const parsed = JSON.parse(patch);
+  const parsed = JSON.parse(affectedReachBaselinePatch(measured, recorded));
 
-  // The printed patch is the EXACT replacement: applying it in the SAME round the dev saw the refusal in
-  // leaves nothing left to hand-derive — every metric and the full importers list is already correct.
+  // The baseline is shrink-only against origin/main: a patch for GROWTH must never raise a ceiling.
   assert.equal(parsed._comment, "measured ceiling", "the patch preserves fields the recorded baseline already carries");
-  assert.equal(parsed.importerCount, measured.importerCount);
-  assert.equal(parsed.largestScc, measured.largestScc);
-  assert.equal(parsed.medianReachPercent, measured.medianReachPercent);
-  assert.deepEqual(parsed.importers, measured.importers);
+  for (const metric of ["importerCount", "largestScc", "medianReachPercent"] as const) {
+    assert.ok(parsed[metric] <= recorded[metric], `${metric} must not exceed the previous ceiling`);
+  }
+  assert.deepEqual(parsed.importers, recorded.importers, "growth's new importer is not recorded");
+  assert.deepEqual(affectedReachGrowth(measured, recorded), ["importerCount"], "the growth is named for removal");
 
-  // Re-measuring against the patched baseline refuses nothing: the round that would have been needed to
-  // discover a wrong hand-derived patch never happens.
-  const reVerdictMetrics = (["importerCount", "largestScc", "medianReachPercent"] as const)
-    .filter((metric) => measured[metric as keyof typeof measured] > parsed[metric]);
-  assert.deepEqual(reVerdictMetrics, [], "the exact patch must leave no metric still refused");
+  // A genuine shrink does move the ceiling down, to exactly the measured values.
+  const shrunkMeasured = measureAffectedReach(new Map(FIXTURE).set("test/old.test.ts", "export {};"));
+  const shrunk = JSON.parse(affectedReachBaselinePatch(shrunkMeasured, recorded));
+  assert.equal(shrunk.importerCount, 0);
+  assert.equal(shrunk.medianReachPercent, 0);
+  assert.deepEqual(shrunk.importers, []);
+  assert.deepEqual(affectedReachGrowth(shrunkMeasured, recorded), []);
 
   // A failure to measure (or to write the patch) must never be fatal — it is best-effort, reported as text.
   const lines: string[] = [];

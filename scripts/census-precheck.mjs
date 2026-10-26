@@ -1578,8 +1578,17 @@ export function measureAffectedReach(files, load = loadAffectedSuitesGraph) {
 /** The exact scripts/affected-reach-baseline.json text to record `measured`: every field `recorded` already
  *  carries (its `_comment`) stays, only the three metrics and the importers list move to the measured values. */
 export function affectedReachBaselinePatch(measured, recorded) {
-  return `${JSON.stringify({ ...recorded, importerCount: measured.importerCount, largestScc: measured.largestScc,
-    medianReachPercent: measured.medianReachPercent, importers: measured.importers }, null, 2)}\n`;
+  // The baseline is shrink-only against origin/main, so a metric that grew keeps its recorded ceiling (the
+  // growth must be removed from the code, never recorded) and only a metric that shrank moves down.
+  const metric = (name) => Math.min(measured[name], recorded[name] ?? Infinity);
+  const importers = measured.importers.filter((f) => (recorded.importers ?? []).includes(f));
+  return `${JSON.stringify({ ...recorded, importerCount: metric("importerCount"), largestScc: metric("largestScc"),
+    medianReachPercent: metric("medianReachPercent"), importers }, null, 2)}\n`;
+}
+
+/** The metrics where `measured` is over the `recorded` ceiling — growth no baseline patch may excuse. */
+export function affectedReachGrowth(measured, recorded) {
+  return ["importerCount", "largestScc", "medianReachPercent"].filter((m) => measured[m] > recorded[m]);
 }
 
 /** Reads the tracked src/scripts/bin/test code tree at `root` — the same population the reach ratchet walks. */
@@ -1595,6 +1604,12 @@ export function reportAffectedReachExactBaseline(root, report = (line) => consol
   try {
     const measured = measureAffectedReach(readAffectedReachTree(root));
     const recorded = JSON.parse(readFileSync(join(root, AFFECTED_REACH_BASELINE_PATH), "utf8"));
+    const grew = affectedReachGrowth(measured, recorded);
+    if (grew.length > 0) {
+      report(`affected-reach: ${grew.join(", ")} grew past the recorded ceiling - remove the growth (new importers: ` +
+        `${measured.importers.filter((f) => !(recorded.importers ?? []).includes(f)).join(", ") || "none"}); ` +
+        `the ceiling is shrink-only and is NOT raised`);
+    }
     report(`affected-reach-exact-baseline: ${AFFECTED_REACH_BASELINE_PATH}:\n${affectedReachBaselinePatch(measured, recorded)}`);
   } catch (e) {
     report(`census-precheck: affected-reach exact baseline NOT PRINTED - ${String(e?.message ?? e)}`);
