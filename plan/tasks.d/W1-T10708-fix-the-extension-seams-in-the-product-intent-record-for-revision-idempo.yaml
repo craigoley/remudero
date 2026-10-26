@@ -7,7 +7,10 @@
   verify: human
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=64d6f33158619eda
+  # backlog gardener: placed=2026-10-26T12:08:11.240Z
   attempts: 0
   files:
     - src/lib/product-intent.ts
