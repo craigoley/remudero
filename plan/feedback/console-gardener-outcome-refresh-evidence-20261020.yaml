@@ -60,7 +60,7 @@ raw: >-
   Trials remains out of scope.
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/14349
 summary:
