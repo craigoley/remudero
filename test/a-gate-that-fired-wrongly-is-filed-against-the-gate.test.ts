@@ -447,7 +447,7 @@ function omittedRepairPatchFixture(file: Record<string, unknown>, readFullDiff: 
     if (path.includes("/compare/base...red")) return { merge_base_commit: { sha: "base" }, files: [] };
     throw new Error(`unexpected repair evidence read: ${args.join(" ")}`);
   };
-  return { reads, run: () => loadGateRepairObservations([rule], { ghJson, ghText: async args => {
+  return { reads, ghJson, run: () => loadGateRepairObservations([rule], { ghJson, ghText: async args => {
     reads.push(args);
     assert.deepEqual(args, ["api", "repos/o/r/compare/red...green", "-H", "Accept: application/vnd.github.diff"]);
     return readFullDiff();
@@ -502,4 +502,28 @@ test("an incomplete full-diff repair remains unavailable rather than an empty or
   }
   const unavailable = new Error("full-diff API unavailable");
   await assert.rejects(omittedRepairPatchFixture(missing, () => { throw unavailable; }).run(), error => error === unavailable);
+});
+
+test("omitted repair patches use the maintained default full-diff transport", async t => {
+  const f = await inventoryFixture(t);
+  const command = "api repos/o/r/compare/red...green -H Accept: application/vnd.github.diff";
+  const shim = ghShim([{ when: command, stdout: fullRepairDiff },
+    { when: "", stderr: "unexpected repair transport command", exit: 1 }]);
+  const previousPath = process.env.PATH, previousCache = process.env.RMD_GH_CACHE_HOME;
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousCache === undefined) delete process.env.RMD_GH_CACHE_HOME;
+    else process.env.RMD_GH_CACHE_HOME = previousCache;
+    rmSync(shim.dir, { recursive: true, force: true });
+  });
+  process.env.PATH = `${shim.dir}:${previousPath ?? ""}`;
+  process.env.RMD_GH_CACHE_HOME = join(f.root, "repair-transport-cache");
+  const captured = omittedRepairPatchFixture({ filename: baseline, additions: 1, deletions: 1 },
+    () => { throw new Error("the injected text read is not used"); });
+  const observations = await loadGateRepairObservations([rule], { ghJson: captured.ghJson });
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0]!.repairDiff, `diff --git a/${baseline} b/${baseline}\n${fullRepairHunk}`);
+  assert.deepEqual(shim.calls(), [command]);
+  assert.equal(captured.reads.length, 0);
 });
