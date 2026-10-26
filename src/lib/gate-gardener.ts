@@ -232,48 +232,6 @@ export function failedSuitesInLog(log: string): Set<string> {
   return failed;
 }
 
-interface GateRepairDiffFile {
-  filename: string;
-  previous_filename?: string;
-  patch?: string;
-  additions?: number;
-  deletions?: number;
-}
-
-// Compare JSON can omit a text patch still available in the same comparison's full-diff media.
-function recoveredGateRepairPatch(file: GateRepairDiffFile, raw: string, pair: CiFailurePair): string {
-  const unread = (reason: string): never => { throw new Error(`gate repair diff unreadable for PR #${pair.pr} ${pair.redSha}...${pair.greenSha}: ${file.filename}: ${reason}`); };
-  if (typeof file.additions !== "number" || typeof file.deletions !== "number" ||
-      !Number.isSafeInteger(file.additions) || !Number.isSafeInteger(file.deletions) ||
-      file.additions < 0 || file.deletions < 0) return unread("missing or invalid changed-line counts");
-  const header = `diff --git a/${file.previous_filename ?? file.filename} b/${file.filename}\n`;
-  const blocks = raw.split(/(?=^diff --git )/m).filter(block => block.startsWith(header));
-  if (blocks.length !== 1 || /\n(?:GIT binary patch|Binary files )/.test(blocks[0]!)) return unread("missing, ambiguous or binary full-diff file");
-  const lines = blocks[0]!.split("\n");
-  let oldLeft = 0, newLeft = 0, added = 0, deleted = 0, firstHunk = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
-    if (hunk) {
-      if (oldLeft !== 0 || newLeft !== 0) return unread("unfinished unified hunk");
-      oldLeft = Number(hunk[1] ?? 1); newLeft = Number(hunk[2] ?? 1);
-      if (!Number.isSafeInteger(oldLeft) || !Number.isSafeInteger(newLeft)) return unread("invalid unified-hunk counts");
-      if (firstHunk < 0) firstHunk = i;
-      continue;
-    }
-    if (firstHunk < 0) continue;
-    if (line === "\\ No newline at end of file" || (line === "" && oldLeft === 0 && newLeft === 0)) continue;
-    if (line.startsWith(" ")) { oldLeft--; newLeft--; }
-    else if (line.startsWith("+")) { newLeft--; added++; }
-    else if (line.startsWith("-")) { oldLeft--; deleted++; }
-    else return unread("unprefixed unified-hunk line");
-    if (oldLeft < 0 || newLeft < 0) return unread("unified hunk exceeds its declared counts");
-  }
-  if (firstHunk < 0 || oldLeft !== 0 || newLeft !== 0 || added + deleted === 0 ||
-      added !== file.additions || deleted !== file.deletions) return unread("textual hunk or changed-line totals incomplete");
-  return lines.slice(firstHunk).join("\n");
-}
-
 export async function loadGateRepairObservations(rules: readonly GateRepairRule[], sources: GateDefuseSources = {}): Promise<GateRepairObservation[]> {
   const readJsonAsync = sources.ghJson ?? ((args: string[]) => ghJsonAsync(args));
   const readTextAsync = sources.ghText ?? ((args: string[]) => ghTextAsync(args));
@@ -299,14 +257,10 @@ export async function loadGateRepairObservations(rules: readonly GateRepairRule[
     }
     const corpus = collectCiFailureCorpus({ prs: [{ number: pr.number, commits: corpusCommits }] });
     for (const pair of corpus.pairs.filter((pair) => pair.state === "repaired")) {
-      const comparePath = `${api}/compare/${pair.redSha}...${pair.greenSha}`;
-      const diff = await readJsonAsync(["api", comparePath]) as { files: GateRepairDiffFile[] };
+      const diff = await readJsonAsync(["api", `${api}/compare/${pair.redSha}...${pair.greenSha}`]) as { files: Array<{ filename: string; patch?: string }> };
       const files = diff.files ?? [];
-      if (files.length === 0) throw new Error(`gate repair diff unreadable for PR #${pr.number}`);
-      const raw = files.some(file => typeof file.patch !== "string")
-        ? await readTextAsync(["api", comparePath, "-H", "Accept: application/vnd.github.diff"]) : "";
-      const repairDiff = files.map(file => `diff --git a/${file.filename} b/${file.filename}\n${
-        typeof file.patch === "string" ? file.patch : recoveredGateRepairPatch(file, raw, pair)}`).join("\n");
+      if (files.length === 0 || files.some((file) => file.patch === undefined)) throw new Error(`gate repair diff unreadable for PR #${pr.number}`);
+      const repairDiff = files.map((file) => `diff --git a/${file.filename} b/${file.filename}\n${file.patch}`).join("\n");
       const direct = rules.filter((rule) => rule.gate === pair.gate);
       const failed = runs.get(pair.redSha)?.check_runs.find((check) => check.name === pair.gate && check.conclusion === "failure");
       const log = direct.length || !failed ? "" : await readTextAsync(["run", "view", "--job", String(failed.id), "--log-failed"]);
