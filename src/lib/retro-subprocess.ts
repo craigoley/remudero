@@ -3,6 +3,7 @@
  * only the daemon hook comes through this adapter.
  */
 import { fileURLToPath } from "node:url";
+import { performance } from "node:perf_hooks";
 import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
 import {
   spawnDetachedGroup,
@@ -51,7 +52,7 @@ export function automatedRetroGatherObserver(automated: boolean, ctx: {
     let started: number | undefined;
     const observe = (state: "entered" | "returned" | "threw"): void => {
       try {
-        const at = (ctx.now ?? Date.now)();
+        const at = (ctx.now ?? (() => performance.now()))();
         if (started === undefined) started = at;
         const memory = (ctx.memoryUsage ?? (() => process.memoryUsage()))();
         ctx.log("retro.gather.phase", { phase, phase_state: state, duration_ms: Math.max(0, at - started),
