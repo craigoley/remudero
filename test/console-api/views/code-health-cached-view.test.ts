@@ -5,6 +5,10 @@ import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { withTempDir } from "#src/lib/tmp.js";
 import { inboxThreadId } from "#src/lib/inbox-thread.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { createReadModelWorker } from "#src/lib/read-model-worker.js";
+import { viewEtag, type ViewBodyEntry, type ViewSource } from "#src/lib/views.js";
+import { judgeSource } from "#src/lib/view-freshness.js";
 import { CODE_HEALTH_SCOPE_KEY, CODE_HEALTH_VIEW_NAME, createCodeHealthView, readCodeHealthInventory, readCodeHealthRelatedWork, validateCodeHealthRequest } from "#src/lib/code-health-view.js";
 import * as store from "#src/lib/code-health-store.js";
 
@@ -13,6 +17,80 @@ function roster(dir: string) {
   writeFileSync(join(dir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [{ instanceId: instance, options: { controlRoot: root, ledgerPath: join(root, "state", "ledger.ndjson") } }], improvementEvidence: { version: "repository-evidence-inventory-v1", measurementState: "not_collected", repositories: [{ repository, instanceIds: [instance], expectedDailySources: ["pull_requests", "ledger_activity", "deployments"], expectedQualitySources: ["quality", "coverage"] }], unresolvedInstances: [] } }));
   return { repository, instance, root, inventory: readCodeHealthInventory(dir) };
 }
+
+async function withScopeReading(
+  reading: (now: number) => ViewSource,
+  key: string,
+  visit: (source: ReturnType<typeof createReadModelWorker>, now: number, repository: string) => void,
+): Promise<void> {
+  await withTempDir("code-health-source-clock", async dir => {
+    const { repository } = roster(dir), now = Date.now(), builtAt = now - 240_000;
+    const entries: ViewBodyEntry[] = createCodeHealthView({ stateDir: dir, keys: () => ["repository=acme%2Fatlas"] })
+      .materialize({ now: builtAt, instances: [] }).map(({ key, data, sources }) => ({
+        view: CODE_HEALTH_VIEW_NAME, key, version: 1, generation: 1,
+        etag: viewEtag(CODE_HEALTH_VIEW_NAME, 1, true, data),
+        body: { view: CODE_HEALTH_VIEW_NAME, version: 1, generatedAt: fixedClock(builtAt).iso(), asOf: null, stale: true, sources, data },
+      }));
+    const updated = reading(now);
+    // The real consumer receives the same two message kinds as production: an unchanged body,
+    // then newer source readings. No judge fake can turn the held timestamp into a fresh one.
+    const fixture = `import {parentPort,workerData} from 'node:worker_threads';
+      parentPort.on('message',message=>{if(message.type==='stop'){
+        const signal=new Int32Array(workerData.signal);Atomics.store(signal,1,1);Atomics.notify(signal,1);parentPort.close();}});
+      for(const entry of ${JSON.stringify(entries)})parentPort.postMessage({type:'body',entry});
+      parentPort.postMessage({type:'sources',sources:[${JSON.stringify(updated)}],bodies:[{view:'code-health',key:${JSON.stringify(key)},sources:[${JSON.stringify(updated)}]}]});`;
+    let arrived!: () => void;
+    const ready = new Promise<void>(resolve => { arrived = resolve; });
+    const source = createReadModelWorker({ stateDir: dir, instances: [], clock: fixedClock(now),
+      workerUrl: new URL(`data:text/javascript,${encodeURIComponent(fixture)}`),
+      observe: message => { if (message.type === "sources") arrived(); } });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      source.start();
+      await Promise.race([ready, new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("source-clock fixture did not publish its bounded messages")), 10_000);
+      })]);
+      visit(source, now, repository);
+    } finally { clearTimeout(timeout); assert.equal(source.stop(), true, "the owned fixture worker must confirm shutdown"); }
+  });
+}
+
+const scopeReading = (now: number): ViewSource => ({ name: "repositories:code-health-scope", kind: "repositories", asOf: fixedClock(now).iso(), state: "fresh", budgetMs: 180_000 });
+
+test("code health scope stays ready when only its source clock advances", async () => {
+  await withScopeReading(scopeReading, CODE_HEALTH_SCOPE_KEY, (source, now, repository) => {
+    const held = source.body(CODE_HEALTH_VIEW_NAME, CODE_HEALTH_SCOPE_KEY)!;
+    const originalClock = held.body.sources.find(value => value.name === "repositories:code-health-scope")!.asOf;
+    assert.equal(originalClock, fixedClock(now - 240_000).iso(), "the cached body must actually predate the scope budget");
+    const etag = held.etag;
+    assert.equal(source.judge(held.body.sources, now, held).find(value => value.name === "repositories:code-health-scope")?.asOf, fixedClock(now).iso());
+    assert.equal(validateCodeHealthRequest(new URLSearchParams({ repository }), source, now), undefined);
+    assert.equal(source.body(CODE_HEALTH_VIEW_NAME, CODE_HEALTH_SCOPE_KEY)!.etag, etag, "a source refresh does not require different report data");
+    assert.equal(held.body.sources.find(value => value.name === "repositories:code-health-scope")!.asOf, originalClock);
+    assert.equal((held.body.data as { freshness: string }).freshness, "unavailable", "a scope clock cannot renew missing measurements");
+    assert.equal(validateCodeHealthRequest(new URLSearchParams("repository=acme/foreign"), source, now)?.status, 400);
+    assert.equal(validateCodeHealthRequest(new URLSearchParams("repository=acme/atlas&page=bad"), source, now)?.status, 400);
+  });
+});
+
+test("code health scope refuses unqualified source clock updates", async () => {
+  for (const reading of [
+    (now: number) => scopeReading(now - 180_001),
+    (now: number): ViewSource => ({ ...scopeReading(now - 180_001), budgetMs: 1_800_000 }),
+    (now: number): ViewSource => ({ ...scopeReading(now), state: "unavailable" }),
+    (now: number): ViewSource => ({ ...scopeReading(now), asOf: "not-a-time" }),
+    (now: number): ViewSource => ({ ...scopeReading(now), asOf: null }),
+    (now: number) => scopeReading(now + 1),
+  ]) await withScopeReading(reading, CODE_HEALTH_SCOPE_KEY, (source, now, repository) => {
+    assert.equal(validateCodeHealthRequest(new URLSearchParams({ repository }), source, now)?.status, 503);
+  });
+  await withScopeReading(scopeReading, "repository=acme%2Fatlas", (source, now, repository) => {
+    assert.equal(validateCodeHealthRequest(new URLSearchParams({ repository }), source, now)?.status, 503, "another body's fresh clock cannot authorize the held roster");
+  });
+  await withScopeReading(scopeReading, CODE_HEALTH_SCOPE_KEY, (source, now, repository) => {
+    assert.equal(validateCodeHealthRequest(new URLSearchParams({ repository }), source, now), undefined, "a genuinely refreshed scope is the positive control for these refusals");
+  });
+});
 
 test("code health related work links the native saved conversation without inventing its freshness", async () => {
   await withTempDir("code-health-chat-links", dir => {
@@ -81,7 +159,9 @@ test("code health answers not ready until the configured repository list is held
   await withTempDir("code-health-not-ready", dir => {
     const scopeNow = Date.now();
     const wanted: Array<[string, string]> = [];
-    const source = (body?: unknown) => ({ body: () => body as never, want: (view: string, key: string) => void wanted.push([view, key]) });
+    const source = (body?: unknown) => ({ body: () => body as never,
+      judge: (sources: readonly ViewSource[], now: number) => sources.map(value => judgeSource(value, now)),
+      want: (view: string, key: string) => void wanted.push([view, key]) });
     const notReady = { error: "view_not_ready", status: 503, detail: "Code health is waiting for the configured repository list." };
     assert.deepEqual(validateCodeHealthRequest(new URLSearchParams(""), source(undefined) as never, scopeNow), notReady);
     const staleScope = { body: { data: { version: "code-health-view-v1", repository: "all", expectedRepositories: ["acme/atlas"] },
