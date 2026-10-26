@@ -48,7 +48,6 @@ import { readyDraftPullRequest, type LiveStateResult, terminalStateReason, listR
 import { openPrsWithPostedIdsSteps, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, openPrViewSteps, type ClassifiedOpenPrView, fetchCiFailures, attachPostedGateIds, type EscalationIntake, buildEscalationReconcileCandidates } from "../../lib/tick-read-worker.js";
 import { type TempSweepOpts, type TempSweepSummary, sweepStaleTempDirs } from "../../lib/tmp.js";
 import { ghJson } from "../../lib/worker.js";
-import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
 
 type HostFn = (...args: any[]) => any;
 export interface SweepCommandHost {
@@ -121,6 +120,7 @@ export interface SweepCommandHost {
   readonly buildInboxDraftHook: HostFn;
   readonly refreshEscalationTriageEvidence: HostFn;
   readonly gitCredentialFixSpawn: HostFn;
+  readonly runWorkerTailSweepRung: HostFn;
   readonly runInflightLockSweepRung: HostFn;
   readonly runWorkerStallDetectorRung: HostFn;
   readonly runMountRecommenderRung: HostFn;
@@ -789,7 +789,7 @@ export function buildSweepHook(
     sweepPostFixReverification, gitCredentialFixSpawn,
     handedOffHeadRiskJudge, codeScanningJudgeDeps,
     sweepEscalationTriage, runAutomaticBranchReapRung,
-    runInflightLockSweepRung, runWorkerStallDetectorRung,
+    runWorkerTailSweepRung, runInflightLockSweepRung, runWorkerStallDetectorRung,
     runMountRecommenderRung,
   } = host;
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
@@ -1313,47 +1313,6 @@ export function readyDraftViaGh(
       },
       log,
     });
-}
-
-/** Retention window {@link sweepStaleWorkerTails} ages a `.tail` file out on — generously above
- *  any realistic drain cadence, so a still-relevant tail (W1-T945's future `rmd peek`, an
- *  operator re-reading a just-finished run) is never reclaimed out from under a live read;
- *  bounded at all so the directory does not grow forever (design note v). */
-export const WORKER_TAIL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-
-/**
- * AGE OUT stale `<root>/state/runs/*.tail` files — the sweep-side half of design note v ("the
- * reaper/sweep path that reclaims run scratch must be extended to age these out on a stated
- * retention, not to delete them at run end"). Wired into the daemon's poll cadence via
- * {@link runWorkerTailSweepRung}, riding the SAME per-poll slot `runWorktreeReapRung`/
- * `runInflightLockSweepRung`/`runTmpSweepRung` already occupy — no new schedule of its own.
- * Best-effort throughout: a stat/unlink race with a live writer (another run's still-open
- * tail) or a concurrent sweep is swallowed per-file, never fatal to the sweep tick.
- */
-export function sweepStaleWorkerTails(root: string, opts: { maxAgeMs?: number; now?: () => number } = {}): { removed: string[] } {
-  const dir = join(root, "state", "runs");
-  const maxAgeMs = opts.maxAgeMs ?? WORKER_TAIL_RETENTION_MS;
-  const nowMs = (opts.now ?? Date.now)();
-  const removed: string[] = [];
-  let entries: string[];
-  try {
-    entries = existsSync(dir) ? readdirSync(dir) : [];
-  } catch {
-    return { removed }; // best-effort — an unreadable dir costs a skipped sweep, never a throw
-  }
-  for (const entry of entries) {
-    if (!entry.endsWith(".tail")) continue;
-    const p = join(dir, entry);
-    try {
-      if (nowMs - statSync(p).mtimeMs > maxAgeMs) {
-        unlinkSync(p);
-        removed.push(entry);
-      }
-    } catch {
-      /* best-effort — see this function's own doc */
-    }
-  }
-  return { removed };
 }
 
 export function fetchOpenPrsWithPostedIds(owner: string, repo: string, fetch: GhApiFetcher): OpenPrRest[] {
@@ -1927,22 +1886,6 @@ export async function sweepEscalationReconcile(
   return intake
     ? { ...summary, issuesSeen: intake.issuesSeen, droppedNoTaskTrailer: intake.droppedNoTaskTrailer, droppedNoReferent: intake.droppedNoReferent }
     : summary;
-}
-
-/**
- * The daemon's per-poll WORKER-TAIL retention rung (W1-T942 design note v) — ages out stale
- * `<config.root>/state/runs/*.tail` files via {@link sweepStaleWorkerTails}, on the SAME
- * per-poll cadence `runWorktreeReapRung`/`runInflightLockSweepRung`/`runTmpSweepRung` already
- * ride (see `buildSweepHook`'s call site). Own try/catch so a sweep hiccup never masks — or is
- * masked by — the rungs around it, the same discipline every sibling rung in this file follows.
- */
-export function runWorkerTailSweepRung(config: Config, log: (step: string, extra?: Record<string, unknown>) => void): void {
-  try {
-    const swept = sweepStaleWorkerTails(config.root);
-    if (swept.removed.length > 0) log("daemon.worker_tail_sweep", { removed: swept.removed.length });
-  } catch (e) {
-    log("daemon.worker_tail_sweep", { error: String((e as Error)?.message ?? e) });
-  }
 }
 
 export function runTmpSweepRung(

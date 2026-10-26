@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import { join } from "node:path";
@@ -73,6 +73,7 @@ const PINNED_TO_RUN_TASK = new Map([
   ["publishAbandonedFixOwnerAhead", "the run-task.ts git-site tables (W1-T6121, W1-T6135) name it"],
   ["resetTrackedDirtyFixOwner", "the run-task.ts git-site table (W1-T6121) names it"],
   ["runMountRecommenderRung", "its doc names `.remudero/`, and W1-T3701's house-layout ratchet counts files"],
+  ["sweepStaleWorkerTails", "its `now?: () => number` is a legacy clock shape; clock-signature rows are per file"],
 ]);
 
 /** The design's reference census, read from the sources as they stand: a run-task.ts declaration that
@@ -250,20 +251,15 @@ test("W1-T9338: full hook runs maintenance with the tick snapshot and persists b
   const tick = { openPrViews: [], plan: f.plan, staleGateWorkflowsByPr: new Map(),
     behindMainByPr: new Map(), baseChangedFilesByPr: new Map(), creditCandidates: [] };
   // The rungs that moved with the hook run for real: the escalation reads answer from the shared
-  // gh shim, the PR-terminal rung asks the board gateway about the one PR the ledger names, and the
-  // tail rung works under the fixture root.
+  // gh shim, and the PR-terminal rung asks the board gateway about the one PR the ledger names.
   const shim = ghShim([{ when: "", stdout: "[]" }]);
   t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const oldPath = process.env.PATH;
   process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
   t.after(() => { process.env.PATH = oldPath; });
   const prUrl = "https://github.com/acme/fixture/pull/77";
-  mkdirSync(join(f.root, "state", "runs"), { recursive: true });
+  mkdirSync(join(f.root, "state"), { recursive: true });
   writeFileSync(f.ledgerPath, JSON.stringify({ step: "pr.opened", pr_url: prUrl, ts: new Date().toISOString() }) + "\n");
-  const staleTail = join(f.root, "state", "runs", "RUN-OLD.tail");
-  writeFileSync(staleTail, "old\n");
-  const longAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  utimesSync(staleTail, longAgo, longAgo);
   const prRefs: unknown[] = [];
   const github = { prByRef: (ref: unknown) => { prRefs.push(ref); return null; } } as unknown as GitHub;
   const hook = buildSweepHook(host, "acme", "fixture", f.config, f.ledgerPath, "HOOK", f.plan,
@@ -272,15 +268,13 @@ test("W1-T9338: full hook runs maintenance with the tick snapshot and persists b
   const outcome = await hook();
   assert.deepEqual(outcome, { reviewerCodeStale: stale, planOnlyRunBranchReceipts: [], reviewInputViews: [] });
   assert.deepEqual(f.logs.filter((row) => row.step === "sweep.error"), []);
-  for (const name of ["reverify", "branchReap", "locks", "stalls", "mounts", "draft"]) {
+  for (const name of ["reverify", "branchReap", "tails", "locks", "stalls", "mounts", "draft"]) {
     assert.equal(f.calls.filter((c) => c.name === name).length, 1, `${name} runs once`);
   }
   const steps = f.logs.map((row) => row.step);
   assert.equal(steps.filter((step) => step === "sweep.escalation_reconcile.summary").length, 1, "reconcile runs once");
   assert.deepEqual(prRefs, [prUrl], "the terminal rung reads through the board gateway");
   assert.equal(steps.filter((step) => step === "daemon.tmp_sweep").length, 1, "the temp sweep runs once");
-  assert.equal(existsSync(staleTail), false, "the tail rung ages out the stale tail");
-  assert.deepEqual(f.logs.find((row) => row.step === "daemon.worker_tail_sweep")?.removed, 1);
   assert.equal(f.calls.find((c) => c.name === "stalls")!.args[5], 456);
   assert.equal(f.calls.find((c) => c.name === "effects")!.args[0].spawnImpl instanceof Function, true);
   const persisted = readAutomaticBranchReapState(join(f.root, "state", automaticBranchReapStateFileName("fixture")));
@@ -352,7 +346,7 @@ test("W1-T9338: command composes a dry-run summary and contains enumeration fail
   // Native mocks keep the real config reader and owner parser, with no git process or host config.
   t.mock.method(os, "homedir", () => f.root);
   // The escalation reconcile moved with the command, so its issue reads run for real against the
-  // shared gh shim; every other spawn stays the git stand-in below.
+  // shared gh shim on PATH; only git is stood in for below.
   const shim = ghShim([{ when: "", stdout: "[]" }]);
   t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const oldPath = process.env.PATH;
@@ -360,8 +354,7 @@ test("W1-T9338: command composes a dry-run summary and contains enumeration fail
   t.after(() => { process.env.PATH = oldPath; });
   const realExecFileSync = childProcess.execFileSync;
   t.mock.method(childProcess, "execFileSync", (file: string, args: string[], opts: object) => {
-    if (file === "gh") return realExecFileSync(file, args, opts);
-    assert.equal(file, "git");
+    if (file !== "git") return realExecFileSync(file, args, opts);
     if (args.includes("remote.origin.url")) return "https://github.com/acme/fixture.git\n";
     throw new Error("fixture has no git history");
   });
