@@ -5,6 +5,7 @@ import { join, relative } from "node:path";
 import { test } from "node:test";
 import { ProductIntentStore, productStatePaths } from "#src/lib/product-intent-store.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { declaredBody, violations } from "#test/helpers/openapi-strict.js";
 
 const ACTOR = "clerk:alice";
 const brief = {
@@ -299,7 +300,6 @@ test("W1-T10657: trusted product facts survive restart in the canonical record",
   assert.equal(moved.value.replayed, false);
   assert.equal(moved.value.receipt.revision, 2);
   assert.equal(moved.value.receipt.objectiveRevision, 1);
-  assert.match(moved.value.receipt.operationId, /^ptransition_[a-f0-9]{64}$/);
   const restarted = new ProductIntentStore({ root }).read(ACTOR, id);
   assert.ok(restarted.ok);
   assert.deepEqual(restarted.value.repository, repository);
@@ -413,4 +413,26 @@ test("W1-T10657: trusted product transitions replay one durable revision after u
   assert.equal(read.value.revision, 2);
   assert.equal(read.value.stageEvidence.length, 1);
   assert.deepEqual(read.value.history.map((item) => item.revision), [1, 2]);
+});
+
+test("W1-T10657: trusted facts keep public product history and receipts within the declared contract", (t) => {
+  const root = ownedFixtureDir(t, "product-transition-contract").dir;
+  const store = new ProductIntentStore({ root });
+  const created = store.write(ACTOR, create);
+  assert.ok(created.ok);
+  const command = transitionFor(created.value.receipt.productId);
+  const changed = store.transition(ACTOR, command);
+  assert.ok(changed.ok);
+  const restarted = new ProductIntentStore({ root });
+  const product = restarted.read(ACTOR, command.id);
+  const receipt = restarted.receipt(ACTOR, command.requestId);
+  assert.ok(product.ok);
+  assert.ok(receipt.ok);
+  const response = declaredBody("/v1/products", "GET", 200);
+  for (const [label, body] of [
+    ["product history", { version: "product-intent-v1", product: product.value }],
+    ["receipt lookup", { version: "product-intent-v1", receipt: receipt.value }],
+  ] as const) {
+    assert.deepEqual(violations(body, response), [], `${label} after a trusted transition must match the published GET contract`);
+  }
 });

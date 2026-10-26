@@ -179,7 +179,6 @@ export class ProductIntentStore {
   /** One save path for briefs and trusted transitions: lock, replay, revision guard, quota, atomic commit. */
   private persist(
     actor: string, input: { requestId: string; id?: string; expectedRevision: number }, payloadDigest: string,
-    operation: "pwrite" | "ptransition",
     derive: (previous: StoredProduct | undefined, id: string, now: string) => unknown,
   ): { receipt: ProductReceipt; replayed: boolean } {
     const paths = this.paths(actor, true);
@@ -203,7 +202,7 @@ export class ProductIntentStore {
       const serialized = JSON.stringify(product);
       if (Buffer.byteLength(serialized) > PRODUCT_INTENT_LIMITS.productBytes) throw new ProductStoreFault("invalid_input");
       const receipt: ProductReceipt = {
-        operationId: `${operation}_${digest(`${paths.ownerKey}:${requestKey}`)}`, productId: id,
+        operationId: `pwrite_${digest(`${paths.ownerKey}:${requestKey}`)}`, productId: id,
         revision: product.revision, objectiveRevision: product.objectiveRevision,
         savedAt: now, payloadDigest, recordDigest: productRecordDigest(product),
       };
@@ -222,7 +221,7 @@ export class ProductIntentStore {
       const parsed = productWriteSchema.safeParse(command);
       if (!parsed.success || Buffer.byteLength(JSON.stringify(parsed.data)) > PRODUCT_INTENT_LIMITS.requestBytes) throw new ProductStoreFault("invalid_input");
       const input = parsed.data;
-      return this.persist(actor, input, digest(JSON.stringify(input)), "pwrite", (previous, id, now) => {
+      return this.persist(actor, input, digest(JSON.stringify(input)), (previous, id, now) => {
         const changedObjective = previous && digest(JSON.stringify(previous.brief)) !== digest(JSON.stringify(input.brief));
         return {
           version: PRODUCT_INTENT_VERSION, id, revision: (previous?.revision ?? 0) + 1,
@@ -243,7 +242,7 @@ export class ProductIntentStore {
       const parsed = productTransitionSchema.safeParse(command);
       if (!parsed.success || Buffer.byteLength(JSON.stringify(parsed.data)) > PRODUCT_INTENT_LIMITS.requestBytes) throw new ProductStoreFault("invalid_input");
       const input = parsed.data;
-      return this.persist(actor, input, digest(JSON.stringify(input)), "ptransition", (previous, _id, now) => {
+      return this.persist(actor, input, digest(JSON.stringify(input)), (previous, _id, now) => {
         if (!previous) throw new ProductStoreFault("not_found");
         if (previous.objectiveRevision !== input.expectedObjectiveRevision) throw new ProductStoreFault("stale_revision");
         const added = input.stageEvidence ?? [];

@@ -76,7 +76,7 @@ export const storedProductSchema = z.object({
 }).strict().refine((value) => value.objectiveRevision <= value.revision);
 
 export const productReceiptSchema = z.object({
-  operationId: z.string().regex(/^p(write|transition)_[a-f0-9]{64}$/), productId: productIdSchema,
+  operationId: z.string().regex(/^pwrite_[a-f0-9]{64}$/), productId: productIdSchema,
   revision, objectiveRevision: revision, savedAt: instant, payloadDigest: hash, recordDigest: hash,
 }).strict();
 
