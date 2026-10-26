@@ -485,7 +485,7 @@ test("improvement creation recovers a lock released after exclusive acquisition 
 
 
 test("improvement draft handoff narrows the native selector and preserves the attempt guard", async () => {
-  const { createImprovementThread, readImprovementThread, requestImprovementAction } = await planningModule();
+  const { createImprovementThread, readImprovementThread, requestImprovementAction, runImprovementAction } = await planningModule();
   const { buildInboxDraftHook } = await import("#src/run-task.js");
   const { updateProposalRegistry } = await import("#src/lib/inbox.js");
   await withTempDir("improvement-draft-selection", async dir => {
@@ -498,9 +498,118 @@ test("improvement draft handoff narrows the native selector and preserves the at
     const hook = buildInboxDraftHook("acme", "atlas", { root: inboxRoot } as import("#src/lib/config.js").Config, "IMPROVEMENT-TEST", () => {},
       async proposals => { batches.push(proposals.map(proposal => proposal.id)); return proposals.map(proposal => ({ ok: false as const, proposalId: proposal.id, error: "ordinary test failure" })); },
       undefined, () => "a".repeat(40), undefined, undefined, saved.proposalId);
-    await hook(); assert.deepEqual(batches, [[saved.proposalId]], "the explicit request does not draft unrelated queued proposals");
-    await hook(); assert.equal(batches.length, 1, "the normal one-attempt-per-cause guard still applies");
+    const run = () => runImprovementAction(requested.operation.operationId, deps, async () => hook(), async () => assert.fail("drafting cannot file"), () => undefined);
+    assert.equal((await run()).state, "waiting"); assert.deepEqual(batches, [[saved.proposalId]], "the explicit request does not draft unrelated queued proposals");
+    assert.equal((await run()).state, "waiting"); assert.equal(batches.length, 1, "the normal one-attempt-per-cause guard still applies");
     const attempts = JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-draft-attempts.json"), "utf8")); assert.equal(typeof attempts[saved.proposalId], "string"); assert.equal(attempts["P-UNRELATED"], undefined);
+  });
+});
+
+test("saved improvement actions start only through the daemon-owned handoff: interrupted trigger publication", async () => {
+  const planning = await planningModule();
+  await withTempDir("improvement-trigger-recovery", async dir => {
+    const { deps, request, inboxRoot } = sourceFixture(dir);
+    const saved = await planning.createImprovementThread(request, deps); assert(saved.state === "saved");
+    const view = planning.readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
+    const interrupted = await planning.requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest,
+      idempotencyKey: "interrupted-trigger-request-0001" }, deps, stage => {
+      if (stage === "requested") throw new Error("service interrupted after saving the request");
+    });
+    assert.equal(interrupted.state, "uncertain");
+    const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
+    assert.equal(JSON.parse(readFileSync(registryPath, "utf8")).proposals[0].trigger.fired, false);
+    assert.equal(existsSync(join(inboxRoot, "state", "inbox-draft-attempts.json")), false, "saving never starts drafting");
+    const script = `
+      import assert from "node:assert/strict";
+      import { join } from "node:path";
+      import { fixedClock } from "#src/lib/clock.js";
+      import { pendingImprovementActions, readImprovementThread, runImprovementAction } from "#src/lib/improvement-thread.js";
+      import { startImprovementActionPump } from "#src/lib/daemon.js";
+      import { daemonImprovementActionDeps } from "#src/cli/commands/daemon.js";
+      import { buildInboxDraftHook } from "#src/run-task.js";
+      import { anchorFingerprint, captureInboxDraftSnapshot } from "#src/lib/inbox.js";
+      const { stateDir, now, requestId, proposalId, inboxRoot } = JSON.parse(process.argv[1]);
+      const deps = { stateDir, clock: fixedClock(now), actorId: "restarted-daemon" };
+      const batches = [], results = [];
+      let handed = false;
+      const wired = daemonImprovementActionDeps(stateDir, { improvement: async request => {
+        handed = true;
+        const result = await runImprovementAction(request.operationId, deps, async target => {
+          const hook = buildInboxDraftHook("acme", "atlas", { root: inboxRoot }, "IMPROVEMENT-RECOVERY", () => {},
+            async proposals => {
+              batches.push(proposals.map(p => p.id));
+              return proposals.map(p => {
+                const snapshot = captureInboxDraftSnapshot(p, { repository: "acme/atlas" });
+                return { ok: true, proposalId: p.id, snapshot, candidate: {
+                  proposalId: p.id, fragmentYaml: "- id: W1-T99999\\n  title: Simplify repeated work\\n",
+                  stampLine: "Recovered draft", anchorFingerprint: anchorFingerprint(p.evidenceAnchors),
+                  completion: { snapshot, lintClean: true, violations: [] } } };
+              });
+            }, undefined, () => "a".repeat(40), undefined, undefined, target.proposalId,
+            { root: target.controlRoot, ledgerPath: target.ledgerPath });
+          await hook();
+        }, async () => assert.fail("a draft request cannot file"), () => undefined);
+        results.push(result);
+        return { outcome: "queued" };
+      } });
+      const pump = startImprovementActionPump({ ...wired, checkStop: () => handed ? "one handoff" : undefined }, 5, () => {});
+      try {
+        for (let i = 0; i < 500 && !handed; i++) await new Promise(resolve => setTimeout(resolve, 2));
+      } finally { pump.stop(); await pump.settled(); }
+      assert.equal(handed, true, "the restarted daemon must discover the saved request");
+      assert.deepEqual(batches, [[proposalId]], "the native selector must reach the saved proposal without resubmission");
+      assert.equal(results.length, 1); assert.equal(results[0].state, "completed");
+      const view = readImprovementThread(requestId, deps);
+      assert.equal(view.state, "saved"); assert.equal(view.drafting.state, "ready");
+      const pending = []; for await (const row of pendingImprovementActions(stateDir)) pending.push(row);
+      assert.deepEqual(pending, [], "the completed draft must leave the pending queue");
+      process.stdout.write(JSON.stringify({ state: results[0].state, batches }));
+    `;
+    const raw = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script,
+      JSON.stringify({ stateDir: deps.stateDir, now: deps.clock.now(), requestId: saved.requestId, proposalId: saved.proposalId, inboxRoot })],
+      { cwd: repoRoot(), encoding: "utf8", timeout: 15000 });
+    assert.deepEqual(JSON.parse(raw), { state: "completed", batches: [[saved.proposalId]] });
+  });
+});
+
+test("saved improvement actions start only through the daemon-owned handoff: recovery preserves validation and ownership", async () => {
+  const planning = await planningModule();
+  for (const change of ["source", "goal", "scope", "owner"] as const) await withTempDir(`improvement-recovery-${change}`, async dir => {
+    const { deps, request, inboxRoot, input } = sourceFixture(dir);
+    const saved = await planning.createImprovementThread(request, deps); assert(saved.state === "saved");
+    const view = planning.readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
+    const interrupted = await planning.requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest,
+      idempotencyKey: "guarded-trigger-recovery-0001" }, deps, stage => {
+      if (stage === "requested") throw new Error("interrupted trigger publication");
+    });
+    assert.equal(interrupted.state, "uncertain");
+    const queued = []; for await (const row of planning.pendingImprovementActions(deps.stateDir)) queued.push(row);
+    assert.equal(queued.length, 1);
+    let held: ReturnType<typeof acquireInflightLock> | undefined;
+    if (change === "source") {
+      const changed = structuredClone(input); changed.currentSha = "c".repeat(40);
+      assert.equal(publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(deps.stateDir, request.repository), input: changed,
+        expectedSnapshotId: request.snapshotId, clock: deps.clock }).state, "published");
+    } else if (change === "goal") {
+      const amended = await planning.createImprovementThread({ ...request, goal: "Preserve the API and simplify only the measured function.",
+        idempotencyKey: "amended-goal-before-recovery-0001" }, deps);
+      assert.equal(amended.state, "saved");
+    } else if (change === "scope") {
+      const path = join(deps.stateDir, "read-model", "repositories-sources.json"), registry = JSON.parse(readFileSync(path, "utf8"));
+      registry.instances[0].options.controlRoot = join(dir, "other-instance"); writeFileSync(path, JSON.stringify(registry));
+    } else {
+      const key = createHash("sha256").update(JSON.stringify([request.repository, request.instance, request.opportunityId])).digest("hex");
+      held = acquireInflightLock(join(deps.stateDir, "improvement-threads", "locks"), key, { run_id: "active-conversation-owner", reclaim: false });
+    }
+    try {
+      const refused = await planning.runImprovementAction(queued[0]!.operationId, deps, async () => assert.fail("validation must precede drafting"),
+        async () => assert.fail("draft recovery cannot file"), () => undefined);
+      assert.equal(refused.state, change === "owner" ? "busy" : change === "scope" ? "source_unavailable" : "refused");
+      const proposal = JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-proposals.json"), "utf8")).proposals[0];
+      assert.equal(proposal.trigger.fired, false, "recovery must not publish a trigger through a failed guard");
+      assert.equal(existsSync(join(inboxRoot, "state", "inbox-draft-attempts.json")), false);
+      if (held) assert.equal(existsSync(held.path), true, "the active owner retains its lease");
+    } finally { held?.release(); }
   });
 });
 
@@ -622,7 +731,7 @@ test("improvement CLI preserves fleet execution config when selecting a reposito
 });
 
 test("improvement drafting preserves occupied fleet and repository locks and both refusal windows", async () => {
-  const { createImprovementThread, readImprovementThread, requestImprovementAction } = await planningModule();
+  const { createImprovementThread, readImprovementThread, requestImprovementAction, runImprovementAction } = await planningModule();
   const { buildInboxDraftHook } = await import("#src/run-task.js");
   const { acquireDrainLock } = await import("#src/lib/drain-lock.js");
   for (const guard of ["fleet-lock", "repository-lock", "fleet-deferral", "repository-deferral"] as const) await withTempDir(`improvement-${guard}`, async dir => {
@@ -630,7 +739,8 @@ test("improvement drafting preserves occupied fleet and repository locks and bot
     const { deps, request, inboxRoot } = sourceFixture(dir, { stateDir });
     const saved = await createImprovementThread(request, deps); assert(saved.state === "saved");
     const view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
-    assert.equal((await requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: `preserve-native-${guard}` }, { ...deps })).state, "requested");
+    const requested = await requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: `preserve-native-${guard}` }, { ...deps });
+    assert(requested.state === "requested");
     const ledgerPath = join(inboxRoot, "state", "ledger.ndjson"); writeFileSync(ledgerPath, "");
     const guardRoot = guard.startsWith("fleet") ? root : inboxRoot;
     const path = join(guardRoot, "state", guard.endsWith("lock") ? "inbox-draft.lock" : "inbox-draft-deferred-until.json");
@@ -641,9 +751,10 @@ test("improvement drafting preserves occupied fleet and repository locks and bot
     const hook = buildInboxDraftHook("acme", "atlas", config, "IMPROVEMENT-LOCK-TEST", () => {}, async (proposals, receivedConfig) => {
       batches++; assert.equal(receivedConfig, config); return proposals.map(proposal => ({ ok: false as const, proposalId: proposal.id, error: "ordinary test failure" }));
     }, undefined, () => "a".repeat(40), undefined, undefined, saved.proposalId, { root: inboxRoot, ledgerPath });
-    try { await hook(); assert.equal(batches, 0, `${guard} must prevent spending`); assert.equal(readFileSync(path, "utf8"), prior, "the existing holder or refusal is unchanged"); }
+    const run = () => runImprovementAction(requested.operation.operationId, deps, async () => hook(), async () => assert.fail("drafting cannot file"), () => undefined);
+    try { assert.equal((await run()).state, "waiting"); assert.equal(batches, 0, `${guard} must prevent spending`); assert.equal(readFileSync(path, "utf8"), prior, "the existing holder or refusal is unchanged"); }
     finally { if (held) held.release(); else unlinkSync(path); }
-    await hook(); assert.equal(batches, 1, "the same native selection runs once its guard permits it");
+    assert.equal((await run()).state, "waiting"); assert.equal(batches, 1, "the same native selection runs once its guard permits it");
     assert.equal(existsSync(join(root, "state", "inbox-draft.lock")), false); assert.equal(existsSync(join(inboxRoot, "state", "inbox-draft.lock")), false);
   });
 });

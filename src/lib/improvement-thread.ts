@@ -595,17 +595,6 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
       writeActionIndex(deps.stateDir, { ...index, [kind]: operationId }, owns); wrote = true; afterActionPersist?.("indexed");
       action.state = "requested"; writeAction(deps.stateDir, action, owns); afterActionPersist?.("requested");
     }
-    if (kind === "draft" && ["requested", "waiting"].includes(action.state)) {
-      const registryPath = join(intent.scope.inboxStateDir, "inbox-proposals.json");
-      strictRegistry(registryPath);
-      updateProposalRegistry(registryPath, current => {
-        strictRegistry(registryPath); if (!owns!()) throw new Error("Improvement action ownership changed.");
-        const proposal = current.find(row => row.id === intent.proposalId);
-        if (!proposal || !proposal.improvement || proposal.improvement.goalDigest !== input.goalDigest || !proposal.improvement.conversationReady) throw new Error("The conversation changed before drafting was requested.");
-        return current.map(row => row.id === intent.proposalId ? { ...row, trigger: { fired: true, description: "Plan drafting explicitly requested for this saved goal." } } : row);
-      }, { maxWaitMs: 0 });
-      syncProposalRegistryEntry(registryPath, intent.proposalId);
-    }
     if (!owns()) return fail("uncertain", "The decision was saved, but its writer changed before handoff.");
     // The daemon discovers this durable request without a browser or a service-side launcher.
     return { state: "requested", operation: action, execution: { state: "not_requested" } };
@@ -679,6 +668,18 @@ export async function runImprovementAction(operationId: string, deps: Improvemen
     if (view.state !== "saved" || view.currentRequestId !== action.requestId || view.goalDigest !== action.goalDigest || "state" in source || source.context !== intent.context ||
         action.kind === "file" && (view.drafting.state !== "ready" || view.drafting.digest !== action.draftDigest || view.correspondence.state !== "linked" || view.correspondence.pendingInputs !== 0 || view.correspondence.pendingWork !== 0)) {
       action.state = "refused"; action.reason = "The source, goal, or reviewed draft changed before this action could run."; writeAction(deps.stateDir, action, owns); return action;
+    }
+    // Recover trigger publication only after the daemon revalidates the sealed decision and owns the chat.
+    if (action.kind === "draft") {
+      const registryPath = join(scope.inboxStateDir, "inbox-proposals.json");
+      strictRegistry(registryPath);
+      updateProposalRegistry(registryPath, current => {
+        strictRegistry(registryPath); if (!owns!()) throw new Error("Improvement action ownership changed.");
+        const proposal = current.find(row => row.id === intent.proposalId);
+        if (!proposal || !proposal.improvement || proposal.improvement.requestId !== action!.requestId || proposal.improvement.goalDigest !== action!.goalDigest || !proposal.improvement.conversationReady) throw new Error("The conversation changed before drafting was requested.");
+        return current.map(row => row.id === intent.proposalId ? { ...row, trigger: { fired: true, description: "Plan drafting explicitly requested for this saved goal." } } : row);
+      }, { maxWaitMs: 0 });
+      syncProposalRegistryEntry(registryPath, intent.proposalId);
     }
     const target = actionExecutionTarget(intent, scope);
     // Save uncertainty BEFORE any consequential native filing call. A crash cannot look unattempted on restart.
