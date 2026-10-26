@@ -642,9 +642,9 @@ test("a ci-log round is priced against each red check and the failing test file 
     { step: "sweep.disposed", run_id: "DAEMON-1", pr_number: 7817, head_sha: "bbb", reason: "fix strikes exhausted (2/2) — coverage-ratchet failed on bbb1234 — ci-log fix", ts: "2026-09-29T13:00:00.000Z" },
     { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "ci-log", head_sha: "bbb", elapsed_ms: 120_000, ts: "2026-09-29T13:02:00.000Z" },
     // A dispatch that carries its own failures names the failing test, and a retried file is flaky.
-    { step: "test.flake_retry", file: "test/house-layout.test.ts", ts: "2026-09-29T12:00:00.000Z" },
-    { step: "sweep.disposed", run_id: "DAEMON-1", pr_number: 7818, head_sha: "ccc", ts: "2026-09-29T13:10:00.000Z" },
-    { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "ci-log", head_sha: "ccc", elapsed_ms: 60_000, ts: "2026-09-29T13:11:00.000Z",
+    { step: "test.flake_retry", retry_outcome: "recovered", head_sha: "cccccccccccccccccccccccccccccccccccccccc", pr_numbers: [7818], file: "test/house-layout.test.ts", ts: "2026-09-29T12:00:00.000Z" },
+    { step: "sweep.disposed", run_id: "DAEMON-1", pr_number: 7818, head_sha: "cccccccccccccccccccccccccccccccccccccccc", ts: "2026-09-29T13:10:00.000Z" },
+    { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "ci-log", head_sha: "cccccccccccccccccccccccccccccccccccccccc", elapsed_ms: 60_000, ts: "2026-09-29T13:11:00.000Z",
       ci_failures: [{ check: "coverage-shard (5/8)", signature: ciFailureSignature("coverage-shard (5/8)\t2026-09-29T13:05:00.1Z not ok 3 - test/house-layout.test.ts") }] },
   ];
   const byName = new Map(ciFrictionRoundsFromLedger(records).map((r) => [`${r.pr}:${r.cause.name}`, r.minutes]));
