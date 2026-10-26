@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { kickFilePath } from "#src/lib/fleet-control.js";
 import {
   BOOTSTRAP_CHECKS, bootstrapConfirmed, bootstrapEvidenceId, ghProductBuildTarget, productPlanOrigin, ProductBuildService,
   type BuildObservation, type BuildTask, type ProductBuildOptions, type ProductBuildTarget, type TargetInspection, type TaskRead,
@@ -13,6 +12,7 @@ import { ghShim } from "#test/helpers/gh-shim.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const actor = "clerk:alice";
+const kickMarker = (root: string, repo: string, taskId: string) => join(root, "state", `KICK_REQUESTED-${repo}:${taskId}`);
 const HEAD = "a".repeat(40);
 const ID = 1432832754;
 const identity = { provider: "github", id: ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public", verifiedAt: "2026-10-26T00:00:00.000Z" } as const;
@@ -144,8 +144,8 @@ test("W1-T10615: a product build writes the real repo-scoped kick marker by defa
   const service = new ProductBuildService({ ...f.options, kick: undefined });
   const started = await service.execute(actor, f.command());
   assert.ok(started.ok);
-  assert.ok(existsSync(kickFilePath(f.root, "W9-T1", "wreckterra")));
-  assert.ok(!existsSync(kickFilePath(f.root, "W9-T1")), "the unscoped marker of this repository's own task is untouched");
+  assert.ok(existsSync(kickMarker(f.root, "wreckterra", "W9-T1")));
+  assert.ok(!existsSync(join(f.root, "state", "KICK_REQUESTED-W9-T1")), "the unscoped marker of this repository's own task is untouched");
   mkdirSync(join(f.root, "state"), { recursive: true });
   writeFileSync(join(f.root, "state", "PAUSE"), "{}");
   const halted = fixture(t);
