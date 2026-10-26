@@ -34,6 +34,8 @@ import { RMD_TMP_PREFIX } from "./tmp.js";
 import { observeSlotCapacity, publishSlotCapacity, retireOwnedSlotCapacity, SlotCapacityCleanupError } from "./test-slot-capacity.js";
 import { acquireSlotMutation, createGuardHolderProbe, slotMutationPending, type GuardHolderEvidence, type OrphanGuardRecovery } from "./test-slot-mutation.js";
 import { observeTestSlotParent } from "./test-slot-parent.js";
+import { describeQueuePosition, estimateQueueEta, readHoldHistory, readTestSlotQueue, recordTestSlotHold, takeTestSlotTicket, testSlotQueueDir,
+  type HoldRecord, type OwnTicket, type QueueEta, type QueueHolderView, type QueuedTicket, type TicketJudge } from "./test-slot-queue.js";
 
 /** Names the slot directory every container and the host share (the scratch mount's bind). */
 export const TEST_SLOT_DIR_ENV = "RMD_TEST_SLOT_DIR";
@@ -873,6 +875,8 @@ export interface TestSlotOptions {
   pid?: number;
   load?: () => HostLoad;
   log?: (line: string) => void;
+  /** The human line a queued waiter prints when where it stands changes; default stderr unless `log` is injected. */
+  say?: (line: string) => void;
   /** Which priority binaries exist, for the caller's {@link lowPriorityCommand}. */
   binaryExists?: BinaryProbe;
   /** This run's expected peak (bytes). Set, a slot opens to it only while the memory headroom holds it plus every
@@ -967,7 +971,8 @@ export async function acquireTestSlotAsync(label: string, opts: Omit<TestSlotOpt
   return next.value;
 }
 
-function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<number, TestSlotLease> {
+/** The acquisition as a generator of sleeps, so a test can interleave two waiters on one shared clock. */
+export function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<number, TestSlotLease> {
   const maximum = opts.maxConcurrency ?? Number.MAX_SAFE_INTEGER;
   if (!Number.isSafeInteger(maximum) || maximum < 1) throw new RangeError("test worker ceiling must be a positive safe integer");
   const guardHolder = createGuardHolderProbe();
@@ -1163,6 +1168,82 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     return `memory headroom ${mib(headroom)} MiB < ${mib(need)} MiB for this run and the live holders' peaks`;
   };
   let announced = false;
+  // W1-T9950: a FIFO ticket per waiter, so admission follows arrival. An explicit protected parent gets no new entry.
+  let queueing = !parentPolicy, ticket: OwnTicket | undefined, lastQueued = "";
+  const say = opts.say ?? (opts.log ? undefined : (line: string) => void process.stderr.write(`${line}\n`));
+  const judge: TicketJudge = { now: () => clock.now(), hostname: host, bootId, pidNamespace, isPidAlive, silentBeats: TEST_SLOT_SILENT_BEATS };
+  const dropTicket = (): void => {
+    const own = ticket;
+    ticket = undefined;
+    try { own?.drop(); }
+    catch (error) { cleanupLog({ step: "test_slot.ticket_cleanup_failed", label, ticket: own?.name, error: String(error) }); }
+  };
+  const queueFailed = (error: unknown): void => {
+    queueing = false;
+    dropTicket();
+    log(JSON.stringify({ step: "test_slot.queue_unavailable", label, dir: testSlotQueueDir(dir), error: String(error),
+      decision: "this waiter polls unqueued, in arrival-blind order, as before W1-T9950" }));
+  };
+  const joinQueue = (): void => {
+    if (!queueing || ticket) return;
+    try {
+      ticket = takeTestSlotTicket(dir, { pid: opts.pid ?? process.pid, host: host(), bootId: bootId(), pidNs: pidNamespace(), processStart,
+        label, arrivedAt: startedIso, heartbeatAt: clock.iso(), heartbeatIntervalMs: pollMs });
+    } catch (error) { queueFailed(error); }
+  };
+  /** The live tickets ahead of this waiter (dead ones reaped on the way); joins the line when anyone is in it. */
+  const queueAhead = (): QueuedTicket[] => {
+    if (!queueing) return [];
+    try {
+      ticket?.beat(clock.iso());
+      const live = readTestSlotQueue(dir, judge, row => log(JSON.stringify({ ...row, by: label })), ticket?.name);
+      if (!ticket && live.length > 0) joinQueue();
+      const own = ticket?.name;
+      return own === undefined ? live : live.filter(t => t.name < own);
+    } catch (error) { queueFailed(error); return []; }
+  };
+  /** Read-only view of each slot's holder: never creates, reclaims or guards a slot file. */
+  const slotView = (judgeOpen: boolean): { open: number; holders: QueueHolderView[]; privateSeen: boolean; unproven: boolean } => {
+    const view = { open: 0, holders: [] as QueueHolderView[], privateSeen: false, unproven: false };
+    for (let i = 1; i <= slots; i += 1) {
+      const path = join(dir, `slot-${i}.json`);
+      try {
+        const st = lstatSync(path);
+        if (st.isFile() && (st.mode & 0o077) === 0) { view.privateSeen = true; view.holders.push({ slot: i }); continue; }
+        const held = st.isFile() ? readTestSlotHolder(path, st) : null;
+        if (held?.heartbeatIntervalMs !== undefined || held?.workIdentity !== undefined) view.unproven = true;
+        view.holders.push({ slot: i, label: held?.label, pid: held?.pid, elapsedMs: held ? clock.now() - Date.parse(held.startedAt) : undefined });
+        // Only a cadence-less dead holder counts as open here; anything needing exact-tree evidence waits for the head.
+        if (judgeOpen && held && !view.unproven && testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace })) view.open += 1;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") view.open += 1;
+        else view.holders.push({ slot: i, label: `unreadable: ${(error as NodeJS.ErrnoException).code ?? String(error)}` });
+      }
+    }
+    return view;
+  };
+  /** One `test_slot.queued` row (and one human line) each time this waiter's position or the holder set changes. */
+  const reportQueue = (ahead: readonly QueuedTicket[]): void => {
+    if (!ticket) return;
+    const holders = slotView(false).holders.filter(h => h.label !== undefined || h.pid !== undefined || h.elapsedMs === undefined);
+    const key = JSON.stringify([ahead.map(t => t.name), holders.map(h => [h.slot, h.pid, h.label])]);
+    if (key === lastQueued) return;
+    lastQueued = key;
+    let eta: QueueEta, history: HoldRecord[] = [];
+    try {
+      history = readHoldHistory(dir);
+      eta = estimateQueueEta({ slots, holders, ahead: ahead.map(t => ({ label: t.ticket.label })), history });
+    } catch (error) { eta = { basis: `ETA unknown: hold history unreadable (${String(error)})` }; }
+    const position = ahead.length + 1, aheadOf = ahead.map(t => ({ label: t.ticket.label, pid: t.ticket.pid }));
+    const message = describeQueuePosition(position, aheadOf, holders, eta);
+    log(JSON.stringify({ step: "test_slot.queued", label, position, ahead: aheadOf, holders, etaMs: eta.etaMs, etaBasis: eta.basis, message }));
+    say?.(message);
+  };
+  const recordHold = (acquiredAt: number, held: number): void => {
+    if (parentPolicy) return;
+    try { recordTestSlotHold(dir, { label, heldMs: clock.now() - acquiredAt, concurrency: held, endedAt: clock.iso() }, slots); }
+    catch (error) { cleanupLog({ step: "test_slot.hold_history_failed", label, error: String(error) }); }
+  };
   try {
     return yield* waitForSlot();
   } catch (error) {
@@ -1170,10 +1251,23 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     const concurrency = sized();
     return unslotted("slot_unavailable", concurrency,
       `test slot UNAVAILABLE (${dir}: ${String((error as Error)?.message ?? error)}); ran unslotted at --test-concurrency=${concurrency}`);
+  } finally {
+    // Acquired, past the bound, unavailable or abandoned: the ticket never outlives this acquisition.
+    dropTicket();
   }
   function* waitForSlot(): Generator<number, TestSlotLease> {
     for (;;) {
       poll += 1;
+      // W1-T9950: only the queue's head — or a waiter with fewer live tickets ahead than open slots — touches a slot.
+      const ahead = queueAhead();
+      const view = ahead.length > 0 ? slotView(true) : undefined;
+      const holders: string[] = [];
+      if (view && ahead.length >= view.open) {
+        // Fail closed while yielding: what this poll saw only adds to what the last admitted poll derived.
+        if (view.privateSeen) privateRequired = true;
+        if (view.unproven) reservedWorkUnproven = true;
+        holders.push(`queued behind ${ahead.length} earlier waiter(s) with ${view.open} slot(s) open`);
+      } else {
       privateRequired = basePrivate || cleanupIncomplete;
       reservedWorkUnproven = false;
       // Recover only our own, privately inspected dead holders BEFORE calculating memory.
@@ -1196,7 +1290,6 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") log(JSON.stringify({ step: "test_slot.owner_recovery_refused", slot: i, error: String(error) }));
         }
       }
-      const holders: string[] = [];
       for (let i = 1; i <= slots; i += 1) {
         const path = join(dir, `slot-${i}.json`);
         for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1243,7 +1336,8 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
             writeRecord(body);
             removeCapacity = privateWriter ? publishSlotCapacity(path, fd, i, ownedRecord) : undefined;
             const waitedMs = clock.now() - startedAt;
-            if (announced) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir }));
+            if (announced || ticket) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir, ticketed: ticket !== undefined, aheadAtAcquire: ahead.length }));
+            const acquiredAt = clock.now();
             let held = true;
             let closed = false;
             const close = (): void => {
@@ -1307,6 +1401,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
                       : reclaimStaleLock(path, { parseHolder: parseTestSlotHolder, isStale: ours, onReclaim: () => {}, onLostReclaim: () => {} });
                     held = false; close();
                     if (result.outcome !== "reclaimed" && result.outcome !== "missing") cleanupLog({ step: "test_slot.release_lost", label, path });
+                    else recordHold(acquiredAt, concurrency);
                     return;
                   } catch (error) {
                     // Preserve the latest failure for the bounded terminal cleanup receipt.
@@ -1432,6 +1527,8 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
           }
         }
       }
+      }
+      joinQueue();
       const waitedMs = clock.now() - startedAt;
       if (waitedMs >= waitBoundMs) {
         log(JSON.stringify({ step: "test_slot.wait_bound_exceeded", label, waitedMs, holders }));
@@ -1442,6 +1539,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
         announced = true;
         log(JSON.stringify({ step: "test_slot.waiting", label, dir, holders }));
       }
+      reportQueue(ahead);
       yield Math.min(pollMs, Math.max(0, waitBoundMs - waitedMs));
     }
   }
