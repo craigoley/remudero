@@ -155,6 +155,10 @@ const CHMOD_REMEDY =
  */
 const DECLARED: readonly Declared[] = [
   {
+    kind: "chmod", file: "worker/spawn/codex-native-cache.test.ts", key: "0o500", count: 1,
+    reason: "The native-cache policy explicitly requires the owner's read, write and execute mode bits before granting a directory. The fixture asserts that stat-mode refusal and unchanged permissions, not an OS write denial, so it holds for uid 0 too.",
+  },
+  {
     kind: "chmod", file: "infra/product-intents.test.ts", key: "0o644", count: 1,
     reason: "The product store explicitly rejects group/world-readable stat modes before reading private state. This tests mode classification, not OS access denial, so the refusal holds for every uid.",
   },
