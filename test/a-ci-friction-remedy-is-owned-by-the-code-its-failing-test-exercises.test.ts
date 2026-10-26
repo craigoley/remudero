@@ -145,3 +145,25 @@ test("W1-T9059: an artifact test filename remains a test signature", t => {
   assert.deepEqual(locateCiFrictionOwner("check:ci-log:coverage-shard:test-artifact-test-ts", [`coverage-shard: ${file}`], f.search())?.files,
     [SOURCE, file]);
 });
+
+
+test("a runtime test failure never assigns its remedy to a type-only or quoted import", t => {
+  const f = fixture(t);
+  f.put("src/lib/config.ts", "export interface Config { value: string }\n");
+  for (const inert of [
+    'import type { Config } from "#src/lib/config.js";',
+    'import { type Config } from "#src/lib/config.js";',
+    '// import { config } from "#src/lib/config.js";',
+    'const example = 'import { config } from "#src/lib/config.js";';',
+  ]) {
+    f.put(TEST, inert + '\nimport { govern } from "#src/lib/dispatch-governor.js";\n');
+    f.commit();
+    assert.deepEqual(locateCiFrictionOwner(`check:test:${TEST}`, [], f.search())?.files, [SOURCE, TEST], inert);
+  }
+  f.put(TEST, 'import type { Config } from "#src/lib/config.js";\n');
+  f.commit();
+  assert.deepEqual(locateCiFrictionOwner(`check:test:${TEST}`, [], f.search())?.files, [TEST]);
+  f.put(TEST, 'import type { Config } from "#src/lib/config.js";\nimport "#src/lib/config.js";\n');
+  f.commit();
+  assert.deepEqual(locateCiFrictionOwner(`check:test:${TEST}`, [], f.search())?.files, ["src/lib/config.ts", TEST], "a separate real side-effect import still supplies an owner candidate");
+});
