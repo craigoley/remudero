@@ -66,6 +66,10 @@ interface HarnessOpts {
   onMain?: Outcome;
   /** The failing test's outcome on a trial merge of the head with main; undefined leaves the probe unwired. */
   merged?: Outcome;
+  /** Per-file trial-merge outcomes, read before `merged`. */
+  mergedByFile?: Record<string, Outcome>;
+  /** The PR's own changed paths (its pulls/files read); undefined leaves that read unread. */
+  prChanged?: string[];
   behindBy?: number;
 }
 
@@ -85,13 +89,14 @@ function harness(rows: Row[], opts: HarnessOpts) {
     reproduceFailingTestsOnMain: async (_pr, files) =>
       files.map((file) => ({ file, outcome: opts.onMain ?? "passes", duration_ms: 9, cached: false })),
     ...(opts.baseChanged === undefined ? {} : {
-      readRedBaseRefreshFacts: async () => ({ behindBy: opts.behindBy ?? 2, baseChangedFiles: opts.baseChanged }),
+      readRedBaseRefreshFacts: async () => ({ behindBy: opts.behindBy ?? 2, baseChangedFiles: opts.baseChanged,
+        ...(opts.prChanged === undefined ? {} : { prAddedLines: Object.fromEntries(opts.prChanged.map((path) => [path, [1]])) }) }),
     }),
     readTestImportClosure: async () => CLOSURE,
     ...(opts.merged === undefined ? {} : {
       reproduceFailingTestsOnMerge: async (pr: OpenPrView, files: readonly string[], sha: string) => {
         merges.push(`${pr.headSha}+${sha}`);
-        return files.map((file) => ({ file, outcome: opts.merged!, duration_ms: 7, cached: false }));
+        return files.map((file) => ({ file, outcome: opts.mergedByFile?.[file] ?? opts.merged!, duration_ms: 7, cached: false }));
       },
     }),
     behindMainByPr: new Map([[PR, opts.behindBy ?? 2]]),
@@ -135,7 +140,7 @@ function worker(): WorkerResult {
   };
 }
 
-async function fixRung(merged: Outcome | undefined, mainTip: string | null = MAIN, ledger?: Row[]) {
+async function fixRung(merged: Outcome | undefined, mainTip: string | null = MAIN, ledger?: Row[], prChanged?: string[]) {
   const events: string[] = [];
   const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const outcome = await runFixRung({
@@ -157,7 +162,8 @@ async function fixRung(merged: Outcome | undefined, mainTip: string | null = MAI
       log: (step: string, extra?: Record<string, unknown>) => { events.push(step); logged.push({ step, extra }); },
       say: () => {},
       account: (result: WorkerResult) => result,
-      readRedBaseRefreshFacts: async () => ({ behindBy: 5, baseChangedFiles: [FILE] }),
+      readRedBaseRefreshFacts: async () => ({ behindBy: 5, baseChangedFiles: [FILE],
+        ...(prChanged === undefined ? {} : { prAddedLines: Object.fromEntries(prChanged.map((path) => [path, [88]])) }) }),
       updateBranch: async () => { events.push("update-branch"); return { ok: true }; },
       readMainTip: async () => {
         if (mainTip === null) throw new Error("main tip unreadable");
@@ -570,4 +576,99 @@ test("a recorded refresh refusal stays bound to its exact red head and main", as
     assert.equal(judgments, control === "same" ? 0 : 1, control);
     assert.deepEqual(h.merges, [], "recorded evidence introduces no new probe");
   }
+});
+
+// OBSERVED 2026-10-25 on #14196: a half-done rename (`freshByName` -> `freshProducers`) in src/lib/sweep.ts broke
+// four tests in a suite the PR never touched. Main's own copy of that suite passed, the head was behind a main that
+// kept changing src/lib/sweep.ts, so the red read as fixed on main; a trial merge short of clear kept the refresh,
+// and the fleet took main instead of sending the PR's own red to the fix lane.
+const OTHER = "test/a-plan-only-pr-requeues-its-cancelled-check.test.ts";
+const OWN_DIFF = ["src/lib/sweep.ts", "test/a-superseded-runs-rerun-never-overrides-the-newest-run.test.ts"];
+
+/** Live refresh history spanning the PR's whole life, so only the PR's own diff can refuse a first refresh. */
+const liveHistory = (): Row[] => ["fix.base_refreshed", "sweep.base_red.refresh", "sweep.base_fixed.refresh", "refresh.clearance"]
+  .map((step): Row => ({ ts: ago(600), step, pr_number: 5000, outcome: "error: 422" }));
+const prClearances = (rows: Row[]) => clearances(rows).filter((r) => r.pr_number === PR);
+
+function renameRedPr(): OpenPrView {
+  return redPr({ createdAt: ago(60), ciFailures: [
+    { name: "typecheck", logTail: "src/lib/sweep.ts(18901,29): error TS2304: Cannot find name 'freshByName'." },
+    { name: CHECK, logTail: `not ok 6 - ${FILE}\n  error: 'freshByName is not defined'\nok 7 - ${OTHER}` },
+  ] });
+}
+
+test("PR 14196: a red the PR's own diff reaches takes the fix lane when the trial merge is partial", async () => {
+  const h = harness([mainHealth(), ...liveHistory()], { baseChanged: ["src/lib/sweep.ts"], prChanged: OWN_DIFF, merged: "passes", mergedByFile: { [FILE]: "fails" } });
+  await runSweep([renameRedPr(), peer()], h.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(h.merges, [`${HEAD}+${MAIN}`], "the trial merge still runs: only a clear one may refresh");
+  assert.deepEqual(h.refreshed, [], "a partial trial merge does not take main for a red the PR's diff reaches");
+  assert.deepEqual(h.fixed, [PR], "the PR's own red reaches the fix lane");
+  assert.equal(h.rows.filter((r) => r.step === "sweep.base_fixed.refresh" && r.pr_number === PR).length, 0);
+  const row = prClearances(h.rows)[0];
+  assert.deepEqual([row?.arm, row?.refresh, row?.evidence, row?.merged_verdict], ["base-fixed", false, "partial", "partial"]);
+  assert.deepEqual(row?.own_paths, ["src/lib/sweep.ts"], "the row names the PR's own path the red reaches");
+  assert.equal(row?.reason, "the PR's own diff changes src/lib/sweep.ts (a path that reaches the red) and the trial merge is partial");
+
+  // The stalled-stage arm reads the same evidence: the stage escalates instead of taking main.
+  const stalled = harness(stalledRows(liveHistory()), { baseChanged: ["src/lib/sweep.ts"], prChanged: OWN_DIFF, merged: "unrunnable" });
+  await runSweep([redPr({ createdAt: ago(60) })], { ...stalled.deps, actionable: () => false }, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(stalled.refreshed, []);
+  assert.match(stalled.escalations[0] ?? "", /fixed-on-main \(branch refresh refused: unrunnable\)/);
+  assert.deepEqual(prClearances(stalled.rows)[0]?.own_paths, ["src/lib/sweep.ts"]);
+});
+
+test("PR 14196: a red the PR's own diff reaches is refreshed only on a trial merge that clears it", async () => {
+  // Unrunnable and unwired trial merges refuse, as a repeat on the same red does.
+  for (const merged of ["unrunnable", undefined] as const) {
+    const h = harness([mainHealth(), ...liveHistory()], { baseChanged: ["src/lib/sweep.ts"], prChanged: OWN_DIFF, ...(merged === undefined ? {} : { merged }) });
+    await runSweep([renameRedPr(), peer()], h.deps, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual([h.refreshed, h.fixed], [[], [PR]], String(merged));
+    assert.equal(prClearances(h.rows)[0]?.evidence, "unrunnable", String(merged));
+    assert.match(String(prClearances(h.rows)[0]?.reason), /^the PR's own diff changes src\/lib\/sweep\.ts/);
+  }
+  // A clear trial merge carries the PR's diff, so it is evidence main fixed the red: main once, no strike.
+  const clear = harness([mainHealth(), ...liveHistory()], { baseChanged: ["src/lib/sweep.ts"], prChanged: OWN_DIFF, merged: "passes" });
+  await runSweep([renameRedPr(), peer()], clear.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual([clear.refreshed, clear.fixed], [[PR], []]);
+  assert.deepEqual([prClearances(clear.rows)[0]?.evidence, prClearances(clear.rows)[0]?.own_paths], ["merged-probe", ["src/lib/sweep.ts"]]);
+  // Controls: a PR diff the red cannot reach, and an unread PR diff, keep today's refresh on the same partial merge.
+  for (const prChanged of [["plan/tasks.d/W1-T1-a-shard.yaml"], undefined]) {
+    const h = harness([mainHealth(), ...liveHistory()], { baseChanged: ["src/lib/sweep.ts"], ...(prChanged === undefined ? {} : { prChanged }),
+      merged: "passes", mergedByFile: { [FILE]: "fails" } });
+    await runSweep([renameRedPr(), peer()], h.deps, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual([h.refreshed, h.fixed], [[PR], []], String(prChanged));
+    const row = prClearances(h.rows)[0];
+    assert.deepEqual([row?.evidence, row?.own_paths], ["partial", prChanged === undefined ? undefined : []], String(prChanged));
+  }
+});
+
+test("PR 14196: a base red reproduced on main is refreshed whatever the PR's own diff reaches", async () => {
+  // This head's red reproduced on an older main, so main itself had it: the PR's diff decides nothing there.
+  const reproduced: Row = { ts: ago(20), run_id: "old", task_id: "W1-T8008", step: "sweep.base_reproduction", pr_number: PR,
+    head_sha: HEAD, main_sha: "2".repeat(40), verdict: "reproduced", files: [{ file: FILE, outcome: "fails", duration_ms: 9, cached: false }] };
+  const h = harness([mainHealth(), ...liveHistory(), reproduced], { baseChanged: ["src/lib/sweep.ts"], prChanged: OWN_DIFF, merged: "unrunnable" });
+  await runSweep([redPr({ createdAt: ago(60) }), peer()], h.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual([h.refreshed, h.fixed], [[PR], []]);
+  const row = prClearances(h.rows)[0];
+  assert.deepEqual([row?.arm, row?.refresh, row?.evidence, row?.own_paths], ["base-red", true, "unrunnable", undefined]);
+});
+
+test("PR 14196: the PR's own reach is named in the clearance and bounded in its reason", async () => {
+  const input = { failingTestFiles: [FILE], reach: { counted: ["src/lib/sweep.ts"], complete: true }, priorRefresh: false };
+  const many = ["src/lib/sweep.ts", "src/run-task.ts", "package.json", "test/helpers/sweep-test.ts", "scripts/ci.mjs"];
+  const unwired = await assessRefreshClearance({ ...input, ownReach: many }, undefined);
+  assert.deepEqual([unwired.refresh, unwired.evidence, unwired.ownPaths], [false, "unrunnable", many]);
+  assert.equal(unwired.reason, "the PR's own diff changes src/lib/sweep.ts, src/run-task.ts, package.json and 2 more " +
+    "(a path that reaches the red) and the trial-merge probe is unwired");
+  const fileless = await assessRefreshClearance({ ...input, failingTestFiles: [], ownReach: ["package.json"] }, undefined);
+  assert.deepEqual([fileless.refresh, fileless.evidence], [false, "fileless"]);
+  // An empty reach is read evidence the PR's diff stays clear of the red: today's refresh, and the row says so.
+  const clear = await assessRefreshClearance({ ...input, ownReach: [] }, undefined);
+  assert.deepEqual([clear.refresh, clear.evidence, clear.ownPaths], [true, "unrunnable", []]);
+  // The fix rung: the PR changed the failing test file itself, and the trial merge cannot run.
+  const rung = await fixRung("fails", null, undefined, [FILE]);
+  assert.equal(rung.events.includes("update-branch"), false, "no main merge for a red the PR's own diff reaches");
+  assert.ok(rung.events.includes("spawn"), "the round dispatches its worker");
+  const rungRow = rung.logged.find((r) => r.step === "refresh.clearance")?.extra;
+  assert.deepEqual([rungRow?.evidence, rungRow?.own_paths], ["unrunnable", [FILE]]);
 });

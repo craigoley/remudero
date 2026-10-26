@@ -65,20 +65,30 @@ export function codeqlAlertsReadDue(lines: readonly Record<string, unknown>[], p
   return codeqlCheckFailed || securityArmRefusalAtHead(lines, prNumber, headSha)?.state === "blocked";
 }
 
-/** W1-T9633 — the disposed row's sentence for a security hold: the verdict, its owner, and each alert read at this head.
- *  W1-T9731: each alert carries its message (bounded at hydration); with none read, or a pass that stood down, it says so. */
-export function securityHoldReason(refusal: SecurityArmRefusal,
-  alerts?: readonly { alertNumber: number; ruleId: string; path: string; line: number; message?: string }[],
-  standDown?: string): string {
+type NamedAlert = { alertNumber: number; ruleId: string; path: string; line: number; message?: string };
+function namedAlerts(alerts?: readonly NamedAlert[]): string {
   const said = (a: { message?: string }) => a.message?.replace(/\s+/g, " ").trim();
-  const named = alerts?.length
+  return alerts?.length
     ? ` (${alerts.map(a => `alert #${a.alertNumber} ${a.ruleId} at ${a.path}:${a.line}${said(a) ? `: "${said(a)}"` : ""}`).join(", ")})`
     : " (no high or critical CodeQL alert was read at this head this pass)";
+}
+
+/** W1-T9633 — the disposed row's sentence for a security hold: the verdict, its owner, and each alert read at this head.
+ *  W1-T9731: each alert carries its message (bounded at hydration); with none read, or a pass that stood down, it says so. */
+export function securityHoldReason(refusal: SecurityArmRefusal, alerts?: readonly NamedAlert[], standDown?: string): string {
+  const named = namedAlerts(alerts);
   return refusal.state === "blocked"
     ? `security hold: the code-scanning merge policy refused the arm at this head on a new high or critical alert` +
       `${named} (security merge blocked: ${refusal.reason}) — owner fix-lane${standDown ? `; this pass: ${standDown}` : ""}`
     : `security hold: the code-scanning merge policy could not classify this head's CodeQL result ` +
       `(security merge unknown: ${refusal.reason}) — owner security-policy; restore complete trusted exact-head evidence and re-evaluate the policy; the hold remains until qualified`;
+}
+
+/** #14202 — the cause a PR names while its `security-merge-policy` status is blocked at this head and its blocker
+ *  is another stage (a red, a base-red wait, a review): the published verdict and each alert read at this head. */
+export function securityPolicyCause(refusal: SecurityArmRefusal, alerts?: readonly NamedAlert[]): string {
+  return `security-merge-policy ${refusal.state} at this head: ${refusal.reason}${namedAlerts(alerts)} — ` +
+    "this PR's own new alert, owner fix-lane; it stays after this blocker clears";
 }
 
 export function finalBlocker(ruleBlocker: PrBlocker, facts: BlockerFacts): PrBlocker {

@@ -31,7 +31,6 @@ function fixture(t: { after: (fn: () => void) => void }, shardText: string) {
     clock: { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() } as unknown as BacklogSources["clock"],
     fileExists: () => true, proofsHolding: () => new Set(),
   };
-  void fixedClock;
   return {
     root, shards, sources, task,
     read: () => readFileSync(join(root, rel), "utf8"),
@@ -104,7 +103,12 @@ test("an open backlog decision defers the same async proposal despite a new evid
   assert.deepEqual(changed.disposition, first.disposition, "older evidence changes the hash, not the decision");
   let open = [{ target: ID, decision, prNumber: 14156, headSha: "a".repeat(40) }];
   const events: Array<{ step: string; extra: unknown }> = [];
-  const deps = { repoRoot: f.root, stateDir: join(f.root, "state"),
+  // The pass seeds its class draw from deps.clock (rng = seed ?? clock.now()) and keys its cheap
+  // fingerprint on clock's hour bucket plus the tasks.d mtime. On systemClock, 1 pass in 8 drew
+  // `place` below 0.5 (Beta(3,1)) and landed nothing, and a shard written in the first pass's mtime
+  // tick read as unchanged input (PR #14176, coverage-shard 3/8). The landing pass takes seed 1
+  // (place=0.846), as the sibling backlog fixtures do, and each pass gets its own fixed hour.
+  const deps = { repoRoot: f.root, stateDir: join(f.root, "state"), clock: fixedClock(T0),
     log: (step: string, extra?: unknown) => { events.push({ step, extra }); },
     openWorkspace: () => { throw new Error("inventory must not open a workspace"); } };
   const spec = backlogGardenSpec(deps, { ...f.sources, openDecisions: async () => open });
@@ -129,7 +133,7 @@ test("an open backlog decision defers the same async proposal despite a new evid
   writeFileSync(join(f.root, otherShard), `- id: ${other.id}\n  title: t\n  status: queued\n`);
   f.sources.mergedLastDay = () => 1;
   const landed: Array<{ paths: string[]; body: string }> = [];
-  const gardenDeps = { ...deps, openWorkspace: () => ({ root: f.root,
+  const gardenDeps = { ...deps, seed: 1, clock: fixedClock(T0 + HOUR), openWorkspace: () => ({ root: f.root,
     land: (proposal: { paths: string[]; body: string }) => {
       landed.push(proposal);
       return "https://example.test/pull/2";
