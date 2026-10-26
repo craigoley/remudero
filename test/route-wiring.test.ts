@@ -306,7 +306,8 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
 const COVERED: ReadonlySet<string> = new Set([
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts, W1-T10612 identity/mount test.
   "POST /v1/products",
-  // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts, W1-T10617 research contract test.
+  // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts,
+  // W1-T10617: the served product route invokes the production capability across the transport process boundary.
   "POST /v1/products/research",
   "POST /v1/control/assistant-action",
   "POST /v1/control/stop",

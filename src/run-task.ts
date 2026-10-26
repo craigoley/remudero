@@ -853,6 +853,7 @@ import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
 import { planFilesIdentity } from "./lib/thread-plan.js";
+import { triageProductResearchProvider, type ProductResearchProvider } from "./lib/product-research.js";
 import {
   buildReadyServeServer,
   currentBranch,
@@ -28771,6 +28772,26 @@ export function boardColdStartGate(boardPath: string, clock: Clock = systemClock
 // applies at boot — logs forced 0600, an off-main notice, a reap-waiting bind — is only real if
 // it is proven on the ACTUAL boot path, in-process, where a coverage record exists. A spawned
 // child proves the non-TTY log behaviour but reports no coverage for the lines that did it.
+export function resolveServeProductResearch(config: Config, cwd: string): {
+  productResearchProvider?: ProductResearchProvider; productResearchBudgetUsd?: number;
+} {
+  const mounts = loadMounts(mountsPath(cwd));
+  if (!mounts.capabilities) return {};
+  const mount = mounts.synthesis.triage;
+  if (mount.provider && !enabledWorkerProviders(config).includes(mount.provider)) return {};
+  const settingsFile = renderWorkerSettings({
+    templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+    hooksDir: join(resolveInstallRoot(config), "hooks"),
+    outPath: join(config.root, "tmp", "serve-product-research-settings.json"),
+  });
+  validateWorkerSettingsFile(settingsFile);
+  return {
+    productResearchBudgetUsd: DEFAULT_BUDGET_USD,
+    productResearchProvider: triageProductResearchProvider({ config, cwd, mount, settingsFile,
+      spawn: ledgeredNonDispatchSpawn("triage") }),
+  };
+}
+
 export async function serveCommand(
   rest: string[],
   // `branch` is injectable for the SAME reason main()'s freshness check is: CI checks out a
@@ -28983,6 +29004,12 @@ export async function serveCommand(
     log("serve.feedback_expander_unavailable", { error: String((e as Error)?.message ?? e) });
   }
 
+  let productResearch: ReturnType<typeof resolveServeProductResearch> = {};
+  try { productResearch = resolveServeProductResearch(config, repoRoot); }
+  catch (error) {
+    log("serve.product_research_unavailable", { error: String((error as Error)?.message ?? error) });
+  }
+
   // `inflightHolder` wires deriveStatus's THIRD liveness disjunct (lib/status.ts) to the real
   // lock directory — the same `<config.root>/state/inflight` path `acquireInflightLock` writes
   // and the sweep rung reaps, never a second notion of where locks live. Without this the
@@ -29067,6 +29094,7 @@ export async function serveCommand(
     // differ: fleet-control flag files must match what `rmd daemon`/`rmd drain` check
     // (config.root); plan/questions.ndjson must match where `appendQuestion` writes (repoRoot).
     fleetControlRoot: config.root,
+    ...productResearch,
     assistantRepository: `${self.owner}/${self.repo}`,
     questionsRoot: repoRoot,
     tokens,

@@ -4,7 +4,9 @@ import { test, type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { ProductIntentStore, productStatePaths } from "#src/lib/product-intent-store.js";
-import { ProductResearchService, type ProductResearchProvider, type ProductResearchView } from "#src/lib/product-research.js";
+import { ProductResearchService, triageProductResearchProvider, type ProductResearchProvider, type ProductResearchView } from "#src/lib/product-research.js";
+import { SubscriptionOnlyRefusedError, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { CodexToolchainBlockedError, ProviderCapacityBlockedError } from "#src/lib/worker-provider.js";
 import { declaredBody, violations } from "#test/helpers/openapi-strict.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
@@ -47,6 +49,41 @@ async function ok(service: ProductResearchService, body: unknown): Promise<Produ
 }
 
 const researchFile = (root: string) => `${productStatePaths(root, ACTOR).directory}/research/${productStatePaths(root, ACTOR).ownerKey}.json`;
+
+test("the triage research adapter preserves admission refusals and never invents a report or budget", async (t) => {
+  const root = ownedFixtureDir(t, "product-research-admission").dir;
+  const calls: SpawnWorkerArgs[] = [];
+  let outcome: Partial<WorkerResult> | Error = {};
+  const config = { root, claudeBin: "/unused" };
+  const mount = { model: "sonnet", effort: "low", maxTurns: 400, contextBudget: 180000 };
+  const adapter = triageProductResearchProvider({ config, mount, cwd: root, settingsFile: "/fixture/settings.json",
+    spawn: async (args) => { calls.push(args); if (outcome instanceof Error) throw outcome; return outcome as WorkerResult; } });
+  const signal = new AbortController().signal;
+  const input = { objective: "bounded objective", objectiveRevision: 1, sources: SOURCES,
+    requestId: "admission-research-001", budgetUsd: 1, signal };
+  for (const budgetUsd of [0, -1, NaN, Infinity]) assert.equal(await adapter.research({ ...input, budgetUsd }), undefined);
+  assert.equal(calls.length, 0, "an unresolved budget never starts even an injected transport");
+  for (const refusal of [new ProviderCapacityBlockedError([]), new SubscriptionOnlyRefusedError("opus"),
+    new CodexToolchainBlockedError("fixture executable absent"), { notStarted: "admission-abandoned" as const },
+    { usageRefusal: { matched: "fixture quota" } }, { budgetRefused: true }, { costUsd: NaN }, { costUsd: -1 }]) {
+    outcome = refusal;
+    assert.equal(await adapter.research(input), undefined, "admission and unmeasurable spend remain unavailable");
+  }
+  outcome = new Error("transport broke after admission");
+  await assert.rejects(adapter.research(input), /transport broke after admission/);
+  outcome = { apiError: true };
+  await assert.rejects(adapter.research(input), /transport failed/);
+  outcome = { costUsd: 0, text: "null" };
+  assert.equal(await adapter.research(input), null, "invalid provider data stays invalid for the named operation to reject");
+  outcome = { costUsd: 0.25, text: JSON.stringify({ summary: "supplied evidence only", spendUsd: 9000 }) };
+  assert.deepEqual(await adapter.research(input), { summary: "supplied evidence only", spendUsd: 0.25 });
+  const call = calls.at(-1)!;
+  assert.equal(call.config, config, "the existing paid/subscription policy is passed unchanged");
+  assert.equal(call.maxBudgetUsd, 1);
+  assert.equal(call.signal, signal, "the operation's cancellation reaches the transport");
+  assert.equal(call.mountProvider, undefined, "an unpinned mount keeps normal provider admission");
+  assert.deepEqual(call.tools, []);
+});
 
 /** Own the new fixture's exact stat bits even under a restrictive host umask; restore the mask synchronously. */
 function replaceStateMode(file: string, body: string, mode: number): void {

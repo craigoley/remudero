@@ -1,14 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { generateKeyPairSync, sign } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { buildProductRoutes } from "#src/lib/product-routes.js";
-import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
-import { createService, type IdentityProvider } from "#src/lib/service.js";
+import { buildServeRoutes, operatorSessionProvider, type ServeDeps } from "#src/lib/serve.js";
+import { createService, OPERATOR_SESSION_HEADER, type IdentityProvider } from "#src/lib/service.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { declaredBody, violations } from "#test/helpers/openapi-strict.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { resolveServeProductResearch, DEFAULT_BUDGET_USD } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import { parse, stringify } from "yaml";
+import { withLiveSpawnAllowed } from "#src/lib/spawn-guard.js";
 
 const command = { version: "product-intent-v1", requestId: "route-create-00001", expectedRevision: 0,
   brief: { name: "Wreckterra", idea: "private original mobile combat idea", portfolio: "OleyArcade",
@@ -49,11 +55,11 @@ function assembled(root: string, extra: Partial<ServeDeps> = {}) {
   return routes;
 }
 
-async function server(t: TestContext, options: { mount?: boolean; missingRoot?: boolean; enforcement?: boolean; deps?: Partial<ServeDeps> } = {}) {
-  const root = ownedFixtureDir(t, "product-http").dir;
+async function server(t: TestContext, options: { root?: string; operatorSession?: IdentityProvider; mount?: boolean; missingRoot?: boolean; enforcement?: boolean; deps?: Partial<ServeDeps> } = {}) {
+  const root = options.root ?? ownedFixtureDir(t, "product-http").dir;
   const log: unknown[] = [];
   const routes = options.mount ? assembled(root, options.deps) : buildProductRoutes({ root: options.missingRoot ? undefined : root });
-  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity,
+  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: options.operatorSession ?? identity,
     routes, enforceWriteTiers: options.enforcement, enforceReadSensitivity: options.enforcement,
     log: (step, extra) => { log.push({ step, extra }); } });
   await new Promise<void>((resolve) => instance.listen(0, "127.0.0.1", resolve));
@@ -62,10 +68,10 @@ async function server(t: TestContext, options: { mount?: boolean; missingRoot?: 
 }
 
 interface Reply { version: string; error?: string; receipt?: { productId: string; revision: number }; product?: { brief: { idea: string } }; products?: unknown[] }
-async function request(base: string, path: string, session?: "alice" | "bob", body?: unknown) {
+async function request(base: string, path: string, session?: "alice" | "bob", body?: unknown, headers: Record<string, string> = {}) {
   const result = await fetch(base + path, { method: body === undefined ? "GET" : "POST",
     headers: { authorization: "Bearer fixture-write", ...(session ? { "x-test-session": session } : { "x-rmd-actor": "clerk:alice" }),
-      ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      ...(body === undefined ? {} : { "content-type": "application/json" }), ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const reply = await result.json() as Reply;
   const method = body === undefined ? "GET" : "POST";
@@ -95,6 +101,125 @@ test("W1-T10612: product routes require verified operator identity and are mount
     assert.deepEqual(receipt.body.receipt, saved.body.receipt);
     assert.ok(!JSON.stringify(app.log).includes(command.brief.idea), "service diagnostics never log source idea text");
   } finally { await app.close(); }
+});
+
+test("W1-T10617: the served product route invokes the production capability across the transport process boundary", async (t) => {
+  const root = ownedFixtureDir(t, "product-research-transport").dir;
+  const keys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const issuer = "https://product-research.example";
+  const origin = "https://console.product-research.example";
+  const jwk = { ...keys.publicKey.export({ format: "jwk" }), kid: "product-research", alg: "RS256", use: "sig" };
+  const operatorSession = operatorSessionProvider({ issuer, allowedOrigins: [origin], operatorUserIds: ["alice"] },
+    { fetchImpl: (async () => new Response(JSON.stringify({ keys: [jwk] }))) as typeof fetch });
+  assert.ok(operatorSession);
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const unsigned = `${encode({ alg: "RS256", typ: "JWT", kid: "product-research" })}.${encode({
+    iss: issuer, sub: "alice", azp: origin, iat: now, nbf: now, exp: now + 300, fva: [120, -1] })}`;
+  const sessionHeaders = { [OPERATOR_SESSION_HEADER]: `${unsigned}.${sign("RSA-SHA256", Buffer.from(unsigned), keys.privateKey).toString("base64url")}` };
+  const mounts = parse(readFileSync(join(REPO_ROOT, ".remudero/mounts.yaml"), "utf8"));
+  mounts.synthesis.triage.provider = "codex";
+  mkdirSync(join(root, ".remudero"));
+  writeFileSync(join(root, ".remudero/mounts.yaml"), stringify(mounts));
+  const capture = join(root, "transport-calls.ndjson");
+  const mode = join(root, "transport-mode");
+  const executable = join(root, "codex-fixture.cjs");
+  writeFileSync(executable, `#!${process.execPath}
+const fs = require('node:fs');
+let prompt = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => prompt += chunk);
+process.stdin.on('end', () => {
+  fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ prompt, argv: process.argv.slice(2),
+    pid: process.pid, home: process.env.HOME, cwd: process.cwd() }) + '\\n');
+  const mode = fs.existsSync(${JSON.stringify(mode)}) ? fs.readFileSync(${JSON.stringify(mode)}, 'utf8') : 'ok';
+  const text = mode === 'invalid' ? '{broken' : JSON.stringify({ summary: 'Source URLs need verification; park zones remain unresolved.',
+    spendUsd: 99999, questions: [{ text: 'Which park zones are in scope?' }] });
+  for (const event of [
+    { type: 'thread.started', thread_id: 'product-research-fixture' }, { type: 'turn.started' },
+    { type: 'item.completed', item: { type: 'agent_message', text } },
+    { type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } }
+  ]) console.log(JSON.stringify(event));
+  process.exitCode = mode === 'error' ? 1 : 0;
+});
+`, { mode: 0o700 });
+  const config: Config = { root, installRoot: REPO_ROOT, claudeBin: "/unused",
+    workerProviders: { enabled: ["codex"], codexModel: "gpt-6-luna", codexBin: executable, codexHome: join(root, "codex-home") } };
+  const production = resolveServeProductResearch(config, root);
+  assert.equal(production.productResearchBudgetUsd, DEFAULT_BUDGET_USD);
+  const app = await server(t, { root, operatorSession, mount: true, enforcement: true, deps: production });
+  try {
+    const saved = await request(app.url, "/v1/products", "alice", command, sessionHeaders);
+    assert.ok(saved.body.receipt);
+    const body = { version: "product-research-v1", requestId: "transport-research-0001",
+      productId: saved.body.receipt.productId, expectedObjectiveRevision: 1 };
+    const post = async (payload: unknown, verified = true) => {
+      const response = await withLiveSpawnAllowed(() => fetch(app.url + "/v1/products/research", { method: "POST",
+        headers: { authorization: "Bearer fixture-write", "content-type": "application/json",
+          ...(verified ? sessionHeaders : { "x-rmd-actor": "operator:alice" }) }, body: JSON.stringify(payload) }));
+      const reply = await response.json();
+      assert.deepEqual(violations(reply, declaredBody("/v1/products/research", "POST", response.status)), []);
+      return { status: response.status, reply };
+    };
+    assert.equal((await post(body, false)).status, 403);
+    assert.equal(existsSync(capture), false, "unverified callers cannot start the transport");
+    const first = await post(body);
+    assert.equal(first.status, 200);
+    assert.equal(first.reply.run.outcome, "completed", readFileSync(join(root, "state/ledger.ndjson"), "utf8"));
+    assert.equal(first.reply.run.provider, "synthesis.triage:sonnet");
+    assert.equal(first.reply.run.budgetUsd, DEFAULT_BUDGET_USD);
+    assert.ok(first.reply.run.spendUsd < 1, "transport usage overrides a model's invented spend");
+    assert.equal(first.reply.run.executionAuthority, "none");
+    assert.deepEqual(first.reply.run.sources, command.brief.research.map(source => ({ ...source, disposition: "data" })));
+    const calls = () => readFileSync(capture, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.equal(calls().length, 1);
+    assert.notEqual(calls()[0].pid, process.pid, "the default worker crossed a real process boundary");
+    assert.match(calls()[0].prompt, /UNTRUSTED EXTERNAL CONTENT/);
+    assert.match(calls()[0].prompt, /openstreetmap/);
+    assert.match(calls()[0].prompt, /objectiveRevision/);
+    const argv: string[] = calls()[0].argv;
+    assert.equal(argv[argv.indexOf("--sandbox") + 1], "read-only");
+    assert.ok(!argv.includes("--dangerously-bypass-approvals-and-sandbox"));
+    const answer = { questionId: first.reply.open.find((q: { origin: string }) => q.origin === "provider").id, answer: "the south end" };
+    const answered = await post({ ...body, requestId: "transport-research-0002", answers: [answer] });
+    assert.ok(answered.reply.accepted.some((a: { questionId: string }) => a.questionId === answer.questionId));
+    assert.ok(!answered.reply.open.some((q: { id: string }) => q.id === answer.questionId));
+    assert.equal((await post(body)).reply.replayed, true);
+    assert.equal(calls().length, 1, "answers and retries never buy a second run for the same revision");
+    const rows = readFileSync(join(root, "state/ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.ok(rows.some(row => row.step === "worker.assignment" && row.lane === "triage"));
+    assert.ok(rows.some(row => row.step === "worker.attempt" && row.success === true));
+    assert.ok(existsSync(join(root, "state/products/v1/research")));
+
+    for (const failure of ["invalid", "error"]) {
+      writeFileSync(mode, failure);
+      const another = await request(app.url, "/v1/products", "alice", { ...command, requestId: `transport-create-${failure}` }, sessionHeaders);
+      assert.ok(another.body.receipt);
+      const result = await post({ ...body, requestId: `transport-research-${failure}`, productId: another.body.receipt.productId });
+      assert.equal(result.reply.run.outcome, "failed");
+      assert.equal(result.reply.run.failure, failure === "invalid" ? "invalid_output" : "provider_error");
+      assert.equal(result.reply.run.summary, undefined);
+    }
+  } finally { await app.close(); }
+
+  const unavailable = resolveServeProductResearch({ ...config, workerProviders: { ...config.workerProviders, enabled: ["claude"] } }, root);
+  assert.equal(unavailable.productResearchProvider, undefined, "a disabled mounted provider grants no capability");
+  const missingTransport = resolveServeProductResearch({ ...config,
+    workerProviders: { ...config.workerProviders, codexBin: join(root, "missing-codex") } }, root);
+  const refused = await server(t, { root, operatorSession, mount: true, enforcement: true, deps: missingTransport });
+  try {
+    const saved = await request(refused.url, "/v1/products", "alice", { ...command, requestId: "transport-create-missing" }, sessionHeaders);
+    assert.ok(saved.body.receipt);
+    const productId = saved.body.receipt.productId;
+    const response = await withLiveSpawnAllowed(() => fetch(refused.url + "/v1/products/research", { method: "POST",
+      headers: { ...sessionHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ version: "product-research-v1", requestId: "transport-research-missing",
+        productId, expectedObjectiveRevision: 1 }) }));
+    const reply = await response.json();
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/research", "POST", response.status)), []);
+    assert.equal(reply.run.outcome, "unavailable", "a configured capability with no executable produces no report");
+    assert.equal(reply.run.summary, undefined);
+  } finally { await refused.close(); }
 });
 
 test("product HTTP validation rejects authority fields, malformed JSON and over-budget requests", async (t) => {
