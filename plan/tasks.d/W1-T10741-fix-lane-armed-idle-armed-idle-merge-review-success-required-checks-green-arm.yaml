@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.19
   status: queued
@@ -23,3 +23,13 @@
     Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
     - PR #13952: 54.46 PR-hours — cao825: commit 189e996ca merged main into a fleet PR head
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "The filed plan describes a fix in src/lib/sweep.ts plus a new test file, which is an ordinary implement task in the fix-lane's own harness. Nothing in the description mentions secrets, credentials, auth, deletion of data or branches, or irreversible actions."
+      - "The description does not say the change alters merge, deploy or review policy. However, the defect name (\"armed-idle-merge ... green-arm\") touches merge-arming behavior, so the actual change should be checked in review. No diff is shown, so I cannot confirm its scope."
+      - "The family track record is clean (5 merged, 0 declined, Beta mean 0.94). The declared test file is absent at base, which is expected for a new test. The acceptance criterion is a grep for a test name, which is verifiable. CI and review still gate the PR."
+    judged_at: "2026-10-26T19:56:44.100Z"
+    pin: "11fbd0eba29900506fe4150ec9fbb557f7b54458459c4e6aa9f46db02c4852a9"
