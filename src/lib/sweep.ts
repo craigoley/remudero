@@ -2209,6 +2209,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readCiGateRollup",
   "readCiGateRequired", // W1-T5979
   "liveCiRunForHead",
+  "refreshCiRunForHead",
   "reaggregateCiGate",
   "readMainTip",
   "readMainRepair",
@@ -2375,6 +2376,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readCiGateRollup"
   | "readCiGateRequired"
   | "liveCiRunForHead"
+  | "refreshCiRunForHead"
   | "reaggregateCiGate"
   | "readMainTip"
   | "readMainRepair"
@@ -3249,9 +3251,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // `close` above already uses (W1-T921) — no `gh` call this closure makes is unobservable
     // offline. `check.jobId` absent (neither URL nor external id resolved) degrades to a NAMED
     // no-op — never a guessed target.
-    // W1-T4586: read at effect time for repairs and refreshes. Only ci.yml shares the cancellation group;
-    // complete pages prove inactivity, while an unavailable reading stays distinct from false.
+    // W1-T4586: ONE read, only when the sweep is about to act on red CI. The concurrency group
+    // that cancels a sibling is ci.yml's, so only its runs count.
     liveCiRunForHead: async (pr) => {
+      try {
+        // A READ, so it rides readJsonImpl (the read seam), never ghRunImpl (the effect seam).
+        const body = (await readJsonImpl(["api", `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=50`])) as
+          | { workflow_runs?: Array<{ path?: string; status?: string }> }
+          | undefined;
+        return (body?.workflow_runs ?? []).some((run) => run.path === ".github/workflows/ci.yml" && run.status !== "completed");
+      } catch (e) {
+        log("sweep.live_ci_run.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
+        return false;
+      }
+    },
+    // Complete evidence for refreshes; the legacy repair guard above retains its positive-only behavior.
+    refreshCiRunForHead: async (pr) => {
       try {
         // A READ, so it rides readJsonImpl (the read seam), never ghRunImpl (the effect seam).
         const seenRunIds = new Set<number>();
@@ -12195,7 +12210,7 @@ export interface RefreshValueGate {
 }
 
 export async function buildRefreshValueGate(
-  deps: Pick<SweepDeps, "runId" | "ledgerPath" | "readBranchProtectionStrict" | "refreshJudge" | "baseChangedFilesByPr" | "liveCiRunForHead" | "log">,
+  deps: Pick<SweepDeps, "runId" | "ledgerPath" | "readBranchProtectionStrict" | "refreshJudge" | "baseChangedFilesByPr" | "refreshCiRunForHead" | "log">,
   openPrs: readonly OpenPrView[],
   ledgerLines: readonly Record<string, unknown>[],
   nowMs: number,
@@ -12250,8 +12265,8 @@ export async function buildRefreshValueGate(
       let judgeError: string | undefined;
       // A green/red summary can coexist with a queued or running coverage leg at this exact head.
       let liveCiInFlight: boolean | undefined = view.checksState === "pending";
-      if (!liveCiInFlight && deps.liveCiRunForHead) {
-        try { liveCiInFlight = await deps.liveCiRunForHead(view); }
+      if (!liveCiInFlight && deps.refreshCiRunForHead) {
+        try { liveCiInFlight = await deps.refreshCiRunForHead(view); }
         catch (error) {
           liveCiInFlight = undefined;
           deps.log?.("sweep.live_ci_run.error", { pr_number: view.prNumber, error: String((error as Error)?.message ?? error) });
@@ -14012,9 +14027,11 @@ export interface SweepDeps {
   /** W1-T5979: ci-gate's REQUIRED list, which a timeout's rollup-sourced not-ready list is filtered
    *  to; `[]` is the reader's unreadable answer. Omitted, that list is the unfiltered rollup. */
   readCiGateRequired?: () => readonly string[];
-  /** W1-T4586: whether another CI run for this head is queued or running; undefined is unavailable evidence.
-   *  Omitted, legacy fixtures retain their behavior. Repair arms wait on true; refreshes also hold on unread. */
-  liveCiRunForHead?: (pr: OpenPrView) => boolean | undefined | Promise<boolean | undefined>;
+  /** W1-T4586: whether another CI run for this PR's head is still queued or in progress. Omitted, the
+   *  sweep never waits on one (the behaviour before this field existed). */
+  liveCiRunForHead?: (pr: OpenPrView) => boolean | Promise<boolean>;
+  /** Complete current-head CI activity for refreshes; undefined is unavailable, never observed inactivity. */
+  refreshCiRunForHead?: (pr: OpenPrView) => boolean | undefined | Promise<boolean | undefined>;
   /** W1-T1275 — re-drive `ci-gate`'s OWN job through the same per-job Actions route
    *  {@link requeueCheck} uses, when {@link staleCiGateTransition} names a sibling that reached a
    *  terminal success LATER than the gate's own verdict. AT MOST ONCE per (head, transition). */
