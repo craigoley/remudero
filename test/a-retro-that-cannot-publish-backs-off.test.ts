@@ -3,15 +3,15 @@ import { test } from "node:test";
 import fsDefault, { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   retroTriggerCheck,
   recordRetroAttempt,
   recentRetroAttempt,
   retroAttemptPath,
   RETRO_ATTEMPT_RETRY_MS,
-} from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 import {
   saveMarker,
   evaluateRetroBackoff,
@@ -19,7 +19,7 @@ import {
   loadRetroAttemptRecord,
   defaultRetroBackoffPolicy,
   type ShippedGithub,
-} from "../src/lib/retro.js";
+} from "#src/lib/retro.js";
 
 // ── W1-T4664 — A RETRO THAT FAILS PREPUBLISH RE-FIRES EVERY POLL ───────────────────────
 //
@@ -212,4 +212,64 @@ test("W1-T4664: retroTriggerCheck widens the merges reading with a cheap (non-Gi
     "40 runless merges since the attempt clears the merges floor — the trigger proceeds past the doubling delay",
   );
   assert.equal(githubReads, 1, "clearing the merges floor let the normal (GitHub-backed) evaluation proceed, exactly once");
+});
+
+test("an out-of-range retro deadline is a refusal rather than a trigger failure", () => {
+  // Pure replay: both timestamps are pinned; no wall-clock or production state is changed.
+  const attempt = { retroAttemptAt: "2026-10-26T21:17:06.118Z", markerTs: "2026-10-06T10:45:50.161Z", mergesSinceMarker: 3719, streak: 30 };
+  const now = new Date("2026-10-26T23:10:51.722Z");
+  const policy = defaultRetroBackoffPolicy();
+  for (const streak of [30, 2048]) {
+    const record = { ...attempt, streak };
+    const refused = evaluateRetroBackoff(record, 3743, attempt.markerTs, now, policy);
+    assert.deepEqual(refused, { eligible: false, streak, nextEligibleAt: null, mergesFloor: 3744,
+      nextEligibleAtState: "outside-date-range" });
+    assert.deepEqual(evaluateRetroBackoff(record, 3744, attempt.markerTs, now, policy), { eligible: true });
+    assert.deepEqual(evaluateRetroBackoff(record, 0, "different-marker", now, policy), { eligible: true });
+    assert.equal(evaluateRetroBackoff(record, 3743, attempt.markerTs, new Date("2026-11-26T23:10:51.722Z"), policy).eligible,
+      false, "formatting refusal must not silently cap the original uncapped wait");
+  }
+  const finite = evaluateRetroBackoff({ ...attempt, streak: 29 }, 3743, attempt.markerTs, now, policy);
+  assert.equal(finite.eligible, false);
+  if (finite.eligible) assert.fail("the finite time arm is still in the future");
+  assert.equal(typeof finite.nextEligibleAt, "string");
+  assert.equal(finite.nextEligibleAtState, undefined, "representable legacy receipts keep their shape");
+});
+
+test("retro backoff formats the last supported Date and refuses only the next millisecond", () => {
+  const attempt = { retroAttemptAt: "2026-10-26T21:17:06.118Z", markerTs: "2026-10-06T10:45:50.161Z", mergesSinceMarker: 3719, streak: 1 };
+  const now = new Date("2026-10-26T23:10:51.722Z");
+  const toLastDate = 8_640_000_000_000_000 - Date.parse(attempt.retroAttemptAt);
+  assert.deepEqual(evaluateRetroBackoff(attempt, 3719, attempt.markerTs, now, { baseDelayMs: toLastDate, mergesThreshold: 25 }),
+    { eligible: false, streak: 1, nextEligibleAt: "+275760-09-13T00:00:00.000Z", mergesFloor: 3744 });
+  assert.deepEqual(evaluateRetroBackoff(attempt, 3719, attempt.markerTs, now, { baseDelayMs: toLastDate + 1, mergesThreshold: 25 }),
+    { eligible: false, streak: 1, nextEligibleAt: null, mergesFloor: 3744, nextEligibleAtState: "outside-date-range" });
+});
+
+test("retro trigger reports an unrepresentable deadline without inventing a timestamp", (t) => {
+  const { config, markerPath } = fixtureRoot();
+  t.after(() => fsDefault.rmSync(config.root, { recursive: true, force: true }));
+  const markerTs = "2026-10-06T10:45:50.161Z";
+  saveMarker(markerPath, { ts: markerTs, learnings_count: 0, runs_seen: 0 });
+  writeFileSync(retroAttemptPath(config.root), JSON.stringify({
+    retroAttemptAt: "2026-10-26T21:17:06.118Z", markerTs, mergesSinceMarker: 3719, streak: 30,
+  }));
+  const now = new Date("2026-10-26T23:10:51.722Z");
+  let githubReads = 0;
+  const github = { ...healthyGithub(), unavailable: () => { githubReads++; return undefined; } };
+  assert.equal(retroTriggerCheck(now, { config, github }), undefined);
+  assert.equal(retroTriggerCheck(now, { config, github }), undefined);
+  assert.equal(githubReads, 0, "a backed-off tick never reaches the remote credit probe");
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const rows = readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const backoffs = rows.filter((row) => row.step === "daemon.retro_trigger.backoff");
+  assert.equal(backoffs.length, 1, "the real producer still deduplicates identical refused ticks");
+  assert.equal(backoffs[0].next_eligible_at, null);
+  assert.equal(backoffs[0].next_eligible_at_state, "outside-date-range");
+  assert.equal(backoffs[0].merges_floor, 3744);
+  assert.equal(backoffs[0].merges_since_marker, 3719);
+  assert.match(backoffs[0].reason, /uncapped time boundary is outside the supported Date range/);
+  assert.match(backoffs[0].reason, /eligible once 3744 merges have landed/);
+  assert.doesNotMatch(backoffs[0].reason, /eligible again at null|Invalid time value/);
+  assert.equal(loadRetroAttemptRecord(retroAttemptPath(config.root))?.streak, 30, "inspection never resets the attempt");
 });
