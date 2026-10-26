@@ -319,12 +319,13 @@ test("runFixRung: missing birth snapshot never manufactures a foreign-tree stand
   }
 });
 
-test("a clean advanced worktree cannot spend a worker on failure evidence from its previous head", async () => {
+test("a published head advance cannot spend a worker on its previous failure evidence", async () => {
   const { root, worktreePath, branch } = await initFixRungRepo();
   try {
     const before = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     execFileSync("git", ["-C", worktreePath, "commit", "--allow-empty", "-qm", "a newer branch tip"], { env: GIT_ENV });
     const advanced = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", worktreePath, "push", "--quiet", "origin", `HEAD:refs/heads/${branch}`], { env: GIT_ENV });
     const birth = captureWorktreeSnapshotViaGit(worktreePath);
     assert.ok(worktreeSnapshotIsClean(birth));
     let spawned = 0;

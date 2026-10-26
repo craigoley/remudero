@@ -3943,10 +3943,16 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     const roundPushBaseSha = scopeMergeStartSha ?? roundBase.baseSha;
     if (roundBase.advanced) deps.log("fix.round_head_advanced", { head_sha: priorHeadSha, round_base_sha: roundBase.baseSha, reason: roundBase.reason });
     if (roundBase.advanced && scopeMergeStartSha === undefined) {
-      const reason = `branch advanced from ${priorHeadSha} to ${roundBase.baseSha} before the worker started; the ordinary sweep must read fresh exact-head failure evidence`;
-      deps.log("fix.evidence_head_superseded", { head_sha: priorHeadSha, current_head_sha: roundBase.baseSha, reason });
-      deps.log("fix.stood_down", { head_sha: priorHeadSha, current_head_sha: roundBase.baseSha, site: "rung.evidence_head", reason });
-      return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+      let publishedHead: string | undefined;
+      try { publishedHead = await (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch); }
+      catch { deps.log("fix.evidence_head_unread", { head_sha: priorHeadSha, worktree_head_sha: roundBase.baseSha }); }
+      // A retained unpublished commit is still this round's existing recovery input, not proof the PR moved.
+      if (publishedHead !== undefined && publishedHead !== priorHeadSha) {
+        const reason = `published branch advanced from ${priorHeadSha} to ${publishedHead} before the worker started; the ordinary sweep must read fresh exact-head failure evidence`;
+        deps.log("fix.evidence_head_superseded", { head_sha: priorHeadSha, current_head_sha: publishedHead, worktree_head_sha: roundBase.baseSha, reason });
+        deps.log("fix.stood_down", { head_sha: priorHeadSha, current_head_sha: publishedHead, site: "rung.evidence_head", reason });
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+      }
     }
     const fixRoundStartedAtMs = systemClock.now();
     const roundId = `${opts.runId}:${attempt + retriggers}:${fixRoundStartedAtMs}`;
