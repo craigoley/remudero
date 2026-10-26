@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
-import { persistedInboxPath, readPersistedInbox, writePersistedInbox, type PersistedInbox, type PersistedInboxContent } from "../src/lib/fleet-lane.js";
+import { classificationSnapshotPath, persistedInboxPath, readClassificationSnapshot, readPersistedInbox, writePersistedInbox, type PersistedInbox, type PersistedInboxContent } from "../src/lib/fleet-lane.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, inboxLegacyView, inboxViewBodies, refreshInboxClassification, type InboxRefresh } from "../src/lib/inbox-view.js";
 import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
 import { buildInboxAttentionCensusRoute, buildInboxRoute, buildInboxThreadReplyRoute, buildInboxThreadsRoute, buildKeepProposalRoute, inboxTriagePath, readSlowLaneInbox, type PanelGraphDeps } from "../src/lib/panel-graph.js";
@@ -16,6 +16,18 @@ import type { PlanSourceOutcome } from "../src/lib/serve-plan-reload.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { buildReadModelViewRoutes, renderView, type ViewBodyEntry, type ViewBodySource } from "../src/lib/views.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import type { Proposal } from "#src/lib/inbox.js";
+import { navBadgeView } from "#src/lib/nav-badge-view.js";
+import { inboxThreadListSources, peekSlowLaneClassification } from "#src/lib/panel-graph.js";
+import { listThreadViews } from "#src/lib/inbox-responder.js";
+import { backfillRecommendations, readRecommendationStore, recommendationFor, recommendationStorePath } from "#src/lib/inbox-recommendation.js";
+import { buildInboxThreadRoute } from "#src/lib/panel-graph.js";
+import { createInboxThreadView, INBOX_THREAD_VIEW_NAME, inboxThreadViewKey } from "#src/lib/inbox-thread-view.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
+import { createDemandBook } from "#src/lib/view-demand.js";
+import { inboxGardenerPath } from "#src/lib/inbox-retirement.js";
+import { readAllThreads } from "#src/lib/inbox-thread.js";
 
 type Ctx = { after(fn: () => void | Promise<void>): void };
 function world(t: Ctx, count = 80) {
@@ -27,7 +39,7 @@ function world(t: Ctx, count = 80) {
   const planPath = join(root, "plan", "tasks.yaml");
   const ledgerPath = join(root, "state", "ledger.ndjson");
   writeFileSync(planPath, "[]\n"); writeFileSync(ledgerPath, "");
-  const proposals = Array.from({ length: count }, (_, i) => ({ id: `ruling:p${i}`, summary: `${"source detail ".repeat(90)}${i}`, evidenceAnchors: [] }));
+  const proposals: Proposal[] = Array.from({ length: count }, (_, i) => ({ id: `ruling:p${i}`, summary: `${"source detail ".repeat(90)}${i}`, evidenceAnchors: [] }));
   const write = () => writeFileSync(registry, JSON.stringify({ proposals }));
   write();
   const deps: PanelGraphDeps = { root, inboxRoot: root, planPath, ledgerPath,
@@ -61,7 +73,7 @@ async function served(t: Ctx, w: ReturnType<typeof world>, initial: InboxRefresh
   const inbox = options.boundInbox === false ? originalInbox : boundConsoleReadRoute(originalInbox, { fleetControlRoot: w.root } as ServeDeps, 1000, { setTimer: () => undefined, clock: fixedClock(w.at) });
   const census = buildInboxAttentionCensusRoute(deps);
   const native = buildReadModelViewRoutes({ legacy: [inboxLegacyView(deps, fixedClock(w.at))], readModel: handle, readModelViews: [INBOX_VIEW_NAME], clock: fixedClock(w.at) });
-  const threads = options.withWrites ? [buildInboxThreadsRoute(deps, undefined, { warm: false })] : [];
+  const threads = options.withWrites ? [buildInboxThreadsRoute(deps, undefined, { warm: false }), buildInboxThreadRoute(deps)] : [];
   const writes = options.withWrites ? [buildKeepProposalRoute(w.deps), buildInboxThreadReplyRoute(w.deps)] : [];
   const routes = [inbox, census, ...native, ...threads, ...writes, ...mountInstanceInboxRoutes({ instance: "core", repository: "owner/core", stateDir: join(w.root, "state"), routes: [inbox, census, ...threads, ...writes] })];
   const server = createService({ tokens: { read: "read", write: "write" }, routes });
@@ -79,6 +91,146 @@ async function served(t: Ctx, w: ReturnType<typeof world>, initial: InboxRefresh
   };
   return { get, post, put, reads: () => reads, entries };
 }
+
+test("W1-T10431: age-information classification agrees across badges lanes and thread history", async t=>{
+  const w=world(t,3),ageId="board-review:stale:PR-41",threadId=inboxThreadId(ageId);
+  w.proposals[0]={id:ageId,originatingItemId:"PR-41",summary:"board-review: PR-41 has sat open 72.0h, past the 48h depth threshold",evidenceAnchors:[]};
+  w.proposals[1]={id:"ruling:real-human-ask",summary:"An explicit human ruling is required.",evidenceAnchors:[]};
+  w.proposals[2]={id:"proof-debt:W1-T2",summary:"The fleet retains its existing proof work.",evidenceAnchors:[]};w.write();
+  const store=join(w.root,"state/inbox-threads.jsonl");
+  appendThreadMessage(inboxThreadIdentity(ageId),"escalation","The earlier age observation is retained.",{threadStorePath:store,now:()=>w.at-1000});
+  const original=readFileSync(store,"utf8"),first=await w.refresh(),s=await served(t,w,first,{withWrites:true});
+  const recommendationCalls: string[] = [];
+  const recommend = () => backfillRecommendations({ stateDir: join(w.root, "state"), readProposals: () => [w.proposals[0]!],
+    evidence: { shards: async () => new Map(), shardText: async () => undefined, taskHistory: async () => [], resolve: async () => undefined },
+    summarize: async ({ context }) => { recommendationCalls.push(context); return { action: "reply", text: "Which policy should apply?",
+      why: "The age finding now carries an unanswered policy question.", evidence: [], obsolete: false }; } }, 1);
+  assert.equal((await recommend()).written, 0);
+  assert.equal(recommendationCalls.length, 0, "a captured age observation cannot request recommendation work");
+  const badge=()=>navBadgeView({inboxRoot:w.root,scopes:()=>[],clock:fixedClock(w.at)}).compute(new URLSearchParams());
+  const initialBadge=await badge();assert.ok(!("error" in initialBadge));
+  const needs=await s.get("/v1/views/inbox?section=needsYou"),fleet=await s.get("/v1/views/inbox?section=fleet");
+  assert.equal(needs.status,200);assert.equal(fleet.status,200);
+  const ids=(items:Array<{proposalId:string}>)=>items.map(item=>item.proposalId);
+  assert.deepEqual(ids(needs.body.data.items),["ruling:real-human-ask"]);
+  assert.deepEqual(new Set(ids(fleet.body.data.items)),new Set([ageId,"proof-debt:W1-T2"]));
+  const legacy=await s.get("/v1/inbox?section=needsYou");assert.equal(legacy.status,200);
+  assert.deepEqual(ids(Object.values(legacy.body.needsYou).flat() as Array<{proposalId:string}>),ids(needs.body.data.items));
+  assert.equal(initialBadge.data.inbox.needsYou,needs.body.data.items.length,"the badge must count the same source-owned asks as the Inbox lanes");
+  assert.equal(initialBadge.data.inbox.fleet,fleet.body.data.items.length);
+  const light=classificationSnapshotPath(join(w.root,"state")),heldLight=readFileSync(light,"utf8");
+  assert.equal(readClassificationSnapshot(join(w.root,"state"))?.displayOwners?.[ageId],"fleet");
+  for(const variant of ["missing-owner","foreign-owner","invalid-owner","foreign-restoration","foreign-review","duplicate-review","fleet-review","invalid-review"] as const){
+    const bad=JSON.parse(heldLight);
+    if(variant==="missing-owner")delete bad.displayOwners[ageId];
+    if(variant==="foreign-owner")bad.displayOwners["foreign:id"]="fleet";
+    if(variant==="invalid-owner")bad.displayOwners[ageId]="unknown";
+    if(variant==="foreign-restoration")bad.restoredForReview.push("foreign:id");
+    if(variant==="foreign-review")bad.requiresReview=["foreign:id"];
+    if(variant==="duplicate-review")bad.requiresReview=["ruling:real-human-ask","ruling:real-human-ask"];
+    if(variant==="fleet-review")bad.requiresReview=[ageId];
+    if(variant==="invalid-review")bad.requiresReview={ [ageId]: true };
+    writeFileSync(light,JSON.stringify(bad));
+    assert.equal(readClassificationSnapshot(join(w.root,"state")),undefined,variant);
+    const unknownBadge=await badge();assert.ok(!("error" in unknownBadge));assert.equal(unknownBadge.data.inbox.needsYou,undefined,variant);
+  }
+  writeFileSync(light,heldLight);
+  const history=await s.get("/v1/inbox/threads");assert.equal(history.status,200);
+  assert.equal(history.body.threads.find((item:any)=>item.threadId===threadId)?.attention,"history");
+  assert.equal(readFileSync(store,"utf8"),original,"classification cannot fabricate a reply or retire history");
+  const fullPath=persistedInboxPath(join(w.root,"state")),heldFull=readFileSync(fullPath,"utf8"),restoredLight=JSON.parse(heldLight);
+  restoredLight.displayOwners[ageId]="operator";restoredLight.restoredForReview=[ageId];
+  delete restoredLight.requiresReview;
+  writeFileSync(light,JSON.stringify(restoredLight));unlinkSync(fullPath);
+  try {
+    assert.deepEqual(readClassificationSnapshot(join(w.root,"state"))?.restoredForReview,[ageId],"positive control: the owned light snapshot retains restoration");
+    const restored=await s.get("/v1/inbox/threads");assert.equal(restored.status,503,"the HTTP route cannot substitute light evidence for the missing owned full snapshot");
+    const lightDeps={...w.deps,inboxFromSlowLane:true},captured=peekSlowLaneClassification(lightDeps);assert.ok(captured);
+    const projected=listThreadViews(inboxThreadListSources(lightDeps).items(captured.classified),new Map(),{});
+    assert.equal(projected.find(item=>item.threadId===threadId)?.attention,"decision","the light projection must preserve an explicitly restored human review");
+    assert.equal(readFileSync(store,"utf8"),original,"restoration projection cannot manufacture correspondence");
+  }finally{writeFileSync(light,heldLight);writeFileSync(fullPath,heldFull);}
+  appendThreadMessage(inboxThreadIdentity(ageId),"escalation","Which existing policy should apply?",{threadStorePath:store,now:()=>w.at},{question:true});
+  const sourceQuestion=readThread(threadId,{threadStorePath:store});assert.equal(sourceQuestion.status,"ok");
+  assert.equal(sourceQuestion.messages.at(-1)?.extra?.question,true,"positive control: the real append API retained the question marker");
+  const questioned=await w.refresh();s.put(questioned);
+  assert.equal((await recommend()).written, 1, "the writer uses captured operator ownership for the unanswered question");
+  assert.equal(recommendationCalls.length, 1);
+  const recommendationStore = readRecommendationStore(recommendationStorePath(join(w.root, "state")));
+  const capturedQuestion = readPersistedInbox(join(w.root, "state"))!.classifications.find(c => c.proposalId === ageId)!;
+  assert.equal(recommendationFor(w.proposals[0]!, "notReady", recommendationStore, capturedQuestion)?.action, "reply");
+  s.put(await w.refresh());
+  const current=await s.get("/v1/views/inbox?section=needsYou"),afterBadge=await badge();assert.ok(!("error" in afterBadge));
+  assert.equal(current.status,200);
+  assert.deepEqual(new Set(ids(current.body.data.items)),new Set([ageId,"ruling:real-human-ask"]),"a genuine unanswered question stays visible as an operator ask");
+  assert.equal(afterBadge.data.inbox.needsYou,current.body.data.items.length);
+  assert.equal(current.body.data.items.find((item: any) => item.proposalId === ageId)?.recommendation?.action, "reply",
+    "the served lane retains the recommendation for its captured human ask");
+  const recommendedLegacy = await s.get("/v1/inbox?section=needsYou");
+  assert.equal(recommendedLegacy.body.needsYou.notReady.find((item: any) => item.proposalId === ageId)?.recommendation?.action, "reply");
+  const threads=await s.get("/v1/inbox/threads");assert.equal(threads.status,200);
+  assert.equal(threads.body.threads.find((item:any)=>item.threadId===threadId)?.attention,"reply");
+  appendThreadMessage(inboxThreadIdentity(ageId), "reply", "Use the existing policy.", { threadStorePath: store, now: () => w.at + 1 });
+  s.put(await w.refresh());
+  const answered = await s.get("/v1/views/inbox?section=fleet");
+  assert.equal(answered.body.data.items.find((item: any) => item.proposalId === ageId)?.recommendation, undefined,
+    "a stored recommendation does not grant authority after the question is answered");
+  assert.equal((await recommend()).written, 0);
+  assert.equal(recommendationCalls.length, 1);
+  const retainedMessages = readFileSync(store, "utf8");
+  writeFileSync(inboxGardenerPath(join(w.root, "state")), "{ unreadable lifecycle");
+  const unknown = await w.refresh(); s.put(unknown);
+  const unknownClassification = readPersistedInbox(join(w.root, "state"))!.classifications.find(c => c.proposalId === ageId)!;
+  assert.equal(unknownClassification.requiresReview, true, "the real classifier retains unknown lifecycle for review");
+  assert.equal(unknownClassification.displayOwner, "operator");
+  const unknownNeeds = await s.get("/v1/views/inbox?section=needsYou"), unknownBadge = await badge();
+  assert.ok(!("error" in unknownBadge));
+  assert.ok(ids(unknownNeeds.body.data.items).includes(ageId));
+  assert.equal(unknownBadge.data.inbox.needsYou, unknownNeeds.body.data.items.length);
+  const unknownFull = readFileSync(fullPath, "utf8");
+  let lightAttention: string | undefined;
+  unlinkSync(fullPath);
+  try {
+    const lightDeps = { ...w.deps, inboxFromSlowLane: true };
+    const captured = peekSlowLaneClassification(lightDeps);
+    assert.ok(captured, "unreadable lifecycle remains visible through the light snapshot alone");
+    const items = inboxThreadListSources(lightDeps).items(captured.classified);
+    assert.equal(listThreadViews(items, new Map(), {}).find(item => item.threadId === threadId)?.attention,
+      "decision", "the light projection cannot downgrade lifecycle uncertainty to in-progress work");
+    const threads = readAllThreads({ threadStorePath: store });
+    assert.equal(threads.status, "ok");
+    const projected = listThreadViews(items, threads.threads, {});
+    lightAttention = projected.find(item => item.threadId === threadId)?.attention;
+    assert.equal(lightAttention, "decision", "the light projection must retain unreadable lifecycle review");
+    assert.equal(captured.classified.classifications.find(c => c.proposalId === ageId)?.requiresReview, true);
+    assert.ok(readClassificationSnapshot(join(w.root, "state"))?.requiresReview?.includes(ageId));
+    assert.equal(readFileSync(store, "utf8"), retainedMessages, "light projection preserves answered history");
+  } finally { writeFileSync(fullPath, unknownFull); }
+  const db = openProjectorReadModel(join(w.root, "read-model-state"), "core");
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL,key TEXT NOT NULL,version INTEGER NOT NULL,
+      generation INTEGER NOT NULL,etag TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(view,key)) WITHOUT ROWID;`);
+    for (const body of unknown.bodies) db.prepare("INSERT INTO view_body VALUES('inbox',?,1,1,?,?)")
+      .run(body.key, JSON.stringify(body), JSON.stringify(body));
+    const demand = createDemandBook({ clock: fixedClock(w.at) }), key = inboxThreadViewKey(threadId);
+    demand.want(INBOX_THREAD_VIEW_NAME, key);
+    const view = createInboxThreadView({ inboxRoot: w.root, demand, clock: fixedClock(w.at) });
+    const cached = view.materialize({ now: w.at, instances: [{ db }] })[0]!;
+    const legacyDetail = await s.get(`/v1/inbox/thread?id=${encodeURIComponent(threadId)}`);
+    assert.equal(legacyDetail.status, 200); assert.equal(cached.data.found, true, cached.data.reason);
+    assert.equal(legacyDetail.body.attention, "decision", "unknown lifecycle retains the existing human review obligation");
+    assert.equal(legacyDetail.body.attention, lightAttention, "full and light projections retain the same review obligation");
+    assert.equal(cached.data.thread?.attention, legacyDetail.body.attention, "cached detail must retain the classifier's review marker");
+    assert.deepEqual(cached.data.thread?.correspondence, legacyDetail.body.correspondence);
+    assert.deepEqual(cached.data.thread?.messages.slice(1), legacyDetail.body.messages.slice(1));
+    assert.deepEqual(cached.data.thread?.messages[0]?.actions, legacyDetail.body.messages[0].actions);
+    assert.equal(cached.data.thread?.messages[0]?.text, legacyDetail.body.messages[0].text);
+    assert.equal(cached.data.thread?.correspondence?.state, "unknown");
+    assert.equal(cached.data.thread?.correspondence?.pendingWork, null, "unknown correspondence cannot claim zero pending work");
+  } finally { db.close(); await flushReadModelTransactions(); }
+  assert.equal(readFileSync(store, "utf8"), retainedMessages, "review classification preserves every history byte");
+  assert.equal(s.reads(),0,"neither lanes nor history can reclassify mutable inputs on the request");
+});
 
 test("equal-count inbox pages cannot mix classification snapshots", async (t) => {
   const w = world(t), before = await w.refresh(), s = await served(t, w, before);

@@ -1,0 +1,31 @@
+- id: W1-T10693
+  title: A new check-then-use pair on one path is refused before the push, not by a CodeQL fix round after it
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=e93588034fe56993
+  # backlog gardener: placed=2026-10-26T09:20:26.839Z
+  attempts: 0
+  files:
+    - scripts/census-precheck.mjs
+    - src/lib/sweep.ts
+  acceptance:
+    - claim: A diff that adds an existsSync or statSync test on a path followed by a read or write of the same path in the same function is reported by census-precheck, naming file and line and the js/file-system-race remedy
+      proof: "unit test: census-precheck reports an added check-then-use pair on one path"
+    - claim: A diff that opens the path directly and handles ENOENT or EEXIST is not reported
+      proof: "unit test: census-precheck does not report a direct open that handles ENOENT"
+    - claim: Only lines added by the diff are judged, so an existing pair on main never refuses a push
+      proof: "unit test: census-precheck ignores a check-then-use pair that main already carries"
+  origin: followup:W1-T10398-1792967162454:2026-10-25T22:29:37.095Z:0
+  design: "Finding from reading src/lib/sweep.ts: a CodeQL js/file-system-race red reaches a fix worker only through withCodeqlAlertEvidence and codeScanningFixCiFailures, after the push and a full CI cycle. W1-T10394's FILE_SYSTEM_RACE_HINT makes that round cheaper but cannot remove it. The prevention point is the pre-push census precheck. CREATES: scripts/file-system-race-precheck.mjs"
+  rationale: >-
+    From the 2026-10-25 follow-up on W1-T10398-1792967162454, ratified via rmd approve:
+  
+    follow-up harvest [research]: read `src/lib/sweep.ts` around the "UNTRUSTED SCANNER EVIDENCE"
+    text, to find where a fix round is spent on the CodeQL check and whether it can be prevented
+    there. — from W1-T10398 (run W1-T10398-1792967162454)

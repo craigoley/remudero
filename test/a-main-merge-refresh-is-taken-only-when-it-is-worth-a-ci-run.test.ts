@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { test } from "node:test";
 
 import {
@@ -484,4 +485,137 @@ test("W1-T7735: a base-fixed admission still consults the value test and writes 
   const lightRow = decided(lightRows)[0];
   assert.equal(lightRow?.forced_by, REFRESH_ADMISSION_FORCED_BY);
   assert.equal(lightRow?.decision_id, `7051@${"2".repeat(40)}:${REFRESH_ADMISSION_FORCED_BY}:${at}`);
+});
+
+test("a green summary does not erase active CI when a refresh settles", async () => {
+  for (const light of [false, true]) {
+    const ready = pr(7333);
+    const asked: RefreshJudgeQuestion[] = [];
+    const reads: string[] = [];
+    const h = harness({ behindMainByPr: one(7333, 2), baseChangedFilesByPr: one(7333, base(["src/mine.ts"])),
+      readBranchProtectionStrict: () => false,
+      refreshCiRunForHead: async current => { reads.push(current.headSha); return true; },
+      refreshJudge: async question => { asked.push(question); return "independent"; } });
+    if (light) assert.equal(await runLightPassReadyRefresh([ready], h.deps, POLICY), undefined);
+    else await runSweep([ready], h.deps, POLICY);
+    assert.deepEqual(h.updated, [], "an independent run in flight must not be cancelled by a refresh");
+    assert.deepEqual(reads, [ready.headSha], "read current-head CI exactly at settlement");
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0]!.ciInFlight, true);
+    assert.equal(decided(h.rows)[0]!.ci_in_flight, true);
+    assert.equal(decided(h.rows)[0]!.decision, "skip");
+  }
+});
+
+test("the active-CI refresh guard preserves terminal-CI and judge-overlap decisions", async () => {
+  for (const active of [false, true]) {
+    const ready = pr(7334);
+    const asked: RefreshJudgeQuestion[] = [];
+    const h = harness({ behindMainByPr: one(7334, 2), baseChangedFilesByPr: one(7334, base(["src/mine.ts"])),
+      readBranchProtectionStrict: () => false, refreshCiRunForHead: () => active,
+      refreshJudge: async question => { asked.push(question); return "overlap"; } });
+    assert.equal(await runLightPassReadyRefresh([ready], h.deps, POLICY), 7334);
+    assert.deepEqual(h.updated.map(x => x.prNumber), [7334]);
+    assert.equal(asked.length, active ? 1 : 0);
+    assert.equal(decided(h.rows)[0]!.ci_in_flight, active);
+    assert.equal(decided(h.rows)[0]!.decision, "refresh");
+  }
+});
+
+
+function maintainedRefreshCiEffects(root: string, read: (args: string[]) => unknown) {
+  return buildSweepEffects({
+    owner: "craigoley", repo: "remudero", config: { claudeBin: "/usr/bin/true", root } as never,
+    ledgerPath: join(root, "ledger.ndjson"), runId: "SWEEP-W1-T7735", plan: { tasks: [] } as never, log: () => {},
+    policy: undefined, reviewRunner: undefined, spawnImpl: undefined, pushEmptyCommit: undefined,
+    issuesImpl: { create: () => { throw new Error("no issue is filed here"); } } as never,
+    stallNotice: undefined, armImpl: undefined, armSessionPrsOverride: undefined, updateBranchImpl: undefined,
+    captureRepairFeedbackImpl: undefined, productionProgressJudge: false, readJsonImpl: read,
+  } as never);
+}
+
+test("ready refresh uses the maintained current-head CI producer", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}refresh-ci-reader-`));
+  try {
+    for (const status of ["queued", "in_progress", "completed"]) {
+      const reads: string[][] = [];
+      const ready = pr(7335);
+      const effects = maintainedRefreshCiEffects(root, args => {
+        reads.push(args); return { workflow_runs: [{ id: 1, path: ".github/workflows/ci.yml", status }] };
+      });
+      const h = harness({ behindMainByPr: one(7335, 2), baseChangedFilesByPr: one(7335, base(["src/mine.ts"])),
+        readBranchProtectionStrict: () => false, refreshCiRunForHead: effects.refreshCiRunForHead,
+        refreshJudge: async question => { assert.equal(question.ciInFlight, true); return "independent"; } });
+      assert.equal(await runLightPassReadyRefresh([ready], h.deps, POLICY), status === "completed" ? 7335 : undefined);
+      assert.equal(h.updated.length, status === "completed" ? 1 : 0);
+      assert.deepEqual(reads, [["api", `repos/craigoley/remudero/actions/runs?head_sha=${ready.headSha}&per_page=50`]]);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a throwing current-head CI read cannot press a ready refresh", async () => {
+  const ready = pr(7336);
+  const h = harness({ behindMainByPr: one(7336, 2), baseChangedFilesByPr: one(7336, base(["src/mine.ts"])),
+    readBranchProtectionStrict: () => false,
+    refreshCiRunForHead: async () => { throw new Error("current-head CI unavailable"); } });
+  assert.equal(await runLightPassReadyRefresh([ready], h.deps, POLICY), undefined);
+  assert.deepEqual(h.updated, []);
+  assert.equal(decided(h.rows)[0]!.ci_in_flight, null, "unread is not a fabricated no-CI decision");
+  assert.match(String(decided(h.rows)[0]!.reason), /CI activity unavailable/);
+});
+
+
+test("the refresh CI reader distinguishes complete pages from unavailable evidence", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}refresh-ci-pages-`));
+  const fullOtherPage = Array.from({ length: 50 }, (_, i) => ({ id: i + 1, path: ".github/workflows/other.yml", status: "completed" }));
+  const cases: Array<{ name: string; read: (page: number) => unknown; active: boolean | undefined; pages: number }> = [
+    { name: "read error", read: () => { throw new Error("API unavailable"); }, active: undefined, pages: 1 },
+    { name: "missing response", read: () => undefined, active: undefined, pages: 1 },
+    { name: "null response", read: () => null, active: undefined, pages: 1 },
+    { name: "missing list", read: () => ({}), active: undefined, pages: 1 },
+    { name: "missing identity", read: () => ({ workflow_runs: [{ id: 1, status: "completed" }] }), active: undefined, pages: 1 },
+    { name: "missing CI status", read: () => ({ workflow_runs: [{ id: 1, path: ".github/workflows/ci.yml" }] }), active: undefined, pages: 1 },
+    { name: "later active CI", read: page => ({ workflow_runs: page === 1 ? fullOtherPage : [{ id: 51, path: ".github/workflows/ci.yml", status: "queued" }] }), active: true, pages: 2 },
+    { name: "later terminal CI", read: page => ({ workflow_runs: page === 1 ? fullOtherPage : [{ id: 51, path: ".github/workflows/ci.yml", status: "completed" }] }), active: false, pages: 2 },
+    { name: "repeated full page", read: () => ({ workflow_runs: fullOtherPage }), active: undefined, pages: 2 },
+    { name: "malformed run ID", read: () => ({ workflow_runs: [{ id: "bad", path: ".github/workflows/ci.yml", status: "completed" }] }), active: undefined, pages: 1 },
+    { name: "complete empty list", read: () => ({ workflow_runs: [] }), active: false, pages: 1 },
+  ];
+  try {
+    for (const control of cases) {
+      const ready = pr(7337);
+      const reads: string[][] = [];
+      const effects = maintainedRefreshCiEffects(root, args => {
+        reads.push(args); return control.read(Number(args[1]!.match(/[?&]page=(\d+)/)?.[1] ?? 1));
+      });
+      const h = harness({ behindMainByPr: one(7337, 2), baseChangedFilesByPr: one(7337, base(["src/mine.ts"])),
+        readBranchProtectionStrict: () => false, refreshCiRunForHead: effects.refreshCiRunForHead,
+        refreshJudge: async question => { assert.equal(question.ciInFlight, true); return "independent"; } });
+      const result = await runLightPassReadyRefresh([ready], h.deps, POLICY);
+      assert.equal(result, control.active === false ? 7337 : undefined, control.name);
+      assert.equal(h.updated.length, control.active === false ? 1 : 0, control.name);
+      assert.equal(decided(h.rows)[0]!.ci_in_flight, control.active ?? null, control.name);
+      assert.equal(reads.length, control.pages, control.name);
+      assert.deepEqual(reads[0], ["api", `repos/craigoley/remudero/actions/runs?head_sha=${ready.headSha}&per_page=50`]);
+      if (control.pages === 2) assert.deepEqual(reads[1], ["api", `repos/craigoley/remudero/actions/runs?head_sha=${ready.headSha}&per_page=50&page=2`]);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("unavailable refresh CI evidence recovers on the same head without resetting work", async () => {
+  const ready = pr(7338);
+  let active: boolean | undefined;
+  const facts = { behindMainByPr: one(7338, 2), baseChangedFilesByPr: one(7338, base(["src/mine.ts"])),
+    readBranchProtectionStrict: () => false, refreshCiRunForHead: () => active };
+  const first = harness(facts);
+  assert.equal(await runLightPassReadyRefresh([ready], first.deps, POLICY), undefined);
+  assert.equal(decided(first.rows)[0]!.ci_in_flight, null);
+  const repeated = harness(facts, first.rows);
+  assert.equal(await runLightPassReadyRefresh([ready], repeated.deps, POLICY), undefined);
+  assert.equal(decided(repeated.rows).length, 0, "the unchanged unavailable decision is recorded once");
+  active = false;
+  const recovered = harness(facts, first.rows);
+  assert.equal(await runLightPassReadyRefresh([ready], recovered.deps, POLICY), 7338);
+  assert.deepEqual(recovered.updated.map(x => x.prNumber), [7338]);
+  assert.equal(decided(recovered.rows)[0]!.ci_in_flight, false);
 });

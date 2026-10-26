@@ -185,6 +185,9 @@ function readyOverlapRoutes(): GhShimRoute[] {
     { when: `compare/${HEAD.sha}...main`, stdout: json({ ahead_by: 2, files: [{ filename: FILE }] }) },
     { when: "/pulls/7214/files", stdout: json([{ filename: FILE }]) },
     { when: "update-branch", stdout: "{}" },
+    // W1-T7735: a refresh needs COMPLETE current-head CI activity; an empty run list is "no run in flight",
+    // where the catch-all `{}` would read as a malformed response and hold the refresh.
+    { when: "actions/runs?head_sha=", stdout: json({ workflow_runs: [] }) },
     { when: "/pulls/7214", stdout: json({ ...PR, merged_at: null, head: HEAD }) },
     { when: "check-runs", stdout: json({ check_runs: [{ name: "ci-gate", status: "completed", conclusion: "success" }] }) },
     { when: "/status", stdout: json({ statuses: [{ context: "remudero-review", state: "success" }] }) },

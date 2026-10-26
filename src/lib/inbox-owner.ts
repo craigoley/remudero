@@ -31,9 +31,62 @@ export function inboxKind(proposalId: string): string {
   return colon === -1 ? proposalId : proposalId.slice(0, colon);
 }
 
-export function inboxOwner(proposal: { id: string }): "operator" | "fleet" {
+/** Source facts, not a display id alone, can establish that a finding is information. */
+export interface InboxOwnershipEvidence {
+  id: string;
+  summary?: unknown;
+  originatingItemId?: unknown;
+  trigger?: unknown;
+  reframeHistory?: unknown;
+  requiresReview?: unknown;
+}
+
+/** W1-T10431: only the producer's exact PR-age observation is informational. Missing,
+ * ambiguous or human-directed evidence remains an ask. This is NOT execution permission. */
+export function isAgeOnlyInboxInformation(proposal: InboxOwnershipEvidence): boolean {
+  if (proposal.trigger !== undefined ||
+      (proposal.requiresReview !== undefined && proposal.requiresReview !== false) ||
+      (proposal.reframeHistory !== undefined && (!Array.isArray(proposal.reframeHistory) || proposal.reframeHistory.length !== 0))) return false;
+  const identity = /^board-review:stale:(PR-[1-9]\d*|#[1-9]\d*)$/.exec(proposal.id);
+  const referent = identity?.[1];
+  if (!referent || identity?.[0] !== proposal.id || proposal.originatingItemId !== referent || typeof proposal.summary !== "string") return false;
+  const observation = /^board-review: (PR-[1-9]\d*|#[1-9]\d*) has sat open ((?:0|[1-9]\d*)\.\d)h, past the ((?:0|[1-9]\d*)(?:\.\d+)?)h depth threshold$/.exec(proposal.summary);
+  if (!observation || observation[0] !== proposal.summary || observation[1] !== referent) return false;
+  const age = Number(observation[2]), threshold = Number(observation[3]);
+  return Number.isFinite(age) && Number.isFinite(threshold) && threshold > 0 && age >= threshold;
+}
+
+export function inboxOwner(proposal: InboxOwnershipEvidence): "operator" | "fleet" {
   const kind = inboxKind(proposal.id);
-  return kind === "feedback-docket" || FLEET_KINDS.has(kind) ? "fleet" : "operator";
+  return kind === "feedback-docket" || FLEET_KINDS.has(kind) || isAgeOnlyInboxInformation(proposal) ? "fleet" : "operator";
+}
+
+/** Display ownership never enlarges the fleet's existing executable population. */
+export function fleetExecutionEligible(proposal: InboxOwnershipEvidence): boolean {
+  const kind = inboxKind(proposal.id);
+  return kind === "feedback-docket" || FLEET_KINDS.has(kind);
+}
+
+type OwnershipThreadMessage = { role: string; seq: number; extra?: { question?: boolean; event?: unknown } };
+
+/** Stored sequence, not a backfilled event's timestamp, establishes whether a question was answered. */
+export function hasUnansweredInboxQuestion(messages: readonly OwnershipThreadMessage[]): boolean {
+  const reply = messages.filter(m => m.role === "reply" && m.extra?.event === undefined)
+    .reduce((seq, m) => Math.max(seq, m.seq), 0);
+  return messages.some(m => m.role === "escalation" && m.extra?.event === undefined && m.extra?.question === true && m.seq > reply);
+}
+
+/** Called only with the producer's already captured, readable thread evidence. No I/O or action authority. */
+export function captureInboxOwner(proposal: InboxOwnershipEvidence, messages: readonly OwnershipThreadMessage[], requiresReview: boolean): "operator" | "fleet" {
+  if (requiresReview || isAgeOnlyInboxInformation(proposal) && hasUnansweredInboxQuestion(messages)) return "operator";
+  return inboxOwner(proposal);
+}
+
+/** A missing capture cannot move an age finding out of the human lane. Unknown kinds never inherit fleet ownership. */
+export function classifiedInboxOwner(proposal: InboxOwnershipEvidence, classification: { displayOwner?: "operator" | "fleet"; retirement?: { state?: string }; requiresReview?: boolean }): "operator" | "fleet" {
+  if (classification.requiresReview || classification.retirement?.state === "restored_for_review" || classification.displayOwner === "operator") return "operator";
+  if (classification.displayOwner === "fleet" && (fleetExecutionEligible(proposal) || isAgeOnlyInboxInformation(proposal))) return "fleet";
+  return inboxOwner({ id: proposal.id });
 }
 
 // ── WHO SENT AN INBOX ITEM, AND WHEN (W1-T8825) ───────────────────────────────────────────────
