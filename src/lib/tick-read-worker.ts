@@ -1579,6 +1579,7 @@ function* ciFailuresSteps(
     failures.push({
       name,
       ...(c.title ? { title: c.title } : {}),
+      ...(c.context && typeof c.description === "string" && c.description.trim() !== "" ? { statusDescription: c.description } : {}),
       logTail,
       conclusion: (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase(),
       ...(c.completedAt ? { completedAt: c.completedAt } : {}),
