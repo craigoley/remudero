@@ -6,13 +6,15 @@ import {
 import { join } from "node:path";
 import { z } from "zod";
 import { systemClock, type Clock } from "./clock.js";
-import { InflightLockError, withInflightLock } from "./inflight-lock.js";
+import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
 import { productRequestIdSchema, productIdSchema, type ProductBrief, type ProductProjection, type ProductStoreCode } from "./product-intent.js";
 import { ProductIntentStore, productStatePaths } from "./product-intent-store.js";
 
 export const PRODUCT_RESEARCH_VERSION = "product-research-v1" as const;
 /** PRIMARY CONTROL: storage quotas for research evidence; they grant no provider or spending authority. */
 export const PRODUCT_RESEARCH_LIMITS = { requestBytes: 64 * 1024, stateBytes: 1024 * 1024, runs: 32, answers: 256, questions: 64, receipts: 1024 } as const;
+/** PRIMARY CONTROL: an admitted research request may hold the provider transport for at most 30 seconds. */
+export const PRODUCT_RESEARCH_TIMEOUT_MS = 30_000;
 
 export type ProductResearchCode = ProductStoreCode | "already_answered";
 export type ProductResearchResult = { ok: true; value: ProductResearchView; code?: never } | { ok: false; code: ProductResearchCode; value?: never };
@@ -23,7 +25,8 @@ export type ProductResearchFailure = "provider_error" | "invalid_output" | "over
 export interface ProductResearchProvider {
   readonly id: string;
   /** `sources` are untrusted DATA: the provider must never treat them as instructions or authority. */
-  research(input: { objective: string; objectiveRevision: number; sources: { label: string; url: string }[] }): Promise<unknown>;
+  research(input: { objective: string; objectiveRevision: number; sources: { label: string; url: string }[];
+    requestId: string; budgetUsd: number; signal: AbortSignal }): Promise<unknown>;
 }
 
 const MAX_ID = Number.MAX_SAFE_INTEGER;
@@ -137,6 +140,8 @@ interface ResearchOptions {
   root?: string; store?: ProductIntentStore; provider?: ProductResearchProvider; clock?: Clock;
   /** Operator-configured spending ceiling per run; provider output can never raise it. Default 0. */
   budgetUsd?: number; sync?: (fd: number) => void;
+  /** An operator may shorten the primary deadline; this option can never increase it. */
+  timeoutMs?: number;
 }
 
 /** Bounded research and clarification over an existing product: durable evidence, no authority. */
@@ -219,6 +224,16 @@ export class ProductResearchService {
     }
   }
 
+  /** A receipt read after an unknown rename outcome must re-establish durability before success. */
+  private confirmDurable(paths: ReturnType<ProductResearchService["paths"]>): void {
+    try {
+      const file = openSync(paths.file, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try { this.sync(file); } finally { closeSync(file); }
+      const directory = openSync(paths.research, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try { this.sync(directory); } finally { closeSync(directory); }
+    } catch (cause) { throw Object.assign(new ResearchFault("outcome_unknown"), { cause }); }
+  }
+
   private async execute(actor: string, command: unknown): Promise<ProductResearchView> {
     const parsed = productResearchCommandSchema.safeParse(command);
     if (!parsed.success || Buffer.byteLength(JSON.stringify(parsed.data)) > PRODUCT_RESEARCH_LIMITS.requestBytes) throw new ResearchFault("invalid_input");
@@ -234,61 +249,68 @@ export class ProductResearchService {
     const requestKey = digest(input.requestId);
     const payloadDigest = digest(JSON.stringify(input));
     this.ensureDirectory(paths);
+    // Hold the existing process-aware lock across the provider await, not only the final write.
+    const lock = acquireInflightLock(paths.locks, `research-${paths.ownerKey}`, { run_id: `product-research-${randomUUID()}` });
+    try {
+      const before = this.read(paths);
+      const prior = before.receipts[requestKey];
+      if (prior && prior.payloadDigest !== payloadDigest) throw new ResearchFault("idempotency_conflict");
+      const record = before.products[input.productId] ?? emptyRecord();
 
-    const before = this.read(paths);
-    const prior = before.receipts[requestKey];
-    if (prior && prior.payloadDigest !== payloadDigest) throw new ResearchFault("idempotency_conflict");
-    const record = before.products[input.productId] ?? emptyRecord();
+      // At most one completed run per objective revision; an unavailable provider is not asked again to say so.
+      const here = record.runs.filter((run) => run.objectiveRevision === first.objectiveRevision);
+      const provider = this.options.provider;
+      const needsRun = !prior && !here.some((run) => run.outcome === "completed" || run.outcome === "failed") && !(provider === undefined && here.some((run) => run.outcome === "unavailable"));
+      if (!prior && (Object.keys(before.receipts).length >= PRODUCT_RESEARCH_LIMITS.receipts ||
+        (needsRun && record.runs.length >= PRODUCT_RESEARCH_LIMITS.runs))) throw new ResearchFault("capacity");
+      const researchStartedAt = this.clock.iso();
+      const draft = needsRun ? await this.runResearch(first, requestKey, paths.ownerKey, provider) : undefined;
 
-    // At most one completed run per objective revision; an unavailable provider is not asked again to say so.
-    const here = record.runs.filter((run) => run.objectiveRevision === first.objectiveRevision);
-    const provider = this.options.provider;
-    const needsRun = !prior && !here.some((run) => run.outcome === "completed") && !(provider === undefined && here.some((run) => run.outcome === "unavailable"));
-    const draft = needsRun ? await this.runResearch(first, requestKey, paths.ownerKey, provider) : undefined;
-
-    const outcome = withInflightLock(paths.locks, `research-${paths.ownerKey}`, () => {
-      const product = loaded();
-      const state = this.read(paths);
-      const existing = state.receipts[requestKey];
-      if (existing) {
-        if (existing.payloadDigest !== payloadDigest) throw new ResearchFault("idempotency_conflict");
-        const current = state.products[input.productId] ?? emptyRecord();
-        return { run: current.runs.find((run) => run.id === existing.runId), view: project(product.id, product.brief, product.objectiveRevision, current, true) };
-      }
-      if (Object.keys(state.receipts).length >= PRODUCT_RESEARCH_LIMITS.receipts) throw new ResearchFault("capacity");
-      const now = this.clock.iso();
-      let next = normalize(state.products[input.productId] ?? emptyRecord(), product.brief, now);
-      if (draft) {
-        if (next.runs.length >= PRODUCT_RESEARCH_LIMITS.runs) throw new ResearchFault("capacity");
-        const known = new Set([...CATALOG.map((item) => item.id), ...next.questions.map((item) => item.id)]);
-        const proposed: Question[] = (draft.questions ?? []).map((item) => ({ id: `pq_${digest(item.text).slice(0, 16)}`, text: item.text, origin: "provider" as const, objectiveRevision: product.objectiveRevision }))
-          .filter((item, index, all) => !known.has(item.id) && all.findIndex((other) => other.id === item.id) === index);
-        next = { ...next, runs: [...next.runs, { ...draft.run, startedAt: now, finishedAt: now }], questions: [...next.questions, ...proposed] };
-      }
-      const answered: Answer[] = [];
-      for (const item of input.answers ?? []) {
-        const fields = dependsOf(item.questionId, next);
-        if (!fields) throw new ResearchFault("invalid_input");
-        const standing = next.answers.find((answer) => answer.questionId === item.questionId && validAnswer(answer, product.brief, next));
-        if (standing) {
-          if (standing.answer !== item.answer) throw new ResearchFault("already_answered");
-          continue;
+      const outcome = (() => {
+        const product = loaded();
+        const state = this.read(paths);
+        const existing = state.receipts[requestKey];
+        if (existing) {
+          if (existing.payloadDigest !== payloadDigest) throw new ResearchFault("idempotency_conflict");
+          this.confirmDurable(paths);
+          const current = state.products[input.productId] ?? emptyRecord();
+          return { run: current.runs.find((run) => run.id === existing.runId), view: project(product.id, product.brief, product.objectiveRevision, current, true) };
         }
-        answered.push({ questionId: item.questionId, answer: item.answer, objectiveRevision: product.objectiveRevision, scopeDigest: scopeDigest(product.brief, fields), status: "accepted", answeredAt: now });
-      }
-      if (next.answers.length + answered.length > PRODUCT_RESEARCH_LIMITS.answers || next.questions.length > PRODUCT_RESEARCH_LIMITS.questions) throw new ResearchFault("capacity");
-      next = { ...next, answers: [...next.answers, ...answered] };
-      this.commit(paths, {
-        ...state,
-        products: Object.fromEntries([...Object.entries(state.products).filter(([key]) => key !== input.productId), [input.productId, next] as const]),
-        receipts: Object.fromEntries([...Object.entries(state.receipts), [requestKey, { payloadDigest, productId: input.productId, runId: draft?.run.id ?? null, savedAt: now }] as const]),
-      });
-      return { run: draft ? next.runs.find((run) => run.id === draft.run.id) : undefined, view: project(product.id, product.brief, product.objectiveRevision, next, false) };
-    }, { run_id: `product-research-${randomUUID()}` });
+        if (Object.keys(state.receipts).length >= PRODUCT_RESEARCH_LIMITS.receipts) throw new ResearchFault("capacity");
+        const now = this.clock.iso();
+        let next = normalize(state.products[input.productId] ?? emptyRecord(), product.brief, now);
+        if (draft) {
+          if (next.runs.length >= PRODUCT_RESEARCH_LIMITS.runs) throw new ResearchFault("capacity");
+          const known = new Set([...CATALOG.map((item) => item.id), ...next.questions.filter((item) => item.objectiveRevision === product.objectiveRevision).map((item) => item.id)]);
+          const proposed: Question[] = (draft.questions ?? []).map((item) => ({ id: `pq_${digest(item.text).slice(0, 16)}`, text: item.text, origin: "provider" as const, objectiveRevision: product.objectiveRevision }))
+            .filter((item, index, all) => !known.has(item.id) && all.findIndex((other) => other.id === item.id) === index);
+          next = { ...next, runs: [...next.runs, { ...draft.run, startedAt: researchStartedAt, finishedAt: now }], questions: [...next.questions, ...proposed] };
+        }
+        const answered: Answer[] = [];
+        for (const item of input.answers ?? []) {
+          const fields = dependsOf(item.questionId, next);
+          if (!fields) throw new ResearchFault("invalid_input");
+          const standing = next.answers.find((answer) => answer.questionId === item.questionId && validAnswer(answer, product.brief, next));
+          if (standing) {
+            if (standing.answer !== item.answer) throw new ResearchFault("already_answered");
+            continue;
+          }
+          answered.push({ questionId: item.questionId, answer: item.answer, objectiveRevision: product.objectiveRevision, scopeDigest: scopeDigest(product.brief, fields), status: "accepted", answeredAt: now });
+        }
+        if (next.answers.length + answered.length > PRODUCT_RESEARCH_LIMITS.answers || next.questions.length > PRODUCT_RESEARCH_LIMITS.questions) throw new ResearchFault("capacity");
+        next = { ...next, answers: [...next.answers, ...answered] };
+        this.commit(paths, {
+          ...state,
+          products: Object.fromEntries([...Object.entries(state.products).filter(([key]) => key !== input.productId), [input.productId, next] as const]),
+          receipts: Object.fromEntries([...Object.entries(state.receipts), [requestKey, { payloadDigest, productId: input.productId, runId: draft?.run.id ?? null, savedAt: now }] as const]),
+        });
+        return { run: draft ? next.runs.find((run) => run.id === draft.run.id) : undefined, view: project(product.id, product.brief, product.objectiveRevision, next, false) };
+      })();
 
-    // Canonical record: the run is stage evidence in the product's own durable record. A retry heals a failure here.
-    if (outcome.run) this.recordEvidence(actor, input.productId, outcome.run);
-    return outcome.view;
+      // Canonical record: the run is stage evidence in the product's own durable record. A retry heals a failure here.
+      if (outcome.run) this.recordEvidence(actor, input.productId, outcome.run);
+      return outcome.view;
+    } finally { lock.release(); }
   }
 
   private recordEvidence(actor: string, productId: string, run: Run): void {
@@ -318,12 +340,22 @@ export class ProductResearchService {
       ({ run: { ...base, ...extra, outcome }, questions: undefined });
     if (!provider) return make("unavailable");
     let raw: unknown;
+    const controller = new AbortController();
+    const configured = this.options.timeoutMs;
+    const timeoutMs = configured !== undefined && Number.isSafeInteger(configured) && configured > 0
+      ? Math.min(configured, PRODUCT_RESEARCH_TIMEOUT_MS) : PRODUCT_RESEARCH_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      raw = await provider.research({ objective: product.brief.objective ?? product.brief.idea, objectiveRevision: product.objectiveRevision, sources: sources.map(({ label, url }) => ({ label, url })) });
+      const expired = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => { controller.abort(); reject(new Error("research deadline")); }, timeoutMs);
+      });
+      raw = await Promise.race([provider.research({ objective: product.brief.objective ?? product.brief.idea,
+        objectiveRevision: product.objectiveRevision, sources: sources.map(({ label, url }) => ({ label, url })),
+        requestId: base.id, budgetUsd: this.budgetUsd, signal: controller.signal }), expired]);
     } catch {
       // The provider's own message is untrusted text: only the closed failure code is recorded.
       return make("failed", { failure: "provider_error" });
-    }
+    } finally { if (timer !== undefined) clearTimeout(timer); }
     const output = providerOutputSchema.safeParse(raw);
     if (!output.success) return make("failed", { failure: "invalid_output" });
     const spendUsd = output.data.spendUsd ?? 0;

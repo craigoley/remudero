@@ -145,7 +145,8 @@ test("W1-T10617: untrusted research text grants no provider or spending authorit
   assert.equal(view.run?.provider, "fixture-research", "only the configured provider is ever recorded");
   assert.equal(view.run?.budgetUsd, 0, "the configured ceiling is untouched");
   assert.equal(view.run?.executionAuthority, "none");
-  assert.deepEqual(Object.keys(smuggled.inputs[0] as object).sort(), ["objective", "objectiveRevision", "sources"]);
+  assert.deepEqual(Object.keys(smuggled.inputs[0] as object).sort(), ["budgetUsd", "objective", "objectiveRevision", "requestId", "signal", "sources"]);
+  assert.equal((smuggled.inputs[0] as { budgetUsd: number }).budgetUsd, 0);
   assert.equal(view.run?.sources[0]?.disposition, "data");
   const product = store.read(ACTOR, id);
   assert.ok(product.ok);
@@ -218,4 +219,72 @@ test("product research heals missing canonical evidence on an identical retry", 
   const product = store.read(ACTOR, id);
   assert.ok(product.ok);
   assert.deepEqual(product.value.stageEvidence.map((item) => item.id), [healed.run?.id]);
+});
+
+test("product research admits one provider call across concurrent retries", async (t) => {
+  const { root, store, id } = seed(t);
+  let finish!: (value: unknown) => void;
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const held = new Promise<unknown>((resolve) => { finish = resolve; });
+  let calls = 0;
+  const fixture: ProductResearchProvider = { id: "held-provider", research: async () => {
+    calls++; entered(); return held;
+  } };
+  const service = new ProductResearchService({ root, store, provider: fixture, clock });
+  const body = command(id, 1);
+  const first = service.run(ACTOR, body);
+  await started;
+  try {
+    const retry = service.run(ACTOR, body);
+    const result = await Promise.race([retry, new Promise<undefined>((resolve) => setTimeout(resolve, 50))]);
+    assert.equal(result?.code, "busy", "a live provider call must be refused before a second call starts");
+    assert.equal(calls, 1);
+  } finally { finish({ summary: "One bounded call", spendUsd: 0 }); await first; }
+});
+
+test("product research retry cannot acknowledge a persistent durability failure", async (t) => {
+  const { root, store, id } = seed(t);
+  let calls = 0;
+  const service = new ProductResearchService({ root, store, clock, sync: () => {
+    if (++calls >= 2) throw Error("persistent directory sync failure");
+  } });
+  const body = command(id, 1);
+  assert.equal((await service.run(ACTOR, body)).code, "outcome_unknown");
+  assert.equal((await service.run(ACTOR, body)).code, "outcome_unknown", "reading a receipt is not proof that its directory is durable");
+  assert.equal((await ok(new ProductResearchService({ root, store, clock }), body)).replayed, true);
+});
+
+test("product research repeats an affected provider question for a changed objective", async (t) => {
+  const { root, store, id } = seed(t);
+  const service = new ProductResearchService({ root, store, provider: provider().fixture, clock });
+  const first = await ok(service, command(id, 1));
+  const question = first.open.find((item) => item.origin === "provider")!;
+  await ok(service, command(id, 1, { answers: [{ questionId: question.id, answer: "Bethesda only" }] }));
+  const product = store.read(ACTOR, id); assert.ok(product.ok);
+  const changed = store.write(ACTOR, { version: "product-intent-v1", requestId: rid("update"), id,
+    expectedRevision: product.value.revision, brief: { ...brief, idea: "A different city and objective" } });
+  assert.ok(changed.ok);
+  const next = await ok(service, command(id, 2));
+  assert.ok(next.open.some((item) => item.id === question.id), "a changed objective must not silently lose its unresolved provider question");
+  assert.ok(!next.accepted.some((item) => item.questionId === question.id));
+});
+
+test("product research bounds the provider deadline and never automatically repeats a failed call", async (t) => {
+  const { root, store, id } = seed(t);
+  let calls = 0;
+  let seen!: Parameters<ProductResearchProvider["research"]>[0];
+  const fixture: ProductResearchProvider = { id: "unresponsive-provider", research: async (input) => {
+    calls++; seen = input; return new Promise(() => {});
+  } };
+  const service = new ProductResearchService({ root, store, provider: fixture, clock, timeoutMs: 10 });
+  const body = command(id, 1);
+  const failed = await ok(service, body);
+  assert.deepEqual([failed.run?.outcome, failed.run?.failure], ["failed", "provider_error"]);
+  assert.equal(seen.signal.aborted, true);
+  assert.equal(seen.requestId, failed.run?.id);
+  assert.equal(seen.budgetUsd, 0);
+  await ok(service, body);
+  await ok(service, command(id, 1));
+  assert.equal(calls, 1, "a timed-out or failed transport has no automatic spend retry");
 });
