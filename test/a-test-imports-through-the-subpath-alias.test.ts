@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { test } from "node:test";
 // @ts-ignore the executable .mjs module has no declaration file.
-import { LOCATION_RELATIVE_ERE, aliasFor, hasLocationRelativeSpecifier, main as codemodMain, rewriteSource } from "#scripts/test-location-codemod.mjs";
+import { LOCATION_RELATIVE_ERE, aliasFor, hasLocationRelativeSpecifier, isTransientTestPath, main as codemodMain, rewriteSource } from "#scripts/test-location-codemod.mjs";
 
 const ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
 
@@ -105,7 +105,7 @@ test("W1-T9864: location-relative test files never rise above the merge base", (
     return;
   }
   const atBase = gitGrepFiles([], [base, "--", "test"]).length;
-  const atHead = new Set([...gitGrepFiles(["--untracked"], ["--", "test"])]).size;
+  const atHead = new Set(gitGrepFiles(["--untracked"], ["--", "test"]).filter((f) => !isTransientTestPath(f))).size;
   assert.ok(
     atHead <= atBase,
     `${atHead} test files carry a location-relative specifier at HEAD, ${atBase} at merge base ${base.slice(0, 9)} — ` +
@@ -127,7 +127,7 @@ test("W1-T9864: a new test file carries no location-relative specifier", (t) => 
       .split("\n")
       .filter((line) => line.startsWith("?? "))
       .map((line) => line.slice(3)),
-  ].filter((f) => f.endsWith(".test.ts"));
+  ].filter((f) => f.endsWith(".test.ts") && !isTransientTestPath(f));
   const offenders = added.filter((f) => hasLocationRelativeSpecifier(readFileSync(join(ROOT, f), "utf8")));
   assert.deepEqual(offenders, [], "a new test imports through #src/*, #scripts/* and #test/*, never a relative path");
 });

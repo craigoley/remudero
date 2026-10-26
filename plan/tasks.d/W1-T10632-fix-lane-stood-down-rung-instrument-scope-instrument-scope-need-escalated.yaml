@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.19
   status: queued
@@ -27,10 +27,12 @@
     - PR #13313: 1.81 PR-hours — instrument scope need escalated
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.91
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
     reasons:
-      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The filing lists repeated blocker labels and PR-hours but supplies no root-cause finding or specific remedy; its finding cannot be verified from the supplied evidence.; on the change's description/files alone, no diff was read — Acceptance checks only for a test-title string using grep, which does not establish that instrument-scope escalation clears automatically or preserves the existing gate."
-    judged_at: "2026-10-25T18:50:06.632Z"
-    pin: "282343c37d551792282e24bb20d6fa3e9d23f7ee19fc323a3ed8a0fa19e19f03"
+      - "The plan record declares two files: a test file (new, absent at base) and scripts/test-placement/test-folders.tsv (a test-placement mapping). Neither is described as touching secrets, credentials, auth, permissions, merge/deploy/infrastructure policy, or data deletion."
+      - "The task is a machine-filed implement task from the fix-lane family, which has a clean track record (5 merged, 0 declined, Beta mean 0.94). It targets a repeated defect class backed by 4 distinct cited PRs, so the finding is verifiable from the evidence shown."
+      - "Acceptance is a grep check on a named test in the declared test file, which is mechanically verifiable. It requires no operator decision on priorities, budget, or policy, and the change is reversible and still passes CI and review. No bounded change view was supplied, so this judgment rests on the description and files list alone."
+    judged_at: "2026-10-26T09:50:39.231Z"
+    pin: "c413a8b08e69131b42858982022b3514478100d845ad29c8266a511d6e994156"

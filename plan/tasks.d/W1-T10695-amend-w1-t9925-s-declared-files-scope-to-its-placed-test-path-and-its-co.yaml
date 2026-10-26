@@ -1,0 +1,46 @@
+- id: W1-T10695
+  title: "Amend W1-T9925's declared files: scope to its placed test path and its config-gardener registration site"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=373ba518d16417af
+  # backlog gardener: placed=2026-10-26T09:20:26.839Z
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T9925-an-llm-judge-re-ranks-the-queue-by-measured-cost-of-delay.yaml
+  acceptance:
+    - claim: "W1-T9925's files: list names its test under test/gardeners/ instead of the flat test/ path"
+      proof: 'grep: "test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts" in plan/tasks.d/W1-T9925-an-llm-judge-re-ranks-the-queue-by-measured-cost-of-delay.yaml'
+    - claim: "W1-T9925's files: list includes src/lib/config-gardener.ts, the registration site its own design requires"
+      proof: 'grep: "src/lib/config-gardener.ts" in plan/tasks.d/W1-T9925-an-llm-judge-re-ranks-the-queue-by-measured-cost-of-delay.yaml'
+  origin: "ratification candidate verify-human-automate:W1-T9925 — its two build attempts (adaptive-lifetime dispatches=2, last verdict blocked_inflight, zero merge/open-PR evidence) were each refused outside-declared-files on the exact two paths named in the recorded decision (plan/decisions.d/W1-T9925-W1-T9925-1792889958072.md, auto-chosen 2026-10-25 'amend scope'): the mandated test placement under test/gardeners/ (per the test-restructure placement map) and the queue_judge.prediction registration site src/lib/config-gardener.ts. This fragment carries out that already-chosen, purely mechanical scope widening on the existing shard — no change to its design, acceptance content, risk band, dependency ordering, or any release/merge gate — so the next dispatch is no longer blocked by a declared-scope mismatch."
+  rationale: >-
+    From the 2026-10-26 proposal on verify-human-automate:W1-T9925, ratified via rmd approve:
+  
+    W1-T9925 kept failing to build (2 attempts over 8 days) and a judge reads it as safe to enter
+    the self-improvement flow:
+      all dependencies are merged and the task involves only technical queue‑ranking logic with no indicated policy or budget decision, so it can proceed in the self‑improvement flow.
+  
+    AN LLM JUDGE RE-RANKS THE QUEUE BY MEASURED COST OF DELAY AND IS JUDGED ON ITS OWN PREDICTIONS
+    — on origin/main 07a425844 the 526 queued tasks hold 81 at plain priority 1, 53 at 1.x and 168
+    at 2, the fleet starts about 4-6 runs an hour, and operator-pinned protective P1s W1-T9706 and
+    W1-T9761 waited 15+ hours while newer tasks started
+  
+  
+    Dependencies all merged: yes. Cited in src/: no.
+  
+  
+    Evidence: adaptive lifetime pressure: attributable dispatches=2; capacity refusals=0; open PR
+    evidence=0; merge evidence=0; last terminal verdict=blocked_inflight; attributable
+    terminal-verdict history=none
+  
+    Judge provenance: decision=automate;
+    observed_state=W1-T9925:adaptive-lifetime=2:capacity=0:open=0:merged=0:last=verdict:blocked_inflight:2.
+  
+  
+    This is an automation candidate only. The existing inbox/draft flow owns the next step; the
+    shard, plan records, release rows, and merge gates remain unchanged.

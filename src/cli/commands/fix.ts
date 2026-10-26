@@ -7,7 +7,7 @@ import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, r
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
 import { fixRoundBaseHead } from "../../lib/fix-round-base.js";
 import { admittedFixTestPaths } from "../../lib/fix-test-scope.js";
-import { productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, requeuedCheckKeysFromLedger, type JobRequeueOutcome } from "../../lib/sweep.js";
+import { fixRungInputFields, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, requeuedCheckKeysFromLedger, type JobRequeueOutcome } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync } from "../../lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -111,6 +111,7 @@ export interface FixCommandHost {
   readonly spawnFixWorkerBounded: RunTaskCommandHost["spawnFixWorkerBounded"];
   readonly startShellLessMergeConflictMerge: RunTaskCommandHost["startShellLessMergeConflictMerge"];
   readonly updatePrBodyViaGh: HostFn;
+  readonly dispatchBodyProofRepair: HostFn;
   readonly withPredecessorTranscriptCopies: RunTaskCommandHost["withPredecessorTranscriptCopies"];
   readonly workerBoundaryStack: RunTaskCommandHost["workerBoundaryStack"];
   readonly workerChangedPaths: (raw: string) => string[];
@@ -2069,6 +2070,8 @@ async function routeFix(
 
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   pendingAnswer?: OpenPrView["pendingAnswer"];
+  /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
+  prBodySha256?: string;
 },
   host: FixCommandHost,
 ): ReturnType<RunTaskCommandHost["runFixRung"]> {
@@ -2113,8 +2116,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   } = fixCommandHelpers(host);
   const roundRows: Record<string, unknown>[] = [];
   const deps = { ...opts.deps, log: (step: string, extra?: Record<string, unknown>) => {
-    roundRows.push({ ...extra, task_id: opts.taskId, step });
-    opts.deps.log(step, extra);
+    // W1-T10339: a stand-down (and a design handoff) records the head, task contract and body it read, so the sweep
+    // dispatches this PR again only once one of them has changed.
+    const row = step === "fix.stood_down" || step === "fix.needs_design"
+      ? { ...fixRungInputFields({ headSha: typeof extra?.head_sha === "string" ? extra.head_sha : opts.initialReview.headSha,
+          contractRevision: currentContractRevision, bodySha256: opts.prBodySha256 }), ...extra }
+      : extra;
+    roundRows.push({ ...row, task_id: opts.taskId, step });
+    opts.deps.log(step, row);
   } };
   // W1-T7096: production call sites opt into the LLM judge. A caller that wires none (a test
   // fixture) keeps the former bounds as an explicit, judge-shaped stand-in — never a silent LLM spawn.
@@ -3500,6 +3509,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     const proofDiscriminationNow =
       proofDiscriminationFromReview !== undefined && opts.proofDiscrimination?.source === "gate-log"
         ? { ...proofDiscriminationFromReview, source: "gate-log" as const }
+        : proofDiscriminationFromReview !== undefined && opts.proofDiscrimination?.bodyRepair === true
+        // W1-T10339: a taskless PR's body-repair marker is likewise a property of the dispatch.
+        ? { ...proofDiscriminationFromReview, bodyRepair: true as const }
         : proofDiscriminationFromReview;
     const proofRepairRound = proofDiscriminationNow?.source === "gate-log";
     // W1-T2236: this round's structured gate-failure remedy (the `gate-fix` mode's ONLY input —
@@ -3687,8 +3699,12 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment merge" };
       }
     }
+    // W1-T10339: a handoff is reused only while the inputs it read stand — an amended contract or an edited (taskless)
+    // PR body at the same head gets a real round. A row from before those fields existed keeps the head-only reuse.
     const priorDesign = roundLedger.find((row) =>
-      row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha);
+      row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha &&
+      !(typeof row.contract_revision === "string" && row.contract_revision !== currentContractRevision) &&
+      !(typeof row.read_body_sha256 === "string" && opts.prBodySha256 !== undefined && row.read_body_sha256 !== opts.prBodySha256));
     if (priorDesign) {
       const reason = String(priorDesign.reason);
       const escalated = roundLedger.findLast((row) => row.step === "fix.stood_down" && row.site === "rung.needs_design" &&
@@ -4478,9 +4494,18 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       review: { state: review.state, capped: review.capped, criteria: review.criteria, reviewerOutcome: review.reviewerOutcome },
       getLedgerLinesNow: () => (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
     });
+    // W1-T10339: a PR with no task trailer is judged on its own BODY, so its proof is repaired there and never
+    // handed to the plan-amendment writer (which can only refuse it, `shard-not-found`).
+    const repairBodyProofs = (proofEvidence: ProofDiscriminationEvidence): Promise<{ kind: "written" | "refused"; reason?: string }> =>
+      host.dispatchBodyProofRepair({
+        prUrl: opts.prUrl, reviewBase: opts.reviewBase, evidence: proofEvidence, transcriptText: workerTranscript(fixResult),
+        priorHeadSha, log: deps.log, fetchPrBody: deps.fetchPrBody ?? host.fetchPrBodyViaGh,
+        updatePrBody: deps.updatePrBody ?? host.updatePrBodyViaGh, execProof: deps.execAcceptanceGateRepairProof,
+      });
     if (fixAction.kind === "hand-off") {
       // A NEEDS_DESIGN round still carries the PROOF_AMENDMENT its prompt asks for (W1-T8921, W1-T5689: dropped here).
-      if (evidence.proofDiscrimination) amendProofs(evidence.proofDiscrimination);
+      if (evidence.proofDiscrimination?.bodyRepair === true) await repairBodyProofs(evidence.proofDiscrimination);
+      else if (evidence.proofDiscrimination) amendProofs(evidence.proofDiscrimination);
       const refusalExcerpt = refusalExcerptFromFixReport(fixReport);
       deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha, contract_revision: currentContractRevision,
         ...(currentSemanticRevision === undefined ? {} : { task_semantic_revision: currentSemanticRevision }),
@@ -4907,7 +4932,16 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     if (fixMode === "proof-discrimination" && evidence.proofDiscrimination) {
       // NOT `reviewReport`: for this mode it was just overwritten with the live PR BODY (above) —
       // the worker's PROOF_AMENDMENT proposal lives only in its own transcript.
-      amendProofs(evidence.proofDiscrimination);
+      if (evidence.proofDiscrimination.bodyRepair === true) {
+        const repaired = await repairBodyProofs(evidence.proofDiscrimination);
+        if (repaired.kind === "refused") {
+          // A refused or empty proposal ends the round; the sweep holds it until the head, contract or body changes.
+          const reason = `taskless capped proof not repaired in the PR body: ${repaired.reason}`;
+          deps.log("fix.stood_down", { site: "rung.body_proof_repair", head_sha: priorHeadSha, reason });
+          logFixDone();
+          return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+        }
+      } else amendProofs(evidence.proofDiscrimination);
     }
     // W1-T3557: RE-RESOLVE THE CONTRACT AT THE CURRENT PR HEAD, right before it is handed to the
     // reviewer — never earlier, so a strike's own push (just landed, just gone CI-green above)

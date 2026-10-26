@@ -2209,6 +2209,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readCiGateRollup",
   "readCiGateRequired", // W1-T5979
   "liveCiRunForHead",
+  "refreshCiRunForHead",
   "reaggregateCiGate",
   "readMainTip",
   "readMainRepair",
@@ -2375,6 +2376,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readCiGateRollup"
   | "readCiGateRequired"
   | "liveCiRunForHead"
+  | "refreshCiRunForHead"
   | "reaggregateCiGate"
   | "readMainTip"
   | "readMainRepair"
@@ -3263,6 +3265,36 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return false;
       }
     },
+    // Complete evidence for refreshes; the legacy repair guard above retains its positive-only behavior.
+    refreshCiRunForHead: async (pr) => {
+      try {
+        // A READ, so it rides readJsonImpl (the read seam), never ghRunImpl (the effect seam).
+        const seenRunIds = new Set<number>();
+        for (let page = 1; ; page++) {
+          const body = (await readJsonImpl(["api", `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=50` +
+            (page === 1 ? "" : `&page=${page}`)])) as { workflow_runs?: Array<{ id?: number; path?: string; status?: string }> } | undefined;
+          if (body === undefined || body === null) throw new Error("CI workflow run response unavailable");
+          if (!Array.isArray(body.workflow_runs)) throw new Error("CI workflow run list malformed");
+          let unread = false;
+          for (const run of body.workflow_runs) {
+            const id = run.id;
+            if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0 || seenRunIds.has(id)) {
+              throw new Error("CI workflow run identity unavailable or repeated across pages");
+            }
+            seenRunIds.add(id);
+            if (typeof run.path !== "string" || run.path.length === 0) { unread = true; continue; }
+            if (run.path !== ".github/workflows/ci.yml") continue;
+            if (typeof run.status !== "string" || run.status.length === 0) { unread = true; continue; }
+            if (run.status !== "completed") return true;
+          }
+          if (unread) throw new Error("CI workflow run identity or status unavailable");
+          if (body.workflow_runs.length < 50) return false;
+        }
+      } catch (e) {
+        log("sweep.live_ci_run.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
+        return undefined;
+      }
+    },
 
     rerunFailedChecks: async (pr) => {
       const live = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as
@@ -3542,14 +3574,27 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixOwnerReclaimableAtHold: (pr, decline) => {
       const { worktree_path: ownerPath, branch, task_id: taskId } = decline;
       if (typeof ownerPath !== "string" || typeof branch !== "string" || typeof taskId !== "string") return false;
+      if (decline.owner_recovery_reason === "owner_dirty_recovery_preserve_failed" &&
+          (branch !== pr.headRefName || taskId !== fixLedgerTaskIdFor(pr))) return false;
       try {
-        return decideRegisteredFixOwnerRecovery(registeredOwnerRecovery.capture({
+        const snapshot = registeredOwnerRecovery.capture({
           repoDir, worktreesRoot: worktreesDir(config), ownerPath, taskId, branch,
           expectedRemoteSha: pr.headSha, observedRemoteSha: pr.headSha, inflightDir,
           claimKey: fixBranchClaimKey(owner, repo, branch),
           claimRoundEnded: (claimRunId: string) => fixRoundClaimEnded(ledgerPath, claimRunId),
           idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath), spawnWallClockBoundMs), // ledger-read-intent: live
-        })).kind !== "keep";
+        });
+        const decision = decideRegisteredFixOwnerRecovery(snapshot);
+        if (decline.owner_recovery_reason !== "owner_dirty_recovery_preserve_failed") return decision.kind !== "keep";
+        if (decision.kind !== "preserve-tracked-dirty" || typeof snapshot.localSha !== "string") return false;
+        // The ordinary preservation helper proves parent and exact-tree identity before returning
+        // this immutable ref. Revalidation never clears the index, removes the owner or starts work.
+        const ref = registeredOwnerRecovery.preserveTrackedDirty?.(repoDir, ownerPath, branch, snapshot.localSha);
+        const prefix = `refs/rmd-recovery/fix-dirty/${branch}/${snapshot.localSha}/`;
+        if (typeof ref !== "string" || !ref.startsWith(prefix) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref.slice(prefix.length))) return false;
+        log("sweep.fix.checkout_owner_dirty_preserved", { pr_number: pr.prNumber, task_id: taskId, branch,
+          local_sha_prefix: snapshot.localSha.slice(0, 12), recovery_ref: ref.slice(0, 512), from_backstop_revalidation: true });
+        return true;
       } catch {
         // An unreadable owner has the remedy a kept one has: the hold and its single escalation stand.
         return false;
@@ -12179,7 +12224,7 @@ export interface RefreshValueGate {
 }
 
 export async function buildRefreshValueGate(
-  deps: Pick<SweepDeps, "runId" | "ledgerPath" | "readBranchProtectionStrict" | "refreshJudge" | "baseChangedFilesByPr" | "log">,
+  deps: Pick<SweepDeps, "runId" | "ledgerPath" | "readBranchProtectionStrict" | "refreshJudge" | "baseChangedFilesByPr" | "refreshCiRunForHead" | "log">,
   openPrs: readonly OpenPrView[],
   ledgerLines: readonly Record<string, unknown>[],
   nowMs: number,
@@ -12200,15 +12245,15 @@ export async function buildRefreshValueGate(
   }
   const memo = judgedVerdicts(ledgerLines);
   const rowKey = (l: Record<string, unknown>): string =>
-    JSON.stringify([l.pr_number, l.head_sha, l.path, l.decision, l.judge ?? null]);
+    JSON.stringify([l.pr_number, l.head_sha, l.path, l.decision, l.judge ?? null, l.ci_in_flight ?? null]);
   const written = new Set(ledgerLines.filter((l) => l.step === REFRESH_DECIDED_STEP).map(rowKey));
   const queueDepth = openPrs.filter((pr) => pr.checksState === "pending").length;
   const benefitWeight = observedRefreshBenefitWeight(ledgerLines);
   const ciMinutes = observedCiMinutes(ledgerLines);
-  const valueOf =(c: ArmedStalledPr, view: OpenPrView, path: RefreshPath, judge?: RefreshJudgeVerdict) => {
+  const valueOf =(c: ArmedStalledPr, view: OpenPrView, path: RefreshPath, judge?: RefreshJudgeVerdict, liveCiInFlight = false) => {
     const facts = refreshOverlapOf(c, view, deps.baseChangedFilesByPr?.get(view.prNumber));
     const repairNeeded = facts.repairNeeded || path === "base-red" || path === "plan-repair";
-    const ciInFlight = view.checksState === "pending";
+    const ciInFlight = view.checksState === "pending" || liveCiInFlight;
     const value = decideRefresh({ path, overlap: facts.overlap, overlapFiles: facts.files, repairNeeded, strict, ciInFlight,
       judge, queueDepth, benefitWeight, ciMinutes });
     return { facts, ciInFlight, value };
@@ -12232,7 +12277,27 @@ export async function buildRefreshValueGate(
       const key = `${view.prNumber}@${view.headSha}`;
       let judge: RefreshJudgeVerdict | undefined = memo.get(key);
       let judgeError: string | undefined;
-      let decided = valueOf(c, view, path, judge);
+      // A green/red summary can coexist with a queued or running coverage leg at this exact head.
+      let liveCiInFlight: boolean | undefined = view.checksState === "pending";
+      if (!liveCiInFlight && deps.refreshCiRunForHead) {
+        try { liveCiInFlight = await deps.refreshCiRunForHead(view); }
+        catch (error) {
+          liveCiInFlight = undefined;
+          deps.log?.("sweep.live_ci_run.error", { pr_number: view.prNumber, error: String((error as Error)?.message ?? error) });
+        }
+        if (typeof liveCiInFlight !== "boolean") {
+          const { facts, value } = valueOf(c, view, path);
+          const row = refreshDecidedRow({ runId: deps.runId, taskId: c.taskId, prNumber: view.prNumber, headSha: view.headSha, path,
+            value: { ...value, decision: "skip", reason: "current-head CI activity unavailable — no refresh this pass", predictedBenefit: 0 },
+            overlapFiles: facts.files, strict, ciInFlight: undefined, requestId, forcedBy, updateReason: c.updateReason, nowMs });
+          if (requestId !== undefined || !written.has(rowKey(row))) {
+            written.add(rowKey(row));
+            appendLine(deps.ledgerPath, row as Record<string, unknown> & { run_id: string; task_id: string; step: string });
+          }
+          return false;
+        }
+      }
+      let decided = valueOf(c, view, path, judge, liveCiInFlight);
       if (decided.value.decision === "ask-judge") {
         const base = deps.baseChangedFilesByPr?.get(view.prNumber);
         const asked = await askRefreshJudge(deps.refreshJudge, {
@@ -12242,7 +12307,7 @@ export async function buildRefreshValueGate(
         judge = asked.verdict;
         judgeError = asked.error;
         if (asked.verdict !== "judge-unavailable") memo.set(key, asked.verdict);
-        decided = valueOf(c, view, path, judge);
+        decided = valueOf(c, view, path, judge, liveCiInFlight);
       }
       const row = refreshDecidedRow({ runId: deps.runId, taskId: c.taskId, prNumber: view.prNumber, headSha: view.headSha, path,
         value: decided.value, overlapFiles: decided.facts.files, strict, ciInFlight: decided.ciInFlight, judge, judgeError,
@@ -12911,6 +12976,9 @@ export type NonExecutedProofExecOutcome = Exclude<
 
 export interface ProofDiscriminationEvidence {
   progressApproach?: string;
+  /** W1-T10339: the PR carries no task trailer, so its BODY's Acceptance block is what review judges and the round
+   *  repairs it there — never through a plan shard, which a taskless PR does not have. */
+  bodyRepair?: true;
   /** W1-T5544: `"gate-log"` marks evidence read from the red `proof-discrimination` check's own job log
    *  at this head (no posted review exists for it); absent means the capped review's own rows. */
   readonly source?: "review" | "gate-log";
@@ -13655,7 +13723,8 @@ export function fixDispatchHoldAtHead(
   const last = declines[declines.length - 1];
   const ownerPath = typeof last?.worktree_path === "string" ? last.worktree_path : undefined;
   if (declines.length >= FIX_CLAIM_DECLINE_BACKSTOP && (ownerPath === undefined || ownerWorktreeExists(ownerPath)) &&
-      !(ownerPath !== undefined && last.owner_recovery_decision === "keep" && ownerReclaimable?.(pr, last) === true)) {
+      !(ownerPath !== undefined && (last.owner_recovery_decision === "keep" ||
+        last.owner_recovery_reason === "owner_dirty_recovery_preserve_failed") && ownerReclaimable?.(pr, last) === true)) {
     const why = String(last.owner_recovery_reason);
     // W1-T5974: a staged-only refusal names the paths an operator must inspect before clearing it.
     const staged = Array.isArray(last.staged_paths) && last.staged_paths.length > 0
@@ -13984,6 +14053,8 @@ export interface SweepDeps {
   /** W1-T4586: whether another CI run for this PR's head is still queued or in progress. Omitted, the
    *  sweep never waits on one (the behaviour before this field existed). */
   liveCiRunForHead?: (pr: OpenPrView) => boolean | Promise<boolean>;
+  /** Complete current-head CI activity for refreshes; undefined is unavailable, never observed inactivity. */
+  refreshCiRunForHead?: (pr: OpenPrView) => boolean | undefined | Promise<boolean | undefined>;
   /** W1-T1275 — re-drive `ci-gate`'s OWN job through the same per-job Actions route
    *  {@link requeueCheck} uses, when {@link staleCiGateTransition} names a sibling that reached a
    *  terminal success LATER than the gate's own verdict. AT MOST ONCE per (head, transition). */
@@ -15384,14 +15455,24 @@ export function terminalFixDesignHandoff(
  *  later pass stands down FOREVER; a `fix.stood_down` is such an end. `fix.resolved` is never stalled.
  *  TASK-ID KEYED (callers guard on the CURRENT head). W1-T1210: no `fix.dispatch` row ⇒ stalled. */
 export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, taskId: string | undefined): boolean {
-  if (!taskId) return false;
+  return readFixRungEnd(lines, taskId).stalled;
+}
+
+/** W1-T10339 — the rung's end as `fixRungStalledWithoutNewHead` reads it, plus the `fix.stood_down` row that ended it
+ *  (absent when any other row ended it, or a later dispatch, review or resolution superseded it). */
+function readFixRungEnd(lines: Array<Record<string, unknown>>, taskId: string | undefined):
+  { stalled: boolean; standDown?: Record<string, unknown> } {
+  if (!taskId) return { stalled: false };
   let stalled = false;
+  let standDown: Record<string, unknown> | undefined;
   let dispatched = false;
   let ciHead: unknown;
   let amendmentNumber: number | undefined;
   let awaitingAmendment: number | undefined;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
+    if (line.step === "fix.dispatch" || line.step === "fix.review" || line.step === "fix.resolved" ||
+        line.step === "fix.ci_not_green" || line.step === "fix.commit_refused") standDown = undefined;
     if (line.step === "fix.dispatch") {
       dispatched = true;
       stalled = false;
@@ -15412,6 +15493,7 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
       stalled = line.state !== "success";
     } else if (line.step === "fix.stood_down") {
       stalled = line.outcome !== "handed_off"; // a stand-down ENDS the rung; a hand-off to the sweep is a live wait
+      standDown = stalled ? line : undefined;
     } else if (line.step === "fix.done" && line.subtype === "admission_abandoned") {
       stalled = true;
     } else if (line.step === "fix.done" && line.worker_exit === "unobserved") {
@@ -15432,10 +15514,42 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
   }
   if (awaitingAmendment !== undefined && lines.some((line) =>
     line.step === PR_TERMINAL_STEP && (line.state === "merged" || line.state === "closed") && Number(line.pr_number) === awaitingAmendment)) {
-    return true;
+    return { stalled: true };
   }
   // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
-  return stalled || !dispatched;
+  return { stalled: stalled || !dispatched, ...(stalled && standDown ? { standDown } : {}) };
+}
+
+/** W1-T10339 — WHAT A STAND-DOWN READ. Each `fix.stood_down` and `fix.needs_design` row names the head, the task-contract
+ *  revision and (for a PR with no task trailer, whose BODY is the authoritative Acceptance) the body digest it worked on. */
+export interface FixRungInputs { headSha: string; contractRevision?: string; bodySha256?: string }
+
+/** sha256 of a PR body as both the sweep and the fix rung read it — trimmed, so a trailing newline is not an edit. */
+export function prBodyDigest(body: string | undefined): string | undefined {
+  return typeof body === "string" ? createHash("sha256").update(body.trim(), "utf8").digest("hex") : undefined;
+}
+
+/** The ledger fields a stand-down records for {@link FixRungInputs}; an input that was not read is not written. */
+export function fixRungInputFields(inputs: Partial<FixRungInputs>): Record<string, string> {
+  return {
+    ...(inputs.headSha === undefined ? {} : { read_head_sha: inputs.headSha }),
+    ...(inputs.contractRevision === undefined ? {} : { read_contract_revision: inputs.contractRevision }),
+    ...(inputs.bodySha256 === undefined ? {} : { read_body_sha256: inputs.bodySha256 }),
+  };
+}
+
+/** W1-T10339 — have the inputs a recorded row read moved? A row written before these fields existed has not recorded
+ *  what it read, so it reads as moved (today's re-dispatch). A contract or body the caller could not read cannot show a
+ *  change. Only an already-open escalation at rung.strike keeps its issue-closing release. */
+export function fixRungInputsUnchanged(row: Record<string, unknown>, current: FixRungInputs): boolean {
+  if (typeof row.read_head_sha !== "string" || row.read_head_sha !== current.headSha ||
+      row.site === "rung.strike" && typeof row.reason === "string" &&
+        row.reason.startsWith("a needs-human escalation for this exact (task, PR, head ") &&
+        row.reason.includes(", cause) is ALREADY OPEN and ")) return false;
+  if (typeof row.read_contract_revision === "string" && current.contractRevision !== undefined &&
+      row.read_contract_revision !== current.contractRevision) return false;
+  return !(typeof row.read_body_sha256 === "string" && current.bodySha256 !== undefined &&
+    row.read_body_sha256 !== current.bodySha256);
 }
 
 /** W1-T9999 — the ledger row a pass writes when it settles an orphaned fix seed. */
@@ -15443,7 +15557,9 @@ export const FIX_SEED_ORPHANED_STEP = "sweep.fix.seed_orphaned";
 
 export interface FixSeed { ts?: string; runId?: string }
 /** `orphaned`: the earlier run no longer owns a continuation; ordinary checkout/worker claims still gate redispatch. */
-export type FixSeedRead = { kind: "live" | "ended" | "orphaned"; seed: FixSeed; orphanReason?: "owner-run-ended" };
+export type FixSeedRead = { kind: "live" | "ended" | "orphaned" | "held"; seed: FixSeed; orphanReason?: "owner-run-ended";
+  /** W1-T10339: `held` only — the stand-down that ended the rung while every input it read still stands. */
+  hold?: { site: string; reason: string } };
 
 function continuationEndedAtEmptyBoot(
   lines: ReadonlyArray<Record<string, unknown>>, from: number, ownerRunId: string, taskId: string, runId: string,
@@ -15466,6 +15582,7 @@ export function fixSeedRead(
   lines: ReadonlyArray<Record<string, unknown>>,
   pr: Pick<OpenPrView, "prNumber" | "headSha" | "taskId">,
   runId: string,
+  current?: FixRungInputs,
 ): FixSeedRead | undefined {
   const taskId = fixLedgerTaskIdFor(pr) ?? reviewLedgerKeyFor(undefined, pr.prNumber);
   const disposed = (line: Record<string, unknown>) => line.step === "sweep.disposed" && line.pr_number === pr.prNumber;
@@ -15498,7 +15615,15 @@ export function fixSeedRead(
     if (seed.runId !== undefined && seed.runId !== runId) return { kind: "orphaned", seed };
     return { kind: fixRungStalledWithoutNewHead([...lines], taskId) ? "ended" : "live", seed };
   }
-  if (fixRungStalledWithoutNewHead([...window], taskId)) return { kind: "ended", seed };
+  const end = readFixRungEnd([...window], taskId);
+  if (end.stalled) {
+    // W1-T10339: a stand-down whose recorded inputs all still stand is a hold, not an ended rung.
+    if (current !== undefined && end.standDown !== undefined && fixRungInputsUnchanged(end.standDown, current)) {
+      return { kind: "held", seed, hold: { site: String(end.standDown.site ?? "unknown"),
+        reason: typeof end.standDown.reason === "string" ? end.standDown.reason : "no reason recorded" } };
+    }
+    return { kind: "ended", seed };
+  }
   const handoffAt = window.findLastIndex((line) => rung(line) && line.step === "fix.stood_down" && line.outcome === "handed_off");
   // Rotation may retain another seed's handoff and an older head's dispatch in this window.
   // Neither owns this seed; unread identities still veto recovery.
@@ -15510,8 +15635,22 @@ export function fixSeedRead(
   // this boot's explicit empty adoption receipt; a different run id or age alone proves nothing.
   if (!ownerHandedOff && seed.runId !== undefined &&
       continuationEndedAtEmptyBoot(lines, seedAt, seed.runId, taskId, runId) &&
-      window.filter((line) => rung(line) && line.step === "fix.dispatch" &&
-        (typeof line.head_sha !== "string" || line.head_sha === pr.headSha)).every((line) => line.run_id === seed.runId)) {
+      window.every((line, index) => {
+        if (!rung(line) || line.step !== "fix.dispatch" ||
+            (typeof line.head_sha === "string" && line.head_sha !== pr.headSha)) return true;
+        if (line.run_id === seed.runId) return true;
+        // Rotation can retain a completed earlier round at this same head while dropping
+        // the dispositions that separated it from the seed. Only its exact terminal before
+        // the seed owner's own dispatch settles that older owner; incomplete joins still veto.
+        return index < dispatchAt && window[dispatchAt].run_id === seed.runId &&
+          typeof line.run_id === "string" && line.run_id.length > 0 &&
+          typeof line.round_id === "string" && line.round_id.length > 0 &&
+          typeof line.worker_run_id === "string" && line.worker_run_id.length > 0 &&
+          window.slice(index + 1, dispatchAt).some(done => done.step === "fix.done" &&
+            done.task_id === taskId && done.run_id === line.run_id &&
+            done.round_id === line.round_id && done.worker_run_id === line.worker_run_id &&
+            done.head_sha === pr.headSha && line.head_sha === pr.headSha);
+      })) {
     return { kind: "orphaned", seed, orphanReason: "owner-run-ended" };
   }
   // A hand-off to the sweep is a live wait only until the sweep has disposed the same head after it.
@@ -17390,6 +17529,8 @@ export async function runSweep(
   };
   const ruleBlockerByIndex = new Map<number, PrBlocker>();
   const planProofBlockedPrs = new Set<number>();
+  /** W1-T10339: taskless capped PRs, repaired in their own body by the fix lane (never plan repair). */
+  const bodyProofRepairPrs = new Set<number>();
   const baseRedStandDownPrs = new Set<number>();
   const incidentHeldPrs = new Set<number>(); // W1-T5939: blocker reads awaiting-ci, so no stage stall escalates
   const infrastructureBlockerByPr = new Map<number, PrBlocker>(); // W1-T9932: a plan-only infra red's re-run or escalation
@@ -18677,7 +18818,7 @@ export async function runSweep(
       planProofUnrunnable: planProofBlockedPrs.has(pr.prNumber) ||
         (isBlockedCi(pr) && pr.isPlanFiling === true) || metadataWait,
       strikesExhausted: disposition === "blocked-ambiguous" && isFixStrikeExhausted(pr, policy),
-      ownRed: disposition === "blocked-fixable" && isBlockedCi(pr),
+      ownRed: disposition === "blocked-fixable" && (isBlockedCi(pr) || bodyProofRepairPrs.has(pr.prNumber)),
       operatorHold: mergeHold !== undefined,
       dispatchHeld: dispatchHold !== undefined,
       securityArmRefusal: securityHold,
@@ -19383,7 +19524,10 @@ export async function runSweep(
     // W1-T7243: capped repairs keep their remedy and counters; the judge chooses whether to repeat it.
     let planShardRepairDue = false;
     if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion).arm) {
-      planProofBlockedPrs.add(pr.prNumber);
+      // W1-T10339: a PR with no task trailer has no plan shard to repair; its body is the Acceptance.
+      const bodyRepairOnly = !carriesTaskTrailer(pr);
+      if (bodyRepairOnly) { bodyProofRepairPrs.add(pr.prNumber); proofDiscrimination.bodyRepair = true; }
+      else planProofBlockedPrs.add(pr.prNumber);
       // W1-T7837: a verdict whose EVERY proof hit a host gap (runner absent, worktree reclaimed, runtime broken,
       // no exec context) says nothing about the body, so a body or shard repair cannot help it. It is re-reviewed.
       // A grade with NO recorded skip reason (a row predating W1-T305, or a base_unreadable proof) cannot be shown to be
@@ -19421,7 +19565,7 @@ export async function runSweep(
         }
       } else {
         const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
-        const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function";
+        const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function" && !bodyRepairOnly;
         const planRepairStrikes = priorPlanRepairStrikesFromLedger(pr, ledgerLines);
         const action = deps.fixProgressJudge
           ? await judgeCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, {
@@ -19479,6 +19623,10 @@ export async function runSweep(
         `the plan-shard flag is the next rung`;
     }
     let terminalDesignHold: { amended: boolean; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string } | undefined;
+    // W1-T10339: a PR with no task trailer is judged on its BODY, so the body is an input a stand-down read.
+    const standDownBodySha = carriesTaskTrailer(pr) ? undefined : prBodyDigest(pr.body);
+    let designReleasedByBody = false;
+    let standDownHold: { site: string; reason: string } | undefined;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
@@ -19505,6 +19653,9 @@ export async function runSweep(
         if (unreadable) {
           disposition = "wait";
           reason = `terminal design handoff task contract revision unavailable — no fix admitted: ${unreadable.reason}`;
+        } else if (typeof held.read_body_sha256 === "string" && standDownBodySha !== undefined && held.read_body_sha256 !== standDownBodySha) {
+          // W1-T10339: the body this taskless handoff read has been edited — a changed input releases the hold.
+          designReleasedByBody = true;
         } else {
           const semantic = semanticStandingOn !== undefined && semanticCurrent !== undefined && /^narrative-v1:[a-f0-9]{64}$/.test(semanticCurrent)
             ? { standingOn: semanticStandingOn, observed: semanticCurrent } : undefined;
@@ -19519,6 +19670,31 @@ export async function runSweep(
       } else if (handoff.kind === "unavailable") {
         disposition = "wait";
         reason = handoff.reason;
+      }
+    }
+    // W1-T10339 — A STOOD-DOWN REPAIR IS NOT RE-DISPATCHED ON INPUTS THAT HAVE NOT CHANGED. The newest `fix.stood_down`
+    // recorded the head, task-contract revision and (taskless) body digest it read; while all three stand, a dispatch
+    // would stand down again with no worker. It escalates once through the exact-head escalation route and holds.
+    if ((disposition === "conflicted" || disposition === "blocked-fixable") && terminalDesignHold === undefined &&
+        !designReleasedByBody && prior.fixed.has(`${pr.prNumber}@${pr.headSha}`) &&
+        !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
+        !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
+      let contractRevision: string | undefined;
+      let readable = true;
+      // A run-unfiled PR's task is synthetic (`PR-<n>`): its body, not a plan record, is the contract it read.
+      try {
+        contractRevision = pr.taskId === undefined || /^PR-\d+$/.test(fixLedgerTaskIdFor(pr)) ? undefined
+          : deps.readTaskContractRevision?.(pr.taskId);
+      }
+      catch (error) { readable = false; deps.log?.("sweep.stand_down_hold.unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) }); }
+      const held = readable ? fixSeedRead(ledgerLines, pr, deps.runId,
+        { headSha: pr.headSha, contractRevision, bodySha256: standDownBodySha }) : undefined;
+      if (held?.kind === "held" && held.hold !== undefined) {
+        standDownHold = held.hold;
+        disposition = "refused-escalate";
+        reason = `fix stood down at ${held.hold.site} and nothing it read has changed (head ${pr.headSha.slice(0, 7)}, task contract` +
+          `${standDownBodySha === undefined ? "" : ", PR body"}) — no worker is dispatched until one does: ${held.hold.reason}`;
+        ruleBlockerByIndex.set(prIndex, "escalated");
       }
     }
     byDisposition[disposition]++;
@@ -19754,7 +19930,7 @@ export async function runSweep(
           !metadataRedRuledOut(ledgerLines, pr);
         // W1-T9999: the seed's own rung decides, never an earlier rung's; an earlier run's seed with no rung row is settled.
         const seedRead = dispatchedThisHead ? fixSeedRead(ledgerLines, pr, deps.runId) : undefined;
-        alreadyDone = terminalDesignHold?.amended === true || metadataRed || emptyDiffReviewFailure(pr)
+        alreadyDone = terminalDesignHold?.amended === true || designReleasedByBody || metadataRed || emptyDiffReviewFailure(pr)
           ? false
           : dispatchedThisHead && (seedRead?.kind ?? "live") === "live"; // no read: a taskless PR's key (W1-T9955)
         if (seedRead?.kind === "orphaned" && !deps.dryRun) {
@@ -19788,11 +19964,15 @@ export async function runSweep(
         // escalation rather than being deduped by a stale head's `acted:true` line forever.
         alreadyDone = isContradictory ? priorContradiction !== undefined || legacyContradiction
           : !strikeLadderDue && !sloLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
+        if (standDownHold !== undefined) alreadyDone = ledgerLines.some(row => row.step === "sweep.disposed" &&
+            row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.stand_down_hold === true &&
+            (row.acted === true || row.stand_down_escalation_outcome === "delivered" || row.stand_down_escalation_outcome === "failed"));
         // W1-T2427: the LARGEST silent population (7,888 rows). Without this sentence the row is
         // indistinguishable from `deps.escalate` being unwired or throwing.
         if (alreadyDone) {
-          dedupStandDownReason =
-            `an escalation was already filed for this head (${pr.headSha.slice(0, 7)}) — the ` +
+          dedupStandDownReason = standDownHold !== undefined
+            ? `stand-down hold: ${reason} — escalated once for this head (${pr.headSha.slice(0, 7)}), no worker dispatched and no capacity spent`
+            : `an escalation was already filed for this head (${pr.headSha.slice(0, 7)}) — the ` +
             `escalation is deduped, not skipped, and a new head re-earns its own`;
         }
         break;
@@ -19902,6 +20082,7 @@ export async function runSweep(
       : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
     if (emptyDiffSupersession) extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
     if (gardenRecordRefusal !== undefined) extraDisposedFields = { ...extraDisposedFields, garden_record_refusal: gardenRecordRefusal };
+    if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_hold: true, stand_down_site: standDownHold.site };
     if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true, needs_design_round_id: terminalDesignHold.roundId,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),
       ...(terminalDesignHold.semantic === undefined ? {} : { progress_task_semantic_revision: terminalDesignHold.semantic.standingOn }) };
@@ -21402,7 +21583,14 @@ export async function runSweep(
               break;
             }
             case "refused-escalate":
-              await deps.escalate(pr, reason, question!);
+              try {
+                await deps.escalate(pr, reason, question!);
+                if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_escalation_outcome: "delivered" };
+              } catch (error) {
+                if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_escalation_outcome: "failed",
+                  stand_down_escalation_error: String(error) };
+                throw error;
+              }
               break;
             case "blocked-ambiguous":
               {
