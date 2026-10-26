@@ -9,6 +9,7 @@
   "test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts",
   "test/cash-fallback-reads-the-remaining-allowance.test.ts",
   "test/the-fix-progress-judge-sees-the-red-it-rules-on.test.ts",
+  "test/inflight-contention-does-not-durably-block.test.ts",
   "stryker.conf.json",
   "scripts/mutation-ratchet.mjs",
   "scripts/mutation-baseline.json"
