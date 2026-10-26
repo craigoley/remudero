@@ -362,7 +362,8 @@ def registered_worktrees(home, protected, repos):
             continue
         for name in sorted(os.listdir(admin)):
             try:
-                text = open(os.path.join(admin, name, "gitdir")).read().strip()
+                with open(os.path.join(admin, name, "gitdir")) as stream:
+                    text = stream.read().strip()
             except OSError:
                 continue
             path = os.path.dirname(text) if os.path.basename(text) == ".git" else ""
