@@ -377,7 +377,7 @@ test("W1-T9338: command composes a dry-run summary and contains enumeration fail
     { step: "daemon.headroom", window: "five_hour", over_ceiling: false, percent_used: 41, limit_pct: 80,
       ts: new Date().toISOString() },
   ].map((row) => JSON.stringify(row)).join("\n") + "\n");
-  const ledgerRows = () => readFileSync(f.ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const writtenRows = () => readFileSync(f.ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   const closes = () => shim.calls().filter((call) => call.startsWith("issue close"));
   const output: string[] = [];
   const errors: string[] = [];
@@ -398,11 +398,11 @@ test("W1-T9338: command composes a dry-run summary and contains enumeration fail
   assert.ok(shim.calls().some((call) => call.includes("repos/acme/other/issues?")),
     "the reconcile reads the named repo's issues");
   // The reconcile receives the command's dry run: it counts the recovered escalation and writes nothing.
-  const recoverySummaries = ledgerRows().filter((row) => row.step === "sweep.headroom_recovery.summary");
+  const recoverySummaries = writtenRows().filter((row) => row.step === "sweep.headroom_recovery.summary");
   assert.deepEqual(recoverySummaries.map((row) => [row.candidates, row.retired]), [[1, 1]],
     "the dry run still finds the candidate");
   assert.deepEqual(closes(), [], "a dry run closes no issue");
-  assert.equal(ledgerRows().some((row) => row.step === "daemon.headroom_reserve.retired"), false);
+  assert.equal(writtenRows().some((row) => row.step === "daemon.headroom_reserve.retired"), false);
   const triage = f.calls.find((c) => c.name === "triage")!;
   assert.deepEqual([triage.args[0].owner, triage.args[0].repo, triage.args[1], triage.args[3].dryRun],
     ["acme", "other", [], true]);
@@ -413,6 +413,6 @@ test("W1-T9338: command composes a dry-run summary and contains enumeration fail
   assert.equal(await sweepCommand(host, ["--repo", "other"]), 0);
   assert.equal(closes().length, 1, "a live run closes the recovered escalation");
   assert.ok(closes()[0]!.includes(issueUrl), "it closes the escalation the ledger names");
-  const retiredRows = ledgerRows().filter((row) => row.step === "daemon.headroom_reserve.retired");
+  const retiredRows = writtenRows().filter((row) => row.step === "daemon.headroom_reserve.retired");
   assert.deepEqual(retiredRows.map((row) => row.issue_url), [issueUrl]);
 });
