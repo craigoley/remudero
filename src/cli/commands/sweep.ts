@@ -37,16 +37,11 @@ import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields }
 import { reviewCommand as reviewCommandFromModule, runReview as runReviewFromModule, type ReviewCommandDeps, type ReviewCommandHost } from "./review.js";
 import { runFixRung as runFixRungFromModule, type FixCommandHost } from "./fix.js";
 import type { RunTaskCommandHost } from "./run-task-verb.js";
-import { buildWorkerEnv, billingMode } from "../../lib/env.js";
 import { type IssueGateway, type OpenIssue, ghIssueGateway } from "../../lib/escalate.js";
-import { readFeedbackDocketMarker, writeFeedbackDocketMarker } from "../../lib/feedback-docket.js";
 import { type FeedbackEntry, feedbackCaptured, listFeedback, type FeedbackOrigin, captureFeedback, stageFeedbackCapture } from "../../lib/feedback.js";
 import { step, runStepsSync } from "../../lib/git-push.js";
 import { ghExec } from "../../lib/github-transport.js";
-import { updateProposalRegistry, type Proposal } from "../../lib/inbox.js";
 import { DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
-import { type MountHeadroomCell, recommendMounts, mountRecommendationProposalCandidate } from "../../lib/mount-recommender.js";
-import { loadMounts, mountsPath } from "../../lib/mounts.js";
 import { type GhApiFetcher, type OpenPrRest, PLAN_FILING_FILE_CACHE_MAX_ENTRIES, paceGhEntry, paceGhEntryAsync, fetchSinglePrRestAsync, checkRunsRestArgs } from "../../lib/open-prs-rest.js";
 import { isGhRateLimitError, readRequiredStatusCheckContexts } from "../../lib/status.js";
 import { readyDraftPullRequest, type LiveStateResult, terminalStateReason, listRetirableEscalationIssues, type PrTerminalReconcileSummary, closedPrLookup, closedPrFromRef, runPrTerminalReconcile, type CiFailure, type RepairFilingCapture, type HandedOffHeadJudgmentPool, type SweepSummary, handedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, type EscalationReconcileSummary, runEscalationReconcile, isBlockedCi, reviewOnlyStandDownReason } from "../../lib/sweep.js";
@@ -54,7 +49,6 @@ import { openPrsWithPostedIdsSteps, type PlanFilingClassificationEvent, type Pla
 import { type TempSweepOpts, type TempSweepSummary, sweepStaleTempDirs } from "../../lib/tmp.js";
 import { ghJson } from "../../lib/worker.js";
 import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
-import { pathToFileURL } from "node:url";
 
 type HostFn = (...args: any[]) => any;
 export interface SweepCommandHost {
@@ -129,6 +123,7 @@ export interface SweepCommandHost {
   readonly gitCredentialFixSpawn: HostFn;
   readonly runInflightLockSweepRung: HostFn;
   readonly runWorkerStallDetectorRung: HostFn;
+  readonly runMountRecommenderRung: HostFn;
   readonly inFlightTaskIdsFrom: HostFn;
   readonly lightPassActionable: HostFn;
 }
@@ -795,6 +790,7 @@ export function buildSweepHook(
     handedOffHeadRiskJudge, codeScanningJudgeDeps,
     sweepEscalationTriage, runAutomaticBranchReapRung,
     runInflightLockSweepRung, runWorkerStallDetectorRung,
+    runMountRecommenderRung,
   } = host;
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -1931,132 +1927,6 @@ export async function sweepEscalationReconcile(
   return intake
     ? { ...summary, issuesSeen: intake.issuesSeen, droppedNoTaskTrailer: intake.droppedNoTaskTrailer, droppedNoReferent: intake.droppedNoReferent }
     : summary;
-}
-
-export const MOUNT_RECOMMENDER_CADENCE_POLICY = {
-  kind: "daily-ledger-evidence-accrual",
-  intervalMs: 24 * 60 * 60 * 1000,
-} as const;
-
-function mountRecommenderCadenceMarkerPath(root: string): string {
-  return join(root, "state", "last-mount-recommender.json");
-}
-
-function mountRecommenderNextFireMs(marker: ReturnType<typeof readFeedbackDocketMarker>): number | undefined {
-  if (!marker) return undefined;
-  const last = Date.parse(marker.lastFireIso);
-  if (Number.isNaN(last)) return undefined;
-  return last + MOUNT_RECOMMENDER_CADENCE_POLICY.intervalMs;
-}
-
-/**
- * W1-T2575 — the missing RECOMMENDATION leg (MASTER-PLAN §9, WS-8). `scripts/mount-headroom-
- * sweep.mjs` (W1-T2560, extended W1-T2574) already MEASURES: it groups retained ledger runs into
- * (type, risk, class) cells and, within each, into (provider, served_model, effort) arms — a
- * printed table a human had to read and act on, with nothing that turned it into a decision. This
- * rung is that missing leg: it reads the sweep's own `cells` via a dynamic import (the script
- * sits outside tsconfig's `include`, the SAME "dynamic import at the call site, cast to an
- * explicit shape" discipline `test/a-mount-comparison-across-unmatched-populations-is-not-a-
- * measurement.test.ts` already established for consuming it from typed code), hands them to
- * {@link recommendMounts} (lib/mount-recommender.ts) alongside the CURRENTLY LOADED
- * `.remudero/mounts.yaml` table (so the Tier Invariant, G-17, is checked against what is actually
- * committed), and files every cleared recommendation through `updateProposalRegistry` — the SAME
- * W1-T240 single-writer the feedback-docket rung immediately above uses, idempotent by
- * `mountRecommendationProposalId` so a re-poll before ratification never duplicates. A REFUSAL
- * (the expected, common outcome — see mount-recommender.ts's own header, "refuse more often than
- * recommend") is counted and logged, never filed: it asserts nothing an inbox proposal could
- * ratify. `recommendMounts` and `mountRecommendationProposalCandidate` are BOTH pure (no I/O,
- * mutate no routing table) — every read (the ledger corpus, `mounts.yaml`) and every write (the
- * proposal registry) happens here, in this rung, exactly once. Own try/catch: an empty/missing
- * ledger corpus (`buildMountHeadroomSweep` throws on zero runs) or a malformed `mounts.yaml` must
- * never take down the sweep composite this rides inside, same discipline as every other rung on
- * this cadence.
- */
-export async function runMountRecommenderRung(
-  config: Config,
-  runId: string,
-  log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: {
-    root?: string;
-    env?: NodeJS.ProcessEnv;
-    clock?: Clock;
-    buildMountHeadroomSweep?: (stateDir: string) => { cells: MountHeadroomCell[] };
-  } = {},
-): Promise<{ filed: number; refused: number }> {
-  const root = deps.root ?? repoRoot;
-  try {
-    const now = (deps.clock ?? systemClock).date();
-    const stateDir = join(config.root, "state");
-    const markerPath = mountRecommenderCadenceMarkerPath(config.root);
-    const marker = readFeedbackDocketMarker(markerPath);
-    const nextFireMs = mountRecommenderNextFireMs(marker);
-    if (nextFireMs !== undefined && now.getTime() < nextFireMs) {
-      log("mount_recommendation.skipped", {
-        run_id: runId,
-        cadence_kind: MOUNT_RECOMMENDER_CADENCE_POLICY.kind,
-        interval_ms: MOUNT_RECOMMENDER_CADENCE_POLICY.intervalMs,
-        last_fire_iso: marker?.lastFireIso,
-        next_fire_iso: new Date(nextFireMs).toISOString(),
-      });
-      return { filed: 0, refused: 0 };
-    }
-    writeFeedbackDocketMarker(markerPath, { lastFireIso: now.toISOString() });
-
-    let buildMountHeadroomSweep = deps.buildMountHeadroomSweep;
-    if (!buildMountHeadroomSweep) {
-      const scriptUrl = pathToFileURL(join(root, "scripts", "mount-headroom-sweep.mjs")).href;
-      ({ buildMountHeadroomSweep } = (await import(scriptUrl)) as {
-        buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
-      });
-    }
-    const sweep = buildMountHeadroomSweep(stateDir);
-    const mounts = loadMounts(mountsPath(root));
-    // Derive the objective from the SAME sanctioned environment boundary a real worker crosses:
-    // API only when config opts in AND the key is materially present; otherwise subscription.
-    // Only key names reach `billingMode`, and neither names nor values are retained below.
-    const materialWorkerEnv = buildWorkerEnv({}, deps.env ?? process.env, {
-      allowApiKey: config.overflow === "api_key",
-    });
-    const materialBillingMode = billingMode(Object.keys(materialWorkerEnv));
-    let objectiveFallbacks = 0;
-    const outcomes = recommendMounts(sweep.cells, mounts, {
-      billingMode: materialBillingMode,
-      warn: (message) => {
-        objectiveFallbacks++;
-        log("mount_recommendation.objective_fallback", { run_id: runId, detail: message.slice(0, 500) });
-      },
-    });
-
-    const registryPath = join(config.root, "state", "inbox-proposals.json");
-    let filed = 0;
-    let refused = 0;
-    for (const outcome of outcomes) {
-      if (outcome.kind === "refusal") {
-        refused++;
-        continue;
-      }
-      const candidate = mountRecommendationProposalCandidate(outcome);
-      updateProposalRegistry(registryPath, (current) => {
-        if (current.some((p) => p.id === candidate.id)) return null; // already filed, idempotent
-        filed++;
-        const proposal: Proposal = { id: candidate.id, summary: candidate.summary, evidenceAnchors: candidate.evidenceAnchors };
-        return [...current, proposal];
-      });
-    }
-
-    log("mount_recommendation.swept", {
-      run_id: runId,
-      filed,
-      refused,
-      cells: sweep.cells.length,
-      billing_mode: billingMode(Object.keys(materialWorkerEnv)),
-      objective_fallbacks: objectiveFallbacks,
-    });
-    return { filed, refused };
-  } catch (e) {
-    log("mount_recommendation.error", { error: String((e as Error)?.message ?? e) });
-    return { filed: 0, refused: 0 };
-  }
 }
 
 /**

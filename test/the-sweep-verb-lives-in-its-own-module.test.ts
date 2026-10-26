@@ -72,6 +72,7 @@ const PINNED_TO_RUN_TASK = new Map([
   ["removeAbandonedFixWorktreeOwner", "the run-task.ts git-site tables (W1-T6121, W1-T6135) name it"],
   ["publishAbandonedFixOwnerAhead", "the run-task.ts git-site tables (W1-T6121, W1-T6135) name it"],
   ["resetTrackedDirtyFixOwner", "the run-task.ts git-site table (W1-T6121) names it"],
+  ["runMountRecommenderRung", "its doc names `.remudero/`, and W1-T3701's house-layout ratchet counts files"],
 ]);
 
 /** The design's reference census, read from the sources as they stand: a run-task.ts declaration that
@@ -250,7 +251,7 @@ test("W1-T9338: full hook runs maintenance with the tick snapshot and persists b
     behindMainByPr: new Map(), baseChangedFilesByPr: new Map(), creditCandidates: [] };
   // The rungs that moved with the hook run for real: the escalation reads answer from the shared
   // gh shim, the PR-terminal rung asks the board gateway about the one PR the ledger names, and the
-  // tail and mount rungs work under the fixture root.
+  // tail rung works under the fixture root.
   const shim = ghShim([{ when: "", stdout: "[]" }]);
   t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const oldPath = process.env.PATH;
@@ -271,7 +272,7 @@ test("W1-T9338: full hook runs maintenance with the tick snapshot and persists b
   const outcome = await hook();
   assert.deepEqual(outcome, { reviewerCodeStale: stale, planOnlyRunBranchReceipts: [], reviewInputViews: [] });
   assert.deepEqual(f.logs.filter((row) => row.step === "sweep.error"), []);
-  for (const name of ["reverify", "branchReap", "locks", "stalls", "draft"]) {
+  for (const name of ["reverify", "branchReap", "locks", "stalls", "mounts", "draft"]) {
     assert.equal(f.calls.filter((c) => c.name === name).length, 1, `${name} runs once`);
   }
   const steps = f.logs.map((row) => row.step);
@@ -280,8 +281,6 @@ test("W1-T9338: full hook runs maintenance with the tick snapshot and persists b
   assert.equal(steps.filter((step) => step === "daemon.tmp_sweep").length, 1, "the temp sweep runs once");
   assert.equal(existsSync(staleTail), false, "the tail rung ages out the stale tail");
   assert.deepEqual(f.logs.find((row) => row.step === "daemon.worker_tail_sweep")?.removed, 1);
-  assert.equal(steps.filter((step) => String(step).startsWith("mount_recommendation.")).length, 1, "mounts run once");
-  assert.equal(existsSync(join(f.root, "state", "last-mount-recommender.json")), true);
   assert.equal(f.calls.find((c) => c.name === "stalls")!.args[5], 456);
   assert.equal(f.calls.find((c) => c.name === "effects")!.args[0].spawnImpl instanceof Function, true);
   const persisted = readAutomaticBranchReapState(join(f.root, "state", automaticBranchReapStateFileName("fixture")));

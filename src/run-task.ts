@@ -13,10 +13,10 @@ export { captureRepairFeedbackWithPriorVerdict, dispatchFixPreflightStandDown, r
   latestPriorVerdictSuppresses, buildOpenPrViews, updatedForWorkflowFromLedger, runOneShotSweep,
   sweepEscalationReconcile, renderEscalationReconcileSummary, buildEscalationCloser,
   retireRecoveredHeadroomEscalations, tickReadReverificationDeps, buildRereadPrAtAct,
-  sweepPrTerminalRung, runTmpSweepRung, runWorkerTailSweepRung, runMountRecommenderRung,
-  fixRungAllowedBesideInFlight, blockedFixableIsRequeueOnly, reviewOnlyLightPassDeps,
-  buildHeadroomRecoveryCandidates, renderHeadroomRecoveryCloseComment, fetchOpenPrsWithPostedIds,
-  sweepStaleWorkerTails, runIsAwaitingExternal, MOUNT_RECOMMENDER_CADENCE_POLICY } from "./cli/commands/sweep.js";
+  sweepPrTerminalRung, runTmpSweepRung, runWorkerTailSweepRung, fixRungAllowedBesideInFlight,
+  blockedFixableIsRequeueOnly, reviewOnlyLightPassDeps, buildHeadroomRecoveryCandidates,
+  renderHeadroomRecoveryCloseComment, fetchOpenPrsWithPostedIds, sweepStaleWorkerTails,
+  runIsAwaitingExternal } from "./cli/commands/sweep.js";
 export type { SweepEscalationReconcileSummary } from "./cli/commands/sweep.js";
 import {
   runFixRung as runFixRungFromModule,
@@ -1426,6 +1426,7 @@ import {
   type AgentRuling,
   type RulingJudgeVerdict,
 } from "./lib/ruling-judge.js";
+import { mountRecommendationProposalCandidate, recommendMounts, type MountHeadroomCell } from "./lib/mount-recommender.js";
 import {
   DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS,
   GATED_RUNGS,
@@ -30983,6 +30984,132 @@ function feedbackDocketMarkerWithFire(
   };
 }
 
+export const MOUNT_RECOMMENDER_CADENCE_POLICY = {
+  kind: "daily-ledger-evidence-accrual",
+  intervalMs: 24 * 60 * 60 * 1000,
+} as const;
+
+function mountRecommenderCadenceMarkerPath(root: string): string {
+  return join(root, "state", "last-mount-recommender.json");
+}
+
+function mountRecommenderNextFireMs(marker: ReturnType<typeof readFeedbackDocketMarker>): number | undefined {
+  if (!marker) return undefined;
+  const last = Date.parse(marker.lastFireIso);
+  if (Number.isNaN(last)) return undefined;
+  return last + MOUNT_RECOMMENDER_CADENCE_POLICY.intervalMs;
+}
+
+/**
+ * W1-T2575 — the missing RECOMMENDATION leg (MASTER-PLAN §9, WS-8). `scripts/mount-headroom-
+ * sweep.mjs` (W1-T2560, extended W1-T2574) already MEASURES: it groups retained ledger runs into
+ * (type, risk, class) cells and, within each, into (provider, served_model, effort) arms — a
+ * printed table a human had to read and act on, with nothing that turned it into a decision. This
+ * rung is that missing leg: it reads the sweep's own `cells` via a dynamic import (the script
+ * sits outside tsconfig's `include`, the SAME "dynamic import at the call site, cast to an
+ * explicit shape" discipline `test/a-mount-comparison-across-unmatched-populations-is-not-a-
+ * measurement.test.ts` already established for consuming it from typed code), hands them to
+ * {@link recommendMounts} (lib/mount-recommender.ts) alongside the CURRENTLY LOADED
+ * `.remudero/mounts.yaml` table (so the Tier Invariant, G-17, is checked against what is actually
+ * committed), and files every cleared recommendation through `updateProposalRegistry` — the SAME
+ * W1-T240 single-writer the feedback-docket rung immediately above uses, idempotent by
+ * `mountRecommendationProposalId` so a re-poll before ratification never duplicates. A REFUSAL
+ * (the expected, common outcome — see mount-recommender.ts's own header, "refuse more often than
+ * recommend") is counted and logged, never filed: it asserts nothing an inbox proposal could
+ * ratify. `recommendMounts` and `mountRecommendationProposalCandidate` are BOTH pure (no I/O,
+ * mutate no routing table) — every read (the ledger corpus, `mounts.yaml`) and every write (the
+ * proposal registry) happens here, in this rung, exactly once. Own try/catch: an empty/missing
+ * ledger corpus (`buildMountHeadroomSweep` throws on zero runs) or a malformed `mounts.yaml` must
+ * never take down the sweep composite this rides inside, same discipline as every other rung on
+ * this cadence.
+ */
+export async function runMountRecommenderRung(
+  config: Config,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: {
+    root?: string;
+    env?: NodeJS.ProcessEnv;
+    clock?: Clock;
+    buildMountHeadroomSweep?: (stateDir: string) => { cells: MountHeadroomCell[] };
+  } = {},
+): Promise<{ filed: number; refused: number }> {
+  const root = deps.root ?? repoRoot;
+  try {
+    const now = (deps.clock ?? systemClock).date();
+    const stateDir = join(config.root, "state");
+    const markerPath = mountRecommenderCadenceMarkerPath(config.root);
+    const marker = readFeedbackDocketMarker(markerPath);
+    const nextFireMs = mountRecommenderNextFireMs(marker);
+    if (nextFireMs !== undefined && now.getTime() < nextFireMs) {
+      log("mount_recommendation.skipped", {
+        run_id: runId,
+        cadence_kind: MOUNT_RECOMMENDER_CADENCE_POLICY.kind,
+        interval_ms: MOUNT_RECOMMENDER_CADENCE_POLICY.intervalMs,
+        last_fire_iso: marker?.lastFireIso,
+        next_fire_iso: new Date(nextFireMs).toISOString(),
+      });
+      return { filed: 0, refused: 0 };
+    }
+    writeFeedbackDocketMarker(markerPath, { lastFireIso: now.toISOString() });
+
+    let buildMountHeadroomSweep = deps.buildMountHeadroomSweep;
+    if (!buildMountHeadroomSweep) {
+      const scriptUrl = pathToFileURL(join(root, "scripts", "mount-headroom-sweep.mjs")).href;
+      ({ buildMountHeadroomSweep } = (await import(scriptUrl)) as {
+        buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
+      });
+    }
+    const sweep = buildMountHeadroomSweep(stateDir);
+    const mounts = loadMounts(mountsPath(root));
+    // Derive the objective from the SAME sanctioned environment boundary a real worker crosses:
+    // API only when config opts in AND the key is materially present; otherwise subscription.
+    // Only key names reach `billingMode`, and neither names nor values are retained below.
+    const materialWorkerEnv = buildWorkerEnv({}, deps.env ?? process.env, {
+      allowApiKey: config.overflow === "api_key",
+    });
+    const materialBillingMode = billingMode(Object.keys(materialWorkerEnv));
+    let objectiveFallbacks = 0;
+    const outcomes = recommendMounts(sweep.cells, mounts, {
+      billingMode: materialBillingMode,
+      warn: (message) => {
+        objectiveFallbacks++;
+        log("mount_recommendation.objective_fallback", { run_id: runId, detail: message.slice(0, 500) });
+      },
+    });
+
+    const registryPath = join(config.root, "state", "inbox-proposals.json");
+    let filed = 0;
+    let refused = 0;
+    for (const outcome of outcomes) {
+      if (outcome.kind === "refusal") {
+        refused++;
+        continue;
+      }
+      const candidate = mountRecommendationProposalCandidate(outcome);
+      updateProposalRegistry(registryPath, (current) => {
+        if (current.some((p) => p.id === candidate.id)) return null; // already filed, idempotent
+        filed++;
+        const proposal: Proposal = { id: candidate.id, summary: candidate.summary, evidenceAnchors: candidate.evidenceAnchors };
+        return [...current, proposal];
+      });
+    }
+
+    log("mount_recommendation.swept", {
+      run_id: runId,
+      filed,
+      refused,
+      cells: sweep.cells.length,
+      billing_mode: billingMode(Object.keys(materialWorkerEnv)),
+      objective_fallbacks: objectiveFallbacks,
+    });
+    return { filed, refused };
+  } catch (e) {
+    log("mount_recommendation.error", { error: String((e as Error)?.message ?? e) });
+    return { filed: 0, refused: 0 };
+  }
+}
+
 /**
  * Automatic remote-branch cleanup for one target repository. The cheap branch-set read happens on
  * every full sweep, while the existing expensive classifier/pruner runs only on first use, a branch
@@ -41470,6 +41597,7 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     gitCredentialFixSpawn,
     runInflightLockSweepRung,
     runWorkerStallDetectorRung,
+    runMountRecommenderRung,
     inFlightTaskIdsFrom,
     lightPassActionable,
   };
