@@ -93,3 +93,37 @@ test("a source coverage refusal preserves observations without inventing a workf
   assert.deepEqual(locateCiFrictionOwner("check:ci-log:coverage-ratchet:coverage-report-failed", ["coverage-ratchet: COVERAGE-REPORT-FAILED artifact upload failed"], f.search())?.files,
     [workflow], "actual infrastructure evidence keeps its original workflow route");
 });
+
+
+test("a scanner warning retains measured friction without inventing a defect in its reporter", t => {
+  const f = fixture(t);
+  const warning = "UNTRUSTED SCANNER EVIDENCE: the CodeQL check failed at this pull request's head, and this high-severity";
+  writeFileSync(join(f.repo.dir, "src/scanner-reporter.ts"), `export const warning = ${JSON.stringify(warning)};\n`);
+  f.repo.git("add", "."); f.repo.git("commit", "-qm", "record the real scanner warning producer");
+  f.repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const search = f.search();
+  assert.deepEqual(search.filesContaining(warning).map(hit => hit.file), ["src/scanner-reporter.ts"],
+    "positive control sees the exact warning in its actual emitter");
+  const key = "check:ci-log:codeql-alert-909-js-file-system-race:untrusted-scanner-evidence-the-codeql-check-failed-at-this-p";
+  const detail = `ci-log round — coverage-shard (7/8): unrelated caller assertion; CodeQL alert #910 (js/file-system-race): ${warning}; CodeQL alert #909 (js/file-system-race): ${warning}; security-merge-policy`;
+  assert.equal(locateCiFrictionOwner(key, [detail], search), undefined,
+    "emitting a scanner finding establishes no harness failure mechanism");
+  const result = ladder(key, [detail, detail, detail, detail], search);
+  assert.equal(result.next?.decision.kind, "escalate");
+  assert.equal(result.next?.price.minutes, 27);
+  assert.equal(result.next?.price.rounds, 4);
+  assert.equal(result.next?.decision.kind === "escalate" && result.next.decision.holdReason, "no-owner");
+  assert.match(result.next?.decision.kind === "escalate" ? result.next.decision.why : "", /scanner.*mechanism.*UNKNOWN/i);
+});
+
+test("a concrete scanner runner defect remains owned even beside another alert's warning", t => {
+  const f = fixture(t);
+  writeFileSync(join(f.repo.dir, "src/scanner-runner.ts"), 'throw new Error("scanner helper crashed");\n');
+  f.repo.git("add", "."); f.repo.git("commit", "-qm", "record a concrete scanner runner failure");
+  f.repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const key = "check:ci-log:codeql-alert-909-js-file-system-race:scanner-helper-crashed";
+  const details = ["ci-log round — CodeQL alert #910 (js/file-system-race): UNTRUSTED SCANNER EVIDENCE: another finding; CodeQL alert #909 (js/file-system-race): scanner helper crashed"];
+  assert.deepEqual(locateCiFrictionOwner(key, details, f.search())?.files, ["src/scanner-runner.ts"],
+    "only this cause's own signature can identify its diagnosis");
+  assert.equal(ladder(key, details, f.search()).next?.decision.kind, "draft");
+});

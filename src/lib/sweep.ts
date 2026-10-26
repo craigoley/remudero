@@ -3437,9 +3437,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       let jobId: string | undefined;
       try {
         const rollup = await restRollupFor(owner, repo, pr.headSha, readJsonImpl);
-        const gate = dedupeRollupByLatestAttempt(rollup).find(
-          (c) => (c.name ?? c.context ?? "") === CI_GATE_CHECK_NAME,
-        );
+        const gate = ciGateReaggregateTarget(rollup, transition.gateRunId);
         jobId = gate && checkJobId(gate);
       } catch (e) {
         log("sweep.ci_gate_reaggregate.rollup_error", {
@@ -5320,7 +5318,10 @@ export function classifyMergeRefusal(
   }
   if (!rollup) return { kind: "other", check, reason: `GitHub names "${check}", but this head's rollup is unreadable` };
   const { latest, superseded } = classifyRollupSupersession(rollup);
-  const newest = latest.find((c) => rollupEntryName(c) === check);
+  const matches = latest.filter((c) => rollupEntryName(c) === check);
+  const unresolved = matches.filter((c) => !REQUIRED_CHECK_OK.has(rollupEntryState(c)));
+  if (unresolved.length > 1) return { kind: "real-red", check, reason: `"${check}" has multiple unresolved independent producers` };
+  const newest = unresolved[0] ?? matches[0];
   if (!newest) return { kind: "other", check, reason: `GitHub names "${check}", but this head's rollup carries no run of it` };
   const state = rollupEntryState(newest);
   const jobOf = (c: RollupCheckEntry) => c.jobId ?? checkJobId(c);
@@ -5340,9 +5341,9 @@ export function classifyMergeRefusal(
   if (check === CI_GATE_CHECK_NAME) {
     const gated = required.filter((name) => name !== CI_GATE_CHECK_NAME);
     if (gated.length === 0) return { kind: "other", check, reason: "ci-gate's newest run failed and its REQUIRED list is unreadable" };
-    const inputs = gated.map((name) => latest.find((c) => rollupEntryName(c) === name));
-    const present = inputs.filter((c): c is RollupCheckEntry => c !== undefined);
-    const allGreen = present.length === gated.length && present.every((c) => REQUIRED_CHECK_OK.has(rollupEntryState(c)));
+    const present = latest.filter((c) => gated.includes(rollupEntryName(c)));
+    const allGreen = gated.every((name) => present.some((c) => rollupEntryName(c) === name)) &&
+      present.every((c) => REQUIRED_CHECK_OK.has(rollupEntryState(c)));
     const lastInput = present.reduce<RollupCheckEntry | undefined>((acc, c) =>
       acc === undefined || (c.completedAt ?? "") > (acc.completedAt ?? "") ? c : acc, undefined);
     if (allGreen && newest.completedAt && lastInput?.completedAt && lastInput.completedAt > newest.completedAt) {
@@ -7103,6 +7104,7 @@ export interface RollupCheckEntry {
   externalId?: string;
   workflowRunId?: number;
   workflowId?: number;
+  workflowName?: string;
   jobId?: string;
 }
 
@@ -7132,22 +7134,29 @@ export const REQUIRED_CHECK_FAIL = new Set([
   "STALE",
 ]);
 
-/** W1-T5694: newest run per workflow/name, then latest attempt; independent producers use completion.
+function rollupProducerKey(c: RollupCheckEntry): { key: string; known: boolean } {
+  const posted = /^(?:run:\d+:\d+:)?job:\d+$/.test(c.externalId ?? "");
+  const kind = c.context !== undefined && c.name === undefined ? "status" : "check";
+  const identifiedWorkflow = c.workflowId !== undefined ? `workflow:${c.workflowId}`
+    : c.workflowName ? `workflow-name:${c.workflowName}` : undefined;
+  const workflow = posted ? identifiedWorkflow ? `posted:${identifiedWorkflow}` : "posted"
+    : identifiedWorkflow ?? "legacy";
+  return { key: JSON.stringify([kind, workflow, c.name ?? c.context ?? ""]),
+    known: posted || c.workflowId !== undefined || Boolean(c.workflowName) };
+}
+
+/** Newest run per producer/name, then latest attempt. Independent producers remain independently
+ *  enforced; a later completion from another workflow cannot clear their failures (#14160).
  *  Entries without workflow identity retain start/id ordering and last-encountered status ties. */
 export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: readonly T[]): T[] {
   const groups = new Map<string, T>();
-  const identity = (c: T) => {
-    const posted = /^(?:run:\d+:\d+:)?job:\d+$/.test(c.externalId ?? "");
-    const workflow = posted ? "posted" : c.workflowId === undefined ? "legacy" : `workflow:${c.workflowId}`;
-    return { key: JSON.stringify([workflow, c.name ?? c.context ?? ""]), known: posted || c.workflowId !== undefined };
-  };
-  const later = (c: T, prior: T, completion = false): boolean => {
-    const time = (e: T) => completion ? e.completedAt ?? e.startedAt ?? "" : e.startedAt ?? "";
+  const later = (c: T, prior: T): boolean => {
+    const time = (e: T) => e.startedAt ?? "";
     if (time(c) !== time(prior)) return time(c) > time(prior);
     return typeof c.checkRunId !== "number" || typeof prior.checkRunId !== "number" || c.checkRunId >= prior.checkRunId;
   };
   for (const c of rollup) {
-    const { key, known } = identity(c);
+    const { key, known } = rollupProducerKey(c);
     const prior = groups.get(key);
     if (!prior) {
       groups.set(key, c);
@@ -7159,13 +7168,7 @@ export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: 
       groups.set(key, c);
     }
   }
-  const latest = new Map<string, T>();
-  for (const c of groups.values()) {
-    const name = c.name ?? c.context ?? "";
-    const prior = latest.get(name);
-    if (!prior || later(c, prior, true)) latest.set(name, c);
-  }
-  return [...latest.values()];
+  return [...groups.values()];
 }
 
 /** One failure a later attempt of the same check outranks; `pendingRerun` when that attempt is still running. */
@@ -7178,10 +7181,10 @@ export interface SupersededRed<T extends RollupCheckEntry = RollupCheckEntry> {
 /** W1-T4908 — `latest` is exactly {@link dedupeRollupByLatestAttempt}'s output; `superseded` names each dropped failure. */
 export function classifyRollupSupersession<T extends RollupCheckEntry>(rollup: readonly T[]): { latest: T[]; superseded: SupersededRed<T>[] } {
   const latest = dedupeRollupByLatestAttempt(rollup);
-  const keep = new Map(latest.map((c) => [c.name ?? c.context ?? "", c]));
+  const keep = new Map(latest.map((c) => [rollupProducerKey(c).key, c]));
   const state = (c: T) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
   const superseded = rollup.flatMap((entry) => {
-    const supersededBy = keep.get(entry.name ?? entry.context ?? "") as T;
+    const supersededBy = keep.get(rollupProducerKey(entry).key) as T;
     if (supersededBy === entry || !REQUIRED_CHECK_FAIL.has(state(entry))) return [];
     const s = state(supersededBy);
     return [{ entry, supersededBy, pendingRerun: !REQUIRED_CHECK_OK.has(s) && !REQUIRED_CHECK_FAIL.has(s) }];
@@ -7192,8 +7195,10 @@ export function classifyRollupSupersession<T extends RollupCheckEntry>(rollup: r
 /** W1-T9913 — check names whose dropped failure is outranked by a newest run that PASSED, never by a red or a pending one. */
 export function supersededRedsNowPassing(rollup: readonly RollupCheckEntry[]): string[] {
   const state = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
-  return [...new Set(classifyRollupSupersession(rollup).superseded
-    .filter((r) => REQUIRED_CHECK_OK.has(state(r.supersededBy))).map((r) => r.entry.name ?? r.entry.context ?? ""))];
+  const { latest, superseded } = classifyRollupSupersession(rollup);
+  return [...new Set(superseded
+    .filter((r) => REQUIRED_CHECK_OK.has(state(r.supersededBy))).map((r) => r.entry.name ?? r.entry.context ?? ""))]
+    .filter((name) => latest.filter((c) => (c.name ?? c.context ?? "") === name).every((c) => REQUIRED_CHECK_OK.has(state(c))));
 }
 
 /** W1-T4105 — what a fix worker was sent against: the PR head and the check(s) it must fix. */
@@ -7226,9 +7231,10 @@ export function decideFixSuperseded(
   }
   if (snapshot.failingChecks.length === 0) return { kind: "continue" };
   const latest = dedupeRollupByLatestAttempt(observed.rollup ?? []);
-  const green = snapshot.failingChecks.every((name) =>
-    latest.some((c) => (c.name ?? c.context) === name && REQUIRED_CHECK_OK.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase())),
-  );
+  const green = snapshot.failingChecks.every((name) => {
+    const matches = latest.filter((c) => (c.name ?? c.context) === name);
+    return matches.length > 0 && matches.every((c) => REQUIRED_CHECK_OK.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase()));
+  });
   return green ? { kind: "superseded", condition: "check-green", oldHead: head, newHead: head } : { kind: "continue" };
 }
 
@@ -7305,7 +7311,7 @@ function requiredCheckGate(
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const required = new Set(requiredContexts ?? []);
   const knownRequired = required.size > 0;
-  // Dedupe to ONE entry per check name — the LATEST attempt — before judging. Dedup cannot change
+  // Dedupe to ONE entry per producer/name — the LATEST attempt — before judging. Dedup cannot change
   // whether `gate` is empty (grouping merges rows sharing a key, it never drops one), so the
   // "required but not yet registered" distinction the caller draws is unaffected (W1-T457).
   const gate = dedupeRollupByLatestAttempt(
@@ -7379,9 +7385,9 @@ export function cancelledRequiredCheckNames(
   if (required.size === 0) return [];
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const gate = dedupeRollupByLatestAttempt(all);
-  return gate
+  return [...new Set(gate
     .filter((c) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase() === "CANCELLED")
-    .map((c) => c.name ?? c.context ?? "unknown");
+    .map((c) => c.name ?? c.context ?? "unknown"))];
 }
 
 const qualityGate = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): RollupCheckEntry[] => dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT && ([...(requiredCheckNames ?? [])].includes(c.name ?? "") || [...(requiredCheckNames ?? [])].includes(c.context ?? ""))));
@@ -7389,7 +7395,7 @@ const rollupState = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.statu
 export const redQualityGateNames = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): string[] => {
   const required = [...(requiredCheckNames ?? [])];
   const red = qualityGate(rollup, required).filter((c) => REQUIRED_CHECK_FAIL.has(rollupState(c))).map((c) => c.name ?? c.context ?? "unknown");
-  if (red.length > 0) return red;
+  if (red.length > 0) return [...new Set(red)];
   const latest = dedupeRollupByLatestAttempt(rollup ?? []);
   const families = CI_MATRIX_AGGREGATORS.filter((entry) =>
     (entry.aggregator === "ci" || entry.aggregator === "coverage-ratchet") && required.includes(entry.aggregator) &&
@@ -7460,12 +7466,10 @@ export function stillRedRequiredNames(redNames: readonly string[], rollup: Rollu
   if (redNames.length === 0) return [];
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const deduped = dedupeRollupByLatestAttempt(all);
-  const byKey = new Map(deduped.map((c) => [c.name ?? c.context ?? "", c] as const));
   return redNames.filter((name) => {
-    const fresh = byKey.get(name);
-    if (!fresh || !fresh.startedAt) return true; // unreadable/absent — fail open, still red
-    const s = (fresh.state ?? fresh.conclusion ?? fresh.status ?? "").toUpperCase();
-    return REQUIRED_CHECK_FAIL.has(s);
+    const matches = deduped.filter((c) => (c.name ?? c.context ?? "") === name);
+    return matches.length === 0 || matches.some((fresh) =>
+      !fresh.startedAt || REQUIRED_CHECK_FAIL.has((fresh.state ?? fresh.conclusion ?? fresh.status ?? "").toUpperCase()));
   });
 }
 
@@ -7683,7 +7687,10 @@ const rollupRunId = (c: RollupCheckEntry): number | undefined =>
  *  still in flight. No run identity proves nothing in flight; no rollup proves nothing (W1-T5953). */
 export function deferredRequeueTarget(rollup: RollupCheckEntry[] | undefined, name: string): { jobId?: string; runInFlight: boolean } | undefined {
   if (!rollup) return undefined;
-  const entry = dedupeRollupByLatestAttempt(rollup).find((c) => (c.name ?? c.context) === name);
+  const matches = dedupeRollupByLatestAttempt(rollup).filter((c) => (c.name ?? c.context) === name);
+  const unresolved = matches.filter((c) => !REQUIRED_CHECK_OK.has(rollupState(c)));
+  if (unresolved.length > 1 || (unresolved.length === 0 && matches.length > 1)) return undefined;
+  const entry = unresolved[0] ?? matches[0];
   if (!entry) return { runInFlight: false };
   const run = rollupRunId(entry);
   return {
@@ -8294,12 +8301,23 @@ export function earlyRedEvidenceRollup<T extends RollupCheckEntry>(
  *  sibling's latest attempt is a terminal SUCCESS that STARTED AFTER ci-gate's did. `jobId` is
  *  ci-gate's OWN, never the sibling's: the AGGREGATOR is re-driven. */
 export interface StaleCiGateTransition {
+  /** Bind fresh retry targeting to the failed aggregate's run, never a same-named independent job. */
+  gateRunId?: number;
   jobId?: string;
   /** The required sibling whose later terminal success makes ci-gate's own verdict stale. */
   siblingName: string;
   /** That sibling's latest-attempt `startedAt` (ISO) — names WHICH transition (design iv), and
    *  is what {@link ciGateReaggregateKey} bounds the recompute to firing once for. */
   siblingStartedAt: string;
+}
+
+function ciGateReaggregateTarget(rollup: readonly RollupCheckEntry[], gateRunId?: number): RollupCheckEntry | undefined {
+  const gates = dedupeRollupByLatestAttempt(rollup).filter((c) => (c.name ?? c.context) === CI_GATE_CHECK_NAME);
+  const failed = gates.filter((c) => REQUIRED_CHECK_FAIL.has(rollupState(c)) &&
+    (gateRunId === undefined || rollupRunId(c) === gateRunId));
+  if (failed.length !== 1) return undefined;
+  if (gateRunId === undefined && gates.some((c) => c !== failed[0] && !REQUIRED_CHECK_OK.has(rollupState(c)))) return undefined;
+  return failed[0];
 }
 
 /** W1-T1275 — detect the ONE shape design note iii pins, and nothing wider. `ci-gate` must have a
@@ -8310,7 +8328,7 @@ export function staleCiGateTransition(rollup: RollupCheckEntry[] | undefined): S
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   if (all.length === 0) return undefined;
   const deduped = dedupeRollupByLatestAttempt(all);
-  const gate = deduped.find((c) => (c.name ?? c.context ?? "") === CI_GATE_CHECK_NAME);
+  const gate = ciGateReaggregateTarget(deduped);
   if (!gate || !gate.startedAt) return undefined;
   const gateState = (gate.state ?? gate.conclusion ?? gate.status ?? "").toUpperCase();
   if (!REQUIRED_CHECK_FAIL.has(gateState)) return undefined;
@@ -8324,7 +8342,9 @@ export function staleCiGateTransition(rollup: RollupCheckEntry[] | undefined): S
     if (!latest || c.startedAt > (latest.startedAt ?? "")) latest = c;
   }
   if (!latest) return undefined;
-  return { siblingName: latest.name ?? latest.context ?? "unknown", siblingStartedAt: latest.startedAt! };
+  const gateRunId = rollupRunId(gate);
+  return { siblingName: latest.name ?? latest.context ?? "unknown", siblingStartedAt: latest.startedAt!,
+    ...(gateRunId === undefined ? {} : { gateRunId }) };
 }
 
 /** The (head, sibling-transition) identity {@link CI_GATE_REAGGREGATE_STEP}'s rows are keyed on.
@@ -17778,9 +17798,9 @@ export async function runSweep(
     const memo = refreshClearanceKey(pr.prNumber, pr.headSha, mainSha, testFiles);
     const decided = refusedClearances.get(memo);
     if (decided !== undefined) return { refresh: false, evidence: decided, reason: "this head's refusal at this main is already recorded" };
-    let mainChangedFiles: string[] | undefined;
+    let facts: RedBaseRefreshFacts | undefined;
     try {
-      mainChangedFiles = (await deps.readRedBaseRefreshFacts?.(pr))?.baseChangedFiles;
+      facts = await deps.readRedBaseRefreshFacts?.(pr);
     } catch (error) {
       // An unread delta is no evidence either way: `mainPathsReachingRed` then proves nothing.
       log("sweep.red_base_refresh.read_error", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
@@ -17792,11 +17812,16 @@ export async function runSweep(
       // An unreadable closure is unknown, never empty: the pre-filter cannot refuse on it.
       log("refresh.clearance.closure_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
     }
+    // The same reach rule over the PR's OWN diff: a test passing on main is evidence main fixed it only when
+    // the head's change cannot reach it. A base-red head's red reproduced on main itself, so its diff decides nothing.
+    const prChangedFiles = arm === "base-red" || facts?.prAddedLines === undefined ? undefined : Object.keys(facts.prAddedLines);
+    const ownReach = mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles: prChangedFiles, closure, isHarnessPath: isCiHarnessPath });
     const clearance = await assessRefreshClearance({
       failingTestFiles: testFiles,
-      reach: mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles, closure, isHarnessPath: isCiHarnessPath }),
+      reach: mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles: facts?.baseChangedFiles, closure, isHarnessPath: isCiHarnessPath }),
       priorRefresh: refreshedOnSameRed(refreshRecords, pr.prNumber, checks, testFiles) ? true
         : history.source === "unreadable" ? undefined : false,
+      ...(ownReach === undefined ? {} : { ownReach: ownReach.counted }),
     }, deps.reproduceFailingTestsOnMerge ? () => deps.reproduceFailingTestsOnMerge!(pr, testFiles, mainSha) : undefined);
     appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REFRESH_CLEARANCE_STEP,
       ...refreshClearanceFields({ arm, pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainSha, checks, test_files: testFiles },
@@ -19105,11 +19130,11 @@ export async function runSweep(
         ...pr.cancelledRequiredChecks!.map(c => c.name),
       ], rollup));
       const cancelled = pr.cancelledRequiredChecks!.filter(c => fresh.has(c.name));
-      const freshByName = new Map(dedupeRollupByLatestAttempt(rollup ?? []).map(c => [c.name ?? c.context, c]));
+      const freshProducers = dedupeRollupByLatestAttempt(rollup ?? []);
       const explained = new Set(pr.cancelledRequiredChecks!.flatMap(c => c.explainedFailures ?? [])
         .filter(alias => {
-          const latest = freshByName.get(alias.name);
-          return !latest || !latest.checkRunId || latest.checkRunId === alias.checkRunId || !REQUIRED_CHECK_FAIL.has(rollupState(latest));
+          const matches = freshProducers.filter(c => (c.name ?? c.context) === alias.name);
+          return matches.every(latest => !latest.checkRunId || latest.checkRunId === alias.checkRunId || !REQUIRED_CHECK_FAIL.has(rollupState(latest)));
         }).map(alias => alias.name));
       const deterministicTimeouts = new Set<string>();
       const outcomes: string[] = [];
@@ -19131,11 +19156,12 @@ export async function runSweep(
         }
         if (deferred !== undefined) continue;
         if (check.explainedFailures?.length) {
-          const producer = freshByName.get(check.name);
+          const producers = freshProducers.filter(latest => (latest.name ?? latest.context) === check.name && checkJobId(latest) === check.jobId);
+          const producer = producers.length === 1 ? producers[0] : undefined;
           if (!producer || (producer.conclusion ?? producer.state ?? "").toUpperCase() !== "CANCELLED" ||
-              (producer.status ?? "").toUpperCase() !== "COMPLETED" || checkJobId(producer) !== check.jobId || !check.explainedFailures.every(alias => {
-                const latest = freshByName.get(alias.name);
-                return latest !== undefined && latest.checkRunId === alias.checkRunId && rollupState(latest) === "FAILURE";
+              (producer.status ?? "").toUpperCase() !== "COMPLETED" || !check.explainedFailures.every(alias => {
+                const aliases = freshProducers.filter(latest => (latest.name ?? latest.context) === alias.name && latest.checkRunId === alias.checkRunId);
+                return aliases.length === 1 && rollupState(aliases[0]) === "FAILURE";
               })) {
             outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
             continue;
