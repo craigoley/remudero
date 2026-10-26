@@ -80,8 +80,8 @@ export interface SweepCommandHost {
   readonly writeFixCensusSnapshotAsync: HostFn;
   readonly runPlanScopedFixRound: HostFn;
   readonly materializePlanRoundWorktree: HostFn;
-  readonly pushFixRoundPrechecked: HostFn;
-  readonly pushFixRound: HostFn;
+  pushSweepFixRound(deps: Pick<BuildSweepEffectsDeps, "log" | "repo">, wt: string, branch: string,
+    expectedHeadSha?: string, priorHeadSha?: string): Promise<unknown>;
   readonly buildFixRungDispatchArgs: HostFn;
   readonly openTaskIdsFromPlan: HostFn;
   readonly waitForCiGreen: HostFn;
@@ -215,7 +215,7 @@ export function buildSweepEffects(
     preserveStaleDirtyFixOwner, clearStaleDirtyFixOwner, resetTrackedDirtyFixOwner,
     depReviewCommand, dispatchFixPreflightStandDown, ghLiveState, resolveFixRungTaskContractAtHeadAsync,
     createFixRungWorktreeWithToolchain, captureWorktreeSnapshotViaGit, writeFixCensusSnapshotAsync,
-    runPlanScopedFixRound, materializePlanRoundWorktree, pushFixRoundPrechecked, pushFixRound,
+    runPlanScopedFixRound, materializePlanRoundWorktree, pushSweepFixRound,
     buildFixRungDispatchArgs, openTaskIdsFromPlan, waitForCiGreen, restRollupFor,
     buildRequiredFixReviewRunner, fetchPrBodyViaGh, updatePrBodyViaGh, repairPrMetadata,
     ghLiveHead, fetchPrDiffFilesViaGh, redBaseRefreshFactsFromRest,
@@ -527,7 +527,7 @@ export function buildSweepEffects(
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
     materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
     pushFixRoundImpl: (wt: string, branch: string, sha?: string, prior?: string) => // W1-T8833: the sweep rung pushes as the run loop's does
-      pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior),
+      pushSweepFixRound(deps, wt, branch, sha, prior),
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs,
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan,
     waitForCiGreenImpl: waitForCiGreen,

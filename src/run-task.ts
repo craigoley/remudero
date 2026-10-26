@@ -42281,8 +42281,8 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     writeFixCensusSnapshotAsync,
     runPlanScopedFixRound,
     materializePlanRoundWorktree,
-    pushFixRoundPrechecked,
-    pushFixRound,
+    pushSweepFixRound: (deps, wt, branch, sha, prior) =>
+      pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior),
     buildFixRungDispatchArgs,
     openTaskIdsFromPlan,
     waitForCiGreen,
