@@ -60,7 +60,7 @@ function scene(seed: Record<string, unknown>[]) {
 const lightPass = (prs: OpenPrView[], deps: SweepDeps) => runSweepLightPass(prs, { ...deps,
   actionable: (d) => d === "post-review", standDownReasonFor: () => "deferred to full sweep (light pass)" });
 
-test("a stalled PR whose own escalation is still open files no second stage-stall escalation", async () => {
+test("a stalled PR whose own escalation is still open escalates once, naming that escalation", async () => {
   const s = scene(judgedAtHead());
   await lightPass([stalled], s.deps);
   const disposed = s.rows("sweep.disposed").at(-1)!;
@@ -69,15 +69,19 @@ test("a stalled PR whose own escalation is still open files no second stage-stal
   assert.equal(disposed.blocker_owner, "NONE");
   assert.equal(disposed.blocker_age_ms, 0);
   assert.equal(disposed.acted, false);
-  assert.equal(s.escalations.length, 0, JSON.stringify(s.escalations));
+  // The original may never have reached a person, so the stall is still reported -- by name, not as unknown.
+  assert.equal(s.escalations.length, 1, JSON.stringify(s.escalations));
+  assert.match(s.escalations[0].reason, new RegExp(`already escalated at ${at("05:31:40").replace(/[.]/g, "\\.")}, still awaiting an operator`));
+  assert.doesNotMatch(s.escalations[0].reason, /unknown signature/);
+  assert.equal(s.escalations[0].cause, "stage-stall");
   const stuck = s.rows("pr.stuck");
   assert.equal(stuck.length, 1);
   assert.equal(stuck[0].original_escalation, "open");
   assert.equal(stuck[0].original_escalation_at, at("05:31:40"));
   assert.equal(disposed.stage_stuck, true);
-  // The next pass is the same stage: still nothing filed, and no second stuck row.
+  // The next pass is the same stage: no second escalation, and no second stuck row.
   await lightPass([stalled], s.deps);
-  assert.equal(s.escalations.length, 0);
+  assert.equal(s.escalations.length, 1);
   assert.equal(s.rows("pr.stuck").length, 1);
 });
 

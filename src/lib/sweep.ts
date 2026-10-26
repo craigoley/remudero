@@ -17525,8 +17525,8 @@ export async function runSweep(
     }
     // PR 14326 (issue 14390): an ownerless `escalated` stage reports on its first pass, so a light pass that deferred
     // the disposition re-escalated a PR whose progress-judge escalation was still open, as "unknown signature".
-    // An escalation of this head that is still unanswered already asks the operator: record the stall, file
-    // nothing. An answered one, or one the ledger cannot name, still escalates, naming what it found.
+    // The report still escalates -- the original may never have reached a person, or been closed unanswered, and a
+    // stall nobody is told about is the defect this report exists for -- but it names the escalation it found.
     let originalEscalationOpen = false;
     let escalationFields: Record<string, unknown> = {};
     if (fields.blocker === "escalated") {
@@ -17553,7 +17553,7 @@ export async function runSweep(
     const row = { pr_number: pr.prNumber, ...fields, diagnosis, ...boundFields,
       held_ms: heldMs, ...escalationFields };
     recordStuck(row);
-    if (escalationHandled || originalEscalationOpen) return;
+    if (escalationHandled) return;
     try {
       await deps.escalate(pr, reason, {
         taskId: escalationTaskIdFor(pr), prNumber: pr.prNumber, prUrl: pr.prUrl, question: reason,
