@@ -214,7 +214,7 @@ export function dueRefreshOutcomes(
 /** The decision row, so every caller writes one shape. */
 export function refreshDecidedRow(input: {
   runId: string; taskId?: string; prNumber: number; headSha: string; path: RefreshPath | string;
-  value: RefreshValue; overlapFiles: readonly string[]; strict: boolean | undefined; ciInFlight: boolean | undefined;
+  value: RefreshValue; overlapFiles: readonly string[]; strict: boolean | undefined; ciInFlight: boolean;
   judge?: RefreshJudgeVerdict; judgeError?: string; forcedBy?: string; requestId?: string; updateReason?: string;
   nowMs: number;
 }): Record<string, unknown> {
@@ -224,7 +224,7 @@ export function refreshDecidedRow(input: {
     pr_number: input.prNumber, head_sha: input.headSha, path: input.path,
     decision: input.value.decision, reason: input.value.reason,
     overlap_files: input.overlapFiles.slice(0, REFRESH_ROW_FILE_CAP), overlap_count: input.overlapFiles.length,
-    strict: input.strict ?? null, ci_in_flight: input.ciInFlight ?? null, judge: input.judge ?? null,
+    strict: input.strict ?? null, ci_in_flight: input.ciInFlight, judge: input.judge ?? null,
     predicted_cost_ci_min: input.value.predictedCostCiMin, predicted_benefit: input.value.predictedBenefit,
     ...(input.judgeError === undefined ? {} : { judge_error: input.judgeError }),
     ...(input.forcedBy === undefined ? {} : { forced_by: input.forcedBy }),
