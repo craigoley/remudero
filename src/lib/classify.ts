@@ -503,6 +503,8 @@ export async function runDiagnoseThenRetry(deps: DiagnoseThenRetryDeps): Promise
           headSha: deps.progressInput?.headSha ?? "uncommitted", ledger: rounds,
           currentRed: [result.evidence.text ?? result.evidence.subtype ?? "unknown failure"],
           operatorAnswer: deps.progressInput?.operatorAnswer }),
+          ...(deps.progressInput?.failureEvidence ? { failureEvidence: deps.progressInput.failureEvidence } : {}),
+          ...(deps.progressInput?.reviewFailureEvidence ? { reviewFailureEvidence: deps.progressInput.reviewFailureEvidence } : {}),
           strikesSpent: cls === "transient" ? state.transientRetries : state.strikes,
           formerCeiling: cls === "transient" ? MAX_TRANSIENT_RETRIES : MAX_STRIKES,
           parkedReason: `${site}: ${action.reason}${findings ? `; diagnosis: ${findings}` : ""}` };
