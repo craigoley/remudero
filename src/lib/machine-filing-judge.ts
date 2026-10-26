@@ -53,7 +53,7 @@ import {
   type RiskJudgeVerdict,
   type RiskPolicy,
 } from "./risk-judge.js";
-import { deterministicEscalation, UNPRICED_PRIORITY, withoutRulingBlock } from "./machine-filing.js";
+import { backstopConcern, deterministicEscalation, UNPRICED_PRIORITY, withoutRulingBlock } from "./machine-filing.js";
 import {
   FLAKE_INCIDENT_MAIN_INHERITED_STEP, flakeIncidentMainInherited, type FlakeIncidentRecordEvidence, type FlakeJudgeEvidencePort, type MainRedAtBase,
 } from "./flake-incident-gardener.js";
@@ -358,7 +358,10 @@ export function machineJudgeInput(task: Task, record: FamilyTrackRecord, pathExi
   // Judged AS IT WOULD DISPATCH: shown `verify: human`, the judge counted on a person who, on
   // proceed, is never asked (measured 2026-09-29: "verify: human is set, giving a human checkpoint").
   const base = buildFilingRiskJudgeInput({ ...task, verify: "auto" });
-  const description = `${base.change.description}\n${machineEvidence(task, exists)}${extraEvidence === undefined ? "" : `\n${extraEvidence}`}`;
+  // A deletion or merge-policy word in a record that declares only tests or prose is not escalated by the
+  // backstop (W1-T10350); it reaches the judge here as a named concern, and the judge applies the rule.
+  const concern = backstopConcern(task);
+  const description = `${base.change.description}\n${machineEvidence(task, exists)}${extraEvidence === undefined ? "" : `\n${extraEvidence}`}${concern === undefined ? "" : `\n${concern}`}`;
   return {
     ...base,
     // Stated first, in the operator's words: the judge's generic framing leans LOW on a defect title.

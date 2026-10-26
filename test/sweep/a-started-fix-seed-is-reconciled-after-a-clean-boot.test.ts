@@ -111,7 +111,9 @@ test("a started fix seed preserves both empty and uncertain adoption evidence th
     const core = rows.map(row => JSON.stringify(row)).join("\n") + "\n";
     const bytes = Buffer.byteLength(core);
     writeFileSync(ledgerPath, core + JSON.stringify({ step: "ci.polling", padding: "x".repeat(bytes * 4) }) + "\n");
-    assert.equal(rotateLedger(ledgerPath, { ceilingBytes: bytes * 2 }).rotated, true);
+    // Pin the rotation clock to the fixture's own timeline: the fixed-date seed row must not age out
+    // of the sweep.disposed retention window as wall-clock time passes.
+    assert.equal(rotateLedger(ledgerPath, { ceilingBytes: bytes * 2, now: () => new Date(boot.ts) }).rotated, true);
     const after = readLedgerLines(ledgerPath);
     for (const expected of ["run_child.adoption_pass", ...(step ? [step] : [])]) {
       assert.ok(after.some(row => row.step === expected), `${expected} is a decision input, not disposable telemetry`);
@@ -179,7 +181,7 @@ test("a metadata-only fix seed retains its reused judgment through real ledger r
     { ...adoption, live: 1, adopted: 1 }, boot];
   const core = rows.map(row => JSON.stringify(row)).join("\n") + "\n", bytes = Buffer.byteLength(core);
   writeFileSync(ledgerPath, core + JSON.stringify({ step: "ci.polling", padding: "x".repeat(bytes * 4) }) + "\n");
-  assert.equal(rotateLedger(ledgerPath, { ceilingBytes: bytes * 2 }).rotated, true);
+  assert.equal(rotateLedger(ledgerPath, { ceilingBytes: bytes * 2, now: () => new Date(boot.ts) }).rotated, true);
   const after = readLedgerLines(ledgerPath);
   assert.ok(after.some(row => row.step === "fix.progress_reused"));
   assert.equal(fixSeedRead(after, pr, CURRENT)?.kind, "orphaned");

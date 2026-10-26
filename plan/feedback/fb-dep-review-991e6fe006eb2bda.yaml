@@ -72,10 +72,11 @@ raw: |-
   </details>
 attachments: []
 origin: repair#dep-review
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: dep-review:own-red:craigoley/remudero:@anthropic-ai/claude-code@2.1.303
 thread_id: null
+answered_by: null

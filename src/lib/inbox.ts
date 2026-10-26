@@ -26,7 +26,7 @@ export type DraftLintViolation = RelintViolation;
 import { callSiteCandidates, MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadEvent, captureInboxInput, verifiedInboxInput, type InboxCausalScope, type InboxInputReference, type ThreadEvent, type ThreadEventKind, type ThreadMessageExtra, type ThreadStoreDeps } from "./inbox-thread.js";
-import { inboxKind } from "./inbox-owner.js";
+import { inboxKind, isAgeOnlyInboxInformation } from "./inbox-owner.js";
 import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
@@ -462,7 +462,7 @@ export interface DraftExclusion {
 
 export type DraftSelectionContext = Pick<
   ReadinessContext,
-  "isRatified" | "isDeclined" | "boardReferents" | "grepAnchorTrue" | "openProposalIds"
+  "isRatified" | "isDeclined" | "boardReferents" | "grepAnchorTrue" | "openProposalIds" | "retirement"
 >;
 
 function readDraftExclusion(check: () => DraftExclusion | undefined): DraftExclusion | undefined {
@@ -533,6 +533,17 @@ function rankDraftSelection(proposals: Proposal[], drafts: DraftCache): Proposal
  *  daemon's draft-independent exclusions; omitting it preserves the manual force. */
 export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: DraftSelectionContext): Proposal[] {
   return proposals.filter((p) => {
+    if (isAgeOnlyInboxInformation(p)) {
+      let informational = true;
+      try {
+        const retirement = ctx?.retirement?.(p);
+        informational = !retirement || !("unknown" in retirement) && retirement.state !== "restored_for_review";
+      } catch {
+        // Unreadable lifecycle evidence is not authority to suppress a potentially restored human ask.
+        informational = false;
+      }
+      if (informational) return false;
+    }
     if (p.lifecycleAction || p.skillFile) return false;
     if (ctx ? draftExclusionForProposal(p, ctx) : p.trigger && !p.trigger.fired) return false;
     const cached = drafts[p.id];
@@ -772,6 +783,9 @@ export interface PredicateFailure {
 export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "ratified" | "drafting" | "retired" | "declined";
 
 export interface InboxClassification {
+  /** Display ownership captured once with the producer's thread evidence; never execution permission. */
+  displayOwner?: "operator" | "fleet";
+  requiresReview?: true;
   retirement?: InboxRetirementView;
   needsTriageReason?: string;
   releaseTaskId?: string;
@@ -1387,7 +1401,8 @@ export function classifyProposal(
   if (held) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: current task dispatch hold requires operator review" }], needsTriageReason: "Current security or dispatch hold preserves this ask for operator review" };
 
   if (lifecycle && !held) {
-    if ("unknown" in lifecycle) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: lifecycle evidence unavailable" }], needsTriageReason: lifecycle.unknown };
+    if ("unknown" in lifecycle) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: lifecycle evidence unavailable" }], needsTriageReason: lifecycle.unknown,
+      ...(isAgeOnlyInboxInformation(proposal) ? { requiresReview: true as const } : {}) };
     if (lifecycle.state === "retired" && lifecycle.proofKind === "merged-task" &&
       (!lifecycle.scope.taskId || !ctx.plan.byId.has(lifecycle.scope.taskId) || ctx.depsUnobservable?.(lifecycle.scope.taskId) !== undefined || !ctx.isMerged(ctx.plan.byId.get(lifecycle.scope.taskId)!))) {
       return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "deps_observable", detail: "needs-triage: current merge credit no longer confirms the retirement" }],

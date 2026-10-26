@@ -1,0 +1,27 @@
+- id: W1-T10709
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — escalated:merge conflict (mergeState dirty) cost 6.23 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.27
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:escalated:merge conflict (mergeState dirty)"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/flow-escalated-merge-conflict-mergestate-dirty.test.ts
+  acceptance:
+    - claim: "escalated:merge conflict (mergeState dirty) is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T10709: flow-escalated-merge-conflict-mergestate-dirty clears without a person\" in test/sweep/flow-escalated-merge-conflict-mergestate-dirty.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    escalated:merge conflict (mergeState dirty) cost 6.23 PR-hours; owner NONE
+    Owner NONE is absent.
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #14176: 5.57 PR-hours — merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on openapi/daemon.yaml (ours -0, theirs -0), packages/api-client/src/schema.d.ts (ours -0, theirs -0), scripts/expiring-fixture-census.mjs (ours -0, theirs -0), src/lib/open-prs-rest.ts (ours -0, theirs -0), src/lib/read-model-slow-lane.ts (ours -11, theirs -2), src/lib/read-model-worker.ts (ours -7, theirs -0), src/lib/serve.ts (ours -3, theirs -2), src/lib/views.ts (ours -1, theirs -1), test/a-view-lane-constructs-only-the-views-it-owns.test.ts (ours -1, theirs -1), test/every-view-body-matches-its-schema.test.ts (ours -4, theirs -3) — would dispatch the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head — NOT DISPATCHED this pass: fix checkout claim declined 3 times on #14176 at head 0804227 (registered worktree owner /home/node/Remudero/worktrees/sweep-W1-T10559-1792983204646, owner_dirty_recovery_preserve_failed) — FIX_CLAIM_DECLINE_BACKSTOP 3 reached, no further claim is attempted at this head while that worktree exists
+    - PR #10551: 2.03 PR-hours — merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on src/lib/fix-progress-judge.ts (ours -0, theirs -3), src/lib/pr-blocker.ts (ours -0, theirs -0), src/lib/sweep.ts (ours -79, theirs -128), src/run-task.ts (ours -37, theirs -61), test/auto-merge-blocked-codeql-review-thread.test.ts (ours -8, theirs -2) — would dispatch the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head — NOT DISPATCHED this pass: fix checkout claim declined 3 times on #10551 at head 3644414 (registered worktree owner /home/node/Remudero/worktrees/sweep-W1-T7243-1791611477902, dirty_worktree) — FIX_CLAIM_DECLINE_BACKSTOP 3 reached, no further claim is attempted at this head while that worktree exists
+    - PR #10829: 1.34 PR-hours — merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on learnings/ci.yaml (ours -0, theirs -0), learnings/index.json (ours -1, theirs -0) — would dispatch the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head — NOT DISPATCHED this pass: fix checkout claim declined 3 times on #10829 at head 3874a18 (registered worktree owner /home/node/Remudero/worktrees/sweep-W1-T7899-1791711829493, dirty_worktree) — FIX_CLAIM_DECLINE_BACKSTOP 3 reached, no further claim is attempted at this head while that worktree exists
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
