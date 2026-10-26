@@ -318,3 +318,34 @@ test("runFixRung: missing birth snapshot never manufactures a foreign-tree stand
     rmSync(worktreePath, { recursive: true, force: true });
   }
 });
+
+test("a clean advanced worktree cannot spend a worker on failure evidence from its previous head", async () => {
+  const { root, worktreePath, branch } = await initFixRungRepo();
+  try {
+    const before = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", worktreePath, "commit", "--allow-empty", "-qm", "a newer branch tip"], { env: GIT_ENV });
+    const advanced = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const birth = captureWorktreeSnapshotViaGit(worktreePath);
+    assert.ok(worktreeSnapshotIsClean(birth));
+    let spawned = 0;
+    let pushed = 0;
+    const issues = fakeIssueStore();
+    const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    const outcome = await runFixRung({ ...fixRungBaseOpts(worktreePath), branch, strikeCap: 1,
+      birthWorktreeSnapshot: birth,
+      initialReview: fakeReview("failure", [criterion({ claim: "old-head failure", met: false })], before),
+      deps: { spawn: async () => { spawned++; return result({ text: "NEEDS_DESIGN: missing old-head security evidence" }); },
+        waitForCiGreen: async () => "red", runReview: async () => fakeReview("failure", []), push: () => { pushed++; },
+        issues, ledgerPath: tmpLedgerPath(), log: (step, extra) => logs.push({ step, extra }), say: () => {}, account: r => r,
+        readLiveState: async () => ({ ok: true, state: "OPEN" }), captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
+        readRegisteredWorktrees: async () => [{ path: worktreePath, branch }] },
+    });
+    assert.equal(spawned, 0, "the next ordinary snapshot must provide evidence for the newer head first");
+    assert.equal(pushed, 0);
+    assert.equal(issues.calls.length, 0, "a normal branch advance is no new operator design question");
+    assert.equal(outcome.outcome, "stood_down");
+    assert.equal(outcome.review.headSha, before, "do not relabel stale evidence as evidence for the new head");
+    assert.equal(execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), advanced);
+    assert.ok(logs.some(row => row.step === "fix.evidence_head_superseded" && row.extra?.head_sha === before && row.extra?.current_head_sha === advanced));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
