@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { test } from "node:test";
 
 import {
@@ -519,4 +520,30 @@ test("the active-CI refresh guard preserves terminal-CI and judge-overlap decisi
     assert.equal(decided(h.rows)[0]!.ci_in_flight, active);
     assert.equal(decided(h.rows)[0]!.decision, "refresh");
   }
+});
+
+
+test("ready refresh uses the maintained current-head CI producer", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}refresh-ci-reader-`));
+  try {
+    for (const status of ["queued", "in_progress", "completed"]) {
+      const reads: string[][] = [];
+      const ready = pr(7335);
+      const effects = buildSweepEffects({
+        owner: "craigoley", repo: "remudero", config: { claudeBin: "/usr/bin/true", root } as never,
+        ledgerPath: join(root, "ledger.ndjson"), runId: "SWEEP-W1-T7735", plan: { tasks: [] } as never, log: () => {},
+        policy: undefined, reviewRunner: undefined, spawnImpl: undefined, pushEmptyCommit: undefined,
+        issuesImpl: { create: () => { throw new Error("no issue is filed here"); } } as never,
+        stallNotice: undefined, armImpl: undefined, armSessionPrsOverride: undefined, updateBranchImpl: undefined,
+        captureRepairFeedbackImpl: undefined, productionProgressJudge: false,
+        ghJsonImpl: ((args: string[]) => { reads.push(args); return { workflow_runs: [{ path: ".github/workflows/ci.yml", status }] }; }) as never,
+      } as never);
+      const h = harness({ behindMainByPr: one(7335, 2), baseChangedFilesByPr: one(7335, base(["src/mine.ts"])),
+        readBranchProtectionStrict: () => false, liveCiRunForHead: effects.liveCiRunForHead,
+        refreshJudge: async question => { assert.equal(question.ciInFlight, true); return "independent"; } });
+      assert.equal(await runLightPassReadyRefresh([ready], h.deps, POLICY), status === "completed" ? 7335 : undefined);
+      assert.equal(h.updated.length, status === "completed" ? 1 : 0);
+      assert.deepEqual(reads, [["api", `repos/craigoley/remudero/actions/runs?head_sha=${ready.headSha}&per_page=50`]]);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

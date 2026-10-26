@@ -12179,7 +12179,7 @@ export interface RefreshValueGate {
 }
 
 export async function buildRefreshValueGate(
-  deps: Pick<SweepDeps, "runId" | "ledgerPath" | "readBranchProtectionStrict" | "refreshJudge" | "baseChangedFilesByPr" | "log">,
+  deps: Pick<SweepDeps, "runId" | "ledgerPath" | "readBranchProtectionStrict" | "refreshJudge" | "baseChangedFilesByPr" | "liveCiRunForHead" | "log">,
   openPrs: readonly OpenPrView[],
   ledgerLines: readonly Record<string, unknown>[],
   nowMs: number,
@@ -12205,10 +12205,10 @@ export async function buildRefreshValueGate(
   const queueDepth = openPrs.filter((pr) => pr.checksState === "pending").length;
   const benefitWeight = observedRefreshBenefitWeight(ledgerLines);
   const ciMinutes = observedCiMinutes(ledgerLines);
-  const valueOf =(c: ArmedStalledPr, view: OpenPrView, path: RefreshPath, judge?: RefreshJudgeVerdict) => {
+  const valueOf =(c: ArmedStalledPr, view: OpenPrView, path: RefreshPath, judge?: RefreshJudgeVerdict, liveCiInFlight = false) => {
     const facts = refreshOverlapOf(c, view, deps.baseChangedFilesByPr?.get(view.prNumber));
     const repairNeeded = facts.repairNeeded || path === "base-red" || path === "plan-repair";
-    const ciInFlight = view.checksState === "pending";
+    const ciInFlight = view.checksState === "pending" || liveCiInFlight;
     const value = decideRefresh({ path, overlap: facts.overlap, overlapFiles: facts.files, repairNeeded, strict, ciInFlight,
       judge, queueDepth, benefitWeight, ciMinutes });
     return { facts, ciInFlight, value };
@@ -12232,7 +12232,9 @@ export async function buildRefreshValueGate(
       const key = `${view.prNumber}@${view.headSha}`;
       let judge: RefreshJudgeVerdict | undefined = memo.get(key);
       let judgeError: string | undefined;
-      let decided = valueOf(c, view, path, judge);
+      // A green/red summary can coexist with a queued or running coverage leg at this exact head.
+      const liveCiInFlight = view.checksState === "pending" || await deps.liveCiRunForHead?.(view) === true;
+      let decided = valueOf(c, view, path, judge, liveCiInFlight);
       if (decided.value.decision === "ask-judge") {
         const base = deps.baseChangedFilesByPr?.get(view.prNumber);
         const asked = await askRefreshJudge(deps.refreshJudge, {
@@ -12242,7 +12244,7 @@ export async function buildRefreshValueGate(
         judge = asked.verdict;
         judgeError = asked.error;
         if (asked.verdict !== "judge-unavailable") memo.set(key, asked.verdict);
-        decided = valueOf(c, view, path, judge);
+        decided = valueOf(c, view, path, judge, liveCiInFlight);
       }
       const row = refreshDecidedRow({ runId: deps.runId, taskId: c.taskId, prNumber: view.prNumber, headSha: view.headSha, path,
         value: decided.value, overlapFiles: decided.facts.files, strict, ciInFlight: decided.ciInFlight, judge, judgeError,
