@@ -121,6 +121,7 @@ function installHook(dir: string): void {
   mkdirSync(join(dir, "scripts", "lib"), { recursive: true });
   mkdirSync(join(dir, "src", "lib"), { recursive: true });
   copyFileSync(join(REPO_ROOT, "src", "lib", "rule-suites.ts"), join(dir, "src", "lib", "rule-suites.ts"));
+  copyFileSync(join(REPO_ROOT, "src", "lib", "trust-root-text.ts"), join(dir, "src", "lib", "trust-root-text.ts"));
   copyFileSync(join(REPO_ROOT, "hooks", "pre-push"), join(dir, "hooks", "pre-push"));
   chmodSync(join(dir, "hooks", "pre-push"), 0o755);
   for (const script of ["census-precheck.mjs", "clock-signature-ratchet.mjs", "comment-load-ratchet.mjs", "fixture-copy-census.mjs", "house-layout-census.mjs", "deps-interface-census.mjs", "test-repo-root-codemod.mjs", "coverage-session-blanking-check.mjs"]) {

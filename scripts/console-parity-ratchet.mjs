@@ -148,6 +148,8 @@ export const CLI_ONLY = {
       // A held-out skill eval: spawns sealed paired attempts on the daemon host and writes its proposal registry there;
       // a spend the operator confirms per invocation, not a console action.
       "skill-eval",
+      // A read-only procedure census over the ledger union on the daemon host; it writes nothing and routes nothing.
+      "procedures",
       "benchmark-aa",
       "benchmark-paid-pilot",
       // W1-T4098: lints the operator's OWN Claude Code memory directory on the operator's machine —
