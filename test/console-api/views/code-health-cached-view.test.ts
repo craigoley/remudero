@@ -76,6 +76,7 @@ test("code health scope stays ready when only its source clock advances", async 
 test("code health scope refuses unqualified source clock updates", async () => {
   for (const reading of [
     (now: number) => scopeReading(now - 180_001),
+    (now: number): ViewSource => ({ ...scopeReading(now - 180_001), budgetMs: 1_800_000 }),
     (now: number): ViewSource => ({ ...scopeReading(now), state: "unavailable" }),
     (now: number): ViewSource => ({ ...scopeReading(now), asOf: "not-a-time" }),
     (now: number): ViewSource => ({ ...scopeReading(now), asOf: null }),
