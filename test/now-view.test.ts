@@ -1401,7 +1401,7 @@ test("snapshot gateway receives immutable head evidence from the real tick produ
   mkdirSync(join(root, "state"), { recursive: true }); writeFileSync(ledgerPath, "");
   const row = { number: 901, html_url: "https://github.com/o/r/pull/901", state: "closed", merged_at: "2026-09-30T11:00:00Z",
     closed_at: "2026-09-30T11:00:00Z", created_at: "2026-09-30T10:00:00Z", updated_at: "2026-09-30T11:00:00Z",
-    title: "fix: real producer evidence", body: "Remudero-Task: W1-T7", head: { ref: "run-W1-T7-1790000000000", sha: head }, draft: false };
+    title: "fix: real producer evidence", body: "Remudero-Task: W1-T7", head: { ref: "fix/read-model-evidence", sha: head }, draft: false };
   const shim = ghShim([{ when: "pulls/901/files", stdout: files.map(f => JSON.stringify(f)).join("\n") }]);
   const previous = process.env.PATH; process.env.PATH = shim.dir + ":" + (previous ?? "");
   t.after(() => { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; });
