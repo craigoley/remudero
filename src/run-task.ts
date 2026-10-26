@@ -790,6 +790,7 @@ import {
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
 import { checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { resolveProjectPreflight, runProjectPreflight } from "./lib/ci-project-preflight.js";
 import { observeSynchronousPreflightPhase, reportPreflightPhase } from "./lib/preflight-phase-progress.js";
 import {
   buildPreflightSummary,
@@ -19538,6 +19539,8 @@ export function runPreflightScopedDiffCoverage(
  * `os.loadavg()` is the one input here that cannot be arranged.
  */
 export type PreflightCommandDeps = PreflightDeps & {
+  projectRoot?: string;
+  projectTestSlot?: NonNullable<Parameters<typeof runProjectPreflight>[1]>["testSlot"];
   loadavg?: () => readonly number[] | undefined;
   cpuCount?: number;
   coverageFreeBytes?: (path: string) => number;
@@ -19587,31 +19590,39 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const onPhase = deps.onPhase ?? reportPreflightPhase;
   const phase = <T>(name: string, run: () => T): T => observeSynchronousPreflightPhase(name, () => boundary(run), onPhase);
 
-  const result = phase("default", () => runPreflight(repoRoot, { ...deps, range, spawn, onPhase }));
+  const root = deps.projectRoot ?? repoRoot;
+  const project = resolveProjectPreflight(root, {
+    ciParity: rest.includes("--ci-parity"), coverage: rest.includes("--coverage"), proofs: rest.includes("--proofs"),
+  });
+  const core = project.kind === "core";
+  const result = phase("default", () => core
+    ? runPreflight(root, { ...deps, range, spawn, onPhase })
+    // Preserve the executor identity that selects the bounded subprocess, including with metrics.
+    : runProjectPreflight(project, { ...deps, range, spawn: deps.spawn, onPhase, testSlot: deps.projectTestSlot }));
   // W1-T3737 — THE FAST TIER IS THE DEFAULT. MEASURED on origin/main: it runs twenty checks in
   // 29s with no false reds, and the three-step default passed a diff CI then refused (the #5928
   // comment-load shape, 12s green). `--fast` stays accepted and is now a no-op, so every existing
   // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
   // no escape is a wall and an operator on a slow host must still be able to push.
-  const fast = rest.includes("--no-fast") ? undefined : phase("fast", () => runPreflightFast(repoRoot, { spawn }));
+  const fast = !core || rest.includes("--no-fast") ? undefined : phase("fast", () => runPreflightFast(root, { spawn }));
   // W1-T4108 — RIDE THE SAME `--no-fast` ESCAPE AS `fast` ABOVE. Both are further, GitHub-free
   // additions to the same default tier that #6677/#6687/#6690/#6693 (2026-09-23) show CI, not
   // preflight, was catching: console-parity/the two census suites cost seconds like every other
   // fast-tier member, and the scoped diff-coverage step names its own size-based skip rather than
   // needing a second flag to stay fast — see runPreflightScopedDiffCoverage's own doc.
-  const ciChecks = rest.includes("--no-fast")
+  const ciChecks = !core || rest.includes("--no-fast")
     ? undefined
-    : phase("ci-checks", () => preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn })));
-  const scopedCoverage = rest.includes("--no-fast")
+    : phase("ci-checks", () => preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(root, { spawn })));
+  const scopedCoverage = !core || rest.includes("--no-fast")
     ? undefined
-    : phase("fast-coverage", () => preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn })));
+    : phase("fast-coverage", () => preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(root, { spawn })));
   // Full-suite routes key containment/deadlines on the ORIGINAL spawn identity. Observe their
   // tier boundaries, never wrap their executor into the injected-spawn synchronous route.
-  const ciParity = rest.includes("--ci-parity") ? phase("ci-parity", () => runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
-  const coverage = rest.includes("--coverage") ? phase("coverage", () => runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
+  const ciParity = core && rest.includes("--ci-parity") ? phase("ci-parity", () => runCiParityAdmitted(root, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
+  const coverage = core && rest.includes("--coverage") ? phase("coverage", () => runPreflightCoverage(root, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
   // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
   // 29-second default tier cannot absorb that. Named in the coverage line below either way.
-  const proofs = rest.includes("--proofs") ? phase("proofs", () => runPreflightProofs(repoRoot, { spawn: deps.spawn })) : undefined;
+  const proofs = core && rest.includes("--proofs") ? phase("proofs", () => runPreflightProofs(root, { spawn: deps.spawn })) : undefined;
 
   for (const step of result.steps) {
     console.log(step.detail);
@@ -19665,14 +19676,14 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // you its conditions IF YOU ASK has the same defect, because nobody asks. `headSha` is the
   // proof that adding a surface is not enough on its own — it has been computed on this path all
   // along and written to the JSON summary, and never reached the sentence a human reads.
-  const headSha = readHeadShaForSummary();
+  const headSha = readHeadShaForSummary(undefined, root);
   // W1-T3017 — PEEK, never resolve. The pin belongs to whichever mode actually diffed; a run with
   // no diff-consuming step has no base, and resolving one here would put a sha on the line that no
   // step ever measured against.
   const preflightSpawn = spawn ?? defaultPreflightSpawn;
-  const pin = peekPinnedBase(repoRoot, preflightSpawn);
+  const pin = peekPinnedBase(root, preflightSpawn);
   const runContext = detectRunContext({
-    repoRoot,
+    repoRoot: root,
     headSha,
     spawn: preflightSpawn,
     loadavgStart,
@@ -19690,7 +19701,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     ...(proofs?.steps ?? []),
   ];
   const treeAdvisory = runTreeAdvisoryLine(runContext, steps);
-  const tiers: PreflightTier[] = [
+  const tiers: PreflightTier[] = core ? [
     { name: "commitlint/typecheck/emitter", enableWith: "always runs", ran: true },
     { name: "the fast gate", enableWith: "drop --no-fast", ran: fast !== undefined },
     { name: "console-parity + census suites (W1-T4108)", enableWith: "drop --no-fast", ran: ciChecks !== undefined },
@@ -19698,6 +19709,9 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     { name: "ci-parity", enableWith: "--ci-parity", ran: ciParity?.execution === "completed" },
     { name: "coverage", enableWith: "--coverage", ran: coverage !== undefined },
     { name: "proof discrimination", enableWith: "--proofs", ran: proofs !== undefined },
+  ] : [
+    { name: `${project.repository ?? "unresolved target"} declared quality + commit policy`, enableWith: "always runs", ran: project.kind === "consumer" },
+    { name: "hosted CI", enableWith: "required on the source PR", ran: false },
   ];
   console.log(
     "\n" +
@@ -19724,7 +19738,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // named path, never the default the orchestrator trusts. Only a real, non-injected spawn may
   // fall back to the default: that is the one call shape the orchestrator's own verdict comes
   // from.
-  const summaryPath = preflightSummaryTarget(rest, deps);
+  const summaryPath = preflightSummaryTarget(rest, deps, root);
   const summary = { ...buildPreflightSummary({
     steps,
     finishedAt: new Date().toISOString(),
@@ -19732,10 +19746,10 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     headSha,
     args: rest,
     runContext,
-  }), ...(metrics ? { sandboxMetrics: metrics.finish() } : {}) };
+  }), qualityProfile: project.repository ?? "unavailable", ...(metrics ? { sandboxMetrics: metrics.finish() } : {}) };
   if (summaryPath === undefined) {
     console.log(
-      `### summary NOT written: an injected spawn refuses the default path (${preflightSummaryPath(repoRoot)}) — pass --summary-file to write one anyway`,
+      `### summary NOT written: an injected spawn refuses the default path (${preflightSummaryPath(root)}) — pass --summary-file to write one anyway`,
     );
   } else {
     try {
@@ -19761,9 +19775,10 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
  */
 export function readHeadShaForSummary(
   exec: (file: string, args: string[]) => string = (file, args) => execFileSync(file, args, { encoding: "utf8" }),
+  root: string = repoRoot,
 ): string {
   try {
-    return exec("git", ["-C", repoRoot, "rev-parse", "HEAD"]).trim() || "unknown";
+    return exec("git", ["-C", root, "rev-parse", "HEAD"]).trim() || "unknown";
   } catch {
     return "unknown";
   }
