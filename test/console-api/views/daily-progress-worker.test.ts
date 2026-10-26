@@ -268,8 +268,8 @@ test("daily production slow lane retains required unowned siblings before counti
       }]) });
       return { name, root: boardRoot, stateDir, repository };
     });
-    for (const owned of [["core"], ["core", "sibling"], []]) {
-      const stateDir = join(root, `owner-count-${owned.length}`);
+    for (const owned of [["core"], ["sibling"], ["core", "sibling"], []]) {
+      const stateDir = join(root, `owner-${owned.join("-") || "none"}`);
       createRepositoriesSourcePublisher({ stateDir, instances: () => instances.map(instance => ({
         instanceId: instance.name, options: { root: instance.root, instanceRepository: { owner: "acme", repo: "app" } },
       })) })();
@@ -301,6 +301,9 @@ test("daily production slow lane retains required unowned siblings before counti
           const source = report.coverage.sources.find(source => source.id === `acme/app:prs:${instance.name}`); assert(source);
           assert.equal(source.state, "not_collected"); assert.equal(source.required, true);
           assert.equal(source.lastSuccessAt, null); assert.match(source.reason!, /not owned/);
+          const activity = report.coverage.sources.find(source => source.id === `acme/app:ledger:${instance.name}`); assert(activity);
+          assert.equal(activity.state, "not_collected"); assert.equal(activity.required, false);
+          assert.equal(activity.lastAttemptAt, null); assert.equal(activity.lastSuccessAt, null);
         }
         const job = Object.values(readDailyProgressManifest(stateDir).jobs)[0]!;
         assert.equal(job.lastSuccessAt, owned.length === 2 ? clock.iso() : null);

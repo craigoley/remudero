@@ -80,3 +80,39 @@ test("W1-T9823: the git owner search names the pull request whose merge added a 
   assert.equal(search.addedByPr?.("test/y.test.ts"), undefined);
   assert.equal(search.addedByPr?.("test/absent.test.ts"), undefined);
 });
+
+
+test("retry evidence cannot turn another head or an unsuccessful retry into a flaky cause", () => {
+  const head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  for (const [extra, recovered] of [
+    [{ head_sha: head, pr_numbers: [1], retry_outcome: "recovered" }, true],
+    [{ head_sha: other, pr_numbers: [1], retry_outcome: "recovered" }, false],
+    [{ head_sha: head, pr_numbers: [2], retry_outcome: "recovered" }, false],
+    [{ head_sha: head, pr_numbers: [1], retry_outcome: "also_failed" }, false],
+    [{ head_sha: head, pr_numbers: [1] }, false],
+    [{ retry_outcome: "recovered" }, false],
+    [{}, false],
+  ] as const) {
+    const rounds = ciFrictionRoundsFromLedger([
+      pr(head, 1),
+      { step: "test.flake_retry", file: FILE, ts: "2026-10-13T00:30:00.000Z", ...extra } as LedgerRecord,
+      dispatch(head, "DAEMON-1", "2026-10-13T01:00:00.000Z", [{ check: "coverage-shard (3/8)", signature: FILE }]),
+    ]);
+    assert.deepEqual(rounds.map(r => [r.pr, r.cause.name, r.minutes]), [[1, `test:${FILE}${recovered ? ":flaky" : ""}`, 10]], JSON.stringify(extra));
+  }
+});
+
+test("retry failure titles stay with the recorded PR head instead of contaminating later evidence", () => {
+  const head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  for (const recordedHead of [head, other, undefined]) {
+    const [round] = ciFrictionRoundsFromLedger([
+      pr(head, 1),
+      { step: "test.flake_retry", retry_outcome: "also_failed", file: FILE, titles: ["recorded failure"], pr_numbers: [1], head_sha: recordedHead, ts: "2026-10-13T00:30:00.000Z" } as LedgerRecord,
+      dispatch(head, "DAEMON-1", "2026-10-13T01:00:00.000Z", [{ check: "coverage-shard (3/8)" }]),
+    ]);
+    assert.deepEqual(round?.evidence?.flatMap(e => e.tests ?? []) ?? [], recordedHead === head ? ["recorded failure"] : []);
+    assert.equal(round?.minutes, 10);
+  }
+});

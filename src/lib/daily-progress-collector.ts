@@ -110,7 +110,6 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
     if (dates.size > MAX_DATES) throw new Error("daily catch-up exceeds its per-pass calendar bound");
     const ordered = [...dates].sort(), earliest = dailyWindow(ordered[0]!, timeZone).windowStart;
     const configuredInstances = config.instances.filter(s => s.repository.toLowerCase() === repository).map(s => ({ ...s, repository }));
-    const instances = configuredInstances.filter(s => config.ownedInstanceNames === undefined || config.ownedInstanceNames.includes(s.name));
     const configured: ExpectedDailySource[] = configuredInstances.flatMap(instance => [
       { id: `${repository}:prs:${instance.name}`, repository, instanceId: instance.name, kind: "pull_requests" as const, required: true },
       { id: `${repository}:ledger:${instance.name}`, repository, instanceId: instance.name, kind: "ledger_activity" as const, required: false },
@@ -120,6 +119,7 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
     const expectedSources: ExpectedDailySource[] = [...configured,
       { id: `${repository}:deployments`, repository, instanceId: null, kind: "deployments", required: false },
       { id: `${repository}:open`, repository, instanceId: null, kind: "pull_requests", required: false }];
+    const instances = configuredInstances.filter(s => config.ownedInstanceNames === undefined || config.ownedInstanceNames.includes(s.name));
     const raw = instances.map(instance => {
       const [owner, repo] = repository.split("/") as [string, string];
       const saved = board(instance.root, owner, repo), rows = [...saved.closed?.values() ?? []];
