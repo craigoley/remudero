@@ -224,7 +224,7 @@ test("product repository refuses malformed commands, mixed actions, identity gap
   const done = await service.execute(actor, f.command());
   assert.ok(done.ok);
   // Same request id with a changed command conflicts; a second operation on a bound product elsewhere conflicts.
-  assert.deepEqual(await service.execute(actor, f.command({ visibility: "private" })), { ok: false, code: "idempotency_conflict" });
+  assert.deepEqual(await service.execute(actor, f.command({ visibility: "private", expectedRevision: 1 })), { ok: false, code: "idempotency_conflict" });
   assert.deepEqual(await service.execute(actor, f.command({ requestId: "repo-request-0000009", name: "wreckterra2" })), { ok: false, code: "repository_conflict" });
 });
 
@@ -237,13 +237,14 @@ test("product repository journal durability: sync failures, corruption and unsaf
   const service = f.service(provider, { sync });
   const adopted = new FakeProvider();
   adopted.repos.set("craigoley/wreckterra", { id: 7, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" });
+  const adopt = f.command({ action: "adopt", repositoryId: 7 });
   failing = true;
   assert.deepEqual(await f.service(adopted, { sync }).execute(actor, f.command({ action: "adopt", repositoryId: 7 })), { ok: false, code: "unavailable" });
   failing = false;
   const receipt = await f.service(adopted, { sync }).execute(actor, f.command({ action: "adopt", repositoryId: 7 }));
   assert.ok(receipt.ok);
   budget = 4; // the four ancestry syncs pass; the replay's own directory requalification fails
-  const replay = await f.service(adopted, { sync }).execute(actor, f.command({ action: "adopt", repositoryId: 7 }));
+  const replay = await f.service(adopted, { sync }).execute(actor, adopt);
   assert.deepEqual(replay, { ok: false, code: "outcome_unknown" }, "a replay is requalified by a directory fsync");
   budget = Infinity;
   assert.ok(service);
