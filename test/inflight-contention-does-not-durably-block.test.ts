@@ -33,6 +33,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { MAX_STRIKES } from "#src/lib/classify.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 import { runDaemon } from "../src/lib/daemon.js";
@@ -116,6 +117,41 @@ test("a dependent task's review failure still escalates instead of becoming an o
   assert.equal(result.escalations, 1);
   assert.ok(result.rows.some(row => row.step === "daemon.blocked"));
   assert.ok(!result.rows.some(row => row.step === "daemon.block.inflight_contention"));
+});
+
+test("a live claim preserves spent fix attempts before a dependent blocker exhausts", async () => {
+  const inflightDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}dependent-retry-`));
+  const parent = independentTaskPlan("D").tasks[0];
+  const descendant = { ...parent, id: "E", depends_on: ["D"] } as Task;
+  const plan = { tasks: [parent, descendant], byId: new Map([["D", parent], ["E", descendant]]) } as Plan;
+  let holder: ReturnType<typeof acquireInflightLock> | undefined;
+  let attempts = 0, fixes = 0, escalations = 0, descendants = 0;
+  try {
+    await runDaemon(plan, {
+      refreshMerged: () => () => false,
+      runOne: async (id): Promise<RunResult> => {
+        if (id === "E") descendants++;
+        attempts++;
+        if (attempts === 2) {
+          holder = acquireInflightLock(inflightDir, "D", { run_id: "existing-owner", isPidAlive: () => true });
+          assert.throws(() => acquireInflightLock(inflightDir, "D", { run_id: "duplicate", isPidAlive: () => true }), InflightLockError);
+          return { taskId: id, runId: "D-contended", merged: false, costUsd: 0, verdict: "blocked_inflight" };
+        }
+        holder?.release();
+        holder = undefined;
+        return { taskId: id, runId: `D-review-${attempts}`, merged: false, costUsd: 0.1, verdict: "blocked_review" };
+      },
+      dispatchFix: async () => { fixes++; },
+      escalateBlock: async () => { escalations++; },
+      sleep: async () => {},
+    }, { max: MAX_STRIKES + 4 });
+    assert.equal(fixes, MAX_STRIKES, "contention must not replenish the fixed failure budget");
+    assert.equal(escalations, 1);
+    assert.equal(descendants, 0);
+  } finally {
+    holder?.release();
+    rmSync(inflightDir, { recursive: true, force: true });
+  }
 });
 
 // ── (1) PRODUCER, POSITIVE — a live claim is a deferral: no durable write, tick continues ──
