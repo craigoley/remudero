@@ -14,9 +14,10 @@ import {
   TEST_PROCESS_GUARD_IMPORTS,
   openWeightUnitTestPlan,
 } from "#src/lib/worker-provider.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 test("W1-T10421: check:test:test/the-open-weight-unit-test-check-loads-the-suite-guards.test.ts:flaky is prevented, not retried", () => {
-  const cwd = mkdtempSync(join(tmpdir(), "ow-plan-"));
+  const cwd = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ow-plan-`));
   try {
     mkdirSync(join(cwd, "test"), { recursive: true });
     mkdirSync(join(cwd, "scripts"), { recursive: true });
