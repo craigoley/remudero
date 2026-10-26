@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { test, type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
@@ -287,4 +287,27 @@ test("product research bounds the provider deadline and never automatically repe
   await ok(service, body);
   await ok(service, command(id, 1));
   assert.equal(calls, 1, "a timed-out or failed transport has no automatic spend retry");
+});
+
+test("product research reports real pending-file cleanup failures and refuses state symlinks", async (t) => {
+  for (const replaceWithDirectory of [false, true]) {
+    const { root, store, id } = seed(t);
+    const directory = `${productStatePaths(root, ACTOR).directory}/research`;
+    const service = new ProductResearchService({ root, store, clock, sync: () => {
+      const name = readdirSync(directory).find((entry) => entry.endsWith(".pending"));
+      assert.ok(name);
+      const pending = `${directory}/${name}`;
+      unlinkSync(pending);
+      if (replaceWithDirectory) mkdirSync(pending);
+      throw Error("filesystem changed during sync");
+    } });
+    assert.equal((await service.run(ACTOR, command(id, 1))).code, replaceWithDirectory ? "recovery_required" : "unavailable");
+  }
+  const { root, store, id } = seed(t);
+  const service = new ProductResearchService({ root, store, clock });
+  await ok(service, command(id, 1));
+  const file = researchFile(root);
+  unlinkSync(file);
+  symlinkSync("missing-private-state", file);
+  assert.equal((await service.run(ACTOR, command(id, 1))).code, "unavailable", "O_NOFOLLOW filesystem errors must not become an empty successful state");
 });
