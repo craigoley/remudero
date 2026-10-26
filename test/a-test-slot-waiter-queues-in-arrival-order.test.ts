@@ -99,8 +99,7 @@ function writeTicket(dir: string, arrivedAtMs: number, fields: Partial<TestSlotT
   const ticket: TestSlotTicket = { pid: 1, host: hostname(), bootId: "boot-1", pidNs: "ns-1", label: "fixture", nonce, arrivedAt: at,
     heartbeatAt: at, heartbeatIntervalMs: 5_000, ...fields };
   const name = testSlotTicketName(arrivedAtMs, 0, nonce);
-  writeFileSync(join(queue, name), JSON.stringify(ticket));
-  chmodSync(join(queue, name), 0o644);
+  writeFileSync(join(queue, name), JSON.stringify(ticket), { mode: 0o644 });
   return name;
 }
 
