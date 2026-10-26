@@ -3254,12 +3254,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     liveCiRunForHead: async (pr) => {
       try {
         // A READ, so it rides readJsonImpl (the read seam), never ghRunImpl (the effect seam).
+        const seenRunIds = new Set<number>();
         for (let page = 1; ; page++) {
           const body = (await readJsonImpl(["api", `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=50` +
-            (page === 1 ? "" : `&page=${page}`)])) as { workflow_runs?: Array<{ path?: string; status?: string }> } | undefined;
+            (page === 1 ? "" : `&page=${page}`)])) as { workflow_runs?: Array<{ id?: number; path?: string; status?: string }> } | undefined;
           if (!Array.isArray(body?.workflow_runs)) throw new Error("CI workflow run listing unavailable");
           let unread = false;
           for (const run of body.workflow_runs) {
+            const id = run.id;
+            if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0 || seenRunIds.has(id)) {
+              throw new Error("CI workflow run identity unavailable or repeated across pages");
+            }
+            seenRunIds.add(id);
             if (typeof run.path !== "string" || run.path.length === 0) { unread = true; continue; }
             if (run.path !== ".github/workflows/ci.yml") continue;
             if (typeof run.status !== "string" || run.status.length === 0) { unread = true; continue; }

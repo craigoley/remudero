@@ -541,7 +541,7 @@ test("ready refresh uses the maintained current-head CI producer", async () => {
       const reads: string[][] = [];
       const ready = pr(7335);
       const effects = maintainedRefreshCiEffects(root, args => {
-        reads.push(args); return { workflow_runs: [{ path: ".github/workflows/ci.yml", status }] };
+        reads.push(args); return { workflow_runs: [{ id: 1, path: ".github/workflows/ci.yml", status }] };
       });
       const h = harness({ behindMainByPr: one(7335, 2), baseChangedFilesByPr: one(7335, base(["src/mine.ts"])),
         readBranchProtectionStrict: () => false, liveCiRunForHead: effects.liveCiRunForHead,
@@ -567,14 +567,16 @@ test("a throwing current-head CI read cannot press a ready refresh", async () =>
 
 test("the refresh CI reader distinguishes complete pages from unavailable evidence", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}refresh-ci-pages-`));
-  const fullOtherPage = Array.from({ length: 50 }, () => ({ path: ".github/workflows/other.yml", status: "completed" }));
+  const fullOtherPage = Array.from({ length: 50 }, (_, i) => ({ id: i + 1, path: ".github/workflows/other.yml", status: "completed" }));
   const cases: Array<{ name: string; read: (page: number) => unknown; active: boolean | undefined; pages: number }> = [
     { name: "read error", read: () => { throw new Error("API unavailable"); }, active: undefined, pages: 1 },
     { name: "missing list", read: () => ({}), active: undefined, pages: 1 },
-    { name: "missing identity", read: () => ({ workflow_runs: [{ status: "completed" }] }), active: undefined, pages: 1 },
-    { name: "missing CI status", read: () => ({ workflow_runs: [{ path: ".github/workflows/ci.yml" }] }), active: undefined, pages: 1 },
-    { name: "later active CI", read: page => ({ workflow_runs: page === 1 ? fullOtherPage : [{ path: ".github/workflows/ci.yml", status: "queued" }] }), active: true, pages: 2 },
-    { name: "later terminal CI", read: page => ({ workflow_runs: page === 1 ? fullOtherPage : [{ path: ".github/workflows/ci.yml", status: "completed" }] }), active: false, pages: 2 },
+    { name: "missing identity", read: () => ({ workflow_runs: [{ id: 1, status: "completed" }] }), active: undefined, pages: 1 },
+    { name: "missing CI status", read: () => ({ workflow_runs: [{ id: 1, path: ".github/workflows/ci.yml" }] }), active: undefined, pages: 1 },
+    { name: "later active CI", read: page => ({ workflow_runs: page === 1 ? fullOtherPage : [{ id: 51, path: ".github/workflows/ci.yml", status: "queued" }] }), active: true, pages: 2 },
+    { name: "later terminal CI", read: page => ({ workflow_runs: page === 1 ? fullOtherPage : [{ id: 51, path: ".github/workflows/ci.yml", status: "completed" }] }), active: false, pages: 2 },
+    { name: "repeated full page", read: () => ({ workflow_runs: fullOtherPage }), active: undefined, pages: 2 },
+    { name: "malformed run ID", read: () => ({ workflow_runs: [{ id: "bad", path: ".github/workflows/ci.yml", status: "completed" }] }), active: undefined, pages: 1 },
     { name: "complete empty list", read: () => ({ workflow_runs: [] }), active: false, pages: 1 },
   ];
   try {
