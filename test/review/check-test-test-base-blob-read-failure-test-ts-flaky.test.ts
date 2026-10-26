@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { buildBaseProofDir } from "#src/lib/check-proof.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const HERMETIC = {
@@ -26,7 +27,7 @@ const HERMETIC = {
 };
 
 test("W1-T10407: ambient global git config (diff.renames=false) cannot change the added-test set", () => {
-  const cfgDir = mkdtempSync(join(tmpdir(), "t10407-cfg-"));
+  const cfgDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t10407-cfg-`));
   const cfg = join(cfgDir, "gitconfig");
   writeFileSync(cfg, "[diff]\n\trenames = false\n");
   const saved = { ...Object.fromEntries(Object.keys(HERMETIC).map((k) => [k, process.env[k]])) };
