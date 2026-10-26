@@ -449,6 +449,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_FOUNDRY_CLAUDE_ENDPOINT", "HTTPS Foundry /anthropic base URL for the bounded Opus cash adapter.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_FRESHNESS_RESTART_MAX", "Deploy entrypoint knob documented by the containment restart discipline.", ["src/lib/containment.ts"]),
   envEntry("RMD_GH_CACHE_HOME", "Overrides the cache root for shared GitHub reads and cadence state.", ["src/lib/config.ts", "src/lib/github-transport.ts"]),
+  envEntry("SWC_NATIVE_BINDING_CACHE", "Internal Codex writer grant for a verified private native-addon cache. Native integrity and ancestor checks remain enabled; read-only workers receive no new write grant.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_GH_CLIENT", "Names the client (claude, codex or agent) a GitHub read through the broker is logged under.", ["src/lib/gh-read-broker.ts"]),
   envEntry("RMD_GH_COOLDOWN_S", "Sets the shared GitHub read floor in seconds; digits only, default 180, and zero disables the floor.", ["src/lib/github-transport.ts"]),
   envEntry("RMD_GH_PACE_ROOT", "Overrides the directory holding the per-login GitHub pacer state shared across Mac accounts.", ["src/lib/gh-read-broker.ts"]),

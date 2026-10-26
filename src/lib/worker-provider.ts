@@ -8,6 +8,7 @@ import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { constants as fsConstants, accessSync, appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
+import { prepareWorkerNativeCache } from "./worker-native-cache.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
@@ -2462,7 +2463,7 @@ type CodexSpawnEnvArgs = Pick<
   "cwd" | "prompt" | "workerHome" | "zdotdir" | "env" | "runId" | "taskId"
 >;
 
-function codexSpawnEnv(config: Config, args: CodexSpawnEnvArgs): Record<string, string | undefined> {
+function codexSpawnEnv(config: Config, args: CodexSpawnEnvArgs, nativeCacheRoot?: string): Record<string, string | undefined> {
   const allowed = ["PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME", "SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN"];
   const env: Record<string, string | undefined> = {};
   for (const key of allowed) if (process.env[key] !== undefined) env[key] = process.env[key];
@@ -2484,6 +2485,7 @@ function codexSpawnEnv(config: Config, args: CodexSpawnEnvArgs): Record<string, 
   // So neither exclusion above is wrong and neither is edited here — this is the missing THIRD
   // boundary, not a replacement for the two that already work.
   env.HOME = args.workerHome;
+  if (nativeCacheRoot !== undefined) env.SWC_NATIVE_BINDING_CACHE = nativeCacheRoot;
   if (args.zdotdir !== undefined) env.ZDOTDIR = args.zdotdir;
   Object.assign(env, workerMarkerEnv(args.runId, args.taskId, workerInstallationScope(config.root)));
   return env;
@@ -2710,7 +2712,7 @@ export function codexTestSlotArgs(env: NodeJS.ProcessEnv = process.env): string[
   return args;
 }
 
-function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
+function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">, nativeCacheRoot?: string): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
   if (!model) throw new Error("refusing a Codex spawn with no model: the account default would run unreviewed");
@@ -2754,6 +2756,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     //
     "-c", 'shell_environment_policy.inherit="core"',
     "-c", 'shell_environment_policy.exclude=["CODEX_HOME","OPENAI_API_KEY","ANTHROPIC_API_KEY"]',
+    ...(nativeCacheRoot === undefined ? [] : ["-c", `shell_environment_policy.set.SWC_NATIVE_BINDING_CACHE=${JSON.stringify(nativeCacheRoot)}`]),
     // W1-T3135/W1-T3267 — THE CODEX LANE'S PROJECT-DOC ROUTE, AND BOTH FLAGS OR NEITHER.
     // The generated AGENTS.md is the preferred, compact index; CLAUDE.md stays in the same list as
     // the maintained fallback for a checkout that lacks the generated file. The cap is unchanged:
@@ -2787,6 +2790,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     ...(readOnly || disposableReview ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
     // Writers only: a reader or review runs no typecheck that needs the host slot.
     ...(readOnly || disposableReview ? [] : codexTestSlotArgs()),
+    ...(nativeCacheRoot === undefined ? [] : ["--add-dir", nativeCacheRoot]),
     "-C", args.cwd,
     "-",
   ];
@@ -2797,9 +2801,11 @@ export async function spawnCodexWorker(
   config: Config,
   selection?: Pick<ProviderCapacity, "model" | "effort">,
 ): Promise<CodexWorkerResult> {
-  return withTempDir("codex-worker", (privateTmpDir) =>
-    spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection),
-  );
+  return withTempDir("codex-worker", (privateTmpDir) => {
+    const nativeCacheRoot = process.platform !== "win32" && !codexReadOnly(args) && args.sandboxIntent !== "disposable-review"
+      ? prepareWorkerNativeCache() : undefined;
+    return spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, nativeCacheRoot);
+  });
 }
 
 /** Azure deployment authentication is process-local to the daemon. It is deliberately not a
@@ -5377,6 +5383,7 @@ async function spawnCodexWorkerInPrivateTemp(
   config: Config,
   privateTmpDir: string,
   selection?: Pick<ProviderCapacity, "model" | "effort">,
+  nativeCacheRoot?: string,
 ): Promise<CodexWorkerResult> {
   const bin = resolveCodexBin(config);
   const startedAt = Date.now();
@@ -5408,9 +5415,9 @@ async function spawnCodexWorkerInPrivateTemp(
     );
     if (pidRef.pid !== undefined) teardownOnce(pidRef.pid);
   };
-  const childEnv = { ...codexSpawnEnv(config, args), TMPDIR: privateTmpDir };
+  const childEnv = { ...codexSpawnEnv(config, args, nativeCacheRoot), TMPDIR: privateTmpDir };
   const contained = spawn(
-    { command: bin, args: codexExecArgs(args, config, selection), cwd: args.cwd, env: childEnv },
+    { command: bin, args: codexExecArgs(args, config, selection, nativeCacheRoot), cwd: args.cwd, env: childEnv },
     (chunk) => {
       if (outputLimit || timedOut) return;
       // W1-T8203: stderr past its bound is truncated (head + tail), never a teardown and never a verdict.

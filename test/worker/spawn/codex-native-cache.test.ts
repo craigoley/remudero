@@ -1,20 +1,22 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { spawnCodexWorker } from "#src/lib/worker-provider.js";
+import { prepareWorkerNativeCache } from "#src/lib/worker-native-cache.js";
 import type { ContainedSpawnOptions } from "#src/lib/worker-containment.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const posix = { skip: process.platform === "win32" ? "POSIX native-cache permissions" : false };
 const require = createRequire(import.meta.url);
 
-async function writerOptions(inspect: (options: ContainedSpawnOptions, root: string, home: string) => void) {
+async function writerOptions(inspect: (options: ContainedSpawnOptions, root: string, home: string) => void,
+  mode: "writer" | "reader" | "review" = "writer") {
   const root = mkdtempSync(join(tmpdir(), "rmd-native-cache-test-"));
   const home = join(root, "host-home"), unsafe = join(root, "unsafe-worker-parent");
   mkdirSync(home, { mode: 0o700 });
@@ -27,7 +29,8 @@ async function writerOptions(inspect: (options: ContainedSpawnOptions, root: str
   const child = Object.assign(new EventEmitter(), streams);
   try {
     await spawnCodexWorker({ cwd: REPO_ROOT, prompt: "fixture only", workerHome,
-      settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: ["Read", "Bash"],
+      settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: mode === "reader" ? ["Read"] : ["Read", "Bash"],
+      ...(mode === "review" ? { sandboxIntent: "disposable-review" as const, sandboxReadRoots: [REPO_ROOT] } : {}),
       containment: { spawn(options) {
         inspect(options, root, home);
         queueMicrotask(() => {
@@ -79,7 +82,8 @@ test("Codex writer native parsing succeeds with security checks and unsafe cache
     const installed = names.map(name => { try { return require.resolve(name); } catch { return undefined; } }).filter((path): path is string => path !== undefined);
     assert.equal(installed.length, 1, "the installed native carrier is a positive control");
     const native = installed[0]!;
-    assert.ok(readFileSync(native).includes(Buffer.from("SWC native addon:")), "this scenario requires the real security-checking carrier");
+    const originalNative = readFileSync(native);
+    assert.ok(originalNative.includes(Buffer.from("SWC native addon:")), "this scenario requires the real security-checking carrier");
     copyFileSync(native, join(copy, basename(native)));
     const env: NodeJS.ProcessEnv = { NODE_PATH: join(REPO_ROOT, "node_modules") };
     for (const key of ["HOME", "TMPDIR", "PATH", "LANG", "USER"]) env[key] = options.env[key];
@@ -99,5 +103,74 @@ test("Codex writer native parsing succeeds with security checks and unsafe cache
     const refused = run({ SWC_NATIVE_BINDING_CACHE: join(root, "unsafe-worker-parent", "cache") });
     assert.notEqual(refused.status, 0, "an unsafe configured root remains refused after a successful native load");
     assert.match(refused.stderr, /parent writable by another user|trusted sticky protection/);
+    assert.ok(originalNative.equals(readFileSync(native)), "shared dependency bytes remain unchanged");
+  });
+});
+
+test("read-only and disposable-review workers receive no native-cache write grant", posix, async () => {
+  for (const mode of ["reader", "review"] as const) await writerOptions((options, _root, home) => {
+    assert.equal(shellCache(options), undefined);
+    assert.equal(options.env.SWC_NATIVE_BINDING_CACHE, undefined);
+    assert.equal(existsSync(join(home, ".cache")), false);
+    assert.notEqual(options.env.HOME, home);
+  }, mode);
+});
+
+function cacheFixture(check: (home: string) => void) {
+  const home = mkdtempSync(join(tmpdir(), "rmd-native-cache-guard-"));
+  try { check(home); } finally { rmSync(home, { recursive: true, force: true }); }
+}
+
+test("native cache creation is private and repeated preparation preserves the namespace", posix, () => {
+  cacheFixture(home => {
+    const first = prepareWorkerNativeCache(home);
+    const marker = join(first, "owned-marker"); writeFileSync(marker, "retained");
+    assert.equal(prepareWorkerNativeCache(home), first);
+    assert.equal(lstatSync(first).mode & 0o777, 0o700);
+    assert.equal(lstatSync(first).uid, process.geteuid!());
+    assert.equal(readFileSync(marker, "utf8"), "retained");
+  });
+});
+
+test("native cache refuses unsafe ancestors and existing public namespaces without changing their modes", posix, () => {
+  cacheFixture(home => {
+    const parent = join(home, ".cache"); mkdirSync(parent); chmodSync(parent, 0o777);
+    assert.throws(() => prepareWorkerNativeCache(home), /untrusted directory/);
+    assert.equal(lstatSync(parent).mode & 0o7777, 0o777);
+    assert.equal(existsSync(join(parent, "remudero")), false);
+    chmodSync(parent, 0o700);
+    const root = join(parent, "remudero", "swc-native"); mkdirSync(root, { recursive: true }); chmodSync(root, 0o755);
+    assert.throws(() => prepareWorkerNativeCache(home), /private to its writer/);
+    assert.equal(lstatSync(root).mode & 0o7777, 0o755);
+    chmodSync(root, 0o500);
+    assert.throws(() => prepareWorkerNativeCache(home), /private to its writer/);
+    assert.equal(lstatSync(root).mode & 0o7777, 0o500);
+  });
+});
+
+test("native cache rejects symlink and foreign-owner ancestors before granting a writable directory", posix, () => {
+  cacheFixture(home => {
+    const target = join(home, "other"); mkdirSync(target); writeFileSync(join(target, "marker"), "retained");
+    symlinkSync(target, join(home, ".cache"));
+    assert.throws(() => prepareWorkerNativeCache(home), /untrusted directory/);
+    assert.equal(readFileSync(join(target, "marker"), "utf8"), "retained");
+    assert.equal(existsSync(join(target, "remudero")), false);
+    unlinkSync(join(home, ".cache"));
+    assert.throws(() => prepareWorkerNativeCache(home, process.geteuid!() + 1), /untrusted directory|private to its writer/);
+  });
+});
+
+test("native cache refuses when process ownership cannot be measured", posix, t => {
+  t.mock.method(process, "geteuid", () => undefined as never);
+  cacheFixture(home => assert.throws(() => prepareWorkerNativeCache(home), /ownership cannot be verified/));
+});
+
+test("native cache permits a trusted sticky parent without relaxing the private leaf", posix, () => {
+  cacheFixture(root => {
+    chmodSync(root, 0o1777);
+    const home = join(root, "home"); mkdirSync(home, { mode: 0o700 });
+    const cache = prepareWorkerNativeCache(home);
+    assert.equal(lstatSync(root).mode & 0o7777, 0o1777);
+    assert.equal(lstatSync(cache).mode & 0o777, 0o700);
   });
 });
