@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync, execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { createHash } from "node:crypto";
 import { sourceFixture } from "#test/helpers/improvement-thread-fixture.js";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { fixedClock } from "#src/lib/clock.js";
@@ -91,6 +92,26 @@ test("improvement chat never confirms a write after its lock ownership changed",
     assert.equal(result.kind, "busy", "a lost writer cannot acknowledge a saved message");
     assert.equal(existsSync(store.threadStorePath), false, "ownership is checked again before append");
     assert.deepEqual(JSON.parse(readFileSync(lockPath, "utf8")), replacement, "the replacement holder is retained");
+  });
+});
+
+test("improvement chat refuses missing or unreadable ownership before appending", async () => {
+  const { appendThreadMessageOnce } = await import("#src/lib/inbox-thread.js");
+  for (const damage of ["missing", "unparseable"] as const) await withTempDir(`improvement-chat-lock-${damage}`, dir => {
+    const lockPath = join(dir, "inbox-thread-locks", "write.lock");
+    let observations = 0;
+    const store = { threadStorePath: join(dir, "inbox-threads.jsonl"), now: () => {
+      observations++;
+      if (damage === "missing") unlinkSync(lockPath);
+      else writeFileSync(lockPath, "{unreadable-owner");
+      return 1793610000000;
+    } };
+    const result = appendThreadMessageOnce(inboxThreadIdentity("improvement:acme-atlas:quality"), "reply", "Keep the API stable.", "unreadable-lock-request", store);
+    assert.equal(observations, 1, "the fixture damages the acquired lock during message preparation");
+    assert.equal(result.kind, "busy", "unverifiable ownership cannot acknowledge a message");
+    assert.equal(existsSync(store.threadStorePath), false, "the writer refuses before creating the message store");
+    if (damage === "missing") assert.equal(existsSync(lockPath), false);
+    else assert.equal(readFileSync(lockPath, "utf8"), "{unreadable-owner", "unknown ownership is preserved");
   });
 });
 
@@ -270,14 +291,52 @@ test("improvement action execution revalidates current source and refuses change
     const { deps, request, input } = sourceFixture(dir);
     const saved = await createImprovementThread(request, deps); assert(saved.state === "saved");
     const view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
-    const pending = await requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: "source-change-draft-00001" }, { ...deps });
+    const decision = { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: "source-change-draft-00001" };
+    const pending = await requestImprovementAction("draft", decision, { ...deps });
     assert(pending.state === "requested");
     const changed = structuredClone(input); changed.currentSha = "c".repeat(40);
     const published = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(deps.stateDir, request.repository), input: changed, expectedSnapshotId: request.snapshotId, clock: deps.clock }); assert.equal(published.state, "published");
     let calls = 0;
     const refused = await runImprovementAction(pending.operation.operationId, deps, async () => { calls++; }, async () => { calls++; return undefined; }, () => undefined);
     assert("kind" in refused); assert.equal(refused.state, "refused"); assert.equal(calls, 0);
+    const replay = await requestImprovementAction("draft", decision, { ...deps });
+    assert(replay.state === "requested"); assert.deepEqual(replay.operation, refused, "the same decision recovers its durable refusal even after the source changes");
+    assert.deepEqual(replay.execution, { state: "not_requested" }); assert.equal(calls, 0);
     const historical = readImprovementThread(saved.requestId, deps); assert(historical.state === "saved"); assert.equal(historical.source.state, "stale"); assert.equal(historical.messages.length, 2);
+  });
+});
+
+test("improvement approval requires the exact reviewed goal and completed repository draft", async () => {
+  const { createImprovementThread, readImprovementThread, isReviewedImprovementDraft } = await planningModule();
+  const { captureInboxDraftSnapshot } = await import("#src/lib/inbox.js");
+  type Proposal = import("#src/lib/inbox.js").Proposal;
+  type Draft = import("#src/lib/inbox.js").DraftedCandidate;
+  await withTempDir("improvement-reviewed-draft", async dir => {
+    const { deps, request, inboxRoot } = sourceFixture(dir);
+    const saved = await createImprovementThread(request, deps); assert(saved.state === "saved");
+    const view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
+    const proposal: Proposal = JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-proposals.json"), "utf8")).proposals[0];
+    const draft: Draft = { proposalId: proposal.id, fragmentYaml: "- id: NEW-1\n  title: Simplify repeated work\n",
+      stampLine: "Reviewed improvement draft", anchorFingerprint: "",
+      completion: { snapshot: captureInboxDraftSnapshot(proposal, { repository: request.repository }), lintClean: true, violations: [] } };
+    const reviewed = { goalDigest: view.goalDigest, draftDigest: createHash("sha256").update(JSON.stringify(draft)).digest("hex") };
+    assert.equal(isReviewedImprovementDraft(proposal, draft, reviewed), true, "the exact completed draft is admissible for review");
+    assert.equal(isReviewedImprovementDraft(proposal, draft, undefined), false);
+    assert.equal(isReviewedImprovementDraft(proposal, undefined, reviewed), false);
+    assert.equal(isReviewedImprovementDraft({ ...proposal, improvement: undefined }, draft, reviewed), false);
+    assert.equal(isReviewedImprovementDraft({ ...proposal, improvement: { ...proposal.improvement!, conversationReady: false } }, draft, reviewed), false);
+    assert.equal(isReviewedImprovementDraft(proposal, draft, { ...reviewed, goalDigest: "f".repeat(64) }), false);
+    assert.equal(isReviewedImprovementDraft(proposal, { ...draft, fragmentYaml: "unreviewed replacement" }, reviewed), false);
+    const reject = (changed: Draft, reason: string) => {
+      const freshDigest = createHash("sha256").update(JSON.stringify(changed)).digest("hex");
+      assert.equal(isReviewedImprovementDraft(proposal, changed, { ...reviewed, draftDigest: freshDigest }), false, reason);
+    };
+    reject({ ...draft, proposalId: "another-proposal" }, "a digest cannot authorize another proposal");
+    reject({ ...draft, completion: undefined }, "an unfinished draft is refused");
+    reject({ ...draft, completion: { ...draft.completion!, lintClean: false } }, "failed lint is refused");
+    reject({ ...draft, completion: { ...draft.completion!, violations: ["unresolved lint finding"] } }, "remaining violations are refused");
+    reject({ ...draft, completion: { ...draft.completion!, snapshot: { ...draft.completion!.snapshot, repository: "acme/foreign" } } }, "another repository is refused");
+    reject({ ...draft, completion: { ...draft.completion!, snapshot: { ...draft.completion!.snapshot, generation: "old-generation" } } }, "an obsolete goal generation is refused");
   });
 });
 
