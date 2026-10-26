@@ -24,7 +24,7 @@
     it for every other TASK_TYPES member; (5) it passes scanSkillDraft's allowlist. Failure messages NAME the skill.
     FALSIFIER FIXTURES: the check logic is a function taking a skill directory, and the test runs it against fixture
     skills with applies-to: implemnt and with a when-paths glob matching nothing, asserting each fails naming the skill.
-    Retain the two existing hand-written tests unchanged; this task adds only the discovery test.
+    Retain the two existing hand-written tests unchanged; add only the discovery test and its required census catalog registration in src/lib/rule-suites.ts. The suite remains in normal rule checks and full CI.
     Do not change selection or scan behaviour."
   acceptance:
     - claim: "the discovery test declares the new skill-conformance census"
@@ -35,9 +35,9 @@
   risk: low
   origin: feedback#fb-1791856366583-e5a5e9
   plan_refs: ["§7B"]
-  files: [test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts]
+  files: [test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts, src/lib/rule-suites.ts]
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=27ce200e0ea1f88a
   attempts: 0
-  note: "verify:auto — pure test addition over existing exports; no src change."
+  note: "verify:auto — discovery test over existing exports plus its required catalog-only census registration; no selection, scanning or permission change."

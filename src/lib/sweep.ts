@@ -3574,14 +3574,27 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixOwnerReclaimableAtHold: (pr, decline) => {
       const { worktree_path: ownerPath, branch, task_id: taskId } = decline;
       if (typeof ownerPath !== "string" || typeof branch !== "string" || typeof taskId !== "string") return false;
+      if (decline.owner_recovery_reason === "owner_dirty_recovery_preserve_failed" &&
+          (branch !== pr.headRefName || taskId !== fixLedgerTaskIdFor(pr))) return false;
       try {
-        return decideRegisteredFixOwnerRecovery(registeredOwnerRecovery.capture({
+        const snapshot = registeredOwnerRecovery.capture({
           repoDir, worktreesRoot: worktreesDir(config), ownerPath, taskId, branch,
           expectedRemoteSha: pr.headSha, observedRemoteSha: pr.headSha, inflightDir,
           claimKey: fixBranchClaimKey(owner, repo, branch),
           claimRoundEnded: (claimRunId: string) => fixRoundClaimEnded(ledgerPath, claimRunId),
           idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath), spawnWallClockBoundMs), // ledger-read-intent: live
-        })).kind !== "keep";
+        });
+        const decision = decideRegisteredFixOwnerRecovery(snapshot);
+        if (decline.owner_recovery_reason !== "owner_dirty_recovery_preserve_failed") return decision.kind !== "keep";
+        if (decision.kind !== "preserve-tracked-dirty" || typeof snapshot.localSha !== "string") return false;
+        // The ordinary preservation helper proves parent and exact-tree identity before returning
+        // this immutable ref. Revalidation never clears the index, removes the owner or starts work.
+        const ref = registeredOwnerRecovery.preserveTrackedDirty?.(repoDir, ownerPath, branch, snapshot.localSha);
+        const prefix = `refs/rmd-recovery/fix-dirty/${branch}/${snapshot.localSha}/`;
+        if (typeof ref !== "string" || !ref.startsWith(prefix) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref.slice(prefix.length))) return false;
+        log("sweep.fix.checkout_owner_dirty_preserved", { pr_number: pr.prNumber, task_id: taskId, branch,
+          local_sha_prefix: snapshot.localSha.slice(0, 12), recovery_ref: ref.slice(0, 512), from_backstop_revalidation: true });
+        return true;
       } catch {
         // An unreadable owner has the remedy a kept one has: the hold and its single escalation stand.
         return false;
@@ -13710,7 +13723,8 @@ export function fixDispatchHoldAtHead(
   const last = declines[declines.length - 1];
   const ownerPath = typeof last?.worktree_path === "string" ? last.worktree_path : undefined;
   if (declines.length >= FIX_CLAIM_DECLINE_BACKSTOP && (ownerPath === undefined || ownerWorktreeExists(ownerPath)) &&
-      !(ownerPath !== undefined && last.owner_recovery_decision === "keep" && ownerReclaimable?.(pr, last) === true)) {
+      !(ownerPath !== undefined && (last.owner_recovery_decision === "keep" ||
+        last.owner_recovery_reason === "owner_dirty_recovery_preserve_failed") && ownerReclaimable?.(pr, last) === true)) {
     const why = String(last.owner_recovery_reason);
     // W1-T5974: a staged-only refusal names the paths an operator must inspect before clearing it.
     const staged = Array.isArray(last.staged_paths) && last.staged_paths.length > 0
@@ -15621,8 +15635,22 @@ export function fixSeedRead(
   // this boot's explicit empty adoption receipt; a different run id or age alone proves nothing.
   if (!ownerHandedOff && seed.runId !== undefined &&
       continuationEndedAtEmptyBoot(lines, seedAt, seed.runId, taskId, runId) &&
-      window.filter((line) => rung(line) && line.step === "fix.dispatch" &&
-        (typeof line.head_sha !== "string" || line.head_sha === pr.headSha)).every((line) => line.run_id === seed.runId)) {
+      window.every((line, index) => {
+        if (!rung(line) || line.step !== "fix.dispatch" ||
+            (typeof line.head_sha === "string" && line.head_sha !== pr.headSha)) return true;
+        if (line.run_id === seed.runId) return true;
+        // Rotation can retain a completed earlier round at this same head while dropping
+        // the dispositions that separated it from the seed. Only its exact terminal before
+        // the seed owner's own dispatch settles that older owner; incomplete joins still veto.
+        return index < dispatchAt && window[dispatchAt].run_id === seed.runId &&
+          typeof line.run_id === "string" && line.run_id.length > 0 &&
+          typeof line.round_id === "string" && line.round_id.length > 0 &&
+          typeof line.worker_run_id === "string" && line.worker_run_id.length > 0 &&
+          window.slice(index + 1, dispatchAt).some(done => done.step === "fix.done" &&
+            done.task_id === taskId && done.run_id === line.run_id &&
+            done.round_id === line.round_id && done.worker_run_id === line.worker_run_id &&
+            done.head_sha === pr.headSha && line.head_sha === pr.headSha);
+      })) {
     return { kind: "orphaned", seed, orphanReason: "owner-run-ended" };
   }
   // A hand-off to the sweep is a live wait only until the sweep has disposed the same head after it.

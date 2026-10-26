@@ -124,3 +124,56 @@ test("real rotation preserves the exact old-head recovery and its uncertain-owne
     assert.equal(fixSeedRead(after, pr, CURRENT)?.kind, uncertain ? "live" : "orphaned");
   }
 });
+
+function completedEarlierRound(): Row[] {
+  const rows = history();
+  rows[0] = { ...rows[0], head_sha: pr.headSha, round_id: "prior-round", worker_run_id: "prior-worker" };
+  rows.splice(1, 1, { step: "fix.done", task_id: pr.taskId, run_id: PRIOR,
+    head_sha: pr.headSha, round_id: "prior-round", worker_run_id: "prior-worker", fix_outcome: "NEEDS_SCOPE" });
+  rows.splice(4, 0, { step: "fix.dispatch", task_id: pr.taskId, run_id: OWNER,
+    head_sha: pr.headSha, round_id: "seed-round" });
+  return rows;
+}
+
+test("a completed earlier round at the same head cannot keep a dead seed owner live", () => {
+  assert.deepEqual(fixSeedRead(completedEarlierRound(), pr, CURRENT), {
+    kind: "orphaned", seed: { runId: OWNER }, orphanReason: "owner-run-ended",
+  });
+});
+
+test("settled-round recovery requires exact terminal identities before the seed's dispatch", () => {
+  for (const field of ["round_id", "run_id", "task_id", "head_sha", "worker_run_id"]) {
+    for (const value of [undefined, "foreign"]) {
+      const rows = completedEarlierRound();
+      rows[1] = { ...rows[1], [field]: value };
+      assert.equal(fixSeedRead(rows, pr, CURRENT)?.kind, "live", `${field}=${String(value)}`);
+    }
+  }
+  const late = completedEarlierRound();
+  const [done] = late.splice(1, 1);
+  late.push(done!);
+  assert.equal(fixSeedRead(late, pr, CURRENT)?.kind, "live", "a terminal after the newer dispatch cannot settle its prior ownership window");
+  for (const field of ["live", "adopted", "unreadable", "misidentified"]) {
+    const rows = completedEarlierRound();
+    rows.find(row => row.step === "run_child.adoption_pass")![field] = 1;
+    assert.equal(fixSeedRead(rows, pr, CURRENT)?.kind, "live", field);
+  }
+});
+
+test("real rotation retains the exact earlier-round completion needed by empty-boot recovery", t => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-old-head-seed-rotation-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const timeline = completedEarlierRound();
+  const start = Date.now() - timeline.length * 1000;
+  const rows = timeline.map((row, index) => ({ ...row, ts: new Date(start + index * 1000).toISOString() }));
+  const core = rows.map(row => JSON.stringify(row)).join("\n") + "\n";
+  const bytes = Buffer.byteLength(core);
+  writeFileSync(ledgerPath, core + JSON.stringify({ step: "ci.polling", padding: "x".repeat(bytes * 4) }) + "\n");
+  assert.equal(rotateLedger(ledgerPath, { ceilingBytes: bytes * 2 }).rotated, true);
+  const after = readLedgerLines(ledgerPath);
+  assert.ok(after.some(row => row.step === "fix.done" && row.round_id === "prior-round"));
+  assert.equal(fixSeedRead(after, pr, CURRENT)?.kind, "orphaned");
+  const incomplete = after.map(row => row.step === "fix.done" ? { ...row, round_id: undefined } : row);
+  assert.equal(fixSeedRead(incomplete, pr, CURRENT)?.kind, "live");
+});

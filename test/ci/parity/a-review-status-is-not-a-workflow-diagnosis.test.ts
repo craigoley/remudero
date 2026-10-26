@@ -4,8 +4,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
-import { ciFrictionLadder, ciFrictionShardYaml, gitCiFrictionOwnerSearch, type CiFrictionRound } from "#src/lib/ci-friction-gardener.js";
-import { locateCiFrictionOwner } from "#src/lib/ci-friction-remedy.js";
+import { ciFrictionLadder, ciFrictionRoundsFromLedger, ciFrictionShardYaml, gitCiFrictionOwnerSearch, priceCiFrictionCauses, type CiFrictionRound } from "#src/lib/ci-friction-gardener.js";
+import { locateCiFrictionOwner, type OwnerSearch } from "#src/lib/ci-friction-remedy.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const NOW = Date.parse("2026-10-25T03:56:00Z");
@@ -126,4 +126,110 @@ test("a concrete scanner runner defect remains owned even beside another alert's
   assert.deepEqual(locateCiFrictionOwner(key, details, f.search())?.files, ["src/scanner-runner.ts"],
     "only this cause's own signature can identify its diagnosis");
   assert.equal(ladder(key, details, f.search()).next?.decision.kind, "draft");
+});
+
+test("a census growth refusal retains its observations without assigning the reporter as a repair owner", async t => {
+  const reporter = "scripts/census-precheck.mjs";
+  const runner = reporter;
+  const diagnostic = "census-precheck: this branch grows";
+  const failure = "census-precheck: could not measure — census snapshot reader crashed";
+  const sources = new Map([
+    [runner, `const message = ${JSON.stringify(diagnostic)};\nthrow new Error(${JSON.stringify(failure)});\n`],
+  ]);
+  const searched: string[] = [];
+  const search: OwnerSearch = {
+    filesContaining(term) {
+      searched.push(term);
+      return [...sources].flatMap(([file, source]) => source.includes(term) ? [{ file, hits: 1 }] : []);
+    },
+    fileExists: file => sources.has(file),
+  };
+  assert.deepEqual(search.filesContaining(diagnostic).map(hit => hit.file), [reporter],
+    "positive control resolves the growth reporter");
+  const crashed = spawnSync(process.execPath, ["-e", sources.get(runner)!], { encoding: "utf8" });
+  assert.equal(crashed.status, 1);
+  assert.ok(crashed.stderr.includes(failure), "positive control executes the concrete runner failure");
+  const growth = [
+    `${diagnostic} 1 census count(s) CI will refuse: census-suite: test/the-affected-suite-reach-ratchet.test.ts fails — importerCount: 934 > 933`,
+    `${diagnostic} 1 census count(s) CI will refuse: comment-load: src/lib/repo-location.ts has 60 comment lines > ceiling 57`,
+    `${diagnostic} 3 census count(s) CI will refuse: fixture-copy: gitInitSites 224 > baseline 223`,
+  ];
+  const scenarios = [
+    { name: "growth alone", details: growth, owned: false },
+    { name: "runner alone", details: [failure], owned: true },
+    { name: "growth then runner", details: [...growth, failure], owned: true },
+    { name: "runner then growth", details: [failure, ...growth], owned: true },
+  ];
+  for (const { name, details, owned } of scenarios) await t.test(name, () => {
+    const records: Parameters<typeof ciFrictionRoundsFromLedger>[0] = details.flatMap((reason, index) => {
+      const run_id = `census-${index}`;
+      const ts = new Date(NOW).toISOString();
+      return [
+        { step: "pr.opened", run_id, ts, pr_url: `https://github.com/fixture/repo/pull/${12700 + index}` },
+        { step: "fix.dispatch", run_id, ts, round: 1, mode: "ci-log", elapsed_ms: (index + 1) * 60_000 },
+        { step: "fix.commit_refused", run_id, ts, round: 1, reason },
+      ];
+    });
+    const rounds = ciFrictionRoundsFromLedger(records);
+    const retained = JSON.stringify(rounds);
+    const cause = { kind: "fix_refusal" as const, name: "census-precheck" };
+    const minutes = details.length * (details.length + 1) / 2;
+    assert.deepEqual(rounds.map(round => round.detail), details, "ledger observations survive grouping");
+    assert.deepEqual(rounds.map(round => round.cause), details.map(() => cause));
+    const priced = priceCiFrictionCauses(rounds, undefined, NOW);
+    assert.deepEqual(priced, [{ cause, minutes, rounds: details.length, prs: details.length }]);
+    searched.length = 0;
+    assert.deepEqual(locateCiFrictionOwner("fix_refusal:census-precheck", details, search)?.files,
+      owned ? [runner] : undefined);
+    const result = ciFrictionLadder({ priced, rounds, tasks: [], receipts: new Set(), escalated: new Set(),
+      ownerSearch: search, nowMs: NOW });
+    assert.deepEqual(result.next?.price, priced[0], "all growth and runner costs remain priced");
+    assert.equal(JSON.stringify(rounds), retained, "ownership diagnosis preserves every original round");
+    assert.equal(result.next?.decision.kind, owned ? "draft" : "escalate");
+    if (owned) {
+      assert.ok(result.next?.decision.kind === "draft");
+      assert.deepEqual(result.next.decision.owner.files, [runner], "concrete runner evidence retains its source owner");
+    } else {
+      assert.ok(result.next?.decision.kind === "escalate");
+      assert.equal(result.next.decision.holdReason, "no-owner");
+      assert.match(result.next.decision.why, /census.*mechanism.*UNKNOWN/i);
+    }
+    assert.equal(searched.length, owned ? 2 : 0, "only concrete runner evidence enters each ownership search");
+  });
+});
+
+test("mixed census findings retain the concrete runner owner through ledger pricing and the ladder", t => {
+  const f = fixture(t);
+  mkdirSync(join(f.repo.dir, "scripts"));
+  writeFileSync(join(f.repo.dir, "scripts/census-precheck.mjs"), 'export const refusal = "census-precheck: this branch grows";\n');
+  const message = "census snapshot reader crashed";
+  writeFileSync(join(f.repo.dir, "scripts/census-runner.mjs"), `throw new Error(${JSON.stringify(message)});\n`);
+  f.repo.git("add", "."); f.repo.git("commit", "-qm", "record distinct census reporter and failing runner");
+  f.repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const crash = spawnSync(process.execPath, [join(f.repo.dir, "scripts/census-runner.mjs")], { encoding: "utf8" });
+  assert.equal(crash.status, 1);
+  assert.ok(crash.stderr.includes(message));
+  const reasons = [
+    "census-precheck: this branch grows 1 census count(s) CI will refuse: fixture-copy: real branch finding",
+    `census-precheck: ${message}`,
+  ];
+  const records = reasons.flatMap((reason, index) => {
+    const run_id = `run-census-${index}`, head_sha = String(index).repeat(40), task_id = `W1-T${9000 + index}`;
+    return [
+      { step: "pr.opened", run_id, task_id, ts: new Date(NOW - 3000).toISOString(), pr_number: 13000 + index, pr_url: `https://github.com/acme/fixture/pull/${13000 + index}` },
+      { step: "fix.dispatch", run_id, task_id, ts: new Date(NOW - 2000).toISOString(), head_sha, round: 1, mode: "ci-log", elapsed_ms: 180000 },
+      { step: "fix.commit_refused", run_id, task_id, ts: new Date(NOW - 1000).toISOString(), head_sha, round: 1, reason },
+    ];
+  });
+  const retained = JSON.stringify(records);
+  const rounds = ciFrictionRoundsFromLedger(records), priced = priceCiFrictionCauses(rounds);
+  assert.equal(rounds.length, 2);
+  assert.equal(priced.length, 1, "the existing cost class is not renamed or split to fabricate a lower after-window");
+  assert.deepEqual(priced[0], { cause: { kind: "fix_refusal", name: "census-precheck" }, minutes: 6, rounds: 2, prs: 2 });
+  const result = ciFrictionLadder({ priced, rounds, tasks: [], receipts: new Set(), escalated: new Set(), ownerSearch: f.search(), nowMs: NOW });
+  assert.equal(result.next?.decision.kind, "draft");
+  assert.deepEqual(result.next?.decision.kind === "draft" ? result.next.decision.owner.files : [], ["scripts/census-runner.mjs"]);
+  assert.equal(result.next?.price.minutes, 6);
+  assert.equal(JSON.stringify(records), retained);
+  assert.deepEqual(locateCiFrictionOwner("fix_refusal:census-precheck", [reasons[1]!], f.search())?.files, ["scripts/census-runner.mjs"]);
 });

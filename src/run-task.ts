@@ -1131,6 +1131,7 @@ import {
 } from "./lib/retro-open-pr-guard.js";
 import {
   AUTOMATED_RETRO_DECISION_ENV,
+  automatedRetroGatherObserver,
   decodeAutomatedRetroDecision,
   retroExitAfterPrOpened,
   runAutomatedRetroSubprocess,
@@ -22794,12 +22795,15 @@ async function retroCommand(
   // from a unit test. Written as an `if` here the reporting body was unreachable in every test
   // that does not truncate, and `diff-coverage` blocked the PR naming exactly those lines.
   reportRetroLedgerTruncation(retroLedgerRead, { ledgerPath, runId: `RETRO-${retroReadStartedMs}` });
+  const observeGather = automatedRetroGatherObserver(opts.automated !== undefined && !dryRun, {
+    log: (step, fields) => appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...fields }),
+  });
   // W1-T1013: the follow-up harvest's OWN corpus — the archive∪live union, resolved
   // separately from `ledgerNdjson` above so every OTHER miner buildGather runs keeps
   // reading the single-file corpus it always has (see buildGather's `followupLedgerNdjson`
   // doc for why this must stay a second, explicit input rather than replacing `ledgerNdjson`
   // outright).
-  const followupLedgerNdjson = followupLedgerUnionNdjson(join(config.root, "state"));
+  const followupLedgerNdjson = observeGather("followup-ledger", () => followupLedgerUnionNdjson(join(config.root, "state")));
   const learningsMd = existsSync(learningsPath) ? readFileSync(learningsPath, "utf8") : "";
   // W1-T89/P18: plan/mast-mapping.yaml is DATA (Rule 2) — loaded here, never
   // touched by buildGather itself. A missing file degrades to an empty table
@@ -22829,13 +22833,14 @@ async function retroCommand(
   // a proposal's indented (a)/(b)/(c) continuation bullets). Best-effort: a read/parse
   // hiccup degrades to "no dedup source" (every followup mints) rather than aborting
   // the retro — the SAME non-fatal discipline the mast-mapping/orientation reads use.
-  let gatherPlanRead: { plan: ReturnType<typeof loadPlan> | undefined } | { error: unknown };
-  try {
-    const tasksYamlPath = join(checkoutRoot, "plan", "tasks.yaml");
-    gatherPlanRead = { plan: existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath) : undefined };
-  } catch (error) {
-    gatherPlanRead = { error: error };
-  }
+  const gatherPlanRead: { plan: ReturnType<typeof loadPlan> | undefined } | { error: unknown } = observeGather("plan-inputs", () => {
+    try {
+      const tasksYamlPath = join(checkoutRoot, "plan", "tasks.yaml");
+      return { plan: existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath) : undefined };
+    } catch (error) {
+      return { error: error };
+    }
+  });
   const readGatherPlan = (): ReturnType<typeof loadPlan> | undefined => {
     if ("error" in gatherPlanRead) throw gatherPlanRead.error;
     return gatherPlanRead.plan;
@@ -22864,7 +22869,7 @@ async function retroCommand(
   // organ. loadMounts throws on a bad/absent table — same fail-closed
   // discipline every other mounts.yaml read in this file already has.
   const mountsTable = loadMounts(mountsPath(checkoutRoot));
-  const gather = buildGather({
+  const gather = observeGather("gather", () => buildGather({
     ledgerNdjson,
     followupLedgerNdjson,
     learningsMd,
@@ -22883,7 +22888,7 @@ async function retroCommand(
     // the same tree `openTaskTitles` above already loads.
     planCoherence: readPlanCoherenceInputs(checkoutRoot),
     now: Date.now(),
-  });
+  }));
   // W1-T111 (P25 iv): the approve/reframe rate is telemetry, not decoration — the field's
   // failure mode is the rubber-stamp queue, so it rides EVERY retro (cumulative, all-time,
   // never scoped to `sinceTs` — a fatigue signal needs the whole history to be trustworthy).
@@ -22893,7 +22898,7 @@ async function retroCommand(
   // checkout (this repo's own working tree, `repoRoot` — never a PR diff). Best-effort + silent
   // on failure, the SAME non-fatal discipline `openProposalLines`/`openTaskTitles` above already
   // follow: a read/scan hiccup degrades to "nothing to advise" rather than aborting the retro.
-  const netStateAdvisorySection = netStateAdvisorySectionFor(checkoutRoot);
+  const netStateAdvisorySection = observeGather("net-state", () => netStateAdvisorySectionFor(checkoutRoot));
   // W1-T367: a single batched `projectPlan` pass over the SAME `repoRoot`/plan/tasks.yaml the
   // plan-health sweep reads below, so its "already shipped" skip is decided the SAME way the
   // dispatch path decides it — never the decorative yaml `status:` field (MEASURED: 248/359
@@ -22921,11 +22926,11 @@ async function retroCommand(
   try {
     const planHealthPlan = readGatherPlan();
     if (planHealthPlan) {
-      const planHealthProjection = projectPlan(
+      const planHealthProjection = observeGather("plan-projection", () => projectPlan(
         planHealthPlan,
         { ledgerPath, github: opts.github ?? buildBatchedGithub(owner, repo) },
         join(config.root, "state", "status.json"),
-      );
+      ));
       followupReferentRead = {
         kind: "ok",
         merged: new Set([...planHealthProjection].filter(([, v]) => v.merged).map(([id]) => id)),
@@ -22951,7 +22956,7 @@ async function retroCommand(
   // every standing rule the linter encodes — rides EVERY retro report (dry-run and real
   // alike), same as the net-state advisory section above.
   const planHealthSection = planHealthSweepSectionFor(checkoutRoot, isTaskMerged, () => readGatherPlan()?.tasks);
-  const reportWithoutPromotion =
+  const reportWithoutPromotion = observeGather("report", () =>
     [
       renderGather(gather),
       "",
@@ -22962,7 +22967,7 @@ async function retroCommand(
       retroLedgerScopeNote(retroLedgerRead),
     ].join("\n") +
     planStateTruthSection +
-    planHealthSection;
+    planHealthSection);
 
   if (dryRun) {
     console.log(reportWithoutPromotion + netStateAdvisorySection);

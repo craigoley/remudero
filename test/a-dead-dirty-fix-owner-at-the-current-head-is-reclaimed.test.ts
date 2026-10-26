@@ -13,6 +13,7 @@ import {
   buildSweepEffects, captureRegisteredFixOwnerSnapshot, clearStaleDirtyFixOwner,
   decideRegisteredFixOwnerRecovery, preserveStaleDirtyFixOwner, registeredFixWorktreeOwner,
   removeAbandonedFixWorktreeOwner,
+  preserveOrDiscardFixOwnerResidue,
   type BuildSweepEffectsDeps, type CaptureRegisteredFixOwnerDeps, type RegisteredFixOwnerSnapshot,
 } from "#src/run-task.js";
 import {
@@ -80,7 +81,8 @@ function capture(f: Fixture, deps: CaptureRegisteredFixOwnerDeps = {}): Register
 }
 
 type Log = { step: string; extra?: Record<string, unknown> };
-function effectsFor(f: Fixture, opts: { rounds?: ReturnType<typeof history>; captureDeps?: CaptureRegisteredFixOwnerDeps; wallClockMs?: number } = {}) {
+function effectsFor(f: Fixture, opts: { rounds?: ReturnType<typeof history>; captureDeps?: CaptureRegisteredFixOwnerDeps; wallClockMs?: number;
+  preserveTracked?: (...args: any[]) => unknown } = {}) {
   const logs: Log[] = [];
   const order: string[] = [];
   const ledgerPath = join(f.root, "ledger.ndjson");
@@ -96,6 +98,7 @@ function effectsFor(f: Fixture, opts: { rounds?: ReturnType<typeof history>; cap
     spawnImpl: (async () => ({ sessionId: "probe", costUsd: 0, text: "REPORT\nprobe", blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, verdict: "success", tokens: {}, compactionEvents: [], childEnvKeys: [] } as unknown as WorkerResult)) as never,
     registeredWorktreeOwnerImpl: registeredFixWorktreeOwner,
     registeredOwnerRecovery: {
+      preserveTrackedDirty: opts.preserveTracked ?? preserveOrDiscardFixOwnerResidue,
       capture: (args: Parameters<typeof captureRegisteredFixOwnerSnapshot>[0]) =>
         captureRegisteredFixOwnerSnapshot(args, { ...deadOwner, ...opts.captureDeps }),
       preserveStaleDirty: (root: string, repoDir: string, ownerPath: string, branch: string, localSha: string) => {
@@ -258,4 +261,60 @@ test("W1-T7998: a backstop hold re-asks the owner decision and lifts when it is 
     assert.equal(lifted.dispatched, 1, "the claim proceeds in the pass the owner became reclaimable");
     assert.deepEqual(lifted.escalations, []);
   } finally { f.cleanup(); }
+});
+
+function indexedIgnoredOwner(f: Fixture) {
+  git(f.ownerPath, "add", "--", FILE);
+  writeFileSync(join(f.ownerPath, ".gitignore"), "coverage/\n");
+  mkdirSync(join(f.ownerPath, "coverage"));
+  const path = "coverage/indexed.txt";
+  writeFileSync(join(f.ownerPath, path), "unpublished indexed bytes\n");
+  git(f.ownerPath, "add", ".gitignore");
+  git(f.ownerPath, "add", "--force", "--", path);
+  return path;
+}
+
+test("a verified preservation capsule lifts only the failed tracked-owner backstop", () => {
+  const f = fixture();
+  try {
+    const path = indexedIgnoredOwner(f);
+    const pr = prView(f), declines = keptDeclines(f, { owner_recovery_reason: "owner_dirty_recovery_preserve_failed" });
+    assert.ok(fixDispatchHoldAtHead(pr, declines), "three failed claims still hold without a fresh capsule");
+    const indexPath = git(f.ownerPath, "rev-parse", "--path-format=absolute", "--git-path", "index");
+    const index = readFileSync(indexPath), status = git(f.ownerPath, "status", "--porcelain=v1");
+    const built = effectsFor(f);
+    assert.equal(fixDispatchHoldAtHead(pr, declines, existsSync, built.effects.fixOwnerReclaimableAtHold), undefined);
+    const refs = git(f.repo.dir, "for-each-ref", "--format=%(refname)", "refs/rmd-recovery/fix-dirty").split("\n");
+    assert.equal(refs.length, 1);
+    assert.equal(git(f.repo.dir, "show", `${refs[0]}:${path}`), "unpublished indexed bytes");
+    assert.equal(git(f.repo.dir, "rev-parse", `${refs[0]}^1`), f.head);
+    assert.deepEqual(readFileSync(indexPath), index);
+    assert.equal(git(f.ownerPath, "status", "--porcelain=v1"), status);
+    assert.deepEqual(built.order, [], "revalidation does not clear or remove the owner");
+    assert.equal(registeredFixWorktreeOwner(f.repo.dir, `refs/heads/${BRANCH}`), realpathSync(f.ownerPath));
+    assert.equal(built.logs.filter(row => row.step === "fix.dispatch").length, 0);
+  } finally { f.cleanup(); }
+});
+
+test("tracked-owner revalidation retains live uncertain and unverified preservation holds", () => {
+  const variants = [
+    { captureDeps: { processCensus: () => ({ state: "occupied", scanned: 1, pid: 7 }) } },
+    { captureDeps: { processCensus: () => { throw new Error("process ownership unreadable"); } } },
+    { preserveTracked: () => { throw new Error("tree mismatch"); } },
+    { preserveTracked: () => undefined },
+    { preserveTracked: () => "not-a-verified-recovery-ref" },
+    { preserveTracked: () => ({ refusal: "owner_dirty_staged_only_refused" }) },
+  ] as Parameters<typeof effectsFor>[1][];
+  for (const options of variants) {
+    const f = fixture();
+    try {
+      indexedIgnoredOwner(f);
+      const pr = prView(f), declines = keptDeclines(f, { owner_recovery_reason: "owner_dirty_recovery_preserve_failed" });
+      const built = effectsFor(f, options), status = git(f.ownerPath, "status", "--porcelain=v1");
+      assert.ok(fixDispatchHoldAtHead(pr, declines, existsSync, built.effects.fixOwnerReclaimableAtHold));
+      assert.equal(git(f.ownerPath, "status", "--porcelain=v1"), status);
+      assert.deepEqual(built.order, []);
+      assert.equal(git(f.repo.dir, "for-each-ref", "--format=%(refname)", "refs/rmd-recovery/fix-dirty"), "");
+    } finally { f.cleanup(); }
+  }
 });
