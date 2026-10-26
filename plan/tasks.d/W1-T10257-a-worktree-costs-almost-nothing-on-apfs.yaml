@@ -4,12 +4,12 @@
   depends_on: []
   type: implement
   verify: auto
-  principles: {tdd: strict}
+  principles: { tdd: strict }
   budget_usd: 8.00
-  risk: high  # Rule 19: one concern — how a worktree's tracked files are materialized; branch naming, dependency linking and retirement are unchanged
+  risk: high # Rule 19: one concern — how a worktree's tracked files are materialized; branch naming, dependency linking and retirement are unchanged
   band_meaning: span
   origin: "operator 2026-10-20: the janitor should be doing a better job of cleaning up; find ways to reduce the space each worktree needs"
-  plan_refs: [W1-T5533, W1-T2622, W1-T10256]
+  plan_refs: [ W1-T5533, W1-T2622, W1-T10256 ]
   files:
     - src/lib/cow-worktree.ts
     - src/lib/hand-worktree.ts
@@ -18,9 +18,13 @@
     - docs/cli-reference.md
     - deploy/mac/JANITOR.md
     - doctrine/plan-and-task-hygiene/finish-owned-work.md
-    - test/a-worktree-costs-almost-nothing-on-apfs.test.ts
+    - test/worker/a-worktree-costs-almost-nothing-on-apfs.test.ts
+    - scripts/console-parity-ratchet.mjs
+    - scripts/console-parity-baseline.json
+    - test/worktree-creation-census.test.ts
+    - test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
   status: queued
-  priority: 1  # operator-2026-10-20: the Mac sits under 4 GB free; every agent worktree is a full checkout
+  priority: 1 # operator-2026-10-20: the Mac sits under 4 GB free; every agent worktree is a full checkout
   attempts: 0
   rationale: |
     READ 2026-10-20 at origin/main 4c83ace0f, on the Mac (APFS, `diskutil info /`: File System Personality APFS).
@@ -44,9 +48,12 @@
     1. src/lib/cow-worktree.ts exports `addCowWorktree({ repoDir, dir, branch, base, donorDir, port })`.
        - The port wraps git, file cloning and statfs, so tests can inject them.
        - Steps:
-         a. Probe clone support ON THE TARGET VOLUME. Clone one donor file into the target parent with
-            `copyFileSync(src, dst, constants.COPYFILE_FICLONE_FORCE)`, which is clonefile(2) on macOS.
-            ENOTSUP, EXDEV, ENOSYS or any error means FALLBACK, never a partial clone.
+         a. Probe real native clone support ON THE TARGET VOLUME with a platform-qualified Mac backend.
+            Use a native clonefile operation or a verified Apple cp clone backend, with truthful fallback
+            classification; do not assume Node/libuv COPYFILE_FICLONE_FORCE implements clonefile on Darwin.
+            The real default backend and unsupported/cross-device/failure arms must be exercised.
+            ENOTSUP, EXDEV, ENOSYS or other unsupported evidence means ordinary-checkout fallback,
+            never a false clone result, partial successful checkout, unsafe overwrite or dependency install.
          b. `git worktree add --no-checkout --no-track -b <branch> <dir> <base>`.
          c. Select the paths to clone: tracked paths where the donor's index blob equals `<base>`'s tree blob, and the
             donor's working file is unmodified (absent from `git diff-files --name-only`).
@@ -82,9 +89,11 @@
        - Report the median per-worktree delta next to a plain `git worktree add` measured the same way.
        - The claim stands only if the clone delta is a small fraction of the checkout delta.
        - No fixed threshold is set. The number is reported, not gated.
+
+    Qualification clarification: report before/after free space as a shared-filesystem observation, not uniquely attributed per-job peak or proven reclaimable bytes. Keep background-drift controls, unchanged tree/content/dirty-donor checks and explicit UNKNOWN for incomplete native evidence. No capacity threshold or validation gate changes are included.
   acceptance:
     - claim: "with clone support every unchanged tracked file is cloned and only changed or donor-dirty paths are written by git, the result is a clean checkout of the base with the donor's uncommitted edits absent, and without clone support it falls back to a normal checkout with the same tree"
-      proof: 'grep: test("W1-T10257: a worktree clones unchanged checkout files and falls back off APFS" in test/a-worktree-costs-almost-nothing-on-apfs.test.ts'
+      proof: 'grep: test("W1-T10257: a worktree clones unchanged checkout files and falls back off APFS" in test/worker/a-worktree-costs-almost-nothing-on-apfs.test.ts'
     - claim: "the maintained hand-worktree entry calls the shared CoW materializer"
       proof: 'grep: addCowWorktree( in src/lib/hand-worktree.ts'
   falsifier: |

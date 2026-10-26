@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { benchmarkNonDispatchSpawn } from "../src/lib/benchmark-run.js";
 import { spawnFlightJudgeWorker } from "../src/lib/flight-judge.js";
@@ -11,8 +10,9 @@ import { runOpenWeightWalkingLadder, spawnWorker } from "../src/lib/worker.js";
 import { clearOpenWeightAbsence } from "../src/lib/worker-provider.js";
 import type { Config } from "../src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
-
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { spendRoleOf } from "#src/lib/spend-rows.js";
+import { captureGardenerSpendSource, foldGardenerSpend } from "#src/lib/gardener-spend.js";
 
 function assignment(id: string, provider: "cash" | "codex", model: string): WorkerSelectionAssignment {
   return { version: 1, id, phase: "pre-execution",
@@ -109,7 +109,8 @@ test("an auxiliary fallback caller hook failure leaves the worker and attempt in
     }) as typeof spawnWorker;
     assert.equal(await benchmarkNonDispatchSpawn("review", fake)({ ...args(root),
       onModelFallbackAttempt: () => { throw new Error("observer failure"); } }), final);
-    assert.equal(rows(root).filter((entry) => entry.step === "worker.attempt").length, 2);
+    assert.equal(rows(root).filter((entry) => entry.step === "worker.attempt").length, 1,
+      "replaying a terminal selection through the final result does not count it twice");
     assert.ok(warnings.some((line) => line.includes("benchmark.non_dispatch_fallback_hook_unavailable")));
   } finally { console.error = originalError; rmSync(root, { recursive: true, force: true }); }
 });
@@ -154,7 +155,7 @@ test("malformed fallback and final resource envelopes remain named unknown witho
     }) as typeof spawnWorker;
     assert.equal(await benchmarkNonDispatchSpawn("review", raw)(args(root)), broken);
     const attempts = rows(root).filter((entry) => entry.step === "worker.attempt");
-    assert.equal(attempts.length, 2);
+    assert.equal(attempts.length, 1, "the same malformed terminal envelope is retained once");
     assert.ok(attempts.every((entry) => entry.benchmark_run_unavailable_reason === "worker-result-fields-unavailable"));
     assert.ok(attempts.every((entry) => entry.total_cost_usd === undefined && entry.tokens === undefined));
     assert.equal(logged.filter((line) => line.includes("benchmark.non_dispatch_resource_unavailable")).length, 2);
@@ -319,5 +320,276 @@ test("Codex attempts preserve explicit notional pricing without turning it into 
     const accounting = (receipt.benchmark_run as Record<string, any>).accounting;
     assert.deepEqual(accounting.subscriptionNotionalUsd, { state: "observed", value: 0.75 });
     assert.equal(accounting.apiCostUsd.state, "unavailable");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test("W1-T10668: outer fallback retains both selection receipts", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-outer-terminal-"));
+  const settingsFile = join(root, "settings.json");
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true,
+    allowUnsandboxedCommands: false } }));
+  const models: string[] = [];
+  const callbacks: NonNullable<Parameters<NonNullable<SpawnWorkerArgs["onModelFallbackAttempt"]>>[0]>[] = [];
+  let successor: WorkerResult | undefined;
+  clearOpenWeightAbsence();
+  try {
+    const returned = await benchmarkNonDispatchSpawn("inbox-draft", spawnWorker)({
+      cwd: REPO_ROOT, permissionMode: "bypassPermissions", settingsFile, prompt: "bounded outer fallback fixture",
+      model: "sonnet", effort: "low", mountProvider: "cash", cashSonnetEmergency: true,
+      config: { root, claudeBin: "/unused/claude", dailyCapUsd: { normal: 10, squeezed: 25 },
+        workerProviders: { enabled: ["cash"], cashEndpoint: "https://example.test/" } } as Config,
+      onModelFallbackAttempt: (attempt) => {
+        callbacks.push(attempt);
+        assert.equal(models.length, 1, "the first terminal callback precedes the successor's adapter");
+        assert.equal(rows(root).filter(row => row.step === "worker.attempt").length, 1);
+      },
+      providerRouting: { spawnOpenWeight: async (_args, _config, selection) => {
+        models.push(selection.model);
+        if (models.length === 1) return { ...result("cash", selection.model, "pending", true),
+          costUsd: 0, budgetRefused: true, budgetReservedUsd: 0, budgetSettledUsd: 0,
+          servedModel: null, sessionId: "", text: "", blocks: [],
+          tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 } };
+        successor = result("cash", selection.model, "pending");
+        return successor;
+      } },
+    });
+    const ledger = rows(root);
+    const selections = ledger.filter(row => row.step === "worker.assignment");
+    const attempts = ledger.filter(row => row.step === "worker.attempt");
+    assert.deepEqual(models, ["claude-sonnet-5-5", "gpt-5-nano"]);
+    assert.equal(returned, successor, "the observer never replaces the actual successor result");
+    assert.equal(callbacks.length, 1);
+    assert.equal(callbacks[0]!.reason, "cash-sonnet-refused");
+    assert.equal(callbacks[0]!.model, models[0]);
+    assert.equal(callbacks[0]!.result?.budgetRefused, true);
+    assert.deepEqual(ledger.map(row => row.step), ["worker.assignment", "worker.attempt", "worker.assignment", "worker.attempt"]);
+    const ids = selections.map(row => (row.worker_assignment as WorkerSelectionAssignment).id);
+    assert.equal(new Set(ids).size, 2);
+    assert.deepEqual(attempts.map(row => row.selection_assignment_id), ids);
+    assert.deepEqual(attempts.map(row => row.success), [false, true]);
+    assert.equal(returned.selectionAssignmentId, ids[1]);
+    assert.equal(callbacks[0]!.selectionAssignmentId, ids[0]);
+    assert.ok(attempts.every(row => ((row.benchmark_run as Record<string, unknown>)
+      .assignmentJoin as Record<string, unknown>).state === "observed"));
+    assert.deepEqual(selections.map(row => row.run_id), attempts.map(row => row.run_id));
+    assert.ok(attempts.every(row => spendRoleOf(row) !== "produced"),
+      "coverage receipts must not become a second monetary producer");
+  } finally { clearOpenWeightAbsence(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T10668: canonical money is counted once", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-terminal-replay-"));
+  let originalCalls = 0;
+  try {
+    const first = result("cash", "cash-a", "a", true);
+    const second = result("cash", "cash-b", "b");
+    const raw = (async (input: SpawnWorkerArgs) => {
+      input.onSelectionAssignment?.(assignment("a", "cash", "cash-a"));
+      input.onSelectionAssignment?.(assignment("b", "cash", "cash-b"));
+      input.onModelFallbackAttempt?.({ selectionAssignmentId: "a", model: "cash-a", reason: "cash-sonnet-refused", result: first });
+      input.onModelFallbackAttempt?.({ selectionAssignmentId: "a", model: "cash-a", reason: "cash-sonnet-refused", result: first });
+      return second;
+    }) as typeof spawnWorker;
+    assert.equal(await benchmarkNonDispatchSpawn("triage", raw)({ ...args(root),
+      onModelFallbackAttempt: () => { originalCalls += 1; } }), second);
+    const ledger = rows(root);
+    const attempts = ledger.filter(row => row.step === "worker.attempt");
+    assert.deepEqual(attempts.map(row => row.selection_assignment_id), ["a", "b"]);
+    assert.deepEqual(attempts.map(row => row.total_cost_usd), [0.25, 0.25]);
+    assert.ok(attempts.every(row => ((row.benchmark_run as Record<string, unknown>)
+      .assignmentJoin as Record<string, unknown>).state === "observed"),
+      "a late terminal callback still joins its earlier durable assignment");
+    assert.equal(attempts[0]!.run_id, "triage-a");
+    assert.equal(originalCalls, 2, "deduplication does not suppress the existing caller's observer");
+    const canonical = { step: "machine_judge.attempt_spend", model: "cash-a",
+      billing_mode: "api", total_cost_usd: 0.25 };
+    assert.equal(spendRoleOf(canonical), "produced");
+    assert.deepEqual([canonical, ...attempts].filter(row => spendRoleOf(row) === "produced"), [canonical],
+      "terminal coverage and canonical monetary producer ownership remain separate");
+
+    const at = new Date().toISOString();
+    const repository = "fixture/outer-fallback";
+    const passId = "12345678-1234-4123-8123-123456789abc";
+    const origin = { state: "linked", version: 1, name: "config", passId };
+    const parent = { ts: at, step: "garden.lifecycle", name: "config", passId, repository,
+      daemon_run_id: "fixture-generation", phase: "completed", exit: 0 };
+    const priced = { ...canonical, ts: at, run_id: "priced-a", task_id: "FIXTURE", gardener_origin: origin };
+    writeFileSync(join(root, "state", "gardener-runtime.json"), JSON.stringify({ version: 1, repository,
+      daemonRunId: "fixture-generation", codeSha: null, configuredAt: at, observedAt: at,
+      gardens: [{ name: "config", enabled: true, scope: "repository", cadenceMs: 1_000, phase: "completed",
+        observedAt: at, passId, nextDueAt: null, queueMs: null, executionMs: null, exit: 0, reason: null,
+        attempts: 1, completions: 1, failures: 0, lastCompletedAt: at, lastSuccessAt: at, lastFailureAt: null }] }));
+    writeFileSync(join(root, "state", "ledger.ndjson"), [parent, priced, priced,
+      ...attempts.map(row => ({ ...row, ts: at, gardener_origin: origin }))].map(row => JSON.stringify(row)).join("\n") + "\n");
+    const spend = foldGardenerSpend(await captureGardenerSpendSource(join(root, "state"), undefined, { repository }), repository, at);
+    assert.equal(spend.totalUsd, 0.25, "the real exact-parent collector retains canonical money once despite replayed coverage");
+    assert.equal(spend.counts.priced, 1);
+
+    const unknown = result("cash", "cash-unknown", "placeholder");
+    delete unknown.selectionAssignmentId;
+    const missing = (async (input: SpawnWorkerArgs) => {
+      input.onModelFallbackAttempt?.({ model: "cash-unknown", reason: "cash-sonnet-refused", result: unknown });
+      input.onModelFallbackAttempt?.({ model: "cash-unknown", reason: "cash-sonnet-refused", result: unknown });
+      return unknown;
+    }) as typeof spawnWorker;
+    await benchmarkNonDispatchSpawn("review", missing)(args(root));
+    const unjoined = rows(root).filter(row => row.step === "worker.attempt" && row.lane === "review");
+    assert.equal(unjoined.length, 1);
+    assert.deepEqual((unjoined[0]!.benchmark_run as Record<string, unknown>).assignmentJoin,
+      { state: "unavailable", reason: "assignment-not-observed-in-run" });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test("W1-T10668: observer failures preserve flow and removal fails", async () => {
+  for (const fault of ["caller", "resource", "ledger"] as const) {
+    const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-outer-fault-"));
+    const settingsFile = join(root, "settings.json");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true,
+      allowUnsandboxedCommands: false } }));
+    if (fault === "ledger") mkdirSync(join(root, "state", "ledger.ndjson"), { recursive: true });
+    const originalError = console.error;
+    const warnings: string[] = [];
+    const models: string[] = [];
+    let callbacks = 0;
+    console.error = (...parts: unknown[]) => { warnings.push(parts.map(String).join(" ")); };
+    clearOpenWeightAbsence();
+    try {
+      const run = fault === "caller" ? spawnWorker : benchmarkNonDispatchSpawn("review", spawnWorker);
+      const final = await run({
+        cwd: REPO_ROOT, permissionMode: "bypassPermissions", settingsFile, prompt: "bounded outer fault fixture",
+        model: "sonnet", effort: "low", mountProvider: "cash", cashSonnetEmergency: true,
+        config: { root, claudeBin: "/unused/claude", dailyCapUsd: { normal: 10, squeezed: 25 },
+          workerProviders: { enabled: ["cash"], cashEndpoint: "https://example.test/" } } as Config,
+        onModelFallbackAttempt: () => { callbacks += 1; if (fault === "caller") throw new Error("caller observer unavailable"); },
+        providerRouting: { spawnOpenWeight: async (_args, _config, selection) => {
+          models.push(selection.model);
+          if (models.length !== 1) return result("cash", selection.model, "pending");
+          const first = { ...result("cash", selection.model, "pending", true),
+            budgetRefused: true, budgetReservedUsd: 0, budgetSettledUsd: 0, costUsd: 0 };
+          return fault === "resource" ? Object.defineProperty(first, "tokens", {
+            get: () => { throw new TypeError("fixture usage unavailable"); },
+          }) : first;
+        } },
+      });
+      assert.deepEqual(models, ["claude-sonnet-5-5", "gpt-5-nano"], "the successor runs with the same two adapter calls");
+      assert.equal(final.isError, false);
+      assert.equal(final.routedModel, models[1]);
+      assert.equal(callbacks, 1, "removing only the outer observer loses this terminal notification, not the successor");
+      const event = fault === "caller" ? "worker.outer_fallback_telemetry_unavailable"
+        : fault === "resource" ? "benchmark.non_dispatch_resource_unavailable" : "benchmark.non_dispatch_attempt_unavailable";
+      assert.ok(warnings.some(line => line.includes(event)), `${fault} failure has a bounded diagnostic`);
+      if (fault === "resource") {
+        const attempts = rows(root).filter(row => row.step === "worker.attempt");
+        assert.equal(attempts.length, 2);
+        assert.equal(attempts[0]!.benchmark_run_unavailable_reason, "worker-result-fields-unavailable");
+        assert.equal(attempts[0]!.total_cost_usd, undefined);
+        assert.equal(attempts[1]!.success, true);
+      }
+    } finally { clearOpenWeightAbsence(); console.error = originalError;
+      rmSync(root, { recursive: true, force: true }); }
+  }
+});
+test("W1-T10668: terminal invocation and price uncertainty stay explicit", async () => {
+  const zeroWork = { ...result("cash", "pending", "pending", true), subtype: "error_budget_refused",
+    numTurns: 0, costUsd: 0, budgetRefused: true, budgetReservedUsd: 0, budgetSettledUsd: 0,
+    sessionId: "", servedModel: null, text: "", blocks: [],
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 } };
+  const paidRefusal = { ...result("cash", "pending", "pending", true), budgetRefused: true,
+    budgetReservedUsd: 0.75, budgetSettledUsd: 0 };
+  const unknown = { ...result("cash", "pending", "pending", true), subtype: "", costUsd: 0 };
+  const completed = result("cash", "pending", "pending");
+  for (const [kind, first] of [["zero-work-refusal", zeroWork], ["paid-later-refusal", paidRefusal],
+    ["unknown", unknown], ["completed", completed]] as const) {
+    const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-terminal-evidence-"));
+    const settingsFile = join(root, "settings.json");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true,
+      allowUnsandboxedCommands: false } }));
+    const models: string[] = [];
+    clearOpenWeightAbsence();
+    try {
+      const final = await benchmarkNonDispatchSpawn("inbox-draft", spawnWorker)({
+        cwd: REPO_ROOT, permissionMode: "bypassPermissions", settingsFile, prompt: "bounded terminal evidence fixture",
+        model: "sonnet", effort: "low", mountProvider: "cash", cashSonnetEmergency: true,
+        config: { root, claudeBin: "/unused/claude", dailyCapUsd: { normal: 10, squeezed: 25 },
+          workerProviders: { enabled: ["cash"], cashEndpoint: "https://example.test/" } } as Config,
+        providerRouting: { spawnOpenWeight: async (_args, _config, selection) => {
+          models.push(selection.model);
+          return models.length === 1 ? first : result("cash", selection.model, "successor");
+        } },
+      });
+      assert.equal(models[0], "claude-sonnet-5-5");
+      assert.equal(models.length, kind === "completed" ? 1 : 2, "only the existing routing predicate chooses a successor");
+      assert.equal(final.isError, false);
+      const attempts = rows(root).filter(row => row.step === "worker.attempt");
+      assert.equal(attempts.length, models.length);
+      const terminal = attempts[0]!.terminal_evidence as Record<string, unknown>;
+      assert.equal(terminal.state, "observed");
+      assert.deepEqual(terminal.invocation, { state: "unavailable", reason: "provider-invocation-not-reported" },
+        "routing, complete zero-work quality evidence and scalar prices never manufacture a transport receipt");
+      if (kind === "zero-work-refusal") {
+        assert.deepEqual(terminal.allowanceRefused, { state: "observed", value: true });
+        assert.deepEqual(terminal.reservedUsd, { state: "observed", value: 0 });
+        assert.deepEqual(terminal.settledUsd, { state: "observed", value: 0 });
+        assert.deepEqual(terminal.resultSubtype, { state: "observed", value: "error_budget_refused" });
+        assert.equal(attempts[0]!.total_cost_usd, 0, "preserve the existing explicit zero-work estimate");
+      } else if (kind === "paid-later-refusal") {
+        assert.deepEqual(terminal.allowanceRefused, { state: "observed", value: true });
+        assert.deepEqual(terminal.reservedUsd, { state: "observed", value: 0.75 });
+        assert.equal(attempts[0]!.total_cost_usd, 0.25, "a later allowance refusal does not erase prior reported cost");
+      } else {
+        assert.deepEqual(terminal.allowanceRefused, { state: "unavailable", reason: "terminal-field-not-reported" });
+        assert.deepEqual(terminal.reservedUsd, { state: "unavailable", reason: "terminal-field-not-reported" });
+        if (kind === "unknown") {
+          assert.equal(attempts[0]!.total_cost_usd, undefined);
+          assert.equal(attempts[0]!.tokens, undefined, "empty envelopes' defaults are not measurements");
+        } else {
+          assert.deepEqual(terminal.resultSubtype, { state: "observed", value: "success" });
+          assert.deepEqual(terminal.isError, { state: "observed", value: false });
+        }
+      }
+    } finally { clearOpenWeightAbsence(); rmSync(root, { recursive: true, force: true }); }
+  }
+
+  const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-terminal-contract-"));
+  try {
+    // This is a projection-contract control. Only the worker's explicit admission marker establishes not-started.
+    const notStarted = { ...result("cash", "pending", "pending", true), notStarted: "admission-abandoned" as const,
+      subtype: "", costUsd: 0 };
+    delete notStarted.selectionAssignmentId;
+    const noCall = (async () => notStarted) as typeof spawnWorker;
+    assert.equal(await benchmarkNonDispatchSpawn("review", noCall)(args(root)), notStarted);
+    const stopped = rows(root).find(row => row.step === "worker.attempt")!;
+    assert.deepEqual((stopped.terminal_evidence as Record<string, unknown>).invocation,
+      { state: "observed", value: "not-started", reason: "admission-abandoned" });
+    assert.equal(stopped.total_cost_usd, undefined);
+
+    const bad = Object.defineProperty({ ...result("cash", "bad", "bad", true) }, "subtype",
+      { get: () => { throw new TypeError("private terminal getter"); } });
+    const good = result("codex", "subscription", "sub");
+    good.costUsd = 0;
+    good.notionalCostUsd = 0.75;
+    const raw = (async (input: SpawnWorkerArgs) => {
+      input.onSelectionAssignment?.(assignment("bad", "cash", "bad"));
+      input.onModelFallbackAttempt?.({ selectionAssignmentId: "bad", model: "bad", reason: "cash-sonnet-refused", result: bad });
+      input.onSelectionAssignment?.(assignment("invalid", "cash", "invalid"));
+      input.onModelFallbackAttempt?.({ selectionAssignmentId: "invalid", model: "invalid", reason: "cash-sonnet-refused",
+        result: { ...result("cash", "invalid", "invalid", true), subtype: "private invalid status",
+          budgetRefused: "invalid", budgetReservedUsd: Number.NaN, budgetSettledUsd: -1 } as unknown as WorkerResult });
+      input.onSelectionAssignment?.(assignment("no-result", "cash", "missing"));
+      input.onModelFallbackAttempt?.({ selectionAssignmentId: "no-result", model: "missing", reason: "unsupported-response-format" });
+      input.onSelectionAssignment?.(assignment("sub", "codex", "subscription"));
+      return good;
+    }) as typeof spawnWorker;
+    assert.equal(await benchmarkNonDispatchSpawn("triage", raw)(args(root)), good);
+    const ledger = rows(root).filter(row => row.step === "worker.attempt" && row.lane === "triage");
+    assert.deepEqual(ledger[0]!.terminal_evidence, { state: "unavailable", reason: "worker-terminal-fields-unavailable" });
+    assert.equal(ledger[0]!.benchmark_run_unavailable_reason, "worker-result-fields-unavailable");
+    const invalid = ledger[1]!.terminal_evidence as Record<string, unknown>;
+    for (const field of ["resultSubtype", "allowanceRefused", "reservedUsd", "settledUsd"])
+      assert.deepEqual(invalid[field], { state: "unavailable", reason: "invalid-terminal-field" });
+    assert.doesNotMatch(JSON.stringify(invalid), /private invalid status/);
+    assert.deepEqual(ledger[2]!.terminal_evidence, { state: "unavailable", reason: "worker-result-not-reported" });
+    assert.equal(ledger[2]!.total_cost_usd, undefined);
+    assert.equal(ledger[3]!.billing_mode, "subscription");
+    assert.equal(ledger[3]!.total_cost_usd, undefined);
+    assert.equal(ledger[3]!.notional_cost_usd, 0.75);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

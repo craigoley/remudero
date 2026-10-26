@@ -1,0 +1,38 @@
+- id: W1-T10722
+  title: "THE FIX-LANE GARDENER'S COSTLIEST DEFECT CLASS — commit-refused:the task declares no files, so there is no surface to stage cost 4091.41 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.04
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "fix-lane:commit-refused:the task declares no files, so there is no surface to stage#r2"
+  files:
+    - src/run-task.ts
+    - test/worker/run-task/fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage.test.ts
+  acceptance:
+    - claim: "commit-refused:the task declares no files, so there is no surface to stage no longer needs an operator hand fix"
+      proof: "grep: test(\"W1-T10722: fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage clears without a person\" in test/worker/run-task/fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage.test.ts"
+  note: "Filed by fix-lane at rung 2; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    commit-refused:the task declares no files, so there is no surface to stage cost 4091.41 PR-hours; owner fix-lane
+    Owner: the fix lane itself (a defect in the harness that repairs PRs, not in the PR).
+    Source owner: src/run-task.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #6436: 832.80 PR-hours — the task declares no files, so there is no surface to stage
+    - PR #6428: 827.34 PR-hours — the task declares no files, so there is no surface to stage
+    - PR #6503: 825.59 PR-hours — the task declares no files, so there is no surface to stage
+    - PR #6507: 825.29 PR-hours — the task declares no files, so there is no surface to stage
+    - PR #6905: 780.59 PR-hours — the task declares no files, so there is no surface to stage
+    Previous remedy W1-T7699: src/run-task.ts, test/fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage.test.ts; did not fall: share of PR-hours 27.8% (1262.8768180555555/4537.912736388929) before, 27.4% (1262.8768180555555/4601.953433611104) after, over 10.5 day(s) each side. Take a structurally different remedy.
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.87
+    reasons:
+      - "high-risk verdict at confidence 0.87 — on the change's description/files alone, no diff was read — The filing requests a structurally different remedy in src/run-task.ts but specifies no proposed mechanism or staging boundaries, leaving the remedy's scope unverifiable from the supplied record.; on the change's description/files alone, no diff was read — The supplied acceptance proof checks for test text with grep; it does not demonstrate that the commit-refused condition clears without operator intervention.; on the change's description/files alone, no diff was read — The rationale reports recurrence and an ineffective previous remedy, but supplies no root-cause diagnosis supporting the next implementation."
+    judged_at: "2026-10-26T15:04:10.050Z"
+    pin: "ef369164ab99cddbc01af72087a58bb569c225fcd147d72181ea2c4c871c9f20"

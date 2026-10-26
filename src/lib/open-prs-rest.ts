@@ -118,6 +118,7 @@ interface RestCheckRun {
   id?: number;
   external_id?: string | null;
   name?: string;
+  output?: { title?: string | null } | null;
   /** "queued" | "in_progress" | "completed" — lowercase, where GraphQL reports "QUEUED" etc. */
   status?: string;
   /** "success" | "failure" | "neutral" | … — `null` while the run is still incomplete. */
@@ -153,6 +154,8 @@ interface RestStatus {
  *  `rollupFromRest(...)` into `checksStateFromRollup`, so drift in either shape fails `tsc`. */
 export interface RestRollupEntry {
   name?: string;
+  /** The posted refusing gate, distinct from a hosting bundle's check name. */
+  title?: string;
   context?: string;
   status?: string;
   conclusion?: string;
@@ -221,6 +224,7 @@ export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]
   const workflows = new Map(workflowRuns?.map((r) => [r.id, r.workflow_id]));
   const fromRuns = checkRuns.map((c) => {
     const e: RestRollupEntry = { name: c.name ?? "" };
+    if (typeof c.output?.title === "string" && c.output.title.trim() !== "") e.title = c.output.title;
     const status = upper(c.status);
     const conclusion = upper(c.conclusion);
     if (status !== undefined) e.status = status;

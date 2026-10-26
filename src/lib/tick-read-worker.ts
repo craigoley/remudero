@@ -620,6 +620,8 @@ export function buildBehindMainByPr(
 
 /** One rollup check entry as `gh pr list --json statusCheckRollup` returns it. */
 export interface RollupCheck {
+  /** The actual refusing gate posted by a bundled check, preserved from REST output.title. */
+  title?: string;
   /** Exact REST identity and posted constituent outcome; absent on unreadable/GraphQL-only rows. */
   headSha?: string;
   outputSummary?: string;
@@ -1577,6 +1579,7 @@ function* ciFailuresSteps(
     }
     failures.push({
       name,
+      ...(c.title ? { title: c.title } : {}),
       logTail,
       conclusion: (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase(),
       ...(c.completedAt ? { completedAt: c.completedAt } : {}),

@@ -7,7 +7,10 @@
   verify: human
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=64d6f33158619eda
+  # backlog gardener: placed=2026-10-26T12:08:11.240Z
   attempts: 0
   files:
     - src/lib/product-intent.ts
@@ -29,3 +32,14 @@
     follow-up harvest [research]: read `src/lib/product-intent.ts`, `product-intent-store.ts`,
     `product-routes.ts` and the #14286 diff, to fix the exact extension seams for revision,
     idempotency and the durable record. — from W1-T10617 (run W1-T10617-1792982701706)
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "The filed task explicitly limits work to reading and reporting, and acceptance criterion 4 requires all three product source files to remain unchanged."
+      - "The requested report follows the ratified research follow-up and requires checkable origin/main file:line citations and PR #14286 diff citations."
+      - "The stated scope requests no destructive action, sensitive access change, policy change, or operator priority decision."
+      - "the judge said proceed, but W1-T10708: at verify: auto it fails lint (headless-fitness, proof-dialect)"
+    judged_at: "2026-10-26T14:43:26.979Z"
+    pin: "cb398d526e4394c08166c888a9173eb66d567a9a292a0f0d6f582669335cb5a7"

@@ -29,6 +29,7 @@ import {
   reviewStatusWithoutMechanism,
   coverageRefusalWithoutMechanism,
   scannerWarningWithoutMechanism,
+  censusRefusalWithoutMechanism,
   parseCiFrictionOrigin,
   type CiFrictionCauseState,
   type CiFrictionOwner,
@@ -727,17 +728,21 @@ function redChecksByHead(records: readonly LedgerRecord[]): Map<string, string[]
   return index;
 }
 
-/** W1-T9057: `pr -> titles` of the `test.flake_retry` rows whose retry ALSO failed. */
-function alsoFailedTitlesByPr(records: readonly LedgerRecord[]): Map<number, string[]> {
-  const index = new Map<number, string[]>();
-  for (const r of records) {
-    if (r.step !== "test.flake_retry" || r.retry_outcome !== "also_failed" || !Array.isArray(r.titles) || !Array.isArray(r.pr_numbers)) continue;
-    const titles = (r.titles as unknown[]).filter((t): t is string => typeof t === "string" && t !== "");
-    for (const pr of r.pr_numbers as unknown[]) {
-      if (typeof pr !== "number") continue;
-      const list = index.get(pr) ?? [];
-      for (const t of titles) if (!list.includes(t)) list.push(t);
-      index.set(pr, list);
+/** Retry evidence belongs to the exact PR head; an attempted retry alone proves no recovery. */
+function retryEvidenceByPrHead(records: readonly LedgerRecord[]): Map<string, { recovered: Set<string>; failedTitles: string[] }> {
+  const index = new Map<string, { recovered: Set<string>; failedTitles: string[] }>();
+  for (const row of records) {
+    if (row.step !== "test.flake_retry" || typeof row.head_sha !== "string" || !/^[a-f0-9]{40}$/i.test(row.head_sha) || !Array.isArray(row.pr_numbers)) continue;
+    if (row.retry_outcome !== "recovered" && row.retry_outcome !== "also_failed") continue;
+    for (const pr of row.pr_numbers as unknown[]) {
+      if (typeof pr !== "number" || !Number.isSafeInteger(pr) || pr <= 0) continue;
+      const key = `${pr}@${row.head_sha}`;
+      const evidence = index.get(key) ?? { recovered: new Set<string>(), failedTitles: [] };
+      if (row.retry_outcome === "recovered" && typeof row.file === "string" && CI_TEST_FILE_SIGNATURE.test(row.file)) evidence.recovered.add(row.file);
+      if (row.retry_outcome === "also_failed" && Array.isArray(row.titles)) {
+        for (const title of row.titles as unknown[]) if (typeof title === "string" && title !== "" && !evidence.failedTitles.includes(title)) evidence.failedTitles.push(title);
+      }
+      index.set(key, evidence);
     }
   }
   return index;
@@ -755,6 +760,7 @@ interface RoundBoundary {
   /** The pull request the round's head belongs to, for a run that logged no `pr.opened`. */
   pr?: number;
   prUrl?: string;
+  headSha?: string;
   evidence?: CiFailureEvidence[];
 }
 
@@ -785,9 +791,8 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
   const urlByRun = runPrUrlIndex(records);
   const urlByHead = new Map<string, string>();
   for (const r of records) if (typeof r.head_sha === "string" && typeof r.pr_url === "string" && !urlByHead.has(r.head_sha)) urlByHead.set(r.head_sha, r.pr_url);
-  const alsoFailedByPr = alsoFailedTitlesByPr(records);
+  const retriesByPrHead = retryEvidenceByPrHead(records);
   const redByHead = redChecksByHead(records);
-  const flaky = new Set(records.filter((r) => r.step === "test.flake_retry" && typeof r.file === "string").map((r) => r.file as string));
   // A refusal belongs to the latest dispatch of the same run on the same round: a numbered round
   // (an implement run) or, for the sweep's "resume"/"fresh" rounds, the same head sha.
   const roundKey = (r: LedgerRecord): string | undefined =>
@@ -803,7 +808,9 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
     }
     if (r.step === "fix.dispatch") {
       const round = typeof r.round === "number" ? r.round : undefined;
-      const split = r.mode === "ci-log" ? ciLogCauses(r, redByHead, flaky) : undefined;
+      const roundPr = prByRun.get(r.run_id) ?? (typeof r.head_sha === "string" ? prByHead.get(r.head_sha) : undefined);
+      const retryEvidence = retriesByPrHead.get(`${roundPr}@${String(r.head_sha)}`);
+      const split = r.mode === "ci-log" ? ciLogCauses(r, redByHead, retryEvidence?.recovered ?? new Set<string>()) : undefined;
       const list = byRun.get(r.run_id) ?? [];
       const elapsed = typeof r.elapsed_ms === "number" && r.elapsed_ms > 0 ? r.elapsed_ms / 60_000 : undefined;
       const named = Array.isArray(r.ci_failures)
@@ -811,7 +818,7 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
         : "";
       const conflicted = Array.isArray(r.conflicted_files) ? (r.conflicted_files as unknown[]).filter((f) => typeof f === "string").slice(0, 3).join(", ") : "";
       const detail = [`${String(r.mode)} round`, named, conflicted ? `conflicted: ${conflicted}` : ""].filter(Boolean).join(" — ");
-      const boundary: RoundBoundary = { ts: r.ts, detail, round, cause: causeFromDispatchMode(r.mode), split, elapsed, pr: typeof r.head_sha === "string" ? prByHead.get(r.head_sha) : undefined, prUrl: typeof r.head_sha === "string" ? urlByHead.get(r.head_sha) : undefined, evidence: failureEvidenceOf(r) };
+      const boundary: RoundBoundary = { ts: r.ts, detail, round, cause: causeFromDispatchMode(r.mode), split, elapsed, pr: typeof r.head_sha === "string" ? prByHead.get(r.head_sha) : undefined, prUrl: typeof r.head_sha === "string" ? urlByHead.get(r.head_sha) : undefined, headSha: typeof r.head_sha === "string" ? r.head_sha : undefined, evidence: failureEvidenceOf(r) };
       list.push(boundary);
       byRun.set(r.run_id, list);
       const key = roundKey(r);
@@ -844,7 +851,7 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
         const causes = boundary.split ?? [boundary.cause];
         const prUrl = urlByRun.get(runId) ?? boundary.prUrl;
         // A `test.flake_retry` row whose retry ALSO failed names the titles a round's own log may not have carried.
-        const titles = alsoFailedByPr.get(pr) ?? [];
+        const titles = retriesByPrHead.get(`${pr}@${String(boundary.headSha)}`)?.failedTitles ?? [];
         const evidence = boundary.evidence !== undefined && boundary.evidence.length > 0
           ? boundary.evidence
           : titles.length > 0 && boundary.cause.kind === "check" ? [{ check: "test.flake_retry", tests: titles.slice(0, CI_FAILURE_TESTS_CAP) }] : [];
@@ -1344,7 +1351,9 @@ export function ciFrictionDraftRationale(draft: CiFrictionDraft, key: string): s
 
 /** A literal regression title admitted by the real proof policy; the full cause remains in origin/evidence. */
 export function ciFrictionRemedyTestTitle(taskId: string, key: string): string {
-  const title = `${taskId}: ${key.replace(/ in /g, " within ")} is prevented, not retried`;
+  const title = key === "fix_refusal:census-precheck"
+    ? `${taskId}: the diagnosed census runner failure is prevented while healthy findings remain refused`
+    : `${taskId}: ${key.replace(/ in /g, " within ")} is prevented, not retried`;
   const proof = { id: taskId, acceptance: [{ claim: "prevent this CI friction cause", proof: `unit test: ${title}` }] } as Task;
   if (proofResolvabilityViolations(proof).length === 0) return title;
   return `${taskId}: CI friction ${createHash("sha256").update(key).digest("hex").slice(0, 16)} is prevented, not retried`;
@@ -1376,10 +1385,18 @@ export function ciFrictionShardYaml(draft: CiFrictionDraft, taskId: string, pric
     costPopulation: priced.map((p) => p.minutes),
     acceptance: [
       // The build must pass the named regression; a declaration alone is not repair evidence.
-      { claim: `the harness no longer spends a fix round on ${key}`, proof: `unit test: ${ciFrictionRemedyTestTitle(taskId, key)}` },
+      { claim: key === "fix_refusal:census-precheck"
+        ? `the diagnosed census runner failure owned by ${owner.files[0]!} is prevented or self-healed while healthy branch findings still refuse publication`
+        : `the harness no longer spends a fix round on ${key}`, proof: `unit test: ${ciFrictionRemedyTestTitle(taskId, key)}` },
     ],
-    note: `Filed by the ci-friction gardener (W1-T4435) at rung ${rung}. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures ${key}'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung ${rung + 1}.`,
-    rationale: ciFrictionDraftRationale(draft, key),
+    note: `Filed by the ci-friction gardener (W1-T4435) at rung ${rung}. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures ${key}'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung ${rung + 1}.` +
+      (key === "fix_refusal:census-precheck" ? " The regression must execute the diagnosed failure through the real owner path and retain a control that a healthy branch finding is still refused; class-wide cost observations and after-window measurement remain unchanged." : ""),
+    rationale: [...ciFrictionDraftRationale(draft, key), ...(key === "fix_refusal:census-precheck" ? [
+      "",
+      "The regression must execute the diagnosed failure through the real owner path, not assert a reporter label or text.",
+      "It must retain a control that a healthy branch finding is still refused by the existing predicate.",
+      "The class-wide cost observations and after-window measurement remain unchanged; the healthy predicate is not a repair target.",
+    ] : [])],
   }).text;
 }
 
@@ -1564,6 +1581,8 @@ export function ciFrictionLadder(input: {
           ? "The source coverage refusal identifies uncovered changes, not a workflow failure mechanism; diagnosis remains UNKNOWN"
         : scannerWarningWithoutMechanism(key, details)
           ? "The scanner warning reports a branch finding, not a harness failure mechanism; diagnosis remains UNKNOWN"
+        : censusRefusalWithoutMechanism(key, details)
+          ? "The census refusal reports branch findings, not a census reporter failure mechanism; diagnosis remains UNKNOWN"
         : legacyRefusal + (input.ownerSearch.workflowOwner ? "; no declared workflow job resolves it" : "")
         + (workflowGap(input.ownerSearch, key, details) ?? "") + testAlone, prior: s.prior, holdReason: "no-owner", evidence } };
     if (!owner) line.state = "escalate";

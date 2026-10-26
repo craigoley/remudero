@@ -91,8 +91,8 @@ test("W1-T9057: a drafted rationale carries each round's PR link, failing test t
 test("W1-T9057: a round with no titles of its own takes the titles of the PR's also_failed flake retry", () => {
   const records = [
     { step: "pr.opened", run_id: "run-2", pr_url: PR_URL, ts: TS },
-    { step: "test.flake_retry", source: "selector-shadow", retry_outcome: "also_failed", file: "test/y.test.ts", titles: ["flaky title"], pr_numbers: [4242], ts: TS },
-    { step: "fix.dispatch", run_id: "run-2", round: 1, mode: "ci-log", head_sha: "bbb", elapsed_ms: 600_000, ts: "2026-10-13T02:00:00.000Z",
+    { step: "test.flake_retry", source: "selector-shadow", retry_outcome: "also_failed", head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", file: "test/y.test.ts", titles: ["flaky title"], pr_numbers: [4242], ts: TS },
+    { step: "fix.dispatch", run_id: "run-2", round: 1, mode: "ci-log", head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", elapsed_ms: 600_000, ts: "2026-10-13T02:00:00.000Z",
       ci_failures: [{ check: "coverage-shard (1/8)", signature: null }] },
   ] as unknown as LedgerRecord[];
   const [round] = remedyRoundsOf(ciFrictionRoundsFromLedger(records));
