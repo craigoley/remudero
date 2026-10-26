@@ -179,6 +179,7 @@ function requireScoutRuns(sources: ScoutSources): ReadonlySet<string> {
 
 function isTestOnlyScout(t: Task): boolean {
   return t.status === "queued" && t.attempts === 0 && !t.retirement &&
+    t.risk_ruling?.verdict !== "operator" && t.risk_ruling?.operator_release_pin === undefined &&
     t.author_class === "machine" && t.origin?.startsWith("scout:") === true && t.files?.length === 1 &&
     /^test\/(?:[\w-]+\/){0,2}scout-[\w.-]+\.test\.ts$/.test(t.files[0]!);
 }
