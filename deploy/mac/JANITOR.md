@@ -547,7 +547,10 @@ saved ref and HEAD, compares its exact object set and runs full Git integrity ch
 No upstream or source-store object can satisfy that qualification. Ref or symbolic-HEAD
 changes during preservation or before retirement retain the source. Shallow/unsupported
 object formats and insufficient space for both the complete bundle and independent
-verification store retain it too. This covers recorded Git roots, not unreferenced
+verification store retain it too. The bundle reuses stored deltas, so it is about the
+size of the source pack: the space bound counts each object at its stored size when its
+delta base is in the saved closure and at its full size otherwise, and space for the
+verifier store is checked again against the bundle's real size before qualification. This covers recorded Git roots, not unreferenced
 objects or a byte-for-byte copy of the index, reflogs, configuration or working files;
 patch and untracked-archive preservation remain separate. Installation never releases
 an account's disabled hold.
