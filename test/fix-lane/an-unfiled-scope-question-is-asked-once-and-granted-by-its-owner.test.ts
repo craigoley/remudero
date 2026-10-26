@@ -8,6 +8,7 @@ import type { OpenIssue } from "#src/lib/escalate.js";
 import { readEscalationAnswers, type EscalationAnswerGateway } from "#src/lib/escalation-answers.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { scopeEscalationStandDown, unfiledScopeGrant } from "#src/lib/fix-progress-judge.js";
+import { readFixScopeHistory } from "#src/lib/fix-scope-history.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -306,10 +307,40 @@ test("archived operator scope answers reach the native fix worker without wideni
   f.run.deps.ledgerPath = join(state, "ledger.ndjson");
   delete f.run.deps.ledgerLines;
   const result = await runFixRung(f.run);
-  assert.equal(f.prompts.length, 1, "positive control: the actual rung reached its worker");
+  assert.ok(f.prompts.length > 0, "positive control: the actual rung reached its worker");
   assert.deepEqual(GRANTED_LINE.exec(f.prompts[0]!)?.slice(1), [HELD, ISSUE]);
+  assert.equal(f.prompts.length, 1, "the approved scope needs only one worker");
   assert.equal(result.outcome, "fixed");
   assert.equal(f.pushes(), 1);
   assert.equal(f.issues.length, 0, "rotation cannot create a second permission question");
   assert.deepEqual(f.repo.git("diff", "--name-only", `${f.headSha}..HEAD`).split("\n"), [HELD]);
+});
+
+
+test("an unread archive cannot certify an operator scope grant", async (t) => {
+  const state = ownedFixtureDir(t, "unread-scope-archive").dir;
+  writeFileSync(join(state, "ledger.2026-10-26T00-00-00-000Z.ndjson.gz"), "not a gzip stream");
+  writeFileSync(join(state, "ledger.ndjson"), JSON.stringify(answered()) + "\n");
+  await assert.rejects(readFixScopeHistory(join(state, "ledger.ndjson"), PR), /scope authority history is incomplete/);
+});
+
+test("malformed relevant scope evidence stops the real rung before a worker", async (t) => {
+  const f = rungFixture(() => [], "granted");
+  const state = ownedFixtureDir(t, "malformed-scope-authority").dir;
+  writeFileSync(join(state, "ledger.ndjson"), `{"task_id":"${KEY}","step":"panel.question_answered",\n`);
+  f.run.deps.ledgerPath = join(state, "ledger.ndjson");
+  delete f.run.deps.ledgerLines;
+  const result = await runFixRung(f.run);
+  assert.equal(result.outcome, "stood_down");
+  assert.match(result.reason ?? "", /scope authority UNKNOWN/);
+  assert.equal(f.prompts.length, 0);
+  assert.equal(f.pushes(), 0);
+});
+
+test("a neighboring PR's archived answer grants no paths to this PR", async (t) => {
+  const state = ownedFixtureDir(t, "other-pr-scope-authority").dir;
+  const rows = [held({ task_id: `${KEY}0`, pr_number: PR * 10 }), answered({ task_id: `${KEY}0` })];
+  writeFileSync(join(state, "ledger.2026-10-26T00-00-00-000Z.ndjson"), rows.map(r => JSON.stringify(r)).join("\n") + "\n");
+  writeFileSync(join(state, "ledger.ndjson"), "");
+  assert.deepEqual(await readFixScopeHistory(join(state, "ledger.ndjson"), PR), []);
 });
