@@ -288,6 +288,10 @@ test("changed file evidence refuses stale foreign incomplete and reopened heads"
     (d: EvidenceDocument) => { d.entries[0].evidence.source = "ledger_marker"; },
     (d: EvidenceDocument) => { d.entries[0].files = Array.from({ length: 3000 }, (_, i) => `src/${i}.ts`); },
     (d: EvidenceDocument) => { d.entries[0].files = ["src/one.ts", "src/one.ts"]; },
+    (d: EvidenceDocument) => { d.entries[0].files = ["src/invalid\0path.ts"]; },
+    (d: EvidenceDocument) => { d.entries[0].files = ["/absolute.ts"]; },
+    (d: EvidenceDocument) => { d.entries[0].files = ["../outside.ts"]; },
+    (d: EvidenceDocument) => { d.entries[0].files = ["src//ambiguous.ts"]; },
     (d: EvidenceDocument) => { d.entries[0].at = -1; },
     (d: EvidenceDocument) => { d.entries.push({ ...d.entries[0] }); },
   ]) {

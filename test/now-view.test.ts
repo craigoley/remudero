@@ -47,6 +47,7 @@ import { viewEtag, type ViewSwitchMode } from "../src/lib/views.js";
 import { changedFilesCachePath, createChangedFilesCache } from "#src/lib/changed-files-cache.js";
 import { isPlanOnlyChangeset } from "#src/lib/status.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { ChildProcess } from "node:child_process";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
@@ -297,6 +298,15 @@ async function persistedEvidence(t: TestCtx, files: string[]) {
 
 test("snapshot gateway consumes qualified changed file evidence without fetching", async (t) => {
   const fixture = await persistedEvidence(t, ["src/fix.ts"]);
+  // Record the real synchronous spawn leaf, without replacing its execution. A shim log alone can
+  // still be empty between fork and the child starting; that is not evidence of no spawn.
+  type SpawnLeaf = { spawn(options: { file: string }): number };
+  const prototype = ChildProcess.prototype as unknown as SpawnLeaf, originalSpawn = prototype.spawn;
+  const spawns: string[] = [];
+  t.mock.method(prototype, "spawn", function(this: SpawnLeaf, options) {
+    spawns.push(options.file);
+    return originalSpawn.call(this, options);
+  });
   const shim = ghShim([]), previous = process.env.PATH;
   process.env.PATH = `${shim.dir}:${previous ?? ""}`;
   t.after(() => { process.env.PATH = previous; });
@@ -307,6 +317,7 @@ test("snapshot gateway consumes qualified changed file evidence without fetching
   assert.equal(snapshotEvidence(gateway, 999).status, "unknown");
   gateway.changedFiles?.("https://github.com/o/r/pull/999");
   await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual(spawns, [], "snapshot hits and misses never reach the real process-spawn leaf");
   assert.deepEqual(shim.calls(), [], "neither evidence nor legacy snapshot misses spawn gh");
   assert.equal(readFileSync(fixture.path, "utf8"), before, "the view never writes the producer's cache");
 });
