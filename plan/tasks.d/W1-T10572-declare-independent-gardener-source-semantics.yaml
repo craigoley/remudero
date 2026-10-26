@@ -10,6 +10,8 @@
   status: queued
   attempts: 0
   author_class: machine
+  # recon_read_from_origin_main: rationale and four criteria read at origin/main e7a6716ac39e3a334acd4b5524350a2170558816, remote https://github.com/craigoley/remudero.git
+  # recon_proofs_fail_on_base: all four grep proofs match 0 lines at ca29cfe29^ (merge base of #14193) and 1 line at head, each on one physical line
   origin: "console-followup:approved-gardener-producer-contract-20261024"
   files:
     - openapi/daemon.yaml

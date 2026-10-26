@@ -155,6 +155,7 @@ import { buildRecordJudgeLabelRoute, fileJudgeLabelStore } from "./judge-calibra
 import { createOperatorAgentRowsSource } from "./operator-agent-read-model.js";
 import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, prewarmOperatorAgentReads, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
+import { buildProductRoutes } from "./product-routes.js";
 import { automationTriggerLedgerJournal, buildAutomationTriggerRoutes, createAutomationTriggerRegistry, submitAutomationTrigger, type AutomationTriggerRegistry } from "./automation-trigger.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import {
@@ -2958,6 +2959,7 @@ function assembleServeRoutes(
     legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
+    ...buildProductRoutes({ root: deps.fleetControlRoot }),
     withStatusNeedsYou(withFleetRuntimeHealth(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), readRuntimeHealth), needsYouGates),
     ...buildRepoDashboardRoutes({
       selectedRegistryObserver,
