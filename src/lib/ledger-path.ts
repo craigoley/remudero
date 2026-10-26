@@ -2,6 +2,8 @@ import { join } from "node:path";
 
 import type { Config } from "./config.js";
 
+// Import this constant; never spell the filename in another src module — the ledger-literal census
+// (test/ledger-literal-census.test.ts) refuses any src file but the owner modules that does.
 export const LEDGER_FILENAME = "ledger.ndjson";
 export const LEDGER_CARRIED_PREFIX_SUFFIX = ".carried.json";
 export const LEDGER_RETAINED_STEPS_SUFFIX = ".retained-steps.json";

@@ -1181,7 +1181,7 @@ export { SELECTOR_SHADOW_MISS_TEST_PATH };
 export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string, changedPaths: readonly string[] = []): string {
   const origin = selectorShadowCauseOrigin(miss.file);
   const edge = `${changedPaths.length ? changedPaths.join(", ") : miss.headSha} -> ${miss.file}`;
-  const pattern = miss.file.replaceAll(".", "\\.");
+  const proofTitle = `${taskId}: the selector covers the recorded suite for every recorded edge`;
   const files = ["src/lib/affected-suites.ts", SELECTOR_SHADOW_MISS_TEST_PATH];
   const q = JSON.stringify;
   return [
@@ -1193,17 +1193,18 @@ export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string,
     ...machineShardHeaderLines(files),
     `  origin: ${q(origin)}`,
     `  files: [${files.join(", ")}]`,
-    `  note: ${q(`W1-T4439 first observed a ${miss.selection} miss on coverage run ${miss.runId}${miss.prNumber ? ` for PR #${miss.prNumber}` : ""} at ${miss.headSha}: ${edge}. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in ${SELECTOR_SHADOW_MISS_TEST_PATH} that selects ${miss.file} for each edge: diff-coverage blocks an edge no test exercises.`)}`,
+    `  design: ${q(`Exercise the selector for the exact recorded suite ${miss.file} on every recorded input edge: ${edge}. The regression named "${proofTitle}" must call the selector and assert that exact suite is selected for every edge. Observation: coverage run ${miss.runId}, head ${miss.headSha}, base ${miss.baseSha ?? "unknown"}${miss.prNumber ? `, PR #${miss.prNumber}` : ""}. A filename-only assertion is not the requested repair.`)}`,
+    `  note: ${q(`W1-T4439 first observed a ${miss.selection} miss on coverage run ${miss.runId}${miss.prNumber ? ` for PR #${miss.prNumber}` : ""} at ${miss.headSha}: ${edge}. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test named "${proofTitle}" in ${SELECTOR_SHADOW_MISS_TEST_PATH} that calls the selector and asserts ${miss.file} is selected for each recorded edge: diff-coverage blocks an edge no test exercises.`)}`,
     "  acceptance:",
-    `    - claim: ${q(`the ${miss.selection} selector includes ${miss.file} when this edge is exercised`)}`,
-    `      proof: ${q(`grep: ${pattern} in src/lib/affected-suites.ts`)}`,
-    `    - claim: ${q(`a regression test selects ${miss.file} for each recorded edge`)}`,
-    `      proof: ${q(`grep: ${pattern} in ${SELECTOR_SHADOW_MISS_TEST_PATH}`)}`,
+    `    - claim: ${q(`the ${miss.selection} selector includes the recorded missed suite when each recorded edge is exercised`)}`,
+    `      proof: ${q(`unit test: ${proofTitle}`)}`,
+    `    - claim: ${q(`a regression test calls the selector and asserts the recorded missed suite is selected for each recorded edge`)}`,
+    `      proof: ${q(`unit test: ${proofTitle}`)}`,
     "",
   ].join("\n");
 }
 
-/** The regression test a structural repair must add: its proof greps for the missed file there. */
+/** The regression test a structural repair must add and execute for every recorded edge. */
 export function selectorShadowStructuralTestPath(file: string): string {
   return newTestPath(`affected-suites-selects-${file.split("/").at(-1)!.replace(/\.test\.ts$/, "")}`, ["src/lib/affected-suites.ts"], "selector-shadow-gardener");
 }
@@ -1212,6 +1213,7 @@ export function selectorShadowStructuralTestPath(file: string): string {
  *  so the task names every edge seen and asks for the selector's rule to be fixed, not one more edge. */
 export function selectorShadowStructuralTask(file: string, taskId: string, edges: readonly string[], repairedTaskId: string): string {
   const testPath = selectorShadowStructuralTestPath(file);
+  const proofTitle = `${taskId}: the selector structurally covers every recorded edge`;
   const files = ["src/lib/affected-suites.ts", testPath];
   const q = JSON.stringify;
   return [
@@ -1223,10 +1225,11 @@ export function selectorShadowStructuralTask(file: string, taskId: string, edges
     ...machineShardHeaderLines(files),
     `  origin: ${q(selectorShadowStructuralOrigin(file))}`,
     `  files: [${files.join(", ")}]`,
-    `  note: ${q(`W1-T4839: ${file} was missed again after ${repairedTaskId} (its narrow edge) merged, so another narrow edge is not the repair. Every edge seen: ${edges.join("; ")}. Find what these edges share and fix the selector's rule for it. Later misses of this suite are ledgered as selector-shadow.miss_evidence rows naming this task; no further task is filed for it.`)}`,
+    `  design: ${q(`Repair the selector rule for the exact recorded suite ${file}, exercising every recorded edge: ${edges.join("; ")}. The regression named "${proofTitle}" must call the selector and assert that exact suite is selected for every edge. The earlier narrow task ${repairedTaskId} already merged; another filename-only edge is not the requested structural repair.`)}`,
+    `  note: ${q(`W1-T4839: ${file} was missed again after ${repairedTaskId} (its narrow edge) merged, so another narrow edge is not the repair. Every edge seen: ${edges.join("; ")}. Find what these edges share and fix the selector's rule for it. Add a test named "${proofTitle}" in ${testPath} that calls the selector and asserts ${file} is selected for every recorded edge. Later misses of this suite are ledgered as selector-shadow.miss_evidence rows naming this task; no further task is filed for it.`)}`,
     "  acceptance:",
-    `    - claim: ${q(`the selector includes ${file} for every edge seen (${edges.join("; ")}), with a regression test`)}`,
-    `      proof: ${q(`grep: ${file.replaceAll(".", "\\.")} in ${testPath}`)}`,
+    `    - claim: ${q(`the selector includes the recorded missed suite for every recorded edge, with a regression test that calls the selector`)}`,
+    `      proof: ${q(`unit test: ${proofTitle}`)}`,
     "",
   ].join("\n");
 }

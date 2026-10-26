@@ -9,8 +9,9 @@ import type { Plan } from "../src/lib/plan.js";
 import {
   buildSweepEffects, cancelledRequiredCheckNames, checkJobId, checksStateFromRollup,
   classifyRollupSupersession, dedupeRollupByLatestAttempt, redQualityGateNames,
-  stillRedRequiredNames, type OpenPrView,
-} from "../src/lib/sweep.js";
+  decideFixSuperseded, stillRedRequiredNames, supersededRedsNowPassing, staleCiGateTransition,
+  classifyMergeRefusal, deferredRequeueTarget, type OpenPrView,
+} from "#src/lib/sweep.js";
 
 const NAME = "coverage-ratchet";
 const OLD = 37217449601;
@@ -22,6 +23,89 @@ const check = (run: number, id: number, conclusion: string, minute: string) => (
   details_url: `https://github.com/o/r/actions/runs/${run}/job/${id}`,
 });
 const triple = [check(OLD, 101, "failure", "16:54"), check(NEW, 102, "success", "17:13"), check(OLD, 103, "failure", "17:45")];
+
+test("independent ci-gate producers preserve the failure GitHub still enforces on PR 14160", () => {
+  const failed = { name: "ci-gate", workflowName: "CI", status: "COMPLETED", conclusion: "FAILURE",
+    startedAt: "2026-10-25T14:14:10Z", completedAt: "2026-10-25T14:24:36Z",
+    detailsUrl: "https://github.com/craigoley/remudero/actions/runs/40199725167/job/121192783427" };
+  const independent = { name: "ci-gate", workflowName: "CI gate", status: "COMPLETED", conclusion: "SUCCESS",
+    startedAt: "2026-10-25T14:49:49Z", completedAt: "2026-10-25T14:50:40Z" };
+  for (const rows of [[failed, independent], [independent, failed]]) {
+    assert.equal(checksStateFromRollup(rows, ["ci-gate"]), "red", "a different workflow cannot supersede CI's failed aggregate");
+    assert.deepEqual(redQualityGateNames(rows, ["ci-gate"]), ["ci-gate"]);
+    assert.deepEqual(stillRedRequiredNames(["ci-gate"], rows), ["ci-gate"]);
+    assert.equal(classifyRollupSupersession(rows).superseded.length, 0);
+    assert.deepEqual(supersededRedsNowPassing(rows), []);
+    assert.equal(decideFixSuperseded({ headSha: "head", failingChecks: ["ci-gate"] },
+      { headSha: "head", rollup: rows }, () => false).kind, "continue");
+    const repaired = { ...failed, conclusion: "SUCCESS", startedAt: "2026-10-25T16:06:00Z", completedAt: "2026-10-25T16:07:08Z" };
+    const fixed = [...rows, repaired];
+    assert.equal(checksStateFromRollup(fixed, ["ci-gate"]), "green", "the original producer's actual retry clears its failure");
+    assert.equal(classifyRollupSupersession(fixed).superseded[0]?.supersededBy, repaired);
+    assert.equal(decideFixSuperseded({ headSha: "head", failingChecks: ["ci-gate"] },
+      { headSha: "head", rollup: fixed }, () => false).kind, "superseded");
+  }
+});
+
+test("a required commit status and same-named check must each pass", () => {
+  const status = { context: "required", state: "FAILURE", startedAt: "2026-10-25T14:00:00Z" };
+  const passed = { name: "required", conclusion: "SUCCESS", startedAt: "2026-10-25T15:00:00Z" };
+  for (const rows of [[status, passed], [passed, status]]) {
+    assert.equal(checksStateFromRollup(rows, ["required"]), "red");
+    assert.equal(classifyRollupSupersession(rows).superseded.length, 0);
+  }
+  assert.equal(checksStateFromRollup([{ ...status, state: "SUCCESS" }, passed], ["required"]), "green");
+});
+
+test("the real aggregate retry targets the failed producer and refuses drift or ambiguity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-independent-gates-"));
+  const calls: string[][] = [];
+  const gateRun = 40199725167;
+  const editedRun = 40204059995;
+  const raw = [
+    { id: 701, name: "ci-gate", status: "completed", conclusion: "failure", started_at: "2026-10-25T14:14:10Z",
+      completed_at: "2026-10-25T14:24:36Z", details_url: `https://github.com/o/r/actions/runs/${gateRun}/job/701` },
+    { id: 702, name: "ci-gate", status: "completed", conclusion: "success", started_at: "2026-10-25T14:49:49Z",
+      completed_at: "2026-10-25T14:50:40Z", details_url: `https://github.com/o/r/actions/runs/${editedRun}/job/702` },
+    { id: 703, name: "acceptance-author-gate", status: "completed", conclusion: "success", started_at: "2026-10-25T14:40:00Z",
+      completed_at: "2026-10-25T14:41:00Z", details_url: "https://github.com/o/r/actions/runs/40200000000/job/703" },
+  ];
+  const workflows = [{ id: gateRun, workflow_id: 10 }, { id: editedRun, workflow_id: 20 }];
+  const rows = () => rollupFromRest(raw, [], workflows);
+  try {
+    const transition = staleCiGateTransition(rows());
+    assert.ok(transition);
+    assert.equal(transition.gateRunId, gateRun);
+    assert.equal(deferredRequeueTarget(rows(), "ci-gate")?.jobId, "701");
+    const refusal = classifyMergeRefusal('Required status check "ci-gate" is failing.', rows(), ["acceptance-author-gate"]);
+    assert.equal(refusal.kind, "stale-check");
+    assert.equal(refusal.kind === "stale-check" && refusal.jobId, "701");
+    const effects = buildSweepEffects({ owner: "o", repo: "r", config: { root } as Config,
+      ledgerPath: join(root, "ledger.ndjson"), runId: "independent-producers", plan: { tasks: [], byId: new Map() } as unknown as Plan,
+      log: () => {}, restRollupForImpl: rollupForAsync, readJsonImpl: async (args) => {
+        if (args[1].includes("/check-runs?")) return { check_runs: raw };
+        if (args[1].endsWith("/status")) return { statuses: [] };
+        if (args[1].includes("/actions/runs?head_sha=")) return { workflow_runs: workflows };
+        throw new Error(`unexpected fixture read: ${args[1]}`);
+      }, ghRunImpl: (_file, args) => { calls.push([...args]); },
+    });
+    await effects.reaggregateCiGate?.({ prNumber: 14160, headSha: "head" } as OpenPrView, transition);
+    assert.deepEqual(calls, [["api", "-X", "POST", "repos/o/r/actions/jobs/701/rerun"]]);
+    raw[0].conclusion = "success";
+    raw[1].conclusion = "failure";
+    await effects.reaggregateCiGate?.({ prNumber: 14160, headSha: "head" } as OpenPrView, transition);
+    assert.equal(calls.length, 1, "the other producer becoming red cannot retarget an old transition");
+    raw[0].conclusion = "failure";
+    assert.equal(staleCiGateTransition(rows()), undefined, "multiple failed aggregates are ambiguous, not an extra retry grant");
+    assert.equal(deferredRequeueTarget(rows(), "ci-gate"), undefined);
+    assert.equal(classifyMergeRefusal('Required status check "ci-gate" is failing.', rows(), ["acceptance-author-gate"]).kind, "real-red");
+    await effects.reaggregateCiGate?.({ prNumber: 14160, headSha: "head" } as OpenPrView,
+      { siblingName: transition.siblingName, siblingStartedAt: transition.siblingStartedAt });
+    assert.equal(calls.length, 1, "an unbound ambiguous transition makes no write");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("test/a-superseded-runs-rerun-never-overrides-the-newest-run.test.ts: #9124 triple, same-run retry, and lone failure", () => {
   const rollup = rollupFromRest(triple, [], workflows);
@@ -51,14 +135,14 @@ test("REST identity records workflow, run, job, and external id without losing c
   assert.deepEqual(status, { context: "remudero-review", state: "SUCCESS" });
 });
 
-test("different workflows sharing ci-gate use latest completion after each selects its newest run", () => {
+test("different workflows sharing ci-gate each retain their newest run's requirement", () => {
   const rows = rollupFromRest([
     { ...check(NEW, 201, "failure", "16:53"), name: "ci-gate" },
     { ...check(OLD, 202, "success", "16:00"), name: "ci-gate", completed_at: "2026-10-04T17:45:00Z" },
   ], [], [{ id: OLD, workflow_id: 10 }, { id: NEW, workflow_id: 20 }]);
   for (const order of [rows, [...rows].reverse()]) {
-    assert.equal(checksStateFromRollup(order, ["ci-gate"]), "green");
-    assert.equal(dedupeRollupByLatestAttempt(order)[0].checkRunId, 202);
+    assert.equal(checksStateFromRollup(order, ["ci-gate"]), "red");
+    assert.deepEqual(dedupeRollupByLatestAttempt(order).map((c) => c.checkRunId).sort(), [201, 202]);
   }
   rows[0].completedAt = "2026-10-04T18:00:00Z";
   assert.equal(checksStateFromRollup(rows, ["ci-gate"]), "red");
@@ -80,7 +164,7 @@ test("legacy job-only posted gates remain a separate producer from Actions check
     check(NEW, 301, "failure", "17:00"),
     { ...check(OLD, 302, "success", "16:00"), external_id: "job:302", completed_at: "2026-10-04T18:00:00Z" },
   ], [], workflows);
-  assert.equal(checksStateFromRollup(rows, [NAME]), "green");
+  assert.equal(checksStateFromRollup(rows, [NAME]), "red");
 });
 
 test("a superseded cancellation never supplies the requeue target and skipped stays green", () => {
