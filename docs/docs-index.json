@@ -722,6 +722,12 @@
       "grepHint": "W1-T10191 lifetime-pressure automate finding"
     },
     {
+      "path": "docs/forensics/w1-t9930-blocked-inflight-attribution.md",
+      "title": "W1-T9930: blocked_inflight verdicts versus the lifetime attribution counter",
+      "summary": "Evidence: every ledger row with `task_id` W1-T9930, taken from the live `ledger.ndjson` plus all",
+      "grepHint": "W1-T9930: blocked_inflight verdicts versus the lifetime attribution counter"
+    },
+    {
       "path": "docs/forensics/why-a-review-refuses-head-task-metadata-unavailable.md",
       "title": "Why a review refuses head-task-metadata-unavailable",
       "summary": "Partial forensic record for W1-T10346: verified mechanisms and historical reports, with the missing cohort evidence identified explicitly.",
