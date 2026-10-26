@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { hostname } from "node:os";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { withTempDir } from "#src/lib/tmp.js";
@@ -197,6 +198,50 @@ test("code health exports bounded provenance without publishing security results
     assert.notEqual(run(narrowed).configHash, manifest.configHash);
     writeFileSync(inputPath, JSON.stringify({ ...raw, analyzedSha: "wrong" }));
     assert.throws(() => execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--input", inputPath, "--output", output], { stdio: "pipe" }), /failed/i);
+  });
+});
+
+
+test("code health provenance reads its checked analysis input through one descriptor", async () => {
+  await withTempDir("code-health-provenance-race", async dir => {
+    const original = { repository: "acme/atlas", analyzedSha: "a".repeat(40), ref: "refs/heads/main", runId: "123", runAttempt: "1",
+      observedAt: "2026-11-02T05:00:00.000Z", language: "javascript-typescript", sarifId: "12345678-1234-1234-1234-123456789012",
+      config: "paths-ignore: []", exclusions: [],
+      sarif: { version: "2.1.0", runs: [{ tool: { driver: { name: "CodeQL", version: "2.23.0", rules: [{ id: "js/example" }] } },
+        artifacts: [{ location: { uri: "src/example.ts" }, roles: ["analysisTarget"] }],
+        invocations: [{ executionSuccessful: true, endTimeUtc: "2026-11-02T04:59:00.000Z" }] }] } };
+    const inputPath = join(dir, "input.json"), replacement = join(dir, "replacement.json"), hook = join(dir, "replace-after-check.mjs");
+    // The hook replaces the input path just after its first file-type check, the window a path re-read exposes.
+    writeFileSync(hook, `import fs from "node:fs"; import { syncBuiltinESMExports } from "node:module";
+const [target, swap] = JSON.parse(process.env.CODE_HEALTH_RACE); let fd = -1, done = false;
+const replace = () => { if (!done) { done = true; fs.renameSync(swap, target); } };
+const { statSync, openSync, fstatSync } = fs;
+fs.statSync = (path, ...rest) => { const result = statSync(path, ...rest); if (path === target) replace(); return result; };
+fs.openSync = (path, ...rest) => { const result = openSync(path, ...rest); if (path === target) fd = result; return result; };
+fs.fstatSync = (handle, ...rest) => { const result = fstatSync(handle, ...rest); if (handle === fd) replace(); return result; };
+syncBuiltinESMExports();\n`);
+    let outputIndex = 0;
+    const run = (path: string, race: [string, string]) => {
+      const output = join(dir, `output-${outputIndex++}.json`);
+      execFileSync(process.execPath, ["--import", pathToFileURL(hook).href, join(repoRoot(), "scripts/code-health-provenance.mjs"),
+        "--input", path, "--output", output], { encoding: "utf8", stdio: "pipe", env: { ...process.env, CODE_HEALTH_RACE: JSON.stringify(race) } });
+      return JSON.parse(readFileSync(output, "utf8"));
+    };
+    writeFileSync(inputPath, JSON.stringify(original));
+    writeFileSync(replacement, JSON.stringify({ ...original, repository: "acme/replaced" }));
+    const published = run(inputPath, [inputPath, replacement]);
+    assert.match(readFileSync(inputPath, "utf8"), /acme\/replaced/, "the control replaced the path after its check");
+    assert.equal(published.repository, "acme/atlas", "the published evidence is the file whose type and size were checked");
+    const linked = join(dir, "linked.json");
+    writeFileSync(replacement, JSON.stringify(original));
+    symlinkSync(replacement, linked);
+    assert.equal(run(replacement, ["", ""]).repository, "acme/atlas", "the link target alone is a valid input");
+    assert.throws(() => run(linked, ["", ""]), /evidence export failed/, "a link substituted for the analysis input is refused, not followed");
+    const fifo = join(dir, "input-pipe");
+    execFileSync("mkfifo", [fifo]);
+    assert.throws(() => execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--input", fifo,
+      "--output", join(dir, "pipe-output.json")], { stdio: "pipe", timeout: 10000 }), /evidence export failed/,
+    "opening a pipe with no writer is refused at once, never awaited");
   });
 });
 

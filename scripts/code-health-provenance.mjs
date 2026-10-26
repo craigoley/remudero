@@ -3,7 +3,7 @@
 import { parseLcovRecords } from "./lib/lcov.mjs";
 import { parseLcovTotals, classifyCoverageTier } from "./coverage-ratchet.mjs";
 import { createHash } from "node:crypto";
-import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -104,7 +104,8 @@ function boundedRead(path, limit) {
   if (!path) throw new Error("Unbounded or unavailable analysis input.");
   // Operate on one open handle only, and bound the bytes actually read rather than trusting a
   // size observed earlier, so a file that grows after the type check is still refused.
-  const fd = openSync(path, "r");
+  // No link is followed and a pipe or device is refused at once instead of blocking for a writer.
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     if (!fstatSync(fd).isFile()) throw new Error("Unbounded or unavailable analysis input.");
     const buffer = Buffer.allocUnsafe(limit + 1);
