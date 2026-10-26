@@ -3395,7 +3395,7 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
   // is the caller's to answer; a wrong guess here would flag every task that merely EDITS a module.
   if (!opts.moduleExists) return [];
   const severity: LintSeverity = opts.callSite ?? "warn";
-  const declaredSrc = (task.files ?? []).filter((f) => f.startsWith("src/") && f.endsWith(".ts") && !f.includes("*"));
+  const declaredSrc = (task.files ?? []).filter((f) => f.startsWith("src/") && (f.endsWith(".ts") || f.endsWith(".tsx")) && !f.includes("*"));
   const declaredSrcSet = new Set(declaredSrc);
   const created = declaredSrc.filter((f) => !opts.moduleExists!(f));
   const addedExports = (opts.addedExports ?? []).filter(
@@ -3412,7 +3412,7 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
     // A CALL, not a mention: the pattern must demand an invocation…
     if (!pattern.includes("(")) return undefined;
     // …in a src/ file, not a test. Tests prove behavior; they do not prove production reachability.
-    if (!path.startsWith("src/") || !path.endsWith(".ts") || path.includes("*")) return undefined;
+    if (!path.startsWith("src/") || (!path.endsWith(".ts") && !path.endsWith(".tsx")) || path.includes("*")) return undefined;
     return { pattern, path };
   };
   const proofs = (task.acceptance ?? []).map(parsedGrepCallProof).filter((p): p is { pattern: string; path: string } => !!p);

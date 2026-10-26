@@ -28,6 +28,7 @@ import {
   ownerSearchTerms,
   reviewStatusWithoutMechanism,
   coverageRefusalWithoutMechanism,
+  scannerWarningWithoutMechanism,
   parseCiFrictionOrigin,
   type CiFrictionCauseState,
   type CiFrictionOwner,
@@ -1561,6 +1562,8 @@ export function ciFrictionLadder(input: {
         ? "The remudero-review status identifies a verdict producer, but these rounds supply no failure mechanism for a workflow repair; diagnosis remains UNKNOWN"
         : coverageRefusalWithoutMechanism(key, details)
           ? "The source coverage refusal identifies uncovered changes, not a workflow failure mechanism; diagnosis remains UNKNOWN"
+        : scannerWarningWithoutMechanism(key, details)
+          ? "The scanner warning reports a branch finding, not a harness failure mechanism; diagnosis remains UNKNOWN"
         : legacyRefusal + (input.ownerSearch.workflowOwner ? "; no declared workflow job resolves it" : "")
         + (workflowGap(input.ownerSearch, key, details) ?? "") + testAlone, prior: s.prior, holdReason: "no-owner", evidence } };
     if (!owner) line.state = "escalate";

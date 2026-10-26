@@ -26,6 +26,7 @@
     - src/lib/serve.ts
     - src/run-task.ts
     - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
     - test/**/improvement-thread.test.ts
     - test/**/improvement-thread-route.test.ts
   rationale: Native Ask turns are temporary and read-only, existing Inbox routes only read/reply to existing

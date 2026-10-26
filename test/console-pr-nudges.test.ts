@@ -266,7 +266,7 @@ function strikeExhaustedRedPr(): OpenPrView {
     taskId: "W1-T4051",
     reviewState: "none",
     checksState: "red",
-    ciFailures: [{ name: "coverage-shard (1/4)", conclusion: "failure", excerpt: "not ok 1" }],
+    ciFailures: [{ name: "coverage-shard (1/4)", conclusion: "failure", logTail: "not ok 1 - a failing test" }],
     unmetCriteria: [],
     priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap,
     lastActivityAt: new Date().toISOString(),

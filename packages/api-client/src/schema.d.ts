@@ -142,6 +142,124 @@ export interface components {
         state: "not_requested";
       };
     };
+    ProductId: string;
+    ProductRequestId: string;
+    ProductRevision: number;
+    ProductResearchLink: {
+      label: string;
+      /** HTTP(S) only; credentials and token, access_token, api_key or x-vercel-protection-bypass query keys are refused. */
+      url: string;
+    };
+    /** Private operator proposals. Text is trimmed and must remain nonempty. Requested repository and resources confer no execution authority. The resulting stored product must fit 24576 bytes. */
+    ProductBrief: {
+      idea: string;
+      name?: string;
+      portfolio?: string;
+      objective?: string;
+      constraints?: (string)[];
+      decisions?: ({
+        key: string;
+        value: string;
+        provenance: {
+          kind: "operator" | "research" | "recommendation";
+          reference?: string;
+        };
+      })[];
+      research?: (ProductResearchLink)[];
+      requestedRepository?: {
+        owner: string;
+        name: string;
+      };
+      resourceEnvelope?: {
+        budgetUsd: number;
+        maxConcurrentBuilds: number;
+        existingSetupOnly: boolean;
+      };
+    };
+    /** At most 65536 raw request bytes. Omit id and use expectedRevision 0 to create; an update names its existing product and current revision. Ownership comes only from verifiedActor. Reusing requestId with the same normalized command replays its original receipt; a changed command conflicts. Owner, verified repository, stage evidence and execution authority fields are rejected. A changed brief advances objectiveRevision; every accepted write advances revision. */
+    ProductWrite: {
+      version: "product-intent-v1";
+      requestId: ProductRequestId;
+      id?: ProductId;
+      expectedRevision: number;
+      brief: ProductBrief;
+    };
+    ProductRepositoryIdentity: {
+      provider: "github";
+      id: number;
+      owner: string;
+      name: string;
+      defaultBranch: string;
+      visibility: "public" | "private" | "internal";
+      verifiedAt: string;
+    };
+    ProductStageEvidence: {
+      id: string;
+      stage: "research" | "repository" | "plan" | "build" | "review" | "deploy" | "improve";
+      outcome: "proposed" | "queued" | "admitted" | "running" | "succeeded" | "failed" | "unknown" | "blocked";
+      objectiveRevision: ProductRevision;
+      observedAt: string;
+      references: (ProductResearchLink)[];
+    };
+    ProductReceipt: {
+      operationId: string;
+      productId: ProductId;
+      revision: ProductRevision;
+      objectiveRevision: ProductRevision;
+      savedAt: string;
+      payloadDigest: string;
+      recordDigest: string;
+    };
+    ProductProjection: {
+      version: "product-intent-v1";
+      id: ProductId;
+      revision: ProductRevision;
+      objectiveRevision: ProductRevision;
+      createdAt: string;
+      updatedAt: string;
+      brief: ProductBrief;
+      repository: (ProductRepositoryIdentity) | (null);
+      stageEvidence: (ProductStageEvidence)[];
+      executionAuthority: "none";
+      history: (ProductReceipt)[];
+    };
+    ProductSummary: {
+      id: ProductId;
+      revision: ProductRevision;
+      objectiveRevision: ProductRevision;
+      createdAt: string;
+      updatedAt: string;
+      name: string;
+      portfolio?: string;
+    };
+    ProductListResponse: {
+      version: "product-intent-v1";
+      products: (ProductSummary)[];
+    };
+    ProductReadResponse: {
+      version: "product-intent-v1";
+      product: ProductProjection;
+    };
+    ProductReceiptResponse: {
+      version: "product-intent-v1";
+      receipt: ProductReceipt;
+    };
+    ProductWriteResponse: {
+      version: "product-intent-v1";
+      receipt: ProductReceipt;
+      replayed: boolean;
+    };
+    ProductError: {
+      version: "product-intent-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large";
+    };
+    /** The service's scope, tier or sensitivity gate refused access before the product handler. */
+    ProductAccessError: {
+      error: "unauthorized" | "forbidden";
+      required_scope?: "read" | "write";
+      required_tier?: "middle";
+      required_sensitivity?: "sensitive";
+    };
     /** Bounded read-only answer-v1; missing evidence is explicit and citations are dated. */
     OperatorAgentAnswer: {
       version: "answer-v1";
@@ -3769,7 +3887,7 @@ export interface components {
       view: "code-health";
       version: 1;
       generatedAt: string;
-      asOf: unknown;
+      asOf: (string) | (null);
       stale: boolean;
       sources: (ViewSource)[];
       data: CodeHealthViewData;
@@ -3782,48 +3900,108 @@ export interface components {
       unresolvedInstances: (string)[];
       repositories: ({
         repository: string;
-        snapshotId: unknown;
+        snapshotId: (string) | (null);
         state: "measured" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized" | "rate_limited";
-        summary: unknown;
+        summary: ({
+          met: number;
+          assessed: number;
+          expected: number;
+          healthy: (boolean) | (null);
+        }) | (null);
         urgentFindings: {
-          value: unknown;
+          value: (number) | (null);
           precision: "exact" | "at_least" | "unavailable";
           /** The measured CodeQL scope; this is not a comprehensive security assessment. */
           scope: string;
         };
-        measuredAt: unknown;
-        analyzedSha: unknown;
-        currentSha: unknown;
+        measuredAt: (string) | (null);
+        analyzedSha: (string) | (null);
+        currentSha: (string) | (null);
         freshness: "fresh" | "stale" | "unavailable";
-        lastAttemptAt: unknown;
-        nextCheckDueAt: unknown;
+        lastAttemptAt: (string) | (null);
+        nextCheckDueAt: (string) | (null);
         collection: ({
           state: "none";
         }) | ({
           state: "failed";
           startedAt: string;
           finishedAt: string;
-          snapshotId: unknown;
+          snapshotId: (string) | (null);
           reason: string;
           failureKind?: "unauthorized" | "rate_limited" | "unavailable";
         }) | ({
           state: "unavailable";
           reason: string;
         });
-        reason: unknown;
+        reason: (string) | (null);
         sourceClocks: ({
           kind: string;
           state: "complete" | "partial" | "stale" | "not_collected" | "unavailable";
-          measuredAt: unknown;
-          analyzedSha: unknown;
+          measuredAt: (string) | (null);
+          analyzedSha: (string) | (null);
         })[];
       })[];
-      snapshotId: unknown;
-      isCurrentSnapshot: unknown;
-      assessment: unknown;
-      findingCount: unknown;
+      snapshotId: (string) | (null);
+      isCurrentSnapshot: (boolean) | (null);
+      assessment: ({
+        version: "code-health-v1";
+        repository: string;
+        analyzedSha: string;
+        currentSha: string;
+        baselineSha: (string) | (null);
+        policyVersion: string;
+        observedAt: string;
+        nextDueAt: (string) | (null);
+        state: "measured" | "partial" | "stale" | "not_collected" | "unavailable";
+        sources: ({
+          id: string;
+          kind: string;
+          required: boolean;
+          state: "complete" | "partial" | "stale" | "not_collected" | "unavailable";
+          analyzedSha: (string) | (null);
+          observedAt: (string) | (null);
+          scopeHash: (string) | (null);
+          toolVersion: (string) | (null);
+          rulesVersion: (string) | (null);
+          configHash: (string) | (null);
+          baseline: ({
+            sha: string;
+            scopeHash: string;
+            toolVersion: string;
+            rulesVersion: string;
+            configHash: string;
+          }) | (null);
+          exclusions: (string)[];
+          reason: (string) | (null);
+        })[];
+        checks: ({
+          id: string;
+          category: "maintainability" | "security" | "reliability" | "tests";
+          state: "met" | "not_met" | "not_measured";
+          sourceIds: (string)[];
+          reason: string;
+        })[];
+        findings: ({
+          fingerprint: string;
+          sourceId: string;
+          severity: "critical" | "high" | "medium" | "low";
+          category: string;
+          status: "new" | "existing" | "unknown";
+          path: string;
+          title: string;
+          effortMinutes: (number) | (null);
+          estimateKind: ("modeled") | (null);
+        })[];
+        summary: {
+          met: number;
+          assessed: number;
+          expected: number;
+          healthy: (boolean) | (null);
+        };
+      }) | (null);
+      findingCount: (number) | (null);
       urgentFindings: {
-        value: unknown;
+        value: (number) | (null);
         precision: "exact" | "at_least" | "unavailable";
         /** The measured CodeQL scope; this is not a comprehensive security assessment. */
         scope: string;
@@ -3846,14 +4024,14 @@ export interface components {
           fingerprint: string;
           sourceId: string;
           scanId: string;
-          analyzedSha: unknown;
-          observedAt: unknown;
+          analyzedSha: (string) | (null);
+          observedAt: (string) | (null);
           severity: "critical" | "high" | "medium" | "low";
           title: string;
           path: string;
         })[];
-        effortMinutes: unknown;
-        estimateKind: unknown;
+        effortMinutes: (number) | (null);
+        estimateKind: ("modeled") | (null);
         relatedWork: ({
           repository: string;
           proposalId: string;
@@ -3863,13 +4041,13 @@ export interface components {
         })[];
       })[];
       relatedWorkState: "reported" | "partial" | "stale" | "unavailable" | "not_collected";
-      relatedWorkAsOf: unknown;
-      relatedWorkReason: unknown;
+      relatedWorkAsOf: (string) | (null);
+      relatedWorkReason: (string) | (null);
       /** Current source evidence can support a planning conversation; this does not approve, file or execute work. */
       planningAvailable: boolean;
       freshness: "fresh" | "stale" | "unavailable";
       page: {
-        nextCursor: unknown;
+        nextCursor: (string) | (null);
       };
     };
     /** GET /v1/views/repositories (docs/views.md, src/lib/repositories-view.ts): the repository portfolio across every instance serve holds, in one body. Each instance's `summary` IS its GET /v1/i/<instance>/repos/summary body, computed by the read-model worker from that instance's projected `repo_row` table; `projects` precomputes the console's grouping and its "worst is <repo>" line. Dark until state/read-model/switches.json sets `repositories` to `serve`. Version 2 carries no clock stamp in `data`: each summary's `generated_at` is its `repositories:<instance>` source's `asOf`, so the ETag moves only when the content does. */
@@ -6010,6 +6188,30 @@ export interface paths {
           "409": ImprovementFailure;
           "500": Error;
           "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/products": {
+    get: {
+      responses: {
+          "200": (ProductListResponse) | (ProductReadResponse) | (ProductReceiptResponse);
+          "400": ProductError;
+          "401": ProductAccessError;
+          "403": (ProductError) | (ProductAccessError);
+          "404": ProductError;
+          "503": ProductError;
+        };
+    };
+    post: {
+      responses: {
+          "200": ProductWriteResponse;
+          "400": ProductError;
+          "401": ProductAccessError;
+          "403": (ProductError) | (ProductAccessError);
+          "404": ProductError;
+          "409": ProductError;
+          "413": ProductError;
+          "503": ProductError;
         };
     };
   };

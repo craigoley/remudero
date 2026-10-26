@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { hostname } from "node:os";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { withTempDir } from "#src/lib/tmp.js";
@@ -197,6 +198,73 @@ test("code health exports bounded provenance without publishing security results
     assert.notEqual(run(narrowed).configHash, manifest.configHash);
     writeFileSync(inputPath, JSON.stringify({ ...raw, analyzedSha: "wrong" }));
     assert.throws(() => execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--input", inputPath, "--output", output], { stdio: "pipe" }), /failed/i);
+  });
+});
+
+
+test("code health provenance reads its checked analysis input through one descriptor", async () => {
+  await withTempDir("code-health-provenance-race", async dir => {
+    const original = { repository: "acme/atlas", analyzedSha: "a".repeat(40), ref: "refs/heads/main", runId: "123", runAttempt: "1",
+      observedAt: "2026-11-02T05:00:00.000Z", language: "javascript-typescript", sarifId: "12345678-1234-1234-1234-123456789012",
+      config: "paths-ignore: []", exclusions: [],
+      sarif: { version: "2.1.0", runs: [{ tool: { driver: { name: "CodeQL", version: "2.23.0", rules: [{ id: "js/example" }] } },
+        artifacts: [{ location: { uri: "src/example.ts" }, roles: ["analysisTarget"] }],
+        invocations: [{ executionSuccessful: true, endTimeUtc: "2026-11-02T04:59:00.000Z" }] }] } };
+    const inputPath = join(dir, "input.json"), replacement = join(dir, "replacement.json"), hook = join(dir, "replace-after-check.mjs");
+    // The hook replaces the input path just after its first file-type check, the window a path re-read exposes.
+    writeFileSync(hook, `import fs from "node:fs"; import { syncBuiltinESMExports } from "node:module";
+const [target, swap] = JSON.parse(process.env.CODE_HEALTH_RACE); let fd = -1, done = false;
+const replace = () => { if (!done) { done = true; fs.renameSync(swap, target); } };
+const { statSync, openSync, fstatSync } = fs;
+fs.statSync = (path, ...rest) => { const result = statSync(path, ...rest); if (path === target) replace(); return result; };
+fs.openSync = (path, ...rest) => { const result = openSync(path, ...rest); if (path === target) fd = result; return result; };
+fs.fstatSync = (handle, ...rest) => { const result = fstatSync(handle, ...rest); if (handle === fd) replace(); return result; };
+syncBuiltinESMExports();\n`);
+    let outputIndex = 0;
+    const run = (path: string, race: [string, string]) => {
+      const output = join(dir, `output-${outputIndex++}.json`);
+      execFileSync(process.execPath, ["--import", pathToFileURL(hook).href, join(repoRoot(), "scripts/code-health-provenance.mjs"),
+        "--input", path, "--output", output], { encoding: "utf8", stdio: "pipe", env: { ...process.env, CODE_HEALTH_RACE: JSON.stringify(race) } });
+      return JSON.parse(readFileSync(output, "utf8"));
+    };
+    writeFileSync(inputPath, JSON.stringify(original));
+    writeFileSync(replacement, JSON.stringify({ ...original, repository: "acme/replaced" }));
+    const published = run(inputPath, [inputPath, replacement]);
+    assert.match(readFileSync(inputPath, "utf8"), /acme\/replaced/, "the control replaced the path after its check");
+    assert.equal(published.repository, "acme/atlas", "the published evidence is the file whose type and size were checked");
+    const linked = join(dir, "linked.json");
+    writeFileSync(replacement, JSON.stringify(original));
+    symlinkSync(replacement, linked);
+    assert.equal(run(replacement, ["", ""]).repository, "acme/atlas", "the link target alone is a valid input");
+    assert.throws(() => run(linked, ["", ""]), /evidence export failed/, "a link substituted for the analysis input is refused, not followed");
+    const fifo = join(dir, "input-pipe");
+    execFileSync("mkfifo", [fifo]);
+    assert.throws(() => execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--input", fifo,
+      "--output", join(dir, "pipe-output.json")], { stdio: "pipe", timeout: 10000 }), /evidence export failed/,
+    "opening a pipe with no writer is refused at once, never awaited");
+  });
+});
+
+
+test("code health provenance CLI refuses a pipe before a blocking open", async () => {
+  await withTempDir("code-health-provenance-pipe", async dir => {
+    const value = { repository: "acme/atlas", analyzedSha: "a".repeat(40), ref: "refs/heads/main", runId: "123", runAttempt: "1",
+      observedAt: "2026-11-02T05:00:00.000Z", language: "javascript-typescript", sarifId: "12345678-1234-1234-1234-123456789012",
+      config: "paths-ignore: []", exclusions: [],
+      sarif: { version: "2.1.0", runs: [{ tool: { driver: { name: "CodeQL", version: "2.23.0", rules: [{ id: "js/example" }] } },
+        artifacts: [{ location: { uri: "src/example.ts" }, roles: ["analysisTarget"] }],
+        invocations: [{ executionSuccessful: true, endTimeUtc: "2026-11-02T04:59:00.000Z" }] }] } };
+    const script = join(repoRoot(), "scripts/code-health-provenance.mjs");
+    const regular = join(dir, "input.json"), fifo = join(dir, "input-pipe"), output = join(dir, "output.json");
+    writeFileSync(regular, JSON.stringify(value));
+    execFileSync(process.execPath, [script, "--input", regular, "--output", output], { stdio: "pipe", timeout: 10000 });
+    assert.equal(JSON.parse(readFileSync(output, "utf8")).repository, "acme/atlas", "a valid regular input is still published");
+    execFileSync("mkfifo", [fifo]);
+    // A FIFO with no writer blocks a plain open forever; the 10 s child bound turns that into a failure.
+    assert.throws(() => execFileSync(process.execPath, [script, "--input", fifo, "--output", join(dir, "pipe-output.json")],
+      { stdio: "pipe", timeout: 10000 }), (error: NodeJS.ErrnoException & { stderr?: Buffer }) =>
+      error.code !== "ETIMEDOUT" && /evidence export failed/.test(String(error.stderr ?? error.message)),
+    "a pipe with no writer is refused by the exporter itself, never left to the child's time bound");
   });
 });
 
@@ -776,13 +844,172 @@ test("code health background collection is leased, daily, restart-aware and inde
 
 
 test("code health bounded evidence reads refuse a pipe without blocking the worker", async () => {
-  await withTempDir("code-health-pipe", dir => {
+  await withTempDir("code-health-pipe", async dir => {
     const path = join(dir, "metadata.json"), fifo = join(dir, "metadata-pipe");
     writeFileSync(path, JSON.stringify({ observed: true }));
     execFileSync("mkfifo", [fifo]);
-    const script = 'import {readCodeHealthArtifactJson} from "#src/lib/code-health-store.js";const p=readCodeHealthArtifactJson(process.argv[1]);if(!p.observed)process.exit(2);try{readCodeHealthArtifactJson(process.argv[2]);process.exit(3);}catch{process.stdout.write("refused");}';
-    const read = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, path, fifo], { cwd: repoRoot(), timeout: 3000, encoding: "utf8" });
-    assert.equal(read, "refused", "an invalid file type is an unavailable source, never an unbounded blocking read");
+    // The child says ready once its imports and the ordinary-file control read are done, so the bound
+    // below times the pipe read alone, never a cold module load.
+    const script = 'import {readCodeHealthArtifactJson} from "#src/lib/code-health-store.js";const p=readCodeHealthArtifactJson(process.argv[1]);if(!p.observed)process.exit(2);process.stdout.write("ready\\n");try{readCodeHealthArtifactJson(process.argv[2]);process.exit(3);}catch{process.stdout.write("refused");}';
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, path, fifo], { cwd: repoRoot(), stdio: ["ignore", "pipe", "inherit"] });
+    let out = "", stalled: "startup" | "read" | undefined, readTimer: NodeJS.Timeout | undefined;
+    // BACKSTOP: a child that never finishes loading is reported as such, not as a blocking read.
+    const startTimer = setTimeout(() => { stalled = "startup"; child.kill("SIGKILL"); }, 120_000);
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+      out += chunk;
+      if (readTimer === undefined && out.includes("ready\n")) {
+        clearTimeout(startTimer);
+        readTimer = setTimeout(() => { stalled = "read"; child.kill("SIGKILL"); }, 3000);
+      }
+    });
+    const code = await new Promise<number | null>(resolve => child.on("close", resolve));
+    clearTimeout(startTimer); clearTimeout(readTimer);
+    assert.notEqual(stalled, "startup", "the reader child loaded and read the ordinary file");
+    assert.equal(stalled, undefined, "an invalid file type is an unavailable source, never an unbounded blocking read");
+    assert.deepEqual([code, out], [0, "ready\nrefused"], "the ordinary file is read and the pipe is refused");
+  });
+});
+
+test("code health resolves configured CodeQL languages from a language matrix or the analysis init step", async () => {
+  const sha = "a".repeat(40), uses = (action: string) => `      - uses: github/${action}@${"f".repeat(40)}\n`;
+  const read = async (workflow: string) => {
+    const downloads: string[] = [];
+    const result = readCodeHealthQualityEvidence("acme/atlas", async (args) => {
+      const route = args[0] === "api" ? args[1] ?? "" : "";
+      if (route.endsWith("/commits/main")) return JSON.stringify({ sha });
+      if (route.includes("/actions/workflows/codeql.yml/runs")) return JSON.stringify({ workflow_runs: [{ id: 123, head_sha: sha, head_branch: "main", status: "completed", path: ".github/workflows/codeql.yml" }] });
+      if (route.includes("/contents/.github/workflows/codeql.yml")) return JSON.stringify({ type: "file", encoding: "base64", size: Buffer.byteLength(workflow), content: Buffer.from(workflow).toString("base64") });
+      if (route.includes("/actions/runs/123/artifacts")) return JSON.stringify({ total_count: 2, artifacts: ["actions", "python"].map((language, n) => ({ id: n + 1, name: `code-health-quality-${language}`,
+        expired: false, size_in_bytes: 1000, workflow_run: { id: 123, head_sha: sha, head_branch: "main", repository_id: 1, head_repository_id: 1 } })) });
+      if (args[0] === "run" && args[1] === "download") {
+        const dir = args[args.indexOf("--dir") + 1]!; downloads.push(args[args.indexOf("--name") + 1]!);
+        mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, "code-health-quality.json"), "{}"); return "";
+      }
+      throw new Error("fixture stops after the configured artifacts were selected");
+    });
+    await assert.rejects(result);
+    return downloads;
+  };
+  const both = ["code-health-quality-actions", "code-health-quality-python"];
+  assert.deepEqual(await read(`jobs:\n  analyze:\n    strategy:\n      matrix:\n        language: [python, actions]\n    steps:\n${uses("codeql-action/analyze")}`), both,
+    "a plain language matrix names the configured analyses");
+  assert.deepEqual(await read(`jobs:\n  analyze:\n    steps:\n${uses("codeql-action/init")}        with:\n          languages: python, actions\n${uses("codeql-action/analyze")}`), both,
+    "without a matrix, the init step's literal language list names them");
+  for (const languages of ["${{ matrix.language }}", ""]) {
+    const workflow = `jobs:\n  analyze:\n    steps:\n${uses("codeql-action/init")}        with:\n          languages: "${languages}"\n${uses("codeql-action/analyze")}`;
+    await assert.rejects(readCodeHealthQualityEvidence("acme/atlas", async (args) => {
+      const route = args[1] ?? "";
+      if (route.endsWith("/commits/main")) return JSON.stringify({ sha });
+      if (route.includes("/runs?")) return JSON.stringify({ workflow_runs: [{ id: 123, head_sha: sha, head_branch: "main", status: "completed", path: ".github/workflows/codeql.yml" }] });
+      return JSON.stringify({ type: "file", encoding: "base64", size: Buffer.byteLength(workflow), content: Buffer.from(workflow).toString("base64") });
+    }), /CodeQL languages (could not be resolved|cannot be resolved safely)/, `an unresolved init language list (${JSON.stringify(languages)}) is not guessed`);
+  }
+});
+
+test("code health records unreadable saved coverage as an unavailable source", async () => {
+  await withTempDir("code-health-coverage-unavailable", async stateDir => {
+    const repository = "acme/atlas", sha = "a".repeat(40), at = "2026-11-02T05:00:00.000Z", sarifId = "12345678-1234-1234-1234-123456789012";
+    const clock = clockFromMillisFn(() => Date.parse(at) + 60_000);
+    const artifact = { version: "code-health-source-v1", kind: "quality", repository, analyzedSha: sha, ref: "refs/heads/main", runId: "123", runAttempt: "1", observedAt: at,
+      language: "actions", sarifId, scanId: `codeql:123:1:actions:${sarifId}`, state: "complete", reasons: [], toolVersion: "2.23.0", rulesVersion: "b".repeat(64), configHash: "c".repeat(64), ruleCount: 12,
+      exclusions: ["test/**"], scope: { kind: "explicit-analysis-targets", fileCount: 2, hash: "d".repeat(64) }, completion: { kind: "workflow-analysis-step", state: "success", at } };
+    const evidence = { currentSha: sha, quality: { analyzedSha: sha, runId: "123", requiredLanguages: ["actions"], artifacts: [artifact], analyses: [{ sarifId, analyzedSha: sha,
+      category: "/language:actions", toolVersion: "2.23.0", analysisKey: ".github/workflows/codeql.yml:analyze", environmentHash: "e".repeat(64), createdAt: at, rulesCount: 12, error: "", warning: "" }] } };
+    mkdirSync(join(stateDir, "code-health"), { recursive: true });
+    writeFileSync(join(stateDir, "code-health", "coverage-source.json"), "{not json");
+    const result = await collectCodeHealth({ stateDir, repository, clock, source: { ok: true, alerts: [], analysisInstances: [] }, readQualityEvidence: async () => evidence });
+    assert.equal(result.state, "published");
+    const saved = readCodeHealthSnapshot(stateDir, repository); assert(saved.state === "observed");
+    const coverage = saved.snapshot.input.scans.find(scan => scan.kind === "coverage");
+    const cached = readCodeHealthCoverageSource(stateDir, repository); assert(cached.state === "unavailable", "control: the saved coverage source reads as unavailable");
+    assert.deepEqual([coverage?.state, coverage?.scanId, coverage?.reason], ["unavailable", "unavailable:coverage", cached.reason],
+      "a broken saved coverage source is named unavailable, never silently treated as not collected");
+  });
+});
+
+test("code health publication stops when its lock ownership can no longer be proven", async () => {
+  await withTempDir("code-health-lock-lost", async stateDir => {
+    const lockPath = join(stateDir, "code-health", "locks", "publication.lock");
+    let calls = 0;
+    const result = publishFixture({ stateDir, input: input(), expectedSnapshotId: null, mayPublish: () => {
+      // The second check runs after the snapshot is staged: the lock disappears before the pointer moves.
+      if (++calls === 2) unlinkSync(lockPath);
+      return true;
+    } });
+    assert.equal(result.state, "unavailable", "an unreadable lock cannot prove ownership, so nothing is published");
+    assert.equal(existsSync(join(stateDir, "code-health", "latest.json")), false, "the pointer never moves without proven ownership");
+    assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas").state === "observed", false);
+  });
+});
+
+test("code health publication yields when another publisher takes a reclaimed lock first", async () => {
+  await withTempDir("code-health-lock-race", async dir => {
+    const stateDir = join(dir, "state"), lockDir = join(stateDir, "code-health", "locks"), lockPath = join(lockDir, "publication.lock"); mkdirSync(lockDir, { recursive: true });
+    const deadPid = Number(execFileSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }));
+    writeFileSync(lockPath, JSON.stringify({ pid: deadPid, run_id: "completed-own-fixture", host: hostname(), startedAt: new Date().toISOString() }));
+    const rival = JSON.stringify({ pid: process.pid, run_id: "rival-publisher", host: hostname(), startedAt: new Date().toISOString() });
+    // The hook lets the stale-lock delete happen, then a rival creates the lock before this publisher retries.
+    const hook = join(dir, "rival-after-reclaim.mjs");
+    writeFileSync(hook, `import fs from "node:fs"; import { syncBuiltinESMExports } from "node:module";
+const { unlinkSync, writeFileSync } = fs; const [target, rival] = JSON.parse(process.env.CODE_HEALTH_LOCK_RACE);
+fs.unlinkSync = (path, ...rest) => { unlinkSync(path, ...rest); if (path === target) writeFileSync(target, rival, { flag: "wx" }); };
+syncBuiltinESMExports();\n`);
+    const script = 'import {publishCodeHealthSnapshot} from "#src/lib/code-health-store.js";import {fixedClock} from "#src/lib/clock.js";' +
+      'process.stdout.write(JSON.stringify(publishCodeHealthSnapshot({stateDir:process.argv[1],input:JSON.parse(process.argv[2]),expectedSnapshotId:null,clock:fixedClock(Date.parse("2026-11-02T06:00:00.000Z"))})));';
+    const out = execFileSync(process.execPath, ["--import", "tsx", "--import", pathToFileURL(hook).href, "--input-type=module", "-e", script, stateDir, JSON.stringify(input())],
+      { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, CODE_HEALTH_LOCK_RACE: JSON.stringify([lockPath, rival]) } });
+    assert.equal(JSON.parse(out).state, "busy", "the publisher that lost the reacquire race reports busy instead of writing");
+    assert.equal(readFileSync(lockPath, "utf8"), rival, "the rival's lock is left untouched");
+    assert.equal(existsSync(join(stateDir, "code-health", "latest.json")), false);
+  });
+});
+
+test("code health marks an open finding with unusable location evidence as incomplete", () => {
+  const sha = "a".repeat(40), sarifId = "12345678-1234-1234-1234-123456789012";
+  const artifact = { version: "code-health-source-v1", kind: "quality", repository: "acme/atlas", analyzedSha: sha, ref: "refs/heads/main", runId: "123", runAttempt: "1",
+    observedAt: "2026-11-02T05:00:00.000Z", language: "actions", sarifId, scanId: `codeql:123:1:actions:${sarifId}`, state: "complete", reasons: [], toolVersion: "2.23.0",
+    rulesVersion: "b".repeat(64), configHash: "c".repeat(64), ruleCount: 12, exclusions: [], scope: { kind: "explicit-analysis-targets", fileCount: 2, hash: "d".repeat(64) },
+    completion: { kind: "workflow-analysis-step", state: "success", at: "2026-11-02T05:00:00.000Z" } };
+  const analysis = { sarifId, analyzedSha: sha, category: "/language:actions", toolVersion: "2.23.0", analysisKey: ".github/workflows/codeql.yml:analyze",
+    environmentHash: "e".repeat(64), createdAt: "2026-11-02T04:59:00.000Z", rulesCount: 12, error: "", warning: "" };
+  const scan = (path: string) => qualityScanFromCollectedEvidence({ repository: "acme/atlas", analyzedSha: sha, runId: "123", requiredLanguages: ["actions"], artifacts: [artifact], analyses: [analysis],
+    source: { ok: true as const, alerts: [{ source: "code-scanning" as const, id: "42", severity: "high" as const, state: "open", createdAt: "2026-11-01T05:00:00.000Z",
+      summary: "Repeated work is hard to change.", url: "https://github.com/acme/atlas/security/code-scanning/42", toolName: "CodeQL", ruleId: "js/repeated-work",
+      ruleTags: ["quality", "maintainability"], location: { path } }],
+      analysisInstances: [{ alertId: "42", analyzedSha: sha, toolVersion: "2.23.0", ref: "refs/heads/main", analysisKey: analysis.analysisKey,
+        category: analysis.category, environmentHash: analysis.environmentHash, instanceState: "open" }] } });
+  const control = scan("src/example.ts");
+  assert.deepEqual([control.state, control.findings.length], ["complete", 1], "control: the same finding with a repository path is complete evidence");
+  for (const path of ["src/../outside.ts", "/abs/example.ts"]) {
+    const escaped = scan(path);
+    assert.deepEqual([escaped.state, escaped.findings.length], ["partial", 0], `an open finding at ${path} cannot make the check look clean`);
+  }
+});
+
+test("code health provenance refuses unresolvable measured files and malformed rule inventories", async () => {
+  await withTempDir("code-health-provenance-invalid", async dir => {
+    const raw = { repository: "acme/atlas", analyzedSha: "a".repeat(40), ref: "refs/heads/main", runId: "123", runAttempt: "1",
+      observedAt: "2026-11-02T05:00:00.000Z", language: "javascript-typescript", sarifId: "12345678-1234-1234-1234-123456789012", config: "paths-ignore: []", exclusions: [],
+      sarif: { version: "2.1.0", runs: [{ tool: { driver: { name: "CodeQL", version: "2.23.0", rules: [{ id: "js/example" }] as Array<{ id?: string }> } },
+        artifacts: [{ location: { uri: "src/example.ts" }, roles: ["analysisTarget"] }, { location: { uri: "src/second.ts" }, roles: ["analysisTarget"] }],
+        invocations: [{ executionSuccessful: true, endTimeUtc: "2026-11-02T04:59:00.000Z" }] }] } };
+    let index = 0;
+    const run = (value: unknown) => {
+      const inputPath = join(dir, `input-${index}.json`), output = join(dir, `output-${index++}.json`);
+      writeFileSync(inputPath, JSON.stringify(value));
+      execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--input", inputPath, "--output", output], { stdio: "pipe" });
+      return JSON.parse(readFileSync(output, "utf8"));
+    };
+    const control = run(raw);
+    assert.deepEqual([control.state, control.scope.fileCount], ["complete", 2], "control: two resolvable measured files are a complete scope");
+    for (const uri of ["../outside.ts", "%2Fetc%2Fpasswd"]) {
+      const escaped = structuredClone(raw); escaped.sarif.runs[0]!.artifacts[1]!.location.uri = uri;
+      const result = run(escaped);
+      assert.deepEqual([result.state, result.scope.hash], ["partial", null], `a measured file at ${uri} makes the scope unresolved, not smaller`);
+      assert(result.reasons.includes("A measured file cannot be resolved within this repository."));
+    }
+    const unnamed = structuredClone(raw); unnamed.sarif.runs[0]!.tool.driver.rules = [{}];
+    assert.throws(() => run(unnamed), /evidence export failed/, "a rule without an identity is an invalid inventory, not a smaller one");
   });
 });
 
