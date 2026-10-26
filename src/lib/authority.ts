@@ -82,6 +82,7 @@ export type AuthorityGateKind = "policy" | "ledger-verdict" | "operator-verb" | 
  * them rather than omitting them because they fall outside that narrower vocabulary.
  */
 export type AuthorityBoundary =
+  | "gh-repository-create"
   | "gh-pr-create"
   | "gh-pr-merge"
   | "gh-pr-update-branch"
@@ -135,6 +136,21 @@ export interface AuthorityRow {
  * `module`. The baseline is empty: every write measured at this task's own HEAD is entered below.
  */
 export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
+  {
+    id: "create-product-repository",
+    action: "create the exact operator-requested GitHub repository after journaling its durable intent",
+    module: "src/lib/product-repository.ts",
+    symbol: "ghProductRepositoryProvider.create (ProductRepositoryService.execute)",
+    boundary: "gh-repository-create",
+    gate: "operator-verb",
+    ledgerSteps: [],
+    verb: "POST /v1/products/repository (action=create)",
+    note: "W1-T10613: the production route requires a verified operator identity and the existing high-tier action-bound nonce. " +
+      "The command binds product/objective revisions and exact owner/name/visibility; provider capability must permit creation. " +
+      "A durable intent precedes POST, uncertain outcomes reconcile without another POST, and success requires provider read-back plus canonical product evidence. " +
+      "Adoption performs no create call. No dedicated ledger step is emitted; private durable operation receipts are not ledger events. " +
+      "This inventory grants no provider or execution authority.",
+  },
   {
     id: "restore-checkpoint-branch",
     action: "recreate an absent source branch at its persisted checkpoint head",
