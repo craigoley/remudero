@@ -4780,7 +4780,7 @@ export async function runDaemon(
     if (!result.merged) {
       // W1-T3979: live ownership is a scheduling deferral even when the task has dependents.
       if (result.verdict === "blocked_inflight") {
-        blockRetryStates.delete(task.id);
+        // A scheduling deferral must not replenish previously spent failure attempts.
         report("daemon.block.inflight_contention", {
           task: task.id,
           verdict: result.verdict,
