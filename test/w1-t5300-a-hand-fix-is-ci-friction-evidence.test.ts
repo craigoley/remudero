@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fixedClock } from "../src/lib/clock.js";
-import { ciFrictionGardenSpec, ciFrictionHandFixRounds, readCiFrictionHandFixes, priceCiFrictionCauses, landedCiFrictionOrigins } from "../src/lib/ci-friction-gardener.js";
+import { ciFrictionLadder, ciFrictionGardenSpec, ciFrictionHandFixRounds, readCiFrictionHandFixes, priceCiFrictionCauses, landedCiFrictionOrigins } from "../src/lib/ci-friction-gardener.js";
 import { ciFrictionEvidence, ciFrictionRemedyRationale, locateCiFrictionOwner } from "../src/lib/ci-friction-remedy.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghShim } from "./helpers/gh-shim.js";
@@ -170,4 +170,19 @@ test("a manual change with an actual priced failure does not receive a second pr
   assert.equal(added.some(row => row.pr === 2), false, "PR2's actual coverage failure already carries its measured cost");
   assert.deepEqual(added.map(row => row.pr), [9, 10]);
   assert.ok(added.every(row => row.cause.kind === "hand_fix"));
+});
+
+
+test("manual file-change signals require a mechanism before implementation is drafted", () => {
+  const observations = ciFrictionHandFixRounds([fix, { ...fix, pr: 10 }], rounds, priceCiFrictionCauses(rounds), search);
+  const input = { tasks: [], receipts: new Set<string>(), escalated: new Set<string>(), ownerSearch: search, nowMs: clock.now() };
+  const manual = ciFrictionLadder({ ...input, priced: priceCiFrictionCauses(observations), rounds: observations });
+  assert.equal(manual.next?.decision.kind, "escalate");
+  assert.match(manual.next?.decision.kind === "escalate" ? manual.next.decision.why : "", /manual.*mechanism/i);
+  assert.equal(manual.ladder[0]?.state, "escalate");
+  const known = ciFrictionLadder({ ...input, priced: priceCiFrictionCauses(rounds), rounds });
+  assert.equal(known.next?.decision.kind, "draft", "a separately evidenced ordinary cause still follows its existing remedy route");
+  const held = ciFrictionLadder({ ...input, priced: priceCiFrictionCauses(observations), rounds: observations,
+    escalated: new Set(["ci-friction:hand_fix:src/worker.ts"]) });
+  assert.equal(held.next, undefined, "the same unqualified signal cannot repeatedly request a design");
 });
