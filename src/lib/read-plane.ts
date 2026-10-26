@@ -263,9 +263,9 @@ export function startReadPlaneTelemetry(options: { clock?: Clock; stallProfiler?
     finally {
       const took = now() - began;
       asyncMs += took;
+      for (const window of [sinceStart, ...lagWindows.values()]) window.asyncMs += took;
       try {
         const { who, key } = whoCalled();
-        for (const window of [sinceStart, ...lagWindows.values()]) window.asyncMs += took;
         if (who.caller !== undefined) {
           for (const totals of [asyncCallers, sinceStart.asyncCallers, ...[...lagWindows.values()].map((w) => w.asyncCallers)]) {
             tally(totals, who, key, took);

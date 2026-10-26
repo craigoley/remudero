@@ -64,6 +64,31 @@ test("W1-T9754: an async spawn meters its synchronous loop time by caller", asyn
   assert.equal(after.sample().async_spawn_sync_ms, 0, "a stopped meter restores the spawn it wrapped");
 });
 
+test("W1-T9754: an attribution failure costs the caller's name, never the spawn or its time", async () => {
+  const own = Object.getOwnPropertyDescriptor(Error, "prepareStackTrace");
+  const restore = (): void => {
+    if (own) Object.defineProperty(Error, "prepareStackTrace", own);
+    else delete (Error as { prepareStackTrace?: unknown }).prepareStackTrace;
+  };
+  let ms = 0;
+  const telemetry = startReadPlaneTelemetry({ clock: clockFromMillisFn(() => (ms += 5)) });
+  try {
+    // The caller capture installs its own stack formatter; refusing that assignment makes the capture throw.
+    Object.defineProperty(Error, "prepareStackTrace", { configurable: true, get: () => undefined,
+      set: () => { throw new Error("no frames today"); } });
+    const child = execFile("true");
+    restore();
+    const exited = await new Promise((resolve) => { child.on("close", (code) => resolve(code)); });
+    const lag = telemetry.sample.takeLagInterval("t");
+    assert.equal(exited, 0, "the spawn ran");
+    assert.equal(lag.async_spawn_sync_ms, 5, "its loop time is still counted");
+    assert.deepEqual(lag.async_by_caller, [], "with no caller to name");
+  } finally {
+    restore();
+    telemetry.stop();
+  }
+});
+
 const comparable = (result: SpawnResult): Pick<SpawnResult, "exitCode" | "signal" | "stdout" | "stderr" | "error"> =>
   ({ exitCode: result.exitCode, signal: result.signal, stdout: result.stdout, stderr: result.stderr,
     ...(result.error === undefined ? {} : { error: result.error }) });

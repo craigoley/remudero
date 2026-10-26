@@ -68,14 +68,19 @@ const rl = require("node:readline").createInterface({ input: process.stdin });
 const b64 = (v) => Buffer.isBuffer(v) ? v.toString("base64") : Buffer.from(String(v ?? "")).toString("base64");
 rl.on("line", (line) => {
   let req;
-  try { req = JSON.parse(line); } catch (error) { return; }
+  try { req = JSON.parse(line); } catch (error) {
+    return; /* Reason: the parent writes only JSON lines; a line with no id has no request to answer. */
+  }
   const answer = (err, stdout, stderr) => process.stdout.write(JSON.stringify({ id: req.id,
     code: err ? err.code : 0, signal: err ? err.signal ?? null : null, stdout: b64(stdout), stderr: b64(stderr) }) + "\n");
   let child;
   try {
     child = cp.execFile(req.file, req.args, { cwd: req.cwd, env: req.env, timeout: req.timeoutMs,
       killSignal: req.killSignal, maxBuffer: req.maxBuffer, encoding: "buffer" }, answer);
-  } catch (error) { answer(error, "", ""); return; }
+  } catch (error) {
+    answer(error, "", ""); /* Reason: a spawn that throws settles as that error, as execFile's own does. */
+  }
+  if (!child) return;
   child.stdin?.on("error", () => {});
   child.stdin?.end(req.input === undefined ? undefined : Buffer.from(req.input, "base64"));
 });
@@ -109,6 +114,7 @@ export function runDirect(request: SpawnRequest, now: () => number = () => perfo
         timeout: request.timeoutMs, killSignal: request.killSignal, maxBuffer: request.maxBuffer, encoding: "utf8" },
       answer);
     } catch (error) {
+      // Reason: execFile throws on an argument it refuses; that settles as its error code, never as a throw.
       syncMs = now() - began;
       answer(error as Error & { code?: unknown }, "", "");
       return;
@@ -152,6 +158,7 @@ export function startSpawnHelper(options: SpawnHelperOptions = {}): SpawnHelper 
     createInterface({ input: child.stdout }).on("line", (line) => {
       let answer: { id?: number; code?: unknown; signal?: unknown; stdout?: string; stderr?: string };
       try { answer = JSON.parse(line); } catch (error) {
+        // Reason: an unreadable answer means the protocol is lost; every waiting request is failed and named.
         die(`helper_garbled: ${String((error as Error)?.message ?? error).slice(0, 80)}`);
         return;
       }
