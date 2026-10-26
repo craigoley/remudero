@@ -1,0 +1,88 @@
+- id: W1-T10668
+  title: An outer fallback retains the first selection's terminal evidence
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  author_class: machine
+  origin: console-followup:outer-fallback-terminal-receipts
+  files:
+    - src/lib/worker.ts
+    - src/lib/benchmark-run.ts
+    - test/benchmark-nondispatch-attempts.test.ts
+    - test/benchmark-worker-attempt-wiring.test.ts
+  acceptance:
+    - claim: The default outer fallback reports the first immutable selection before its successor, and the benchmark wrapper retains both distinct identities without creating a new worker call.
+      proof: 'unit test: W1-T10668: outer fallback retains both selection receipts'
+    - claim: Refused-before-invocation, attempted failure and missing invocation evidence remain distinct; the routing predicate or missing price alone never establishes an uninvoked call.
+      proof: 'unit test: W1-T10668: terminal invocation and price uncertainty stay explicit'
+    - claim: Existing canonical monetary receipts and reported prices remain unchanged, unknown prices remain unknown, and repeated observer delivery cannot double-count a selection or money.
+      proof: 'unit test: W1-T10668: canonical money is counted once'
+    - claim: Observer and resource-read failures do not change the result, fallback sequence or number of calls; removing only the outer observer makes the initial-selection assertion fail while successor controls still pass.
+      proof: 'unit test: W1-T10668: observer failures preserve flow and removal fails'
+  prompt: |
+    Reconcile the landed feedback console-gardener-outer-fallback-receipt-20261025,
+    submission console-followup:008cfbbb-c1f0-4ad8-93a7-9777ae2bcd3f, without treating
+    feedback landing #14154 as an implemented task. At inspected main
+    2dc61738aeadb7801259dabadf8614b3920c4b54, the cashSonnetEmergency outer handoff in
+    worker.ts emits worker.provider.cash_sonnet_fallback_refused and recursively returns
+    spawnWorker without invoking onModelFallbackAttempt for its first selection.
+    benchmarkNonDispatchSpawn records callback attempts and the final result, so the
+    initial selection can lack a terminal coverage receipt. This source mechanism does
+    not establish that any specific historical refusal reached a provider or was billed.
+
+    Observe the first immutable selection before handing off, using the existing
+    best-effort callback and resource-accounting machinery. Extend only the callback
+    and benchmark projection needed to preserve its terminal execution evidence.
+    Represent refused-before-invocation, attempted failure, completed work and unknown
+    evidence truthfully; sonnetRefusedBeforeTransport is a routing predicate, not proof
+    of transport or invoice status. A later-turn allowance refusal can follow paid
+    work. Preserve any reported price and billing mode, absent-price uncertainty,
+    subscription semantics, assignment/pass/repository/generation identity and the
+    existing canonical producer/deduplication boundaries from W1-T10160/W1-T10287.
+    A worker.attempt is coverage evidence, not an additional monetary producer.
+    Do not manufacture zero prices, rewrite history, backfill receipts or infer calls
+    from assignments. Do not change risk_judge.decision's separate evidence-role issue.
+
+    Coordinate the shared worker.ts path with #14287's uninvoked-quality-evidence
+    owner and W1-T10384's cap-continuation scope before implementation. They are
+    distinct tasks, not evidence that this terminal-receipt repair already shipped.
+    Native exclusive task/path ownership and fresh merged-credit/open-head checks
+    remain required; no competing source writer or assumption that a null ref proves
+    unpublished work absent. This task changes no routing predicate, provider, retry,
+    allowance, billing policy, credential, permission, service or operational guard.
+
+    Exercise the actual outer spawnWorker path composed with benchmarkNonDispatchSpawn;
+    fake only external provider work and private fixtures, not the observer path under
+    test. Retain inner-ladder, final-result, missing-identity, malformed-resource,
+    unknown-price, positive-price, subscription, hook-failure and no-new-call controls.
+    Establish per-selection terminal/dedup behavior without collapsing distinct
+    attempts or bypassing existing caller-owned receipts. New test code uses package
+    aliases and the maintained repository-root helper. A literal observer-only removal
+    must produce an initial-selection assertion failure while the successor still
+    executes; restore exact source and preserve all failed receipts.
+
+    Commit before source-positive coverage and prove each changed source is actually
+    instrumented. Keep the stored executable proofs, source-removal controls, native
+    author/resource admission, hosted tests/coverage/security, genuine semantic review
+    and normal protected merge. Do not weaken thresholds or substitute synthetic/live
+    results. Merge, runtime adoption, a naturally completed gardener pass, cached API,
+    generation durability and signed-in rendering remain separate claims. No induced
+    live pass or model call is part of acceptance. CI infrastructure and Azure memory
+    remain with their existing owners; no deployment is authorized.
+  context:
+    - claim: Complete captured-main and twenty-open-head source/plan controls retain the same outer callback omission; the only matching task is the separate cap-continuation task W1-T10384.
+      src: 'https://github.com/craigoley/remudero/blob/2dc61738aeadb7801259dabadf8614b3920c4b54/src/lib/worker.ts#L3139-L3152; terminal-receipt-subject-audit-1792979379866.json'
+    - claim: Ending an operation and classifying its status are distinct observability responsibilities; neither establishes billed money.
+      src: 'https://opentelemetry.io/docs/specs/otel/trace/api/#end'
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Direct human instruction on October26 after the six-item recommendation: go with all of your recommendations - get this all done. Recommendation2 specified releasing and building W1-T10668 exactly in worker.ts, benchmark-run.ts and the two existing benchmark suites. The deterministic backstop matched the negative instruction to preserve history; it did not execute a model. This records actual operator approval, not a model verdict. Observe terminal first-selection evidence only; preserve canonical money, explicit unknown prices, routing, retries, model calls, providers, budgets, permissions, service settings, history and all native author, review, hosted CI and protected-merge gates. No deployment, qualification retry, CI-first exception, guard waiver, forced claim or source-history rewrite is authorized."
+    judged_at: "2026-10-26T11:20:57.531Z"
+    pin: "d957714fa92c30fba05a731e4e38b183ee91139005b4f0f185320567af1a2483"
+    operator_release_pin: "245fd563f3288b5c8b674ab1853c2a8f177acbe7801ddc8b2d639cc1d23c28a9"
