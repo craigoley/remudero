@@ -15621,8 +15621,22 @@ export function fixSeedRead(
   // this boot's explicit empty adoption receipt; a different run id or age alone proves nothing.
   if (!ownerHandedOff && seed.runId !== undefined &&
       continuationEndedAtEmptyBoot(lines, seedAt, seed.runId, taskId, runId) &&
-      window.filter((line) => rung(line) && line.step === "fix.dispatch" &&
-        (typeof line.head_sha !== "string" || line.head_sha === pr.headSha)).every((line) => line.run_id === seed.runId)) {
+      window.every((line, index) => {
+        if (!rung(line) || line.step !== "fix.dispatch" ||
+            (typeof line.head_sha === "string" && line.head_sha !== pr.headSha)) return true;
+        if (line.run_id === seed.runId) return true;
+        // Rotation can retain a completed earlier round at this same head while dropping
+        // the dispositions that separated it from the seed. Only its exact terminal before
+        // the seed owner's own dispatch settles that older owner; incomplete joins still veto.
+        return index < dispatchAt && window[dispatchAt].run_id === seed.runId &&
+          typeof line.run_id === "string" && line.run_id.length > 0 &&
+          typeof line.round_id === "string" && line.round_id.length > 0 &&
+          typeof line.worker_run_id === "string" && line.worker_run_id.length > 0 &&
+          window.slice(index + 1, dispatchAt).some(done => done.step === "fix.done" &&
+            done.task_id === taskId && done.run_id === line.run_id &&
+            done.round_id === line.round_id && done.worker_run_id === line.worker_run_id &&
+            done.head_sha === pr.headSha && line.head_sha === pr.headSha);
+      })) {
     return { kind: "orphaned", seed, orphanReason: "owner-run-ended" };
   }
   // A hand-off to the sweep is a live wait only until the sweep has disposed the same head after it.
