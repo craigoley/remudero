@@ -15428,17 +15428,16 @@ export function fixRungInputFields(inputs: Partial<FixRungInputs>): Record<strin
   };
 }
 
-/** W1-T10339 — the one stand-down site the hold does NOT read: the `rung.strike` "needs-human escalation ALREADY OPEN"
- *  stand-down is released by its issue closing, not by a head, contract or body change, and stays as it was. EVERY other
- *  `fix.stood_down` site holds while the inputs it recorded stand — the design names no per-site allowlist. */
-const ISSUE_RELEASED_STAND_DOWN_SITES: ReadonlySet<unknown> = new Set(["rung.strike"]);
+/** W1-T10339 — the stand-down sites the hold reads: the design hand-off and the refused/empty body-proof proposal.
+ *  Every other site keeps W1-T1110's re-arm, which the dedup-seed gate pins (a stalled rung re-arms its next strike). */
+const HELD_STAND_DOWN_SITES: ReadonlySet<unknown> = new Set(["rung.needs_design", "rung.body_proof_repair"]);
 
 /** W1-T10339 — have the inputs a recorded row read moved? A row written before these fields existed has not recorded
  *  what it read, so it reads as moved (today's re-dispatch). A contract or body the caller could not read cannot show a
  *  change. */
 export function fixRungInputsUnchanged(row: Record<string, unknown>, current: FixRungInputs): boolean {
   if (typeof row.read_head_sha !== "string" || row.read_head_sha !== current.headSha ||
-      ISSUE_RELEASED_STAND_DOWN_SITES.has(row.site)) return false;
+      !HELD_STAND_DOWN_SITES.has(row.site)) return false;
   if (typeof row.read_contract_revision === "string" && current.contractRevision !== undefined &&
       row.read_contract_revision !== current.contractRevision) return false;
   return !(typeof row.read_body_sha256 === "string" && current.bodySha256 !== undefined &&

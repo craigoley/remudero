@@ -268,14 +268,21 @@ test("W1-T10339: a stood-down repair is not re-dispatched on unchanged inputs", 
   rows.push({ step: "proof_amendment.requested", task_id: TASKLESS, outcome: "refused", reason: "shard-not-found" });
   await runSweep([view()], f.deps);
   assert.equal(f.state.dispatched, 0);
-  // Not only the design handoff: every stand-down site holds at unchanged inputs (the strike site is the named exception).
-  for (const site of ["rung.empty_review_evidence", "rung.exhaustion", "rung.review_decision", "rung.pre_dispatch_review", "rung.body_proof_repair"]) {
-    const siteRows: Row[] = [seedRow, dispatchRow, standDown({ site })];
-    const g = holdFixture(siteRows);
-    for (let pass = 0; pass < 3; pass++) await runSweep([view()], g.deps);
-    assert.deepEqual([g.state.dispatched, g.state.admissions, g.state.escalated], [0, 0, 1], `${site}: held, escalated once`);
-    assert.equal(siteRows.find((r) => r.step === "sweep.disposed")?.stand_down_site, site);
-  }
+  // A refused or empty body proposal holds like the design hand-off. Locate the hold row by its stand-down marker: a bare
+  // find over sweep.disposed would return the seed row, which carries no stand_down_site.
+  const refusedRows: Row[] = [seedRow, dispatchRow, standDown({ site: "rung.body_proof_repair" })];
+  const g = holdFixture(refusedRows);
+  for (let pass = 0; pass < 3; pass++) await runSweep([view()], g.deps);
+  assert.deepEqual([g.state.dispatched, g.state.admissions, g.state.escalated], [0, 0, 1], "body_proof_repair: held, escalated once");
+  const refusedHold = refusedRows.find((r) => r.step === "sweep.disposed" && r.stand_down_hold === true);
+  assert.equal(refusedHold?.stand_down_site, "rung.body_proof_repair");
+  // Any other stand-down site keeps W1-T1110's re-arm: no hold row is written and the repair is routed again.
+  const rearmRows: Row[] = [seedRow, dispatchRow, standDown({ site: "rung.empty_review_evidence" })];
+  const h = holdFixture(rearmRows);
+  await runSweep([view()], h.deps);
+  assert.equal(rearmRows.some((r) => r.step === "sweep.disposed" && r.stand_down_hold === true), false);
+  assert.equal(h.state.escalated, 0);
+  assert.equal(h.state.dispatched, 1, "a stalled rung at another site re-arms");
 });
 
 test("W1-T10339: a body edit releases a taskless stand-down at the same head", async () => {
@@ -312,8 +319,7 @@ test("W1-T10339: a hold is released by a new head and a changed contract, and le
   assert.equal(read([standDown({ read_contract_revision: "contract-A" })], { ...current, contractRevision: "contract-B" })?.kind, "ended");
   assert.equal(read([standDown({ read_head_sha: undefined, read_body_sha256: undefined })])?.kind, "ended", "a row without the fields keeps today's re-dispatch");
   assert.equal(read([standDown({ site: "rung.strike" })])?.kind, "ended", "an issue-released strike stand-down is out of scope");
-  assert.equal(read([standDown({ site: "rung.empty_review_evidence" })])?.kind, "held", "every stand-down site holds, not only the design handoff");
-  assert.equal(read([standDown({ site: "rung.empty_review_evidence" })], { ...current, headSha: "b".repeat(40) })?.kind, "ended");
+  assert.equal(read([standDown({ site: "rung.empty_review_evidence" })])?.kind, "ended", "another site keeps W1-T1110's re-arm");
   assert.equal(read([standDown({ site: "rung.body_proof_repair" })])?.kind, "held", "a refused body proposal holds");
   assert.equal(read([standDown({ outcome: "handed_off", site: "rung.ci_handoff" })])?.kind, "live", "a handed_off stand-down is still a live wait");
   assert.equal(read([])?.kind, "live", "a live in-flight rung stays deduped");
