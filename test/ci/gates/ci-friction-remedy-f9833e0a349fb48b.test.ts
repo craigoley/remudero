@@ -14,12 +14,14 @@ import { affectedReachBaselinePatch, measureAffectedReach, reportAffectedReachEx
  * baseline patch in the SAME round the refusal is seen, so the cause is prevented rather than retried.
  */
 
+// Resolve these imports inside the virtual tree, without making them imports of this suite.
+const fixtureImport = (specifier: string) => ["import", JSON.stringify(specifier) + ";"].join(" ");
 const FIXTURE = new Map([
-  ["src/run-task.ts", 'export { a } from "./a.js";'],
+  ["src/run-task.ts", ["export { a } from", JSON.stringify("./a.js") + ";"].join(" ")],
   ["src/a.ts", "export const a = 1;"],
   ["src/isolated.ts", "export {};"],
-  ["test/old.test.ts", 'import "../src/run-task.js";'],
-  ["test/isolated.test.ts", 'import "../src/isolated.js";'],
+  ["test/old.test.ts", fixtureImport("../src/run-task.js")],
+  ["test/isolated.test.ts", fixtureImport("../src/isolated.js")],
 ]);
 
 test("W1-T10191: fix_refusal:census-precheck is prevented, not retried", () => {
@@ -27,8 +29,9 @@ test("W1-T10191: fix_refusal:census-precheck is prevented, not retried", () => {
   assert.deepEqual(baseline, { importerCount: 1, largestScc: 1, medianReachPercent: 50, importers: ["test/old.test.ts"] });
 
   // A new test genuinely growing the reach — the exact shape of #12700 and #12830's refusal.
-  const grown = new Map(FIXTURE).set("test/new.test.ts", 'import "../src/run-task.js";');
+  const grown = new Map(FIXTURE).set("test/new.test.ts", fixtureImport("../src/run-task.js"));
   const measured = measureAffectedReach(grown);
+  assert.deepEqual(measured.importers, ["test/new.test.ts", "test/old.test.ts"]);
   assert.ok(measured.importerCount > baseline.importerCount, "the fixture must reproduce genuine growth");
 
   const recorded = { _comment: "measured ceiling", ...baseline };
