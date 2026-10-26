@@ -1116,6 +1116,35 @@ test("retroCommand: a repair worker that changes identity, provider, or returns 
 // buildGather's real `shippedSince` naturally credits ZERO -- exactly the R8-class
 // mismatch (trigger saw merges, the real gather found none) the gate exists to catch.
 
+test("an automated zero-credit retro records gather phases before the unchanged integrity refusal", async (t) => {
+  const markerTs = "2026-01-01T00:00:00.000Z";
+  const fx = setupFakeRetroFixture(t, { seedMarker: { ts: markerTs, learnings_count: 0, runs_seen: 0 } });
+  await fx.run(async () => {
+    let spawns = 0;
+    const options = { repoRoot: fx.gatherRoot, github: offlineGh,
+      automated: { reason: "merges" as const, mergesSinceMarker: 5, daysSinceMarker: 1 },
+      startTokenRefresh: () => ({ armed: false }),
+      spawn: async () => { spawns++; return fx.fakeSpawn(); } };
+    assert.equal(await withLiveWritesAllowed(() => retroCommand([], options)), 1);
+    const readRows = () => readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    const rows = readRows(), phases = rows.filter(row => row.step === "retro.gather.phase");
+    assert.deepEqual(phases.map(row => [row.phase, row.phase_state]),
+      ["followup-ledger", "plan-inputs", "gather", "net-state", "plan-projection", "report"]
+        .flatMap(phase => [[phase, "entered"], [phase, "returned"]]));
+    assert.equal(new Set(phases.map(row => row.run_id)).size, 1, "every stage joins the same gather attempt");
+    assert.ok(phases.every(row => row.task_id === "RETRO" && row.rss_bytes > 0 && row.duration_ms >= 0));
+    const abort = rows.find(row => row.step === "retro_aborted_integrity");
+    assert.equal(abort?.merges_since_marker, 5);
+    assert.equal(abort?.gather_shipped, 0);
+    assert.equal(spawns, 0);
+    assert.equal(readRows().some(row => row.step === "pr.opened" || row.step === "retro.marker.advanced"), false);
+    assert.equal(JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")).ts, markerTs);
+    // The same real gather in dry-run mode adds no phase rows and still returns its ordinary report.
+    assert.equal(await withLiveWritesAllowed(() => retroCommand(["--dry-run"], options)), 0);
+    assert.equal(readRows().filter(row => row.step === "retro.gather.phase").length, phases.length);
+  });
+});
+
 test(
   "retroCommand: the INTEGRITY GATE aborts an AUTOMATED run when the trigger saw real merges but the " +
     "real gather credits ZERO -- no PR, no marker advance, no follow-up harvest, Architect never spawned",

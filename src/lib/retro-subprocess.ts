@@ -34,6 +34,46 @@ function handoffReason(exitCode: number | null): RetroHandoffReason | undefined 
 type FiredRetroDecision = Extract<RetroTriggerDecision, { fire: true }>;
 type RetroLog = (step: string, extra?: Record<string, unknown>) => void;
 
+type RetroGatherPhase = "followup-ledger" | "plan-inputs" | "gather" | "net-state" | "plan-projection" | "report";
+
+/** Observe synchronous gather work without retaining its inputs or changing its result.
+ * A returned stage can contain an existing degraded result; it is NOT a publication/health verdict.
+ * An entered stage with no return only locates the last observation, not the cause of a process death.
+ * Manual/dry-run retro keeps its existing no-observation path. */
+export function automatedRetroGatherObserver(automated: boolean, ctx: {
+  log: RetroLog;
+  now?: () => number;
+  memoryUsage?: () => NodeJS.MemoryUsage;
+  warn?: (message: string) => void;
+}): <T>(phase: RetroGatherPhase, read: () => T) => T {
+  return (phase, read) => {
+    if (!automated) return read();
+    let started: number | undefined;
+    const observe = (state: "entered" | "returned" | "threw"): void => {
+      try {
+        const at = (ctx.now ?? Date.now)();
+        if (started === undefined) started = at;
+        const memory = (ctx.memoryUsage ?? (() => process.memoryUsage()))();
+        ctx.log("retro.gather.phase", { phase, phase_state: state, duration_ms: Math.max(0, at - started),
+          rss_bytes: memory.rss, heap_used_bytes: memory.heapUsed, heap_total_bytes: memory.heapTotal,
+          external_bytes: memory.external, array_buffers_bytes: memory.arrayBuffers });
+      } catch {
+        // Diagnostic failure must not mask a read's original error or cause the read to run twice.
+        (ctx.warn ?? ((message: string) => console.error(message)))("### [retro] gather phase observation unavailable");
+      }
+    };
+    observe("entered");
+    let returned = false;
+    try {
+      const value = read();
+      returned = true;
+      return value;
+    } finally {
+      observe(returned ? "returned" : "threw");
+    }
+  };
+}
+
 export class AutomatedRetroSubprocessError extends Error {
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
