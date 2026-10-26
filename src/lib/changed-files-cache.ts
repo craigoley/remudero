@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS } from "./github-transport.js";
 
-const SCHEMA = 2;
+const SCHEMA = 1;
 /** PRIMARY CONTROL: GitHub's paginated pull-files endpoint returns at most 3,000 files.
  * At the ceiling completeness is unknowable, including an exactly-3,000-file PR. */
 const PULL_FILES_RESPONSE_LIMIT = 3_000;
@@ -150,14 +150,14 @@ export function createChangedFilesCache(
       log("changed_files_cache.load_refused", { repository, reason: "invalid_json" });
       return;
     }
-    if ((doc?.schema !== SCHEMA && doc?.schema !== 1) || doc.repository !== repository || !Array.isArray(doc.entries)) {
+    if (doc?.schema !== SCHEMA || doc.repository !== repository || !Array.isArray(doc.entries)) {
       log("changed_files_cache.load_refused", { repository, reason: "invalid_schema" });
       return;
     }
     for (const e of doc.entries as Array<{ url?: unknown; files?: unknown; at?: unknown; evidence?: unknown }>) {
       if (typeof e?.url === "string" && isFileList(e.files) && typeof e.at === "number") {
         if (entries.has(e.url)) ambiguous.add(e.url);
-        entries.set(e.url, { files: e.files, at: e.at, immutable: true, ...(doc.schema === SCHEMA ? { evidence: e.evidence } : {}) });
+        entries.set(e.url, { files: e.files, at: e.at, immutable: true, evidence: e.evidence });
       }
     }
     log("changed_files_cache.loaded", { repository, entries: entries.size });
