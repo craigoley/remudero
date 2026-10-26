@@ -14,6 +14,7 @@
   budget_usd: 12
   depends_on:
     - W1-T10560
+    - W1-T10713
   files:
     - src/lib/code-health-view.ts
     - test/console-api/views/code-health-cached-view.test.ts

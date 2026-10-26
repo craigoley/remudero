@@ -1,0 +1,42 @@
+- id: W1-T10708
+  title: Fix the extension seams in the product intent record for revision, idempotency and the durable record
+  repo: remudero
+  depends_on:
+    - W1-T10612
+  type: recon
+  verify: human
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/product-intent.ts
+    - src/lib/product-intent-store.ts
+    - src/lib/product-routes.ts
+  acceptance:
+    - claim: The report names the exact function, type or route in src/lib/product-intent.ts, src/lib/product-intent-store.ts and src/lib/product-routes.ts where a brief revision would attach, each cited as file:line read at origin/main
+      proof: "demonstration: the operator reads the recon report and confirms each revision seam names a real file:line in the three product files"
+    - claim: The report names where an idempotency key would be taken and checked on write, and says whether the existing store write path can already refuse a repeated submission
+      proof: "demonstration: the operator reads the recon report and confirms the idempotency seam and the repeated-write answer are stated"
+    - claim: "The report names where the durable record is written and how it survives a restart, and states what PR #14286 changed in those three files, read from its diff"
+      proof: "demonstration: the operator reads the recon report and confirms it cites the PR 14286 diff for each of the three files"
+    - claim: "The three product files are unchanged: the task reads and reports only"
+      proof: "demonstration: the operator confirms the pull request diff touches no src file"
+  origin: followup:W1-T10617-1792982701706:2026-10-26T02:48:10.889Z:0
+  rationale: >-
+    From the 2026-10-26 follow-up on W1-T10617-1792982701706, ratified via rmd approve:
+  
+    follow-up harvest [research]: read `src/lib/product-intent.ts`, `product-intent-store.ts`,
+    `product-routes.ts` and the #14286 diff, to fix the exact extension seams for revision,
+    idempotency and the durable record. — from W1-T10617 (run W1-T10617-1792982701706)
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.95
+    reasons:
+      - "The filed record limits this task to reading and reporting, and acceptance criterion 4 explicitly requires no source changes."
+      - "The rationale identifies an operator-ratified research follow-up; acceptance requires concrete file:line citations and PR #14286 diff references, providing a checkable basis for the report."
+      - "The stated scope requests no destructive action, sensitive access change, policy change, or operator preference decision."
+      - "the judge said proceed, but W1-T10708: at verify: auto it fails lint (headless-fitness, proof-dialect)"
+    judged_at: "2026-10-26T10:57:27.517Z"
+    pin: "8ccf5af92a9da86c8e71c63b305fadc9be087ce63250c39294325a8e2d0e3b19"

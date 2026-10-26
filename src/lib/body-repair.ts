@@ -354,3 +354,23 @@ export function renderBodyDefects(defects: readonly BodyDefect[]): string {
     })
     .join("\n");
 }
+
+/** W1-T10339 — one validated proof replacement for a PR whose BODY is its Acceptance (it carries no task trailer). */
+export interface BodyProofReplacement { oldProof: string; newProof: string }
+
+/**
+ * W1-T10339 — REPLACE THE PROOF TEXT OF THE ACCEPTANCE BULLETS A VALIDATED REPAIR NAMES, AND NOTHING ELSE. Each old proof must
+ * sit on exactly ONE bullet or `proof:` continuation line of the body; a body that no longer carries it, or carries it on more
+ * than one line, is not guessed at (`undefined`). A claim is never read or written here — {@link refusesToAuthorAClaim}'s line.
+ */
+export function replaceBodyProofs(body: string, replacements: readonly BodyProofReplacement[]): string | undefined {
+  const lines = body.split("\n");
+  for (const { oldProof, newProof } of replacements) {
+    const hits = lines.flatMap((line, index) =>
+      /^\s*(?:[-*+]\s|proof\s*:)/i.test(line) && line.includes(oldProof) ? [index] : []);
+    if (hits.length !== 1) return undefined;
+    const at = hits[0]!;
+    lines[at] = lines[at]!.replace(oldProof, () => newProof);
+  }
+  return lines.join("\n");
+}

@@ -6,7 +6,10 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=e93588034fe56993
+  # backlog gardener: placed=2026-10-26T09:20:26.839Z
   attempts: 0
   files:
     - scripts/census-precheck.mjs

@@ -31,11 +31,14 @@
     NOT IN SCOPE: re-pointing open shards that declare src/run-task.ts for this verb. A shard edit cannot ride a code
     PR (rule 15). The note names the plan-only follow-up.
   design: |
-    1. Create src/cli/commands/sweep.ts. Move sweepCommand, buildSweepEffects, buildSweepHook, buildSweepLightHook into it, plus every top-level run-task.ts symbol whose references all lie inside
-       the moved set. Find that set with a reference census over run-task.ts at the build's base: a symbol moves when
-       no reference to it remains outside the set. Keep each moved body verbatim, apart from reading its collaborators
-       from the host, so diff-coverage's relocation exemption (W1-T2325, W1-T3138) reads the moved lines as moved
-       code rather than new code.
+    1. Create src/cli/commands/sweep.ts. Move the four root implementations sweepCommand,
+       buildSweepEffects, buildSweepHook and buildSweepLightHook into it. Keep each moved body
+       verbatim apart from reading collaborators from the host, so the relocation exemption
+       (W1-T2325, W1-T3138) reads moved lines as moved code rather than new code.
+       Other top-level helpers remain at their existing physical locations behind the host
+       seam in this step, even when all in-file references are from these four roots. Any
+       subsequent helper extraction needs its own scoped task and relocation qualification;
+       this task claims no helper-extraction credit.
     2. Any other run-task.ts symbol the moved code reaches arrives through one exported
        `SweepCommandHost` interface, taken as a parameter. src/lib symbols are imported
        directly. A collaborator that an earlier step already moved into src/cli/commands/ is imported from there. The
@@ -71,3 +74,15 @@
     `dispatch.serialized` and W1-T8771 `dispatch.passed_over` rows whose contended path is src/run-task.ts, before and
     after. FOLLOW-UP (plan-only, after merge): re-point open shards whose work is in sweepCommand, buildSweepEffects, buildSweepHook, buildSweepLightHook from src/run-task.ts to
     src/cli/commands/sweep.ts.
+  amendment: |
+    Operator decision proposed 2026-10-26: bound this extraction to its four named roots.
+    This explicitly replaces design item 1's transitive helper-move requirement; it does not
+    claim that the already-hosted helper bodies have moved. The source-level reference census
+    at the original extraction base 7b49789f1e781b2880578a6efbe06b39235f9acc found a candidate
+    closure of 122 top-level bindings (four roots plus 118 helpers/types/constants), spanning
+    3943 declaration lines. That census is static evidence, not behavioral qualification.
+    Native repair at bd1bee9288e82a86e43c04c613c04425dcbd6282 correctly stopped NEEDS_DESIGN
+    because completing that larger move conflicts with design item 4 and the three-file scope.
+    All original acceptance claims/proofs, behavior, falsifiers, scope, budget and risk remain.
+    No existing test, baseline, limit, import-cycle guard or merge gate exception is granted.
+    The normal native lane retains source repair, semantic review and hosted qualification.
