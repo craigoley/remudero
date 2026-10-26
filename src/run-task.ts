@@ -8706,13 +8706,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
 function asyncFixRungOptions(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0], git: typeof hostWorktreeGitAsync) {
   // Upgrade the extracted run verb's production readers while preserving injected readers.
   const daemonReaders = opts.deps.readLiveState === ghLiveState;
-  return { ...opts, deps: {
+  const deps: typeof opts.deps = {
     ...opts.deps,
     ...(daemonReaders ? { readLiveState: ghLiveStateAsync,
       readPrerequisiteState: (n: number) => ghLiveStateAsync(new URL(String(n), opts.prUrl).href) } : {}),
     ...(opts.deps.readRoundCommits === readFixRoundCommitsViaGit
       ? { readRoundCommits: (wt: string, since: string) => readFixRoundCommitsViaGitAsync(wt, since, git) } : {}),
-  } };
+  };
+  return { ...opts, deps };
 }
 
 /**
