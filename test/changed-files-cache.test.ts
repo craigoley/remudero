@@ -253,6 +253,9 @@ test("changed file evidence binds repository pull request merged state and immut
   await cache.settle();
   const evidence = readEvidence(gh);
   assert.equal(evidence.status, "complete");
+  const wire = JSON.parse(readFileSync(changedFilesCachePath(root, "o", "r"), "utf8"));
+  assert.equal(wire.schema, 1, "additive evidence must remain readable by existing schema-1 changedFiles consumers");
+  assert.deepEqual(wire.entries.map((entry: { files: string[] }) => entry.files), [["src/fix.ts"]]);
   assert.deepEqual([evidence.repository, evidence.prNumber, evidence.headRefOid, evidence.prState, evidence.source, evidence.files],
     ["o/r", 31, evidenceHead, "MERGED", "github_rest_pull_files_paginated", ["src/fix.ts"]]);
   const restarted = boardGateway(rows, createChangedFilesCache(root, "o", "r", { fetch: async () => assert.fail("durable evidence must not refetch") }), []);
