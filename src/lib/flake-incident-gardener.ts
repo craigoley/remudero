@@ -41,6 +41,7 @@ import {
 } from "./selector-shadow-gardener.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { sameTestFile } from "./test-path-resolver.js";
+import { runtimeSpecifiers } from "./source-text-readers.js";
 
 export const FLAKE_INCIDENT_GARDEN_NAME = "flake-incident";
 
@@ -203,12 +204,13 @@ function sameIncidentOrigin(a: string, b: string): boolean {
  *  real `.mjs` file (scripts/*.mjs), so it is kept as written, beside the `.mts` a TypeScript build
  *  would resolve it to: rewriting it to `.ts` named a file that does not exist, and the ci-friction
  *  gardener then had no source owner for the failing test (#11716). */
-export function testSourcePaths(file: string, source: string | undefined): string[] {
+export function testSourcePaths(file: string, source: string | undefined, options: { runtimeOnly?: boolean } = {}): string[] {
   if (source === undefined) return [];
   const out = new Set<string>();
   const specifier = /(?:\bfrom\s+|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["']((?:\.{1,2}\/|#(?:src|scripts|test)\/)[^"']+)["']/g;
-  for (const match of source.matchAll(specifier)) {
-    const spec = match[1]!;
+  const imports = options.runtimeOnly ? runtimeSpecifiers(source) : [...source.matchAll(specifier)].map(match => match[1]!);
+  for (const spec of imports) {
+    if (!/^(?:\.{1,2}\/|#(?:src|scripts|test)\/)/.test(spec)) continue;
     // package.json maps these three aliases from the repository root, not the test's folder.
     // Invalid alias path segments cannot nominate a different source owner after normalization.
     if (spec.startsWith("#") && spec.split("/").slice(1).some(part => ["", ".", "..", "node_modules"].includes(part))) continue;
