@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { gzipSync } from "node:zlib";
 import type { Config } from "#src/lib/config.js";
 import type { OpenIssue } from "#src/lib/escalate.js";
 import { readEscalationAnswers, type EscalationAnswerGateway } from "#src/lib/escalation-answers.js";
@@ -291,4 +292,24 @@ test("a grant for other paths never admits an unfiled PR's out-of-diff path", as
   assert.equal(f.issues.length, 1, "the new path is asked");
   assert.equal(f.rows.filter(r => r.outcome === "unfiled-granted").length, 0);
   assert.equal(GRANTED_LINE.exec(f.prompts[0] ?? "")?.[1], "scripts/another-inventory.json", "the worker is told only the grant");
+});
+
+
+test("archived operator scope answers reach the native fix worker without widening its grant", async (t) => {
+  const f = rungFixture(() => [], "granted");
+  const state = ownedFixtureDir(t, "archived-unfiled-scope").dir;
+  writeFileSync(join(state, "ledger.2026-10-26T00-00-00-000Z.ndjson"),
+    JSON.stringify(held({ head_sha: f.headSha })) + "\n");
+  writeFileSync(join(state, "ledger.2026-10-26T00-01-00-000Z.ndjson.gz"),
+    gzipSync(JSON.stringify(answered()) + "\n"));
+  writeFileSync(join(state, "ledger.ndjson"), JSON.stringify({ step: "fixture.live", task_id: KEY }) + "\n");
+  f.run.deps.ledgerPath = join(state, "ledger.ndjson");
+  delete f.run.deps.ledgerLines;
+  const result = await runFixRung(f.run);
+  assert.equal(f.prompts.length, 1, "positive control: the actual rung reached its worker");
+  assert.deepEqual(GRANTED_LINE.exec(f.prompts[0]!)?.slice(1), [HELD, ISSUE]);
+  assert.equal(result.outcome, "fixed");
+  assert.equal(f.pushes(), 1);
+  assert.equal(f.issues.length, 0, "rotation cannot create a second permission question");
+  assert.deepEqual(f.repo.git("diff", "--name-only", `${f.headSha}..HEAD`).split("\n"), [HELD]);
 });
