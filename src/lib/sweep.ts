@@ -15612,9 +15612,6 @@ function readFixRungEnd(lines: Array<Record<string, unknown>>, taskId: string | 
  *  revision and (for a PR with no task trailer, whose BODY is the authoritative Acceptance) the body digest it worked on. */
 export interface FixRungInputs { headSha: string; contractRevision?: string; bodySha256?: string }
 
-/** The non-conflict rung defers a dirty PR to the existing conflict repair route. */
-export const CONFLICT_REPAIR_HANDOFF_REASON = "merge state is dirty (mergeable === false or mergeable_state === \"dirty\") — a conflicted PR registers no new check runs, so a strike buys no information; standing down for the sweep's own conflicted disposition rather than retrying blindly";
-
 /** sha256 of a PR body as both the sweep and the fix rung read it — trimmed, so a trailing newline is not an edit. */
 export function prBodyDigest(body: string | undefined): string | undefined {
   return typeof body === "string" ? createHash("sha256").update(body.trim(), "utf8").digest("hex") : undefined;
@@ -19802,9 +19799,7 @@ export async function runSweep(
       catch (error) { readable = false; deps.log?.("sweep.stand_down_hold.unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) }); }
       const held = readable ? fixSeedRead(ledgerLines, pr, deps.runId,
         { headSha: pr.headSha, contractRevision, bodySha256: standDownBodySha }) : undefined;
-      const conflictHandoff = disposition === "conflicted" && hasCapturedMergeConflictEvidence(pr.mergeConflict) &&
-        held?.hold?.site === "rung.strike" && held.hold.reason === CONFLICT_REPAIR_HANDOFF_REASON;
-      if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff) {
+      if (held?.kind === "held" && held.hold !== undefined) {
         standDownHold = held.hold;
         disposition = "refused-escalate";
         reason = `fix stood down at ${held.hold.site} and nothing it read has changed (head ${pr.headSha.slice(0, 7)}, task contract` +
