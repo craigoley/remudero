@@ -777,12 +777,21 @@ test("post-fix missing ancestry readers and thrown reads cannot earn a dry-run o
 });
 
 test("post-fix default ancestry refuses an unidentifiable head before any transport or push", async () => {
+  const shim = ghShim([], { kind: "post-fix-invalid-head" });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${savedPath}`;
   let pushes = 0;
-  const result = await sweepPostFixReverification("o", "r", [ciGateTimeoutPr({ headSha: "not-an-exact-head", headRefName: "run-W1-TX-1" })], ledgerPath(), "ANCESTRY-UNKNOWN", () => {}, {
-    isMergedByNumber: n => n === 820,
-    pushEmptyCommit: () => { pushes++; return "newsha"; },
-  });
-  assert.equal(result.redriven, 0);
-  assert.equal(result.results[0]?.outcome, "fix-presence-unknown");
-  assert.equal(pushes, 0);
+  try {
+    const result = await sweepPostFixReverification("o", "r", [ciGateTimeoutPr({ headSha: "not-an-exact-head", headRefName: "run-W1-TX-1" })], ledgerPath(), "ANCESTRY-UNKNOWN", () => {}, {
+      isMergedByNumber: n => n === 820,
+      pushEmptyCommit: () => { pushes++; return "newsha"; },
+    });
+    assert.equal(result.redriven, 0);
+    assert.equal(result.results[0]?.outcome, "fix-presence-unknown");
+    assert.equal(pushes, 0);
+    assert.deepEqual(shim.calls(), []);
+  } finally {
+    process.env.PATH = savedPath;
+    rmSync(shim.dir, { recursive: true, force: true });
+  }
 });
