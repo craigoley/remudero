@@ -3,11 +3,11 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: { tdd: strict }
   budget_usd: 60.00
   rationale: "From a read-only comparison with nanocoai/nanoclaw, whose scripts/skill-conformance.test.ts discovers every skill and enforces invariants with no per-skill test file. RE-VERIFIED at current main: two skills carry applies-to: (proof-preflight, ci-state-forensics, both applies-to: implement), each with its own hand-written test (test/a-proof-preflight-skill-is-selectable-and-bounded.test.ts, test/a-ci-state-forensics-skill-is-selectable-and-bounded.test.ts). A third skill gets no test unless its author writes one. LINE DRIFT since the entry was read at efd226b50: TASK_TYPES is now src/lib/plan.ts:124 (not 105) and scanSkillDraft is src/lib/skill-workshop.ts:308 (not 307); DEFAULT_KNOWLEDGE_BUDGET_CHARS is still src/lib/learnings.ts:49 (8148); observeSkillSelection is skill-workshop.ts:712. NOTE: no skill carries when-paths: today, so the glob check is vacuous on the live tree and is proven by the fixture."
-  design: |
+  design: |-
     Name the census test "every applies-to skill satisfies the discovery invariants" and the fixture test
     "discovery rejects malformed applies-to and dead when-paths by skill name".
     ADD test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts. It globs .claude/skills/*/SKILL.md, keeps
@@ -19,6 +19,7 @@
     skills with applies-to: implemnt and with a when-paths glob matching nothing, asserting each fails naming the skill.
     Retain the two existing hand-written tests unchanged; add only the discovery test and its required census catalog registration in src/lib/rule-suites.ts. The suite remains in normal rule checks and full CI. Register the suite in PRECHECK_PATH_TRIGGERED_SUITES in scripts/census-precheck.mjs so the existing real child executor asks it on every nonempty diff and PRECHECK_PARITY records that route; any tracked-file change can alter a when-paths witness. Update only the existing parity fixtures in test/every-ci-census-is-asked-before-the-push.test.ts to require this named skill census alongside their original structural/birth-gate assertions, and prove empty diffs start no child. Align only the unchanged-import fixture in test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts to require the named always-on skill census while retaining its exact no-baked-closure-read assertions. Do not grow the CI-only baseline or change limits.
     Do not change selection or scan behaviour."
+     Align the six coupled existing census fixtures to assert the mandatory skill census separately while preserving their original population, error, real-child and runtime-policy checks. Fixture compatibility only; no production logic, limit, baseline or exclusion changes.
   acceptance:
     - claim: "the discovery test declares the new skill-conformance census"
       proof: "grep: every applies-to skill satisfies the discovery invariants in test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts"
@@ -28,9 +29,30 @@
   risk: high
   origin: feedback#fb-1791856366583-e5a5e9
   plan_refs: [ "§7B" ]
-  files: [ test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts, src/lib/rule-suites.ts, scripts/census-precheck.mjs, test/every-ci-census-is-asked-before-the-push.test.ts, test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts ]
+  files:
+    - test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts
+    - src/lib/rule-suites.ts
+    - scripts/census-precheck.mjs
+    - test/every-ci-census-is-asked-before-the-push.test.ts
+    - test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts
+    - test/census-precheck-runs-the-admitted-census-suites.test.ts
+    - test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts
+    - test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts
+    - test/the-census-precheck-runs-the-source-text-censuses-a-diff-joins.test.ts
+    - test/the-local-precheck-runs-the-git-leaf-suite-on-any-git-spawn.test.ts
+    - test/the-precheck-asks-the-census-suites-a-test-or-priced-step-moves.test.ts
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=27ce200e0ea1f88a
   attempts: 0
   note: "verify:human — required cross-catalog registration; normal high-risk judgment and existing dispatch hold retained; discovery test over existing exports plus required catalog and real pre-push execution registration; no selection, scanning, limit or permission change."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The filed scope adds a discovery census, catalog registration, pre-push execution registration, and associated tests, consistent with the repository's established census practice."
+      - "The note explicitly limits the task to existing exports with no selection, scanning, limit, or permission change; the supplied scope identifies no destructive or irreversible action."
+      - "Acceptance requires named rejection fixtures for typo'd applies-to and dead when-paths; the rationale explicitly acknowledges that live when-paths coverage is currently vacuous."
+    judged_at: "2026-10-26T23:14:17.986Z"
+    pin: "4435ec2d9cb96f17a82dc6bb19b9e8444638b3894f1c850f444874fa76a622aa"
