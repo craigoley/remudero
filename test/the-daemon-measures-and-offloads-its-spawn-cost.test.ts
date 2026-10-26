@@ -54,7 +54,7 @@ test("W1-T9754: an async spawn meters its synchronous loop time by caller", asyn
     assert.equal(named(alive.async_spawn_sync_by_caller, "asyncSpawningCaller")?.calls, 2);
     assert.equal(telemetry.sample().async_spawn_sync_ms, 0, "the alive window resets on reading");
     const next = telemetry.sample.takeLagInterval("ticker");
-    assert.deepEqual([next.async_spawn_sync_ms, next.async_by_caller], [0, undefined], "the lag window resets too");
+    assert.deepEqual(next, { top: undefined, sync_spawn_ms: 0 }, "the lag window resets to an idle reading");
   } finally {
     telemetry.stop();
   }

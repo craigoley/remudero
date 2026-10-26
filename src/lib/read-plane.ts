@@ -43,9 +43,9 @@ export interface LagIntervalReading {
   /** W1-T9577: present once the interval spawned — its callers by total, and the time none of them holds. */
   by_caller?: SyncSpawnCallerTotal[];
   unnamed_ms?: number;
-  /** W1-T9754: the time ASYNC spawns held the loop inside the spawn call itself (the fork), and, once the
-   *  interval had any, its callers by that total. */
-  async_spawn_sync_ms: number;
+  /** W1-T9754: present once the interval made an ASYNC spawn — the time those held the loop inside the spawn
+   *  call itself (the fork), and their callers by that total. An idle interval reads as before. */
+  async_spawn_sync_ms?: number;
   async_by_caller?: SyncSpawnCallerTotal[];
 }
 
@@ -295,8 +295,8 @@ export function startReadPlaneTelemetry(options: { clock?: Clock; stallProfiler?
       const window = lagWindows.get(consumer) ?? sinceStart;
       lagWindows.set(consumer, freshWindow());
       const reading: LagIntervalReading = { top: window.top[0], sync_spawn_ms: Math.round(window.ms),
-        async_spawn_sync_ms: Math.round(window.asyncMs),
-        ...(window.asyncMs > 0 ? { async_by_caller: namedShare(window.asyncCallers, window.asyncMs).by_caller } : {}) };
+        ...(window.asyncMs > 0 ? { async_spawn_sync_ms: Math.round(window.asyncMs),
+          async_by_caller: namedShare(window.asyncCallers, window.asyncMs).by_caller } : {}) };
       return window.ms > 0 ? { ...reading, ...namedShare(window.callers, window.ms) } : reading;
     },
     observeLoopLag: (reading: LoopLagReading, log: StallLog): void => stallProfiler.observe(reading, log),
