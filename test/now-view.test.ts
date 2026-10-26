@@ -48,6 +48,7 @@ import { changedFilesCachePath, createChangedFilesCache } from "#src/lib/changed
 import { isPlanOnlyChangeset } from "#src/lib/status.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { ChildProcess } from "node:child_process";
+import { createTickReadProducer } from "#src/lib/tick-read-worker.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
@@ -1392,4 +1393,39 @@ test("each pull-request queue row carries its review state, so the console never
   const [body] = view.materialize(ctxOf(clock, [core]));
   assert.ok(body);
   assert.deepEqual(body.data.prQueue.rows.map((r) => [r.prNumber, r.reviewState]), [[9301, "failure"], [9313, "none"]]);
+});
+
+test("snapshot gateway receives immutable head evidence from the real tick producer adapter", async (t) => {
+  const root = scratch(t), head = "e".repeat(40), files = ["src/fix.ts"];
+  const plan = planOf([task("W1-T7", { files })]), ledgerPath = join(root, "state", "ledger.ndjson");
+  mkdirSync(join(root, "state"), { recursive: true }); writeFileSync(ledgerPath, "");
+  const row = { number: 901, html_url: "https://github.com/o/r/pull/901", state: "closed", merged_at: "2026-09-30T11:00:00Z",
+    closed_at: "2026-09-30T11:00:00Z", created_at: "2026-09-30T10:00:00Z", updated_at: "2026-09-30T11:00:00Z",
+    title: "fix: real producer evidence", body: "Remudero-Task: W1-T7", head: { ref: "run-W1-T7-1790000000000", sha: head }, draft: false };
+  const shim = ghShim([{ when: "pulls/901/files", stdout: files.map(f => JSON.stringify(f)).join("\n") }]);
+  const previous = process.env.PATH; process.env.PATH = shim.dir + ":" + (previous ?? "");
+  t.after(() => { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; });
+  const produce = createTickReadProducer({ owner: "o", repo: "r", config: { root, claudeBin: process.execPath }, ledgerPath, checkoutRoot: root }, {
+    fetch: (args) => {
+      const endpoint = args.find(arg => arg.startsWith("repos/")) ?? "";
+      if (endpoint.includes("/pulls?") && endpoint.includes("state=closed")) return [row];
+      if (endpoint.includes("/pulls?") && endpoint.includes("state=open")) return [];
+      if (endpoint.includes("/issues?")) return [];
+      assert.fail("unexpected producer metadata read: " + args.join(" "));
+    },
+    commitTrailerIndex: () => new Map(), evidenceRootFor: () => undefined,
+    issues: { create: () => assert.fail("no issue writes"), listOpen: () => [] },
+    viewsDeps: { requiredContexts: () => [], readCiGateRequired: () => [], fetchCiFailureEvidence: () => [] },
+  });
+  await produce({ plan });
+  const path = changedFilesCachePath(root, "o", "r"), before = readFileSync(path, "utf8");
+  const wire = JSON.parse(before);
+  assert.equal(wire.entries[0].evidence?.headRefOid, head, "production adapter forwards the observed immutable head to its real cache");
+  assert.deepEqual(shim.calls(), ["api --paginate repos/o/r/pulls/901/files --jq .[].filename | @json"], "existing asynchronous reader owns the only file fetch");
+  const gateway = snapshotGithub(root, "o", "r").github, evidence = snapshotEvidence(gateway, 901);
+  assert.equal(evidence.status, "complete"); assert.deepEqual(evidence.files, files);
+  gateway.changedFiles?.("https://github.com/o/r/pull/999");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(shim.calls().length, 1, "persisted view hits and misses never fetch");
+  assert.equal(readFileSync(path, "utf8"), before, "view does not rewrite producer evidence");
 });

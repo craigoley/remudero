@@ -324,3 +324,20 @@ test("changed file evidence preserves JSON encoded filenames on the real asynchr
   assert.deepEqual(evidence.files, files);
   assert.ok(shim.calls().some(call => call.endsWith("--jq .[].filename | @json")));
 });
+
+test("changed file evidence keeps duplicate ambiguity across unrelated durable writes", async () => {
+  const root = makeTempDir("changed-file-evidence"), path = changedFilesCachePath(root, "o", "r");
+  const cache = createChangedFilesCache(root, "o", "r", { fetch: async () => ["src/fix.ts"] });
+  cache.lookup(url(31), "MERGED", evidenceHead); await cache.settle();
+  const original = JSON.parse(readFileSync(path, "utf8"));
+  original.entries.push({ ...original.entries[0], files: ["src/conflicting.ts"] });
+  writeFileSync(path, JSON.stringify(original));
+  const loaded = createChangedFilesCache(root, "o", "r", { fetch: async () => ["src/unrelated.ts"] });
+  assert.deepEqual(loaded.evidence!(url(31), "MERGED", evidenceHead), { status: "unknown", reason: "ambiguous_cache_entries" });
+  loaded.lookup(url(32), "MERGED", evidenceHead); await loaded.settle();
+  assert.equal(loaded.evidence!(url(32), "MERGED", evidenceHead).status, "complete", "unrelated valid entry remains qualified");
+  const restarted = createChangedFilesCache(root, "o", "r", { readOnly: true, fetch: async () => assert.fail("read-only reload cannot fetch") });
+  assert.deepEqual(restarted.evidence!(url(31), "MERGED", evidenceHead), { status: "unknown", reason: "ambiguous_cache_entries" });
+  assert.deepEqual(restarted.lookup(url(31), "MERGED"), ["src/conflicting.ts"], "legacy file access retains its contract");
+  assert.equal(restarted.evidence!(url(32), "MERGED", evidenceHead).status, "complete");
+});
