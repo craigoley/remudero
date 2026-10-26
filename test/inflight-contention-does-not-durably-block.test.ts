@@ -33,7 +33,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { MAX_STRIKES } from "#src/lib/classify.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 import { runDaemon } from "../src/lib/daemon.js";
@@ -41,6 +40,12 @@ import { acquireInflightLock, InflightLockError } from "../src/lib/inflight-lock
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { RunResult } from "../src/lib/run-result.js";
 import { deriveStatus, latestIndependentFailureBlock, type GitHub } from "../src/lib/status.js";
+
+// The fixed failure budget (classify.ts MAX_STRIKES). Deliberately a literal, not an import: a test
+// importing src/lib/classify.ts must be listed in stryker.conf.json's commandRunner, and that file
+// cannot ship beside a src/ change (Standing rule 25). A drift in the real value fails the fixes
+// assertion below, so the literal is still pinned by this test.
+const FIXED_FAILURE_BUDGET = 2;
 
 const OFFLINE_GITHUB: GitHub = {
   prByRef: () => null,
@@ -144,8 +149,8 @@ test("a live claim preserves spent fix attempts before a dependent blocker exhau
       dispatchFix: async () => { fixes++; },
       escalateBlock: async () => { escalations++; },
       sleep: async () => {},
-    }, { max: MAX_STRIKES + 4 });
-    assert.equal(fixes, MAX_STRIKES, "contention must not replenish the fixed failure budget");
+    }, { max: FIXED_FAILURE_BUDGET + 4 });
+    assert.equal(fixes, FIXED_FAILURE_BUDGET, "contention must not replenish the fixed failure budget");
     assert.equal(escalations, 1);
     assert.equal(descendants, 0);
   } finally {
