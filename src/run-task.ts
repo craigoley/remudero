@@ -358,6 +358,7 @@ import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPor
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
+import { queueJudgeGardenSpec, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
 import { scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
@@ -460,7 +461,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout", "review-replay"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout", "review-replay", "queue-judge"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -27320,6 +27321,25 @@ export function issueRevalidationRunTaskPorts(
   };
 }
 
+/** W1-T9925: the queue judge's ports that live here: its judge is the escalation judge's tool-less spawn (one per pass,
+ *  on the mount the issue-revalidation garden already uses), and its open-PR set is the daemon's persisted board, a file
+ *  read with no remote call. `seams` stand in for the spawn and the board read in tests. */
+export function queueJudgeRunTaskPorts(
+  ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; root: string; log: (step: string, extra?: Record<string, unknown>) => void },
+  seams: { spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"]; openBoard?: typeof readOpenBoardSnapshot } = {},
+): Pick<QueueJudgeSources, "judgeText" | "openPrNumbers"> {
+  const { owner, repo, repoRoot, stateDir, root, log } = ctx;
+  const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }, { spawn: seams.spawn });
+  return {
+    judgeText: (prompt) => judge.judgeText(prompt, 0),
+    openPrNumbers: () => {
+      const open = (seams.openBoard ?? readOpenBoardSnapshot)(root, owner, repo);
+      if (!open.ok) throw new Error(`queue judge: the open-PR snapshot is unavailable (${open.reason})`);
+      return new Set(open.snapshot.rows.map((row) => row.number));
+    },
+  };
+}
+
 /** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
 
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
@@ -27390,6 +27410,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       // A filing streak escalates once (gardener.ts), so a refused change reaches a person rather than looping.
       const d = deps("backlog", raiseDuplicate);
       return gardenPass(backlogGardenSpec(d), d);
+    }
+    // W1-T9925: the queue judge re-ranks queued tasks by measured cost of delay through its own reviewed plan PR.
+    case "queue-judge": {
+      const d = deps("queue-judge", raiseDuplicate);
+      return gardenPass(queueJudgeGardenSpec(d, queueJudgeRunTaskPorts({ owner, repo, repoRoot, stateDir, root: config.root, log })), d);
     }
     // W1-T5454: the scout looks for work nobody asked for -- a recurring failure-shaped ledger step no task
     // or scorecard covers is filed through the machine-filing path, bounded by the queue and the day's merges.
