@@ -1345,7 +1345,9 @@ export function ciFrictionDraftRationale(draft: CiFrictionDraft, key: string): s
 
 /** A literal regression title admitted by the real proof policy; the full cause remains in origin/evidence. */
 export function ciFrictionRemedyTestTitle(taskId: string, key: string): string {
-  const title = `${taskId}: ${key.replace(/ in /g, " within ")} is prevented, not retried`;
+  const title = key === "fix_refusal:census-precheck"
+    ? `${taskId}: the diagnosed census runner failure is prevented while healthy findings remain refused`
+    : `${taskId}: ${key.replace(/ in /g, " within ")} is prevented, not retried`;
   const proof = { id: taskId, acceptance: [{ claim: "prevent this CI friction cause", proof: `unit test: ${title}` }] } as Task;
   if (proofResolvabilityViolations(proof).length === 0) return title;
   return `${taskId}: CI friction ${createHash("sha256").update(key).digest("hex").slice(0, 16)} is prevented, not retried`;
@@ -1377,10 +1379,18 @@ export function ciFrictionShardYaml(draft: CiFrictionDraft, taskId: string, pric
     costPopulation: priced.map((p) => p.minutes),
     acceptance: [
       // The build must pass the named regression; a declaration alone is not repair evidence.
-      { claim: `the harness no longer spends a fix round on ${key}`, proof: `unit test: ${ciFrictionRemedyTestTitle(taskId, key)}` },
+      { claim: key === "fix_refusal:census-precheck"
+        ? `the diagnosed census runner failure owned by ${owner.files[0]!} is prevented or self-healed while healthy branch findings still refuse publication`
+        : `the harness no longer spends a fix round on ${key}`, proof: `unit test: ${ciFrictionRemedyTestTitle(taskId, key)}` },
     ],
-    note: `Filed by the ci-friction gardener (W1-T4435) at rung ${rung}. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures ${key}'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung ${rung + 1}.`,
-    rationale: ciFrictionDraftRationale(draft, key),
+    note: `Filed by the ci-friction gardener (W1-T4435) at rung ${rung}. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures ${key}'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung ${rung + 1}.` +
+      (key === "fix_refusal:census-precheck" ? " The regression must execute the diagnosed failure through the real owner path and retain a control that a healthy branch finding is still refused; class-wide cost observations and after-window measurement remain unchanged." : ""),
+    rationale: [...ciFrictionDraftRationale(draft, key), ...(key === "fix_refusal:census-precheck" ? [
+      "",
+      "The regression must execute the diagnosed failure through the real owner path, not assert a reporter label or text.",
+      "It must retain a control that a healthy branch finding is still refused by the existing predicate.",
+      "The class-wide cost observations and after-window measurement remain unchanged; the healthy predicate is not a repair target.",
+    ] : [])],
   }).text;
 }
 
