@@ -1,0 +1,247 @@
+- id: W1-T10751
+  title: "THE HEARTBEAT'S GC VERDICT READS A TREE THE FLEET DOES NOT USE, AND NOTHING ALARMS ON IT — gc_verdict judges the frozen host-side copy of core's checkout while every container's daemon tree and managed repo sits on the scratch mounts, so it read ok through a fleet-wide gc.log and a 1.66 GB stalled store, and fleet-heartbeat-watch.yml has no gc rule at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 16.00
+  risk: high  # Rule 19: one concern, the off-box gc signal (what the beat judges and when the watcher raises it); no reaper, no git maintenance, no host write
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: found by the W1-T10750 filer (#14523) during the 18:40-19:00Z host review; re-verified read-only on the Azure host at 19:05-19:12Z"
+  plan_refs: [W1-T2529, W1-T9617, W1-T10750, W1-T4770]
+  files:
+    - scripts/fleet-heartbeat.sh
+    - .github/workflows/fleet-heartbeat-watch.yml
+    - test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts
+    - test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts
+    - test/helpers/fleet-heartbeat-harness.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main c6ad432e0, and read-only on the Azure host at
+    19:05-19:12Z.
+
+    WHAT THE BEAT READS (scripts/fleet-heartbeat.sh).
+    - `INSTALL_DIR` is the directory the running script sits in (:121). `GC_LOG` is
+      `${INSTALL_DIR}/.git/gc.log` (:1308), and that is the whole gc probe: one file in one tree.
+    - The host crontab runs the beat as
+      `/home/craigoleyagent/rmd-state2/remudero/scripts/fleet-heartbeat.sh` with
+      `RMD_HEARTBEAT_BRANCH=heartbeat-azure`. The live heartbeat-azure payload at 19:05Z reads
+      `install_dir=/home/craigoleyagent/rmd-state2/remudero`, `install_head_sha=65f87ae06` and
+      `gc_verdict=ok`.
+    - That tree is not the one any container uses. Since W1-T9617 turned on
+      `/etc/remudero/scratch-checkouts.on` (present on the host), each build daemon binds its
+      checkout from `<scratch>/rmd/<key>/remudero`, and `deploy/scratch-mounts.sh` says "The old
+      copies stay on their disks as the rollback. Host readers of the checkout resolve it here"
+      (:26). The heartbeat never resolves it.
+    - `stat` on the host: `/home/craigoleyagent/rmd-state2/remudero` is device 66311
+      (`/dev/nvme0n3p1[/state2]`); `/mnt/scratch/rmd/rmd-state2/remudero` and
+      `/mnt/scratch/rmd/rmd-state2/repos/remudero` are device 66312 (`/dev/nvme1n1`, the scratch
+      NVMe). The host-side copy's HEAD is 65f87ae06, committed 2026-10-16; the scratch tree's is
+      c6ad432e0, today's main.
+
+    THE TREES THE CONTAINERS ACTUALLY MOUNT (host `docker inspect` Mounts, 19:06Z; Destination and
+    Source only).
+    - remudero-daemon: `/home/node/Remudero/remudero` <- `/mnt/scratch/rmd/rmd-state2/remudero`;
+      `/home/node/Remudero/repos` <- `/mnt/scratch/rmd/rmd-state2/repos`.
+    - remudero-console-daemon: `.../remudero` <- `/mnt/scratch/rmd/remudero-console-state/remudero`;
+      `.../repos` <- `/mnt/scratch/rmd/remudero-console-state/repos`.
+    - remudero-site-daemon: `.../remudero` <- `/mnt/scratch/rmd/rmd-site-state/remudero`;
+      `.../repos` <- `/mnt/scratch/rmd/rmd-site-state/repos`.
+    - remudero-serve: `.../remudero` <- `/mnt/scratch/rmd/rmd-state2/serve-repo` (its own code
+      dir), and `.../repos` <- `/mnt/scratch/rmd/rmd-state2/repos`, the SAME managed repos core
+      mounts.
+    - Each container's state root (`/home/node/Remudero`) stays on the data disk
+      (`/home/craigoleyagent/rmd-state2`, `/mnt/rmd/remudero-console-state`,
+      `/home/craigoleyagent/rmd-site-state`), with the scratch binds layered over its `remudero`,
+      `repos`, `worktrees` and `tmp`. So a reader that joins `<state_dir>/remudero` or
+      `<state_dir>/repos` from the registry lands on the stale copy every time.
+
+    WHAT THAT HID (the W1-T10750 filer's operator review, 18:40-19:00Z; see #14523).
+    - A gc.log reading "There are too many unreachable loose objects; run 'git prune' to remove
+      them" in the daemon tree of remudero-daemon, -console-daemon, -site-daemon and -serve, with
+      630-862 MB of loose objects each, while the beat published `gc_verdict=ok`.
+    - Core's managed `repos/remudero` held 1.66 GB of loose objects behind stale leftovers.
+    - NOT RE-VERIFIABLE NOW: the approved manual gc already cleared the four daemon trees. At
+      19:10Z none carries a gc.log (core 1,772 loose / 90 MiB, serve 3,314 / 172 MiB, console
+      1,923 / 92 MiB, site 838 / 44 MiB).
+    - STILL TRUE AT 19:10Z, and the sharpest case: core's `repos/remudero` has NO gc.log, yet it
+      holds 35,178 loose objects (1,663 MiB) behind `objects/pack/tmp_pack_yrAjKD` (10-22, a
+      crashed repack) and `refs/remotes/origin/run-unfiled-1791721700000.lock` with its
+      `logs/refs/` twin (10-22). Its maintenance state reads `"failures":3,"escalated":true`. So a
+      gc.log-only probe pointed at the right tree would STILL read ok for the worst store on the
+      host. The verdict must also see leftovers and growth.
+
+    THE WATCHER (.github/workflows/fleet-heartbeat-watch.yml).
+    - The judging loop extracts `supervisor_verdict`, `daemon_verdict`, `dispatch_verdict`,
+      `escalation_spool_verdict`, `crash_loop_verdict` and `session_reaper_verdict` (:323-328).
+      The file does not contain the string `gc` at all. `gc_verdict` reaches the uploaded report and
+      nothing reads it.
+    - It runs hourly (`37 * * * *`) and sees one beat: each beat is a force-pushed parentless
+      commit, so the branch keeps no history. "Unhealthy across consecutive beats" therefore has to
+      be carried by the beat itself, the way `session_reaper_verdict` already judges "already
+      running at the previous beat" from the previous beat's timestamp.
+    - Delivery is one `needs-human-issue.mjs` record per host (`fleet-heartbeat:<branch>`) chosen
+      by a first-match `elif` chain. A gc arm placed in that chain would be masked by any liveness
+      alarm and would itself mask the next one, so it needs its own marker.
+
+    WHAT THIS DOES NOT DUPLICATE.
+    - W1-T10750 (#14523, open) makes the in-daemon repository-maintenance controller heal itself
+      and opens a Remudero issue through escalate.ts when a store escalates. That is the
+      controller reporting on its own work.
+    - This task is the INDEPENDENT off-box probe. It reads the trees, not the controller's state
+      files or ledger rows, so it still fires when the controller is wedged, dead or wrong. It
+      never reads `repository-maintenance-*.json`, never opens an issue from inside the daemon and
+      never runs maintenance.
+    - The two issues differ in source and marker: the reaper's is keyed by repo path through
+      escalate.ts, and this one by host branch through needs-human-issue.mjs. When both fire, the
+      watcher's body names the tree and the reaper's names the escalation. Neither waits on the
+      other, so there is no depends_on.
+
+    PRIOR WORK. W1-T2529 (merged) built the one-tree gc probe and chose "the signal, not the
+    cleanup"; that rule stands. W1-T9617 (merged) moved the hot checkouts to scratch and built
+    `scratch_live_checkout` (deploy/scratch-mounts.sh:142) for host readers; the heartbeat was never
+    moved onto it. Swept plan/tasks.d (gc_verdict, gc.log, install_dir, scratch checkout +
+    heartbeat), the 26 open PRs (including #14495 and #14523) and the remote branch names on
+    2026-10-26: no other task covers this.
+  design: |
+    MEASURE FIRST, read-only, and put the findings in the PR body:
+    - the cost of each candidate loose reading (`git count-objects -v`, or a bounded walk of
+      `objects/??`) on core's `repos/remudero`, niced, beside the beat's five-minute cadence;
+    - which trees `docker inspect` Mounts names for every running instance, against what the
+      registry and `scratch_plan` predict;
+    - whether the heartbeat cron on the host still runs a frozen copy (see "DELIVERY" below).
+
+    (a) THE BEAT RESOLVES THE TREES THE CONTAINERS MOUNT.
+    - The instances are the registry's (`RMD_INSTANCE_REGISTRY`, else the committed
+      `.remudero/daemon-instances.yaml`, read with the grammar recycle-container.sh and the memory
+      probe already use), plus `remudero-serve`.
+    - For each running container, read `docker inspect` Mounts (Destination and Source ONLY, never
+      Env, Cmd or Args). Its daemon tree is the Source bound at `/home/node/Remudero/remudero`. Its
+      managed repos are each git dir under the Source bound at `/home/node/Remudero/repos`.
+    - Reuse `deploy/scratch-mounts.sh`. Do not write a second path translator. When docker cannot
+      answer, fall back the way `scratch_live_checkout` does (the planned placement, then
+      `<state_dir>/remudero`), and name which source answered on every tree's line.
+    - A tree that two containers mount (core's `repos/` is mounted by remudero-daemon and
+      remudero-serve) is judged once, keyed by its host path, and its line lists every mounter.
+    - The beat's own `INSTALL_DIR` is not a judged tree unless a container mounts it.
+
+    (b) A PER-TREE VERDICT FROM EVIDENCE, WITH NO SIZE THRESHOLD.
+    - Each tree publishes one line, for example `gc_tree_<n>=<host path> mounters=<names>
+      verdict=<V> ...`, with `<n>` a stable index and the path in the value. Its parts:
+      - `gc.log`: present or absent, with git's own first line (the W1-T2529 rule: read, never
+        guessed);
+      - leftovers: `objects/maintenance.lock`, `gc.pid`, `objects/pack/tmp_pack_*`,
+        `objects/pack/tmp_idx_*`, `refs/**/*.lock` and `logs/refs/**/*.lock`, each named with its
+        mtime. This is the same set W1-T10750 (b) reclaims; keep the two lists aligned;
+      - the loose count and size, with the change since the previous beat's reading of the same
+        tree.
+    - The beat keeps its previous readings in a state file under `${RMD_ROOT}/state` (the
+      `heartbeat-mem.txt` pattern), so persistence is EVIDENCE:
+      - a leftover is PERSISTENT when a later beat finds the same path with the same mtime. A lock
+        that a live git holds changes or vanishes between beats;
+      - a gc.log is PERSISTENT when it is present on consecutive beats;
+      - growth counts only beside a persistent gc.log or leftover, meaning gc cannot run and the
+        store keeps growing. Growth alone is normal churn and never unhealthy. There is no MiB or
+        object-count limit anywhere.
+    - Verdicts: `ok`, `first-seen` (a marker seen on one beat only), `UNHEALTHY` (persistent,
+      naming each persistent marker and the trend) and `unknown` (unreadable, with the reason).
+      Never ok when any part could not be read.
+    - `gc_verdict` and `gc_disabled_reason` stay as fields. `gc_verdict` becomes the worst
+      per-tree verdict, naming that tree, so existing readers keep working.
+    - Still read-only. The beat never runs `git gc`, `git prune`, `git maintenance` or any
+      object-writing command, and never removes a leftover (W1-T2529's suite keeps guarding this).
+
+    (c) THE WATCHER RAISES A GC ISSUE OF ITS OWN.
+    - Extract the per-tree lines in the judging step. A host with any `UNHEALTHY` tree gets its own
+      record, `--source "fleet-heartbeat:<branch>:gc"`, outside the liveness `elif` chain, so it
+      neither masks nor is masked by BEAT_STALE, CRASH_LOOP and the rest.
+    - Title: "fleet-heartbeat (<branch>): a git store cannot gc". The body names each unhealthy
+      tree, its mounters, its persistent markers and its trend.
+    - The first beat that reads every tree `ok`, `first-seen` or absent resolves that record. A beat
+      that is `unknown` for a tree neither opens nor resolves it, and says so in the report.
+    - `first-seen` alone never raises. That is the "consecutive heartbeats" rule, carried by the
+      beat's own evidence and not by a count the watcher keeps.
+    - Add the new arm to the workflow's self-check step: a fixture beat with a persistent leftover
+      must read as gc-unhealthy, and a first sighting must not.
+
+    DELIVERY. This only helps if the cron runs current code. At 19:05Z the host cron ran the frozen
+    10-16 copy (65f87ae06), so merged heartbeat changes since then are not live. #13770's
+    `session_reaper_verdict` is one of them: it is absent from the live payload. That is REPORTED
+    as its own item and is not this task's scope. The PR body states which checkout the host cron
+    runs at PR time (read-only: the crontab's script path, with the token redacted, and the
+    payload's `install_head_sha`). If it is still the frozen copy, the PR says this change will not
+    reach the host until that is fixed, and does not claim the symptom is fixed.
+
+    Nothing else. No change to object-reaper.ts, the maintenance controller, escalate.ts, the
+    recycle or install scripts, or the crontab.
+  prompt: |
+    Do the MEASURE FIRST step and put its findings in the PR body. Then write
+    test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts (the folder
+    `rmd test-place` computes). Keep that exact path, because the proofs grep it. Import through
+    `#test/*` and `#src/*`.
+    - Every new test title starts with `W1-T10751: ` exactly as in the acceptance proofs.
+    - Drive the REAL committed script through test/helpers/fleet-heartbeat-harness.ts (`runBeat`),
+      with a docker stub on `RMD_HEARTBEAT_DOCKER` that answers `ps` and an `inspect` Mounts format
+      only, and a fixture registry on `RMD_INSTANCE_REGISTRY`.
+    - Build the trees with the repo's gitRepo fixture helpers, not a raw `git init`, because of the
+      fixture-copy census.
+    - The mounted-tree case:
+      - leave `INSTALL_DIR/.git` clean;
+      - point the stub's `/home/node/Remudero/remudero` Source at tree A, which carries a gc.log;
+      - point `/home/node/Remudero/repos` at a dir holding repo B, and have a second container
+        mount that same dir;
+      - assert A's line names git's reason, B is judged once with both mounters listed, and
+        `gc_verdict` is not ok. At base this reads `gc_verdict=ok`.
+    - The persistence case plants `objects/pack/tmp_pack_X` and `refs/remotes/origin/run-x.lock`
+      with its `logs/` twin. Run two beats with the same state dir:
+      - the first beat reads `first-seen`;
+      - a second beat with unchanged mtimes reads `UNHEALTHY`, naming both;
+      - a second beat after the lock's mtime changed (a live writer) does not read `UNHEALTHY`.
+    - The trend case grows the loose count between beats. Assert that the trend is published, that
+      growth with no gc.log or leftover reads `ok`, and that the same growth beside a persistent
+      gc.log reads `UNHEALTHY`.
+    - The unreadable case has the docker stub fail, then makes one tree unreadable. Assert that the
+      fallback source is named and the unreadable tree reads `unknown`, never `ok`.
+    - The watcher case extracts the judging and delivery steps the way test/fleet-heartbeat.test.ts
+      does. Assert three things:
+      - a payload with an `UNHEALTHY` tree raises `fleet-heartbeat:<branch>:gc` beside a FRESH
+        liveness kind;
+      - a `first-seen` payload raises nothing;
+      - an all-ok payload resolves the gc record.
+    - Update test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts so its gc.log sits in a
+      tree the beat resolves as mounted. Its MUTANT must still redden, and its never-gc/prune guard
+      must still hold.
+    Restore base code with `git show origin/main:<path>`, never stash, and watch every new case
+    fail. Run the suites, `npm run -s lint-plan:fast` and `rmd preflight --fast` on the committed
+    tree before the first push.
+  acceptance:
+    - claim: "the beat judges gc health on each daemon tree and managed repo the running containers mount, resolved from the registry and docker's live mounts, judging a shared store once with every mounter, and no longer on its own install checkout"
+      proof: 'grep: test("W1-T10751: the beat judges gc on the trees the containers mount, not its own checkout" in test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts'
+    - claim: "a gc.log or leftover lock is unhealthy only when a later beat finds it unchanged, and a lock whose mtime moved between beats is not"
+      proof: 'grep: test("W1-T10751: a leftover or a gc log is unhealthy only once a later beat finds it unchanged" in test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts'
+    - claim: "the per-tree loose trend is published against the previous beat with no size threshold, and growth is unhealthy only beside a persistent gc.log or leftover"
+      proof: 'grep: test("W1-T10751: the loose trend counts only beside a persistent marker, with no size threshold" in test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts'
+    - claim: "an unreadable mount table or tree publishes the fallback source or unknown, never ok"
+      proof: 'grep: test("W1-T10751: an unreadable mount or tree reads unknown, never ok" in test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts'
+    - claim: "fleet-heartbeat-watch.yml raises a per-host gc issue outside the liveness chain when a tree stays unhealthy across consecutive beats, raises nothing on a first sighting, and resolves on recovery"
+      proof: 'grep: test("W1-T10751: the watcher raises a gc issue for a tree unhealthy across consecutive beats" in test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts'
+  falsifier: |
+    - Point the probe back at `${INSTALL_DIR}/.git`: the mounted-tree case must fail.
+    - Join `<state_dir>/remudero` from the registry instead of reading the mounts: the
+      mounted-tree case must fail, because the stub's Source differs from the literal path.
+    - Drop the previous-beat comparison, so any marker is UNHEALTHY at once: the first-seen half of
+      the persistence case must fail.
+    - Ignore mtime, so any marker present twice is UNHEALTHY: the live-writer half must fail.
+    - Add any fixed loose-size limit: the growth-alone half of the trend case must fail.
+    - Map an unreadable tree to ok: the unreadable case must fail.
+    - Put the gc arm inside the liveness `elif` chain, or drop it: the watcher case must fail.
+    GUARDS that held at base and must still hold:
+    - the beat never runs gc, prune or any object-writing git command, and never removes a file in
+      a judged tree (W1-T2529's suite);
+    - `gc_disabled_reason` is git's own first line;
+    - every existing liveness arm still classifies as before (test/fleet-heartbeat.test.ts).
+    Each guard's existing case must fail when its production branch is removed, and pass again with
+    zero failures once it is restored.

@@ -1,0 +1,35 @@
+- id: W1-T10741
+  title: "THE FIX-LANE GARDENER'S COSTLIEST DEFECT CLASS — armed-idle:armed-idle-merge:review-success-required-checks-green-arm cost 49.27 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.19
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "fix-lane:armed-idle:armed-idle-merge:review-success-required-checks-green-arm"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/fix-lane-armed-idle-armed-idle-merge-review-success-required-checks-green-arm.test.ts
+  acceptance:
+    - claim: "armed-idle:armed-idle-merge:review-success-required-checks-green-arm no longer needs an operator hand fix"
+      proof: "grep: test(\"W1-T10741: fix-lane-armed-idle-armed-idle-merge-review-success-required-checks-green-arm clears without a person\" in test/sweep/fix-lane-armed-idle-armed-idle-merge-review-success-required-checks-green-arm.test.ts"
+  note: "Filed by fix-lane at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    armed-idle:armed-idle-merge:review-success-required-checks-green-arm cost 49.27 PR-hours; owner fix-lane
+    Owner: the fix lane itself (a defect in the harness that repairs PRs, not in the PR).
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #13952: 54.46 PR-hours — cao825: commit 189e996ca merged main into a fleet PR head
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "The filed plan describes a fix in src/lib/sweep.ts plus a new test file, which is an ordinary implement task in the fix-lane's own harness. Nothing in the description mentions secrets, credentials, auth, deletion of data or branches, or irreversible actions."
+      - "The description does not say the change alters merge, deploy or review policy. However, the defect name (\"armed-idle-merge ... green-arm\") touches merge-arming behavior, so the actual change should be checked in review. No diff is shown, so I cannot confirm its scope."
+      - "The family track record is clean (5 merged, 0 declined, Beta mean 0.94). The declared test file is absent at base, which is expected for a new test. The acceptance criterion is a grep for a test name, which is verifiable. CI and review still gate the PR."
+    judged_at: "2026-10-26T19:56:44.100Z"
+    pin: "11fbd0eba29900506fe4150ec9fbb557f7b54458459c4e6aa9f46db02c4852a9"

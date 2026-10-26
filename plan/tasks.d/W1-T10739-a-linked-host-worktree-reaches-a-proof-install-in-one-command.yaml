@@ -1,0 +1,32 @@
+- id: W1-T10739
+  title: A seed-linked host worktree reaches a preflight-admissible proof install in one named command
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 20
+  risk: high
+  band_meaning: span
+  origin: operator-request#vm-resize-health-review-2026-10-26
+  plan_refs:
+    - W1-T10507
+    - W1-T9405
+  files:
+    - scripts/lib/author-dependency-provenance.mjs
+    - src/lib/dependency-seeds.ts
+    - doctrine/plan-and-task-hygiene/host-worktrees-arrive-linked.md
+    - test/review/a-linked-host-worktree-reaches-a-proof-install-in-one-command.test.ts
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: run-W1-T10733-1793035320662 -> run-unfiled-1793035320662
+  rationale: "OBSERVED 2026-10-26, building W1-T10734 in a fresh `git worktree add` checkout: the W1-T10507 post-checkout hook materialized node_modules as `readonly-links` (a real directory whose entries symlink into /mnt/scratch/remudero-dependencies/<user>/<key>/node_modules). `node --import tsx scripts/preflight-author.mjs` then refused within 2 s: 'installed dependency precheck unavailable: dependency tool escapes installed donor: tsx; expensive validation not started'. authorDependencyProvenance requires every tool's realpath under realpath(node_modules). So CLAUDE.md's first rule (author preflight before the first push) cannot run in ANY correctly linked host worktree, and the refusal names no remedy. The sanctioned remedy exists: `remudero-dependencies prime <checkout> --proof` materializes a `private-copy` proof install that the precheck admits (verified: tsx then resolves inside the worktree and the same preflight proceeds to selection and execution). But nothing names it. The refusal does not, and neither does the host-worktree doctrine. And `prime --proof` on a checkout that already has link-only node_modules answers {\"status\":\"present\"} and does nothing, so the author must first delete node_modules by hand, which the doctrine otherwise discourages. The operator waived local preflight for W1-T10734 before the remedy was found."
+  design: "Keep the precheck's integrity rule: a proof run must use tools from a proof (private-copy) install. Do NOT accept readonly-links as a proof install. (1) When authorDependencyProvenance refuses because node_modules is a recognized readonly-links seed materialization (`.rmd-dependency-seed.json` method readonly-links, every escaping tool resolving into that one recorded seed), the refusal names the one command that fixes it: `remudero-dependencies prime <checkout> --proof`. (2) `materializeDependencySeed(checkout, { proof: true })` over an existing readonly-links node_modules that it can positively identify as its own link-only materialization (the recorded seed metadata matches, and every entry is a symlink into that seed) replaces it with the private copy instead of answering `present`. Any other existing node_modules (a real install, foreign links, unknown metadata) is left untouched and still answers `present`. (3) Add one line to doctrine/plan-and-task-hygiene/host-worktrees-arrive-linked.md naming the proof command for author preflight. Proofs run the real default filesystem path (no injected fakes for the replacement decision)."
+  acceptance:
+    - claim: a refusal over a readonly-links worktree names the proof-install command, and a proof prime over its own link-only node_modules yields a private copy the precheck admits, while a foreign or real node_modules is left untouched
+      proof: "unit test: test/review/a-linked-host-worktree-reaches-a-proof-install-in-one-command.test.ts"
+    - claim: the host-worktree doctrine names the proof-install command for author preflight
+      proof: "grep: prime <checkout> --proof in doctrine/plan-and-task-hygiene/host-worktrees-arrive-linked.md"

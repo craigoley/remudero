@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { buildProductRoutes } from "#src/lib/product-routes.js";
 import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
 import { createService, type IdentityProvider } from "#src/lib/service.js";
@@ -235,4 +237,88 @@ test("W1-T10726: served preview matches the public product contract", async (t) 
     assert.deepEqual(readdirSync(root, { recursive: true }).sort(), before, "preview creates no product or journal state");
     assert.ok(!shim.calls().some((call) => call.includes("-X POST")), "preview makes no create call over the real transport");
   } finally { await new Promise<void>((resolve, reject) => instance.close((error) => error ? reject(error) : resolve())); }
+});
+
+const TEAM_ID = "team_oleyarcade";
+const deploy = (productId: string, over: Record<string, unknown> = {}) => ({ version: "product-deployment-v1", requestId: "route-deploy-000001",
+  productId, action: "create", teamId: TEAM_ID, projectName: "wreckterra", repository: { id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra" },
+  expectedRevision: 2, expectedObjectiveRevision: 1, ...over });
+
+test("W1-T10616: the served product deployment operation matches the authenticated API contract", async (t) => {
+  const provider = new Map<string, unknown>();
+  const posts: string[] = [];
+  const vercel = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      const name = /\/v9\/projects\/([^?]+)/.exec(req.url ?? "")?.[1];
+      if (req.headers.authorization !== "Bearer tok_route" || !(req.url ?? "").includes(`teamId=${TEAM_ID}`)) { res.writeHead(403); res.end("{}"); return; }
+      if (req.method === "POST") {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { name: string };
+        posts.push(body.name);
+        provider.set(body.name, { id: "prj_route", name: body.name, accountId: TEAM_ID, link: { type: "github", org: "craigoley", repo: "wreckterra", repoId: WRECKTERRA_ID } });
+        res.writeHead(200); res.end("{}");
+        return;
+      }
+      const found = name ? provider.get(name) : undefined;
+      res.writeHead(found ? 200 : 404); res.end(JSON.stringify(found ?? {}));
+    });
+  });
+  await new Promise<void>((resolve) => vercel.listen(0, "127.0.0.1", resolve));
+  const saved = { token: process.env.VERCEL_TOKEN, team: process.env.VERCEL_TEAM_ID, url: process.env.VERCEL_API_URL };
+  process.env.VERCEL_TOKEN = "tok_route";
+  process.env.VERCEL_TEAM_ID = TEAM_ID;
+  process.env.VERCEL_API_URL = `http://127.0.0.1:${(vercel.address() as AddressInfo).port}`;
+  const root = ownedFixtureDir(t, "product-deployment-http").dir;
+  const products = assembled(root);
+  const mounted = assembled(root, "/v1/products/deployment");
+  assert.equal(mounted[0]?.scope, "write");
+  assert.equal(mounted[0]?.tier, "middle", "binding a project is middle tier: it never deploys or spends");
+  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes: [...products, ...mounted] });
+  await new Promise<void>((resolve) => instance.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(instance.address() as AddressInfo).port}`;
+  t.after(async () => {
+    for (const [key, value] of [["VERCEL_TOKEN", saved.token], ["VERCEL_TEAM_ID", saved.team], ["VERCEL_API_URL", saved.url]] as const) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await new Promise<void>((resolve, reject) => instance.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve) => { vercel.close(() => resolve()); vercel.closeAllConnections(); });
+  });
+  const send = async (session: "alice" | "bob" | undefined, body: unknown, raw?: string) => {
+    const result = await fetch(`${base}/v1/products/deployment`, { method: "POST", headers: { authorization: "Bearer fixture-write",
+      "content-type": "application/json", ...(session ? { "x-test-session": session } : {}) }, body: raw ?? JSON.stringify(body) });
+    const reply = await result.json() as { version: string; error?: string; replayed?: boolean;
+      receipt?: { outcome: string; deployed: boolean; playable: boolean; project: { id: string } } };
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/deployment", "POST", result.status)), [],
+      `the real deployment response (${result.status}) must match its declared contract`);
+    assert.match(result.headers.get("cache-control") ?? "", /no-store/);
+    return { status: result.status, body: reply };
+  };
+  const created = await request(base, "/v1/products", "alice", command);
+  const productId = created.body.receipt!.productId;
+  assert.equal((await send(undefined, deploy(productId))).status, 403, "a shared bearer is not a verified operator");
+  assert.equal((await send("alice", deploy(productId))).body.error, "repository_required", "an unbound product cannot be bound to a project");
+  const intents = new ProductIntentStore({ root });
+  assert.ok(intents.transition("clerk:alice", { version: "product-intent-v1", requestId: "route-bind-0000001", id: productId,
+    expectedRevision: 1, expectedObjectiveRevision: 1,
+    repository: { provider: "github", id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public", verifiedAt: "2026-10-26T00:00:00.000Z" } }).ok);
+  const bound = await send("alice", deploy(productId));
+  assert.equal(bound.status, 200);
+  assert.equal(bound.body.receipt?.outcome, "created");
+  assert.equal(bound.body.receipt?.project.id, "prj_route");
+  assert.equal(bound.body.receipt?.deployed, false);
+  assert.equal(bound.body.receipt?.playable, false);
+  assert.equal(bound.body.replayed, false);
+  assert.equal((await send("alice", deploy(productId))).body.replayed, true);
+  assert.deepEqual(posts, ["wreckterra"], "the real default transport created exactly one project");
+  assert.equal((await send("bob", deploy(productId))).status, 404);
+  assert.equal((await send("alice", deploy(productId, { requestId: "route-deploy-000002", teamId: "team_other" }))).status, 409);
+  assert.equal((await send("alice", deploy(productId, { requestId: "route-deploy-000003", repository: { id: 7, owner: "craigoley", name: "wreckterra" } }))).status, 409);
+  assert.equal((await send("alice", deploy(productId, { projectName: "second" }))).status, 409);
+  assert.equal((await send("alice", { ...deploy(productId), extra: true })).status, 400);
+  assert.equal((await send("alice", undefined, "{broken")).status, 400);
+  assert.equal((await send("alice", undefined, JSON.stringify({ padding: "x".repeat(5000) }))).status, 413);
+  delete process.env.VERCEL_TOKEN;
+  assert.equal((await send("alice", deploy(productId, { requestId: "route-deploy-000004" }))).status, 503, "a missing server-held credential fails explicitly");
 });

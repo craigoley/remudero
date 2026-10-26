@@ -185,6 +185,61 @@ export interface components {
       creation: "user" | "org" | "denied" | "unknown" | "not_checked";
       observedAt: string;
     };
+    ProductDeploymentRepository: {
+      id: number;
+      owner: string;
+      name: string;
+    };
+    /** At most 4096 raw request bytes. action adopt requires the exact provider projectId and never creates; action create must not carry projectId. repository must be the GitHub repository the product is verified to be bound to, and teamId the server-configured Vercel team. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. Credentials are server-held and never accepted here. */
+    ProductDeploymentCommand: {
+      version: "product-deployment-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      action: "adopt" | "create";
+      teamId: string;
+      projectName: string;
+      projectId?: string;
+      repository: ProductDeploymentRepository;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+    };
+    ProductDeploymentProject: {
+      provider: "vercel";
+      id: string;
+      name: string;
+      teamId: string;
+      repository: ProductDeploymentRepository;
+      verifiedAt: string;
+    };
+    /** Binding a project proves none of these; each stays its own independent evidence field. */
+    ProductDeploymentEvidence: {
+      sourceSha: null;
+      deployment: "none";
+      servedRoute: "unverified";
+      physicalDevice: "unverified";
+    };
+    ProductDeploymentReceipt: {
+      operationId: string;
+      productId: ProductId;
+      action: "adopt" | "create";
+      outcome: "adopted" | "created";
+      project: ProductDeploymentProject;
+      deployed: false;
+      playable: false;
+      evidence: ProductDeploymentEvidence;
+      completedAt: string;
+      objectiveRevision: number;
+      payloadDigest: string;
+    };
+    ProductDeploymentResponse: {
+      version: "product-deployment-v1";
+      receipt: ProductDeploymentReceipt;
+      replayed: boolean;
+    };
+    ProductDeploymentError: {
+      version: "product-deployment-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "project_not_found" | "repository_required" | "repository_mismatch" | "team_mismatch" | "project_conflict" | "idempotency_conflict" | "stale_revision" | "capacity" | "creation_denied" | "not_configured" | "busy" | "corrupt" | "unavailable" | "provider_unreadable" | "outcome_unknown" | "recovery_required" | "request_too_large";
+    };
     /** Bounded read-only answer-v1; missing evidence is explicit and citations are dated. */
     OperatorAgentAnswer: {
       version: "answer-v1";
@@ -6098,6 +6153,20 @@ export interface paths {
           "403": (ProductRepositoryError) | (ProductAccessError);
           "404": ProductRepositoryError;
           "503": ProductRepositoryError;
+        };
+    };
+  };
+  "/v1/products/deployment": {
+    post: {
+      responses: {
+          "200": ProductDeploymentResponse;
+          "400": ProductDeploymentError;
+          "401": ProductAccessError;
+          "403": (ProductDeploymentError) | (ProductAccessError);
+          "404": ProductDeploymentError;
+          "409": ProductDeploymentError;
+          "413": ProductDeploymentError;
+          "503": ProductDeploymentError;
         };
     };
   };

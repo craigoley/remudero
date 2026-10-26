@@ -1,0 +1,303 @@
+- id: W1-T10756
+  title: "THE HOST'S CRON JOBS RUN A CHECKOUT FROZEN ON 2026-10-16, SO NO HEARTBEAT CHANGE SINCE THEN IS LIVE AND NOTHING NOTICES — the heartbeat and the nightly reclaim run from ~/rmd-state2/remudero (65f87ae06), which stopped moving when W1-T9617 put the daemon's checkout on scratch; install-host-units.sh converges only the janitor's cron line, and a frozen beat reports nothing about its own age"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 18.00
+  risk: high  # Rule 19: one concern, the code the host's cron jobs run (which checkout, and a beat that says when it is stale); no daemon, launcher or unit change
+  band_meaning: span
+  priority: 1
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: found during the W1-T10751 filing (#14527), when the live heartbeat-azure payload carried no session_reaper_verdict; re-verified read-only on the Azure host at 19:24-19:33Z"
+  plan_refs: [W1-T4770, W1-T2877, W1-T9617, W1-T10751, W1-T4844, W1-T3627, W1-T2725]
+  files:
+    - deploy/install-host-units.sh
+    - scripts/fleet-heartbeat.sh
+    - .github/workflows/fleet-heartbeat-watch.yml
+    - test/deploy/the-fleet-cron-lines-converge-to-the-install.test.ts
+    - test/daemon/a-heartbeat-running-stale-code-says-so.test.ts
+    - test/host-units-install.test.ts
+    - test/helpers/fleet-heartbeat-harness.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main 99a36906a, and read-only on the Azure host at
+    19:24-19:33Z.
+
+    WHAT THE CRON RUNS (service user craigoleyagent's crontab; token values redacted, and the
+    heartbeat line reads its token as `GH_TOKEN=$(cat ~/.gh-token)`, never a literal).
+    - `*/5 * * * *` runs `/home/craigoleyagent/rmd-state2/remudero/scripts/fleet-heartbeat.sh`
+      with `RMD_HEARTBEAT_BRANCH=heartbeat-azure RMD_ROOT=/home/craigoleyagent/rmd-state2`.
+    - `17 4 * * *` runs `/home/craigoleyagent/rmd-state2/remudero/deploy/host-update.sh
+      --reclaim-only` with `RMD_STATE_OFFHOST=azure-disk-snapshot:SYNTHWATCH-RG/remudero-data
+      RMD_STATE_OFFHOST_KEEP=7`, logging to `~/reclaim.log`.
+    - `17 4 * * *` runs `~/.local/bin/rmd-field-trials-refresh`, a copy installed by
+      deploy/install-field-trials-refresh.sh. Its blob equals main's deploy/field-trials-refresh.sh
+      today (ab84b6cdd), but nothing re-checks it.
+    - `7 */6 * * *` runs the janitor `~/rmd-host-cleanup.sh`. This is the only line convergence
+      manages.
+    - Root has no crontab. /etc/cron.d/rmd-tmp-sweep is managed (W1-T5036).
+
+    THE TWO CHECKOUTS.
+    - `~/rmd-state2/remudero` is a detached HEAD at 65f87ae06 (committed 2026-10-16T14:14Z).
+      It is the daemon's OLD checkout. W1-T9617 (#12096, merged 2026-10-15T18:09Z) moved the hot
+      checkouts to scratch, and the daemon now binds `/mnt/scratch/rmd/rmd-state2/remudero`
+      (`.scratch-mounts`). host-update.sh calls the state-disk copy "the stale copy left on the
+      state disk" (:1379). Nothing moves it any more.
+    - `~/rmd-state2/daemon-install` is on main at today's head. The launcher fetches and
+      ff-merges it on every healthy tick (install-host-units.sh converge_host_units, :1228), and
+      runs `$CHECKOUT/deploy/install-host-units.sh` from it (CHECKOUT, :1131).
+    - The live heartbeat-azure beat at 19:30Z reads
+      `install_dir=/home/craigoleyagent/rmd-state2/remudero` and `install_head_sha=65f87ae06`. It has
+      NO `session_reaper_verdict` line.
+    - `git log 65f87ae06..origin/main -- scripts/fleet-heartbeat.sh` has exactly one commit:
+      0a6f42105 (#13770, 10-23, the reaper verdict). So the REAPER_ALARM arm in
+      fleet-heartbeat-watch.yml (:355) has never had a value to read. The reaper itself is
+      healthy: rmd-session-reaper.timer is active, and its 18:28Z pass exited 0. No host-update.sh
+      commit landed after 65f87ae06, so the reclaim has lost nothing yet. W1-T10751 (#14527) changes
+      the heartbeat and will not reach the host either until this is fixed.
+
+    HOW THE JANITOR'S CRON IS CONVERGED (W1-T4770, install-host-units.sh :1986-2156), and why the
+    other lines are not.
+    - The janitor is a COPY. `--install` copies deploy/rmd-host-cleanup.sh to
+      `/home/<user>/rmd-host-cleanup.sh`, renders one exact line
+      (`CLEANUP_CRON_SCHEDULE='7 */6 * * *'` plus its env and log), drops every crontab line that
+      names the installed path (`grep -F -v -- "$CLEANUP_PATH"`) and appends the rendered line.
+      It writes through `crontab -u <service user> -` when it runs as root. `--check` prints
+      `MISSING`/`DRIFTED`/`ok` for the script and for the line, compared byte for byte.
+    - It is managed only in the default host layout (core instance) or behind an explicit
+      `RMD_CLEANUP_PATH`. `RMD_CRONTAB_CMD` is the test seam.
+    - The heartbeat and reclaim lines were never brought in, for three reasons. First, they were
+      hand-installed before the installer existed (W1-T483 and W1-T2725; the crontab's own comments
+      date them). Second, W1-T2877 named "a crontab line installing the five-minute beat" in its
+      problem statement, but its acceptance covered only the units. Third, W1-T4770 was scoped to
+      the janitor. fleet-heartbeat.sh's own W1-T3627 comment (:167) still calls the crontab
+      "hand-maintained host state that no repo file provisions".
+    - Both lines named the daemon's own tree, and that tree kept moving until W1-T9617. So the gap
+      cost nothing until 10-15, and since then has failed silently.
+
+    (b) MAY host-update.sh RUN FROM daemon-install? YES. The #8032 refusal does not apply to it.
+    - #8032 (W1-T4844) ran the watchdog's `rmd deploy-run` from daemon-install, and #8050 reverted
+      it. The refusal was `checkInstallSeparation` (src/lib/install-root.ts:94-118): "install root
+      ... resolves INSIDE the operator's own checkout". It is reached only through the TypeScript
+      `rmd deploy-run` verb, which takes the checkout it runs from as `operatorRepoRoot`. It now
+      also exempts a managed tick from `<state root>/daemon-install` that passes `--state-root`
+      (`allowManagedInstallInvoker`, src/run-task.ts:28123).
+    - host-update.sh is bash, and `--reclaim-only` never runs `bin/rmd` or repo TypeScript on the
+      host. Its node calls are `docker run ... -w /app` on the image (:1075), and node:sqlite for
+      VACUUM (:1533). Neither reads the checkout.
+    - It resolves only sibling files from its own location: runtime-env-vars.sh (:114),
+      `../.remudero/daemon-instances.yaml` (:573), host-recycle-lock.sh (:1327) and
+      scratch-mounts.sh (:1381). All are present in daemon-install.
+    - Its `STATE_DIR` default is `${HOME}/rmd-state` (:133), not derived from the script path, so
+      moving the script changes nothing there.
+    - Its git gc targets are the daemon's scratch checkout and `RMD_OP_DIR` (:1379-1387), never its
+      own tree. The converge refusal reads tracked changes only (`--untracked-files=no`).
+    - install-host-units.sh already runs from daemon-install, under root, every tick.
+    - So no dedicated copy is needed. A git ff-merge replaces a file with a new inode, so a run
+      already in progress keeps reading the old script. Only the files it sources later in that
+      run could come from the next revision. That is the same exposure the launcher already has.
+
+    WHAT A BARE REPOINT OF THE HEARTBEAT WOULD BREAK (measured; the reason this is more than a
+    path change).
+    - PUSH CREDENTIAL. The frozen checkout pushes through a REPO-LOCAL
+      `credential.helper` that reads `$GH_TOKEN`. daemon-install has no credential helper, and
+      there is no global or system one (`~/.gitconfig` holds only user.name/email).
+    - A `git push --dry-run --force origin HEAD:refs/heads/heartbeat-azure` from daemon-install
+      exited 128: "could not read Username for 'https://github.com': terminal prompts disabled".
+    - The same dry run under /bin/sh (dash), with the helper given through
+      `GIT_CONFIG_COUNT/KEY_0/VALUE_0`, exited 0.
+    - A sed-only repoint therefore stops every beat: BEAT_STALE after 30 minutes.
+    - LOOSE OBJECTS. Each beat writes three objects (blob, tree, root commit) with
+      `hash-object -w`/`mktree`/`commit-tree` into `${INSTALL_DIR}/.git` (:1614-1623). That is
+      ~864 a day. Nothing in the frozen checkout runs gc, and it now holds 22,996 loose objects
+      (684 MiB).
+    - daemon-install is fetched every tick, and that fetch runs auto gc. It holds 813 loose
+      objects today. PROJECTION, not measured: at that rate the loose count passes git's
+      `gc.auto` 6,700 within about 7 days. The beat's objects are unreachable but younger than
+      `gc.pruneExpire` (2 weeks), so they cannot be pruned. That leaves git's "too many unreachable
+      loose objects" gc.log, which is the condition W1-T10751 found on the daemon trees.
+
+    WHAT THIS DOES NOT DUPLICATE.
+    - W1-T10751 (#14527, open) changes WHICH TREES the beat's gc probe judges. This task changes
+      WHICH CODE the cron runs, and makes stale code visible.
+    - W1-T10750 (#14523, open) is the daemon's maintenance controller.
+    - Both W1-T10751 and this task edit scripts/fleet-heartbeat.sh and the watcher's judging step.
+      There is no depends_on, and whichever lands second merges main.
+    - Swept plan/tasks.d (crontab, fleet-heartbeat.sh, host-update, install_head_sha), the 21
+      open PRs (including #14527, #14523 and #14495) and the run- branches on 2026-10-26. No other
+      task covers this.
+
+    NOT THIS TASK, reported separately:
+    - the beat's `rmd_verdict` (tsx/node_modules) still reads `INSTALL_DIR`, which is not the
+      daemon's live tree;
+    - the frozen checkout's 684 MiB of loose objects;
+    - the 10-26 nightly STATE SNAPSHOT FAILED for rmd-state2. The cause was an lstat ENOENT
+      on a vanished `state/engines/<hash>/node_modules` inside the image's snapshotState, so it is
+      not frozen-checkout code.
+  design: |
+    MEASURE FIRST, read-only, and put the findings in the PR body:
+    - the service user's crontab, script paths and schedules only, with every token-shaped value
+      redacted. Never print the token file;
+    - the payload's `install_dir`/`install_head_sha`, and whether `session_reaper_verdict` is
+      present;
+    - `git count-objects -v` on daemon-install, so the loose-object effect of (c2) below is
+      measured on the host rather than projected.
+
+    (a) install-host-units.sh CONVERGES EVERY FLEET CRON LINE TO THE CONVERGED INSTALL.
+    - Extend the W1-T4770 block into a small table of fleet cron lines. Each row has a name, a
+      schedule, its env, a repo-relative script, its args and a log. The rows are:
+      - `heartbeat`: `*/5 * * * *`, `scripts/fleet-heartbeat.sh`, env `RMD_HEARTBEAT_BRANCH`,
+        `RMD_ROOT` and `GH_TOKEN=$(cat <token file>)`, output to /dev/null as today. The cron line
+        must stay plain, with no flock (the W1-T3627 deadlock note).
+      - `reclaim`: `17 4 * * *`, `deploy/host-update.sh --reclaim-only`, env `RMD_STATE_OFFHOST`
+        and `RMD_STATE_OFFHOST_KEEP`, logging to `~/reclaim.log`.
+      - `field-trials`: keep deploy/install-field-trials-refresh.sh as the owner of its copy and
+        line. Report its `--check` result as an `ok`/`DRIFTED` line, and converge it with its own
+        `--install` only where the line already exists. Never add it where it is absent (the
+        2026-10-13 site-idle ruling).
+    - The script path in each line is `${STATE_DIR}/daemon-install/<script>`, the same CHECKOUT
+      the launcher converges. No copy is needed (see (b) in the rationale).
+    - Host-specific values are inputs with the current host's defaults, the way
+      `RMD_CLEANUP_WORKTREE_ROOTS` is: branch, token file, off-host target and keep, and log
+      paths. An unreadable token file is reported, never guessed, and no token VALUE is ever
+      rendered.
+    - `--check` prints one `MISSING`/`DRIFTED`/`ok` line per row, compared byte for byte, exactly
+      like the janitor's.
+    - `--install` drops every non-comment line that runs that row's script from ANY directory and
+      writes the one rendered line. The frozen line is therefore replaced, never joined. Unrelated
+      lines and comment lines survive, and a second run leaves exactly one line per row.
+    - The census: any other non-comment line that runs a script out of a repo checkout other than
+      the converged install reads `DRIFTED <line's script> runs <checkout> at <sha>, not the
+      converged install`. That covers a `scripts/`, `deploy/` or `bin/rmd` path whose directory
+      holds a `.git`. It is reported, never rewritten, so the next hand-added line is visible.
+    - Gating matches the janitor's: default host layout on the core instance, or an explicit
+      override. The existing W1-T4770 tests, which set only `RMD_CLEANUP_PATH`, must keep passing
+      unchanged. Use a separate explicit seam for the new rows, or update those tests and say so
+      in the PR.
+
+    (c) THE BEAT RUNS CORRECTLY FROM THE INSTALL, AND A FROZEN BEAT ANNOUNCES ITSELF.
+    - (c1) CREDENTIAL. When `GH_TOKEN` is set, the beat's one push supplies its own credential
+      helper that reads `$GH_TOKEN`, through `git -c credential.helper=...` on that push only. The
+      token never reaches argv, the payload or the crontab. A checkout with its own helper keeps
+      working. The rendered cron line then needs no GIT_CONFIG_* env.
+    - (c2) NO OBJECTS IN THE CHECKOUT IT RUNS FROM. Write the beat's blob, tree and commit into an
+      object store private to the beat. One example is a fresh `GIT_OBJECT_DIRECTORY` under
+      `${RMD_ROOT}/state`, created per beat and removed after the push, behind a guard that names
+      exactly that directory.
+      - The commit is parentless, so nothing from the checkout's objects is needed.
+      - The checkout's loose count must not move across beats.
+      - Still no `git add`, no index write and no gc or prune of any shared repository (the
+        header's working-tree rule and W1-T2529's guard).
+    - (c3) THE BEAT NAMES ITS OWN CODE AGAINST THE CONVERGED INSTALL. Publish these fields:
+      - `beat_script_path`: the resolved `$SOURCE`;
+      - `beat_script_blob`: `git hash-object` of the running file, read-only with no `-w`;
+      - `install_root`: `RMD_HEARTBEAT_INSTALL_ROOT`, else config.json's `installRoot`, else
+        `${RMD_ROOT}/daemon-install`, which is resolveInstallRoot's default;
+      - `install_root_head_sha`;
+      - `install_script_blob`: `git rev-parse HEAD:scripts/fleet-heartbeat.sh` in that root.
+    - Verdict, read from evidence with no time threshold:
+      - `beat_code_verdict=current` when the two blobs match;
+      - `STALE — running <path> (<blob>), the converged install <root> at <sha> carries <blob>`
+        when they differ;
+      - `unknown — <reason>` when there is no install root or either read fails. A failed read is
+        never current.
+    - `install_dir` and `install_head_sha` keep their meaning, the directory the beat runs from.
+    - (c4) THE WATCHER RAISES STALE CODE OUTSIDE THE LIVENESS CHAIN. In fleet-heartbeat-watch.yml,
+      extract `beat_code_verdict` beside the other verdicts. A branch in
+      `DAEMON_EXPECTED_BRANCHES` gets its own needs-human record, `--source
+      "fleet-heartbeat:<branch>:code"`, so it neither masks nor is masked by BEAT_STALE and the rest.
+      - It raises when the verdict is `STALE`.
+      - It ALSO raises when a fresh beat has NO `beat_code_verdict` line at all. The watcher runs
+        from main, so a beat without the field is running code older than this change. That is
+        exactly today's frozen copy, and it is how a frozen copy announces itself instead of
+        staying silent.
+      - `current` resolves the record. `unknown` neither raises nor resolves, and says so in the
+        report.
+      - Title: "fleet-heartbeat (<branch>): the beat runs stale code". The body names the running
+        path, both blobs and the install head.
+      - Add the arm to the workflow's self-check step. A STALE fixture and a field-less fixture must
+        raise, and current and unknown fixtures must not.
+
+    Nothing else. No change to the launcher's converge logic, the units, deploy-run, host-update.sh,
+    the janitor or the reaper.
+  prompt: |
+    Do the MEASURE FIRST step and put its findings in the PR body. Then write the two suites at
+    the exact paths below. `rmd test-place` computed both folders on 2026-10-26, and the proofs
+    grep these paths, so keep them:
+      test/deploy/the-fleet-cron-lines-converge-to-the-install.test.ts
+      test/daemon/a-heartbeat-running-stale-code-says-so.test.ts
+    Import through `#test/*` and `#src/*`. Every new test title starts with `W1-T10756: `, exactly
+    as in the acceptance proofs. Build git fixtures with the repo's gitRepo helpers, never a raw
+    `git init` (the fixture-copy census).
+
+    Installer suite (the fake-crontab pattern of the W1-T4770 test in test/host-units-install.test.ts,
+    with `RMD_CRONTAB_CMD` pointing at a file-backed table and a temp state dir holding a
+    `daemon-install` fixture):
+    - Seed the table with the host's real shape: the heartbeat and reclaim lines pointing at
+      `<state>/remudero/...`, their comment blocks, the janitor's line and an unrelated line.
+    - `--check` exits 1, writes nothing, and prints DRIFTED for the heartbeat and reclaim rows plus
+      the census line naming the frozen checkout.
+    - `--install` leaves exactly one heartbeat and one reclaim line, both running
+      `<state>/daemon-install/...` with the rendered env. Comments and the unrelated line survive.
+      A second `--install` changes nothing, and a following `--check` prints `ok` for every row.
+    - An empty table reads MISSING for each row. The rendered heartbeat line contains
+      `GH_TOKEN=$(cat <token file>)` and no token-shaped value.
+
+    Heartbeat suite (drive the REAL committed script through test/helpers/fleet-heartbeat-harness.ts):
+    - Credential case. The install fixture has no credential helper, and its remote is a local bare
+      repo behind a git wrapper on PATH. For the push call, the wrapper records whether
+      `git config --get credential.helper` (in the push's own environment and `-c` set) resolves to
+      a helper that reads GH_TOKEN. Assert it does, and that GH_TOKEN's fixture value appears in
+      no argv and nowhere in the payload.
+    - Objects case. Run two beats. Assert the checkout's `git count-objects -v` loose count is
+      unchanged, and that the bare remote received each beat.
+    - Stale-code case. Run the script from a copy whose blob differs from the install fixture's
+      HEAD, and assert `beat_code_verdict=STALE` naming both blobs. Run it from the install
+      itself, and assert `current`. With no install root, assert `unknown`.
+    - Watcher case. Extract the judging and delivery steps the way test/fleet-heartbeat.test.ts
+      does. Assert that STALE and field-less payloads on `heartbeat-azure` each raise
+      `fleet-heartbeat:heartbeat-azure:code` beside a FRESH liveness kind. Assert that `current`
+      resolves it and that `unknown` raises nothing.
+
+    Restore base code with `git show origin/main:<path>`, never stash, and watch every new case
+    fail. Before opening the PR, dry-run the new heartbeat on the real host per the memory rule
+    "dry-run on the real host first". That means streaming the branch's script over ssh with a
+    throwaway `RMD_ROOT` and a non-production `RMD_HEARTBEAT_BRANCH`, and it must never push to
+    heartbeat-azure. Put the result in the PR body. Run the suites, `npm run -s lint-plan:fast` and
+    `rmd preflight --fast` on the committed tree before the first push.
+  acceptance:
+    - claim: "install-host-units.sh converges the heartbeat and nightly reclaim cron lines to the converged install checkout, replacing a line that runs any other checkout, with MISSING/DRIFTED/ok check lines like the janitor's"
+      proof: 'grep: test("W1-T10756: every fleet cron line converges to the install checkout with check lines" in test/deploy/the-fleet-cron-lines-converge-to-the-install.test.ts'
+    - claim: "a crontab line that runs a repo script out of a checkout other than the converged install reads DRIFTED in check mode, naming that checkout"
+      proof: 'grep: test("W1-T10756: a cron line that runs a frozen checkout reads drifted" in test/deploy/the-fleet-cron-lines-converge-to-the-install.test.ts'
+    - claim: "the beat pushes from a checkout with no credential helper using GH_TOKEN, and leaves no objects in the checkout it runs from"
+      proof: 'grep: test("W1-T10756: a beat pushes from the install and leaves no objects in it" in test/daemon/a-heartbeat-running-stale-code-says-so.test.ts'
+    - claim: "the beat publishes its own script blob against the converged install's and reads STALE when they differ, current when they match, unknown when the install cannot be read"
+      proof: 'grep: test("W1-T10756: the beat names stale code when its script differs from the converged install" in test/daemon/a-heartbeat-running-stale-code-says-so.test.ts'
+    - claim: "fleet-heartbeat-watch.yml raises a per-host stale-code issue outside the liveness chain for a STALE verdict and for a fresh beat that carries no verdict at all, and resolves it on current"
+      proof: 'grep: test("W1-T10756: the watcher raises stale code, including a beat that predates the field" in test/daemon/a-heartbeat-running-stale-code-says-so.test.ts'
+  falsifier: |
+    - Leave the heartbeat row out of the table: the installer case must fail on the frozen line.
+    - Match the old line by the installed path only, the way the janitor's grep does: the frozen
+      `<state>/remudero/...` line survives beside the new one, and the one-line count must fail.
+    - Drop the census: the drifted-checkout case must fail.
+    - Remove the push's own credential helper: the credential case must fail.
+    - Write the beat's objects into `${INSTALL_DIR}/.git` again: the objects case must fail.
+    - Compare the install's HEAD sha with itself instead of the running file's blob: the
+      stale-code case must fail.
+    - Raise only on an explicit STALE, so a beat without the field stays silent: the field-less
+      half of the watcher case must fail.
+    - Put the arm inside the liveness `elif` chain: the watcher case's FRESH-beside-code assertion
+      must fail.
+    GUARDS that held at base and must still hold:
+    - W1-T4770's janitor tests in test/host-units-install.test.ts (exactly one cleanup entry,
+      unrelated lines survive, DRIFTED on an edited line);
+    - the beat never runs gc or prune and never touches a working tree or index (W1-T2529's
+      suite);
+    - every existing liveness arm still classifies as before (test/fleet-heartbeat.test.ts);
+    - host-update.sh resolves its sibling files from the directory it runs in, so the reclaim
+      can run from daemon-install.
+    Each guard's existing case must fail when its production branch is removed, and pass again with
+    zero failures once it is restored.
