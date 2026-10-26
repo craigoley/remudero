@@ -507,7 +507,7 @@ test("an incomplete full-diff repair remains unavailable rather than an empty or
 test("omitted repair patches use the maintained default full-diff transport", async t => {
   const f = await inventoryFixture(t);
   const command = "api repos/o/r/compare/red...green -H Accept: application/vnd.github.diff";
-  const shim = ghShim([{ when: command, stdout: fullRepairDiff },
+  const shim = ghShim([{ when: command, stdout: fullRepairDiff.slice(0, -1) },
     { when: "", stderr: "unexpected repair transport command", exit: 1 }]);
   const previousPath = process.env.PATH, previousCache = process.env.RMD_GH_CACHE_HOME;
   t.after(() => {
