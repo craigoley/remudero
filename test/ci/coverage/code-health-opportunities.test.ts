@@ -246,6 +246,29 @@ syncBuiltinESMExports();\n`);
 });
 
 
+test("code health provenance CLI refuses a pipe before a blocking open", async () => {
+  await withTempDir("code-health-provenance-pipe", async dir => {
+    const value = { repository: "acme/atlas", analyzedSha: "a".repeat(40), ref: "refs/heads/main", runId: "123", runAttempt: "1",
+      observedAt: "2026-11-02T05:00:00.000Z", language: "javascript-typescript", sarifId: "12345678-1234-1234-1234-123456789012",
+      config: "paths-ignore: []", exclusions: [],
+      sarif: { version: "2.1.0", runs: [{ tool: { driver: { name: "CodeQL", version: "2.23.0", rules: [{ id: "js/example" }] } },
+        artifacts: [{ location: { uri: "src/example.ts" }, roles: ["analysisTarget"] }],
+        invocations: [{ executionSuccessful: true, endTimeUtc: "2026-11-02T04:59:00.000Z" }] }] } };
+    const script = join(repoRoot(), "scripts/code-health-provenance.mjs");
+    const regular = join(dir, "input.json"), fifo = join(dir, "input-pipe"), output = join(dir, "output.json");
+    writeFileSync(regular, JSON.stringify(value));
+    execFileSync(process.execPath, [script, "--input", regular, "--output", output], { stdio: "pipe", timeout: 10000 });
+    assert.equal(JSON.parse(readFileSync(output, "utf8")).repository, "acme/atlas", "a valid regular input is still published");
+    execFileSync("mkfifo", [fifo]);
+    // A FIFO with no writer blocks a plain open forever; the 10 s child bound turns that into a failure.
+    assert.throws(() => execFileSync(process.execPath, [script, "--input", fifo, "--output", join(dir, "pipe-output.json")],
+      { stdio: "pipe", timeout: 10000 }), (error: NodeJS.ErrnoException & { stderr?: Buffer }) =>
+      error.code !== "ETIMEDOUT" && /evidence export failed/.test(String(error.stderr ?? error.message)),
+    "a pipe with no writer is refused by the exporter itself, never left to the child's time bound");
+  });
+});
+
+
 test("code health binds coverage provenance to the existing measured inventory and policy", async () => {
   await withTempDir("code-health-coverage", async dir => {
     const summary = { kind: "coverage_nightly.measured", repository: "acme/atlas", sha: "a".repeat(40), ref: "refs/heads/main", run_id: "123",
