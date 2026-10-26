@@ -350,19 +350,13 @@ export function scannerWarningWithoutMechanism(key: string, details: readonly st
     ciLogSignatures(family, detail).some(signature => /^UNTRUSTED SCANNER EVIDENCE:/.test(signature)));
 }
 
-/** A census growth finding identifies a refused branch, not a defect in the aggregate reporter. */
-export function censusRefusalWithoutMechanism(key: string, details: readonly string[]): boolean {
-  return key === "fix_refusal:census-precheck" && details.some(detail =>
-    /\bcensus-precheck: this branch grows \d+ census count\(s\) CI will refuse:/.test(detail));
-}
-
 /**
  * The code that owns a cause. A refusal is owned by whatever raises its reason; a CI check by the
  * scripts and source that name it; a main-merge cause by the file it conflicts on. `undefined` when
  * nothing can be located — the cause then goes to a person, never to a docs-only record.
  */
 export function locateCiFrictionOwner(key: string, details: readonly string[], search: OwnerSearch): CiFrictionOwner | undefined {
-  if (scannerWarningWithoutMechanism(key, details) || censusRefusalWithoutMechanism(key, details)) return undefined;
+  if (scannerWarningWithoutMechanism(key, details)) return undefined;
   if (key.startsWith("hand_fix:")) {
     const file = key.slice("hand_fix:".length);
     return /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes("..") && search.fileExists(file)
