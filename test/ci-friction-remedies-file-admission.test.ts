@@ -88,3 +88,35 @@ test("a long measured cause gets an executable proof admitted by the unchanged p
   assert.ok(task.origin?.includes(key), "the full measured cause is retained in provenance");
   assert.ok(JSON.stringify(task.rationale).includes(key), "compacting a test title does not discard diagnosis");
 });
+
+
+test("a census remedy proves its diagnosed mechanism while retaining healthy refusals and measured costs", () => {
+  const owner = "src/lib/ci-friction-remedy.ts";
+  const cause = { kind: "fix_refusal" as const, name: "census-precheck" };
+  const key = "fix_refusal:census-precheck";
+  const price = { cause, minutes: 6, rounds: 2, prs: 2 };
+  const details = ["census-precheck: this branch grows 1 census count(s) CI will refuse: fixture-copy: real branch finding",
+    "census-precheck: census snapshot reader crashed"];
+  const rounds = details.map((detail, index) => ({ pr: 13000 + index, cause, minutes: 3,
+    at: "2026-10-26T12:00:00Z", detail }));
+  const retained = JSON.stringify({ price, rounds });
+  const yaml = ciFrictionShardYaml({ price, rung: 1, owner: { files: [owner], why: ["concrete runner signature"] }, rounds }, "W1-T99989");
+  const task = loadPlanFromYaml(yaml, "census mechanism contract").tasks[0]!;
+  assert.equal(task.acceptance![0]!.claim, `the diagnosed census runner failure owned by ${owner} is prevented or self-healed while healthy branch findings still refuse publication`);
+  assert.equal(task.acceptance![0]!.proof, "unit test: W1-T99989: the diagnosed census runner failure is prevented while healthy findings remain refused");
+  assert.match(task.note!, /execute the diagnosed failure through the real owner path/);
+  assert.match(task.note!, /retain a control that a healthy branch finding is still refused/);
+  assert.match(task.note!, /class-wide cost observations and after-window measurement remain unchanged/);
+  assert.ok(details.every(detail => task.rationale!.includes(detail)));
+  assert.equal(JSON.stringify({ price, rounds }), retained);
+  assert.equal(task.verify, "human");
+  assert.ok(task.origin!.includes(key));
+  const plan = loadPlanFromYaml(yaml, "census mechanism admission");
+  assert.deepEqual(lintTask(task, { duplicateSlug: ciFrictionShardStem(key), machineFilingAdmission: { plan, releasedIds: new Set(), pathExists: p => existsSync(join(REPO_ROOT, p)) } }).violations.filter(v => v.severity === "block"), []);
+  for (const name of ["other-refusal", "census-precheck-other"]) {
+    const other = loadPlanFromYaml(ciFrictionShardYaml({ price: { ...price, cause: { ...cause, name } }, rung: 1,
+      owner: { files: [owner], why: [] }, rounds: [] }, "W1-T99988"), "unrelated contract").tasks[0]!;
+    assert.equal(other.acceptance![0]!.claim, `the harness no longer spends a fix round on fix_refusal:${name}`);
+    assert.equal(other.acceptance![0]!.proof, `unit test: W1-T99988: fix_refusal:${name} is prevented, not retried`);
+  }
+});
