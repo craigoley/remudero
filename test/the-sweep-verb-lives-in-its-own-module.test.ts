@@ -345,9 +345,15 @@ test("W1-T9338: command composes a dry-run summary and contains enumeration fail
   const f = sweepFixture(t);
   // Native mocks keep the real config reader and owner parser, with no git process or host config.
   t.mock.method(os, "homedir", () => f.root);
-  // The escalation reconcile moved with the command, so its issue reads run for real against the
-  // shared gh shim on PATH; only git is stood in for below.
-  const shim = ghShim([{ when: "", stdout: "[]" }]);
+  // The escalation reconcile moved with the command, so it runs for real against the shared gh shim
+  // on PATH: one open escalation whose headroom breach the ledger shows recovered is a candidate the
+  // reconcile retires by closing its issue. Only git is stood in for below.
+  const issueUrl = "https://github.com/acme/other/issues/5";
+  const shim = ghShim([
+    { when: "repos/acme/other/issues?", stdout: JSON.stringify([{ number: 5, html_url: issueUrl, state: "open",
+      title: "headroom reserve breached", body: "the five-hour window is over its ceiling" }]) },
+    { when: "", stdout: "[]" },
+  ]);
   t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const oldPath = process.env.PATH;
   process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
@@ -363,6 +369,16 @@ test("W1-T9338: command composes a dry-run summary and contains enumeration fail
   const path = configPath();
   mkdirSync(join(path, ".."), { recursive: true });
   writeFileSync(path, JSON.stringify(f.config));
+  const breachTs = new Date(Date.now() - 60_000).toISOString();
+  mkdirSync(join(f.root, "state"), { recursive: true });
+  writeFileSync(f.ledgerPath, [
+    { step: "daemon.headroom_reserve.escalated", issue_url: issueUrl, window: "five_hour", resets_at: breachTs,
+      ts: breachTs },
+    { step: "daemon.headroom", window: "five_hour", over_ceiling: false, percent_used: 41, limit_pct: 80,
+      ts: new Date().toISOString() },
+  ].map((row) => JSON.stringify(row)).join("\n") + "\n");
+  const ledgerRows = () => readFileSync(f.ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const closes = () => shim.calls().filter((call) => call.startsWith("issue close"));
   const output: string[] = [];
   const errors: string[] = [];
   t.mock.method(systemClock, "now", () => 9338000);
@@ -373,17 +389,30 @@ test("W1-T9338: command composes a dry-run summary and contains enumeration fail
   assert.match(output.join("\n"), /rmd sweep --dry-run — acme\/other/);
   assert.match(output.join("\n"), /post-fix re-verification: 0 open PR\(s\) checked/);
   assert.match(output.join("\n"), /credit backfill: 0 candidate\(s\) reconciled/);
-  assert.match(output.join("\n"), /escalation reconcile: 0 open needs-human issue\(s\) checked · 0 closed/);
+  assert.match(output.join("\n"), /escalation reconcile: 1 open needs-human issue\(s\) checked · 0 closed/);
   assert.match(output.join("\n"), /worktree reap: 0 worktree\(s\) reaped/);
   const effectDeps = f.calls.find((c) => c.name === "effects")!.args[0];
   assert.deepEqual([effectDeps.owner, effectDeps.repo, effectDeps.runId, effectDeps.config],
     ["acme", "other", "SWEEP-9338000", f.config]);
   assert.deepEqual(f.calls.find((c) => c.name === "reverify")!.args.slice(0, 2), ["acme", "other"]);
-  assert.ok(shim.calls().some((call) => call.includes("acme/other")), "the reconcile reads the named repo's issues");
+  assert.ok(shim.calls().some((call) => call.includes("repos/acme/other/issues?")),
+    "the reconcile reads the named repo's issues");
+  // The reconcile receives the command's dry run: it counts the recovered escalation and writes nothing.
+  const recoverySummaries = ledgerRows().filter((row) => row.step === "sweep.headroom_recovery.summary");
+  assert.deepEqual(recoverySummaries.map((row) => [row.candidates, row.retired]), [[1, 1]],
+    "the dry run still finds the candidate");
+  assert.deepEqual(closes(), [], "a dry run closes no issue");
+  assert.equal(ledgerRows().some((row) => row.step === "daemon.headroom_reserve.retired"), false);
   const triage = f.calls.find((c) => c.name === "triage")!;
   assert.deepEqual([triage.args[0].owner, triage.args[0].repo, triage.args[1], triage.args[3].dryRun],
     ["acme", "other", [], true]);
   assert.equal(f.calls.find((c) => c.name === "branchReap")!.args[7].prune, false);
   assert.equal(await sweepCommand({ ...host, commandViews: () => { throw new Error("enumeration unavailable"); } }, ["--repo", "other"]), 1);
   assert.match(errors.join("\n"), /could not list open PRs for acme\/other: enumeration unavailable/);
+  // Without --dry-run the same candidate is retired through the issue gateway.
+  assert.equal(await sweepCommand(host, ["--repo", "other"]), 0);
+  assert.equal(closes().length, 1, "a live run closes the recovered escalation");
+  assert.ok(closes()[0]!.includes(issueUrl), "it closes the escalation the ledger names");
+  const retiredRows = ledgerRows().filter((row) => row.step === "daemon.headroom_reserve.retired");
+  assert.deepEqual(retiredRows.map((row) => row.issue_url), [issueUrl]);
 });
