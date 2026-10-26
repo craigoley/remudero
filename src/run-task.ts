@@ -6,17 +6,7 @@ import {
   buildSweepLightHook as buildSweepLightHookFromModule,
   type SweepCommandHost,
   type LightPassReadPorts,
-  buildOpenPrViews,
 } from "./cli/commands/sweep.js";
-// W1-T9338: the helpers only the sweep verb used moved with it; these names stay importable here.
-export { captureRepairFeedbackWithPriorVerdict, dispatchFixPreflightStandDown, readyDraftViaGh,
-  latestPriorVerdictSuppresses, buildOpenPrViews, updatedForWorkflowFromLedger, runOneShotSweep,
-  sweepEscalationReconcile, renderEscalationReconcileSummary, buildEscalationCloser,
-  retireRecoveredHeadroomEscalations, tickReadReverificationDeps, buildRereadPrAtAct,
-  sweepPrTerminalRung, runTmpSweepRung, fixRungAllowedBesideInFlight, blockedFixableIsRequeueOnly,
-  reviewOnlyLightPassDeps, buildHeadroomRecoveryCandidates, renderHeadroomRecoveryCloseComment,
-  fetchOpenPrsWithPostedIds, runIsAwaitingExternal } from "./cli/commands/sweep.js";
-export type { SweepEscalationReconcileSummary } from "./cli/commands/sweep.js";
 import {
   runFixRung as runFixRungFromModule,
   fixCommand as fixCommandFromModule,
@@ -623,7 +613,7 @@ import {
 // closure below (daemonCommand), wired into BOTH daemonBoot's boot-time param and
 // DaemonDeps.sweepOrphans.
 import { defaultListCandidates, defaultReadMarkers, killProcessGroup, type OrphanSweepDeps } from "./lib/worker-containment.js";
-import { makeTempDir, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir } from "./lib/tmp.js";
+import { makeTempDir, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { daemonInstanceRegistryPath, IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
@@ -701,6 +691,7 @@ import {
   type EscalationOption,
   type AsyncIssueGateway,
   type IssueGateway,
+  type OpenIssue,
   type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret,} from "./lib/escalate.js";
 import {
   boardPrsRestArgs,
@@ -712,10 +703,13 @@ import {
   codeqlCheckFailed,
   hydrateCodeqlHeadAlertsSteps,
   CODEQL_CHECK_NAME,
+  fetchSinglePrRestAsync,
   hydrateMergeStates,
   liveStateFromRest,
   mapRestPr,
   openPrsRestArgs,
+  paceGhEntry,
+  paceGhEntryAsync,
   prStateFromRest,
   rollupFor,
   rollupForAsync,
@@ -728,6 +722,7 @@ import {
   type GhApiFetcher,
   type GhCallPacer,
   createPlanFilingFileCache,
+  PLAN_FILING_FILE_CACHE_MAX_ENTRIES,
   type RestPullRow,
   type RestRollupEntry,
   fetchBoardPrsRestAsync,
@@ -758,6 +753,7 @@ import { applyMergeProbeEvidence, mergedHeadTypechecks, probeMerge, probeOpenPrM
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
+  feedbackCaptured,
   feedbackEntryPath,
   listFeedback,
   parseFeedbackAddArgs,
@@ -1207,6 +1203,7 @@ import {
   appendProducerLedger,
   isSpawnInfraBlockedError,
   LEDGER_COST_TAG_INFRA,
+  DECISION_RELEVANT_LEDGER_STEPS,
   deriveLedgerActor,
   markDaemonProcessActor,
   markLedgerProcessActor,
@@ -1741,10 +1738,10 @@ import {
   type GithubPostureGateway,
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
-import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
-import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
+import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
+import { readyDraftPullRequest, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "./lib/sweep.js";
+import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
   terminalUnionScans } from "./lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
@@ -2312,6 +2309,23 @@ export function buildReviewerHealthRoute(
       exit_code: code, ...(code === 0 ? {} : { failure: failure ?? "no failure reported" }) });
     return code;
   };
+}
+
+/** W1-T4415 — the sweep's draft-readying effect: `gh pr ready` on one draft, ledgered by
+ *  {@link readyDraftPullRequest}. Marking ready is the whole write; it never merges or closes. */
+export function readyDraftViaGh(
+  owner: string,
+  repo: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  exec: typeof ghExec = ghExec,
+): (pr: OpenPrView) => void {
+  return (pr) =>
+    readyDraftPullRequest(pr, {
+      markReady: (prNumber) => {
+        exec(["pr", "ready", String(prNumber), "--repo", `${owner}/${repo}`], { encoding: "utf8", stdio: "pipe" });
+      },
+      log,
+    });
 }
 
 let baseReproductionQueue: Promise<void> = Promise.resolve();
@@ -6529,6 +6543,10 @@ async function restRollupFor(
   return attachPostedGateIds(rollupFor(owner, repo, sha, () => resolved[next++]), runs);
 }
 
+export function fetchOpenPrsWithPostedIds(owner: string, repo: string, fetch: GhApiFetcher): OpenPrRest[] {
+  return runStepsSync(openPrsWithPostedIdsSteps(owner, repo, fetch));
+}
+
 /**
  * Resolve `owner`/`repo`/`number` from a poll loop's `prUrl`, or refuse loudly. Mirrors
  * {@link headShaRestArgs}'s own refusal below: a URL that fails to parse is a broken caller, never
@@ -7570,6 +7588,81 @@ export function captureWorktreeSnapshotViaGit(worktreePath: string): WorktreeSna
 }
 
 
+
+/**
+ * W1-T177: resolve a stand-down reason from an OPTIONAL live-state reader —
+ * shared by the fix rung's THREE internal checks (top of round; immediately
+ * before a false-block escalation; immediately before the exhaustion
+ * escalate()) so all three read via the SAME fail-open contract. `undefined`
+ * (no reader wired, or a failed/indeterminate read) means "proceed exactly
+ * as before this check existed" — standing down fires ONLY on a positive,
+ * freshly-observed terminal reading. A FAILED/INDETERMINATE read (`ok:false`)
+ * is explicitly LEDGERED here (never a silent swallow) so an unreadable
+ * state is legible on the ledger even though it never halts anything — the
+ * read failure itself is observable, distinct from an ordinary un-wired site
+ * (which never calls `log` at all).
+ *
+ * W1-T296 extends this SAME function with a second reason source — branch
+ * authorship — rather than a parallel early-return path: `authorship`, when
+ * supplied, is consulted ONLY after the terminal-state read comes back
+ * OPEN, and ONLY the caller at site `rung.strike` ever passes it (the other
+ * two call sites omit it, so their behavior is byte-identical to before this
+ * task). A foreign read is distinguished on the return value's `foreignHead`
+ * field so the caller knows to escalate, not just ledger — the terminal-state
+ * reason never sets it (a merged/closed PR carries no operator-decidable
+ * question; W1-T196's same reasoning).
+ *
+ * W1-T1278 extends this SAME function with TWO more reason sources — condition A
+ * (`redCheckSupersession`) and condition B (`mergeConflictCheck`) — again never a parallel
+ * early-return path, and again ONLY the caller at site `rung.strike` ever passes them (the
+ * `rung.false_block`/`rung.exhaustion` sites omit both, unchanged). Both are consulted ONLY
+ * after the terminal-state read comes back OPEN, exactly like `authorship`, and NEITHER sets
+ * `foreignHead` — both ledger only (see the two params' own docs for why: a genuinely-red check
+ * or a dirty merge state is a self-evident GitHub-reported fact, never an operator-decidable
+ * question the way a foreign push is).
+ *
+ * W1-T1284 extends this SAME function with a FOURTH reason source — `unchangedTree` — again
+ * never a parallel early-return path, and again ONLY the caller at site `rung.strike` ever
+ * passes it. See {@link unchangedTreeStandDownReason}'s own doc for the defect it closes; it
+ * ledgers only, exactly like `redCheckSupersession`/`mergeConflictCheck` (an unchanged local
+ * tree is a self-evident fact this rung itself observed, never an operator-decidable question).
+ */
+
+/**
+ * W1-T177 SITE (v): the cold/sweep `dispatchFix` pre-flight's terminal-state
+ * check — a REQUIRED, always-mandatory `readLiveState` call (unlike sites
+ * (i)/(ii)/(iii)/(iv), whose reader is optional), because this is the only
+ * site whose real wiring is `buildSweepEffects`'s own closure, never a
+ * caller-supplied dep. Deliberately an INDEPENDENT read from the headRefName
+ * fetch this site also needs (that fetch predates W1-T177 and is unrelated to
+ * the terminal-state contract) — folding `state` into that SAME round trip
+ * previously meant a `gh` hiccup on the read threw BEFORE the fail-open
+ * `ok:false` branch ever ran, surfacing as `sweep.fix.error` (a silent
+ * fleet-wide stand-down on a gh outage — exactly the fail-closed regression
+ * this contract forbids). Splitting the read in two means a state-read
+ * failure ALWAYS reports `ok:false` (never throws past this function) and is
+ * handled by the SAME fail-open contract as every other site: ledgered via
+ * `sweep.fix.indeterminate`, dispatch proceeds to resolve headRefName exactly
+ * as it did before this check existed. Only a positive, freshly-observed
+ * terminal reading (`sweep.fix.not_open`, naming the state) stands the
+ * dispatch down, BEFORE any worktree/git side effect ever touches the PR.
+ */
+export async function dispatchFixPreflightStandDown(
+  readLiveState: (prUrl: string) => LiveStateResult | Promise<LiveStateResult>,
+  pr: { prUrl: string; prNumber: number },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<string | undefined> {
+  const live = await readLiveState(pr.prUrl);
+  if (!live.ok) {
+    log("sweep.fix.indeterminate", { pr_number: pr.prNumber });
+    return undefined;
+  }
+  const reason = terminalStateReason(live.state);
+  if (reason) {
+    log("sweep.fix.not_open", { pr_number: pr.prNumber, state: live.state, reason });
+  }
+  return reason;
+}
 
 /**
  * W1-T177 SITE (iv): the real live-state reader `rmd drain`/`rmd daemon` wire
@@ -23586,6 +23679,157 @@ export async function readUsageSnapshotAsync(
 }
 
 /**
+ * W1-T2603 (A RECOVERED HEADROOM BREACH NEVER CLOSES ITS OWN ESCALATION). `escalateHeadroomReserve`
+ * above raises one `[HARD_STOP]` issue per breach episode and nothing ever retires it — the breach
+ * is a property of the ACCOUNT, not of any task, so it carries no task referent for
+ * `buildEscalationReconcileCandidates` (below) to resolve against and falls through every arm of
+ * that reconciler by construction, not by a bug in it (see this task's own rationale). This is the
+ * missing retirement PATH for exactly that class, kept structurally separate from the task-referent
+ * reconciler rather than bolted onto it.
+ *
+ * RETIRE ON AN OBSERVED RECOVERY, NEVER ON A TIMER OR AN ABSENCE. The daemon's own poll loop
+ * (`daemon.ts`) already writes a `daemon.headroom` row on every tick with `window`, `percent_used`,
+ * `limit_pct` and `over_ceiling` — a POSITIVE reading, taken whether or not the governor is
+ * enforcing (see that step's own "ONE HEARTBEAT PER TICK, IN EVERY ENFORCEMENT POSTURE" doc). This
+ * scans forward from the escalating row's own `ts` for the NEWEST such reading, for the SAME
+ * `window` string, carrying `over_ceiling === false` — a positive observation that the door is open
+ * again. A daemon that stopped reading headroom entirely (the W1-T2565 blind window) produces
+ * exactly zero matching rows, never a false one, so an absence of breach rows is never mistaken for
+ * recovery — the candidate list is built ONLY from a reading that actually happened.
+ *
+ * MATCH THE WINDOW, NOT JUST THE CLASS. The session (5h) and weekly windows breach independently
+ * (`resolveHeadroomWindows`, daemon.ts) — a recovery reading for one must never retire an escalation
+ * raised for the other, so `window` is compared for exact string equality, never treated as
+ * interchangeable with "some window recovered".
+ */
+export interface HeadroomRecoveryCandidate {
+  issueUrl: string;
+  window: string;
+  resetsAt: string;
+  /** The recovery reading that justifies retiring this issue — always `over_ceiling: false`,
+   *  always for the SAME `window`, always newer than the escalation it retires. */
+  recovery: { percentUsed: number; limitPct: number; ts: string };
+}
+
+/**
+ * Pure builder, mirroring `buildEscalationReconcileCandidates`'s own "read the ledger, hand back
+ * candidates" shape: one {@link HeadroomRecoveryCandidate} per still-OPEN headroom-reserve
+ * escalation (`openIssueUrls`, the caller's own live `listOpen` read — never re-read here) whose
+ * `daemon.headroom_reserve.escalated` row names a `window` that has SINCE recovered. An escalated
+ * row missing `window`/`resets_at` (every row written before this task) or whose `issue_url` is not
+ * in `openIssueUrls` (never delivered, or already closed) yields no candidate.
+ */
+export function buildHeadroomRecoveryCandidates(
+  ledgerPath: string,
+  openIssueUrls: ReadonlySet<string>,
+): HeadroomRecoveryCandidate[] {
+  const lines = readLedgerLines(ledgerPath); // ledger-read-intent: live — this scan wants the newest rows only.
+  const candidates: HeadroomRecoveryCandidate[] = [];
+  for (const line of lines) {
+    if (line.step !== "daemon.headroom_reserve.escalated") continue;
+    const issueUrl = typeof line.issue_url === "string" ? line.issue_url : undefined;
+    if (!issueUrl || !openIssueUrls.has(issueUrl)) continue; // undelivered, or already closed
+    const window = typeof line.window === "string" ? line.window : undefined;
+    const resetsAt = typeof line.resets_at === "string" ? line.resets_at : undefined;
+    const escalatedTs = typeof line.ts === "string" ? line.ts : undefined;
+    if (!window || !resetsAt || !escalatedTs) continue; // a pre-W1-T2603 row — no window to match
+    const escalatedMs = Date.parse(escalatedTs);
+    if (!Number.isFinite(escalatedMs)) continue;
+    // The NEWEST matching recovery reading, so the citation names the most current evidence —
+    // "newest wins" never changes WHETHER this retires, only what the close comment cites.
+    let recovery: { percentUsed: number; limitPct: number; ts: string } | undefined;
+    for (const reading of lines) {
+      if (reading.step !== "daemon.headroom") continue;
+      if (reading.window !== window) continue; // THE WINDOW MATCH — never just the class
+      if (reading.over_ceiling !== false) continue; // a positive under-ceiling observation only
+      const readingTs = typeof reading.ts === "string" ? reading.ts : undefined;
+      if (!readingTs) continue;
+      const readingMs = Date.parse(readingTs);
+      if (!Number.isFinite(readingMs) || readingMs <= escalatedMs) continue; // must POSTDATE the breach
+      if (!recovery || readingMs > Date.parse(recovery.ts)) {
+        recovery = {
+          percentUsed: typeof reading.percent_used === "number" ? reading.percent_used : NaN,
+          limitPct: typeof reading.limit_pct === "number" ? reading.limit_pct : NaN,
+          ts: readingTs,
+        };
+      }
+    }
+    if (recovery) candidates.push({ issueUrl, window, resetsAt, recovery });
+  }
+  return candidates;
+}
+
+/** The closing citation posted on a headroom-recovery retirement — mirrors
+ *  `renderReconcileCloseComment`'s "name the resolution" discipline for the task-referent arm. */
+export function renderHeadroomRecoveryCloseComment(c: HeadroomRecoveryCandidate): string {
+  return [
+    "Auto-retired by the headroom-recovery reconciler (W1-T2603).",
+    "",
+    `**${c.window}** is now reading **${c.recovery.percentUsed}% used** (below the ${c.recovery.limitPct}% ` +
+      `operator reserve ceiling) as of ${c.recovery.ts} — under its ceiling again since this escalation was ` +
+      `raised for a breach at ${c.resetsAt !== undefined ? `the window resetting ${c.resetsAt}` : "this window"}.`,
+    "",
+    "_Level-triggered closure from a daemon-observed `daemon.headroom` reading for the SAME window. If the " +
+      "account breaches again, a fresh escalation opens on its own._",
+  ].join("\n");
+}
+
+/**
+ * Reconcile OPEN headroom-reserve escalations against observed recovery — the retirement leg
+ * `escalateHeadroomReserve` never had. Lists open needs-human/fleet-notice issues via the SAME
+ * `listRetirableEscalationIssues` the task-referent reconciler uses (never a second listing
+ * mechanism), builds candidates from the ledger, and closes each with a citation. Best-effort and
+ * non-fatal throughout, mirroring `runEscalationReconcile`'s per-item throw containment: a failed
+ * issue-list read or a failed close is logged and this cycle simply retires fewer, never none of
+ * the reconciler's other rungs.
+ */
+export async function retireRecoveredHeadroomEscalations(
+  ledgerPath: string,
+  runId: string,
+  ctx: { issues: IssueGateway; log?: (step: string, extra?: Record<string, unknown>) => void; dryRun?: boolean },
+): Promise<{ retired: number }> {
+  const log = ctx.log ?? (() => {});
+  let open: OpenIssue[];
+  try {
+    open = listRetirableEscalationIssues(ctx.issues);
+  } catch (e) {
+    log("sweep.headroom_recovery.list_failed", { error: String((e as Error)?.message ?? e) });
+    return { retired: 0 };
+  }
+  const openUrls = new Set(open.map((i) => i.url));
+  const candidates = buildHeadroomRecoveryCandidates(ledgerPath, openUrls);
+  let retired = 0;
+  for (const c of candidates) {
+    // dryRun leaves no trace — mirrors runEscalationReconcile's own "still counts, never acts" preview.
+    if (ctx.dryRun) {
+      retired++;
+      continue;
+    }
+    try {
+      if (!ctx.issues.closeWithComment) throw new Error("issue gateway cannot close issues");
+      ctx.issues.closeWithComment(c.issueUrl, renderHeadroomRecoveryCloseComment(c));
+    } catch (e) {
+      log("sweep.headroom_recovery.close_failed", { issue_url: c.issueUrl, error: String((e as Error)?.message ?? e) });
+      continue;
+    }
+    appendLedger(ledgerPath, {
+      run_id: runId,
+      task_id: "daemon",
+      step: "daemon.headroom_reserve.retired",
+      issue_url: c.issueUrl,
+      window: c.window,
+      resets_at: c.resetsAt,
+      recovered_percent_used: c.recovery.percentUsed,
+      recovered_ts: c.recovery.ts,
+    });
+    log("sweep.headroom_recovery.retired", { issue_url: c.issueUrl, window: c.window, recovered_ts: c.recovery.ts });
+    retired++;
+  }
+  log("sweep.headroom_recovery.summary", { candidates: candidates.length, retired });
+  return { retired };
+}
+
+/**
  * The drain's end-of-run quota check: when a drain stopped with NOTHING RUNNABLE and at least one
  * candidate was declined as INDETERMINATE, ask whether a `gh api rate_limit` bucket is the reason
  * and escalate if it is.
@@ -27158,6 +27402,12 @@ export async function gardenCommand(rest: string[], source: { repoRoot?: string 
   return await runRegisteredGardenPass(name, rest.slice(2), { config, repoRoot: source.repoRoot ?? repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate });
 }
 
+export function sweepPrTerminalRung(github: Pick<GitHub, "prByRef">, ledgerPath: string, runId: string, // W1-T5318
+  tickRead?: Pick<TickReadFacts, "closedPrs">): PrTerminalReconcileSummary {
+  const lookup = tickRead?.closedPrs ? closedPrLookup(tickRead.closedPrs) : (url: string) => closedPrFromRef(github.prByRef(url));
+  return runPrTerminalReconcile(lookup, { ledgerPath, runId });
+}
+
 export function applyTickCreditUpdates(facts: Pick<TickReadFacts, "creditUpdates">, ledgerPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void): void {
   if (facts.creditUpdates.length === 0) return;
@@ -27173,6 +27423,17 @@ export function applyTickCreditUpdates(facts: Pick<TickReadFacts, "creditUpdates
     changed = true;
   }
   if (changed) saveCreditStore(path, current);
+}
+
+/** W1-T4075: the post-fix re-verification rung's two reads, answered from one tick-read generation. */
+export function tickReadReverificationDeps(tickRead: Pick<TickReadFacts, "mergedFixPrNumbers" | "postFixCiFailuresByPr">): {
+  isMergedByNumber: (prNumber: number) => boolean;
+  readCiFailures: (pr: OpenPrView) => CiFailure[] | undefined;
+} {
+  return {
+    isMergedByNumber: (number) => tickRead.mergedFixPrNumbers.includes(number),
+    readCiFailures: (pr) => tickRead.postFixCiFailuresByPr.get(pr.prNumber),
+  };
 }
 
 export function buildDaemonReadRefresher(options: {
@@ -27878,6 +28139,23 @@ export async function waitForPortRelease(
     if (attempt >= attempts) return false;
     await sleep(delayMs);
   }
+}
+
+/**
+ * W1-T1212 — {@link SweepDeps.updatedForWorkflow}'s real wiring: every `${prNumber}:${workflow}`
+ * pair a PRIOR `sweep.update_branch.updated` ledger row already fired for (that row's own
+ * `stale_workflow` field — see `runSweep`'s ledger write, lib/sweep.ts). Reads the SAME durable
+ * ledger every other dedup in this lane already consults — never a second store.
+ */
+export function updatedForWorkflowFromLedger(ledgerPath: string): Set<string> {
+  const out = new Set<string>();
+  for (const line of readLedgerLines(ledgerPath)) {
+    if (line.step !== "sweep.update_branch.updated") continue;
+    const prNumber = line.pr_number;
+    const workflow = line.stale_workflow;
+    if (typeof prNumber === "number" && typeof workflow === "string") out.add(`${prNumber}:${workflow}`);
+  }
+  return out;
 }
 
 /**
@@ -28790,6 +29068,29 @@ export function fixRungCiFailures(owner: string, repo: string): (prUrl: string, 
   return runTaskCommandHelpers(runTaskCommandHost()).fixRungCiFailures(owner, repo);
 }
 
+/** One bounded ledger row per classification transition, never one row per unchanged poll. */
+export function createPlanFilingClassificationTelemetry(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): (event: PlanFilingClassificationEvent) => void {
+  const observed = new Map<string, PlanFilingClassificationSource>();
+  return (event) => {
+    const key = `${event.prNumber}@${event.headSha}`;
+    if (observed.get(key) === event.source) return;
+    observed.delete(key);
+    observed.set(key, event.source);
+    while (observed.size > PLAN_FILING_FILE_CACHE_MAX_ENTRIES) {
+      const oldest = observed.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      observed.delete(oldest);
+    }
+    log("sweep.plan_filing_classified", {
+      pr_number: event.prNumber,
+      head_sha: event.headSha,
+      classification_source: event.source,
+    });
+  };
+}
+
 export function verifiedReviewFindingsForFix(
   rows: ReadonlyArray<Record<string, unknown>>, taskId: string, prUrl: string, headSha: string,
 ): FixReviewFinding[] {
@@ -28845,6 +29146,25 @@ export function openPrMintTexts(owner: string, repo: string, fetch: GhApiFetcher
 }
 
 /**
+ * Build the observed open-PR state the sweep reconciles — the real gateway
+ * (REST `/pulls?state=open`), cross-referenced with the ledger. No `gh`/network
+ * lives in lib/sweep.ts; this is the injected edge.
+ *
+ * REST, NOT `gh pr list --json`: that flag is implemented over GraphQL, which put the sweep's
+ * whole critical path behind a budget that was exhausted on 2026-07-28 — 22 consecutive minutes
+ * of totally blind passes, zero PRs dispositioned, while core sat healthy. See lib/open-prs-rest.ts.
+ */
+export function buildOpenPrViews(owner: string, repo: string, ledgerPath: string, deps: NonNullable<Parameters<typeof openPrViewSteps>[3]> = {}): ClassifiedOpenPrView[] {
+  const fetch = deps.fetch ?? ghJson;
+  return runStepsSync(openPrViewSteps(owner, repo, ledgerPath, deps, {
+    read: fetch,
+    openPrRows: () => paceGhEntry(deps.pacer, isGhRateLimitError, () => fetchOpenPrsWithPostedIds(owner, repo, fetch)),
+    ciFailures: deps.fetchCiFailureEvidence ?? fetchCiFailures,
+    requiredContexts: readRequiredStatusCheckContexts,
+  }));
+}
+
+/**
  * W1-T7734 — THE SWEEP'S SAME-PASS RE-READ OF ONE PR. The act-time guard caught a moved head; this reads
  * that PR (and its rollup) once more THROUGH THE DAEMON'S PACER, rebuilds its `OpenPrView` with the same
  * producer a whole pass uses, and carries the board-wide facts one PR's read cannot recompute. `undefined`
@@ -28863,6 +29183,47 @@ export function servedTickRead<T extends object>(
     const facts = await serve();
     if (facts === undefined) return undefined;
     return { ...facts, servedPublishedAtMs: before !== undefined && facts === before.facts ? before.publishedAtMs : requestedAtMs };
+  };
+}
+
+export function buildRereadPrAtAct(
+  owner: string,
+  repo: string,
+  ledgerPath: string,
+  opts: {
+    pacer?: GhCallPacer;
+    fetchAsync?: GhApiFetcher;
+    views?: Omit<NonNullable<Parameters<typeof buildOpenPrViewsAsync>[3]>, "openPrRows" | "fetchAsync" | "pacer">;
+  } = {},
+): (pr: OpenPrView) => Promise<OpenPrView | undefined> {
+  const read: GhApiFetcher = opts.fetchAsync ??((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
+  return async (pr) => {
+    const checkRuns = new Map<string, unknown>();
+    const row = await paceGhEntryAsync(opts.pacer, isGhRateLimitError, () =>
+      fetchSinglePrRestAsync(owner, repo, pr.prNumber, async (args, onRateLimit) => {
+        const response = await read(args, onRateLimit);
+        if (args[1]?.includes("/check-runs?")) checkRuns.set(args[1], response);
+        return response;
+      }));
+    if (row.state !== "OPEN") return undefined;
+    if (row.statusCheckRollup) {
+      attachPostedGateIds(row.statusCheckRollup, checkRuns.get(checkRunsRestArgs(owner, repo, row.headRefOid)[1]));
+    }
+    const views = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
+      ...opts.views, fetchAsync: read, pacer: opts.pacer, openPrRows: [row],
+    });
+    const view = views.find((candidate) => candidate.prNumber === pr.prNumber);
+    if (!view) throw new Error(`the rebuilt view list did not contain PR #${pr.prNumber}`);
+    // Head-independent facts the whole-board producer and the credit projection computed for this PR.
+    return {
+      ...view,
+      supersededBy: view.supersededBy ?? pr.supersededBy,
+      supersessionVerdict: view.supersessionVerdict ?? pr.supersessionVerdict,
+      taskMergedBy: pr.taskMergedBy,
+      planResequenceIneligible: pr.planResequenceIneligible,
+      planResequenceUnmetDependencies: pr.planResequenceUnmetDependencies,
+      planResequenceHeld: pr.planResequenceHeld,
+    };
   };
 }
 
@@ -30627,6 +30988,109 @@ export function fixBranchClaimKey(owner: string, repo: string, branch: string): 
 }
 
 /**
+ * Wire the four gated effects to their real implementations. dispatchFix
+ * reconstructs a W1-T76 `runFixRung` invocation for a PR discovered COLD (no live
+ * run/session): it checks the PR head branch out into a scratch worktree, seeds a
+ * failing verdict from the ledger's unmet criteria, and degrades strike 1 to a
+ * FRESH spawn (a spawn adapter drops an empty resumeSessionId). All effects are
+ * fail-soft — a reconstruction hiccup escalates rather than crashing the sweep,
+ * so one bad PR never strands the reconciler over the rest.
+ */
+/**
+ * W1-T2416 — THE VERDICT READ THE FILER NEVER HAD. Given every prior feedback entry that shares
+ * this filing's exact `origin` (`repair#<surface>` — matched on the SURFACE, never on the
+ * window-keyed `id`, which by construction cannot match across windows, design ii), returns the
+ * most recent one (by `ts`) ONLY when its `status` is `rejected` — the one verdict this filer now
+ * respects — or `undefined` when nothing should be suppressed:
+ *   - no prior entry for this origin at all (a due surface with no history files exactly as it
+ *     does today);
+ *   - the most recent prior entry is `new`/`grilling`/`proposed`/`accepted`/`answered` — an
+ *     untriaged backlog is not a ruling, and an `accepted` entry means the class is being worked,
+ *     a different question this task deliberately leaves alone (design ii).
+ * Pure over its input — no I/O — so it is unit-testable with hand-built fixtures, no disk
+ * involved.
+ */
+export function latestPriorVerdictSuppresses(priorEntriesForOrigin: readonly FeedbackEntry[]): FeedbackEntry | undefined {
+  let latest: FeedbackEntry | undefined;
+  for (const entry of priorEntriesForOrigin) {
+    if (!latest || Date.parse(entry.ts) > Date.parse(latest.ts)) latest = entry;
+  }
+  return latest?.status === "rejected" ? latest : undefined;
+}
+
+/**
+ * A suppressed repair filing has no file to satisfy the normal same-window `existsSync` guard.
+ * Keep the telemetry level-triggered without writing the same row on every daemon poll: one row
+ * per process for each `(root, window id, rejecting verdict, evidence count)`. A daemon restart
+ * logs the still-active suppression once again, and genuinely new evidence logs a fresh row.
+ */
+const repairFilingSuppressionsLogged = new Set<string>();
+
+/**
+ * W1-T2416 — the SAME per-window dedup {@link buildSweepEffects}'s `captureRepairFeedbackImpl`
+ * default has always used (the `existsSync` check, first, unchanged), PLUS the prior-verdict read
+ * design (i) puts at this exact site: a surface whose most recent `repair#<surface>` entry was
+ * rejected files nothing, and instead ledgers `sweep.repair_filing_suppressed` naming the
+ * surface, the distinct-PR count carried in this filing's own evidence, and the id of the
+ * rejected entry that suppressed it (design iii) — so the suppression is never silent even though
+ * the filing it stands down is.
+ *
+ * `root` is a parameter, not the module-level `repoRoot` {@link buildSweepEffects}'s default
+ * binds it to — so this is directly unit-testable against a throwaway directory, the same shape
+ * `test/sweep-repair-filing.test.ts`'s own `realCaptureRepairFeedback` already established for
+ * the dedup half of this function.
+ *
+ * BEST EFFORT, STRUCTURALLY, AND FAILS OPEN (design v): an unreadable or malformed prior entry —
+ * `listFeedback` throwing on a corrupt neighbour in `plan/feedback/`, or a `ts` that fails to
+ * parse — must never silence a filing that would otherwise happen; the read is wrapped so any
+ * throw falls through to filing exactly as before this task, never to silence.
+ */
+export function captureRepairFeedbackWithPriorVerdict(
+  root: string,
+  filing: RepairFilingCapture,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  landingStateRoot?: string,
+): void {
+  if (feedbackCaptured(root, filing.id, landingStateRoot)) return; // already filed this window
+  let suppressedBy: FeedbackEntry | undefined;
+  try {
+    const priorEntriesForOrigin = listFeedback(root).filter((e) => e.origin === filing.origin);
+    suppressedBy = latestPriorVerdictSuppresses(priorEntriesForOrigin);
+  } catch {
+    suppressedBy = undefined; // fail OPEN — file it, never silenced by a read error
+  }
+  if (suppressedBy) {
+    const distinctPrCount = (filing.raw.match(/^- PR #\d+/gm) ?? []).length;
+    const suppressionKey = `${root}\0${filing.id}\0${suppressedBy.id}\0${distinctPrCount}`;
+    if (!repairFilingSuppressionsLogged.has(suppressionKey)) {
+      log("sweep.repair_filing_suppressed", {
+        surface: filing.origin.replace(/^repair#/, ""),
+        distinct_pr_count: distinctPrCount,
+        rejected_entry_id: suppressedBy.id,
+        id: filing.id,
+      });
+      repairFilingSuppressionsLogged.add(suppressionKey);
+    }
+    return;
+  }
+  const capture = { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin };
+  if (landingStateRoot === undefined) captureFeedback(root, capture);
+  else stageFeedbackCapture(root, landingStateRoot, capture);
+}
+
+/** The one-shot boundary owns and drains its judgment pool before returning a summary. */
+export async function runOneShotSweep(
+  run: (pool: HandedOffHeadJudgmentPool) => Promise<SweepSummary>,
+  pool = handedOffHeadJudgmentPool(),
+): Promise<SweepSummary> {
+  try {
+    return await run(pool);
+  } finally {
+    await awaitHandedOffHeadJudgments(pool);
+  }
+}
+
+/**
  * `rmd sweep [--repo <name>] [--dry-run]` — run ONE level-triggered reconciliation
  * pass over every open PR (W1-T77, ratifies P22 core). FAIL LOUD on junk args
  * BEFORE any `gh`/spawn (Standing rule). --dry-run previews dispositions and takes
@@ -30639,6 +31103,129 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   runCreditBackfill(creditCandidates, { ledgerPath, runId, log, dryRun });
   */
   return sweepCommandFromModule(sweepCommandHost({ commandViews: buildOpenPrViews }), rest);
+}
+
+/** The reconciler's live close side (fb-1784756088300-6a481e): `gh issue close --comment` via
+ *  {@link ghIssueGateway}, built once. Throws if the gateway cannot close, so a phantom close
+ *  is never ledgered — the reconciler's per-issue containment catches it as `close-failed`. */
+export function buildEscalationCloser(
+  owner: string,
+  repo: string,
+  issues: IssueGateway = ghIssueGateway(owner, repo),
+): (url: string, comment: string) => void {
+  return (url, comment) => {
+    if (!issues.closeWithComment) throw new Error("issue gateway cannot close issues");
+    issues.closeWithComment(url, comment);
+  };
+}
+
+/**
+ * The escalation-lifecycle reconciler rung (fb-1784756088300-6a481e), shared verbatim by
+ * `rmd sweep` and the daemon's sweep hook: list open needs-human issues, derive each referent's
+ * CURRENT state, and close the resolved ones with a citation naming the resolver. Injectable
+ * `issues`/`github` for tests. Returns the pass summary; never throws (buildEscalationReconcile-
+ * Candidates degrades a failed read to [], runEscalationReconcile contains per-issue throws).
+ */
+/**
+ * W1-T1101: the reconcile summary as THIS caller sees it — `runEscalationReconcile`'s own shape
+ * (lib/sweep.ts, untouched by this task) plus the three intake counts `sweepEscalationReconcile`
+ * already holds in a local. The widening lives HERE, not on the library type, because the library
+ * function never measures these: `buildEscalationReconcileCandidates` does, one statement earlier,
+ * in this same file. Putting the fields on the shared type would have moved a run-task.ts
+ * measurement into lib/sweep.ts for no reader there.
+ */
+export interface SweepEscalationReconcileSummary extends EscalationReconcileSummary {
+  /**
+   * Open issues the read returned, one statement before the candidate loop — see
+   * {@link EscalationIntake}. Present iff an intake reached this caller, which happens UNLESS the
+   * issue-list read itself failed (the builder's `[]`-on-failure contract never calls its
+   * `onIntake` observer) — so `issuesSeen === undefined` is specifically "the read failed", not
+   * "nothing was measured".
+   */
+  issuesSeen?: number;
+  /** Dropped for carrying no `**Task:**` trailer — see {@link EscalationIntake}. */
+  droppedNoTaskTrailer?: number;
+  /** Dropped for naming neither a plan task nor any resolvable PR referent. */
+  droppedNoReferent?: number;
+}
+
+/**
+ * One-line human render of an escalation-reconcile pass, for `rmd sweep`'s console output
+ * (W1-T1101). The line this replaces printed `total` (the POST-DROP candidate count) under the
+ * label "open needs-human issue(s) checked" — so `total: 0` read identically whether nothing was
+ * open, everything open was dropped, or the issue-list read failed outright. This renders
+ * `issuesSeen` under that label instead (the count the read actually returned), names an
+ * unreadable list as exactly that rather than a bare zero, and — only when a drop shrank
+ * `issuesSeen` down to `total` — names the drop reasons, mirroring the ledger row's own
+ * healthy-path-stays-small asymmetry (see the `sweep.escalation_reconcile.summary` log call in
+ * `runEscalationReconcile`).
+ */
+export function renderEscalationReconcileSummary(s: SweepEscalationReconcileSummary): string {
+  if (s.issuesSeen === undefined) {
+    // No intake reached this pass — on `sweepEscalationReconcile`'s own call site (the only
+    // production caller), that happens exactly when `buildEscalationReconcileCandidates`' issue-list
+    // read threw and returned `[]` under its "do nothing this cycle" contract. `total`/`closed` are
+    // both correctly 0 in that case too, so rendering them here would be the identical, ambiguous
+    // zero this task exists to remove.
+    return "escalation reconcile: issue-list read FAILED this cycle (see sweep.escalation_reconcile.list_failed) — nothing checked, nothing closed";
+  }
+  const droppedTotal = s.issuesSeen - s.total;
+  const droppedNote =
+    droppedTotal > 0
+      ? ` · ${s.total} became candidate(s), ${droppedTotal} dropped (${s.droppedNoTaskTrailer ?? 0} no-task-trailer, ${s.droppedNoReferent ?? 0} no-referent)`
+      : "";
+  return `escalation reconcile: ${s.issuesSeen} open needs-human issue(s) checked · ${s.closed} closed${droppedNote}`;
+}
+
+export async function sweepEscalationReconcile(
+  owner: string,
+  repo: string,
+  plan: Plan,
+  ledgerPath: string,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  opts: { dryRun?: boolean; issues?: IssueGateway; github?: GitHub;
+    tickRead?: Pick<TickReadFacts, "escalationCandidates" | "escalationIntake"> } = {},
+): Promise<SweepEscalationReconcileSummary> {
+  let intake: EscalationIntake | undefined;
+  const candidates = opts.tickRead?.escalationCandidates ?? buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
+    issues: opts.issues,
+    github: opts.github,
+    onIntake: (i) => {
+      intake = i;
+    },
+  });
+  if (opts.tickRead) intake = opts.tickRead.escalationIntake;
+  const summary = await runEscalationReconcile(candidates, {
+    intake,
+    closeIssue: buildEscalationCloser(owner, repo, opts.issues),
+    ledgerPath,
+    runId,
+    log,
+    dryRun: opts.dryRun,
+  });
+  // W1-T2603: the SEPARATE retirement path for a headroom breach that has recovered — this class
+  // carries no task referent, so `buildEscalationReconcileCandidates`/`runEscalationReconcile`
+  // above structurally never see it (see that task's rationale). Sharing this rung's own
+  // `issues`/`dryRun` rather than a second gateway construction, but a fully independent
+  // candidate build and close loop, non-fatal like everything else in this rung — a throw here
+  // must never take out the task-referent reconciler's own summary above.
+  try {
+    await retireRecoveredHeadroomEscalations(ledgerPath, runId, {
+      issues: opts.issues ?? ghIssueGateway(owner, repo),
+      log,
+      dryRun: opts.dryRun,
+    });
+  } catch (e) {
+    log("sweep.headroom_recovery.failed", { error: String((e as Error)?.message ?? e) });
+  }
+  // W1-T1101: the SAME counts the ledger row below has carried since #1084, now also riding on the
+  // returned summary so `renderEscalationReconcileSummary` (the CLI line) can see them. No new
+  // read, no change to what `runEscalationReconcile` measures or logs — the merge happens HERE,
+  // in the file that already holds `intake`, rather than widening lib/sweep.ts's shared type.
+  return intake
+    ? { ...summary, issuesSeen: intake.issuesSeen, droppedNoTaskTrailer: intake.droppedNoTaskTrailer, droppedNoReferent: intake.droppedNoReferent }
+    : summary;
 }
 
 /** Rejudge only observed open issues, using their recorded subjects and this sweep's referent state. */
@@ -31257,6 +31844,24 @@ export function runWorkerTailSweepRung(config: Config, log: (step: string, extra
   }
 }
 
+export function runTmpSweepRung(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  opts: TempSweepOpts = {},
+): TempSweepSummary {
+  try {
+    const swept = sweepStaleTempDirs(opts);
+    log("daemon.tmp_sweep", {
+      removed: swept.removed.length,
+      kept: swept.kept.length,
+      oldest_kept_age_ms: swept.oldestKeptAgeMs,
+    });
+    return swept;
+  } catch (e) {
+    log("daemon.tmp_sweep", { error: String((e as Error)?.message ?? e) });
+    return { removed: [], kept: [], oldestKeptAgeMs: null };
+  }
+}
+
 /**
  * Automatic remote-branch cleanup for one target repository. The cheap branch-set read happens on
  * every full sweep, while the existing expensive classifier/pruner runs only on first use, a branch
@@ -31417,6 +32022,13 @@ function* automaticBranchReapSteps(
 /** Ledger step a worker-stall verdict rides — appended ONCE per quiet episode (design ii), never
  *  once per tick. */
 export const WORKER_STALLED_LEDGER_STEP = "worker.stalled";
+
+/** DEFAULT quiet threshold, mirrored from `plan/policy.yaml`'s `workerStall` row for a caller
+ *  with no policy in hand (test fixtures, primarily) — production always threads the real
+ *  `policy.values.workerStall` through {@link buildSweepHook} instead of relying on this. See
+ *  that row's own comment for why 60 minutes is the default (design note v: comfortably above
+ *  the ~16-minute `--ci-parity` suite W1-T463/W1-T465 measured). */
+export const DEFAULT_WORKER_STALL_MS = 3_600_000;
 
 /** One live in-flight run whose newest `worker.state` row has aged past the policy `workerStall`
  *  threshold, per {@link findStalledWorkers}. */
@@ -31774,6 +32386,94 @@ export function lightPassActionable(
 }
 
 /**
+ * W1-T2430 — DOES THIS PR'S ENTIRE RED VERDICT REDUCE TO CANCELLATIONS?
+ *
+ * TRUE only when {@link isBlockedCi} holds, at least one required check is cancelled
+ * ({@link OpenPrView.cancelledRequiredChecks}), and EVERY {@link OpenPrView.ciFailures} entry
+ * names one of those cancelled checks — the EXACT SAME fold `runSweep`'s own `blocked-fixable`
+ * case performs (`src/lib/sweep.ts`, the `cancelledChecks`/`genuineFailures` pair immediately
+ * before its `dispatchFix` call) to decide whether to stand down after re-queueing rather than
+ * fall through to a fix dispatch. Recomputed here, read-only, off the SAME {@link OpenPrView}
+ * snapshot `runSweep` itself will evaluate (no re-fetch, so no race between this predicate's
+ * answer and the switch's own) — a PR this returns `true` for is GUARANTEED to reach that
+ * stand-down branch and never `dispatchFix`, which is what lets `buildSweepLightHook` admit it
+ * on a light pass without loosening `fixRungAllowed`'s own gate for any other PR.
+ *
+ * A PR with NO cancelled required check (the common case) always reads FALSE here — never
+ * routed to the requeue-only batch, so its ordinary `deferred to full sweep (light pass)`
+ * stand-down is entirely unchanged by this predicate's existence.
+ */
+export function blockedFixableIsRequeueOnly(pr: OpenPrView): boolean {
+  if (!isBlockedCi(pr)) return false;
+  const cancelledChecks = pr.cancelledRequiredChecks ?? [];
+  if (cancelledChecks.length === 0) return false;
+  const genuineFailures = (pr.ciFailures ?? []).filter(
+    (f) => !cancelledChecks.some((c) => c.name === f.name),
+  );
+  return genuineFailures.length === 0;
+}
+
+/**
+ * W1-T1211 — IS THIS RUN DEMONSTRABLY WAITING RATHER THAN SPENDING A WORKER?
+ *
+ * TRUE only when the task's LATEST RETAINED row is {@link AWAITING_EXTERNAL_LEDGER_STEP}. Reading
+ * the latest retained row rather than the latest row of any kind is what makes this survive a
+ * rotation: the polling telemetry beside it is shed by design, and a predicate that depended on it
+ * would silently invert the moment the rotator ran.
+ *
+ * DELIBERATELY NOT `liveInflightRuns`: that pid-checks a lock, which is HOST-LOCAL (a pid on
+ * another host is unreadable), and it carries W1-T1109's consumer defect — the lock-vs-process arm
+ * compares a lock FILENAME's task id against a set of RUN ids, which can never match. Nothing here
+ * builds on it (design note ii).
+ *
+ * FAILS SAFE IN BOTH DIRECTIONS. No rows for the task, or a latest retained row that is any other
+ * step, reads FALSE — the fix rung stands down exactly as it does today. And a run that DIED while
+ * waiting has no worker either, so treating its stale row as "waiting" reaches the same conclusion
+ * by a different route rather than a wrong one.
+ *
+ * WRITTEN AS A DIRECT `.step ===` COMPARISON ON PURPOSE, like `reviewPostRefusedFor` above:
+ * `test/ledger-rotation.test.ts` derives `DECISION_RELEVANT_LEDGER_STEPS` membership by scanning
+ * consumer source for exactly that shape, so this makes the dependency VISIBLE to the check that
+ * exists to find it. The step is registered in that set by this same change.
+ */
+export function runIsAwaitingExternal(lines: ReadonlyArray<Record<string, unknown>>, taskId: string): boolean {
+  let latestTs = "";
+  let awaiting = false;
+  for (const line of lines) {
+    if (line.task_id !== taskId) continue;
+    const rawStep: unknown = line.step;
+    const step = typeof rawStep === "string" ? rawStep : "";
+    if (!DECISION_RELEVANT_LEDGER_STEPS.has(step)) continue; // the retained core only — see this function's doc
+    const ts = typeof line.ts === "string" ? line.ts : "";
+    if (ts >= latestTs) {
+      latestTs = ts;
+      // THE STRING LITERAL, NOT THE CONSTANT, ON PURPOSE. `test/ledger-rotation.test.ts` scans
+      // consumer source for a step-equality comparison against a quoted name; comparing against the
+      // exported identifier instead would hide this dependency from the very guard that exists to
+      // find it, and the predicate would then rest on retention nobody had registered. (The comment
+      // itself must not spell that pattern out either — the scanner reads comments too.)
+      awaiting = line.step === "run.awaiting_external";
+    }
+  }
+  return awaiting;
+}
+
+/**
+ * W1-T1211 — MAY THE FIX RUNG ACT ALONGSIDE THE RUNS CURRENTLY IN FLIGHT?
+ *
+ * TRUE only when EVERY in-flight run is demonstrably waiting. One run still working is enough to
+ * stand the rung down, which is the property the restriction genuinely buys (design note iv: never
+ * run the fix rung beside a spending worker). An EMPTY in-flight set is vacuously true — there is
+ * nothing to be concurrent with.
+ */
+export function fixRungAllowedBesideInFlight(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  inFlightTaskIds: readonly string[],
+): boolean {
+  return inFlightTaskIds.every((taskId) => runIsAwaitingExternal(lines, taskId));
+}
+
+/**
  * W1-T1211: the in-flight TASK ids, read from `state/inflight/*.lock` FILENAMES.
  *
  * A directory read, never a pid probe — see {@link runIsAwaitingExternal}'s doc for why
@@ -31789,6 +32489,14 @@ export function inFlightTaskIdsFrom(inflightDir: string): string[] {
     .filter((entry) => entry.endsWith(".lock") && !entry.startsWith(FIX_BRANCH_CLAIM_PREFIX))
     .map((entry) => entry.slice(0, -".lock".length));
 }
+
+/** W1-T9569 — what a review-only light pass writes on its rows: its scope, in the stand-down text and in
+ * `light_pass_scope`, never the ordinary "deferred to full sweep (light pass)". An ordinary pass gets nothing. */
+export function reviewOnlyLightPassDeps(scope?: LightPassScope): Pick<SweepDeps, "lightPassScope" | "standDownReasonFor"> {
+  const name = scope?.reviewOnly === true ? scope.scope : undefined;
+  return name ? { lightPassScope: name, standDownReasonFor: () => reviewOnlyStandDownReason(name) } : {};
+}
+
 
 export function buildSweepLightHook(
   owner: string,
@@ -40353,7 +41061,7 @@ import {
   escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
 } from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
-import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildCreditCandidates, buildEscalationReconcileCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
+import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildCreditCandidates, buildEscalationReconcileCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
@@ -41687,6 +42395,7 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     buildSweepEffects,
     USAGE,
     DEFAULT_BUDGET_USD,
+    DEFAULT_WORKER_STALL_MS,
     buildReviewerHealthRoute,
     buildFreshTreeReviewRunner,
     buildReviewerCodeFreshnessGate,
@@ -41699,6 +42408,7 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     buildBaseReproductionProbe,
     buildImportClosureRead,
     updateBranchViaGh,
+    captureRepairFeedbackWithPriorVerdict,
     reclaimAbandonedWorker,
     registeredFixWorktreeOwner,
     captureRegisteredFixOwnerSnapshot,
@@ -41712,6 +42422,7 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     clearStaleDirtyFixOwner,
     resetTrackedDirtyFixOwner,
     depReviewCommand,
+    dispatchFixPreflightStandDown,
     ghLiveState,
     resolveFixRungTaskContractAtHeadAsync,
     createFixRungWorktreeWithToolchain,
@@ -41732,6 +42443,7 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     ghLiveHead,
     fetchPrDiffFilesViaGh,
     redBaseRefreshFactsFromRest,
+    readyDraftViaGh,
     readFixRoundCommitsViaGit,
     runNpmScriptViaSpawn,
     commitGeneratorOutputViaGit,
@@ -41742,18 +42454,30 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     FixRungCheckoutRefusedError,
     buildEscalationTriageRuntime,
     sweepPostFixReverification,
+    updatedForWorkflowFromLedger,
+    runOneShotSweep,
     handedOffHeadRiskJudge,
     codeScanningJudgeDeps,
+    sweepEscalationReconcile,
     sweepEscalationTriage,
     runAutomaticBranchReapRung,
+    renderEscalationReconcileSummary,
     buildInboxDraftHook,
+    createPlanFilingClassificationTelemetry,
     refreshEscalationTriageEvidence,
+    tickReadReverificationDeps,
     gitCredentialFixSpawn,
+    buildRereadPrAtAct,
+    sweepPrTerminalRung,
+    runTmpSweepRung,
     runWorkerTailSweepRung,
     runInflightLockSweepRung,
     runWorkerStallDetectorRung,
     runMountRecommenderRung,
+    fixRungAllowedBesideInFlight,
     inFlightTaskIdsFrom,
+    blockedFixableIsRequeueOnly,
     lightPassActionable,
+    reviewOnlyLightPassDeps,
   };
 }
