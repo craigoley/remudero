@@ -38,7 +38,7 @@ function assertDiscovery(dir: string): string[] {
       assert.ok(selected.some(candidate => candidate.name === name), `${label}: when-paths glob ${glob} matches no tracked file`);
     }
     for (const lane of TASK_TYPES) {
-      const selected = observeSkillSelection([skill], lane, DEFAULT_KNOWLEDGE_BUDGET_CHARS, tracked).selected;
+      const selected: ReturnType<typeof observeSkillSelection>["selected"] = observeSkillSelection([skill], lane, DEFAULT_KNOWLEDGE_BUDGET_CHARS, tracked).selected;
       assert.equal(selected.some(candidate => candidate.name === name), skill.appliesTo.includes(lane), `${label}: selector mismatch for ${lane}`);
     }
     const consumers: SkillWorkerCapabilityContext["consumers"][number][] = [];
