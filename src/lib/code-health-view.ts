@@ -141,7 +141,7 @@ export function validateCodeHealthRequest(params: URLSearchParams, source?: View
     if (!roster || roster.version !== "code-health-view-v1" || roster.repository !== "all" || !Array.isArray(roster.expectedRepositories) ||
         now !== undefined && !source.judge(held!.body.sources, now, held!).some(value => {
           if (value.name !== "repositories:code-health-scope" || value.state !== "fresh" || value.asOf === null) return false;
-          const observedAt = Date.parse(value.asOf);
+          const observedAt = Date.parse(value.asOf); // expiring-fixture: exempt -- judged at the injected request clock, fixed in tests.
           return Number.isFinite(observedAt) && observedAt <= now && now - observedAt <= SCOPE_BUDGET_MS;
         })) {
       source.want?.(CODE_HEALTH_VIEW_NAME, ""); return { error: "view_not_ready", status: 503, detail: "Code health is waiting for the configured repository list." };
