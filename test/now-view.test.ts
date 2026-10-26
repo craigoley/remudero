@@ -44,6 +44,9 @@ import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, defaultCreditStorePath, 
 import { makeTempDir } from "../src/lib/tmp.js";
 import { SHADOW_CLASSIFICATIONS, VIEW_SHADOW_DIFF_STEP, createViewShadow, readShadowEvidence } from "../src/lib/view-shadow.js";
 import { viewEtag, type ViewSwitchMode } from "../src/lib/views.js";
+import { changedFilesCachePath, createChangedFilesCache } from "#src/lib/changed-files-cache.js";
+import { isPlanOnlyChangeset } from "#src/lib/status.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
@@ -272,6 +275,72 @@ function restPull(row: BoardPrRest): Record<string, unknown> {
     updated_at: row.updatedAt, head: { ref: row.headRefName, sha: row.headRefOid }, auto_merge: row.autoMergeRequest,
   };
 }
+
+type SnapshotEvidenceGateway = GitHub & { changedFileEvidence?: (url: string) => { status: string; reason?: string; files?: readonly string[] } };
+function snapshotEvidence(gh: GitHub, number: number) {
+  const read = (gh as SnapshotEvidenceGateway).changedFileEvidence;
+  assert.equal(typeof read, "function", "default persisted gateway must expose evidence");
+  return read!(`https://github.com/o/r/pull/${number}`);
+}
+
+async function persistedEvidence(t: TestCtx, files: string[]) {
+  const root = scratch(t), clock = stepped(), head = "c".repeat(40);
+  const row: BoardPrRest = { ...openPr(901, "W1-T7"), state: "MERGED", headRefOid: head };
+  const board = createBoardSnapshotCache(root, "o", "r");
+  assert.equal(board.commitClosed([row]), true);
+  board.commitOpen!([], clock.now());
+  const cache = createChangedFilesCache(root, "o", "r", { clock, fetch: async () => files });
+  const producer = buildBatchedGithub("o", "r", { fetchAll: () => [row], changedFilesCache: cache, exec: () => assert.fail("producer never uses synchronous fallback") });
+  producer.headRefName(row.url); producer.changedFiles!(row.url); await cache.settle();
+  return { root, clock, row, board, path: changedFilesCachePath(root, "o", "r") };
+}
+
+test("snapshot gateway consumes qualified changed file evidence without fetching", async (t) => {
+  const fixture = await persistedEvidence(t, ["src/fix.ts"]);
+  const shim = ghShim([]), previous = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${previous ?? ""}`;
+  t.after(() => { process.env.PATH = previous; });
+  const before = readFileSync(fixture.path, "utf8");
+  const gateway = snapshotGithub(fixture.root, "o", "r", fixture.clock).github;
+  assert.equal(snapshotEvidence(gateway, 901).status, "complete");
+  assert.deepEqual(gateway.changedFiles?.(fixture.row.url), ["src/fix.ts"]);
+  assert.equal(snapshotEvidence(gateway, 999).status, "unknown");
+  gateway.changedFiles?.("https://github.com/o/r/pull/999");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual(shim.calls(), [], "neither evidence nor legacy snapshot misses spawn gh");
+  assert.equal(readFileSync(fixture.path, "utf8"), before, "the view never writes the producer's cache");
+});
+
+test("snapshot changed file evidence distinguishes merged source plan only and unknown", async (t) => {
+  const source = await persistedEvidence(t, ["src/fix.ts"]);
+  const plan = await persistedEvidence(t, ["plan/tasks.d/filing.yaml"]);
+  const sourceEvidence = snapshotEvidence(snapshotGithub(source.root, "o", "r", source.clock).github, 901);
+  const planEvidence = snapshotEvidence(snapshotGithub(plan.root, "o", "r", plan.clock).github, 901);
+  assert.equal(sourceEvidence.status, "complete"); assert.equal(planEvidence.status, "complete");
+  assert.equal(isPlanOnlyChangeset(sourceEvidence.files!), false);
+  assert.equal(isPlanOnlyChangeset(planEvidence.files!), true);
+  const generation = snapshotGithub(source.root, "o", "r", source.clock).generation;
+  writeFileSync(source.path, JSON.stringify({ schema: 1, repository: "o/r", entries: [{ url: source.row.url, files: ["src/old.ts"], at: source.clock.now() }] }));
+  const legacy = snapshotGithub(source.root, "o", "r", source.clock);
+  assert.notEqual(legacy.generation, generation, "changed-file evidence is part of snapshot identity");
+  assert.equal(snapshotEvidence(legacy.github, 901).status, "unknown", "legacy files are never upgraded");
+  rmSync(source.path);
+  assert.equal(snapshotEvidence(snapshotGithub(source.root, "o", "r", source.clock).github, 901).status, "unknown");
+});
+
+test("snapshot changed file evidence guards are load bearing", async (t) => {
+  const fixture = await persistedEvidence(t, ["src/fix.ts"]);
+  assert.equal(snapshotEvidence(snapshotGithub(fixture.root, "o", "r", fixture.clock).github, 901).status, "complete");
+  const original = readFileSync(fixture.path, "utf8"), truncated = JSON.parse(original);
+  truncated.entries[0].evidence.complete = false;
+  writeFileSync(fixture.path, JSON.stringify(truncated));
+  assert.equal(snapshotEvidence(snapshotGithub(fixture.root, "o", "r", fixture.clock).github, 901).status, "unknown", "incomplete list cannot prove repair");
+  writeFileSync(fixture.path, original);
+  fixture.board.commitClosed([{ ...fixture.row, headRefOid: "d".repeat(40) }]);
+  assert.equal(snapshotEvidence(snapshotGithub(fixture.root, "o", "r", fixture.clock).github, 901).status, "unknown", "wrong head cannot prove repair");
+  fixture.board.commitClosed([{ ...fixture.row, state: "CLOSED" }]);
+  assert.equal(snapshotEvidence(snapshotGithub(fixture.root, "o", "r", fixture.clock).github, 901).status, "unknown", "CLOSED is not MERGED");
+});
 
 test("the now view shows open pull requests from the persisted snapshot", (t) => {
   const root = scratch(t);
