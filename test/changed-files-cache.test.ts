@@ -262,7 +262,9 @@ test("changed file evidence binds repository pull request merged state and immut
   assert.deepEqual(readEvidence(restarted), evidence);
   (evidence.files as string[]).push("tainted.ts");
   gh.changedFiles!(url(31))!.push("legacy-taint.ts");
-  assert.deepEqual(readEvidence(gh).files, ["src/fix.ts"], "callers cannot mutate cached evidence");
+  const reread = readEvidence(gh);
+  assert.equal(reread.status, "complete");
+  assert.deepEqual(reread.files, ["src/fix.ts"], "callers cannot mutate cached evidence");
 });
 
 test("changed file evidence refuses stale foreign incomplete and reopened heads", async () => {
@@ -317,6 +319,8 @@ test("changed file evidence preserves JSON encoded filenames on the real asynchr
   const cache = createChangedFilesCache(root, "o", "r", { ghBin: join(shim.dir, "gh") });
   const gh = boardGateway([{ ...pr(31, "MERGED"), headRefOid: evidenceHead }], cache, []);
   gh.changedFiles!(url(31)); await cache.settle();
-  assert.deepEqual(readEvidence(gh).files, files);
+  const evidence = readEvidence(gh);
+  assert.equal(evidence.status, "complete");
+  assert.deepEqual(evidence.files, files);
   assert.ok(shim.calls().some(call => call.endsWith("--jq .[].filename | @json")));
 });
