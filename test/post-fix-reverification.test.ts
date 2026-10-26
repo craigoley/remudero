@@ -745,12 +745,13 @@ test("post-fix default ancestry transport holds contained, missing, contradictor
     const savedPath = process.env.PATH;
     process.env.PATH = `${shim.dir}:${savedPath}`;
     let pushes = 0;
+    const observations: unknown[] = [];
     try {
-      const result = await sweepPostFixReverification("o", "r", [ciGateTimeoutPr({ headSha: head })], ledgerPath(), "ANCESTRY", () => {}, {
+      const result = await sweepPostFixReverification("o", "r", [ciGateTimeoutPr({ headSha: head })], ledgerPath(), "ANCESTRY", (step, extra) => observations.push({ step, extra }), {
         isMergedByNumber: n => n === 820,
         pushEmptyCommit: () => { pushes++; return "newsha"; },
       });
-      assert.equal(pushes, row.expected, row.name);
+      assert.equal(pushes, row.expected, JSON.stringify({ name: row.name, observations, calls: shim.calls() }));
       assert.equal(result.redriven, row.expected, row.name);
       assert.ok(shim.calls().some(call => call.includes("state,mergeCommit")), "the real default reads the merged identity");
       assert.equal(shim.calls().some(call => call.includes("compare/")), !row.missingFix, row.name);
