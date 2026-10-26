@@ -60,10 +60,34 @@ raw: >-
   Trials remains out of scope.
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/14349
+summary:
+  headline: Approve filing a bounded task to show when gardener outcome refresh
+    last succeeded.
+  what_happened: A read-only check found the saved gardener outcome registry much
+    older than current intake cadence, but this does not prove why it went
+    stale. Codex proposes adding local attempt and outcome status to the
+    existing reconciliation step, so the Console can state the real stale reason
+    without changing cadence, admission, or spending.
+  decision: Choose whether to file this as a separately bounded task; filing does
+    not approve implementation or deployment.
+  options:
+    - label: File the bounded task
+      consequence: Creates durable intake only; implementation still requires normal
+        reservation, review, and hosted CI gates.
+      intent: approve
+    - label: Decline for now
+      consequence: No task is filed; the stale registry remains visible without new
+        refresh-status evidence.
+      intent: decline
+    - label: Reframe scope first
+      consequence: Send the proposal back to Codex to narrow it before any task is filed.
+      intent: reframe
+  if_nothing_happens: The stale registry stays unexplained and no task is filed;
+    no gardener is enabled or accelerated.
 expansion: null
 submission_key: console-followup:90f3d8b4-4274-49df-a072-c69955ede915
 thread_id: null
+answered_by: null

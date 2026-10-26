@@ -1,0 +1,56 @@
+- id: W1-T10683
+  title: Keep Code health scope ready when only its verified source clock advances
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: span
+  origin: "Operator-approved cockpit delivery; authenticated Code health readiness audit 2026-10-26"
+  status: queued
+  attempts: 0
+  priority: 2
+  budget_usd: 12
+  depends_on:
+    - W1-T10560
+  files:
+    - src/lib/code-health-view.ts
+    - test/console-api/views/code-health-cached-view.test.ts
+  rationale: >-
+    The Code health scope validator reads the held body's original source timestamp. The read model
+    deliberately keeps a stable body and ETag when report data is unchanged, while publishing that
+    body's newer source readings separately. Live authenticated repository and portfolio reads returned
+    503 after the original scope timestamp aged beyond three minutes despite a populated source store.
+    Use the existing body-specific freshness judgment so a verified scope refresh remains usable.
+  design: >-
+    Judge the held scope body's sources through the existing ViewBodySource judge at the requested
+    clock before applying the unchanged scope freshness bound. Bind the reading to that scope body's
+    view and key; a different body's clock must not authorize the held roster. Retain the required
+    scope source name, fresh state, finite observation time, no future observation, three-minute age
+    bound, declared repository inventory, page identity and saved snapshot checks. Missing, failed,
+    malformed or stale judgments remain not ready and request normal materialization. Do not remove
+    or raise the freshness bound, renew scan measurements, mutate the general ETag mechanism, add
+    scanners, change collection cadence or alter admission, ownership or activation policy.
+
+    Exercise the real read-model consumer that receives body-specific source messages: hold a body
+    with the same ETag and unchanged data, advance only its verified scope source clock, and prove
+    the repository request becomes usable. Preserve negative controls for stale, unavailable, future
+    and foreign-body clocks, plus unknown repository and invalid page rejection. Tests must use
+    real source-clock judgment rather than returning a hand-written ready value from a judge fake.
+  falsifier: >-
+    Restore validation against the held body's original timestamp: the advancing-clock regression
+    must fail while stale and foreign-body controls remain refused. Restore the fix and rerun the
+    verified physical suite. Repeated page reads must not launch collection, a model or filing.
+  acceptance:
+    - claim: verified scope refreshes keep unchanged Code health reports readable without renewing measurements
+      proof: "unit test: code health scope stays ready when only its source clock advances"
+    - claim: stale unavailable future and foreign clocks cannot authorize a saved repository list
+      proof: "unit test: code health scope refuses unqualified source clock updates"
+  note: >-
+    Reserved on origin from the operator checkout for codex/code-health-scope-clock-20261026.
+    Main and all twelve observed open PR heads were inspected, thirteen verified trees with more
+    than 4300 plan-shard controls each. All present validators use the original held timestamp;
+    none uses the existing source judge. The Daily progress head predates this source file.
+    Native shadow bodies pass the strict OpenAPI response schema and explicitly report missing
+    measurements. This task grants no source, runtime or implementation credit at filing time.
