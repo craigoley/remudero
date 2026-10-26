@@ -4778,6 +4778,16 @@ export async function runDaemon(
       return { kind: "merged" };
     }
     if (!result.merged) {
+      // W1-T3979: live ownership is a scheduling deferral even when the task has dependents.
+      if (result.verdict === "blocked_inflight") {
+        blockRetryStates.delete(task.id);
+        report("daemon.block.inflight_contention", {
+          task: task.id,
+          verdict: result.verdict,
+          run_id: result.runId,
+        });
+        return { kind: "continue" };
+      }
       // Block reasoning: reuse the transient/strike taxonomy and the plan's DAG instead of halting on any
       // non-merged verdict (W1-T46, superseding blunt stop-on-block).
       const state = blockRetryStates.get(task.id) ?? INITIAL_RETRY_STATE;
@@ -4825,22 +4835,6 @@ export async function runDaemon(
       blockRetryStates.delete(task.id); // resolved one way or another below
 
       if (disposition.kind === "independent_failure") {
-        if (result.verdict === "blocked_inflight") {
-          // W1-T3979: a LIVE in-flight claim is a scheduling DEFERRAL, not an independent failure.
-          // run-task.ts's own admission (guard 1, the per-task inflight lock) already refused to
-          // spawn a second worker THIS tick — the first worker still owns the live lock and may
-          // still be making forward progress. Writing `dispatch.blocked_independent` here would
-          // durably poison the task in status.ts's `latestIndependentFailureBlock` once that lock
-          // releases, even though nothing about the task itself failed. So: no ledger write, no
-          // entry in `independentFailureBlocksThisRun`, and the tick simply continues — the live
-          // lock, not a ledger row, remains the actual exclusion until its owner finishes.
-          report("daemon.block.inflight_contention", {
-            task: task.id,
-            verdict: result.verdict,
-            run_id: result.runId,
-          });
-          return { kind: "continue" };
-        }
         if (result.verdict === "blocked_illformed") {
           illformedAdmissionBlocksThisRun.set(task.id, JSON.stringify(task));
           report("daemon.block.illformed_admission", {
