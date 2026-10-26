@@ -2,9 +2,10 @@
  * lib/trust-root-text.ts — text an agent obeys must hold nothing a reader cannot see.
  *
  * The TRUST ROOT is every tracked file that instructs an agent here: CLAUDE.md and AGENTS.md, the doctrine
- * bodies, learnings, skills and settings under .claude/, the plan (task text is rendered into worker
+ * bodies, the learnings corpus, the skills and settings under .claude/, the plan (task text is rendered into worker
  * prompts), the narrative stores, and the hooks that set what an agent may run. Machine lanes write much of
- * it: the retro, the gardeners and the triage lane file and amend it every day.
+ * it: the retro, the gardeners and the triage lane file and amend it every day. The plan, its narrative and the
+ * learnings corpus are read from the repo's layout (repo-layout.ts), never named here.
  *
  * A model reads characters a reviewer never sees. Zero-width and format characters split a word so a
  * reviewer and a grep disagree about it; bidirectional controls reorder what a diff displays; Unicode tag
@@ -14,23 +15,43 @@
  * with a model (swamp-club/swamp, .github/workflows/ci.yml, claude-review-integrity); this is the part a
  * deterministic scan can decide, so no model is asked.
  *
- * plan/feedback/ is OUT: it holds external input the triage lane reads as data, and Dependabot release
- * notes there carry U+200B after every "@" on purpose, so a mention cannot ping anyone.
+ * The plan's feedback/ directory is OUT: it holds external input the triage lane reads as data, and Dependabot
+ * release notes there carry U+200B after every "@" on purpose, so a mention cannot ping anyone.
  */
+import { relative, sep } from "node:path";
 
-/** Top-level files in the trust root. */
-export const TRUST_ROOT_FILES: readonly string[] = ["CLAUDE.md", "AGENTS.md", "MASTER-PLAN.md", "DECISIONS.md", "LEARNINGS.md"];
+import type { RepoLayout } from "./repo-layout.js";
 
-/** Directories in the trust root, each ending in `/`. */
-export const TRUST_ROOT_DIRS: readonly string[] = ["doctrine/", "learnings/", ".claude/", "hooks/", "plan/"];
+/** Top-level instruction files no {@link RepoLayout} field names. */
+const INSTRUCTION_FILES: readonly string[] = ["CLAUDE.md", "AGENTS.md", "DECISIONS.md", "LEARNINGS.md"];
 
-/** Directories inside {@link TRUST_ROOT_DIRS} that hold external input, not instructions. */
-export const TRUST_ROOT_EXCLUDED_DIRS: readonly string[] = ["plan/feedback/"];
+/** Instruction directories no {@link RepoLayout} field names, each ending in `/`. */
+const INSTRUCTION_DIRS: readonly string[] = ["doctrine/", ".claude/", "hooks/"];
 
-/** Whether a repo-relative, `/`-separated path is in the trust root. */
-export function isTrustRootPath(path: string): boolean {
-  if (TRUST_ROOT_EXCLUDED_DIRS.some((dir) => path.startsWith(dir))) return false;
-  return TRUST_ROOT_FILES.includes(path) || TRUST_ROOT_DIRS.some((dir) => path.startsWith(dir));
+/** A repo's trust root as repo-relative, `/`-separated paths; every directory ends in `/`. */
+export interface TrustRoot {
+  files: readonly string[];
+  dirs: readonly string[];
+  /** Directories inside {@link dirs} that hold external input, not instructions. */
+  excludedDirs: readonly string[];
+}
+
+/** The trust root of the repo `layout` describes: the fixed instruction files and directories, plus the plan
+ *  directory, the plan's narrative and the learnings corpus wherever the layout puts them. */
+export function trustRootFor(layout: Pick<RepoLayout, "root" | "planDir" | "masterPlan" | "learningsDir">): TrustRoot {
+  const rel = (path: string): string => relative(layout.root, path).split(sep).join("/");
+  const planDir = `${rel(layout.planDir)}/`;
+  return {
+    files: [...INSTRUCTION_FILES, rel(layout.masterPlan)],
+    dirs: [...INSTRUCTION_DIRS, `${rel(layout.learningsDir)}/`, planDir],
+    excludedDirs: [`${planDir}feedback/`],
+  };
+}
+
+/** Whether a repo-relative, `/`-separated path is in `root`. */
+export function isTrustRootPath(root: TrustRoot, path: string): boolean {
+  if (root.excludedDirs.some((dir) => path.startsWith(dir))) return false;
+  return root.files.includes(path) || root.dirs.some((dir) => path.startsWith(dir));
 }
 
 /** Every refused code point range, inclusive, with the name a finding prints. */
