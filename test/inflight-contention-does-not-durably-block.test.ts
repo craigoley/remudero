@@ -33,6 +33,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 import { runDaemon } from "../src/lib/daemon.js";
 import { acquireInflightLock, InflightLockError } from "../src/lib/inflight-lock.js";
@@ -63,6 +64,59 @@ function independentTaskPlan(id = "D"): Plan {
   } as unknown as Task;
   return { tasks: [t], byId: new Map([[id, t]]) } as unknown as Plan;
 }
+
+async function dependentOwnershipResult(verdict: "blocked_inflight" | "blocked_review") {
+  const inflightDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}dependent-claim-`));
+  const holder = acquireInflightLock(inflightDir, "D", { run_id: "existing-owner", isPidAlive: () => true });
+  const parent = independentTaskPlan("D").tasks[0];
+  const descendant = { ...parent, id: "E", depends_on: ["D"] } as Task;
+  const plan = { tasks: [parent, descendant], byId: new Map([["D", parent], ["E", descendant]]) } as Plan;
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let workerSpawns = 0, descendantSpawns = 0, escalations = 0;
+  try {
+    const summary = await runDaemon(plan, {
+      refreshMerged: () => () => false,
+      runOne: async (id): Promise<RunResult> => {
+        if (id === "E") descendantSpawns++;
+        try {
+          const duplicate = acquireInflightLock(inflightDir, id, { run_id: "second-owner", isPidAlive: () => true });
+          workerSpawns++;
+          duplicate.release();
+        } catch (error) {
+          if (!(error instanceof InflightLockError)) throw error;
+          return { taskId: id, runId: `${id}-refused`, merged: false, costUsd: 0, verdict };
+        }
+        return { taskId: id, runId: `${id}-unexpected-worker`, merged: true, costUsd: 0, verdict: "merged" };
+      },
+      escalateBlock: async () => { escalations++; },
+      sleep: async () => {},
+      log: (step, extra = {}) => rows.push({ step, extra }),
+    }, { max: 1 });
+    return { summary, rows, workerSpawns, descendantSpawns, escalations };
+  } finally {
+    holder.release();
+    rmSync(inflightDir, { recursive: true, force: true });
+  }
+}
+
+test("a dependent task's live claim defers without escalation while its descendant remains gated", async () => {
+  const result = await dependentOwnershipResult("blocked_inflight");
+  assert.equal(result.workerSpawns, 0);
+  assert.equal(result.descendantSpawns, 0);
+  assert.deepEqual(result.summary.merged, []);
+  assert.equal(result.escalations, 0, "live ownership must not enter blocker escalation because a descendant exists");
+  assert.ok(result.rows.some(row => row.step === "daemon.block.inflight_contention"));
+  assert.ok(!result.rows.some(row => ["daemon.blocked", "daemon.block.parked", "dispatch.blocked_independent"].includes(row.step)));
+});
+
+test("a dependent task's review failure still escalates instead of becoming an ownership deferral", async () => {
+  const result = await dependentOwnershipResult("blocked_review");
+  assert.equal(result.workerSpawns, 0);
+  assert.equal(result.descendantSpawns, 0);
+  assert.equal(result.escalations, 1);
+  assert.ok(result.rows.some(row => row.step === "daemon.blocked"));
+  assert.ok(!result.rows.some(row => row.step === "daemon.block.inflight_contention"));
+});
 
 // ── (1) PRODUCER, POSITIVE — a live claim is a deferral: no durable write, tick continues ──
 
