@@ -1,0 +1,200 @@
+- id: W1-T10749
+  title: "A PUSH THE REMOTE REFUSES FOR AUTH OR VISIBILITY AFTER A FINISHED BUILD IS A HARNESS FAILURE, AND THE BUILD IS NOT THROWN AWAY — CONSOLE-T127's run -1793037108107 finished a $4.26, 127-turn build, then its harness push got 'remote: Repository not found' 88 ms after the credential socket minted a fresh scoped token; the run ended a worker strike, kept only the OLDER checkpoint it had restored, and removed the worktree that held its own head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern, what the harness does when the remote refuses a finished build's push for auth or visibility; no other push refusal, breaker bound or credential path changes
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: CONSOLE-T127 failed at run.error / git-push-failed 27 min after the operator released its breaker"
+  plan_refs: [W1-T2699, W1-T5115, W1-T6148, W1-T4655, W1-T7742, W1-T8240, W1-T8676, W1-T9786, W1-T9680, W1-T9654, W1-T10742, W1-T147, CONSOLE-T127, CONSOLE-T134]
+  files:
+    - src/lib/git-push.ts
+    - src/lib/secret-boundary.ts
+    - scripts/git-credential-socket-helper.mjs
+    - src/run-task.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/lib/non-worker-verdict.ts
+    - src/lib/stranded-task-detector.ts
+    - src/lib/daemon.ts
+    - test/review/a-push-refused-for-auth-after-a-finished-build-is-a-harness-failure.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main 860537bf7. Ledger reads were read-only, niced and bounded on the host:
+    the console instance's /mnt/rmd/remudero-console-state/state/ledger.ndjson, plus the rotations
+    ledger.2026-10-14T10-02-37-678Z and ledger.2026-10-14T11-53-35-066Z. No core-instance ledger has this signature.
+
+    THE INCIDENT. Run CONSOLE-T127-1793037108107; the operator released the breaker at 17:50:32Z.
+    - 17:51:58Z implement.checkpoint_restored: source_branch run-CONSOLE-T127-1792019257010, head f537386,
+      base "checkpoint", main_conflicts [lib/core-views.ts].
+    - 18:09:17Z implement.done: 127 turns, $4.26. 18:16:50Z implement.preopen_continued (codex fresh handoff).
+    - 18:17:17.881Z push_gate.ran: head 01c7de6, base 2200b28 (console main), remote_sha 000…0, result pass.
+    - 18:17:18.880Z github_app.scoped_token_minted, scoped_repo craigoley/remudero-console, expires_at
+      18:27:18.879Z. Then 18:17:18.884Z boundary.request decision allow, status minted.
+    - 18:17:18.972Z run.error: `git -C …/run-CONSOLE-T127-1793037108107 push origin HEAD` → `remote: Repository
+      not found.` / `fatal: repository 'https://github.com/craigoley/remudero-console.git/' not found`.
+    - The text appears twice, but there was ONE push attempt. git-push.ts:600-603 `pushFailure` builds the
+      message as the execFile message (which already carries stderr) plus `\n` plus stderr again.
+    - 18:17:19.056Z verdict failed, stage run.error, cause git-push-failed.
+    - 18:17:19.069Z implement.checkpoint_kept: source_branch run-CONSOLE-T127-1792019257010, head f537386.
+      That is the checkpoint this run RESTORED, not the head it built.
+    - 18:17:19.188Z worktree.remove. 18:18:28Z daemon.lane_failed, class command_failed, backoff_ms 1800000.
+    - `git ls-remote` on the console remote at 18:26Z lists eight run-CONSOLE-T127-* branches. The newest is
+      -1792019257010 at f537386. -1793037108107 is absent.
+    The same signature ended CONSOLE-T134-1791968576525 on 2026-10-14. It also followed an
+    implement.preopen_continued (09:35:31Z). The mint came at 09:35:50.445Z and run.error at 09:35:50.493Z,
+    48 ms later. That task succeeded on its next run.
+
+    WHICH CREDENTIAL PATH THE PUSH USED. PROVEN from code, with the path itself inferred from timing:
+    - deploy/entrypoint.sh:101-102 installs the global helper that echoes `password=$GH_TOKEN` at call time.
+    - The spawn path wires the run worktree to the daemon's socket. That is src/lib/worker.ts:3272-3281 calling
+      `wireCredentialHelperSocket` (:4676-4695): `credential.helper ""`, `credential.useHttpPath true`, then
+      `!node scripts/git-credential-socket-helper.mjs <socket>`.
+    - The harness's own push runs `hostWorktreeGitAsync` (git-push.ts:743-764). Its config overrides come from
+      `harnessCredentialConfig` (src/lib/worktree-git.ts:344-356). They reset `credential.helper` and add only
+      the socket helper when the worktree's config carries it. Only an UNWIRED worktree re-adds the
+      system/global helpers, which is the GH_TOKEN path.
+    - The socket mints a NEW token per git credential request (secret-boundary.ts:333-347, via
+      `mintScopedToken`, github-app.ts:309-398). That token is scoped to `repositories: [name]` with contents
+      and pull_requests write (:350).
+    - So the 10-minute expiry (secret-boundary.ts:379 SCOPED_TOKEN_TTL_MS) cannot explain this. The token
+      reached GitHub under 100 ms after it was minted.
+    - The ambient GH_TOKEN could not be expired either. github_app.token_refreshed ran at 17:43:45Z, expiring
+      18:43:45Z.
+    - The mint row names no consumer. "The push used the socket" therefore rests on the timing: a mint for this
+      exact repo 88 ms (and on 10-14, 48 ms) before the failure. It is not a logged join. Making it one is
+      design 1 below.
+    - GitHub answered that mint with a token. The installation can therefore see the repository.
+    INFERRED, not provable from this side. GitHub answers "Repository not found" (HTTP 404) to an AUTHENTICATED
+    request whose identity cannot see a private repo. An invalid or absent credential gets "Authentication
+    failed" or "could not read Username" instead. The likeliest mechanism is that GitHub's git frontend had not
+    yet seen the just-minted token's single-repository grant. The token authenticated but saw no repository.
+    This fits a failure that is rare, intermittent, cured by the next run's fresh mint, and absent on core (whose
+    pushes mint the same way, so rarity there is not evidence against it). A transient GitHub-side 404 on
+    receive-pack would look the same. A retry with a fresh mint cures both, so the remedy does not depend on
+    which one it was.
+    NOT THE WORKER'S CONFIG PROBING. The claude worker ran `git push` (18:06:30Z, 18:08:05Z), `gh auth` and
+    `git config` in its sandbox. No mint row follows either push, so the sandbox push never reached the socket
+    (W1-T9654's class). Any non-admitted local or worktree key it wrote would have made the harness push refuse
+    with WorktreeConfigRefusedError (worktree-git.ts:318-339, :396-405). It did not.
+
+    THE DEFECTS (core).
+    1. No retry. git-push.ts:758-762 throws the first push failure. It has no auth/visibility arm, even though
+       a second credential request would mint a fresh token.
+    2. A worker strike. run-task.ts:10684-10695 `runErrorCause` classes it `git-push-failed`.
+       - non-worker-verdict.ts:24-29 INFRASTRUCTURE_THROWN_STAGES has no `run.error`. `streakRefusal` (:50-53)
+         returns undefined, so the W1-T7742 breaker counts the run.
+       - stranded-task-detector.ts:66-80 `nonWorkerVerdictClass` returns undefined, so breaker-release.ts:150
+         reads it as the worker's.
+       - drain.ts:1128 CREDENTIAL_REFUSAL_RE has no "Repository not found", so the lane park class is
+         command_failed.
+    3. The build is thrown away.
+       - run-task-verb.ts:5371-5373 `checkpointToKeep` keeps the RESTORED checkpoint when this run's own branch is
+         absent on origin. :8125-8140 writes that as implement.checkpoint_kept, then removes the worktree.
+       - So the next dispatch restores f537386 again, which still conflicts with main on lib/core-views.ts, and
+         re-pays the implement that produced 01c7de6.
+       - That head exists only as the local run branch in the managed clone, and the next run's `pruneStaleRuns`
+         reaps it (worker.ts:6513).
+       - W1-T9786 (merged) kept the restored checkpoint through a thrown push. It noted, as out of scope, that a
+         thrown run leaves its own head unrecorded.
+
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d on origin/main for git-push-failed, Repository not found and push
+    auth/credential retry, then read the 20 open PRs' titles. No run-W1-T10749-* branch exists. The neighbours:
+    - W1-T9680 (merged) parks a lane on a credential refusal instead of stopping the daemon.
+    - W1-T9654 (queued) names a credential-less WORKER push in fallbackPushCause.
+    - W1-T3011 (merged) is the ambient token's refresh timing.
+    - W1-T9786 (merged) keeps the restored checkpoint.
+    - W1-T10742 (open, #14506) adds `proof_inconclusive` to the same two classifiers. The two builds edit
+      `streakRefusal` and `nonWorkerVerdictClass` side by side, so whichever lands second merges both arms.
+    None retries the push, classes it as non-worker, or keeps the run's own head.
+    lint-plan's duplicate-surface advisory names W1-T147 (queued) for sharing src/run-task.ts and
+    src/lib/daemon.ts. That task is the overnight chaos drill. It shares two hot files and no concern: it injects
+    faults, and this task changes how a refused push is retried, classed and checkpointed.
+    NOT IN SCOPE, reported separately:
+    - Adding "Repository not found" to drain.ts CREDENTIAL_REFUSAL_RE. That changes W1-T9680's lane-park
+      behaviour for every caller.
+    - The worker sandbox's credential-less push (W1-T9654).
+    - Whether a codex pre-open continuation preceding both incidents matters. It is n=2 and unmeasured.
+  design: |
+    1. CREDENTIAL METADATA, NEVER THE VALUE.
+       - The harness push passes a non-secret consumer label (its run id, or the worktree basename) in the
+         environment it already builds for `hostWorktreeGitAsync`.
+       - scripts/git-credential-socket-helper.mjs forwards that label to the socket as one extra request line.
+       - `startCredentialHelperSocket`'s mint row then carries `consumer` and `minted_at` beside `scoped_repo`
+         and `expires_at`.
+       - Every row this task adds carries metadata only: credential_path ("socket" when
+         `harnessCredentialConfig` wired the socket, else "ambient"), scope (scoped repo, or "installation"),
+         expires_at, age_ms at use, attempt. Never the token, and never a prefix or hash of it.
+    2. RETRY ONCE ON AN AUTH OR VISIBILITY REFUSAL. In `worktreePushExecAsync`, after the gate (never re-run the
+       gate; its verdict is keyed and reusable):
+       - A push whose stderr says `Repository not found`, `Authentication failed`, `HTTP 403`, `returned error:
+         403`, `could not read Username` or `Invalid username or token` is retried ONCE.
+       - On the socket path the retry's own credential request mints a fresh token. On the ambient path, call
+         `refreshInstallationToken` first.
+       - Ledger `push.auth_refused` {attempt, credential_path, scope, expires_at, age_ms, outcome}.
+       - Any other push failure (non-fast-forward, hook refusal, census) is untouched and never retried here.
+    3. STILL REFUSED IS NON-WORKER INFRASTRUCTURE.
+       - `runErrorCause` returns a new cause `push-auth-refused`, checked before `git-push-failed`. That is
+         RunErrorCause in run-task-verb.ts:1119 plus run-task.ts:10684.
+       - non-worker-verdict.ts `streakRefusal` returns `push_auth_refused` for a `failed` verdict at stage
+         `run.error` with that cause. For rows written before the cause existed, it matches a
+         `git-push-failed` cause whose `reason` carries one of design 2's refusal lines. So today's
+         CONSOLE-T127 row and the 10-14 CONSOLE-T134 row stop counting.
+       - stranded-task-detector.ts `nonWorkerVerdictClass` maps it to `push_auth_refused`, never `toolchain`.
+         The breaker skips it and the W1-T8241 runbook reads it as the harness's.
+    4. THE KEPT CHECKPOINT IS THE RUN'S OWN HEAD AND RESUMES AT PUSH.
+       - On a `push-auth-refused` throw, the run.error arm records THIS run's branch and head before
+         `worktreeRemove`, instead of the restored checkpoint. The head is kept under a ref that survives
+         `pruneStaleRuns` and a daemon recycle.
+       - It writes implement.checkpoint_kept {source_branch: <this run's branch>, head_sha, failed_cause:
+         push-auth-refused, resume_at: "push", pushed: false}.
+       - `pendingWorkerBoundaryHandoffs` returns it. The next run restores that head and goes straight to the
+         push and PR open: no implement worker is spawned.
+       - If the kept head is gone, ledger that and fall back to today's restore-and-implement.
+       - If its base moved, the push gate re-runs as for any push.
+       - If the push is refused for auth again, it keeps the same head again and still records no strike.
+    5. Nothing else. No breaker bound, other push refusal, credential path, lane-park class or gate changes.
+  prompt: |
+    Write test/review/a-push-refused-for-auth-after-a-finished-build-is-a-harness-failure.test.ts (the folder
+    `rmd test-place` computes for these imports; keep this exact path, because the proofs grep it). Import
+    through `#src/*`, and watch every case fail at base. Restore base code with `git show origin/main:<path>`,
+    never stash.
+    - Every new test title starts with `W1-T10749: ` exactly as in the acceptance proofs.
+    - The retry case drives the push leaf with an injected runner. The first call rejects with a
+      PushFailedError whose stderr is the exact CONSOLE-T127 text; the second resolves. Assert two calls, one
+      gate run, and a `push.auth_refused` row carrying credential_path, scope, expires_at and age_ms.
+    - Give the fake mint a sentinel token string. Assert the sentinel appears in NO ledger row or thrown
+      message. Prove that assertion is load-bearing by making the row include the token and watching it go red.
+    - The classifier case feeds the two real verdict rows (CONSOLE-T127 10-26, CONSOLE-T134 10-14) in their
+      exact old shape, plus the new-cause shape. Assert `runErrorCause`, `streakRefusal` and
+      `nonWorkerVerdictClass` agree on push_auth_refused.
+    - The checkpoint case asserts the kept row names the run's OWN branch and head with resume_at push, not the
+      restored one. Assert `pendingWorkerBoundaryHandoffs` returns it, and a run resuming it pushes with zero
+      implement spawns.
+    - Use the repo's gitRepo fixture helpers, never a raw `git init` (the fixture-copy census).
+    Run the suite, `npm run -s lint-plan:fast` and `rmd preflight --fast` on the committed tree before the first
+    push.
+  acceptance:
+    - claim: "a finished build's push the remote refuses with Repository not found is retried once with a fresh credential, and the ledger records only the credential's path, scope, expiry and age, never its value"
+      proof: 'grep: test("W1-T10749: a push refused for auth is retried once and ledgers only credential metadata" in test/review/a-push-refused-for-auth-after-a-finished-build-is-a-harness-failure.test.ts'
+    - claim: "a push still refused for auth after the retry is the non-worker class push_auth_refused in streakRefusal and nonWorkerVerdictClass, for new rows and for the old git-push-failed rows of CONSOLE-T127 and CONSOLE-T134"
+      proof: 'grep: test("W1-T10749: a push refused for auth is a non-worker strike" in test/review/a-push-refused-for-auth-after-a-finished-build-is-a-harness-failure.test.ts'
+    - claim: "a run whose push is refused for auth keeps its own head as the checkpoint, and the next dispatch resumes it straight to push without spawning an implement worker"
+      proof: 'grep: test("W1-T10749: an auth-refused build resumes straight to push" in test/review/a-push-refused-for-auth-after-a-finished-build-is-a-harness-failure.test.ts'
+  falsifier: |
+    - Drop the retry arm: the retry case must fail on the runner's call count.
+    - Write the token into the push.auth_refused row: the sentinel assertion must fail.
+    - Return undefined from `streakRefusal` for the old git-push-failed shape: the classifier case must fail.
+    - Restore `checkpointToKeep`'s restored-checkpoint choice for this cause: the checkpoint case must fail on
+      source_branch.
+    GUARDS that held at base and must still hold:
+    - a non-fast-forward or hook-refused push is not retried and stays worker-attributable;
+    - a census-refused push still classes census-refused-push;
+    - a worker-error verdict still keeps the restored checkpoint (W1-T8676);
+    - a thrown non-auth run.error still keeps the restored checkpoint (W1-T9786).
+    Remove each guard's production branch in turn: its existing case must fail. Then restore it and require
+    zero failures.
