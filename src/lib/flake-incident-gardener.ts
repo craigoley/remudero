@@ -203,7 +203,8 @@ function sameIncidentOrigin(a: string, b: string): boolean {
  *  A `.js` specifier names its `.ts` source (this repo's ESM convention). A `.mjs` specifier names a
  *  real `.mjs` file (scripts/*.mjs), so it is kept as written, beside the `.mts` a TypeScript build
  *  would resolve it to: rewriting it to `.ts` named a file that does not exist, and the ci-friction
- *  gardener then had no source owner for the failing test (#11716). */
+ *  gardener then had no source owner for the failing test (#11716). Runtime owner inference opts
+ *  into executable imports; historical flake membership retains its existing import population. */
 export function testSourcePaths(file: string, source: string | undefined, options: { runtimeOnly?: boolean } = {}): string[] {
   if (source === undefined) return [];
   const out = new Set<string>();
