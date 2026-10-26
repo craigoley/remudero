@@ -13605,7 +13605,9 @@ export function fleetWithheldStageMs(rows: ReadonlyArray<Record<string, unknown>
   let held = 0;
   passes.forEach(({ row, at }, i) => {
     const text = `${String(row.stand_down_reason ?? "")} ${String(row.reason ?? "")}`;
-    if (row.acted === true || !FLEET_WITHHELD_STAND_DOWN.test(text)) return;
+    const semanticAdmissionHeld = typeof row.stand_down_reason === "string" &&
+      /^not admitted this pass: semantic post-review admission bound \d+(?:, in-flight \d+)?(?:; admitted #\d+(?:, #\d+)* ahead)?$/.test(row.stand_down_reason);
+    if (row.acted === true || !(FLEET_WITHHELD_STAND_DOWN.test(text) || semanticAdmissionHeld)) return;
     held += Math.max(0, (passes[i + 1]?.at ?? nowMs) - at);
   });
   return held;
