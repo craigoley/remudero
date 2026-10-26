@@ -1633,7 +1633,6 @@ export async function daemonCommand(
         // commands. Their own disposition, strike, worktree and review-lock gates remain the
         // authority -- an action request is never a bypass.
         pendingPrActions: () => pendingPrActions(config.root),
-        ...daemonImprovementActionDeps(join(config.root, "state"), fleetRatify),
         livenessPulse: true,
         ...(target.isSelf
           ? {
