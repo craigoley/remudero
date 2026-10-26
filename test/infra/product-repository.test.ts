@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
@@ -231,4 +232,40 @@ test("the default gh provider reports an unknown capability when the viewer cann
   process.env.PATH = `${shim.dir}:${originalPath}`;
   t.after(() => { process.env.PATH = originalPath; });
   assert.equal(await ghProductRepositoryProvider().capability("craigoley"), "unknown");
+});
+
+test("product repository commit failures are classified: before the rename unavailable, after it outcome_unknown then recovered", async (t) => {
+  const f = fixture(t);
+  const provider = new FakeProvider();
+  provider.repos.set("craigoley/wreckterra", { id: 7, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" });
+  let budget = Infinity;
+  const sync = () => { if (--budget < 0) throw new Error("fsync failed"); };
+  const adopt = f.command({ action: "adopt", repositoryId: 7 });
+  budget = 4; // four ancestry syncs pass; the journal file's own sync fails before the rename
+  assert.deepEqual(await f.service(provider, { sync }).execute(actor, adopt), { ok: false, code: "unavailable" });
+  assert.ok(!readdirSync(join(f.root, "state/products/v1/repositories")).some((file) => file.endsWith(".pending")), "the failed temporary is removed");
+  assert.deepEqual(f.journalFiles(), []);
+  budget = 5; // the file sync passes and the rename lands; the directory sync after it fails
+  assert.deepEqual(await f.service(provider, { sync }).execute(actor, adopt), { ok: false, code: "outcome_unknown" });
+  budget = Infinity;
+  const recovered = await f.service(provider, { sync }).execute(actor, adopt);
+  assert.ok(recovered.ok);
+  assert.equal(recovered.value.replayed, true, "the committed journal answers the identical retry without another provider write");
+  assert.deepEqual(provider.creates(), []);
+});
+
+test("product repository serializes per operator: a live lock is busy and an unusable lock directory is unavailable", async (t) => {
+  const f = fixture(t);
+  const provider = new FakeProvider();
+  const service = f.service(provider);
+  const directory = join(f.root, "state/products/v1/repositories");
+  assert.deepEqual(await service.execute(actor, f.command({ action: "adopt", repositoryId: 7 })), { ok: false, code: "repository_not_found" });
+  const locks = join(directory, "locks");
+  const lockFile = join(locks, `${createHash("sha256").update(actor).digest("hex")}.lock`);
+  mkdirSync(locks, { recursive: true });
+  writeFileSync(lockFile, JSON.stringify({ pid: process.pid, run_id: "held", host: "h", startedAt: new Date().toISOString() }));
+  assert.deepEqual(await service.execute(actor, f.command({ action: "adopt", repositoryId: 7 })), { ok: false, code: "busy" });
+  rmSync(locks, { recursive: true });
+  writeFileSync(locks, "not a directory");
+  assert.deepEqual(await service.execute(actor, f.command({ action: "adopt", repositoryId: 7 })), { ok: false, code: "unavailable" });
 });
