@@ -159,3 +159,21 @@ test("settled-round recovery requires exact terminal identities before the seed'
     assert.equal(fixSeedRead(rows, pr, CURRENT)?.kind, "live", field);
   }
 });
+
+test("real rotation retains the exact earlier-round completion needed by empty-boot recovery", t => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-old-head-seed-rotation-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const timeline = completedEarlierRound();
+  const start = Date.now() - timeline.length * 1000;
+  const rows = timeline.map((row, index) => ({ ...row, ts: new Date(start + index * 1000).toISOString() }));
+  const core = rows.map(row => JSON.stringify(row)).join("\n") + "\n";
+  const bytes = Buffer.byteLength(core);
+  writeFileSync(ledgerPath, core + JSON.stringify({ step: "ci.polling", padding: "x".repeat(bytes * 4) }) + "\n");
+  assert.equal(rotateLedger(ledgerPath, { ceilingBytes: bytes * 2 }).rotated, true);
+  const after = readLedgerLines(ledgerPath);
+  assert.ok(after.some(row => row.step === "fix.done" && row.round_id === "prior-round"));
+  assert.equal(fixSeedRead(after, pr, CURRENT)?.kind, "orphaned");
+  const incomplete = after.map(row => row.step === "fix.done" ? { ...row, round_id: undefined } : row);
+  assert.equal(fixSeedRead(incomplete, pr, CURRENT)?.kind, "live");
+});
