@@ -4,9 +4,9 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { preserveTrackedDirtyFixOwner } from "#src/run-task.js";
-import { rmdTempDir } from "#src/lib/tmp.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
-const tmp = () => rmdTempDir("fix-owner-ignored-index");
+const tmp = () => makeTempDir("fix-owner-ignored-index");
 const sha = (root: string, ref: string) => execFileSync("git", ["-C", root, "rev-parse", ref], { encoding: "utf8" }).trim();
 function cloneOf(upstream: string, path: string) {
   execFileSync("git", ["clone", "--quiet", upstream, path]);
