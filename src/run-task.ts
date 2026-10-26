@@ -790,6 +790,7 @@ import {
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
 import { checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { resolveProjectPreflight, runProjectPreflight } from "./lib/ci-project-preflight.js";
 import { observeSynchronousPreflightPhase, reportPreflightPhase } from "./lib/preflight-phase-progress.js";
 import {
   buildPreflightSummary,
@@ -1130,6 +1131,7 @@ import {
 } from "./lib/retro-open-pr-guard.js";
 import {
   AUTOMATED_RETRO_DECISION_ENV,
+  automatedRetroGatherObserver,
   decodeAutomatedRetroDecision,
   retroExitAfterPrOpened,
   runAutomatedRetroSubprocess,
@@ -1173,6 +1175,8 @@ import {
 import {
   findTaskShard,
   parseProofAmendmentProposal,
+  type ProofAmendmentValidationInput,
+  validateProofAmendmentProposal,
   requestProofAmendment,
   requestScopeAmendment,
   isUngrantableInstrumentPath,
@@ -1512,7 +1516,11 @@ import {
   skillWithheldForRun,
   stageSkillDrafts,
   stageSkillLifecycleProposal,
-  workerAllowlistFromSettings,
+  workerAllowlistFromCapabilityContext,
+  skillDraftConsumerLanes,
+  type WorkerAllowlist,
+  type SkillDraft,
+  type SkillWorkerCapabilityContext,
 } from "./lib/skill-workshop.js";
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -1661,7 +1669,8 @@ import {
 } from "./lib/proof-queue-audit.js";
 // W1-T3506: the pure write-boundary refusal (W1-T3389) `runFixRung`'s acceptance-gate body repair
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
-import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
+import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects, replaceBodyProofs } from "./lib/body-repair.js";
+import { fixRungInputFields, prBodyDigest } from "./lib/sweep.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
@@ -8668,6 +8677,8 @@ export function formerBoundStandIn(reached: () => boolean,
 
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   pendingAnswer?: OpenPrView["pendingAnswer"];
+  /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
+  prBodySha256?: string;
 }): ReturnType<RunTaskCommandHost["runFixRung"]> {
   return runFixRungFromModule(opts, fixCommandHost());
 }
@@ -8967,6 +8978,71 @@ export function dispatchProofAmendmentWrite(
   } = {},
 ): void {
   return fixCommandHelpers(fixCommandHost()).dispatchProofAmendmentWrite(params, io);
+}
+
+export type BodyProofRepairOutcome = { kind: "written"; newBodySha256: string } | { kind: "refused"; reason: string };
+
+/**
+ * W1-T10339: THE PARENT-OWNED BODY REPAIR for a capped proof on a PR that carries no task trailer. Its body's Acceptance block is
+ * what review judges, so a validated replacement is written THERE — through the same validator the plan-amendment writer runs
+ * ({@link validateProofAmendmentProposal}: identical claim, parseable proof, a hit at head, no comment-only head match, a miss at
+ * the merge base), then {@link repairedProofsAreSafeToPush} over the rewritten criteria — and never to a plan shard. It replaces
+ * the named proof lines and nothing else, and ledgers `fix.body_proof_repaired` with both body digests. A refused or empty
+ * proposal, or any throw, writes nothing and comes back `refused` with its reason; the caller ends the round on it.
+ */
+export async function dispatchBodyProofRepair(
+  params: {
+    prUrl: string;
+    reviewBase: { owner: string; repo: string; headCheckoutDir: string };
+    evidence: ProofDiscriminationEvidence;
+    transcriptText: string;
+    priorHeadSha: string;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    fetchPrBody: (prUrl: string) => Promise<string>;
+    updatePrBody: (prUrl: string, body: string) => Promise<void>;
+    execProof?: NonNullable<Parameters<typeof diagnoseUnrunnableProofs>[1]>["execProof"];
+  },
+  io: {
+    buildBaseProofDirFn?: typeof buildBaseProofDir;
+    removeBaseWorktreeFn?: (repoDir: string, worktreePath: string) => void;
+    execAtHead?: ProofAmendmentValidationInput["execAtHead"];
+    execAtBase?: ProofAmendmentValidationInput["execAtBase"];
+  } = {},
+): Promise<BodyProofRepairOutcome> {
+  let baseProof: BaseProofDir | undefined;
+  const refuse = (reason: string, detail?: string): BodyProofRepairOutcome => {
+    params.log("fix.body_proof_repair_refused", { head_sha: params.priorHeadSha, reason, ...(detail === undefined ? {} : { detail }) });
+    return { kind: "refused", reason: detail === undefined ? reason : `${reason} (${detail})` };
+  };
+  try {
+    const proposal = parseProofAmendmentProposal(params.transcriptText);
+    if (proposal.length === 0) return refuse("no-proposal", "the worker's report carried no PROOF_AMENDMENT proposal");
+    const { headCheckoutDir } = params.reviewBase;
+    baseProof = (io.buildBaseProofDirFn ?? buildBaseProofDir)(proposal.map((p) => ({ proof: p.newProof })), headCheckoutDir);
+    const validation = validateProofAmendmentProposal(proposal, params.evidence, {
+      headCwd: headCheckoutDir,
+      baseCwd: baseProof.baseIsCheckout || baseProof.baseIsGrepTree ? baseProof.baseCheckoutDir : undefined,
+      execAtHead: io.execAtHead, execAtBase: io.execAtBase,
+      currentHeadSha: params.priorHeadSha, pinnedHeadSha: params.priorHeadSha, planShardPaths: new Set<string>(),
+    });
+    if (!validation.ok) return refuse(validation.refusal.reason, validation.refusal.detail);
+    const body = await params.fetchPrBody(params.prUrl);
+    const repairedBody = replaceBodyProofs(body, validation.validated.map((e) => ({ oldProof: e.oldProof, newProof: e.newProof })));
+    if (repairedBody === undefined) return refuse("body-drifted", "the live body no longer carries each old proof on exactly one bullet");
+    const unsafe = diagnoseUnrunnableProofs(parseAcceptanceBlock(repairedBody), { execProof: params.execProof });
+    if (unsafe.length > 0) return refuse("proof-unsafe-to-push", renderBodyDefects(unsafe));
+    await params.updatePrBody(params.prUrl, repairedBody);
+    const newBodySha256 = prBodyDigest(repairedBody)!;
+    params.log("fix.body_proof_repaired", { head_sha: params.priorHeadSha, old_body_sha256: prBodyDigest(body),
+      new_body_sha256: newBodySha256, claims: validation.validated.map((e) => e.claim) });
+    return { kind: "written", newBodySha256 };
+  } catch (error) {
+    const message = String((error as Error)?.message ?? error);
+    params.log("fix.body_proof_repair_error", { head_sha: params.priorHeadSha, error: message });
+    return { kind: "refused", reason: `error (${message})` };
+  } finally {
+    releaseBaseProofDir(params.reviewBase.headCheckoutDir, baseProof, io.removeBaseWorktreeFn);
+  }
 }
 
 /** The verdict + ledger payload a worker's ERROR envelope maps to. */
@@ -12260,6 +12336,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       registryDir: dirname(holdStatePath), owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "",
       body: view.body ?? "", headSha: view.headRefOid, author: input.author, commits: view.commits, result, nowMs: clock.now(), log,
       capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
+      checks: selectedChecks,
+      escalate: (escalation) => escalate(escalation, { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
     });
     if (refused === "failed") {
       // W1-T9797: the sweep dedups every outcome but hold, so an unfiled remedy must read as hold.
@@ -19532,6 +19610,8 @@ export function runPreflightScopedDiffCoverage(
  * `os.loadavg()` is the one input here that cannot be arranged.
  */
 export type PreflightCommandDeps = PreflightDeps & {
+  projectRoot?: string;
+  projectTestSlot?: NonNullable<Parameters<typeof runProjectPreflight>[1]>["testSlot"];
   loadavg?: () => readonly number[] | undefined;
   cpuCount?: number;
   coverageFreeBytes?: (path: string) => number;
@@ -19581,31 +19661,39 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const onPhase = deps.onPhase ?? reportPreflightPhase;
   const phase = <T>(name: string, run: () => T): T => observeSynchronousPreflightPhase(name, () => boundary(run), onPhase);
 
-  const result = phase("default", () => runPreflight(repoRoot, { ...deps, range, spawn, onPhase }));
+  const root = deps.projectRoot ?? repoRoot;
+  const project = resolveProjectPreflight(root, {
+    ciParity: rest.includes("--ci-parity"), coverage: rest.includes("--coverage"), proofs: rest.includes("--proofs"),
+  });
+  const core = project.kind === "core";
+  const result = phase("default", () => core
+    ? runPreflight(root, { ...deps, range, spawn, onPhase })
+    // Preserve the executor identity that selects the bounded subprocess, including with metrics.
+    : runProjectPreflight(project, { ...deps, range, spawn: deps.spawn, onPhase, testSlot: deps.projectTestSlot }));
   // W1-T3737 — THE FAST TIER IS THE DEFAULT. MEASURED on origin/main: it runs twenty checks in
   // 29s with no false reds, and the three-step default passed a diff CI then refused (the #5928
   // comment-load shape, 12s green). `--fast` stays accepted and is now a no-op, so every existing
   // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
   // no escape is a wall and an operator on a slow host must still be able to push.
-  const fast = rest.includes("--no-fast") ? undefined : phase("fast", () => runPreflightFast(repoRoot, { spawn }));
+  const fast = !core || rest.includes("--no-fast") ? undefined : phase("fast", () => runPreflightFast(root, { spawn }));
   // W1-T4108 — RIDE THE SAME `--no-fast` ESCAPE AS `fast` ABOVE. Both are further, GitHub-free
   // additions to the same default tier that #6677/#6687/#6690/#6693 (2026-09-23) show CI, not
   // preflight, was catching: console-parity/the two census suites cost seconds like every other
   // fast-tier member, and the scoped diff-coverage step names its own size-based skip rather than
   // needing a second flag to stay fast — see runPreflightScopedDiffCoverage's own doc.
-  const ciChecks = rest.includes("--no-fast")
+  const ciChecks = !core || rest.includes("--no-fast")
     ? undefined
-    : phase("ci-checks", () => preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn })));
-  const scopedCoverage = rest.includes("--no-fast")
+    : phase("ci-checks", () => preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(root, { spawn })));
+  const scopedCoverage = !core || rest.includes("--no-fast")
     ? undefined
-    : phase("fast-coverage", () => preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn })));
+    : phase("fast-coverage", () => preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(root, { spawn })));
   // Full-suite routes key containment/deadlines on the ORIGINAL spawn identity. Observe their
   // tier boundaries, never wrap their executor into the injected-spawn synchronous route.
-  const ciParity = rest.includes("--ci-parity") ? phase("ci-parity", () => runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
-  const coverage = rest.includes("--coverage") ? phase("coverage", () => runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
+  const ciParity = core && rest.includes("--ci-parity") ? phase("ci-parity", () => runCiParityAdmitted(root, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
+  const coverage = core && rest.includes("--coverage") ? phase("coverage", () => runPreflightCoverage(root, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
   // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
   // 29-second default tier cannot absorb that. Named in the coverage line below either way.
-  const proofs = rest.includes("--proofs") ? phase("proofs", () => runPreflightProofs(repoRoot, { spawn: deps.spawn })) : undefined;
+  const proofs = core && rest.includes("--proofs") ? phase("proofs", () => runPreflightProofs(root, { spawn: deps.spawn })) : undefined;
 
   for (const step of result.steps) {
     console.log(step.detail);
@@ -19659,14 +19747,14 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // you its conditions IF YOU ASK has the same defect, because nobody asks. `headSha` is the
   // proof that adding a surface is not enough on its own — it has been computed on this path all
   // along and written to the JSON summary, and never reached the sentence a human reads.
-  const headSha = readHeadShaForSummary();
+  const headSha = readHeadShaForSummary(undefined, root);
   // W1-T3017 — PEEK, never resolve. The pin belongs to whichever mode actually diffed; a run with
   // no diff-consuming step has no base, and resolving one here would put a sha on the line that no
   // step ever measured against.
   const preflightSpawn = spawn ?? defaultPreflightSpawn;
-  const pin = peekPinnedBase(repoRoot, preflightSpawn);
+  const pin = peekPinnedBase(root, preflightSpawn);
   const runContext = detectRunContext({
-    repoRoot,
+    repoRoot: root,
     headSha,
     spawn: preflightSpawn,
     loadavgStart,
@@ -19684,7 +19772,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     ...(proofs?.steps ?? []),
   ];
   const treeAdvisory = runTreeAdvisoryLine(runContext, steps);
-  const tiers: PreflightTier[] = [
+  const tiers: PreflightTier[] = core ? [
     { name: "commitlint/typecheck/emitter", enableWith: "always runs", ran: true },
     { name: "the fast gate", enableWith: "drop --no-fast", ran: fast !== undefined },
     { name: "console-parity + census suites (W1-T4108)", enableWith: "drop --no-fast", ran: ciChecks !== undefined },
@@ -19692,6 +19780,9 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     { name: "ci-parity", enableWith: "--ci-parity", ran: ciParity?.execution === "completed" },
     { name: "coverage", enableWith: "--coverage", ran: coverage !== undefined },
     { name: "proof discrimination", enableWith: "--proofs", ran: proofs !== undefined },
+  ] : [
+    { name: `${project.repository ?? "unresolved target"} declared quality + commit policy`, enableWith: "always runs", ran: project.kind === "consumer" },
+    { name: "hosted CI", enableWith: "required on the source PR", ran: false },
   ];
   console.log(
     "\n" +
@@ -19718,7 +19809,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // named path, never the default the orchestrator trusts. Only a real, non-injected spawn may
   // fall back to the default: that is the one call shape the orchestrator's own verdict comes
   // from.
-  const summaryPath = preflightSummaryTarget(rest, deps);
+  const summaryPath = preflightSummaryTarget(rest, deps, root);
   const summary = { ...buildPreflightSummary({
     steps,
     finishedAt: new Date().toISOString(),
@@ -19726,10 +19817,10 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     headSha,
     args: rest,
     runContext,
-  }), ...(metrics ? { sandboxMetrics: metrics.finish() } : {}) };
+  }), qualityProfile: project.repository ?? "unavailable", ...(metrics ? { sandboxMetrics: metrics.finish() } : {}) };
   if (summaryPath === undefined) {
     console.log(
-      `### summary NOT written: an injected spawn refuses the default path (${preflightSummaryPath(repoRoot)}) — pass --summary-file to write one anyway`,
+      `### summary NOT written: an injected spawn refuses the default path (${preflightSummaryPath(root)}) — pass --summary-file to write one anyway`,
     );
   } else {
     try {
@@ -19755,9 +19846,10 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
  */
 export function readHeadShaForSummary(
   exec: (file: string, args: string[]) => string = (file, args) => execFileSync(file, args, { encoding: "utf8" }),
+  root: string = repoRoot,
 ): string {
   try {
-    return exec("git", ["-C", repoRoot, "rev-parse", "HEAD"]).trim() || "unknown";
+    return exec("git", ["-C", root, "rev-parse", "HEAD"]).trim() || "unknown";
   } catch {
     return "unknown";
   }
@@ -22703,12 +22795,15 @@ async function retroCommand(
   // from a unit test. Written as an `if` here the reporting body was unreachable in every test
   // that does not truncate, and `diff-coverage` blocked the PR naming exactly those lines.
   reportRetroLedgerTruncation(retroLedgerRead, { ledgerPath, runId: `RETRO-${retroReadStartedMs}` });
+  const observeGather = automatedRetroGatherObserver(opts.automated !== undefined && !dryRun, {
+    log: (step, fields) => appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...fields }),
+  });
   // W1-T1013: the follow-up harvest's OWN corpus — the archive∪live union, resolved
   // separately from `ledgerNdjson` above so every OTHER miner buildGather runs keeps
   // reading the single-file corpus it always has (see buildGather's `followupLedgerNdjson`
   // doc for why this must stay a second, explicit input rather than replacing `ledgerNdjson`
   // outright).
-  const followupLedgerNdjson = followupLedgerUnionNdjson(join(config.root, "state"));
+  const followupLedgerNdjson = observeGather("followup-ledger", () => followupLedgerUnionNdjson(join(config.root, "state")));
   const learningsMd = existsSync(learningsPath) ? readFileSync(learningsPath, "utf8") : "";
   // W1-T89/P18: plan/mast-mapping.yaml is DATA (Rule 2) — loaded here, never
   // touched by buildGather itself. A missing file degrades to an empty table
@@ -22738,13 +22833,14 @@ async function retroCommand(
   // a proposal's indented (a)/(b)/(c) continuation bullets). Best-effort: a read/parse
   // hiccup degrades to "no dedup source" (every followup mints) rather than aborting
   // the retro — the SAME non-fatal discipline the mast-mapping/orientation reads use.
-  let gatherPlanRead: { plan: ReturnType<typeof loadPlan> | undefined } | { error: unknown };
-  try {
-    const tasksYamlPath = join(checkoutRoot, "plan", "tasks.yaml");
-    gatherPlanRead = { plan: existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath) : undefined };
-  } catch (error) {
-    gatherPlanRead = { error: error };
-  }
+  const gatherPlanRead: { plan: ReturnType<typeof loadPlan> | undefined } | { error: unknown } = observeGather("plan-inputs", () => {
+    try {
+      const tasksYamlPath = join(checkoutRoot, "plan", "tasks.yaml");
+      return { plan: existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath) : undefined };
+    } catch (error) {
+      return { error: error };
+    }
+  });
   const readGatherPlan = (): ReturnType<typeof loadPlan> | undefined => {
     if ("error" in gatherPlanRead) throw gatherPlanRead.error;
     return gatherPlanRead.plan;
@@ -22773,7 +22869,7 @@ async function retroCommand(
   // organ. loadMounts throws on a bad/absent table — same fail-closed
   // discipline every other mounts.yaml read in this file already has.
   const mountsTable = loadMounts(mountsPath(checkoutRoot));
-  const gather = buildGather({
+  const gather = observeGather("gather", () => buildGather({
     ledgerNdjson,
     followupLedgerNdjson,
     learningsMd,
@@ -22792,7 +22888,7 @@ async function retroCommand(
     // the same tree `openTaskTitles` above already loads.
     planCoherence: readPlanCoherenceInputs(checkoutRoot),
     now: Date.now(),
-  });
+  }));
   // W1-T111 (P25 iv): the approve/reframe rate is telemetry, not decoration — the field's
   // failure mode is the rubber-stamp queue, so it rides EVERY retro (cumulative, all-time,
   // never scoped to `sinceTs` — a fatigue signal needs the whole history to be trustworthy).
@@ -22802,7 +22898,7 @@ async function retroCommand(
   // checkout (this repo's own working tree, `repoRoot` — never a PR diff). Best-effort + silent
   // on failure, the SAME non-fatal discipline `openProposalLines`/`openTaskTitles` above already
   // follow: a read/scan hiccup degrades to "nothing to advise" rather than aborting the retro.
-  const netStateAdvisorySection = netStateAdvisorySectionFor(checkoutRoot);
+  const netStateAdvisorySection = observeGather("net-state", () => netStateAdvisorySectionFor(checkoutRoot));
   // W1-T367: a single batched `projectPlan` pass over the SAME `repoRoot`/plan/tasks.yaml the
   // plan-health sweep reads below, so its "already shipped" skip is decided the SAME way the
   // dispatch path decides it — never the decorative yaml `status:` field (MEASURED: 248/359
@@ -22830,11 +22926,11 @@ async function retroCommand(
   try {
     const planHealthPlan = readGatherPlan();
     if (planHealthPlan) {
-      const planHealthProjection = projectPlan(
+      const planHealthProjection = observeGather("plan-projection", () => projectPlan(
         planHealthPlan,
         { ledgerPath, github: opts.github ?? buildBatchedGithub(owner, repo) },
         join(config.root, "state", "status.json"),
-      );
+      ));
       followupReferentRead = {
         kind: "ok",
         merged: new Set([...planHealthProjection].filter(([, v]) => v.merged).map(([id]) => id)),
@@ -22860,7 +22956,7 @@ async function retroCommand(
   // every standing rule the linter encodes — rides EVERY retro report (dry-run and real
   // alike), same as the net-state advisory section above.
   const planHealthSection = planHealthSweepSectionFor(checkoutRoot, isTaskMerged, () => readGatherPlan()?.tasks);
-  const reportWithoutPromotion =
+  const reportWithoutPromotion = observeGather("report", () =>
     [
       renderGather(gather),
       "",
@@ -22871,7 +22967,7 @@ async function retroCommand(
       retroLedgerScopeNote(retroLedgerRead),
     ].join("\n") +
     planStateTruthSection +
-    planHealthSection;
+    planHealthSection);
 
   if (dryRun) {
     console.log(reportWithoutPromotion + netStateAdvisorySection);
@@ -22938,7 +23034,7 @@ async function retroCommand(
   stageSkillDrafts(
     followupRegistryPath,
     gather.skillDrafts,
-    workerAllowlistFromSettings(undefined),
+    draft => skillDraftWorkerAllowlist(config, draft),
     describeSkillInjectionReachability,
     log,
   );
@@ -29466,6 +29562,8 @@ export function buildFixRungDispatchArgs(args: {
     headSha: string;
     reviewInputDigest?: string;
     reviewSummary?: string;
+    /** W1-T10339: the live PR body; only a taskless PR's digest rides the rung, as an input its stand-downs record. */
+    body?: string;
     pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; spent?: true; contributions?: unknown[] };
     checksState?: OpenPrView["checksState"];
     redRequiredChecks?: readonly string[];
@@ -29570,6 +29668,7 @@ export function buildFixRungDispatchArgs(args: {
     strikeCap: args.strikeCap,
     initialReview,
     progressReviewInputDigest: pr.reviewInputDigest,
+    ...(/^PR-\d+$/.test(args.task.id) && prBodyDigest(pr.body) !== undefined ? { prBodySha256: prBodyDigest(pr.body) } : {}),
     initialCriterionIndices,
     constraint: feedbackFixConstraint(pr.pendingAnswer),
     pendingAnswer: pr.pendingAnswer,
@@ -30143,6 +30242,9 @@ function preserveTrackedDirtyPatch(
   const treesMatch = deps.treesMatch ?? ((a: string, b: string) => a === b);
   const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
   const ownerTree = ownerTreeOf ? ownerTreeOf() : temporaryIndexTree(ownerPath, localSha, (env) => {
+    const tracked = hostWorktreeGit(ownerPath, ["ls-files", "--cached", "-z"], { maxBuffer: 1 << 26 });
+    if (tracked.length > 0) hostWorktreeGit(ownerPath,
+      ["--literal-pathspecs", "add", "--force", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"], { env, input: tracked, maxBuffer: 1 << 26 });
     hostWorktreeGit(ownerPath, ["add", "-A"], { env });
   });
   const patchTree = temporaryIndexTree(repoDir, localSha, (env) => {
@@ -30501,9 +30603,21 @@ export function commitWorkerEdits(
     .map((entry) => entry.slice(3)).filter((path) => !existsSync(join(repoDir, path))));
   const withoutStagedDeletions = staged.filter((path) => !alreadyStagedDeletion.has(path));
 
+  // `add -A -- <tracked path>` can refuse an ignored parent directory. Update existing
+  // entries separately; new paths still use Git's ordinary ignore checks, without force.
+  // Read tracking from the index being committed, including the fix round's private index.
+  const stageWorkerPaths = (paths: readonly string[], git: (args: string[]) => string): void => {
+    if (paths.length === 0) return;
+    const tracked = new Set(nulPaths(git(["ls-files", "--cached", "-z", "--", ...paths])));
+    const updates = paths.filter(path => tracked.has(path));
+    const additions = paths.filter(path => !tracked.has(path));
+    if (updates.length > 0) git(["add", "-u", "--", ...updates]);
+    if (additions.length > 0) git(["add", "-A", "--", ...additions]);
+  };
+
   let sha: string;
   if (roundRef === undefined) {
-    if (withoutStagedDeletions.length > 0) runGit(["add", "-A", "--", ...withoutStagedDeletions]);
+    stageWorkerPaths(withoutStagedDeletions, runGit);
     runGit(["commit", "-m", commitMessage]);
     sha = runGit(["rev-parse", "HEAD"]).trim();
   } else {
@@ -30512,7 +30626,7 @@ export function commitWorkerEdits(
     // an unseeded temporary index starts from the prior head, where `add -A` must still stage the removal.
     const addable = mergeHead === undefined ? staged : withoutStagedDeletions;
     const tree = temporaryIndexTree(repoDir, options.priorHeadSha!, (env) => {
-      if (addable.length > 0) hostWorktreeGit(repoDir, ["add", "-A", "--", ...addable], { env });
+      stageWorkerPaths(addable, args => hostWorktreeGit(repoDir, args, { env }));
     }, mergeHead === undefined ? undefined : resolve(repoDir, runGit(["rev-parse", "--git-path", "index"]).trim()));
     if (mergeHead === undefined && tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
       return { committed: false, undeclared, reason: "the worker changed nothing" };
@@ -30675,6 +30789,39 @@ function worktreeGitRunner(worktreePath: string): GitRunner {
  * fallback push and PR creation carry the run home. No message, no commit: an invented subject
  * would attribute work to a run that never asked for it.
  */
+/** Reports the same lane/provider bounds a worker would receive, without changing or invoking it. */
+export function skillDraftWorkerAllowlist(config: Config, draft: SkillDraft, settingsPath = join(resolveInstallRoot(config), "settings", "worker.json")): WorkerAllowlist {
+  const lanes = skillDraftConsumerLanes(draft);
+  const providers = enabledWorkerProviders(config);
+  const pin = workerBoundaryStack.harnessRevision;
+  const current = executingHarnessRevision(fileURLToPath(import.meta.url));
+  const revision = (value: typeof pin): string => value && !Array.isArray(value) && "revision" in value && typeof value.revision === "string" ? value.revision : "";
+  if (lanes.length === 0 || providers.length === 0 || new Set(providers).size !== providers.length) return workerAllowlistFromCapabilityContext(undefined, undefined);
+  const consumers: SkillWorkerCapabilityContext["consumers"][number][] = [];
+  for (const lane of lanes) {
+    for (const provider of providers) {
+      let tools: readonly string[] | undefined;
+      let source: string;
+      if (lane === "implement") { tools = implementToolBound(provider, undefined); source = "src/lib/worker.ts#implementToolBound"; }
+      else if (lane === SKILL_FIX_TASK_TYPE) {
+        const ownership = fixRoundGitOwnership(config);
+        if (provider === "cash" && !ownership.harnessCommits) continue;
+        tools = provider === "cash" ? ownership.cashTools : ownership.harnessCommits ? FIX_WORKER_TOOLS_HARNESS_COMMITS : FIX_WORKER_TOOLS;
+        source = "src/lib/fix-fence.ts#FIX_WORKER_TOOLS+fixRoundGitOwnership";
+      } else if (lane === "recon" || lane === "diagnose") {
+        tools = resolveDispatchLaneToolBound(lane, provider === "cash" ? "openweight" : "claude");
+        source = "src/lib/worker.ts#resolveDispatchLaneToolBound";
+      } else if (lane === "review" || lane === "manual") {
+        tools = implementToolBound(provider, resolveGenericRouteToolBound(lane));
+        source = "src/lib/worker.ts#resolveGenericRouteToolBound+implementToolBound";
+      } else return workerAllowlistFromCapabilityContext(undefined, undefined);
+      consumers.push({ lane, provider, source, tools: tools! });
+    }
+  }
+  if (lanes.some(lane => !consumers.some(c => c.lane === lane))) return workerAllowlistFromCapabilityContext(undefined, undefined);
+  return workerAllowlistFromCapabilityContext(JSON.parse(readFileSync(settingsPath, "utf8")), { generation: revision(pin), currentGeneration: revision(current), consumers });
+}
+
 /**
  * W1-T3727: WHO HOLDS A FIX ROUND'S GIT, as one value both the prompt and the tool bound read.
  *
@@ -35644,13 +35791,16 @@ export function buildInboxDraftHook(
         }
       }
 
-      let draftSelection: DraftSelectionContext | undefined;
+      const lifecycleContext = inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root });
+      let draftSelection: DraftSelectionContext = { retirement: lifecycleContext, isRatified: () => false,
+        grepAnchorTrue: () => true, openProposalIds: new Set(proposals.map(p => p.id)) };
       try {
         const ledgerLines = readLedgerLines(ledgerPath);
         const sha = mainSha();
         const anchors = proposals.flatMap((p) => p.evidenceAnchors);
         const grepFailures = await warmAnchorGrepCache(anchorGrepCache, sha, anchors, grepAnchorWarm);
         draftSelection = {
+          retirement: lifecycleContext,
           grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
@@ -35902,7 +36052,7 @@ export function projectionReadinessAccessors(projection: ReadonlyMap<string, Sta
  * NOTE (W1-T192): the daemon's OWN per-poll draft rung ({@link buildInboxDraftHook}) is what
  * makes a draft exist without this command ever being invoked — see that function's doc.
  */
-export async function inboxCommand(rest: string[], deps: { config?: Config; github?: GitHub } = {}): Promise<number> {
+export async function inboxCommand(rest: string[], deps: { config?: Config; github?: GitHub; draftBatch?: typeof draftProposalBatch } = {}): Promise<number> {
   const badArg = unknownArgError("inbox", rest, [], ["--dry-run"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -35928,7 +36078,10 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   // UNTHROTTLED (see this command's doc) — `rmd inbox` is the manual FORCE, so it always
   // attempts every proposal `proposalsNeedingDraft` names, never consulting the daemon-only
   // DraftAttemptCache.
-  const needsDraft = proposalsNeedingDraft(proposals, drafts);
+  const lifecycleContext = inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root });
+  // Manual force retains its existing conflict behavior while observing lifecycle uncertainty.
+  const needsDraft = proposalsNeedingDraft(proposals, drafts, { retirement: lifecycleContext,
+    isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set() });
 
   const runId = `INBOX-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "inbox", step, lane: "inbox", ...extra });
@@ -35938,7 +36091,8 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   if (needsDraft.length > 0 && !dryRun) {
     const causalScope = { repository: `${owner}/${repo}` };
     const snapshots = needsDraft.map(proposal => captureInboxDraftSnapshot(proposal, causalScope));
-    const outcomes = await draftProposalBatch(needsDraft, config, owner, repo, runId, log);
+    const outcomes = deps.draftBatch ? await deps.draftBatch(needsDraft, config, owner, repo, runId, log)
+      : await draftProposalBatch(needsDraft, config, owner, repo, runId, log);
     commitInboxDraftOutcomes({ stateDir: join(config.root, "state"), scope: causalScope, snapshots, outcomes, log });
     Object.assign(drafts, parseDraftCache(readFileIfExists(draftsPath)));
   }
@@ -35951,7 +36105,6 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   // ratified even if the registry entry itself drifted (the P19 incident).
   const ledgerLinesForRatify = readLedgerLines(ledgerPath);
 
-  const lifecycleContext = inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root });
   const classifications = proposals.map((p) =>
     classifyProposal(p, drafts[p.id], {
       retirement: lifecycleContext,
@@ -43078,6 +43231,7 @@ function fixCommandHost(): FixCommandHost {
     get diffAnchoredFallback() { return diffAnchoredFallback; },
     get diffSinceMergeBase() { return diffSinceMergeBase; },
     get fetchPrBodyViaGh() { return fetchPrBodyViaGh; },
+    get dispatchBodyProofRepair() { return dispatchBodyProofRepair; },
     get fetchPrDiffFilesViaGh() { return fetchPrDiffFilesViaGh; },
     get fixCensusAppliesToRepo() { return fixCensusAppliesToRepo; },
     get fixRoundGitOwnership() { return fixRoundGitOwnership; },

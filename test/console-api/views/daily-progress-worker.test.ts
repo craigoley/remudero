@@ -253,6 +253,63 @@ test("daily collector keeps every configured PR source visible before counting e
   });
 });
 
+test("daily production slow lane retains required unowned siblings before counting exact totals", { timeout: 15_000 }, async () => {
+  await withTempDir("daily-partial-ownership", async root => {
+    const clock = fixedClock(Date.parse("2026-11-02T12:00:00.000Z")), repository = "acme/app";
+    const instances = ["core", "sibling"].map((name, index) => {
+      const boardRoot = join(root, name), stateDir = join(boardRoot, "state");
+      mkdirSync(stateDir, { recursive: true }); writeFileSync(join(stateDir, "ledger.ndjson"), "");
+      const cache = createBoardSnapshotCache(boardRoot, "acme", "app", { clock });
+      cache.recordClosedAttempt!({ ok: true, persisted: cache.commitClosed([{
+        number: index + 1, url: `https://github.com/acme/app/pull/${index + 1}`, state: "MERGED",
+        headRefName: `run-W1-T${index + 1}-1234567890123`, headRefOid: "a".repeat(40),
+        body: `Remudero-Task: W1-T${index + 1}`, title: `Repair ${index + 1}`, autoMergeRequest: null,
+        updatedAt: clock.iso(), mergedAt: "2026-11-02T10:00:00.000Z",
+      }]) });
+      return { name, root: boardRoot, stateDir, repository };
+    });
+    for (const owned of [["core"], ["core", "sibling"], []]) {
+      const stateDir = join(root, `owner-count-${owned.length}`);
+      createRepositoriesSourcePublisher({ stateDir, instances: () => instances.map(instance => ({
+        instanceId: instance.name, options: { root: instance.root, instanceRepository: { owner: "acme", repo: "app" } },
+      })) })();
+      const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }],
+        views: [], oracle: "off", holder: "partial-ownership-proof", clock, post: () => {} });
+      ticker.start();
+      let receive: (message: { type: string; held: boolean; instances: string[]; ownershipEpoch: number }) => void = () => { throw new Error("port not attached"); };
+      let resolveCommit: () => void = () => {}, rejectCommit: (error: Error) => void = () => {};
+      const committed = new Promise<void>((resolve, reject) => { resolveCommit = resolve; rejectCommit = reject; });
+      const lane = runSlowLaneWorker({ on(_event, listener) { receive = listener; }, postMessage(value) {
+        const message = value as SlowLaneMessage;
+        if (message.type === "daily_progress") {
+          try { ticker.publishDailyProgress(structuredClone(message.publication), ticker.homeLeaseIdentity()!); resolveCommit(); }
+          catch (error) { rejectCommit(error as Error); }
+        }
+        if (message.type === "log" && message.step === "read_model.daily_failed") rejectCommit(new Error(String(message.extra.reason)));
+      } }, { dailyProgress: { stateDir, instances } }, { clock, schedule: () => () => {} });
+      try {
+        receive({ type: "lease", held: true, instances: owned, ownershipEpoch: 1 }); await committed;
+        const day = readDailyProgressManifest(stateDir).days[dailyProgressDayKey(repository, "America/New_York", dailyDateAt(clock.now()))]; assert(day);
+        const { report, events } = readDailyProgressRevision(stateDir, day);
+        assert.deepEqual(report.coverage.expectedSources.filter(source => source.required).map(source => source.id).sort(),
+          ["acme/app:prs:core", "acme/app:prs:sibling"], "lease filtering must preserve the configured inventory");
+        assert.equal(report.coverage.sources.filter(source => source.required).length, 2);
+        assert.deepEqual(report.totals.mergedChanges, owned.length === 2 ? { value: 2, precision: "exact" }
+          : owned.length === 1 ? { value: 1, precision: "at_least" } : { value: null, precision: "unavailable" });
+        assert.equal(events.length, owned.length, "complete cached receipts from an unowned source must not be read");
+        for (const instance of instances.filter(instance => !owned.includes(instance.name))) {
+          const source = report.coverage.sources.find(source => source.id === `acme/app:prs:${instance.name}`); assert(source);
+          assert.equal(source.state, "not_collected"); assert.equal(source.required, true);
+          assert.equal(source.lastSuccessAt, null); assert.match(source.reason!, /not owned/);
+        }
+        const job = Object.values(readDailyProgressManifest(stateDir).jobs)[0]!;
+        assert.equal(job.lastSuccessAt, owned.length === 2 ? clock.iso() : null);
+        assert.equal(job.error === null, owned.length === 2, "partial ownership cannot certify a successful collection job");
+      } finally { lane.stop(); ticker.release(); await flushReadModelTransactions(); }
+    }
+  });
+});
+
 test("daily projector refuses a publication it cannot commit and keeps durable history unchanged", { timeout: 30_000 }, async () => {
   const { DatabaseSync } = await import("node:sqlite");
   const { dailyProgressStorePath } = await import("#src/lib/daily-progress-store.js");

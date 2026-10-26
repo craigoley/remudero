@@ -71,7 +71,7 @@ test("daily progress served scope preserves partial evidence and rejects foreign
       let requestNow = now;
       const routeClock = { now: () => requestNow, iso: () => fixedClock(requestNow).iso(), date: () => fixedClock(requestNow).date() };
       const routes = buildReadModelViewRoutes({ legacy: [], readModelViews: [DAILY_PROGRESS_VIEW_NAME], readModel: source,
-        validateRequests: { [DAILY_PROGRESS_VIEW_NAME]: (query, model) => validateDailyProgressRequest(query, model, routeClock.now()) }, clock: routeClock });
+        requestValidators: { [DAILY_PROGRESS_VIEW_NAME]: (query, model) => validateDailyProgressRequest(query, model, routeClock.now()) }, clock: routeClock });
       const route = routes[0]!; assert.equal(route.scope, "read");
       const request = (query: string, headers: Record<string, string> = {}) => {
         let status = 0, body = "";

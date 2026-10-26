@@ -14,6 +14,8 @@ import { repositoriesSourcesPath } from "./repositories-view.js";
 export interface DailyProgressInstance { name: string; repository: string; root: string; stateDir: string }
 export interface DailyProgressCollectionConfig {
   stateDir: string; instances: DailyProgressInstance[]; timeZone?: string;
+  /** Restrict reads to held instances without removing configured source expectations. */
+  ownedInstanceNames?: string[];
   expectedRepositories?: string[]; correctionDates?: string[];
 }
 const REPOSITORY = /^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/i;
@@ -107,12 +109,13 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
     for (const date of config.correctionDates ?? []) { dailyWindow(date, timeZone); if (date > today) throw new Error("future daily correction refused"); dates.add(date); }
     if (dates.size > MAX_DATES) throw new Error("daily catch-up exceeds its per-pass calendar bound");
     const ordered = [...dates].sort(), earliest = dailyWindow(ordered[0]!, timeZone).windowStart;
-    const instances = config.instances.filter(s => s.repository.toLowerCase() === repository).map(s => ({ ...s, repository }));
-    const configured: ExpectedDailySource[] = instances.flatMap(instance => [
+    const configuredInstances = config.instances.filter(s => s.repository.toLowerCase() === repository).map(s => ({ ...s, repository }));
+    const instances = configuredInstances.filter(s => config.ownedInstanceNames === undefined || config.ownedInstanceNames.includes(s.name));
+    const configured: ExpectedDailySource[] = configuredInstances.flatMap(instance => [
       { id: `${repository}:prs:${instance.name}`, repository, instanceId: instance.name, kind: "pull_requests" as const, required: true },
       { id: `${repository}:ledger:${instance.name}`, repository, instanceId: instance.name, kind: "ledger_activity" as const, required: false },
     ]);
-    if (!instances.length) configured.push({ id: `${repository}:prs:missing`, repository, instanceId: null, kind: "pull_requests", required: true },
+    if (!configuredInstances.length) configured.push({ id: `${repository}:prs:missing`, repository, instanceId: null, kind: "pull_requests", required: true },
       { id: `${repository}:ledger:missing`, repository, instanceId: null, kind: "ledger_activity", required: false });
     const expectedSources: ExpectedDailySource[] = [...configured,
       { id: `${repository}:deployments`, repository, instanceId: null, kind: "deployments", required: false },
@@ -159,7 +162,15 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
             fleetAttribution: ids.length || taskIdFromRunBranch(pr.headRefName) ? "confirmed" : "unknown", taskIds: ids, title: pr.title.trim().slice(0, 2048) || "Merged change", url: pr.url });
         }
       }
-      if (!raw.length) sources.push({ id: `${repository}:prs:missing`, repository, instanceId: null, kind: "pull_requests", required: true, state: "not_collected", lastAttemptAt: null, lastSuccessAt: null,
+      for (const instance of configuredInstances.filter(s => !instances.includes(s))) {
+        for (const kind of ["pull_requests", "ledger_activity"] as const) sources.push({
+          id: `${repository}:${kind === "pull_requests" ? "prs" : "ledger"}:${instance.name}`, repository, instanceId: instance.name, kind,
+          required: kind === "pull_requests", state: "not_collected", lastAttemptAt: null, lastSuccessAt: null,
+          coverageStart: null, coverageThrough: null, nextDueAt: null,
+          reason: "This configured source is not owned by this collector; its coverage is not established.",
+        });
+      }
+      if (!configuredInstances.length) sources.push({ id: `${repository}:prs:missing`, repository, instanceId: null, kind: "pull_requests", required: true, state: "not_collected", lastAttemptAt: null, lastSuccessAt: null,
         coverageStart: null, coverageThrough: null, nextDueAt: fixedClock(nextDailyDue(now, timeZone)).iso(), reason: "No configured PR source is available for this repository." });
       if (invalid) for (const source of sources) if (source.required && source.state === "complete") { source.state = "partial"; source.reason = "Some saved PR identities or clocks are invalid; complete totals are unavailable."; }
       for (const observed of activities) {
@@ -168,7 +179,7 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
           reason: `Retained ledger observations do not establish complete activity history.${observed.gaps ? ` ${observed.gaps} source or parse gaps were observed.` : ""}` });
         for (const event of observed.events) if (Date.parse(event.occurredAt) >= start && Date.parse(event.occurredAt) < end) events.set(event.id, event);
       }
-      if (!activities.length) sources.push({ id: `${repository}:ledger:missing`, repository, instanceId: null, kind: "ledger_activity", required: false, state: "not_collected", lastAttemptAt: null, lastSuccessAt: null,
+      if (!configuredInstances.length) sources.push({ id: `${repository}:ledger:missing`, repository, instanceId: null, kind: "ledger_activity", required: false, state: "not_collected", lastAttemptAt: null, lastSuccessAt: null,
         coverageStart: null, coverageThrough: null, nextDueAt: null, reason: "No activity source is configured for this repository." });
       sources.push({ id: `${repository}:deployments`, repository, instanceId: null, kind: "deployments", required: false, state: "not_collected", lastAttemptAt: null, lastSuccessAt: null,
         coverageStart: null, coverageThrough: null, nextDueAt: null, reason: "Deployment evidence is not collected. A merge does not establish deployment." });

@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { dirname, join as joinPath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { REPO_ROOT as PROJECT_ROOT } from "#test/helpers/repo-root.js";
 
 // @source-text-subject — this suite tests a census whose subject is source-code text.
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a STATIC import of the .mjs is a TS7016 and
@@ -29,7 +30,7 @@ const {
   main,
   refusePopulationDrop,
 } = (await import(pathToFileURL(SCRIPT).href)) as {
-    AGED_FIELDS: ReadonlyArray<{ field: string; threshold: string; source: string; evidence: string[] }>;
+    AGED_FIELDS: ReadonlyArray<{ field: string; threshold: string; source: string; evidence: string[]; offsetDays: number | string; consumers?: readonly string[] }>;
     EXEMPT_MARKER: string;
     MARGIN_DAYS: number;
     KNOWN_UNCOVERED_CLOCK_FIELDS: ReadonlyArray<{ field: string; source: string }>;
@@ -102,6 +103,32 @@ function tree(files: Record<string, string>) {
 }
 
 const at = (msFromNow: number) => new Date(NOW + msFromNow).toISOString();
+
+
+test("Code health scope clocks are registered without weakening the fixture census", () => {
+  const row = AGED_FIELDS.find(value => value.field === "asOf" && value.source === "src/lib/code-health-view.ts");
+  assert.ok(row, "the existing scope clock must have its own source-pinned registration");
+  assert.equal(row.offsetDays, 0, "a three-minute clock keeps the census's conservative same-day cutoff");
+  assert.deepEqual(row.consumers, ["validateCodeHealthRequest"]);
+  assert.doesNotThrow(() => assertFieldsStillAged());
+  const source = ["const observedAt = Date.parse(value.asOf);",
+    "return Number.isFinite(observedAt) && observedAt <= now && now - observedAt <= SCOPE_BUDGET_MS;"].join("\n");
+  const input = { files: [row.source], readFile: () => source };
+  assert.doesNotThrow(() => assertFieldListComplete(input));
+  assert.throws(() => assertFieldListComplete({ ...input, agedFields: AGED_FIELDS.filter(value => value.field !== "asOf") }), /INCOMPLETE TABLE.*asOf/s);
+  assert.throws(() => assertFieldsStillAged(path => {
+    const text = readFileSync(joinPath(PROJECT_ROOT, path), "utf8");
+    return path === row.source ? text.replace("<= SCOPE_BUDGET_MS", "<= Number.POSITIVE_INFINITY") : text;
+  }), /STALE TABLE.*SCOPE_BUDGET_MS/s, "removing the actual age guard must invalidate its registration");
+  const fixture = `const scope = { asOf: "${at(DAY)}" };`;
+  const measured = censusExpiringFixtures(tree({ "test/scope-clock.test.ts": `validateCodeHealthRequest();\n${fixture}` }));
+  assert.equal(measured.population, 1);
+  assert.equal(measured.reported.length, 1);
+  assert.equal(measured.reported[0].expiresAt, NOW + DAY, "the field is measured at its own cutoff");
+  assert.equal(measured.reported[0].daysLeft, 1);
+  assert.equal(censusExpiringFixtures(tree({ "test/unrelated-clock.test.ts": fixture })).population, 0,
+    "an unrelated consumer must not acquire this view-specific clock policy");
+});
 
 test("W1-T3838: an unlisted clock-aged field fails the census", () => {
   const source = `const expiresAt = Date.parse(proposal.expiresAt);\nif (expiresAt <= now) return;`;

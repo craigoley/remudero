@@ -21,6 +21,7 @@ import { setLedgerMemoRetentionContext } from "./ledger-union.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { captureSelectedRegistryIntent, copySelectedRegistryIntent, selectedRegistryObserverFromIntent,
   type SelectedRegistryConsumerOptions, type SelectedRegistryIntent } from "./selected-registry-consumers.js";
+import { CODE_HEALTH_VIEW_NAME, createCodeHealthView } from "./code-health-view.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { AGENT_QUALIFICATION_GENERATION, AGENT_VIEW_NAME, createAgentView } from "./agent-view.js";
 import { ANALYTICS_VIEW_NAME, ANALYTICS_SOURCE_CONSOLE_V1, createAnalyticsView, type HostModelApprovalConfig } from "./analytics-view.js";
@@ -1946,6 +1947,7 @@ export function readModelLaneViews(
   return [
     { name: NAV_BADGE_VIEW_NAME, create: () => createNavBadgeReadModelView(ledgerSource) },
     { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource, selectedRegistryObserver) },
+    { name: CODE_HEALTH_VIEW_NAME, demand: true, create: () => createCodeHealthView({ keys: () => demand.keys(CODE_HEALTH_VIEW_NAME) }) },
     { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView({ modelApprovalConfig: data.modelApprovalConfig }) },
     { name: DAILY_PROGRESS_VIEW_NAME, demand: true, create: () => createDailyProgressView({
       ...(data.stateDir ? { stateDir: data.stateDir } : {}), ...(data.dailyProgressTimeZone ? { timeZone: data.dailyProgressTimeZone } : {}),
@@ -2178,6 +2180,7 @@ export function runReadModelWorker(
   const dailyProgress = data.slowLane?.dailyProgress ?? (dailyInstances.length ? { stateDir: data.stateDir, instances: dailyInstances } : undefined);
   const slowLaneConfig: SlowLaneConfig | undefined = data.slowLane || dailyProgress ? { ...data.slowLane,
     ...(data.slowLane ? { instanceInboxes: data.instances.flatMap(i => i.inbox ? [i.inbox] : []),
+      codeHealth: data.slowLane.codeHealth ?? { stateDir: data.stateDir, instances: data.instances.map(i => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) },
       analytics: data.slowLane.analytics ?? { instances: data.instances.map(i => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) } } : {}),
     ...(dailyProgress ? { dailyProgress } : {}) } : undefined;
   let snapshotWrites = Promise.resolve();

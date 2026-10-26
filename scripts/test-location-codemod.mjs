@@ -32,6 +32,15 @@ const SPECIFIER_RE = /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(["'])(\.{1,2}\/[^
 /** The same shape as an ERE for `git grep -E` — POSIX classes, no `\s`/`\b`, which a POSIX engine drops silently. */
 export const LOCATION_RELATIVE_ERE = "(from|import)[[:space:]]*\\(?[[:space:]]*[\"']\\.{1,2}/";
 
+/**
+ * True for a path under a scratch directory some test makes INSIDE test/ (`.tmp-*`, `proof-status-*`). Such a
+ * directory is untracked and exists only while its owner runs, so a count that walks the working tree must not
+ * see it: a sibling test in the same shard makes it appear and vanish between two reads.
+ */
+export function isTransientTestPath(path) {
+  return /(^|\/)(\.tmp-[^/]*|proof-status-[^/]*)\//.test(path);
+}
+
 /** True when `text` carries at least one location-relative import specifier. */
 export function hasLocationRelativeSpecifier(text) {
   return new RegExp(SPECIFIER_RE.source).test(text);

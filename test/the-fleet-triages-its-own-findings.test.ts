@@ -6,10 +6,10 @@
  * the inbox classification has retired never reaches it.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { runDaemon } from "../src/lib/daemon.js";
@@ -33,6 +33,19 @@ import { loadPlan } from "../src/lib/plan.js";
 import { createService } from "../src/lib/service.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { type RunResult } from "../src/run-task.js";
+import { inboxOwner } from "#src/lib/inbox-owner.js";
+import { classifyProposal, draftsDueOnDaemon, proposalsNeedingDraft, type DraftSelectionContext, type Proposal } from "#src/lib/inbox.js";
+import { buildInboxDraftHook, inboxCommand } from "#src/run-task.js";
+import { readClassificationSnapshot, readPersistedInbox } from "#src/lib/fleet-lane.js";
+import { captureInboxOwner, classifiedInboxOwner } from "#src/lib/inbox-owner.js";
+import { inboxGardenerPath, writeInboxGardenerStore, type InboxRetirementView } from "#src/lib/inbox-retirement.js";
+import type { Config } from "#src/lib/config.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { createInboxThreadView, INBOX_THREAD_VIEW_NAME, inboxThreadViewKey } from "#src/lib/inbox-thread-view.js";
+import { inboxThreadId } from "#src/lib/inbox-thread.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
+import { createDemandBook } from "#src/lib/view-demand.js";
 
 const A1 = "adoption:field-no-writer:src/lib/plan.ts:context:";
 const A2 = "adoption:export-no-caller:src/lib/plan.ts:loadPlanAtRef";
@@ -41,6 +54,189 @@ const P2 = "proof-debt:W1-T3";
 const F1 = "followup:W1-T3999:research";
 const RETIRED = "proof-debt:W1-T4";
 const VH = "verify-human:W1-T235";
+
+const AGE_INFORMATION = {
+  id: "board-review:stale:PR-41",
+  originatingItemId: "PR-41",
+  summary: "board-review: PR-41 has sat open 72.0h, past the 48h depth threshold",
+  evidenceAnchors: [],
+};
+
+test("W1-T10431: age-only information preserves explicit unreadable and restored human asks", async t => {
+  assert.equal(inboxOwner(AGE_INFORMATION), "fleet", "positive control: exact source-owned age finding is information");
+  const operatorItems = [
+    { ...AGE_INFORMATION, id: "board-review:escalation:PR-41", summary: "board-review: PR-41 carries an unhandled escalation whose ask could not be read" },
+    { ...AGE_INFORMATION, id: "board-review:future:PR-41" },
+    { ...AGE_INFORMATION, id: "board-review:stale:unknown-41" },
+    { ...AGE_INFORMATION, id: AGE_INFORMATION.id + "\n" },
+    { ...AGE_INFORMATION, summary: "" },
+    { ...AGE_INFORMATION, summary: undefined },
+    { ...AGE_INFORMATION, summary: { text: AGE_INFORMATION.summary } },
+    { ...AGE_INFORMATION, summary: AGE_INFORMATION.summary + "; operator approval is required" },
+    { ...AGE_INFORMATION, summary: AGE_INFORMATION.summary + "\n" },
+    { ...AGE_INFORMATION, originatingItemId: "PR-42" },
+    { ...AGE_INFORMATION, originatingItemId: undefined },
+    { ...AGE_INFORMATION, summary: "board-review: PR-41 has sat open 2.0h, past the 48h depth threshold" },
+    { ...AGE_INFORMATION, summary: "board-review: PR-41 has sat open 72.0h, past the 0h depth threshold" },
+    { ...AGE_INFORMATION, trigger: { description: "A person must choose the release plan." } },
+    { ...AGE_INFORMATION, trigger: null },
+    { ...AGE_INFORMATION, reframeHistory: [{ feedback: "Keep this question open for my decision." }] },
+    { ...AGE_INFORMATION, reframeHistory: null },
+    { ...AGE_INFORMATION, requiresReview: true },
+    { ...AGE_INFORMATION, requiresReview: "false" },
+  ];
+  for (const item of operatorItems) assert.equal(inboxOwner(item), "operator", JSON.stringify(item));
+  assert.equal(inboxOwner({ id: AGE_INFORMATION.id }), "operator", "an id without source facts cannot suppress a human ask");
+  assert.equal(inboxOwner({ id: P1 }), "fleet", "existing fleet ownership is unchanged");
+  assert.equal(inboxOwner({ ...AGE_INFORMATION, reframeHistory: [], requiresReview: false }), "fleet");
+  assert.equal(inboxOwner({ ...AGE_INFORMATION, id: "board-review:stale:#41", originatingItemId: "#41",
+    summary: "board-review: #41 has sat open 48.0h, past the 48h depth threshold" }), "fleet");
+
+  const f = fx({ [AGE_INFORMATION.id]: "not_ready", [P1]: "not_ready" }, []);
+  const root = dirname(f.stateDir);
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "plan"));
+  const planPath = join(root, "plan/tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  writeFileSync(f.ledgerPath, "");
+  const proposals = [AGE_INFORMATION, { id: P1, summary: "Existing fleet work.", evidenceAnchors: [] }];
+  writeFileSync(join(f.stateDir, "inbox-proposals.json"), JSON.stringify({ proposals }));
+  const deps = { root, inboxRoot: root, planPath, ledgerPath: f.ledgerPath, github: { prView: () => null },
+    statusGithub: fakeGitHub(), ratify: { approve: () => {}, reframe: () => {} },
+    inboxMainSha: () => "a".repeat(40), inboxGrepAnchor: () => true,
+    inboxAuditScope: { instance: "core", repository: "owner/core" } };
+  const assertLane = async (owner: "operator" | "fleet") => {
+    const refreshed = await refreshInboxClassification(deps, {});
+    const row = readPersistedInbox(f.stateDir)!.classifications.find(c => c.proposalId === AGE_INFORMATION.id)!;
+    assert.equal(row.displayOwner, owner, "the persisted source owns the human decision");
+    assert.equal(readClassificationSnapshot(f.stateDir)?.displayOwners?.[AGE_INFORMATION.id], owner);
+    const items = (section: string) => refreshed.bodies.filter(b => b.data.section === section).flatMap(b => b.data.items);
+    assert.equal(items("needsYou").some(item => item.proposalId === AGE_INFORMATION.id), owner === "operator");
+    assert.equal(items("fleet").some(item => item.proposalId === AGE_INFORMATION.id), owner === "fleet");
+    assert.ok(items("fleet").some(item => item.proposalId === P1), "existing fleet work remains fleet-owned");
+  };
+  await assertLane("fleet");
+  writeFileSync(inboxGardenerPath(f.stateDir), "{ unreadable");
+  await assertLane("operator");
+  writeInboxGardenerStore(f.stateDir, { version: 1, scope: { repository: "owner/foreign", instance: "core", root }, entries: {}, events: [] });
+  await assertLane("operator");
+  writeInboxGardenerStore(f.stateDir, { version: 1, scope: { ...deps.inboxAuditScope, root }, events: [],
+    entries: { [AGE_INFORMATION.id]: { digest: "a".repeat(64), decision: "needs_triage", reason: "Current lifecycle cannot be verified." } } });
+  await assertLane("operator");
+
+  const restored: InboxRetirementView = { state: "restored_for_review", retirementId: "retained", snapshotKey: "snapshot",
+    scope: { ...deps.inboxAuditScope, proposalId: AGE_INFORMATION.id, taskId: null }, proofId: "proof",
+    proofKind: "merged-task", reason: "Operator restored the ask." };
+  const classification = classifyProposal(AGE_INFORMATION, undefined, { plan: loadPlan(planPath), isMerged: () => false,
+    isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set(), retirement: () => restored });
+  const displayOwner = captureInboxOwner(AGE_INFORMATION, [], classification.retirement?.state === "restored_for_review");
+  assert.equal(classifiedInboxOwner(AGE_INFORMATION, { ...classification, displayOwner }), "operator");
+
+  const drafted: string[][] = [], config = { root } as Config;
+  const draftBatch = async (due: Proposal[]) => {
+    drafted.push(due.map(p => p.id));
+    return due.map(p => ({ proposalId: p.id, ok: false as const, error: "Controlled draft refusal." }));
+  };
+  const hook = buildInboxDraftHook("owner", "core", config, "AGE-LIFECYCLE", () => {}, draftBatch, () => true, () => "a".repeat(40));
+  await hook();
+  assert.deepEqual(new Set(drafted.pop()), new Set([AGE_INFORMATION.id, P1]), "the production daemon reads unknown lifecycle evidence before selecting drafts");
+  assert.equal(await inboxCommand([], { config, github: fakeGitHub(), draftBatch }), 0);
+  assert.deepEqual(new Set(drafted.pop()), new Set([AGE_INFORMATION.id, P1]), "the production manual command retains the same unknown age ask");
+  writeFileSync(join(f.stateDir, "inbox-draft-attempts.json"), "{}");
+  const fallbackEvents: string[] = [];
+  const fallback = buildInboxDraftHook("owner", "core", config, "AGE-READINESS-UNKNOWN", step => { fallbackEvents.push(step); },
+    draftBatch, () => true, () => { throw new Error("Current main evidence unavailable."); });
+  await fallback();
+  assert.ok(fallbackEvents.includes("inbox.draft_readiness_unavailable"));
+  assert.deepEqual(new Set(drafted.pop()), new Set([AGE_INFORMATION.id, P1]), "a failed readiness read still retains lifecycle uncertainty");
+  unlinkSync(inboxGardenerPath(f.stateDir));
+  writeFileSync(join(f.stateDir, "inbox-draft-attempts.json"), "{}");
+  await hook();
+  assert.deepEqual(drafted.pop(), [P1], "the production daemon excludes verified information while retaining existing work");
+  assert.equal(await inboxCommand([], { config, github: fakeGitHub(), draftBatch }), 0);
+  assert.deepEqual(drafted.pop(), [P1], "the production manual command grants no drafting work to verified information");
+});
+
+test("W1-T10431: informational routing grants no new fleet execution eligibility", async (t) => {
+  assert.equal(inboxOwner(AGE_INFORMATION), "fleet", "exercise the changed display owner, not the old operator filter");
+  const f = fx({ [AGE_INFORMATION.id]: "ready", [P1]: "ready", [VH]: "ready" }, [AGE_INFORMATION.id, P1, VH]);
+  t.after(() => rmSync(dirname(f.stateDir), { recursive: true, force: true }));
+  writeFileSync(join(f.stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [AGE_INFORMATION,
+    { id: P1, summary: "Proof evidence needs repair.", evidenceAnchors: [] },
+    { id: VH, summary: "A person must make this decision.", evidenceAnchors: [] }] }));
+  const result = triageFleetLane(f.deps(5));
+  assert.deepEqual(result.filed, [P1], "positive control: already-eligible fleet work still executes");
+  assert.deepEqual(result.merged, []);
+  assert.deepEqual(f.approved, [P1]);
+  assert.equal(f.ledger().filter(row => row.task_id === AGE_INFORMATION.id).length, 0,
+    "information causes no approve, merge, decline, retry or other recorded execution");
+  assert.equal(readFleetLaneStore(f.stateDir)[AGE_INFORMATION.id], undefined);
+  const human={id:VH,summary:"A person must decide.",evidenceAnchors:[]},existing={id:P1,summary:"Existing fleet work.",evidenceAnchors:[]};
+  const population=[AGE_INFORMATION,human,existing];
+  assert.deepEqual(proposalsNeedingDraft(population,{}).map(p=>p.id),[VH,P1],"manual/default selection cannot synthesize work from an observation");
+  assert.deepEqual(draftsDueOnDaemon(population,{},{}).map(p=>p.id),[P1,VH],"the real default daemon selector retains its existing eligible population");
+  const unknown:DraftSelectionContext={isRatified:()=>false,isDeclined:()=>undefined,boardReferents:{kind:"unreadable"},grepAnchorTrue:()=>true,openProposalIds:new Set(),retirement:()=>({unknown:"unreadable lifecycle"})};
+  assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},unknown).length,1,"unknown lifecycle is not proof a human review can be suppressed");
+  assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},{...unknown,isRatified:()=>true}).length,0,"unknown lifecycle cannot bypass existing ratification exclusion");
+  assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},{...unknown,isDeclined:()=>"held by operator"}).length,0,"unknown lifecycle cannot bypass an existing decline");
+  assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},{...unknown,retirement:()=>{throw Error("unavailable");}}).length,1);
+  assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},{...unknown,isRatified:()=>true,retirement:()=>{throw Error("unavailable");}}).length,0,"a failed lifecycle read also retains ratification precedence");
+
+  const conflictId = "codeql-quality:js/conflicting-finding", independentId = "codeql-quality:js/independent-finding";
+  const mixed = fx({ [AGE_INFORMATION.id]: "not_ready", [conflictId]: "not_ready", [independentId]: "not_ready" }, [conflictId]);
+  const cachedDrafts = JSON.parse(readFileSync(join(mixed.stateDir, "inbox-drafts.json"), "utf8"));
+  cachedDrafts[conflictId].anchorFingerprint = "prior-evidence";
+  writeFileSync(join(mixed.stateDir, "inbox-drafts.json"), JSON.stringify(cachedDrafts));
+  const root = dirname(mixed.stateDir);
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "plan"));
+  const planPath = join(root, "plan/tasks.yaml");
+  writeFileSync(planPath, "[]\n"); writeFileSync(mixed.ledgerPath, "");
+  const proposals = [AGE_INFORMATION,
+    { id: conflictId, summary: "Existing fleet work conflicts with another open proposal.", evidenceAnchors: [], conflictsWith: [AGE_INFORMATION.id] },
+    { id: independentId, summary: "Existing independent fleet work.", evidenceAnchors: [] }];
+  writeFileSync(join(mixed.stateDir, "inbox-proposals.json"), JSON.stringify({ proposals }));
+  const deps = { root, inboxRoot: root, planPath, ledgerPath: mixed.ledgerPath, github: { prView: () => null },
+    statusGithub: fakeGitHub(), ratify: { approve: (id: string) => mixed.approved.push(id), reframe: () => assert.fail("information cannot request provider work") },
+    inboxMainSha: () => "a".repeat(40), inboxGrepAnchor: () => true,
+    inboxAuditScope: { instance: "core", repository: "owner/core" } };
+  const refreshed = await refreshInboxClassification(deps, {});
+  const captured = readPersistedInbox(mixed.stateDir)!;
+  assert.equal(captured.classifications.find(c => c.proposalId === AGE_INFORMATION.id)?.displayOwner, "fleet");
+  assert.ok(captured.classifications.find(c => c.proposalId === conflictId)?.reasons.some(r => r.predicate === "no_conflict"),
+    "positive control: the real classifier observed the conflicting proposal");
+  const db = openProjectorReadModel(join(root, "read-model-state"), "core");
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL,key TEXT NOT NULL,version INTEGER NOT NULL,
+      generation INTEGER NOT NULL,etag TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(view,key)) WITHOUT ROWID;`);
+    for (const body of refreshed.bodies) db.prepare("INSERT INTO view_body VALUES('inbox',?,1,1,?,?)")
+      .run(body.key, JSON.stringify(body), JSON.stringify(body));
+    const demand = createDemandBook(), key = inboxThreadViewKey(inboxThreadId(AGE_INFORMATION.id));
+    demand.want(INBOX_THREAD_VIEW_NAME, key);
+    const cached = createInboxThreadView({ inboxRoot: root, demand }).materialize({ now: Date.now(), instances: [{ db }] })[0]!;
+    assert.equal(cached.data.found, true, cached.data.reason);
+    assert.equal(cached.data.thread?.attention, "history");
+    assert.deepEqual(cached.data.thread?.messages[0]?.actions, []);
+  } finally { db.close(); await flushReadModelTransactions(); }
+  assert.deepEqual(triageFleetLane(mixed.deps(5)).filed, []);
+  assert.deepEqual(mixed.approved, []);
+  assert.equal(readFleetLaneStore(mixed.stateDir)[AGE_INFORMATION.id], undefined);
+  const batches: string[][] = [];
+  const draftBatch = async (due: Proposal[]) => {
+    batches.push(due.map(p => p.id));
+    return due.map(p => ({ proposalId: p.id, ok: false as const, error: "Controlled provider refusal." }));
+  };
+  const config = { root } as Config;
+  assert.equal(await inboxCommand([], { config, github: fakeGitHub(), draftBatch }), 0);
+  assert.deepEqual(batches.pop(), [conflictId, independentId], "manual force must preserve existing eligibility even beside conflicting information");
+  const hook = buildInboxDraftHook("owner", "core", config, "AGE-CONFLICT", () => {}, draftBatch, () => true, () => "a".repeat(40));
+  await hook();
+  assert.deepEqual(batches.pop(), [independentId], "the daemon retains its pre-existing conflict exclusion");
+  await hook();
+  assert.deepEqual(batches, [], "a failed provider attempt cannot grant information a retry or repeat existing work");
+  assert.equal(mixed.ledger().filter(row => row.task_id === AGE_INFORMATION.id && row.step !== "inbox.classified").length, 0,
+    "the mixed population produces no informational approval, filing, merge, decline, provider or retry receipt");
+});
 
 interface Fx {
   stateDir: string;

@@ -17,6 +17,9 @@ function checkout(): { root: string; cwd: string } {
   mkdirSync(join(modules, "vitest"), { recursive: true });
   mkdirSync(join(cwd, "tests", "unit"), { recursive: true });
   writeFileSync(join(modules, "vitest", "vitest.mjs"), "");
+  writeFileSync(join(modules, "vitest", "package.json"), JSON.stringify({ name: "vitest", version: "5.0.5" }));
+  writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "shared-config-fixture", type: "module" }));
+  writeFileSync(join(cwd, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/vitest": { version: "5.0.5" } } }));
   writeFileSync(join(cwd, "tests", "unit", "shared.test.ts"), `test("${title}", () => {});\n`);
   symlinkSync(modules, join(cwd, "node_modules"), "dir");
   return { root, cwd };

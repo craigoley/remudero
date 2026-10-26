@@ -33,7 +33,7 @@ import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { ghIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText } from "./escalate.js";
-import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, isScannerBlockerCandidate, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, type PlanFilingFileCache, type PlanFilingFileObservation } from "./open-prs-rest.js";
+import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isScannerBlockerCandidate, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, type PlanFilingFileCache, type PlanFilingFileObservation } from "./open-prs-rest.js";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
 import { planFilesIdentity } from "./thread-plan.js";
 import { isInPlanScope } from "./plan-architect.js";
@@ -619,6 +619,8 @@ export function buildBehindMainByPr(
 
 /** One rollup check entry as `gh pr list --json statusCheckRollup` returns it. */
 export interface RollupCheck {
+  /** The actual refusing gate posted by a bundled check, preserved from REST output.title. */
+  title?: string;
   /** Exact REST identity and posted constituent outcome; absent on unreadable/GraphQL-only rows. */
   headSha?: string;
   outputSummary?: string;
@@ -639,6 +641,8 @@ export interface RollupCheck {
   /** Terminal completion time from the REST-composed rollup. `fetchCiFailures` preserves it
    * only for the newest deduped failure; it never guesses from the start time (W1-T3422). */
   completedAt?: string;
+  /** A status context's own description, verbatim from REST (`securityMergePolicyRefusal` reads it). */
+  description?: string;
 }
 
 export interface RawOpenPr {
@@ -1574,6 +1578,7 @@ function* ciFailuresSteps(
     }
     failures.push({
       name,
+      ...(c.title ? { title: c.title } : {}),
       logTail,
       conclusion: (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase(),
       ...(c.completedAt ? { completedAt: c.completedAt } : {}),
@@ -2334,12 +2339,14 @@ export function* openPrViewSteps(
   // W1-T5633: a head whose latest `CodeQL` check failed has its open high alerts read, unless its ledger
   // already holds a terminal code-scanning ruling for that head (a false positive, or a fix dispatched).
   // W1-T9731: so does a head whose newest arm the security policy refused on a new high alert.
+  // #14202: and a head whose own security-merge-policy status is blocked, armed or not.
   const codeqlHeadAlerts = yield* hydrateCodeqlHeadAlertsSteps(
     owner,
     repo,
     raw
       .filter((pr) => pr.isDraft !== true &&
-        codeqlAlertsReadDue(ledger, pr.number, pr.headRefOid, codeqlCheckFailed(pr.statusCheckRollup)) &&
+        codeqlAlertsReadDue(ledger, pr.number, pr.headRefOid, codeqlCheckFailed(pr.statusCheckRollup) ||
+          securityMergePolicyRefusal(pr.statusCheckRollup)?.state === "blocked") &&
         !codeScanningHeadSettled(ledger, pr.number, pr.headRefOid))
       .map((pr) => ({ number: pr.number, headSha: pr.headRefOid })),
     fetch,
@@ -2641,6 +2648,7 @@ export function* openPrViewSteps(
       mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
       scannerBlocker: scannerBlockers.get(pr.number),
       codeqlHeadAlerts: codeqlHeadAlerts.get(pr.number),
+      securityMergePolicy: securityMergePolicyRefusal(pr.statusCheckRollup),
       workflowRuns: workflowRuns.get(pr.number),
       // W1-T2384: the supersessionVerdict producer W1-T920 deferred and never filed — populated
       // ONLY for a PR `supersededBy` above just flagged (the hydration was scoped to exactly that

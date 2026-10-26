@@ -88,6 +88,7 @@ import {
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { projectClassifiedHumanGates } from "./ask-classification.js";
+import { CODE_HEALTH_VIEW_NAME, validateCodeHealthRequest } from "./code-health-view.js";
 import { buildReadModelViewRoutes, oldestAsOf, viewMode, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
 import { analyticsLegacyView, captureHostModelApprovals, type HostModelApprovalConfig } from "./analytics-view.js";
@@ -2795,7 +2796,8 @@ function assembleServeRoutes(
     ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
   const routeReads = deps.routeReadRollup ?? createRouteReadRollup();
-  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME], servedByDefault: [readModelStatusView.name],
+  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME, CODE_HEALTH_VIEW_NAME],
+    servedByDefault: [readModelStatusView.name],
     ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log, onSubscribers: (change, n, reason) => routeReads.stream("views", change, n, reason) });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -2950,10 +2952,13 @@ function assembleServeRoutes(
   const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, repository: scope.repository, analytics: scope.analytics })), modelApprovalConfig: deps.modelApprovalConfig });
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
-    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME],
+    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME, CODE_HEALTH_VIEW_NAME],
+    demandViews: [...DEMAND_VIEWS, CODE_HEALTH_VIEW_NAME, DAILY_PROGRESS_VIEW_NAME],
     requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"], [AGENT_VIEW_NAME]: ["instance", "part"] },
-    demandViews: [...DEMAND_VIEWS, DAILY_PROGRESS_VIEW_NAME],
-    validateRequests: { [DAILY_PROGRESS_VIEW_NAME]: (params, source) => validateDailyProgressRequest(params, source, systemClock.now()) },
+    requestValidators: {
+      [CODE_HEALTH_VIEW_NAME]: (params, source) => validateCodeHealthRequest(params, source, systemClock.now()),
+      [DAILY_PROGRESS_VIEW_NAME]: (params, source) => validateDailyProgressRequest(params, source, systemClock.now()),
+    },
     legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [

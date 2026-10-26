@@ -16,6 +16,7 @@
   files:
     - src/lib/machine-filing.ts
     - test/triage/the-backstop-judges-path-classes-not-words.test.ts
+    - "src/lib/machine-filing-judge.ts"
   rationale: |
     READ 2026-10-21 at origin/main 03e4f4ac7.
     THE CODE (src/lib/machine-filing.ts).

@@ -118,6 +118,7 @@ interface RestCheckRun {
   id?: number;
   external_id?: string | null;
   name?: string;
+  output?: { title?: string | null } | null;
   /** "queued" | "in_progress" | "completed" — lowercase, where GraphQL reports "QUEUED" etc. */
   status?: string;
   /** "success" | "failure" | "neutral" | … — `null` while the run is still incomplete. */
@@ -143,6 +144,8 @@ interface RestStatus {
   /** GitHub supplies this only on status contexts. A terminal status's update, not its creation,
    * is the comparable completion time when it is present (W1-T3422). */
   updated_at?: string | null;
+  /** The status's own one-line verdict; `security-merge-policy` publishes `<state>: <reason>` here. */
+  description?: string | null;
 }
 
 /** One composed rollup entry — GraphQL's `statusCheckRollup` union member, structurally. Not declared
@@ -151,6 +154,8 @@ interface RestStatus {
  *  `rollupFromRest(...)` into `checksStateFromRollup`, so drift in either shape fails `tsc`. */
 export interface RestRollupEntry {
   name?: string;
+  /** The posted refusing gate, distinct from a hosting bundle's check name. */
+  title?: string;
   context?: string;
   status?: string;
   conclusion?: string;
@@ -170,6 +175,8 @@ export interface RestRollupEntry {
   /** Terminal completion time, when GitHub supplied one. Absence stays absent: consumers that
    * need to prove a verdict predates a main repair must decline rather than substitute a start. */
   completedAt?: string;
+  /** A status context's description, verbatim; check runs carry none. */
+  description?: string;
 }
 
 /** Uppercase a REST enum the way GraphQL reports it, preserving absent as absent. Invariant: this is
@@ -217,6 +224,7 @@ export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]
   const workflows = new Map(workflowRuns?.map((r) => [r.id, r.workflow_id]));
   const fromRuns = checkRuns.map((c) => {
     const e: RestRollupEntry = { name: c.name ?? "" };
+    if (typeof c.output?.title === "string" && c.output.title.trim() !== "") e.title = c.output.title;
     const status = upper(c.status);
     const conclusion = upper(c.conclusion);
     if (status !== undefined) e.status = status;
@@ -245,6 +253,7 @@ export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]
     // A status context has no `started_at`; `created_at` is what the real `gh` gateway maps this from.
     if (s.created_at) e.startedAt = s.created_at;
     if (s.updated_at) e.completedAt = s.updated_at;
+    if (s.description) e.description = s.description;
     return e;
   });
   return [...fromRuns, ...fromStatuses];
@@ -1177,6 +1186,26 @@ export function codeqlCheckFailed(rollup: readonly RestRollupEntry[] | undefined
     if (latest === undefined || (entry.startedAt ?? "") >= (latest.startedAt ?? "")) latest = entry;
   }
   return latest !== undefined && (latest.conclusion ?? "").toUpperCase() === "FAILURE";
+}
+
+/** The status context the trusted security merge producer publishes (`SECURITY_MERGE_CONTEXT`). */
+export const SECURITY_MERGE_POLICY_CONTEXT = "security-merge-policy";
+
+/** #14202 — the newest `security-merge-policy` status's refusal at this head, parsed from the `<state>: <reason>`
+ *  description the producer publishes. Read whether or not the PR was ever armed: the arm refusal row W1-T9731
+ *  reads exists only for a PR green and reviewed enough to arm. A success, a pending status or an unparsed
+ *  description is no refusal. */
+export function securityMergePolicyRefusal(rollup: readonly RestRollupEntry[] | undefined):
+  { state: "blocked" | "unknown"; reason: string } | undefined {
+  let latest: RestRollupEntry | undefined;
+  for (const entry of rollup ?? []) {
+    if (entry.context !== SECURITY_MERGE_POLICY_CONTEXT) continue;
+    if (latest === undefined || (entry.startedAt ?? "") >= (latest.startedAt ?? "")) latest = entry;
+  }
+  const match = /^(blocked|unknown): (\S+)/.exec(latest?.description ?? "");
+  const failed = match?.[1] === "blocked" ? "FAILURE" : "ERROR";
+  return match && (latest?.state ?? "").toUpperCase() === failed
+    ? { state: match[1] as "blocked" | "unknown", reason: match[2]! } : undefined;
 }
 
 export function codeqlHeadAlertsRestArgs(owner: string, repo: string, prNumber: number): string[] {

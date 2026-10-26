@@ -1,0 +1,68 @@
+- id: W1-T10694
+  title: Name why W1-T9930's two dispatch attempts both ended blocked_inflight while its lifetime counter reads attributableDispatches=2
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  priority: 3
+  status: queued
+  # backlog gardener: band=3 evidence=4b93629935d00dc1
+  # backlog gardener: placed=2026-10-26T09:20:26.839Z
+  attempts: 0
+  files:
+    - docs/forensics/w1-t9930-blocked-inflight-attribution.md
+  acceptance:
+    - claim: the forensics doc names the run_ids behind W1-T9930's 2 run.start rows and its 2 blocked_inflight verdict rows, and states whether the two sets are the same run_ids or disjoint
+      proof: "grep: ## Run pairing in docs/forensics/w1-t9930-blocked-inflight-attribution.md"
+    - claim: the forensics doc says, for any run.start with no matching verdict, whether the inflight-lock staleness reclaim ever ran against it and why it did or did not reclaim it
+      proof: "grep: ## Reclaim path in docs/forensics/w1-t9930-blocked-inflight-attribution.md"
+    - claim: "the forensics doc states a conclusion: either a named, reproducible code defect with file and line for a follow-up to fix, or that both attempts were ordinary self-resolving dispatch-claim contention needing no further plan-side action on W1-T9930"
+      proof: "grep: ## Conclusion in docs/forensics/w1-t9930-blocked-inflight-attribution.md"
+  origin: architect
+  rationale: >-
+    From the 2026-10-26 proposal on verify-human-automate:W1-T9930, ratified via rmd approve:
+  
+    From the verify-human-automate:W1-T9930 proposal (judge decision: automate; observed_state
+    W1-T9930:adaptive-lifetime=2:capacity=0:open=0:merged=0:last=verdict:blocked_inflight:2),
+    ratified via rmd approve:
+  
+  
+    The judge's own evidence string reads "attributable dispatches=2; capacity refusals=0; open PR
+    evidence=0; merge evidence=0; last terminal verdict=blocked_inflight; attributable
+    terminal-verdict history=none" -- every one of W1-T9930's recorded "verdict" rows is
+    blocked_inflight, which streakRefusal (src/lib/non-worker-verdict.ts:50-52, via
+    lifetimeInfrastructureRefusal and the LIFETIME_ONLY_REFUSAL_VERDICTS set at line 18-20) is
+    built to EXCLUDE from being "attributable". taskAttributableLifetimeDispatches
+    (src/lib/status.ts:1820-1844) builds exactly that exclusion set from the task's own "verdict"
+    rows and subtracts their run_ids from its "starts" tally -- so a task whose entire terminal
+    history is blocked_inflight should read attributableDispatches=0, not 2.
+    routeAdaptiveLifetimePressure (src/run-task.ts:43097-43174) only skips a shard as "infra_only"
+    when attributableDispatches === 0 (line 43124); W1-T9930 cleared that bar and was judged on a
+    count its own "attributable terminal-verdict history=none" line cannot reconcile.
+  
+  
+    run.start (run-task-verb.ts:5211) is logged AFTER the per-task inflight-lock acquisition
+    (run-task-verb.ts:4850-4859, acquireInflightLock/InflightLockError); a dispatch REFUSED at
+    that lock never logs its own run.start at all. So the 2 counted run.start rows and the 2
+    blocked_inflight verdict rows may be disjoint: two earlier runs could have started, never
+    reached a terminal "verdict" row (so excluded from neither the orphan set nor the
+    infrastructure set, and counted as plain "starts"), and left their per-task inflight locks
+    unreleased -- which is exactly what the later 2 attempts would then be refused against. This
+    recon is read-only: pair the run_ids, and if they are disjoint, say why the stuck run(s) were
+    never reclaimed as stale.
+  design: |-
+    Read-only research, no code change. Pull every ledger row (the full rotation union, not the live file alone) carrying task_id or task === "W1-T9930", in chronological order. List the 2 "run.start" rows and the 2 "verdict" rows with each row's run_id, ts and full fields. For any run.start row whose run_id never appears on a "verdict" row, note what its other rows (if any) say happened to that run -- crashed, orphaned, superseded by a restart -- and whether its per-task inflight lock (state/inflight/<taskId>.lock, or the ledgered inflight.refused/worktree.prune rows around it) was ever reclaimed, and by what mechanism.
+
+    CREATES: docs/forensics/w1-t9930-blocked-inflight-attribution.md
+
+    Write that file with exactly these three section headings, verbatim, in order:
+    ## Run pairing
+    ## Reclaim path
+    ## Conclusion
+
+    "## Run pairing" names each of the 2 run.start run_ids and each of the 2 verdict run_ids, and states plainly whether the two sets are the same run_ids or disjoint.
+    "## Reclaim path" says, for any run.start with no matching verdict, what became of that run and whether the inflight-lock staleness check (acquireInflightLock, run-task-verb.ts ~4850) ever ran against it, and why it did or did not reclaim it.
+    "## Conclusion" states one of two things, in its own words: either (i) names a concrete, reproducible code defect in the attribution or reclaim path, citing file and line, for a follow-up task to fix, or (ii) states that both blocked_inflight verdicts were ordinary, already-self-resolving dispatch-claim contention with no new defect, confirming the judge's automate decision needs no further plan-side action on W1-T9930.
+
+    This task changes no code, files nothing else, and makes no judgement about whether W1-T9930's own design (the base-red re-judging fix) is correct -- that is unrelated to why ITS OWN build attempts were refused twice.
