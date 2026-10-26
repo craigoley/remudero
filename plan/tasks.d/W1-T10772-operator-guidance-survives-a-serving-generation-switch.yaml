@@ -1,47 +1,51 @@
 - id: W1-T10772
-  title: "OPERATOR GUIDANCE ACCEPTED BY THE CONSOLE IS WRITTEN UNDER THE IMMUTABLE SERVING GENERATION'S OWN ROOT, NOT THE STORE THE DAEMON'S FIX LANE READS — qualify the real producer/consumer store, write to a verified common persistent boundary, and make the 200 distinguish recorded from delivered (and answer-question's 200 ok:true even when appendQuestionAnswer returns false)"
+  title: "Persist accepted operator guidance across serving generations"
   repo: remudero
   depends_on: []
+  plan_refs: [W1-T164]
   type: implement
   verify: auto
-  principles: {tdd: strict}
+  priority: 2.5
   risk: high
-  band_meaning: blast-radius
-  budget_usd: 12.00
-  files: [src/lib/serve.ts, src/lib/operator-notes.ts, src/lib/panel-actions.ts, src/commands/serve.ts, test/operator-guidance-survives-a-serving-generation-switch.test.ts]
-  origin: "feedback#console-operator-guidance-generation-store-20261026"
-  plan_refs: ["W1-T3351", "W1-T3348"]
+  band_meaning: span
   status: queued
   attempts: 0
-  rationale: |
-    OBSERVED (untrusted report, to be re-verified by the implementer against current main): serveCommand
-    passes the module repoRoot as ServeDeps.questionsRoot, so operator-notes and answer-question handlers
-    write plan/operator-notes.ndjson under an immutable serving-generation directory, while the fix lane
-    reads task notes from the daemon's canonical repoRoot. A note accepted (POST 200 ok:true, exact GET
-    readback) in generation a was absent from generation b and from the daemon's file. Separately the
-    answer-question route returns 200 ok:true even when appendQuestionAnswer returns false.
-    Narrow gap; not a claim that all Inbox or daemon questions share one cause.
-  design: |
-    (i) QUALIFY FIRST: on current main, identify the real producer root, consumer root, task/repo scope
-    and any existing shared persistent mount; choose the authoritative guidance store from those, never
-    from a source-code generation directory. If no verified common store exists, refuse or expose an
-    honest pending/failed state rather than success.
-    (ii) The 200 distinguishes durably recorded from delivered/consumed; absent/unwritable/unverified
-    sinks refuse. answer-question returns a failure when appendQuestionAnswer returns false.
-    (iii) Preserve write tiers, attribution, actor checks, read-only behavior, idempotency, approval
-    semantics, and every original note/question/origin/failed receipt. No migration, copying of files,
-    live-write redirection, mount/permission/service change, restart or deployment.
-    (iv) Private real-store fixtures: the SAME note stays readable to the correct native task across a
-    generation switch; controls for write failure, foreign repo/task, duplicate, prior history; and a
-    source-only removal falsifier.
+  author_class: machine
+  origin: "feedback#console-operator-guidance-generation-store-20261026"
+  files:
+    - src/lib/operator-notes.ts
+    - src/lib/serve.ts
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/operator-notes.test.ts
+    - test/an-operator-note-reaches-the-docket-from-the-cli.test.ts
+    - test/route-wiring.test.ts
   acceptance:
-    - claim: "a note written through the route stays readable to its native task after an immutable generation switch"
-      proof: "unit test: test/operator-guidance-survives-a-serving-generation-switch.test.ts"
-    - claim: "an unwritable or unverified sink refuses instead of returning 200 ok:true, for notes and answer-question"
-      proof: "unit test: test/operator-guidance-survives-a-serving-generation-switch.test.ts"
-    - claim: "foreign repo/task, duplicate and prior-history controls leave other notes untouched"
-      proof: "unit test: test/operator-guidance-survives-a-serving-generation-switch.test.ts"
-  falsifier: |
-    CLOSE WITHOUT IMPLEMENTATION if current main already roots both handlers and the fix-lane reader at
-    one verified shared store and answer-question already refuses on a false append. Each arm must redden
-    when its source change is removed.
+    - claim: "An actual route append remains readable to the corresponding native task after a serving generation changes"
+      proof: "unit test: W1-T10772: accepted guidance survives a serving generation switch"
+    - claim: "Missing, unverified and unwritable store contexts refuse without reporting a successful append"
+      proof: "unit test: W1-T10772: unverified and unwritable note stores refuse writes"
+    - claim: "Repository and task scope, stamped provenance, append order and existing history remain intact"
+      proof: "unit test: W1-T10772: guidance preserves scope provenance and baseline history"
+    - claim: "The default route, native prompt, fix-lane and CLI docket readers use the same explicitly supplied durable context"
+      proof: "unit test: W1-T10772: default readers share the durable guidance store"
+  rationale: |
+    The original native triage published this reservation in PR14599, but its proposed plan used three identical whole-file proofs and a nonexistent src/commands/serve.ts. The unchanged lint correctly refused; preserve that failure, the original feedback and the unpublished proposal_pr bookkeeping commit. Correct the existing reserved task rather than reserving a competing one. This draft removes the unapproved task-specific budget override and supplies existing paths, distinct executable test titles and an explicit machine-filing judgment boundary; it changes no configured worker budget.
+    The observed accepted-note tuple was present in the prior serving generation but absent from the next generation and the separately sampled Core file. The original note is retained and must not be replayed or copied. Current source roots appendOperatorNote/loadOperatorNotesForTask in their supplied code-tree root, while route, native prompt, fix-lane, note CLI and docket callers supply or directly read different roots. Source discovery must use the actual current caller/config context rather than assuming repoRoot is always module-relative.
+    Read-only metadata on October26 positively verified that Serve and Core already see the same writable persistent state directory: matching bind source, directory device/inode and runtime user, with no files written. This qualifies a possible common boundary, not every repository's routing or an injection acknowledgment. Before wiring it, verify the real default callers' configured state root and repository/instance identity. Pass a typed explicit store context through those defaults; do not infer another account, repository or store from the working directory. Preserve existing write tiers, authorization, attribution and read-only callers. An unverified context must refuse rather than silently fork into a generation directory.
+    Keep this repair to operator guidance. A successful response may attest a completed durable append, never prompt delivery or consumption without a separate actual acknowledgment. Preserve existing response shapes; a new delivery API is not included. Retain already-used legacy history and its provenance without scanning retired generations, migrating, copying or automatically reinjecting old accepted notes. Preserve existing append semantics and task filtering; do not add new business approvals or reinterpret duplicate messages as new authority.
+    All listed source paths exist. src/run-task.ts owns serveCommand, note CLI and the direct docket/recency reads; src/cli/commands/run-task-verb.ts owns the default native prompt read; src/lib/sweep.ts owns fix-lane note reads and writes; src/lib/serve.ts wires the existing routes. src/lib/operator-notes.ts is the shared note boundary. Use the three existing physical suites; new test code must use package aliases. High/span records this coupled caller breadth, not new operating authority.
+    Test real private stores through the actual route and default reader composition across two synthetic immutable code roots sharing one explicitly scoped persistent context. Check true append/readback, task and foreign-repository refusal, missing/unwritable context, unchanged stamps/order/history and the default CLI/fix/prompt paths. Remove only the stable-context wiring, retain the tests, observe the generation-switch assertion fail, restore exactly and require success. Prove every executable changed source file has positive coverage instrumentation and run the population/caller census, types, canonical stored proofs and normal review/CI.
+    The separately reported answer-question false-append behavior remains an unqualified follow-up; this task does not change question workflows, stored answers, rulings or their execution. Broader Inbox snapshot/contention and Analytics timeout work remain separately tracked. Existing source-owner PR14363 and other Serve changes must be reconciled, not overwritten.
+    This filing authorizes no history migration, accepted-note replay, live root/mount/link/permission/service change, restart, provider/billing/budget change, deployment, CI-infrastructure or Azure-memory work. Source implementation, protected merge, actual runtime adoption and naturally observed prompt acknowledgment are separate receipts. If the qualified common boundary cannot be established under those constraints, preserve the task as held and surface the precise unresolved fact.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The description states the task is scoped to operator-guidance persistence. It states no change to auth, permissions, infrastructure, deploy or merge policy, and no deletion or migration of data."
+      - "The description says unverified or unwritable contexts must refuse. It also says write tiers, response shapes and history are preserved, and that no operator-only decision is requested."
+      - "The description declares 8 files that all exist at the base, with four distinct unit-test proofs. The coupling across five default callers and the family's lack of track record are noted but do not meet the HIGH criteria."
+    judged_at: "2026-10-26T22:53:41.419Z"
+    pin: "df425509aea4efc9c0368e4f612b06bdc2bed09ae3ff8881ca5f90b285173c03"
