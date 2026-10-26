@@ -8681,7 +8681,7 @@ components:
           type: string
           format: date-time
         asOf:
-          anyOf:
+          oneOf:
             - type: string
               format: date-time
             - type: "null"
@@ -8757,7 +8757,7 @@ components:
               repository:
                 type: string
               snapshotId:
-                anyOf:
+                oneOf:
                   - type: string
                     pattern: ^[a-f0-9]{64}$
                   - type: "null"
@@ -8772,7 +8772,7 @@ components:
                   - unauthorized
                   - rate_limited
               summary:
-                anyOf:
+                oneOf:
                   - &a1
                     type: object
                     additionalProperties: false
@@ -8792,7 +8792,7 @@ components:
                         type: integer
                         minimum: 0
                       healthy:
-                        anyOf:
+                        oneOf:
                           - type: boolean
                             description: Check policy result for the saved code version. Current access, source age and urgent findings
                               remain separate.
@@ -8807,7 +8807,7 @@ components:
                   - scope
                 properties:
                   value:
-                    anyOf:
+                    oneOf:
                       - type: integer
                         minimum: 0
                       - type: "null"
@@ -8821,17 +8821,17 @@ components:
                     type: string
                     description: The measured CodeQL scope; this is not a comprehensive security assessment.
               measuredAt:
-                anyOf:
+                oneOf:
                   - type: string
                     format: date-time
                   - type: "null"
               analyzedSha:
-                anyOf:
+                oneOf:
                   - type: string
                     pattern: ^[a-f0-9]{40}$
                   - type: "null"
               currentSha:
-                anyOf:
+                oneOf:
                   - type: string
                     pattern: ^[a-f0-9]{40}$
                   - type: "null"
@@ -8842,12 +8842,12 @@ components:
                   - stale
                   - unavailable
               lastAttemptAt:
-                anyOf:
+                oneOf:
                   - type: string
                     format: date-time
                   - type: "null"
               nextCheckDueAt:
-                anyOf:
+                oneOf:
                   - type: string
                     format: date-time
                   - type: "null"
@@ -8882,7 +8882,7 @@ components:
                         type: string
                         format: date-time
                       snapshotId:
-                        anyOf:
+                        oneOf:
                           - type: string
                             pattern: ^[a-f0-9]{64}$
                           - type: "null"
@@ -8907,7 +8907,7 @@ components:
                       reason:
                         type: string
               reason:
-                anyOf:
+                oneOf:
                   - type: string
                   - type: "null"
               sourceClocks:
@@ -8932,29 +8932,29 @@ components:
                         - not_collected
                         - unavailable
                     measuredAt:
-                      anyOf:
+                      oneOf:
                         - type: string
                           format: date-time
                         - type: "null"
                     analyzedSha:
-                      anyOf:
+                      oneOf:
                         - type: string
                           pattern: ^[a-f0-9]{40}$
                         - type: "null"
                 maxItems: 128
           maxItems: 256
         snapshotId:
-          anyOf:
+          oneOf:
             - type: string
               pattern: ^[a-f0-9]{64}$
             - type: "null"
         isCurrentSnapshot:
-          anyOf:
+          oneOf:
             - type: boolean
               description: Whether these are the latest saved results. Historical evidence never enables current planning.
             - type: "null"
         assessment:
-          anyOf:
+          oneOf:
             - type: object
               additionalProperties: false
               required:
@@ -8985,7 +8985,7 @@ components:
                   type: string
                   pattern: ^[a-f0-9]{40}$
                 baselineSha:
-                  anyOf:
+                  oneOf:
                     - type: string
                       pattern: ^[a-f0-9]{40}$
                     - type: "null"
@@ -8995,7 +8995,7 @@ components:
                   type: string
                   format: date-time
                 nextDueAt:
-                  anyOf:
+                  oneOf:
                     - type: string
                       format: date-time
                     - type: "null"
@@ -9042,33 +9042,33 @@ components:
                           - not_collected
                           - unavailable
                       analyzedSha:
-                        anyOf:
+                        oneOf:
                           - type: string
                             pattern: ^[a-f0-9]{40}$
                           - type: "null"
                       observedAt:
-                        anyOf:
+                        oneOf:
                           - type: string
                             format: date-time
                           - type: "null"
                       scopeHash:
-                        anyOf:
+                        oneOf:
                           - type: string
                           - type: "null"
                       toolVersion:
-                        anyOf:
+                        oneOf:
                           - type: string
                           - type: "null"
                       rulesVersion:
-                        anyOf:
+                        oneOf:
                           - type: string
                           - type: "null"
                       configHash:
-                        anyOf:
+                        oneOf:
                           - type: string
                           - type: "null"
                       baseline:
-                        anyOf:
+                        oneOf:
                           - type: object
                             additionalProperties: false
                             required:
@@ -9096,7 +9096,7 @@ components:
                           type: string
                         maxItems: 128
                       reason:
-                        anyOf:
+                        oneOf:
                           - type: string
                           - type: "null"
                   maxItems: 128
@@ -9175,12 +9175,12 @@ components:
                       title:
                         type: string
                       effortMinutes:
-                        anyOf:
+                        oneOf:
                           - type: number
                             minimum: 0
                           - type: "null"
                       estimateKind:
-                        anyOf:
+                        oneOf:
                           - type: string
                             enum:
                               - modeled
@@ -9191,7 +9191,7 @@ components:
                 names the complete population. Each source retains its own measurement time and code revision.
             - type: "null"
         findingCount:
-          anyOf:
+          oneOf:
             - type: integer
               minimum: 0
             - type: "null"
@@ -9275,12 +9275,12 @@ components:
                     scanId:
                       type: string
                     analyzedSha:
-                      anyOf:
+                      oneOf:
                         - type: string
                           pattern: ^[a-f0-9]{40}$
                         - type: "null"
                     observedAt:
-                      anyOf:
+                      oneOf:
                         - type: string
                           format: date-time
                         - type: "null"
@@ -9297,12 +9297,12 @@ components:
                       type: string
                 maxItems: 100
               effortMinutes:
-                anyOf:
+                oneOf:
                   - type: number
                     minimum: 0
                   - type: "null"
               estimateKind:
-                anyOf:
+                oneOf:
                   - type: string
                     enum:
                       - modeled
@@ -9338,12 +9338,12 @@ components:
             - unavailable
             - not_collected
         relatedWorkAsOf:
-          anyOf:
+          oneOf:
             - type: string
               format: date-time
             - type: "null"
         relatedWorkReason:
-          anyOf:
+          oneOf:
             - type: string
             - type: "null"
         planningAvailable:
@@ -9363,7 +9363,7 @@ components:
             - nextCursor
           properties:
             nextCursor:
-              anyOf:
+              oneOf:
                 - type: string
                   maxLength: 512
                 - type: "null"
