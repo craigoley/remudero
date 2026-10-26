@@ -29,7 +29,7 @@ async function writerOptions(inspect: (options: ContainedSpawnOptions, root: str
   const child = Object.assign(new EventEmitter(), streams);
   try {
     await spawnCodexWorker({ cwd: REPO_ROOT, prompt: "fixture only", workerHome,
-      settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: mode === "reader" ? ["Read"] : ["Read", "Bash"],
+      settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: mode === "reader" ? ["Read"] : ["Read", "Edit"],
       ...(mode === "review" ? { sandboxIntent: "disposable-review" as const, sandboxReadRoots: [REPO_ROOT] } : {}),
       containment: { spawn(options) {
         inspect(options, root, home);
