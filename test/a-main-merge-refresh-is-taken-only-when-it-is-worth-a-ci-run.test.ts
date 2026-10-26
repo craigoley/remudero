@@ -485,3 +485,38 @@ test("W1-T7735: a base-fixed admission still consults the value test and writes 
   assert.equal(lightRow?.forced_by, REFRESH_ADMISSION_FORCED_BY);
   assert.equal(lightRow?.decision_id, `7051@${"2".repeat(40)}:${REFRESH_ADMISSION_FORCED_BY}:${at}`);
 });
+
+test("a green summary does not erase active CI when a refresh settles", async () => {
+  for (const light of [false, true]) {
+    const ready = pr(7333);
+    const asked: RefreshJudgeQuestion[] = [];
+    const reads: string[] = [];
+    const h = harness({ behindMainByPr: one(7333, 2), baseChangedFilesByPr: one(7333, base(["src/mine.ts"])),
+      readBranchProtectionStrict: () => false,
+      liveCiRunForHead: async current => { reads.push(current.headSha); return true; },
+      refreshJudge: async question => { asked.push(question); return "independent"; } });
+    if (light) assert.equal(await runLightPassReadyRefresh([ready], h.deps, POLICY), undefined);
+    else await runSweep([ready], h.deps, POLICY);
+    assert.deepEqual(h.updated, [], "an independent run in flight must not be cancelled by a refresh");
+    assert.deepEqual(reads, [ready.headSha], "read current-head CI exactly at settlement");
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0]!.ciInFlight, true);
+    assert.equal(decided(h.rows)[0]!.ci_in_flight, true);
+    assert.equal(decided(h.rows)[0]!.decision, "skip");
+  }
+});
+
+test("the active-CI refresh guard preserves terminal-CI and judge-overlap decisions", async () => {
+  for (const active of [false, true]) {
+    const ready = pr(7334);
+    const asked: RefreshJudgeQuestion[] = [];
+    const h = harness({ behindMainByPr: one(7334, 2), baseChangedFilesByPr: one(7334, base(["src/mine.ts"])),
+      readBranchProtectionStrict: () => false, liveCiRunForHead: () => active,
+      refreshJudge: async question => { asked.push(question); return "overlap"; } });
+    assert.equal(await runLightPassReadyRefresh([ready], h.deps, POLICY), 7334);
+    assert.deepEqual(h.updated.map(x => x.prNumber), [7334]);
+    assert.equal(asked.length, active ? 1 : 0);
+    assert.equal(decided(h.rows)[0]!.ci_in_flight, active);
+    assert.equal(decided(h.rows)[0]!.decision, "refresh");
+  }
+});
