@@ -34,7 +34,9 @@ export interface ProductResearchProvider {
     requestId: string; budgetUsd: number; signal: AbortSignal }): Promise<unknown>;
 }
 
-class ResearchProviderUnavailable extends Error {}
+class ResearchProviderUnavailable extends RmdError {
+  constructor() { super("usage", GENERIC_EXIT_CODE, "product research provider unavailable"); }
+}
 
 /** The serve adapter uses the existing worker transport and its configured triage mount. */
 export function realProductResearchProvider(options: {
