@@ -564,7 +564,7 @@ function nonDispatchTerminalEvidence(result: WorkerResult | undefined) {
         : unavailable("provider-invocation-not-reported"),
       allowanceRefused: flag(result.budgetRefused),
       reservedUsd: amount(result.budgetReservedUsd), settledUsd: amount(result.budgetSettledUsd) };
-  } catch { return unavailable("worker-terminal-fields-unavailable"); }
+  } catch { return { state: "unavailable" as const, reason: "worker-terminal-fields-unavailable" }; }
 }
 
 /** Capture an auxiliary worker call without turning telemetry into a worker or PR gate. The
