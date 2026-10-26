@@ -5,6 +5,8 @@
 // recordable-ratchet classifier used to read only the NAME, so #9186 (title
 // "expiring-fixture-census") was told its whole fix was `npm run comment-load-ratchet`.
 import assert from "node:assert/strict";
+import { rollupFromRest } from "#src/lib/open-prs-rest.js";
+import { fetchCiFailures, fetchCiFailuresAsync } from "#src/lib/tick-read-worker.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -119,4 +121,42 @@ test("W1-T5769: a check that names no gate keeps today's name-keyed behaviour", 
   // A free-text title that is not a gate list is not read as one.
   const prose = { ...plain, title: "Comment load grew past its ceiling" };
   assert.deepEqual(recordableRatchetRepairFor(bundledPr(prose)), ["comment-load-ratchet"]);
+});
+
+
+test("the real REST failure producer carries a bundled refusing title to native repair selection", async () => {
+  const cases = [
+    { title: "expiring-fixture-census", check: 121546733806, job: "121542659823", run: 40313992861,
+      log: 'Error: expiring-fixture-census: INCOMPLETE TABLE — 1 clock-aged field(s) are not in AGED_FIELDS:\n  - "asOf" ages against the clock at src/lib/code-health-view.ts:144, not in AGED_FIELDS and not waived' },
+    { title: "console-parity", check: 121545234937, job: "121541192467", run: 40313791075,
+      log: 'AssertionError: every real COMMANDS verb needs a route or a CLI_ONLY reason — unmapped: improvement-action' },
+  ];
+  for (const observed of cases) {
+    const raw = { id: observed.check, name: "comment-load-ratchet", status: "completed", conclusion: "failure",
+      details_url: `https://github.com/craigoley/remudero/runs/${observed.check}`,
+      external_id: `run:${observed.run}:1:job:${observed.job}`, output: { title: observed.title },
+      started_at: "2026-10-26T11:25:44Z", completed_at: "2026-10-26T11:25:44Z" };
+    const rollup = rollupFromRest([raw], []);
+    const seen: string[] = [];
+    const io = { fetchAnnotations: (_owner: string, _repo: string, job: string) => { seen.push(`annotations:${job}`); return []; },
+      fetchJobLog: (_owner: string, _repo: string, job: string) => { seen.push(`log:${job}`); return observed.log; } };
+    for (const read of [fetchCiFailures, fetchCiFailuresAsync]) {
+      seen.length = 0;
+      const failures = await read("craigoley", "remudero", rollup, 60, io);
+      assert.deepEqual(seen, [`annotations:${observed.job}`, `log:${observed.job}`], "the native leaf resolves the real posting job without another metadata request");
+      const pr = bundledPr(failures[0]!);
+      assert.equal(ratifiedBaselineRatchetRepairFor(pr), undefined, "the actual producer must not turn this other gate into comment-baseline authority");
+      assert.equal(recordableRatchetRepairFor(pr), undefined);
+      assert.equal(failures[0]!.title, observed.title);
+      const disposition = await disposedReason(pr, true);
+      assert.equal(disposition.repaired, 0);
+      assert.ok(disposition.reason.includes(`refused by ${observed.title}`));
+    }
+  }
+  for (const title of [undefined, null, "", "comment-load-ratchet"]) {
+    const raw = { name: "comment-load-ratchet", status: "completed", conclusion: "failure", output: { title } };
+    const failures = fetchCiFailures("fixture", "repo", rollupFromRest([raw], []), 60, { fetchAnnotations: () => [], fetchJobLog: () => "" });
+    assert.deepEqual(ratifiedBaselineRatchetRepairFor(bundledPr(failures[0]!)), ["comment-load-ratchet"], "missing title retains the existing name-based behavior; an exact title retains its existing authority");
+    if (!title) assert.equal(failures[0]!.title, undefined);
+  }
 });
