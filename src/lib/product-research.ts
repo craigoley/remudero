@@ -14,6 +14,7 @@ import type { Config } from "./config.js";
 import type { Mount } from "./mounts.js";
 import { spawnWorker, SubscriptionOnlyRefusedError } from "./worker.js";
 import { ProviderCapacityBlockedError } from "./worker-provider.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
 export const PRODUCT_RESEARCH_VERSION = "product-research-v1" as const;
 /** PRIMARY CONTROL: storage quotas for research evidence; they grant no provider or spending authority. */
@@ -43,7 +44,8 @@ export function realProductResearchProvider(options: {
   mount: Mount; config: Config; cwd: string; settingsFile: string;
   spawn?: typeof spawnWorker;
 }): ProductResearchProvider {
-  const spawn = options.spawn ?? spawnWorker;
+  const raw = options.spawn ?? spawnWorker;
+  const spawn = benchmarkNonDispatchSpawn("serve-product-research", raw);
   return {
     id: `${options.mount.provider ?? "routed"}:${options.mount.model}`,
     async research(input) {

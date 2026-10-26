@@ -252,9 +252,27 @@ writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmi
     assert.deepEqual(violations(reply, declaredBody("/v1/products/research", "POST", 200)), []);
     assert.deepEqual([reply.run.outcome, reply.run.provider, reply.run.spendUsd], ["completed", "claude:haiku", 0.02]);
     assert.equal(calls, 1);
+    const receipts = () => readFileSync(join(fixture, "state", "ledger.ndjson"), "utf8").trim().split("\n")
+      .map((line) => JSON.parse(line) as { step: string; lane?: string; run_id: string; task_id: string;
+        worker_assignment?: { id: string; requested: { model: string }; selected: { provider: string; model: string } };
+        selection_assignment_id?: string; success?: boolean;
+        benchmark_run?: { assignmentJoin?: { state: string; value?: boolean } } })
+      .filter((row) => row.lane === "serve-product-research");
+    const rows = receipts();
+    assert.deepEqual(rows.map((row) => row.step), ["worker.assignment", "worker.attempt"],
+      "the real worker writes exactly one assignment and one terminal receipt");
+    assert.ok(rows[0].worker_assignment?.id);
+    assert.equal(rows[0].worker_assignment.selected.provider, "claude");
+    assert.equal(rows[0].worker_assignment.requested.model, "haiku");
+    assert.ok(rows[0].worker_assignment.selected.model);
+    assert.equal(rows[1].selection_assignment_id, rows[0].worker_assignment.id);
+    assert.deepEqual(rows[1].benchmark_run?.assignmentJoin, { state: "observed", value: true });
+    assert.equal(rows[1].success, true);
+    assert.ok(rows.every((row) => row.run_id === reply.run.id && row.task_id === "PRODUCT-RESEARCH"));
     const retry = await post("alice");
     assert.equal((await retry.json() as { replayed: boolean }).replayed, true);
     assert.equal(calls, 1, "a durable receipt does not start another worker");
+    assert.deepEqual(receipts(), rows, "replaying research never duplicates worker receipts");
   } finally { await app.close(); }
 });
 

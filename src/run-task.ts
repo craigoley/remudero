@@ -29091,7 +29091,7 @@ export async function serveCommand(
     validateWorkerSettingsFile(settingsFile);
     productResearchProvider = realProductResearchProvider({
       mount, config, cwd: repoRoot, settingsFile,
-      spawn: deps.spawn ?? ledgeredNonDispatchSpawn("serve-product-research"),
+      spawn: deps.spawn,
     });
     log("serve.product_research_resolved", { provider: productResearchProvider.id, budget_usd: DEFAULT_BUDGET_USD });
   } catch (error) {
