@@ -30501,9 +30501,21 @@ export function commitWorkerEdits(
     .map((entry) => entry.slice(3)).filter((path) => !existsSync(join(repoDir, path))));
   const withoutStagedDeletions = staged.filter((path) => !alreadyStagedDeletion.has(path));
 
+  // `add -A -- <tracked path>` can refuse an ignored parent directory. Update existing
+  // entries separately; new paths still use Git's ordinary ignore checks, without force.
+  // Read tracking from the index being committed, including the fix round's private index.
+  const stageWorkerPaths = (paths: readonly string[], git: (args: string[]) => string): void => {
+    if (paths.length === 0) return;
+    const tracked = new Set(nulPaths(git(["ls-files", "--cached", "-z", "--", ...paths])));
+    const updates = paths.filter(path => tracked.has(path));
+    const additions = paths.filter(path => !tracked.has(path));
+    if (updates.length > 0) git(["add", "-u", "--", ...updates]);
+    if (additions.length > 0) git(["add", "-A", "--", ...additions]);
+  };
+
   let sha: string;
   if (roundRef === undefined) {
-    if (withoutStagedDeletions.length > 0) runGit(["add", "-A", "--", ...withoutStagedDeletions]);
+    stageWorkerPaths(withoutStagedDeletions, runGit);
     runGit(["commit", "-m", commitMessage]);
     sha = runGit(["rev-parse", "HEAD"]).trim();
   } else {
@@ -30512,7 +30524,7 @@ export function commitWorkerEdits(
     // an unseeded temporary index starts from the prior head, where `add -A` must still stage the removal.
     const addable = mergeHead === undefined ? staged : withoutStagedDeletions;
     const tree = temporaryIndexTree(repoDir, options.priorHeadSha!, (env) => {
-      if (addable.length > 0) hostWorktreeGit(repoDir, ["add", "-A", "--", ...addable], { env });
+      stageWorkerPaths(addable, args => hostWorktreeGit(repoDir, args, { env }));
     }, mergeHead === undefined ? undefined : resolve(repoDir, runGit(["rev-parse", "--git-path", "index"]).trim()));
     if (mergeHead === undefined && tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
       return { committed: false, undeclared, reason: "the worker changed nothing" };
