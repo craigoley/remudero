@@ -1,10 +1,10 @@
 - id: W1-T10709
-  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — escalated:merge conflict (mergeState dirty) cost 6.23 PR-hours"
+  title: Recheck stopped owner recovery once after an accepted answer
   repo: remudero
   depends_on: []
   type: implement
   verify: human
-  risk: low
+  risk: high
   priority: 1.27
   status: queued
   attempts: 0
@@ -14,9 +14,16 @@
     - src/lib/sweep.ts
     - test/sweep/flow-escalated-merge-conflict-mergestate-dirty.test.ts
   acceptance:
-    - claim: "escalated:merge conflict (mergeState dirty) is cleared by its owner without manual intervention"
-      proof: "grep: test(\"W1-T10709: flow-escalated-merge-conflict-mergestate-dirty clears without a person\" in test/sweep/flow-escalated-merge-conflict-mergestate-dirty.test.ts"
-  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+    - claim: one accepted answer permits one fully guarded owner recovery recheck and cannot loop
+      proof: "unit test: owner recovery rechecks one accepted answer without looping"
+    - claim: owner recovery rechecks retain existing live-owner and refusal guards
+      proof: "unit test: owner recovery recheck preserves all existing refusal guards"
+    - claim: the production decline writer remembers a failed recheck without exposing its answer
+      proof: "unit test: failed owner recovery records its answer key at the production decline boundary"
+  note: Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges.
+    Operator approved the exact bounded recheck on 2026-10-26. Human verification, original
+    priority, dependencies, author lineage and spending limits remain unchanged; no implementation
+    or task credit at plan amendment.
   rationale: |
     escalated:merge conflict (mergeState dirty) cost 6.23 PR-hours; owner NONE
     Owner NONE is absent.
@@ -30,6 +37,50 @@
     action: escalate
     confidence: 0.95
     reasons:
-      - "high-risk verdict at confidence 0.95 — on the change's description/files alone, no diff was read — The acceptance requires automatic clearance of a merge-conflict escalation, while the cited cases explicitly stop further dispatch after repeated checkout-claim declines involving dirty worktrees or failed preservation.; on the change's description/files alone, no diff was read — The filed record does not specify a bounded remedy that preserves those protections; its safe resolution cannot be verified from the supplied description, files list, and gates."
+      - "high-risk verdict at confidence 0.95 — on the change's description/files alone, no diff was
+        read — The acceptance requires automatic clearance of a merge-conflict escalation, while the
+        cited cases explicitly stop further dispatch after repeated checkout-claim declines
+        involving dirty worktrees or failed preservation.; on the change's description/files alone,
+        no diff was read — The filed record does not specify a bounded remedy that preserves those
+        protections; its safe resolution cannot be verified from the supplied description, files
+        list, and gates."
     judged_at: "2026-10-26T10:59:20.820Z"
     pin: "5620997d960c1be17a1376f9fe3bf2233f1953071735b56da42d90568b60f391"
+  band_meaning: span
+  principles:
+    tdd: strict
+  design: >-
+    The operator approved this bounded recheck on 2026-10-26 after issue14320 comment6414074846 was
+    accepted by the native question store at 11:11:16Z. The old tracked-preservation failure remains
+    held because fixDispatchHoldAtHead only re-probes keep decisions. PR14350 repaired preservation;
+    this task grants no manual cleanup or liveness exception.
+
+
+    Allow one native owner-recovery recheck for the exact accepted answer and PR head, limited to
+    the recorded owner_dirty_recovery_preserve_failed refusal. Require the existing ownerReclaimable
+    recapture to admit recovery under all current managed-path, branch, identity, live-process,
+    live-claim, readable-state and adaptive-idle checks. Missing, spent, untrusted or empty answers
+    do not authorize a recheck. Other refusal reasons keep their existing behavior.
+
+
+    Bind the opportunity to a stable opaque key for the accepted constraint, PR number and head.
+    Write that consumed key through the real production checkout-claim-decline logger when an
+    attempted recheck fails. Consult those native decline receipts before granting another recheck.
+    The unchanged failed attempt cannot loop; duplicate delivery of the same accepted answer cannot
+    mint another attempt. Keep the original decline history and existing backstop count unchanged. A
+    new head follows the existing per-head policy; do not clear claims or synthesize a dispatch
+    receipt.
+
+
+    Do not delete claims, discard work, reset counters or raise budgets. Preserve every durable
+    patch, index and untracked-work safeguard, immutable recovery ref, exact-tree equality refusal,
+    worker and test admission, task scope, cost ceiling and protected review gate. Actual recovery
+    uses the existing native preservation path and can still refuse. No service restart, role
+    impersonation, scanner exception or spending increase is authorized.
+  falsifier: "Strict TDD: first prove the old hold rejects the newly accepted answer. Add controls for
+    no answer, spent or duplicate answer, wrong refusal, failed prior recheck, another PR/head, live
+    or claimed owner and unreadable state. Exercise the actual production decline writer, capture
+    its opaque receipt, and replay that receipt through the hold to prove boundedness without a fake
+    success value. Remove the correction while retaining tests and observe failures; restore and
+    obtain verified physical test summaries through normal admission. Retain all existing recovery
+    and backstop suites."
