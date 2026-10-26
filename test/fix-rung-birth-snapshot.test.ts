@@ -319,13 +319,13 @@ test("runFixRung: missing birth snapshot never manufactures a foreign-tree stand
   }
 });
 
-test("a published head advance cannot spend a worker on its previous failure evidence", async () => {
+async function observeAdvancedEvidenceRound(mode: "published" | "local" | "unreadable") {
   const { root, worktreePath, branch } = await initFixRungRepo();
   try {
     const before = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     execFileSync("git", ["-C", worktreePath, "commit", "--allow-empty", "-qm", "a newer branch tip"], { env: GIT_ENV });
     const advanced = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    execFileSync("git", ["-C", worktreePath, "push", "--quiet", "origin", `HEAD:refs/heads/${branch}`], { env: GIT_ENV });
+    if (mode !== "local") execFileSync("git", ["-C", worktreePath, "push", "--quiet", "origin", `HEAD:refs/heads/${branch}`], { env: GIT_ENV });
     const birth = captureWorktreeSnapshotViaGit(worktreePath);
     assert.ok(worktreeSnapshotIsClean(birth));
     let spawned = 0;
@@ -339,14 +339,37 @@ test("a published head advance cannot spend a worker on its previous failure evi
         waitForCiGreen: async () => "red", runReview: async () => fakeReview("failure", []), push: () => { pushed++; },
         issues, ledgerPath: tmpLedgerPath(), log: (step, extra) => logs.push({ step, extra }), say: () => {}, account: r => r,
         readLiveState: async () => ({ ok: true, state: "OPEN" }), captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
-        readRegisteredWorktrees: async () => [{ path: worktreePath, branch }] },
+        readRegisteredWorktrees: async () => [{ path: worktreePath, branch }],
+        ...(mode === "unreadable" ? { readRemoteBranchHead: async () => { throw new Error("fixture remote read unavailable"); } } : {}) },
     });
-    assert.equal(spawned, 0, "the next ordinary snapshot must provide evidence for the newer head first");
-    assert.equal(pushed, 0);
-    assert.equal(issues.calls.length, 0, "a normal branch advance is no new operator design question");
-    assert.equal(outcome.outcome, "stood_down");
-    assert.equal(outcome.review.headSha, before, "do not relabel stale evidence as evidence for the new head");
-    assert.equal(execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), advanced);
-    assert.ok(logs.some(row => row.step === "fix.evidence_head_superseded" && row.extra?.head_sha === before && row.extra?.current_head_sha === advanced));
+    return { spawned, pushed, issueCount: issues.calls.length, outcome, logs, before, advanced,
+      headAfter: execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim() };
   } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+test("a published head advance cannot spend a worker on its previous failure evidence", async () => {
+  const r = await observeAdvancedEvidenceRound("published");
+  assert.equal(r.spawned, 0, "the next ordinary snapshot must provide evidence for the newer head first");
+  assert.equal(r.pushed, 0);
+  assert.equal(r.issueCount, 0, "a normal branch advance is no new operator design question");
+  assert.equal(r.outcome.outcome, "stood_down");
+  assert.equal(r.outcome.strikes, 0);
+  assert.equal(r.outcome.review.headSha, r.before, "do not relabel stale evidence as evidence for the new head");
+  assert.equal(r.headAfter, r.advanced);
+  assert.ok(r.logs.some(row => row.step === "fix.evidence_head_superseded" && row.extra?.head_sha === r.before && row.extra?.current_head_sha === r.advanced));
+});
+
+test("a retained unpublished fix keeps its existing native resume route", async () => {
+  const r = await observeAdvancedEvidenceRound("local");
+  assert.equal(r.spawned, 1);
+  assert.equal(r.headAfter, r.advanced);
+  assert.equal(r.logs.some(row => row.step === "fix.evidence_head_superseded"), false);
+});
+
+test("an unreadable remote preserves the existing direction without certifying a published advance", async () => {
+  const r = await observeAdvancedEvidenceRound("unreadable");
+  assert.equal(r.spawned, 1);
+  assert.equal(r.headAfter, r.advanced);
+  assert.equal(r.logs.some(row => row.step === "fix.evidence_head_superseded"), false);
+  assert.ok(r.logs.some(row => row.step === "fix.evidence_head_unread"));
 });
