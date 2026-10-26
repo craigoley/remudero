@@ -37,11 +37,18 @@ const SENSITIVE_SURFACE = new RegExp(
 
 /** Locations that are privileged whatever else the path says (W1-T10350): CI, worker settings, every
  *  Dockerfile, and the operator's own policy and rulings. A test or prose location never overrides these. */
-const PRIVILEGED_LOCATION = /(^|\/)\.github\/|(^|\/)\.claude\/|(^|\/)settings\/|Dockerfile|^plan\/policy\.yaml$|^(DECISIONS|CLAUDE)\.md$/i;
+const PRIVILEGED_LOCATIONS: readonly RegExp[] = [
+  /(?:^|\/)\.github\//i,
+  /(?:^|\/)\.claude\//i,
+  /(?:^|\/)settings\//i,
+  /Dockerfile/i,
+  /^plan\/policy\.yaml$/i,
+  /^(?:DECISIONS|CLAUDE)\.md$/i,
+];
 /** A test file: under test/, or named *.test.* / *.spec.*. */
-const TEST_LOCATION = /^test\/|\.(test|spec)\.[^/]+$/i;
+const TEST_LOCATIONS: readonly RegExp[] = [/^test\//i, /\.(?:test|spec)\.[^/]+$/i];
 /** Prose: everything under docs/ and markdown under plan/ (plan YAML, policy and rulings are not prose). */
-const PROSE_LOCATION = /^docs\/|^plan\/.*\.md$/i;
+const PROSE_LOCATIONS: readonly RegExp[] = [/^docs\//i, /^plan\/.*\.md$/i];
 
 /** Where a declared path sits. `privileged` escalates; `test` and `prose` are never escalated for a word
  *  in their name; `other` is source or config, read by the segment-word rules as before. */
@@ -53,9 +60,9 @@ const MERGE_POLICY_PATH = /(^|\/)[^/]*(auto-?merge|merge-queue|branch-protection
  *  A path is classed by WHERE it sits before any word in it is read. */
 export function pathClass(path: string): PathClass {
   const p = path.replaceAll("\\", "/").replace(/^\.\//, "");
-  if (PRIVILEGED_LOCATION.test(p)) return "privileged";
-  if (TEST_LOCATION.test(p)) return "test";
-  if (PROSE_LOCATION.test(p)) return "prose";
+  if (PRIVILEGED_LOCATIONS.some((re) => re.test(p))) return "privileged";
+  if (TEST_LOCATIONS.some((re) => re.test(p))) return "test";
+  if (PROSE_LOCATIONS.some((re) => re.test(p))) return "prose";
   return SENSITIVE_SURFACE.test(p) || MERGE_POLICY_PATH.test(p) ? "privileged" : "other";
 }
 
