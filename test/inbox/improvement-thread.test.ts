@@ -18,6 +18,7 @@ test("improvement filing receipts retain task identities across ledger rotation"
   const { appendLedger, rotateLedger } = await import("#src/lib/ledger.js");
   const { readLedgerLines } = await import("#src/lib/status.js");
   const { improvementNativeFilingReceipt } = await import("#src/run-task.js");
+  assert.equal(typeof improvementNativeFilingReceipt, "function", "the native filing receipt reader must exist");
   await withTempDir("improvement-filing-rotation", dir => {
     const ledgerPath = join(dir, "ledger.ndjson"), clock = fixedClock(Date.now());
     const proposalId = "improvement-rotation", run_id = "APPROVE-rotation-receipt";
