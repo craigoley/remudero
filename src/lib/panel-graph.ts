@@ -2574,7 +2574,8 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     isAgeOnlyInboxInformation(proposal) && classifiedInboxOwner(proposal, capturedById.get(proposal.id) ?? {}) === "fleet");
   // W1-T8950: an operator item's recommended decision, current for its summary and lane, with its route attached here.
   const recommended = (proposal: { id: string; summary: string }, lane: InboxOptionLane): { recommendation?: ServedRecommendation } => {
-    const recommendation = recommendationFor(proposal, lane, stores.recommendations ?? {});
+    const recommendation = recommendationFor(proposal, lane, stores.recommendations ?? {},
+      classifiedInboxOwner(proposal, capturedById.get(proposal.id) ?? {}));
     return recommendation ? { recommendation } : {};
   };
 

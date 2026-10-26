@@ -159,7 +159,7 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   if (sourceThreads.status !== "ok") throw new Error("Inbox gardener operator intent source unavailable");
   const byId = new Map(proposals.map(proposal => [proposal.id, proposal]));
   const captured = { ...classified, classifications: classifications.map(row => ({ ...row,
-    displayOwner: captureInboxOwner(byId.get(row.proposalId)!, sourceThreads.threads.get(inboxThreadId(row.proposalId)) ?? [], row.retirement?.state === "restored_for_review") })) };
+    displayOwner: captureInboxOwner(byId.get(row.proposalId)!, sourceThreads.threads.get(inboxThreadId(row.proposalId)) ?? [], row.displayOwner === "operator" || row.retirement?.state === "restored_for_review") })) };
   const operatorIntents = new Map(proposals.map(p => [p.id, inboxOperatorIntent(sourceThreads.threads.get(inboxThreadId(p.id)) ?? [])]));
   const gardenerScope = deps.inboxSourceIdentity ?? deps.inboxAuditScope;
   const lifecycleRead = readInboxGardenerStore(stateDir, gardenerScope && { ...gardenerScope, root: deps.inboxRoot });

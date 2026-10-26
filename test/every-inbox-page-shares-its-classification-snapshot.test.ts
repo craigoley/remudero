@@ -16,7 +16,13 @@ import type { PlanSourceOutcome } from "../src/lib/serve-plan-reload.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { buildReadModelViewRoutes, renderView, type ViewBodyEntry, type ViewBodySource } from "../src/lib/views.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
-import type { Proposal } from "#src/lib/inbox.js";
+import { classifyProposal, type Proposal } from "#src/lib/inbox.js";
+import { captureInboxOwner } from "#src/lib/inbox-owner.js";
+import { inboxGardenerPath, type InboxRetirementView } from "#src/lib/inbox-retirement.js";
+import { backfillRecommendations, recommendationStorePath, type RecommendationEvidence } from "#src/lib/inbox-recommendation.js";
+import { inboxLanes } from "#src/lib/panel-graph.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { buildInboxDraftHook, inboxCommand } from "#src/run-task.js";
 import { navBadgeView } from "#src/lib/nav-badge-view.js";
 import { inboxThreadListSources, peekSlowLaneClassification } from "#src/lib/panel-graph.js";
 import { listThreadViews } from "#src/lib/inbox-responder.js";
@@ -103,6 +109,13 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
   assert.deepEqual(ids(Object.values(legacy.body.needsYou).flat() as Array<{proposalId:string}>),ids(needs.body.data.items));
   assert.equal(initialBadge.data.inbox.needsYou,needs.body.data.items.length,"the badge must count the same source-owned asks as the Inbox lanes");
   assert.equal(initialBadge.data.inbox.fleet,fleet.body.data.items.length);
+  const evidence: RecommendationEvidence = { shards: async () => new Map(), shardText: async () => undefined,
+    taskHistory: async () => [], resolve: async entry => entry === "#41" ? "pr" : undefined };
+  const recommendationDeps = { stateDir: join(w.root, "state"), readProposals: () => [w.proposals[0]!], evidence };
+  const informational = await backfillRecommendations({ ...recommendationDeps,
+    summarize: async () => assert.fail("information cannot request recommendation provider work") }, 10);
+  assert.equal(informational.written, 0);
+  assert.equal(fleet.body.data.items.find((item: any) => item.proposalId === ageId).recommendation, undefined);
   const light=classificationSnapshotPath(join(w.root,"state")),heldLight=readFileSync(light,"utf8");
   assert.equal(readClassificationSnapshot(join(w.root,"state"))?.displayOwners?.[ageId],"fleet");
   for(const variant of ["missing-owner","foreign-owner","invalid-owner","foreign-restoration"] as const){
@@ -140,7 +153,91 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
   assert.equal(afterBadge.data.inbox.needsYou,current.body.data.items.length);
   const threads=await s.get("/v1/inbox/threads");assert.equal(threads.status,200);
   assert.equal(threads.body.threads.find((item:any)=>item.threadId===threadId)?.attention,"reply");
+  let recommendationCalls = 0;
+  const generated = await backfillRecommendations({ ...recommendationDeps, summarize: async () => {
+    recommendationCalls++;
+    return { action: "reply", text: "Please keep the current policy while I review the question.",
+      why: "A policy question is waiting for your answer.", evidence: ["#41"], obsolete: false };
+  } }, 10);
+  assert.equal(recommendationCalls, 1, "the captured unanswered question is eligible for a recommendation");
+  assert.equal(generated.written, 1);
+  s.put(await w.refresh());
+  const recommended = (await s.get("/v1/views/inbox?section=needsYou")).body.data.items.find((item: any) => item.proposalId === ageId);
+  assert.equal(recommended.recommendation.action, "reply");
+  assert.equal(recommended.recommendation.obsolete, false);
+  assert.equal(recommended.recommendation.route.path, "/v1/inbox/thread/reply");
+  const legacyRecommendation = (await s.get("/v1/inbox?section=needsYou")).body.needsYou.notReady.find((item: any) => item.proposalId === ageId);
+  assert.deepEqual(legacyRecommendation.recommendation, recommended.recommendation);
+  const storedRecommendation = readFileSync(recommendationStorePath(recommendationDeps.stateDir), "utf8");
+  appendThreadMessage(inboxThreadIdentity(ageId), "reply", "The current policy applies.", { threadStorePath: store, now: () => w.at });
+  s.put(await w.refresh());
+  const answered = (await s.get("/v1/views/inbox?section=fleet")).body.data.items.find((item: any) => item.proposalId === ageId);
+  assert.equal(answered.recommendation, undefined, "a retained recommendation cannot restore action authority after the question is answered");
+  assert.equal(readFileSync(recommendationStorePath(recommendationDeps.stateDir), "utf8"), storedRecommendation);
+  assert.equal((await backfillRecommendations({ ...recommendationDeps,
+    summarize: async () => assert.fail("answered information cannot request another recommendation") }, 10)).written, 0);
   assert.equal(s.reads(),0,"neither lanes nor history can reclassify mutable inputs on the request");
+});
+
+test("W1-T10431: age-only information preserves explicit unreadable and restored human asks through production callers", async t => {
+  t.mock.method(console, "log", () => {});
+  const w = world(t, 2), stateDir = join(w.root, "state");
+  const age: Proposal = { id: "board-review:stale:PR-41", originatingItemId: "PR-41",
+    summary: "board-review: PR-41 has sat open 72.0h, past the 48h depth threshold", evidenceAnchors: [] };
+  w.proposals[0] = age;
+  w.proposals[1] = { id: "ruling:existing-ask", summary: "A person must decide.", evidenceAnchors: [] };
+  w.write();
+  const config = { root: w.root, claudeBin: "/bin/true" };
+  const selected: string[][] = [];
+  const draftBatch: NonNullable<Parameters<typeof inboxCommand>[1]>["draftBatch"] = async due => {
+    selected.push(due.map(p => p.id));
+    return [];
+  };
+  const hook = buildInboxDraftHook("owner", "core", config, "age-lifecycle", () => {}, draftBatch, () => true, () => "sha");
+  const checkCallers = async (expectedAge: boolean) => {
+    selected.length = 0;
+    writeFileSync(join(stateDir, "inbox-draft-attempts.json"), "{}");
+    await hook();
+    assert.equal(await inboxCommand([], { config, github: fakeGitHub(), draftBatch }), 0);
+    assert.equal(selected.length, 2, "both production callers reach the draft boundary for the existing ask");
+    for (const batch of selected) {
+      assert.ok(batch.includes("ruling:existing-ask"));
+      assert.equal(batch.includes(age.id), expectedAge, "production selection must preserve unknown human asks");
+    }
+  };
+  const positive = await w.refresh();
+  assert.equal(readClassificationSnapshot(stateDir)?.displayOwners?.[age.id], "fleet");
+  await checkCallers(false);
+  const lifecyclePath = inboxGardenerPath(stateDir);
+  for (const journal of ["{unreadable", JSON.stringify({ version: 1,
+    scope: { root: w.root, instance: "core", repository: "owner/core" }, events: [],
+    entries: { [age.id]: { digest: "a".repeat(64), decision: "needs_triage", reason: "Human review evidence unavailable" } } })]) {
+    writeFileSync(lifecyclePath, journal);
+    const refreshed = await w.refresh(), s = await served(t, w, refreshed, { withWrites: true });
+    assert.equal(readClassificationSnapshot(stateDir)?.displayOwners?.[age.id], "operator");
+    const native = await s.get("/v1/views/inbox?section=needsYou");
+    assert.ok(native.body.data.items.some((item: any) => item.proposalId === age.id));
+    const legacy = await s.get("/v1/inbox?section=needsYou");
+    assert.ok(legacy.body.needsYou.notReady.some((item: any) => item.proposalId === age.id));
+    const badge = await navBadgeView({ inboxRoot: w.root, scopes: () => [], clock: fixedClock(w.at) }).compute(new URLSearchParams());
+    assert.ok(!("error" in badge));
+    assert.equal(badge.data.inbox.needsYou, 2);
+    const threads = await s.get("/v1/inbox/threads");
+    assert.equal(threads.body.threads.find((item: any) => item.proposalId === age.id)?.attention, "decision");
+    await checkCallers(true);
+  }
+  unlinkSync(lifecyclePath);
+  const retirement: InboxRetirementView = { state: "restored_for_review", retirementId: "retained", snapshotKey: "prior",
+    scope: { repository: "owner/core", instance: "core", proposalId: age.id, taskId: null }, proofId: "prior-proof",
+    proofKind: "merged-task", reason: "Operator restored this ask for review" };
+  const classification = classifyProposal(age, undefined, { plan: loadPlan(w.deps.planPath), isMerged: () => false,
+    isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set(), retirement: () => retirement });
+  classification.displayOwner = captureInboxOwner(age, [], classification.retirement?.state === "restored_for_review");
+  const restored = inboxLanes({ proposals: [age], classifications: [classification], ledgerLines: [] }, w.root);
+  assert.equal(restored.needsYou.notReady[0]?.proposalId, age.id);
+  assert.equal(restored.needsYou.notReady[0]?.retirement?.state, "restored_for_review");
+  assert.equal(restored.fleet.length, 0);
+  assert.ok(positive.bodies.length > 0);
 });
 
 test("equal-count inbox pages cannot mix classification snapshots", async (t) => {

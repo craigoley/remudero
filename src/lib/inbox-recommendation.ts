@@ -4,7 +4,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { buildDecisionSummarySpawnArgs, isOptionIntent, type OptionIntent, type SummarizeInput } from "./feedback.js";
 import { readClassificationSnapshot } from "./fleet-lane.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { inboxOwner } from "./inbox-owner.js";
+import { classifiedInboxOwner, inboxOwner } from "./inbox-owner.js";
 import { INBOX_SPEAKER, optionAction, plainInboxMessage, plainStorePath, readPlainStore, type InboxOptionLane, type PlainBackfillDeps, type PlainOptionAction } from "./inbox-plain.js";
 import type { Mount } from "./mounts.js";
 import { checkOperatorMessage } from "./operator-message.js";
@@ -116,8 +116,9 @@ function servedFields(r: InboxRecommendation): InboxRecommendation {
 }
 
 /** The item's current recommendation with its route, or undefined: none stored, a changed source, or a fleet item. */
-export function recommendationFor(proposal: { id: string; summary: string }, lane: InboxOptionLane, store: RecommendationStore): ServedRecommendation | undefined {
-  if (inboxOwner(proposal) !== "operator") return undefined;
+export function recommendationFor(proposal: { id: string; summary: string }, lane: InboxOptionLane, store: RecommendationStore,
+  owner: "operator" | "fleet" = inboxOwner(proposal)): ServedRecommendation | undefined {
+  if (owner !== "operator") return undefined;
   const stored = store[proposal.id];
   if (!wellShaped(stored) || stored.sourceFingerprint !== recommendationFingerprint(proposal, lane, stored.shardBlob)) return undefined;
   const route = optionAction(stored.action, lane, proposal.id);
@@ -310,9 +311,9 @@ const LANE_OF_STATE: Readonly<Record<string, InboxOptionLane>> = {
   ready: "ready", drafting: "drafting", not_ready: "notReady", deferred_with_trigger: "notReady", declined: "declined",
 };
 
-function snapshotLanes(stateDir: string): Record<string, InboxOptionLane> {
+function snapshotLanes(snapshot: ReturnType<typeof readClassificationSnapshot>): Record<string, InboxOptionLane> {
   const lanes: Record<string, InboxOptionLane> = {};
-  for (const [id, state] of Object.entries(readClassificationSnapshot(stateDir)?.states ?? {})) {
+  for (const [id, state] of Object.entries(snapshot?.states ?? {})) {
     const lane = LANE_OF_STATE[state];
     if (lane) lanes[id] = lane;
   }
@@ -374,12 +375,15 @@ export interface RecommendationTick {
  *  items with no current recommendation, oldest registry order first. */
 export async function backfillRecommendations(deps: RecommendationBackfill, max: number): Promise<RecommendationTick> {
   const tick: RecommendationTick = { seeded: 0, written: 0, refused: 0, dropped: 0 };
-  const lanes = (deps.readLanes ?? (() => snapshotLanes(deps.stateDir)))();
+  const snapshot = readClassificationSnapshot(deps.stateDir);
+  const lanes = deps.readLanes ? deps.readLanes() : snapshotLanes(snapshot);
   const shards = await deps.evidence.shards();
   const items = new Map<string, CurrentItem>();
   for (const proposal of deps.readProposals()) {
     const lane = lanes[proposal.id];
-    if (lane === undefined || inboxOwner(proposal) !== "operator") continue;
+    const owner = snapshot?.displayOwners ? classifiedInboxOwner(proposal, { displayOwner: snapshot.displayOwners[proposal.id],
+      ...(snapshot.restoredForReview?.includes(proposal.id) ? { retirement: { state: "restored_for_review" } } : {}) }) : inboxOwner(proposal);
+    if (lane === undefined || owner !== "operator") continue;
     const taskId = recommendationTaskId(proposal.id);
     const shard = taskId === undefined ? undefined : shards.get(taskId);
     items.set(proposal.id, { proposal, lane, ...(shard ? { shard } : {}), fingerprint: recommendationFingerprint(proposal, lane, shard?.blob) });

@@ -462,6 +462,8 @@ export type DraftSelectionContext = Pick<
   "isRatified" | "isDeclined" | "boardReferents" | "grepAnchorTrue" | "openProposalIds" | "retirement"
 >;
 
+export type DraftSelectionEvidence = DraftSelectionContext | Pick<ReadinessContext, "retirement">;
+
 function readDraftExclusion(check: () => DraftExclusion | undefined): DraftExclusion | undefined {
   try {
     return check();
@@ -528,7 +530,7 @@ function rankDraftSelection(proposals: Proposal[], drafts: DraftCache): Proposal
 /** Every proposal needing a fresh draft. Takes no throttle input by design — this is the unthrottled predicate behind
  *  `rmd inbox`'s manual force, which {@link draftsDueOnDaemon} wraps. Supplying a readiness context enables the
  *  daemon's draft-independent exclusions; omitting it preserves the manual force. */
-export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: DraftSelectionContext): Proposal[] {
+export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: DraftSelectionEvidence): Proposal[] {
   return proposals.filter((p) => {
     if (isAgeOnlyInboxInformation(p)) {
       let informational = true;
@@ -542,7 +544,7 @@ export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache,
       if (informational) return false;
     }
     if (p.lifecycleAction || p.skillFile) return false;
-    if (ctx ? draftExclusionForProposal(p, ctx) : p.trigger && !p.trigger.fired) return false;
+    if (ctx && "isRatified" in ctx ? draftExclusionForProposal(p, ctx) : p.trigger && !p.trigger.fired) return false;
     const cached = drafts[p.id];
     return !cached || isDraftStale(cached, p.evidenceAnchors);
   });
@@ -628,7 +630,7 @@ export function draftsDueOnDaemon(
   drafts: DraftCache,
   attempts: DraftAttemptCache,
   cap: number = DAEMON_DRAFT_BATCH_CAP,
-  ctx?: DraftSelectionContext,
+  ctx?: DraftSelectionEvidence,
   lane: DraftLaneIdentity = resolvedInboxDraftLane(),
 ): Proposal[] {
   const due = rankDraftSelection(
@@ -782,6 +784,7 @@ export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "rati
 export interface InboxClassification {
   /** Display ownership captured once with the producer's thread evidence; never execution permission. */
   displayOwner?: "operator" | "fleet";
+  requiresReview?: true;
   retirement?: InboxRetirementView;
   needsTriageReason?: string;
   releaseTaskId?: string;
@@ -1397,7 +1400,9 @@ export function classifyProposal(
   if (held) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: current task dispatch hold requires operator review" }], needsTriageReason: "Current security or dispatch hold preserves this ask for operator review" };
 
   if (lifecycle && !held) {
-    if ("unknown" in lifecycle) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: lifecycle evidence unavailable" }], needsTriageReason: lifecycle.unknown };
+    if ("unknown" in lifecycle) return { proposalId: proposal.id, state: "not_ready",
+      ...(isAgeOnlyInboxInformation(proposal) ? { displayOwner: "operator" as const, requiresReview: true as const } : {}),
+      reasons: [{ predicate: "lint_clean", detail: "needs-triage: lifecycle evidence unavailable" }], needsTriageReason: lifecycle.unknown };
     if (lifecycle.state === "retired" && lifecycle.proofKind === "merged-task" &&
       (!lifecycle.scope.taskId || !ctx.plan.byId.has(lifecycle.scope.taskId) || ctx.depsUnobservable?.(lifecycle.scope.taskId) !== undefined || !ctx.isMerged(ctx.plan.byId.get(lifecycle.scope.taskId)!))) {
       return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "deps_observable", detail: "needs-triage: current merge credit no longer confirms the retirement" }],
