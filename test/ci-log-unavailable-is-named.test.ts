@@ -219,3 +219,32 @@ test("the auto-resolve table is regex-over-logTail, so an empty tail matches NO 
   assert.equal(matched.length, 0, "no class can fire on an empty tail — this is the disabling, witnessed");
   assert.ok(DEFAULT_FIX_CLASSES.length >= 3, "and it disables the WHOLE table, not one row");
 });
+
+
+test("a failed commit status preserves its own evidence without inventing an Actions log", async () => {
+  const { fetchCiFailuresAsync } = await import("#src/lib/tick-read-worker.js");
+  const { failureEvidenceOf } = await import("#src/lib/fix-progress-judge.js");
+  const description = "unknown: trusted-exact-head-codeql-result-missing";
+  const rollup = [{ context: "security-merge-policy", state: "ERROR", description }];
+  const reads = { fetchAnnotations: () => assert.fail("a commit status has no Actions annotation source"),
+    fetchJobLog: () => assert.fail("a commit status has no Actions job log") };
+  for (const failures of [fetchCiFailures("craigoley", "remudero", rollup, 60, reads),
+    await fetchCiFailuresAsync("craigoley", "remudero", rollup, 60, reads)]) {
+    const failure = failures[0]!;
+    assert.equal(failures.length, 1);
+    assert.equal(failure.statusDescription, description);
+    assert.equal(failure.logTail, "");
+    assert.equal(failure.logUnavailable?.kind, "no-job-id");
+    assert.equal(failure.tailSource, undefined);
+    const prompt = ciLogPrompt(failure);
+    const at = prompt.indexOf(description);
+    assert.ok(at > prompt.indexOf(CI_LOG_FENCE_OPEN));
+    assert.ok(at < prompt.lastIndexOf(CI_LOG_FENCE_CLOSE));
+    assert.match(prompt, /status description/);
+    const evidence = failureEvidenceOf(failures);
+    assert.equal(evidence.checks?.[0]?.excerpt, description);
+    assert.deepEqual(evidence.checks?.[0]?.tests, []);
+    assert.equal(evidence.checks?.[0]?.tail_source, "status-description");
+    assert.equal(evidence.checks?.[0]?.unavailable, "no-job-id");
+  }
+});
