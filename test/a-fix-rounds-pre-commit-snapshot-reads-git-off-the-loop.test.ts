@@ -169,14 +169,27 @@ test("the native snapshot controller can collect bounded child outcomes without 
 });
 
 test("an unreadable snapshot deadline budget refuses before running the controller", async () => {
-  for (const stdout of ["not-json", "{}", JSON.stringify({ ...nestedBudget, timeoutMs: 0 }),
-    JSON.stringify({ ...nestedBudget, timeoutMs: 600_001 }),
-    JSON.stringify({ ...nestedBudget, stages: { ...nestedBudget.stages, structuralGitFree: -1 } })]) {
+  for (const stdout of ["not-json", "{}", JSON.stringify({ ...nestedBudget, version: 2 }),
+    JSON.stringify({ ...nestedBudget, timeoutMs: 0 }), JSON.stringify({ ...nestedBudget, timeoutMs: 600_001 }),
+    JSON.stringify({ ...nestedBudget, stages: { ...nestedBudget.stages, structuralGitFree: -1 } }),
+    JSON.stringify({ ...nestedBudget, stages: { ...nestedBudget.stages, extra: 1 } })]) {
     let calls = 0;
     const checked = await harness.checkFixCensusSnapshotAsync("/fixture/worker", "/fixture/snapshot", () => {}, async () => {
       calls++; return { status: 0, signal: null, stdout, stderr: "" };
     });
     assert.match(checked?.refusal?.text ?? "", /controller budget.*UNKNOWN/i);
     assert.equal(calls, 1, "no guessed deadline or controller execution follows malformed policy");
+  }
+});
+
+
+test("a failed or interrupted budget inspector cannot certify a controller deadline", async () => {
+  for (const native of [{ status: 1, signal: null }, { status: null, signal: "SIGTERM" as NodeJS.Signals }]) {
+    let calls = 0;
+    const checked = await harness.checkFixCensusSnapshotAsync("/fixture/worker", "/fixture/snapshot", () => {}, async () => {
+      calls++; return { ...native, stdout: JSON.stringify(nestedBudget), stderr: "" };
+    });
+    assert.match(checked?.refusal?.text ?? "", /controller budget.*UNKNOWN/i);
+    assert.equal(calls, 1, "a complete-looking payload cannot erase the inspector's native failure");
   }
 });
