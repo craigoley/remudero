@@ -13,6 +13,7 @@ import { drainNowFilePath, kickFilePath, pauseFilePath, pendingPrActions, quietH
 import type { Plan } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
 import { dailyCostCeilingOverridePath } from "../src/lib/policy.js";
@@ -306,6 +307,8 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
 const COVERED: ReadonlySet<string> = new Set([
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts, W1-T10612 identity/mount test.
   "POST /v1/products",
+  // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts and the production-assembly test below (W1-T10613).
+  "POST /v1/products/repository",
   "POST /v1/control/assistant-action",
   "POST /v1/control/stop",
   "POST /v1/control/resume",
@@ -354,7 +357,7 @@ function planOf(): Plan {
  * difference is the whole instrument: a misrooted route writes into the other one and every
  * assertion below notices.
  */
-async function withProductionServer<T>(fn: (h: Harness) => Promise<T>, operator = false): Promise<T> {
+async function withProductionServer<T>(fn: (h: Harness) => Promise<T>, operator = false, stepUp = false): Promise<T> {
   const fleetRoot = mkdtempSync(join(tmpdir(), "rmd-wiring-fleet-"));
   const questionsRoot = mkdtempSync(join(tmpdir(), "rmd-wiring-questions-"));
   const ledgerRoot = mkdtempSync(join(tmpdir(), "rmd-wiring-ledger-"));
@@ -375,7 +378,7 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>, operator 
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
   const now = Math.floor(Date.now() / 1000);
   const header = encode({ alg: "RS256", typ: "JWT", kid: "route-wiring" });
-  const payload = encode({ iss: issuer, sub: "route-wiring-operator", azp: origin, iat: now, nbf: now, exp: now + 300, fva: [120, -1] });
+  const payload = encode({ iss: issuer, sub: "route-wiring-operator", azp: origin, iat: now, nbf: now, exp: now + 300, fva: [stepUp ? 0 : 120, -1] });
   const operatorSession = signer ? `${header}.${payload}.${sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), signer.privateKey).toString("base64url")}` : undefined;
 
   const deps: ServeDeps = {
@@ -515,6 +518,39 @@ test("POST /v1/products persists only the verified operator's brief under the fl
     assert.ok(!existsSync(join(h.questionsRoot, "state/products")));
     assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "saving a draft preserves the ledger");
   }, true);
+});
+
+test("W1-T10613: POST /v1/products/repository is high tier, confirmed, and journals under the fleet root", async () => {
+  const shim = ghShim([{ when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: 1432832754, name: "wreckterra",
+    owner: { login: "craigoley" }, private: false, default_branch: "main" }) }]);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  try {
+    await withProductionServer(async (h) => {
+      const headers: Record<string, string> = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json",
+        [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+      const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify({ version: "product-intent-v1",
+        requestId: "wiring-product-0002", expectedRevision: 0, brief: { idea: "private repository wiring fixture" } }) });
+      const { receipt } = await saved.json() as { receipt: { productId: string } };
+      const payload = JSON.stringify({ version: "product-repository-v1", requestId: "wiring-repository-01", productId: receipt.productId,
+        expectedRevision: 1, expectedObjectiveRevision: 1,
+        action: "adopt", owner: "craigoley", name: "wreckterra", visibility: "public", repositoryId: 1432832754 });
+      const refused = await fetch(`${h.base}/v1/products/repository`, { method: "POST", headers, body: payload });
+      assert.equal(refused.status, 403);
+      assert.equal((await refused.json()).error, "confirm_nonce_required");
+      const confirmed = await fetch(`${h.base}/v1/confirm`, { method: "POST", headers,
+        body: JSON.stringify({ method: "POST", path: "/v1/products/repository", payload }) });
+      assert.equal(confirmed.status, 200);
+      const { nonce } = await confirmed.json() as { nonce: string };
+      const adopted = await fetch(`${h.base}/v1/products/repository`, { method: "POST", headers: { ...headers, "x-confirm-nonce": nonce }, body: payload });
+      assert.equal(adopted.status, 200);
+      assert.equal((await adopted.json()).receipt.repository.id, 1432832754);
+      assert.ok(existsSync(join(h.fleetRoot, "state/products/v1/repositories")));
+      assert.ok(!existsSync(join(h.questionsRoot, "state/products")));
+      assert.ok(!shim.calls().some((call) => call.includes("-X POST")), "adopting makes no create call");
+      assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "adoption preserves the ledger");
+    }, true, true);
+  } finally { process.env.PATH = originalPath; }
 });
 
 test("POST /v1/control/assistant-action binds a verified operator to the fleet root and ledger", async () => {
