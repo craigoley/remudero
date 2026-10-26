@@ -44,6 +44,27 @@ test("W1-T10267: uncommitted untracked and staged tests are scanned before any c
   }
 });
 
+test("W1-T10267: a renamed test with an added procfs write is still scanned", () => {
+  const repo = gitRepo({ kind: "procfs-scan-rename" });
+  try {
+    mkdirSync(join(repo.dir, "test"));
+    const body = Array.from({ length: 30 }, (_, i) => `const line${i} = ${i};\n`).join("");
+    writeFileSync(join(repo.dir, "test", "old.test.ts"), body);
+    repo.git("add", "-A");
+    repo.git("commit", "-q", "-m", "old");
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    repo.git("mv", "test/old.test.ts", "test/renamed.test.ts");
+    writeFileSync(join(repo.dir, "test", "renamed.test.ts"), `${body}mkdirSync("${PROCFS}nope", { recursive: true });\n`);
+    repo.git("add", "-A");
+    repo.git("commit", "-q", "-m", "rename");
+    const found = changedProcfsWriteOffences(repo.dir);
+    assert.equal(found.length, 1);
+    assert.match(found[0], /^test\/renamed\.test\.ts:31 /);
+  } finally {
+    repo.cleanup();
+  }
+});
+
 test("W1-T10267: the real changed-file scan reads a changed test and reports its procfs write", () => {
   const repo = gitRepo({ kind: "procfs-scan" });
   try {

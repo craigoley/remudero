@@ -181,7 +181,7 @@ export function changedProcfsWriteOffences(cwd: string): string[] {
     // the harness commits a worker's edits only after this gate, so a new test is not yet in any commit.
     const git = (args: string[]) => hostWorktreeGit(cwd, args, { timeout: 20_000 });
     const base = git(["merge-base", "origin/main", "HEAD"]).trim();
-    const changed = git(["diff", "--name-only", "--diff-filter=AM", base, "--", "test/"]);
+    const changed = git(["diff", "--name-only", "--diff-filter=AMRC", base, "--", "test/"]);
     const untracked = git(["ls-files", "--others", "--exclude-standard", "--", "test/"]);
     names = [...new Set(`${changed}\n${untracked}`.split("\n").map((n) => n.trim()))]
       .filter((n) => n.endsWith(".test.ts") && !n.endsWith("no-test-aims-a-write-at-procfs.test.ts"));
