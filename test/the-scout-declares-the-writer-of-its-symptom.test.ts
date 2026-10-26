@@ -178,21 +178,24 @@ test("the scout preserves an operator-ratified test-only contract", t => {
   mkdirSync(join(repo.dir, "src/lib"), { recursive: true });
   writeFileSync(join(repo.dir, "src/lib/inbox.ts"), 'log("inbox.draft_error");');
   repo.git("add", "src");
-  const base = scoutShard(symptom, "W1-T99051", [5]).text.replace("  verify: human", "  verify: auto");
-  const pin = taskRulingPin(loadPlanFromYaml(base, "operator-base.yaml").tasks[0]!);
-  const original = base + `  risk_ruling:\n    verdict: operator\n    action: proceed\n    confidence: 1\n    reasons: ["explicit existing operator decision"]\n    judged_at: "${new Date().toISOString()}"\n    pin: "${pin}"\n`;
-  const path = "plan/tasks.d/W1-T99051.yaml";
-  mkdirSync(join(repo.dir, "plan/tasks.d"), { recursive: true });
-  writeFileSync(join(repo.dir, path), original);
-  const task = loadPlanFromYaml(original, path).tasks[0]!;
-  const spec = scoutGardenSpec({ repoRoot: repo.dir, stateDir: repo.dir, clock: fixedClock(Date.now()), log: () => {},
-    openWorkspace: () => { throw new Error("unused"); } }, {
-    mintTaskId: () => { throw new Error("no new task requested"); },
-    plan: () => ({ all: [task], open: [task], shards: new Map([[task.id, path]]) }),
-    ledger: () => [], mergedTasks: () => new Map(), mergedLastDay: () => 0, openRunTasks: () => new Set(),
-  });
-  assert.deepEqual(spec.candidates(spec.inventory(), () => 0), [], "operator scope is not an unratified draft to rederive");
-  assert.equal(readFileSync(join(repo.dir, path), "utf8"), original);
+  for (const verdict of ["operator", "low"]) {
+    const base = scoutShard(symptom, "W1-T99051", [5]).text.replace("  verify: human", "  verify: auto");
+    const pin = taskRulingPin(loadPlanFromYaml(base, "operator-base.yaml").tasks[0]!);
+    const original = base + `  risk_ruling:\n    verdict: ${verdict}\n    action: proceed\n    confidence: 1\n    reasons: ["explicit existing operator decision"]\n    judged_at: "${new Date().toISOString()}"\n    pin: "${pin}"\n`;
+    const released = verdict === "low" ? original + `    operator_release_pin: "${pin}"\n` : original;
+    const path = "plan/tasks.d/W1-T99051.yaml";
+    mkdirSync(join(repo.dir, "plan/tasks.d"), { recursive: true });
+    writeFileSync(join(repo.dir, path), released);
+    const task = loadPlanFromYaml(released, path).tasks[0]!;
+    const spec = scoutGardenSpec({ repoRoot: repo.dir, stateDir: repo.dir, clock: fixedClock(Date.now()), log: () => {},
+      openWorkspace: () => { throw new Error("unused"); } }, {
+      mintTaskId: () => { throw new Error("no new task requested"); },
+      plan: () => ({ all: [task], open: [task], shards: new Map([[task.id, path]]) }),
+      ledger: () => [], mergedTasks: () => new Map(), mergedLastDay: () => 0, openRunTasks: () => new Set(),
+    });
+    assert.deepEqual(spec.candidates(spec.inventory(), () => 0), [], "operator scope is not an unratified draft to rederive");
+    assert.equal(readFileSync(join(repo.dir, path), "utf8"), released);
+  }
 });
 
 test("an inadmissible scout rescope leaves its contract intact and does not poison an independent filing", t => {

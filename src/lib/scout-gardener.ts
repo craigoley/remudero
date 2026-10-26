@@ -454,7 +454,6 @@ export function scoutGardenSpec(
         const refused = machineShardFilingRefusal(text, draft.path, {
           pathExists: path => existsSync(join(ws.root, path)),
           pathExistsAtBase: path => existsSync(join(deps.repoRoot, path)),
-          admissionViolations: deps.admissionViolations,
         });
         if (refused !== undefined) {
           deps.log("scout.record_refused", { step: draft.step, task_id: draft.id, reason: refused });
