@@ -1,7 +1,7 @@
 /** The fix verb and its exclusive helpers, moved from the entrypoint (W1-T9337). */
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
-import { judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures, unfiledScopeGrant } from "../../lib/fix-progress-judge.js";
+import { judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
 import { BASE_REPRODUCTION_MAX_FILES, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, type BaseProbeResult } from "../../lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger } from "../../lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
@@ -3797,6 +3797,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         // read one shared value, never two independently derived ones.
         reachableRemedyFiles,
       }),
+      // #14217: the grant widens what this round stages (fixDeclaredPaths above), so the worker is told it by name;
+      // a proof-repair round stages only test paths, so it is told nothing it could not commit.
+      ...(unfiledGrant && !proofRepairRound
+        ? [`GRANTED SCOPE (#14217): the repository owner granted this PR exactly ${unfiledGrant.paths.join(", ")} by ` +
+            `answering ${UNFILED_SCOPE_GRANT_ANSWER} on ${unfiledGrant.issueUrl}. You MAY edit and save those path(s) ` +
+            "alongside the declared scope above; the harness stages them. Every other path outside the declared scope " +
+            "still follows its rule."]
+        : []),
       ...(scopeRecoveryEvidence ? [scopeRecoveryEvidence] : []),
       ...(refutedFlake ? [`this red reproduced on a rerun at ${priorHeadSha}; it is not a flake. Make a real fix; another FLAKE outcome will be recorded as a no-op without a rerun.`] : []),
       ...(proofRepairRound && proofDiscriminationNow

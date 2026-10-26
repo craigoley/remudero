@@ -254,7 +254,9 @@ export interface UnfiledScopeGrant { paths: string[]; issueUrl: string; origin: 
 /** The repository owner's grant of an unfiled PR's held scope: an accepted `revise-pr` answer (an owner reply on the
  * escalation issue, which lib/escalation-answers.ts ledgers as `panel.question_answered`, or the console's answer
  * route) for this PR's own `PR-<n>` key, newer than its newest well-formed unfiled hold. It grants exactly that hold's
- * paths. A reply on another issue, an answer older than the hold, or any other answer grants nothing. */
+ * paths. A reply on another issue, an answer older than the hold, or any other answer grants nothing. An issue reply
+ * grants only when it was the bare label (`bare_option`): escalation-answers.ts records a qualified reply such as
+ * `revise-pr, but only the test` as its label alone, and a qualification is not the grant the question asked for. */
 export function unfiledScopeGrant(ledger: readonly Record<string, unknown>[], pr: { prNumber: number }): UnfiledScopeGrant | undefined {
   const at = ledger.findLastIndex(row => unfiledHoldRow(row, pr.prNumber));
   if (at < 0) return undefined;
@@ -263,20 +265,31 @@ export function unfiledScopeGrant(ledger: readonly Record<string, unknown>[], pr
   const issue = /\/issues\/(\d+)$/.exec(issueUrl)?.[1];
   const answer = ledger.slice(at + 1).findLast(row => row.step === "panel.question_answered" && row.task_id === `PR-${pr.prNumber}` &&
     typeof row.answer === "string" && row.answer.trim().toLowerCase() === UNFILED_SCOPE_GRANT_ANSWER &&
-    typeof row.origin === "string" && (!row.origin.startsWith("issue#") || (issue !== undefined && row.origin.startsWith(`issue#${issue}:`))));
+    typeof row.origin === "string" &&
+    (!row.origin.startsWith("issue#") || (issue !== undefined && row.origin.startsWith(`issue#${issue}:`) && row.bare_option === true)));
   if (!answer) return undefined;
   return { paths: [...new Set(held.paths as string[])].sort(), issueUrl, origin: answer.origin as string,
     ...(typeof held.head_sha === "string" ? { heldHead: held.head_sha } : {}) };
 }
 const grantHint = (paths: readonly unknown[]): string =>
   `; the repository owner grants exactly ${paths.join(", ")} to this PR by answering ${UNFILED_SCOPE_GRANT_ANSWER} on that issue`;
+/** Checks that only roll other checks up (ci.yml's `ci` over the shard matrix, ci-gate.yml's `ci-gate`, sweep.ts
+ * CI_GATE_CHECK_NAME): beside a real failure they ask nothing of their own. */
+const AGGREGATE_CHECKS: ReadonlySet<string> = new Set(["ci", "ci-gate"]);
 /** An unfiled hold reaches a newer head only on evidence the question is unchanged: every held path is still outside
- * the PR's observed diff, and the red names test files, all of which the escalated round already failed on. */
+ * the PR's observed diff, and EVERY failing check names test files, all of which the escalated round already failed on.
+ * Each failure is read on its own: a seen test beside a failure naming no test file (a typecheck error in another
+ * shard) or an unseen one is a changed question, so the head is re-derived. */
 function unfiledHoldCarries(held: Record<string, unknown>, pr: ScopeHoldPr): boolean {
   if (pr.changedFiles === undefined || (held.paths as string[]).some(path => pr.changedFiles!.includes(path))) return false;
   const seen = Array.isArray(held.red_test_files) ? held.red_test_files.filter((f): f is string => typeof f === "string") : [];
-  const red = baseReproductionFiles(pr.ciFailures ?? []);
-  return seen.length > 0 && red.length > 0 && red.every(file => seen.includes(file));
+  const all = pr.ciFailures ?? [];
+  const own = all.filter(failure => !AGGREGATE_CHECKS.has(failure.name));
+  const failures = own.length > 0 ? own : all;
+  return seen.length > 0 && failures.length > 0 && failures.every(failure => {
+    const red = baseReproductionFiles([failure]);
+    return red.length > 0 && red.every(file => seen.includes(file));
+  });
 }
 export function scopeEscalationStandDown(ledger: readonly Record<string, unknown>[], pr: ScopeHoldPr): ScopeEscalationHold | undefined {
   const unfiled = !pr.taskId || pr.taskId === "unfiled" || pr.taskId === `PR-${pr.prNumber}`;
