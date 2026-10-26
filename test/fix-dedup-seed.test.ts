@@ -303,53 +303,35 @@ test("W1-T1127: a dispatch that reaches the worker still seeds the dedup exactly
     assert.equal(disposed1.length, 1);
     assert.equal(disposed1[0].acted, true);
 
-    // W1-T2268 — THIS ASSERTION USED TO PIN A CRASH, NOT THE INVARIANT. The dedup gate is
-    // CONDITIONAL: `fixRungStalledWithoutNewHead` (sweep.ts) sets `stalled` from a `fix.review`
-    // row whose `state` is not "success", and `runSweep` computes
-    // `alreadyDone = dispatchedThisHead && !fixRungStalledWithoutNewHead(...)`. Under the OLD
-    // graphql transport this fixture's `gh` stub did not answer what `waitForCiGreen` asked, the
-    // rung THREW after `fix.dispatch` (a `sweep.fix.error` row, and NO `fix.review` at all), so
-    // `stalled` stayed false and the gate held — which is the only reason this read as a pure
-    // dedup check. MEASURED both ways: on origin/main pass 1 writes
-    // [sweep.pass, fix.live_head_indeterminate, fix.dispatch, fix.done, sweep.fix.error,
-    // sweep.dispose, sweep.disposed, sweep.summary]; on this head the rung instead runs to
-    // completion and adds review.posted, `fix.review` (state "failure") and fix.stood_down.
-    //
-    // So the rung now genuinely CONCLUDES WITHOUT LANDING A NEW HEAD, which is exactly the shape
-    // `fixRungStalledWithoutNewHead` is documented to re-arm on. The seed itself is unaffected and
-    // still asserted above: `sweep.disposed` carries the fixture commit head_sha, the candidate's own.
-    // What is pinned below is the invariant that survives the transport — a stalled rung re-arms,
-    // and the STRIKE CAP still bounds it — replacing exactly the bound the old assertion gave.
     const review1 = lines1.filter((l) => l.step === "fix.review");
     assert.equal(review1.length, 1, "the rung reached its own review row rather than throwing before it");
-    assert.equal(review1[0].state, "failure", "and concluded non-success — the stalled shape the gate re-arms on");
+    assert.equal(review1[0].state, "failure");
+    const stoodDown = lines1.findLast((l) => l.step === "fix.stood_down" && l.task_id === TASK);
+    assert.equal(stoodDown?.site, "rung.empty_review_evidence");
+    assert.equal(stoodDown?.read_head_sha, headSha, "the stand-down records the input that now holds the repair");
 
-    // A remaining semantic criterion supplies actionable evidence for the next repair.
-    candidate.checksState = "green";
-    candidate.ciFailures = [];
-    candidate.reviewState = "failure";
+    // W1-T10339 design item 2: new review evidence alone does not change the recorded head, contract or body.
     candidate.unmetCriteria = reviewCriteria = [{ claim: "fixture remedy remains", proof: "unit test: fixture remedy",
       met: false, reason: "repair remains", proof_exec: "not_executable" }];
-    const summary2 = await withLiveWritesAllowed(() =>
-      runSweep([candidate], { ...effects, ledgerPath, runId, log, dryRun: false }, DEFAULT_SWEEP_POLICY),
-    );
-    assert.equal(spawnCalls, 2, "a stalled rung re-arms the gate, so pass 2 spends the second strike");
-    assert.equal(summary2.actions[0].acted, true, "pass 2 acted — a real strike, not a dedup stand-down");
+    const escalations: string[] = [];
+    const heldEffects = { ...effects, ledgerPath, runId, log, dryRun: false,
+      escalate: async (_pr: OpenPrView, reason: string) => { escalations.push(reason); } };
+    const summary2 = await withLiveWritesAllowed(() => runSweep([candidate], heldEffects, DEFAULT_SWEEP_POLICY));
+    assert.equal(spawnCalls, 1, "a recorded stand-down at unchanged inputs does not dispatch a second worker");
+    assert.equal(summary2.actions[0].disposition, "refused-escalate");
+    assert.equal(summary2.actions[0].acted, true, "the first observation escalates the standing hold");
+    assert.equal(escalations.length, 1);
+    assert.ok(escalations[0].includes(String(stoodDown?.reason)), "the escalation carries the stand-down's own reason");
 
-    // ⚠ WHAT IS DELIBERATELY *NOT* ASSERTED HERE, AND WHY — MEASURED WHILE WRITING THIS.
-    // The obvious replacement for the old bound is "the strike cap stops the third pass". IT DOES
-    // NOT, and asserting it would have been wrong in the other direction. Driven three times over
-    // this same unchanged head, every pass disposes `blocked-fixable` with `acted: true` and the
-    // reason "required checks red — ci-log fix, STRIKE 1/2" — the counter never advances, so the
-    // cap never binds and the rung re-dispatches without bound. The `fix.dispatch` rows carry no
-    // `head_sha` at all (probed: `{}`), which is the shape a sha-keyed strike count cannot see.
-    //
-    // That is a LATENT defect this transport change EXPOSES rather than causes: on origin/main the
-    // rung throws before `fix.review`, the gate never re-arms, and no pass after the first ever
-    // reaches the counter. It is out of scope for a task whose subject is moving the ci-wait poll
-    // loops off graphql onto REST, and it is named here rather than asserted so that neither the
-    // bound (which does not hold) nor the unbounded behaviour (which is a defect) is pinned as
-    // correct by this file.
+    const summary3 = await withLiveWritesAllowed(() => runSweep([candidate], heldEffects, DEFAULT_SWEEP_POLICY));
+    assert.equal(spawnCalls, 1, "a later pass still dispatches no worker");
+    assert.equal(escalations.length, 1, "a later pass does not repeat the escalation");
+    assert.equal(summary3.actions[0].acted, false);
+    const heldRows = readLedgerLines(ledgerPath).filter((l) => l.step === "sweep.disposed" && l.stand_down_hold === true);
+    assert.equal(heldRows.length, 2);
+    assert.ok(heldRows.every((l) => l.stand_down_site === "rung.empty_review_evidence"));
+    assert.match(String(heldRows[1].stand_down_reason), /stand-down hold: .*nothing it read has changed/);
+
   } finally {
     process.env.PATH = savedPath;
     for (const d of [bare, root, bin]) rmSync(d, { recursive: true, force: true });
