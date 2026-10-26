@@ -15428,16 +15428,14 @@ export function fixRungInputFields(inputs: Partial<FixRungInputs>): Record<strin
   };
 }
 
-/** W1-T10339 — the stand-down sites the hold reads: the design hand-off and the refused/empty body-proof proposal.
- *  Every other site keeps W1-T1110's re-arm, which the dedup-seed gate pins (a stalled rung re-arms its next strike). */
-const HELD_STAND_DOWN_SITES: ReadonlySet<unknown> = new Set(["rung.needs_design", "rung.body_proof_repair"]);
-
 /** W1-T10339 — have the inputs a recorded row read moved? A row written before these fields existed has not recorded
  *  what it read, so it reads as moved (today's re-dispatch). A contract or body the caller could not read cannot show a
- *  change. */
+ *  change. Only an already-open escalation at rung.strike keeps its issue-closing release. */
 export function fixRungInputsUnchanged(row: Record<string, unknown>, current: FixRungInputs): boolean {
   if (typeof row.read_head_sha !== "string" || row.read_head_sha !== current.headSha ||
-      !HELD_STAND_DOWN_SITES.has(row.site)) return false;
+      row.site === "rung.strike" && typeof row.reason === "string" &&
+        row.reason.startsWith("a needs-human escalation for this exact (task, PR, head ") &&
+        row.reason.includes(", cause) is ALREADY OPEN and ")) return false;
   if (typeof row.read_contract_revision === "string" && current.contractRevision !== undefined &&
       row.read_contract_revision !== current.contractRevision) return false;
   return !(typeof row.read_body_sha256 === "string" && current.bodySha256 !== undefined &&
@@ -19546,9 +19544,8 @@ export async function runSweep(
     // recorded the head, task-contract revision and (taskless) body digest it read; while all three stand, a dispatch
     // would stand down again with no worker. It escalates once through the exact-head escalation route and holds.
     if ((disposition === "conflicted" || disposition === "blocked-fixable") && terminalDesignHold === undefined &&
-        !designReleasedByBody && prior.fixed.has(`${pr.prNumber}@${pr.headSha}`) && repairableCodeqlBlocker(pr) === undefined &&
-        !(disposition === "blocked-fixable" && metadataOnlyRed(pr) !== undefined && !metadataRedRuledOut(ledgerLines, pr)) &&
-        !emptyDiffReviewFailure(pr) && !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
+        !designReleasedByBody && prior.fixed.has(`${pr.prNumber}@${pr.headSha}`) &&
+        !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
       let contractRevision: string | undefined;
       let readable = true;
@@ -19835,6 +19832,9 @@ export async function runSweep(
         // escalation rather than being deduped by a stale head's `acted:true` line forever.
         alreadyDone = isContradictory ? priorContradiction !== undefined || legacyContradiction
           : !strikeLadderDue && !sloLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
+        if (standDownHold !== undefined) alreadyDone = ledgerLines.some(row => row.step === "sweep.disposed" &&
+            row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.stand_down_hold === true &&
+            (row.acted === true || row.stand_down_escalation_outcome === "delivered" || row.stand_down_escalation_outcome === "failed"));
         // W1-T2427: the LARGEST silent population (7,888 rows). Without this sentence the row is
         // indistinguishable from `deps.escalate` being unwired or throwing.
         if (alreadyDone) {
@@ -21451,7 +21451,14 @@ export async function runSweep(
               break;
             }
             case "refused-escalate":
-              await deps.escalate(pr, reason, question!);
+              try {
+                await deps.escalate(pr, reason, question!);
+                if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_escalation_outcome: "delivered" };
+              } catch (error) {
+                if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_escalation_outcome: "failed",
+                  stand_down_escalation_error: String(error) };
+                throw error;
+              }
               break;
             case "blocked-ambiguous":
               {
