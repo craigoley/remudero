@@ -247,42 +247,93 @@ function holdFixture(rows: Row[]) {
   return { deps, state };
 }
 
-test("W1-T10339: a stood-down repair is not re-dispatched on unchanged inputs", async () => {
-  const rows: Row[] = [seedRow, dispatchRow, standDown()];
-  const f = holdFixture(rows);
-  await runSweep([view()], f.deps);
-  assert.equal(f.state.dispatched, 0, "no worker is dispatched at an unchanged head, contract and body");
-  assert.equal(f.state.admissions, 0, "no capacity is spent");
-  assert.equal(f.state.escalated, 1, "the hold is escalated once, with the stand-down's own reason");
-  assert.match(f.state.reasons[0]!, /stale plan proof requires a parent-owned amendment/);
-  const first = rows.findLast((r) => r.step === "sweep.disposed")!;
-  assert.deepEqual([first.disposition, first.stand_down_hold, first.stand_down_site], ["refused-escalate", true, "rung.needs_design"]);
-  for (let pass = 0; pass < 5; pass++) await runSweep([view()], f.deps);
-  assert.equal(f.state.dispatched, 0);
-  assert.equal(f.state.escalated, 1, "a later pass does not escalate again");
-  const later = rows.findLast((r) => r.step === "sweep.disposed")!;
-  assert.equal(later.acted, false);
-  assert.match(String(later.stand_down_reason), /stand-down hold: .*nothing it read has changed/);
-  assert.match(String(later.stand_down_reason), /no worker dispatched and no capacity spent/);
-  // A proof_amendment.requested refusal written by the same round is neither a changed input nor a release.
-  rows.push({ step: "proof_amendment.requested", task_id: TASKLESS, outcome: "refused", reason: "shard-not-found" });
-  await runSweep([view()], f.deps);
-  assert.equal(f.state.dispatched, 0);
-  // A refused or empty body proposal holds like the design hand-off. Locate the hold row by its stand-down marker: a bare
-  // find over sweep.disposed would return the seed row, which carries no stand_down_site.
-  const refusedRows: Row[] = [seedRow, dispatchRow, standDown({ site: "rung.body_proof_repair" })];
-  const g = holdFixture(refusedRows);
-  for (let pass = 0; pass < 3; pass++) await runSweep([view()], g.deps);
-  assert.deepEqual([g.state.dispatched, g.state.admissions, g.state.escalated], [0, 0, 1], "body_proof_repair: held, escalated once");
-  const refusedHold = refusedRows.find((r) => r.step === "sweep.disposed" && r.stand_down_hold === true);
-  assert.equal(refusedHold?.stand_down_site, "rung.body_proof_repair");
-  // Any other stand-down site keeps W1-T1110's re-arm: no hold row is written and the repair is routed again.
-  const rearmRows: Row[] = [seedRow, dispatchRow, standDown({ site: "rung.empty_review_evidence" })];
-  const h = holdFixture(rearmRows);
-  await runSweep([view()], h.deps);
-  assert.equal(rearmRows.some((r) => r.step === "sweep.disposed" && r.stand_down_hold === true), false);
-  assert.equal(h.state.escalated, 0);
-  assert.equal(h.state.dispatched, 1, "a stalled rung at another site re-arms");
+test("W1-T10339: a stood-down repair is not re-dispatched on unchanged inputs", async (t) => {
+  const sites = [
+    "rung.needs_design", "rung.body_proof_repair", "rung.empty_review_evidence", "rung.exhaustion",
+    "rung.review_decision", "rung.pre_dispatch_review", "rung.branch_claim", "rung.ci_handoff",
+    "rung.foreign_tree", "rung.strike", "rung.empty_ci_failures", "rung.pr_diff_unreadable",
+    "rung.report_substituted", "rung.empty_commit_surface", "rung.unfiled_scope", "rung.ci_false_block",
+    "rung.post_ci_review_source", "rung.head_contract", "rung.reviewer_code_freshness", "rung.false_block",
+    "rung.retrigger_exhaustion", "rung.future_site", undefined,
+  ];
+  for (const taskId of [TASKLESS, "W1-T10339"]) for (const site of sites) {
+    await t.test(`${taskId}: ${site ?? "unlabelled"}`, async () => {
+      const taskless = taskId === TASKLESS;
+      const body = taskless ? BODY : `${BODY}\nRemudero-Task: ${taskId}\n`;
+      const pr = view({ body, ...(taskless ? {} : { taskId }) });
+      const rows: Row[] = [seedRow, { ...dispatchRow, task_id: taskId }, standDown({ task_id: taskId, site,
+        read_contract_revision: "contract-A", read_body_sha256: taskless ? prBodyDigest(body) : undefined })];
+      const f = holdFixture(rows);
+      f.deps.readTaskContractRevision = () => "contract-A";
+      await runSweep([pr], f.deps);
+      assert.deepEqual([f.state.dispatched, f.state.admissions, f.state.escalated], [0, 0, 1]);
+      assert.match(f.state.reasons[0]!, /stale plan proof requires a parent-owned amendment/);
+      const first = rows.find((r) => r.step === "sweep.disposed" && r.stand_down_hold === true);
+      assert.deepEqual([first?.disposition, first?.stand_down_site], ["refused-escalate", site ?? "unknown"]);
+      rows.push({ step: "proof_amendment.requested", task_id: taskId, outcome: "refused", reason: "shard-not-found" });
+      for (let pass = 0; pass < 3; pass++) {
+        await runSweep([pr], f.deps);
+        assert.deepEqual([f.state.dispatched, f.state.admissions, f.state.escalated], [0, 0, 1]);
+        const later = rows.findLast((r) => r.step === "sweep.disposed")!;
+        assert.equal(later.acted, false);
+        assert.equal(later.stand_down_hold, true);
+        assert.match(String(later.stand_down_reason), /stand-down hold: .*nothing it read has changed/);
+        assert.match(String(later.stand_down_reason), /no worker dispatched and no capacity spent/);
+      }
+    });
+  }
+  await t.test("an already-open strike escalation waits for its issue to close", async () => {
+    const rows = [seedRow, dispatchRow, standDown({ site: "rung.strike",
+      reason: "a needs-human escalation for this exact head is ALREADY OPEN and awaiting a human" })];
+    const f = holdFixture(rows);
+    let open = true;
+    f.deps.readOpenEscalations = () => open ? [{ number: 1, url: "https://github.com/acme/remudero/issues/1",
+      title: "[BLOCKED] repair", body: `**Task:** ${TASKLESS}\n**Class:** BLOCKED\n${PR_URL}\n**Head:** ${HEAD}\n**Cause:** ci\n` }] : [];
+    for (let pass = 0; pass < 3; pass++) {
+      await runSweep([view()], f.deps);
+      assert.deepEqual([f.state.dispatched, f.state.admissions, f.state.escalated], [0, 0, 0]);
+      const held = rows.findLast((r) => r.step === "sweep.disposed")!;
+      assert.equal(held.acted, false);
+      assert.match(String(held.stand_down_reason), /issues\/1/);
+    }
+    open = false;
+    await runSweep([view()], f.deps);
+    assert.deepEqual([f.state.dispatched, f.state.admissions, f.state.escalated], [1, 1, 0]);
+  });
+  await t.test("a failed escalation is recorded once and the stand-down still holds", async () => {
+    const rows = [seedRow, dispatchRow, standDown({ site: "rung.empty_review_evidence" })];
+    const f = holdFixture(rows);
+    f.deps.escalate = () => { f.state.escalated++; throw new Error("issue delivery unavailable"); };
+    await runSweep([view()], f.deps);
+    const failed = rows.findLast((r) => r.step === "sweep.disposed")!;
+    assert.equal(failed.stand_down_hold, true);
+    assert.equal(failed.stand_down_escalation_attempted, true);
+    assert.equal(failed.acted, false);
+    assert.equal(failed.action_error, "issue delivery unavailable");
+    assert.match(String(failed.reason), /stale plan proof requires a parent-owned amendment/);
+    for (let pass = 0; pass < 3; pass++) await runSweep([view()], f.deps);
+    assert.deepEqual([f.state.dispatched, f.state.admissions, f.state.escalated], [0, 0, 1]);
+  });
+});
+
+test("W1-T10339: a changed recorded input routes a held PR normally on the next pass", async () => {
+  for (const release of ["head", "contract", "body"] as const) {
+    const taskId = release === "contract" ? "W1-T10339" : TASKLESS;
+    const pr = view(release === "contract" ? { taskId, body: `${BODY}\nRemudero-Task: ${taskId}\n` } : {});
+    const rows = [seedRow, { ...dispatchRow, task_id: taskId }, standDown({ task_id: taskId,
+      site: "rung.empty_review_evidence", read_contract_revision: "contract-A",
+      read_body_sha256: release === "contract" ? undefined : prBodyDigest(BODY) })];
+    const f = holdFixture(rows);
+    let revision = "contract-A";
+    f.deps.readTaskContractRevision = () => revision;
+    await runSweep([pr], f.deps);
+    assert.deepEqual([f.state.dispatched, f.state.admissions, f.state.escalated], [0, 0, 1]);
+    if (release === "head") pr.headSha = "b".repeat(40);
+    if (release === "contract") revision = "contract-B";
+    if (release === "body") pr.body = EDITED_BODY;
+    await runSweep([pr], f.deps);
+    assert.deepEqual([f.state.dispatched, f.state.admissions, f.state.escalated], [1, 1, 1], `${release} releases the hold`);
+  }
 });
 
 test("W1-T10339: a body edit releases a taskless stand-down at the same head", async () => {
@@ -318,8 +369,9 @@ test("W1-T10339: a hold is released by a new head and a changed contract, and le
   assert.equal(read([standDown({ read_contract_revision: "contract-A" })], { ...current, contractRevision: "contract-A" })?.kind, "held");
   assert.equal(read([standDown({ read_contract_revision: "contract-A" })], { ...current, contractRevision: "contract-B" })?.kind, "ended");
   assert.equal(read([standDown({ read_head_sha: undefined, read_body_sha256: undefined })])?.kind, "ended", "a row without the fields keeps today's re-dispatch");
-  assert.equal(read([standDown({ site: "rung.strike" })])?.kind, "ended", "an issue-released strike stand-down is out of scope");
-  assert.equal(read([standDown({ site: "rung.empty_review_evidence" })])?.kind, "ended", "another site keeps W1-T1110's re-arm");
+  assert.equal(read([standDown({ site: "rung.strike", reason: "a needs-human escalation is ALREADY OPEN" })])?.kind, "ended", "an issue-released strike stand-down is out of scope");
+  assert.equal(read([standDown({ site: "rung.strike" })])?.kind, "held", "other strike stand-downs hold");
+  assert.equal(read([standDown({ site: "rung.empty_review_evidence" })])?.kind, "held", "every recorded stand-down holds");
   assert.equal(read([standDown({ site: "rung.body_proof_repair" })])?.kind, "held", "a refused body proposal holds");
   assert.equal(read([standDown({ outcome: "handed_off", site: "rung.ci_handoff" })])?.kind, "live", "a handed_off stand-down is still a live wait");
   assert.equal(read([])?.kind, "live", "a live in-flight rung stays deduped");

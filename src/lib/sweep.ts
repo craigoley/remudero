@@ -15221,6 +15221,10 @@ function priorActionsFromLedger(
       voidedFixes.set(`${line.pr_number}@${line.head_sha}`, `${String(line.task_id)}@${String(line.head_sha)}`);
       continue;
     }
+    if (line.step === "sweep.disposed" && line.stand_down_hold === true && line.stand_down_escalation_attempted === true &&
+        typeof line.pr_number === "number" && typeof line.head_sha === "string") {
+      escalated.add(`${line.pr_number}@${line.head_sha}`);
+    }
     if (line.step !== "sweep.disposed" || line.acted !== true) continue;
     const pr = typeof line.pr_number === "number" ? line.pr_number : undefined;
     if (pr === undefined) continue;
@@ -15428,16 +15432,12 @@ export function fixRungInputFields(inputs: Partial<FixRungInputs>): Record<strin
   };
 }
 
-/** W1-T10339 — the stand-down sites the hold reads: the design hand-off and the refused/empty body-proof proposal.
- *  Every other site keeps W1-T1110's re-arm, which the dedup-seed gate pins (a stalled rung re-arms its next strike). */
-const HELD_STAND_DOWN_SITES: ReadonlySet<unknown> = new Set(["rung.needs_design", "rung.body_proof_repair"]);
-
 /** W1-T10339 — have the inputs a recorded row read moved? A row written before these fields existed has not recorded
  *  what it read, so it reads as moved (today's re-dispatch). A contract or body the caller could not read cannot show a
- *  change. */
+ *  change. Only an already-open escalation at rung.strike keeps its issue-closing release. */
 export function fixRungInputsUnchanged(row: Record<string, unknown>, current: FixRungInputs): boolean {
   if (typeof row.read_head_sha !== "string" || row.read_head_sha !== current.headSha ||
-      !HELD_STAND_DOWN_SITES.has(row.site)) return false;
+      (row.site === "rung.strike" && typeof row.reason === "string" && row.reason.includes("ALREADY OPEN"))) return false;
   if (typeof row.read_contract_revision === "string" && current.contractRevision !== undefined &&
       row.read_contract_revision !== current.contractRevision) return false;
   return !(typeof row.read_body_sha256 === "string" && current.bodySha256 !== undefined &&
@@ -21451,6 +21451,7 @@ export async function runSweep(
               break;
             }
             case "refused-escalate":
+              if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_escalation_attempted: true };
               await deps.escalate(pr, reason, question!);
               break;
             case "blocked-ambiguous":
