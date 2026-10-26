@@ -4454,7 +4454,7 @@ function objectArguments(raw: unknown): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-async function executeOpenWeightTool(
+export async function executeOpenWeightTool(
   name: string,
   args: Record<string, unknown>,
   cwd: string,
@@ -4462,6 +4462,8 @@ async function executeOpenWeightTool(
   workerHome: string,
   runCheck: ((input: OpenWeightCheckInput) => string | Promise<string>) | undefined,
   ledger: OpenWeightRunCheckLedger,
+  /** Test seam: the selector the `unit_test` dispatch uses. Production is the off-loop child. */
+  selectSuites: (cwd: string, env: Record<string, string>) => Promise<AffectedSelection> = selectOpenWeightUnitTestSuitesOffLoop,
 ): Promise<unknown> {
   switch (name) {
     case "read_file":
@@ -4500,7 +4502,7 @@ async function executeOpenWeightTool(
         const load = readHostLoad();
         const concurrency = scopeRule === CONSUMER_UNIT_TEST_SCOPE_RULE
           ? testRunConcurrency(load, defaultTestSlots(load.cores)) : OPENWEIGHT_UNIT_TEST_CONCURRENCY;
-        const plan = openWeightUnitTestPlan(await selectOpenWeightUnitTestSuitesOffLoop(cwd, checkEnv), argv, cwd, concurrency);
+        const plan = openWeightUnitTestPlan(await selectSuites(cwd, checkEnv), argv, cwd, concurrency);
         if (plan.kind === "refused") {
           ledgerRunCheck(ledger, { check: args.check, outcome: "refused", suites: plan.suites, startedAt, reason: plan.reason, scopeRule });
           return { check: args.check, ran: false, suites: plan.suites, refused: plan.reason };
