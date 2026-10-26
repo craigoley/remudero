@@ -15221,6 +15221,11 @@ function priorActionsFromLedger(
       voidedFixes.set(`${line.pr_number}@${line.head_sha}`, `${String(line.task_id)}@${String(line.head_sha)}`);
       continue;
     }
+    if (line.step === "sweep.disposed" && line.stand_down_hold === true && line.disposition === "refused-escalate" &&
+        typeof line.pr_number === "number" && typeof line.head_sha === "string") {
+      // A hold records its escalation attempt even when delivery failed; later passes still stand down.
+      escalated.add(`${line.pr_number}@${line.head_sha}`);
+    }
     if (line.step !== "sweep.disposed" || line.acted !== true) continue;
     const pr = typeof line.pr_number === "number" ? line.pr_number : undefined;
     if (pr === undefined) continue;
@@ -15428,16 +15433,13 @@ export function fixRungInputFields(inputs: Partial<FixRungInputs>): Record<strin
   };
 }
 
-/** W1-T10339 — the stand-down sites the hold reads: the design hand-off and the refused/empty body-proof proposal.
- *  Every other site keeps W1-T1110's re-arm, which the dedup-seed gate pins (a stalled rung re-arms its next strike). */
-const HELD_STAND_DOWN_SITES: ReadonlySet<unknown> = new Set(["rung.needs_design", "rung.body_proof_repair"]);
-
 /** W1-T10339 — have the inputs a recorded row read moved? A row written before these fields existed has not recorded
  *  what it read, so it reads as moved (today's re-dispatch). A contract or body the caller could not read cannot show a
  *  change. */
 export function fixRungInputsUnchanged(row: Record<string, unknown>, current: FixRungInputs): boolean {
   if (typeof row.read_head_sha !== "string" || row.read_head_sha !== current.headSha ||
-      !HELD_STAND_DOWN_SITES.has(row.site)) return false;
+      // Only the already-open escalation stand-down is issue-released rather than input-released.
+      row.site === "rung.strike" && /^a needs-human escalation .* is ALREADY OPEN and awaiting a human \(/.test(String(row.reason))) return false;
   if (typeof row.read_contract_revision === "string" && current.contractRevision !== undefined &&
       row.read_contract_revision !== current.contractRevision) return false;
   return !(typeof row.read_body_sha256 === "string" && current.bodySha256 !== undefined &&
