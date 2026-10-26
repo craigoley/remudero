@@ -177,8 +177,14 @@ export function procfsWriteOffences(files: readonly { name: string; text: string
 export function changedProcfsWriteOffences(cwd: string): string[] {
   let names: string[];
   try {
-    names = hostWorktreeGit(cwd, ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", "test/"], { timeout: 20_000 })
-      .split("\n").filter((n) => n.endsWith(".test.ts") && !n.endsWith("no-test-aims-a-write-at-procfs.test.ts"));
+    // Committed, staged and unstaged changes (merge-base against the working tree), plus untracked files:
+    // the harness commits a worker's edits only after this gate, so a new test is not yet in any commit.
+    const git = (args: string[]) => hostWorktreeGit(cwd, args, { timeout: 20_000 });
+    const base = git(["merge-base", "origin/main", "HEAD"]).trim();
+    const changed = git(["diff", "--name-only", "--diff-filter=AM", base, "--", "test/"]);
+    const untracked = git(["ls-files", "--others", "--exclude-standard", "--", "test/"]);
+    names = [...new Set(`${changed}\n${untracked}`.split("\n").map((n) => n.trim()))]
+      .filter((n) => n.endsWith(".test.ts") && !n.endsWith("no-test-aims-a-write-at-procfs.test.ts"));
   } catch (error) {
     process.stderr.write(`preopen gate: procfs-write scan skipped, diff unreadable: ${String((error as Error)?.message ?? error).slice(0, 120)}\n`);
     return [];
