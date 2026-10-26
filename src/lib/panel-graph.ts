@@ -3067,7 +3067,7 @@ function readSlowLaneClassification(stateDir: string, registryPath: string): Thr
     const state = snapshot.states[p.id];
     return state === undefined ? [] : [{ proposalId: p.id, state: state as InboxClassification["state"],
       ...(snapshot.displayOwners?.[p.id] ? { displayOwner: snapshot.displayOwners[p.id] } : {}),
-      ...(snapshot.restoredForReview?.includes(p.id) ? { requiresReview: true as const } : {}) }];
+      ...(snapshot.requiresReview?.includes(p.id) || snapshot.restoredForReview?.includes(p.id) ? { requiresReview: true as const } : {}) }];
   });
   const complete = snapshot.complete === true;
   const incompleteReason = complete ? undefined

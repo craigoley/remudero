@@ -27,6 +27,7 @@ import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
 import { createDemandBook } from "#src/lib/view-demand.js";
 import { inboxGardenerPath } from "#src/lib/inbox-retirement.js";
+import { readAllThreads } from "#src/lib/inbox-thread.js";
 
 type Ctx = { after(fn: () => void | Promise<void>): void };
 function world(t: Ctx, count = 80) {
@@ -119,12 +120,16 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
   assert.equal(initialBadge.data.inbox.fleet,fleet.body.data.items.length);
   const light=classificationSnapshotPath(join(w.root,"state")),heldLight=readFileSync(light,"utf8");
   assert.equal(readClassificationSnapshot(join(w.root,"state"))?.displayOwners?.[ageId],"fleet");
-  for(const variant of ["missing-owner","foreign-owner","invalid-owner","foreign-restoration"] as const){
+  for(const variant of ["missing-owner","foreign-owner","invalid-owner","foreign-restoration","foreign-review","duplicate-review","fleet-review","invalid-review"] as const){
     const bad=JSON.parse(heldLight);
     if(variant==="missing-owner")delete bad.displayOwners[ageId];
     if(variant==="foreign-owner")bad.displayOwners["foreign:id"]="fleet";
     if(variant==="invalid-owner")bad.displayOwners[ageId]="unknown";
     if(variant==="foreign-restoration")bad.restoredForReview.push("foreign:id");
+    if(variant==="foreign-review")bad.requiresReview=["foreign:id"];
+    if(variant==="duplicate-review")bad.requiresReview=["ruling:real-human-ask","ruling:real-human-ask"];
+    if(variant==="fleet-review")bad.requiresReview=[ageId];
+    if(variant==="invalid-review")bad.requiresReview={ [ageId]: true };
     writeFileSync(light,JSON.stringify(bad));
     assert.equal(readClassificationSnapshot(join(w.root,"state")),undefined,variant);
     const unknownBadge=await badge();assert.ok(!("error" in unknownBadge));assert.equal(unknownBadge.data.inbox.needsYou,undefined,variant);
@@ -135,6 +140,7 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
   assert.equal(readFileSync(store,"utf8"),original,"classification cannot fabricate a reply or retire history");
   const fullPath=persistedInboxPath(join(w.root,"state")),heldFull=readFileSync(fullPath,"utf8"),restoredLight=JSON.parse(heldLight);
   restoredLight.displayOwners[ageId]="operator";restoredLight.restoredForReview=[ageId];
+  delete restoredLight.requiresReview;
   writeFileSync(light,JSON.stringify(restoredLight));unlinkSync(fullPath);
   try {
     assert.deepEqual(readClassificationSnapshot(join(w.root,"state"))?.restoredForReview,[ageId],"positive control: the owned light snapshot retains restoration");
@@ -181,6 +187,25 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
   assert.ok(!("error" in unknownBadge));
   assert.ok(ids(unknownNeeds.body.data.items).includes(ageId));
   assert.equal(unknownBadge.data.inbox.needsYou, unknownNeeds.body.data.items.length);
+  const unknownFull = readFileSync(fullPath, "utf8");
+  let lightAttention: string | undefined;
+  unlinkSync(fullPath);
+  try {
+    const lightDeps = { ...w.deps, inboxFromSlowLane: true };
+    const captured = peekSlowLaneClassification(lightDeps);
+    assert.ok(captured, "unreadable lifecycle remains visible through the light snapshot alone");
+    const items = inboxThreadListSources(lightDeps).items(captured.classified);
+    assert.equal(listThreadViews(items, new Map(), {}).find(item => item.threadId === threadId)?.attention,
+      "decision", "the light projection cannot downgrade lifecycle uncertainty to in-progress work");
+    const threads = readAllThreads({ threadStorePath: store });
+    assert.equal(threads.status, "ok");
+    const projected = listThreadViews(items, threads.threads, {});
+    lightAttention = projected.find(item => item.threadId === threadId)?.attention;
+    assert.equal(lightAttention, "decision", "the light projection must retain unreadable lifecycle review");
+    assert.equal(captured.classified.classifications.find(c => c.proposalId === ageId)?.requiresReview, true);
+    assert.ok(readClassificationSnapshot(join(w.root, "state"))?.requiresReview?.includes(ageId));
+    assert.equal(readFileSync(store, "utf8"), retainedMessages, "light projection preserves answered history");
+  } finally { writeFileSync(fullPath, unknownFull); }
   const db = openProjectorReadModel(join(w.root, "read-model-state"), "core");
   try {
     db.exec(`CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL,key TEXT NOT NULL,version INTEGER NOT NULL,
@@ -194,6 +219,7 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
     const legacyDetail = await s.get(`/v1/inbox/thread?id=${encodeURIComponent(threadId)}`);
     assert.equal(legacyDetail.status, 200); assert.equal(cached.data.found, true, cached.data.reason);
     assert.equal(legacyDetail.body.attention, "decision", "unknown lifecycle retains the existing human review obligation");
+    assert.equal(legacyDetail.body.attention, lightAttention, "full and light projections retain the same review obligation");
     assert.equal(cached.data.thread?.attention, legacyDetail.body.attention, "cached detail must retain the classifier's review marker");
     assert.deepEqual(cached.data.thread?.correspondence, legacyDetail.body.correspondence);
     assert.deepEqual(cached.data.thread?.messages.slice(1), legacyDetail.body.messages.slice(1));
