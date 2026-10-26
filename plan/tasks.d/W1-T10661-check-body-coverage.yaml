@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.3
   status: queued
@@ -38,3 +38,15 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared files are src/lib/prompt-render.ts and a new unit test (test/worker/check-body-coverage.test.ts). Neither is a secrets, auth, permissions, merge/deploy/infrastructure, or review-policy path, so the description gives no sign of such a touch."
+      - "The description shows no deletion of data, branches or history, and no irreversible action. The acceptance is a unit test, which can be verified automatically (verify: auto)."
+      - "The task asks for no operator-only decision. It is a machine-filed remedy that must change a code path rather than add docs, and the gardener re-measures its effect afterward."
+      - "The family track record (58 merged, 58 declined, Beta mean 0.73) is mixed but not alarming. The change still has to pass CI and review. One declared file does not yet exist at the base, which fits a new test being added."
+      - "No ACTUAL CHANGE view was supplied, so the touched files are not independently confirmed. Nothing in the description suggests that this matters."
+    judged_at: "2026-10-26T01:47:08.843Z"
+    pin: "073bc7eb669a5114372b95dfb29c81a116e09b2ac07c316f1e1f945c6b28ba94"

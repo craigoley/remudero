@@ -26,6 +26,12 @@ Invariants (JANITOR.md "Preserve-then-retire"):
   `ready.json` beside `consumers/`) on it, above it or inside it, or one that cannot be inspected:
   it is never retired, repacked, pruned, compressed, expired or removed. Seed stores belong to the
   reference-aware seed sweeper alone.
+- Discovery scans the configured roots, then the whole home (depth 8; never `HOME_PRUNE` folders,
+  symlinks, protected paths, the preserve root or shared object pools) for checkouts and bare
+  repositories with a remote containing a `managed_remotes` entry, then every worktree a discovered
+  clone or bare store has registered, even inside a `.git` folder. A repository without a managed
+  remote outside the roots is never a candidate. Removal accepts only a path under a root or one
+  found by those two rules inside the home. Loose-folder housekeeping and repacking stay in the roots.
 Usage: preserve-retire.py --home DIR [--apply] [--config PATH]
 """
 import argparse, glob, gzip, json, os, pwd, re, shlex, shutil, stat, subprocess, sys, tarfile, tempfile, time
@@ -41,6 +47,7 @@ DEFAULTS = {"enabled": False, "idle_hours": 24, "retain_days": 7, "interval_hour
                       "Developer/remudero-operator-recovered-worktrees-*", "Downloads/remudero-*",
                       ".local/share/remudero/source-recovery"],
             "temp_roots": [],
+            "managed_remotes": ["github.com/craigoley/remudero"],
             "published_remotes": ["https://github.com/craigoley/", "git@github.com:craigoley/",
                                   "ssh://git@github.com/craigoley/"]}
 # Regenerable trees that are neither preserved nor counted as data.
@@ -53,6 +60,12 @@ BUNDLE_SUFFIXES = (".app", ".framework", ".xcframework", ".bundle")
 # Keep declarations shared with cache-reclaim.py KEEP and dependency-seed-guard.sh. Seed stores and their
 # generations are collected only by the reference-aware seed sweeper (deploy/DEPENDENCY-SEEDS.md).
 KEEP_MARKERS = (".rmd-janitor-keep", ".rmd-scratch-keep", ".rmd-dependency-seed-root.json")
+# Home-wide discovery never enters these folders (personal data, installs, Git admin) or a symlink.
+HOME_PRUNE = {"Library", "Documents", "Desktop", "Pictures", "Music", "Movies", "Applications", ".Trash",
+              "node_modules", ".git"}
+# Shared infrastructure stores (object pools other checkouts borrow from) are never discovered home-wide.
+HOME_PRUNE_PATHS = (".local/share/remudero/git-pools", ".local/share/remudero/repositories")
+MAX_DEPTH = 8
 CENSUS_PRUNE = {"Library", ".Trash", "Music", "Movies", "Pictures", "node_modules"}
 TEMP_BASE = "/private/tmp"
 CODEX_SESSION_DIRS = (".codex/sessions", ".codex/archived_sessions")
@@ -78,6 +91,7 @@ class Repo:
         self.gitdir = self.store = None    # store = the object-store owner (common git dir)
         self.lenders, self.hold = [], ""
         self.scoped = ""                   # keep_scope reason for this checkout or its store
+        self.via = "root"                  # root | managed-remote | registered-worktree (remove guard)
 
     def git(self, *args, **kw):
         if self.kind == "bare":
@@ -127,6 +141,8 @@ def load_config(home, path, temp_base=TEMP_BASE):
         return None, f"refused: numeric settings must be whole numbers, idle_hours >= {MIN_IDLE_HOURS}"
     if cfg["enabled"] is not True:
         return None, "disabled (config enabled=false)"
+    if type(cfg["managed_remotes"]) is not list or any(type(m) is not str or not m.strip() for m in cfg["managed_remotes"]):
+        return None, "refused: managed_remotes must be a list of non-empty strings"
     cfg["preserve_root"] = os.path.join(home, cfg["preserve_root"])
     cfg["home"] = home
     if any(type(r) is not str or os.path.isabs(r) or ".." in r.split("/") for r in cfg["roots"] + cfg["temp_roots"]):
@@ -264,13 +280,14 @@ def is_bare(path, names, dirs):
 
 
 def discover(cfg, protected):
+    """Root discovery, then managed checkouts anywhere in the home, then registered worktrees."""
     found = {}
     for root in cfg["roots"]:
         if not os.path.isdir(root) or os.path.islink(root):
             continue
         base_depth = root.count("/")
         for dirpath, dirs, files in os.walk(root):
-            if dirpath.count("/") - base_depth >= 8 or inside(dirpath, protected):
+            if dirpath.count("/") - base_depth >= MAX_DEPTH or inside(dirpath, protected):
                 dirs[:] = []
                 continue
             if dirpath != root:
@@ -284,7 +301,77 @@ def discover(cfg, protected):
             dirs[:] = [d for d in dirs if d not in (".git", "node_modules")
                        and not os.path.islink(os.path.join(dirpath, d))
                        and not (dirpath == root and d in ("lanes", "state"))]
-    return [Repo(p, k) for p, k in sorted(found.items())]
+    repos = {p: Repo(p, k) for p, k in found.items()}
+    for p, k in discover_managed(cfg, protected, set(repos)):
+        repos[p] = Repo(p, k)
+        repos[p].via = "managed-remote"
+    for p in registered_worktrees(cfg["home"], protected, list(repos.values())):
+        if p not in repos:
+            repos[p] = Repo(p, "worktree")
+            repos[p].via = "registered-worktree"
+    return [repos[p] for p in sorted(repos)]
+
+
+def remote_urls(path, kind):
+    """Every configured remote URL; an unreadable config yields none, so the repo is never a candidate."""
+    cmd = ["git", "--git-dir", path] if kind == "bare" else ["git", "-C", path]
+    out = run(cmd + ["config", "--get-regexp", r"^remote\..*\.url$"], timeout=30)
+    if out.returncode != 0:
+        return []
+    return [line.split(" ", 1)[1] for line in out.stdout.decode(errors="replace").splitlines() if " " in line]
+
+
+def managed(path, kind, cfg):
+    return any(m in url for url in remote_urls(path, kind) for m in cfg["managed_remotes"])
+
+
+def discover_managed(cfg, protected, known):
+    """Checkouts and bare repositories anywhere in the home (outside the roots, which were walked
+    already) with a remote naming a `managed_remotes` entry. A repository without one is never a
+    candidate, so personal projects are left alone however idle they are."""
+    home = cfg["home"]
+    skip = protected + [os.path.join(home, p) for p in HOME_PRUNE_PATHS] + [r for r in cfg["roots"] if inside(r, [home])]
+    base_depth = home.count("/")
+    for dirpath, dirs, files in os.walk(home):
+        if dirpath.count("/") - base_depth >= MAX_DEPTH:
+            dirs[:] = []
+            continue
+        if dirpath != home and dirpath not in known:
+            if ".git" in files or ".git" in dirs:
+                kind = "worktree" if ".git" in files else "clone"
+                if not os.path.islink(os.path.join(dirpath, ".git")) and managed(dirpath, kind, cfg):
+                    yield dirpath, kind
+            elif is_bare(dirpath, files, dirs):
+                if managed(dirpath, "bare", cfg):
+                    yield dirpath, "bare"
+                dirs[:] = []
+                continue
+        dirs[:] = [d for d in dirs if d not in HOME_PRUNE and not os.path.islink(os.path.join(dirpath, d))
+                   and not inside(os.path.join(dirpath, d), skip)]
+
+
+def registered_worktrees(home, protected, repos):
+    """Worktrees a discovered clone or bare store has registered (`worktrees/*/gitdir`), wherever they
+    are, even inside a `.git` folder or outside every root: inside the home, real, not protected."""
+    out = []
+    for r in repos:
+        if r.kind == "worktree":
+            continue
+        admin = os.path.join(r.path if r.kind == "bare" else os.path.join(r.path, ".git"), "worktrees")
+        if os.path.islink(admin) or not os.path.isdir(admin):
+            continue
+        for name in sorted(os.listdir(admin)):
+            try:
+                with open(os.path.join(admin, name, "gitdir")) as stream:
+                    text = stream.read().strip()
+            except OSError:
+                continue
+            path = os.path.dirname(text) if os.path.basename(text) == ".git" else ""
+            if (path and os.path.isabs(path) and inside(path, [home]) and path != home
+                    and os.path.realpath(path) == path and os.path.isfile(os.path.join(path, ".git"))
+                    and not os.path.islink(os.path.join(path, ".git")) and not inside(path, protected)):
+                out.append(path)
+    return out
 
 
 def resolve_git(repo):
@@ -776,10 +863,12 @@ def store_keep_scope(store, repos):
     return ""
 
 
-def remove(repo, roots, protected, repos):
+def remove(repo, roots, protected, repos, home=None):
+    """A path under a scan root, or one discovered by managed remote or worktree registration inside the home."""
     p = repo.path
+    discovered = repo.via in ("managed-remote", "registered-worktree") and home and p.startswith(home + "/")
     if (not os.path.isabs(p) or os.path.realpath(p) != p or os.path.islink(p) or inside(p, protected)
-            or not any(p.startswith(r + "/") for r in roots)):
+            or not (any(p.startswith(r + "/") for r in roots) or discovered)):
         raise Hold("path-guard")
     why = keep_scope(p) or (repo.store and store_keep_scope(repo.store, repos))
     if why:
@@ -1131,7 +1220,7 @@ def main_authorized():
                 raise Hold(f"{why} (declared before retire)")
             if git_snapshot(r) != saved[r.path][1]["git_snapshot"]:
                 raise Hold("refs-changed-before-retire")
-            remove(r, cfg["roots"], protected, repos)
+            remove(r, cfg["roots"], protected, repos, home)
             retired += 1
             say("RETIRED", r.kind, r.path)
         except Hold as h:

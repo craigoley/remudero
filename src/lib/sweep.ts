@@ -13605,7 +13605,9 @@ export function fleetWithheldStageMs(rows: ReadonlyArray<Record<string, unknown>
   let held = 0;
   passes.forEach(({ row, at }, i) => {
     const text = `${String(row.stand_down_reason ?? "")} ${String(row.reason ?? "")}`;
-    if (row.acted === true || !FLEET_WITHHELD_STAND_DOWN.test(text)) return;
+    const semanticAdmissionHeld = row.acted === false && typeof row.stand_down_reason === "string" &&
+      /^not admitted this pass: semantic post-review admission bound \d+(?:, in-flight \d+)?(?:; admitted #\d+(?:, #\d+)* ahead)?$/.test(row.stand_down_reason);
+    if (row.acted === true || !(FLEET_WITHHELD_STAND_DOWN.test(text) || semanticAdmissionHeld)) return;
     held += Math.max(0, (passes[i + 1]?.at ?? nowMs) - at);
   });
   return held;
@@ -17798,9 +17800,9 @@ export async function runSweep(
     const memo = refreshClearanceKey(pr.prNumber, pr.headSha, mainSha, testFiles);
     const decided = refusedClearances.get(memo);
     if (decided !== undefined) return { refresh: false, evidence: decided, reason: "this head's refusal at this main is already recorded" };
-    let mainChangedFiles: string[] | undefined;
+    let facts: RedBaseRefreshFacts | undefined;
     try {
-      mainChangedFiles = (await deps.readRedBaseRefreshFacts?.(pr))?.baseChangedFiles;
+      facts = await deps.readRedBaseRefreshFacts?.(pr);
     } catch (error) {
       // An unread delta is no evidence either way: `mainPathsReachingRed` then proves nothing.
       log("sweep.red_base_refresh.read_error", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
@@ -17812,11 +17814,16 @@ export async function runSweep(
       // An unreadable closure is unknown, never empty: the pre-filter cannot refuse on it.
       log("refresh.clearance.closure_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
     }
+    // The same reach rule over the PR's OWN diff: a test passing on main is evidence main fixed it only when
+    // the head's change cannot reach it. A base-red head's red reproduced on main itself, so its diff decides nothing.
+    const prChangedFiles = arm === "base-red" || facts?.prAddedLines === undefined ? undefined : Object.keys(facts.prAddedLines);
+    const ownReach = mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles: prChangedFiles, closure, isHarnessPath: isCiHarnessPath });
     const clearance = await assessRefreshClearance({
       failingTestFiles: testFiles,
-      reach: mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles, closure, isHarnessPath: isCiHarnessPath }),
+      reach: mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles: facts?.baseChangedFiles, closure, isHarnessPath: isCiHarnessPath }),
       priorRefresh: refreshedOnSameRed(refreshRecords, pr.prNumber, checks, testFiles) ? true
         : history.source === "unreadable" ? undefined : false,
+      ...(ownReach === undefined ? {} : { ownReach: ownReach.counted }),
     }, deps.reproduceFailingTestsOnMerge ? () => deps.reproduceFailingTestsOnMerge!(pr, testFiles, mainSha) : undefined);
     appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REFRESH_CLEARANCE_STEP,
       ...refreshClearanceFields({ arm, pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainSha, checks, test_files: testFiles },

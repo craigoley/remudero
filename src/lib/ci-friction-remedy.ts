@@ -343,12 +343,20 @@ export function coverageRefusalWithoutMechanism(key: string, details: readonly s
   return key.startsWith("check:ci-log:") && details.some(detail => /\bdiff-coverage:\s*BLOCKED\b/i.test(detail));
 }
 
+/** A branch finding's warning identifies the scanner reporter, not a defect in that reporter. */
+export function scannerWarningWithoutMechanism(key: string, details: readonly string[]): boolean {
+  const family = /^check:ci-log:(codeql-alert-\d+-[^:]+)(?::|$)/.exec(key)?.[1];
+  return family !== undefined && details.some(detail =>
+    ciLogSignatures(family, detail).some(signature => /^UNTRUSTED SCANNER EVIDENCE:/.test(signature)));
+}
+
 /**
  * The code that owns a cause. A refusal is owned by whatever raises its reason; a CI check by the
  * scripts and source that name it; a main-merge cause by the file it conflicts on. `undefined` when
  * nothing can be located — the cause then goes to a person, never to a docs-only record.
  */
 export function locateCiFrictionOwner(key: string, details: readonly string[], search: OwnerSearch): CiFrictionOwner | undefined {
+  if (scannerWarningWithoutMechanism(key, details)) return undefined;
   if (key.startsWith("hand_fix:")) {
     const file = key.slice("hand_fix:".length);
     return /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes("..") && search.fileExists(file)

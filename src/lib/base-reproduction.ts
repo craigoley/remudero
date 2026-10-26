@@ -186,6 +186,9 @@ export interface RefreshClearance {
   evidence: RefreshEvidence;
   /** Main's paths since the head's merge base that could change the red; absent when main's delta was unread. */
   countedPaths?: string[];
+  /** The PR's OWN changed paths that could change the red; absent when the PR's diff was unread or not
+   *  this arm's evidence. Any path here keeps the red possibly the PR's own: only a clear trial merge refreshes. */
+  ownPaths?: string[];
   mergedVerdict?: BaseReproductionVerdict;
   mergedFiles?: BaseProbeFile[];
   reason: string;
@@ -233,16 +236,36 @@ export function mainPathsReachingRed(input: {
  *  the trial-merge probe. Red on the merged tree refuses; clear refreshes. Partial, unrunnable or fileless
  *  keeps today's refresh only with readable history that shows no refresh already left this red: a repeat
  *  needs a trial merge that clears it. #12703 took four main merges on its own census red and no worker.
+ *  So does a red the PR's OWN diff reaches (`ownReach`): a test passing on main says nothing of a change only
+ *  the head carries: #14196's half-done rename broke tests its own src change reached, and took main, no fix.
  *  No count, timer or clock decides anything here. */
 export async function assessRefreshClearance(
-  input: { failingTestFiles: readonly string[]; reach: { counted: string[]; complete: boolean } | undefined; priorRefresh: boolean | undefined },
+  input: {
+    failingTestFiles: readonly string[]; reach: { counted: string[]; complete: boolean } | undefined; priorRefresh: boolean | undefined;
+    ownReach?: readonly string[];
+  },
+  probeMerge: (() => Promise<BaseProbeResult>) | undefined,
+): Promise<RefreshClearance> {
+  const clearance = await decideRefreshClearance(input, probeMerge);
+  return input.ownReach === undefined ? clearance : { ...clearance, ownPaths: [...input.ownReach] };
+}
+
+/** At most this many of the PR's own paths are named in a reason; the row's `own_paths` carries them all. */
+const OWN_PATHS_NAMED = 3;
+
+async function decideRefreshClearance(
+  input: Parameters<typeof assessRefreshClearance>[0],
   probeMerge: (() => Promise<BaseProbeResult>) | undefined,
 ): Promise<RefreshClearance> {
   const countedPaths = input.reach?.counted;
   const counted = countedPaths === undefined ? {} : { countedPaths };
-  // Why only a clear trial merge may refresh: no history to read, or a refresh that already left this red.
+  const own = input.ownReach ?? [];
+  const ownText = own.length === 0 ? undefined : `the PR's own diff changes ${own.slice(0, OWN_PATHS_NAMED).join(", ")}` +
+    `${own.length > OWN_PATHS_NAMED ? ` and ${own.length - OWN_PATHS_NAMED} more` : ""} (a path that reaches the red)`;
+  // Why only a clear trial merge may refresh: no history to read, a refresh that already left this red, or
+  // a red the PR's own diff reaches — main passing a test is no evidence about a change only the head carries.
   const unproven = input.priorRefresh === undefined ? "refresh history is unreadable"
-    : input.priorRefresh ? "a refresh already left this red" : undefined;
+    : input.priorRefresh ? "a refresh already left this red" : ownText;
   if (input.priorRefresh && (countedPaths === undefined || countedPaths.length === 0)) {
     return { refresh: false, evidence: "repeat", ...counted, reason: countedPaths === undefined
       ? "a refresh already left this red, and main's changes since the head's merge base are unread"
@@ -342,6 +365,7 @@ export function refreshClearanceFields(
     reason: clearance.reason, history,
     ...(history === "unreadable" ? { unread_sources: [...unreadSources] } : {}),
     ...(clearance.countedPaths === undefined ? {} : { counted_paths: clearance.countedPaths }),
+    ...(clearance.ownPaths === undefined ? {} : { own_paths: clearance.ownPaths }),
     ...(clearance.mergedVerdict === undefined ? {} : { merged_verdict: clearance.mergedVerdict, merged_files: clearance.mergedFiles }),
   };
 }
