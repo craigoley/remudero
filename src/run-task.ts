@@ -164,6 +164,7 @@ import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-reti
 import { registeredGardenEnabled } from "./lib/garden-registry.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
+import { addCowWorktree, linkDonorNodeModules, mainWorktreeOf, renderCowWorktree } from "./lib/cow-worktree.js";
 import { judgeFixProgress, resolveFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
@@ -14580,6 +14581,49 @@ export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; cl
   }
   console.log(renderHandWorktree(result));
   return 0;
+}
+
+/**
+ * `rmd worktree add <dir> -b <branch> <base> [--donor <abs dir>]` (W1-T10257) — a disposable worktree whose
+ * unchanged files are cloned copy-on-write from the donor checkout (default: the repo's main worktree), by
+ * `addCowWorktree` (src/lib/cow-worktree.ts). node_modules is symlinked from the donor.
+ */
+export function worktreeCommand(rest: string[], opts: { repoDir?: string } = {}): number {
+  const positional: string[] = [];
+  let branch: string | undefined;
+  let donorArg: string | undefined;
+  let badArg: string | null = rest[0] === "add" ? null : "rmd worktree: the only subcommand is `add`";
+  for (let i = 1; i < rest.length && badArg === null; i++) {
+    const tok = rest[i];
+    if (tok === "-b" || tok === "--donor") {
+      const value = rest[i + 1];
+      if (value === undefined || value.startsWith("-")) badArg = `rmd worktree add: ${tok} needs a value`;
+      else if (tok === "-b") branch = value;
+      else donorArg = value;
+      i++;
+    } else if (tok.startsWith("-")) badArg = `rmd worktree add: unexpected argument '${tok}' — see \`rmd --help\``;
+    else positional.push(tok);
+  }
+  const [dir, base] = positional;
+  if (badArg === null && (dir === undefined || base === undefined || positional.length !== 2 || branch === undefined)) {
+    badArg = "rmd worktree add: needs <dir>, -b <branch> and <base>";
+  } else if (badArg === null && !isAbsolute(dir)) badArg = `rmd worktree add: <dir> '${dir}' is relative — give an absolute directory`;
+  else if (badArg === null && donorArg !== undefined && !isAbsolute(donorArg)) badArg = `rmd worktree add: --donor '${donorArg}' is relative — give an absolute directory`;
+  if (badArg !== null || dir === undefined || base === undefined || branch === undefined) {
+    console.error(`${badArg}\nusage: ${commandSyntax("worktree")}`);
+    return 2;
+  }
+  const repoDir = opts.repoDir ?? repoRoot;
+  try {
+    const donorDir = donorArg ?? mainWorktreeOf(repoDir);
+    const result = addCowWorktree({ repoDir, dir, branch, base, donorDir });
+    console.log(renderCowWorktree(dir, branch, result));
+    console.log(linkDonorNodeModules(donorDir, dir) ? `node_modules: symlinked from ${donorDir}` : "node_modules: not linked (no donor node_modules, or one already present)");
+    return 0;
+  } catch (error) {
+    console.error(`rmd worktree add: refused — ${(error as Error).message}`);
+    return 1;
+  }
 }
 
 // ledgerGrepCommand / stepFromRawLedgerLine moved to src/lib/report-commands.ts (W1-T2888) —
@@ -41392,6 +41436,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the chosen parent and why, the path and branch; exits 0 created, 1 refused, 2 bad usage.",
   },
   {
+    name: "worktree",
+    syntax: "rmd worktree add <dir> -b <branch> <base> [--donor <abs dir>]",
+    summary: "Add a disposable worktree whose unchanged files are cloned copy-on-write from the operator checkout.",
+    detail: "W1-T10257: a fresh `git worktree add` writes ~128 MB of tracked files the operator checkout already holds; on APFS a clone shares those blocks. Cuts the worktree with `git worktree add --no-checkout --no-track -b <branch> <dir> <base>`, clones every tracked regular file the donor (default: the repo's main worktree, the operator checkout) holds UNCHANGED (index blob equal to <base>'s blob, working file not dirty; the donor's uncommitted edits are never copied) with the platform's clone backend (`cp -c` on macOS, `cp --reflink=always` on Linux), then `git read-tree <base>` and `git checkout-index -a -q` write only the paths not cloned, `git update-index --refresh` and a clean `git status` are asserted, and a dirty status is repaired by a forced rewrite (reported as reconciled-by-rewrite). A volume that cannot clone gets a plain `git worktree add`, with the reason printed. node_modules is symlinked from the donor. Prints the method, the cloned/written counts and the free-space delta (a shared-volume observation, not a per-job attribution). <dir> and --donor must be absolute. Exits 0 created, 1 refused, 2 bad usage.",
+  },
+  {
     name: "next-task-id",
     syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit [--reap [--apply | --reconcile]]] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>]",
     summary: "Claim the next task id, or preview orphan cleanup with --audit --reap; --apply deletes under leases.",
@@ -42707,6 +42757,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await withGhTransportFloorMode("wait", () => nextTaskIdCommand(rest))],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],
+  ["worktree", (rest) => worktreeCommand(rest)],
   ["pr-checks", (rest) => reportPrChecks(rest)],
   [
     "retro",

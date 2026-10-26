@@ -26,6 +26,7 @@ usage:
   rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>] [--sandbox-metrics]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
   rmd pr-checks <pr-number> [--repo <name>]   # Print a PR head's checks (runs and commit statuses, latest attempt) and exit 1 if any is red.
   rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]   # Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.
+  rmd worktree add <dir> -b <branch> <base> [--donor <abs dir>]   # Add a disposable worktree whose unchanged files are cloned copy-on-write from the operator checkout.
   rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit [--reap [--apply | --reconcile]]] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>]   # Claim the next task id, or preview orphan cleanup with --audit --reap; --apply deletes under leases.
   rmd emissions [--days N]   # Which CLI verbs wrote no ledger line in the window -- dead-capability detection.
   rmd receipt <pr> [--repo <name>]   # Print a deterministic in-toto-style run receipt from ledger ground truth.
@@ -252,6 +253,16 @@ rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]
 ```
 
 W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the chosen parent and why, the path and branch; exits 0 created, 1 refused, 2 bad usage.
+
+### `rmd worktree`
+
+Add a disposable worktree whose unchanged files are cloned copy-on-write from the operator checkout.
+
+```
+rmd worktree add <dir> -b <branch> <base> [--donor <abs dir>]
+```
+
+W1-T10257: a fresh `git worktree add` writes ~128 MB of tracked files the operator checkout already holds; on APFS a clone shares those blocks. Cuts the worktree with `git worktree add --no-checkout --no-track -b <branch> <dir> <base>`, clones every tracked regular file the donor (default: the repo's main worktree, the operator checkout) holds UNCHANGED (index blob equal to <base>'s blob, working file not dirty; the donor's uncommitted edits are never copied) with the platform's clone backend (`cp -c` on macOS, `cp --reflink=always` on Linux), then `git read-tree <base>` and `git checkout-index -a -q` write only the paths not cloned, `git update-index --refresh` and a clean `git status` are asserted, and a dirty status is repaired by a forced rewrite (reported as reconciled-by-rewrite). A volume that cannot clone gets a plain `git worktree add`, with the reason printed. node_modules is symlinked from the donor. Prints the method, the cloned/written counts and the free-space delta (a shared-volume observation, not a per-job attribution). <dir> and --donor must be absolute. Exits 0 created, 1 refused, 2 bad usage.
 
 ### `rmd next-task-id`
 
