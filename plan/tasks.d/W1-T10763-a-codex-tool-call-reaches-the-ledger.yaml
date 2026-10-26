@@ -1,0 +1,49 @@
+- id: W1-T10763
+  title: "A CODEX WORKER'S TOOL CALLS NEVER REACH THE LEDGER — `spawnCodexWorker`'s stream observer reports only `working`, so most codex runs carry no `tool-executing` `worker.activity` row and `rmd procedures` (and the transcript miner) count them as runs that took no step; report each `command_execution` and `file_change` item as a tool call"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low  # Rule 19: one concern — codex stream events gain tool-call telemetry; no worker behaviour, prompt or routing changes
+  band_meaning: blast-radius
+  origin: "operator recon 2026-10-26 (Part B, W1-T10727 verdict): the procedure census's denominators hold codex runs with no tool rows"
+  plan_refs: [W1-T10727, W1-T4668]
+  files: [src/lib/worker-provider.ts, test/learning/a-codex-tool-call-reaches-the-ledger.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ at origin/main 7b75a38f7 (2026-10-26).
+    - MEASURED on the core daemon's ledger union (/home/node/Remudero/state, 621 archives), merged runs started
+      2026-10-13..26: 47 of 67 clean codex implement runs, 65 of 75 repaired codex implement runs, and all 8 clean
+      codex diagnose and 8 clean codex recon runs have ZERO `tool-executing` `worker.activity` rows. Every claude
+      run has them (0 of 124 merged claude runs empty).
+    - Cause: only `spawnFoundryClaudeWorker` and `spawnOpenWeightWorker` call `streamObserver` with
+      `kind: "tool-executing"`. `spawnCodexWorker` reports `kind: "working"` and nothing else, although its JSONL
+      stream names every `item.completed:command_execution` and `item.completed:file_change` (see the event list
+      in `CODEX_EVENT_BYTE_KIND_KEYS`). The run-task observer (`WORKER_ACTIVITY_LEDGER_STEP`, run-task-verb.ts) writes
+      a tool row, with `tool_signature` from `toolStepSignature`, only for a `tool-executing` event that carries
+      `toolName`/`toolInput`.
+    - Effect: `rmd procedures` caps every step's clean share for a codex-heavy type (diagnose and recon each had
+      8 of 10 clean runs with no steps), and W1-T10727's verdict had to be re-derived on claude runs alone.
+  design: |
+    1. In `spawnCodexWorker`'s stream handling, for each `command_execution` item emit
+       `{ kind: "tool-executing", toolName: "Bash", toolInput: { command }, cwd }`, and for each `file_change` item
+       one event per changed path as `Edit` (or `Write` for an added file) with `{ file_path }`. Use the item's own
+       fields; never parse free text. The existing `working` events stay.
+    2. The observer, the ledger row shape and `toolStepSignature` are unchanged, so a codex row's signature reads
+       `Bash:git push` or `Edit:src/lib/*.ts` exactly as a claude row's does.
+    New tests go in test/learning/a-codex-tool-call-reaches-the-ledger.test.ts (folder from
+    `rmd test-place`). Import through `#src/*`, and use `test(` titles exactly as in the proofs below. Feed a
+    recorded codex JSONL stream (one command_execution, one file_change) through the real stream handling.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/learning/a-codex-tool-call-reaches-the-ledger.test.ts"
+    - claim: "a codex command execution is reported as a Bash tool call carrying its command"
+      proof: 'grep: test("W1-T10763: a codex command execution is reported as a Bash tool call carrying its command" in test/learning/a-codex-tool-call-reaches-the-ledger.test.ts'
+    - claim: "a codex file change is reported as a file tool call per changed path"
+      proof: 'grep: test("W1-T10763: a codex file change is reported as a file tool call per changed path" in test/learning/a-codex-tool-call-reaches-the-ledger.test.ts'
+  falsifier: |
+    Remove the new `tool-executing` emission. Both tests then observe only `working` events.
