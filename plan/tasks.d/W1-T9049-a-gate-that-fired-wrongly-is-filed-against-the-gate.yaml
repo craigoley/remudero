@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-13: gardener loop audit (operator ruling 2026-10-09: a hand-fixed PR is a bug in rmd)"
   plan_refs: [W1-T4116, W1-T6092, W1-T7421]
-  files: [src/lib/gate-gardener.ts, scripts/census-precheck.mjs, test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts, "src/lib/ci-parity.ts", "src/lib/rule-suites.ts"]
+  files: [src/lib/gate-gardener.ts, scripts/census-precheck.mjs, test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts, "src/lib/ci-parity.ts", "src/lib/rule-suites.ts", "src/lib/plan.ts"]
   status: queued
   priority: 1.5
   attempts: 0
