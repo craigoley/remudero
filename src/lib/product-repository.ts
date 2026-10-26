@@ -90,7 +90,10 @@ export function ghProductRepositoryProvider(text: GhText = ghTextAsync): Product
     try {
       const parsed = z.object({ login: repositoryOwner }).safeParse(JSON.parse(await text(["api", "user"], options)));
       return parsed.success ? parsed.data.login : undefined;
-    } catch { return undefined; }
+    } catch {
+      // An unreadable viewer is surfaced as an unknown capability by the caller, never as a denial.
+      return undefined;
+    }
   };
   return {
     async read(owner, name) {
@@ -100,7 +103,10 @@ export function ghProductRepositoryProvider(text: GhText = ghTextAsync): Product
         const { id, name: canonical, owner: { login }, default_branch: defaultBranch } = parsed.data;
         return { state: "found", repository: { id, owner: login, name: canonical, defaultBranch,
           visibility: parsed.data.visibility ?? (parsed.data.private ? "private" : "public") } };
-      } catch (error) { return httpStatus(error) === 404 ? { state: "absent" } : { state: "unreadable" }; }
+      } catch (error) {
+        const reason = httpStatus(error) === 404 ? "absent" : "unreadable";
+        return reason === "absent" ? { state: "absent" } : { state: "unreadable" };
+      }
     },
     async capability(owner) {
       const login = await viewer();
@@ -144,7 +150,7 @@ const chains = new Map<string, Promise<unknown>>();
 async function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const previous = chains.get(key) ?? Promise.resolve();
   const next = previous.then(fn, fn);
-  const tail = next.catch(() => undefined);
+  const tail = next.catch(() => undefined /* the caller awaits `next` and sees the failure; the tail only orders the chain */);
   chains.set(key, tail);
   try { return await next; }
   finally { if (chains.get(key) === tail) chains.delete(key); }
@@ -337,7 +343,7 @@ export class ProductRepositoryService {
     }
     let refused = false;
     try { await this.provider.create({ owner: input.owner, name: input.name, visibility: input.visibility, scope }); }
-    catch (error) { refused = error instanceof ProviderDenied; }
+    catch (error) { refused = error instanceof ProviderDenied; /* any other failure is an unknown outcome: the read-back decides */ }
     const after = await this.provider.read(input.owner, input.name);
     if (after.state === "found") {
       if (!matches(after.repository)) throw new Fault("repository_conflict");
