@@ -14,18 +14,17 @@
  * PURE: no I/O and no clock reads. Every input type is structural, as in workflow-mining.ts, so retro.ts's
  * `RunSummary[]` and `LedgerRecord[]` pass with no conversion.
  */
-import { fixDispatchCountsAttributed, type TranscriptLedgerRow, type TranscriptRun } from "./workflow-mining.js";
+import {
+  fixDispatchCountsAttributed, normalizeProcedureStep, procedureStepsForRun, type TranscriptLedgerRow, type TranscriptRun,
+} from "./workflow-mining.js";
+
+/** The step reader lives in workflow-mining.ts beside `toolStepsForRun`, so the miner can adopt it with no import cycle. */
+export { normalizeProcedureStep, procedureStepsForRun };
 
 /** The `step` a worker's tool-call rows ride (`WORKER_ACTIVITY_LEDGER_STEP`, src/run-task.ts), duplicated as
  *  workflow-mining.ts duplicates it: this module reads the ledger's wire shape, not run-task.ts. */
 const WORKER_ACTIVITY_STEP = "worker.activity";
 const TOOL_EXECUTING = "tool-executing";
-
-/** A file-tool signature's path when it names no file to coarsen. */
-const VERBATIM_PATHS: ReadonlySet<string> = new Set(["<outside>", "."]);
-
-/** How many directory segments a nested path keeps. */
-const KEPT_DIRECTORIES = 2;
 
 export const PROCEDURE_CENSUS_DEFAULTS = {
   /** A step is universal for a task type when at least this share of its clean runs took it... */
@@ -76,45 +75,7 @@ export interface ProcedureCensus {
   taskTypes: ProcedureTypeCensus[];
 }
 
-/**
- * One tool-call signature as a census step. Bash signatures and bare tool names pass through. A file-tool signature
- * keeps a top-level path, `<outside>` and `.` verbatim; a nested path keeps its first two directories and the file's
- * full extension (from the basename's first `.`), with the basename replaced by `*`:
- * `Read:src/lib/review.ts` → `Read:src/lib/*.ts`, `Edit:test/ci/x.test.ts` → `Edit:test/ci/*.test.ts`.
- */
-export function normalizeProcedureStep(raw: string): string {
-  const colon = raw.indexOf(":");
-  if (colon < 0 || raw.startsWith("Bash:")) return raw;
-  const tool = raw.slice(0, colon);
-  const path = raw.slice(colon + 1);
-  const segments = path.split("/");
-  if (VERBATIM_PATHS.has(path) || segments.length === 1) return raw;
-  const base = segments[segments.length - 1]!;
-  const dot = base.indexOf(".");
-  const extension = dot < 0 ? "" : base.slice(dot);
-  return `${tool}:${segments.slice(0, Math.min(KEPT_DIRECTORIES, segments.length - 1)).join("/")}/*${extension}`;
-}
-
 const isToolCall = (r: TranscriptLedgerRow): boolean => r.step === WORKER_ACTIVITY_STEP && r.event_kind === TOOL_EXECUTING;
-
-/**
- * The ordered census steps of ONE run: each `tool-executing` `worker.activity` row of `runId`, in ledger order, as
- * {@link normalizeProcedureStep} of its `tool_signature`, or its bare `tool_name` when the row carries no signature
- * (every row before 2026-10-13). Each step's first occurrence only.
- */
-export function procedureStepsForRun(records: readonly TranscriptLedgerRow[], runId: string): string[] {
-  const steps: string[] = [];
-  const seen = new Set<string>();
-  for (const r of records) {
-    if (r.run_id !== runId || !isToolCall(r)) continue;
-    const signature = typeof r.tool_signature === "string" && r.tool_signature.length > 0 ? r.tool_signature : undefined;
-    const step = signature !== undefined ? normalizeProcedureStep(signature) : typeof r.tool_name === "string" ? r.tool_name : "";
-    if (step === "" || seen.has(step)) continue;
-    seen.add(step);
-    steps.push(step);
-  }
-  return steps;
-}
 
 const share = (count: number, of: number): number => Math.round((count / of) * 10000) / 10000;
 const byName = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
