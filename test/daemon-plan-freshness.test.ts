@@ -794,8 +794,8 @@ test("an amended on-disk contract reaches the live review plan while the dispatc
         last = signature;
         return fresh;
       },
-      onPlanReload: fresh => { visible = fresh; },
-      runOne: async id => {
+      onPlanReload: (fresh: Plan) => { visible = fresh; },
+      runOne: async (id: string) => {
         ran.push(id);
         active = true;
         writeFileSync(p.file, taskYaml(["A"]) + "  files: [src/original.ts, scripts/approved-companion.mjs]\n");
