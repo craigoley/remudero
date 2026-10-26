@@ -451,6 +451,14 @@ export function scoutGardenSpec(
         const text = withoutRulingBlock(original.trimEnd().split("\n")).join("\n")
           .replace(/^  verify:.*$/m, "  verify: human")
           .replace(/^  files:\s*\n(?:    -[^\n]*\n?)*/m, `  files:\n${draft.files.map((f) => `    - ${f}`).join("\n")}\n`);
+        const refused = machineShardFilingRefusal(text, draft.path, {
+          pathExists: path => existsSync(join(ws.root, path)),
+          pathExistsAtBase: path => existsSync(join(deps.repoRoot, path)),
+        });
+        if (refused !== undefined) {
+          deps.log("scout.record_refused", { step: draft.step, task_id: draft.id, reason: refused });
+          continue;
+        }
         writeFileSync(path, text + "\n");
         written.push({ rel: draft.path, step: draft.step, origin: draft.origin });
       }
