@@ -772,7 +772,7 @@ test("W1-T343 REACHABILITY: daemonCommand hands the SAME sweep.dispatchLanes/wip
 });
 
 
-test("an amended on-disk contract reaches the live review plan while the dispatched worker keeps running", async () => {
+async function observePlanDuringWorker(mode: "none" | "sync" | "async", unread = false) {
   const p = planOnDisk(["A"]);
   writeFileSync(p.file, taskYaml(["A"]) + "  files: [src/original.ts]\n");
   const original = p.plan();
@@ -784,10 +784,14 @@ test("an amended on-disk contract reaches the live review plan while the dispatc
   const worker = new Promise<void>(resolve => { release = resolve; });
   const seenDuringWorker: string[][] = [];
   const ran: string[] = [];
+  const failures: string[] = [];
+  const amend = () => writeFileSync(p.file, taskYaml(["A"]) + "  files: [src/original.ts, scripts/approved-companion.mjs]\n");
+  const freshness = () => { if (active) amend(); return { stale: false } as const; };
   try {
     await runDaemon(original, {
       refreshMerged: () => NONE_MERGED,
       reloadPlan: async () => {
+        if (active && unread) throw new Error("fixture plan unavailable");
         const fresh = p.plan();
         const signature = JSON.stringify(fresh.tasks);
         if (signature === last) return null;
@@ -795,10 +799,14 @@ test("an amended on-disk contract reaches the live review plan while the dispatc
         return fresh;
       },
       onPlanReload: (fresh: Plan) => { visible = fresh; },
+      ...(mode === "none" ? {} : { checkFreshness: mode === "sync" ? freshness : async () => {
+        await new Promise<void>(resolve => setImmediate(resolve));
+        return freshness();
+      } }),
       runOne: async (id: string) => {
         ran.push(id);
         active = true;
-        writeFileSync(p.file, taskYaml(["A"]) + "  files: [src/original.ts, scripts/approved-companion.mjs]\n");
+        if (mode === "none") amend();
         await worker;
         active = false;
         return okResult(id);
@@ -809,17 +817,34 @@ test("an amended on-disk contract reaches the live review plan while the dispatc
         seenDuringWorker.push(files);
         if (files.includes("scripts/approved-companion.mjs")) release();
       },
+      log: (step: string) => { if (step === "daemon.plan_reload_failed") failures.push(step); },
       sleep: async () => {
         await new Promise<void>(resolve => setImmediate(resolve));
         if (active && ++sleeps >= 6) release();
       },
     } as unknown as DaemonDeps, { max: 1, pollIntervalMs: 1 });
-    assert.deepEqual(ran, ["A"], "refreshing review metadata starts no second worker");
-    assert.ok(seenDuringWorker.some(files => files.includes("scripts/approved-companion.mjs")),
-      `the light pass must observe the amended contract before the existing worker settles: ${JSON.stringify(seenDuringWorker)}`);
-    assert.deepEqual(original.byId.get("A")?.files, ["src/original.ts"], "the admitted plan object remains immutable");
+    return { ran, seenDuringWorker, originalFiles: original.byId.get("A")?.files, failures };
   } finally {
     release();
     p.cleanup();
   }
+}
+
+test("an amended on-disk contract reaches the live review plan while the dispatched worker keeps running", async () => {
+  for (const mode of ["none", "sync", "async"] as const) {
+    const observed = await observePlanDuringWorker(mode);
+    assert.deepEqual(observed.ran, ["A"], "refreshing review metadata starts no second worker");
+    assert.ok(observed.seenDuringWorker.some(files => files.includes("scripts/approved-companion.mjs")),
+      `the light pass must observe the amended contract before the existing worker settles (${mode}): ${JSON.stringify(observed.seenDuringWorker)}`);
+    assert.deepEqual(observed.originalFiles, ["src/original.ts"], "the admitted plan object remains immutable");
+  }
+});
+
+test("an unread live-plan amendment keeps the old contract and the existing worker intact", async () => {
+  const observed = await observePlanDuringWorker("async", true);
+  assert.deepEqual(observed.ran, ["A"]);
+  assert.ok(observed.seenDuringWorker.length > 0, "the live review clock still observes its available contract");
+  assert.ok(observed.failures.length > 0, "the unread amendment is named, never treated as a successful reload");
+  assert.ok(observed.seenDuringWorker.every(files => !files.includes("scripts/approved-companion.mjs")));
+  assert.deepEqual(observed.originalFiles, ["src/original.ts"]);
 });
