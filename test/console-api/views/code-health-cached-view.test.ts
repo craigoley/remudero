@@ -79,20 +79,21 @@ test("code health related work is unavailable when its saved sources cannot be r
 
 test("code health answers not ready until the configured repository list is held, and builds nothing it cannot read", async () => {
   await withTempDir("code-health-not-ready", dir => {
+    const scopeNow = Date.now();
     const wanted: Array<[string, string]> = [];
     const source = (body?: unknown) => ({ body: () => body as never, want: (view: string, key: string) => void wanted.push([view, key]) });
     const notReady = { error: "view_not_ready", status: 503, detail: "Code health is waiting for the configured repository list." };
-    assert.deepEqual(validateCodeHealthRequest(new URLSearchParams(""), source(undefined) as never, Date.parse("2026-11-02T12:00:00.000Z")), notReady);
+    assert.deepEqual(validateCodeHealthRequest(new URLSearchParams(""), source(undefined) as never, scopeNow), notReady);
     const staleScope = { body: { data: { version: "code-health-view-v1", repository: "all", expectedRepositories: ["acme/atlas"] },
-      sources: [{ name: "repositories:code-health-scope", asOf: "2026-11-02T11:00:00.000Z" }] } };
-    assert.deepEqual(validateCodeHealthRequest(new URLSearchParams("repository=acme/atlas"), source(staleScope) as never, Date.parse("2026-11-02T12:00:00.000Z")), notReady,
+      sources: [{ name: "repositories:code-health-scope", asOf: new Date(scopeNow - 3_600_000).toISOString() }] } };
+    assert.deepEqual(validateCodeHealthRequest(new URLSearchParams("repository=acme/atlas"), source(staleScope) as never, scopeNow), notReady,
       "an hour-old repository list is not current scope evidence");
     assert.deepEqual(wanted, [[CODE_HEALTH_VIEW_NAME, ""], [CODE_HEALTH_VIEW_NAME, ""]], "each refusal asks for the repository list to be built");
 
     const view = createCodeHealthView({ stateDir: dir, keys: () => ["repository=acme/unknown"] });
-    assert.deepEqual(view.materialize({ now: Date.parse("2026-11-02T12:00:00.000Z"), instances: [] }), [], "with no saved repository list there is no body to build");
+    assert.deepEqual(view.materialize({ now: scopeNow, instances: [] }), [], "with no saved repository list there is no body to build");
     const { repository } = roster(dir);
-    const built = view.materialize({ now: Date.parse("2026-11-02T12:00:00.000Z"), instances: [] });
+    const built = view.materialize({ now: scopeNow, instances: [] });
     assert.deepEqual(built.map(entry => [entry.key, entry.data.repository]), [["", "all"], [CODE_HEALTH_SCOPE_KEY, "all"]],
       `an unknown repository request builds nothing, while the configured ${repository} portfolio is built`);
   });
