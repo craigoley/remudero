@@ -131,9 +131,11 @@ test("W1-T9049: a token rebuilt at runtime to dodge a gate's regex is a suspecte
     const task = loadPlanFromYaml(rendered.text, "production-token").tasks[0]!;
     assert.deepEqual(task.files, [production.recognizer]);
     assert.equal(task.origin, `gate-false-positive:${production.gate}`);
-    // A comment or an unrelated line beside the reconstruction does not make the dodge a repair.
+    // A comment, an unrelated line or a gated line moved unchanged beside the reconstruction does not make the
+    // dodge a repair.
     for (const patch of [`@@\n-${before}\n+// rebuilt so the registry census no longer sees it\n+${after}`,
-      `@@\n-${before}\n-const unrelated = 1;\n+${after}`, `@@\n-${before} // old note\n+${after} // new note`]) {
+      `@@\n-${before}\n-const unrelated = 1;\n+${after}`, `@@\n-${before} // old note\n+${after} // new note`,
+      `@@\n-const moved = "RMD_MOVED";\n-${before}\n+${after}\n+const moved = "RMD_MOVED";`]) {
       const beside = await productionRepair(production.gate, "src/lib/example.ts", patch, before);
       assert.equal(classifyGateRepair(beside.pair, beside.repairDiff, production.ownFiles, production.gateRegex), "token-dodge", patch);
     }
