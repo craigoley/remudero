@@ -34,6 +34,7 @@ import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { formatTail } from "./proofExecutor.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
+import { createProofCache, ProofCacheUnavailableError, type ProofCache, type ProofCacheRelease } from "./proof-cache.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import { configuredDependencySeedRoot } from "./dependency-seeds.js";
@@ -889,6 +890,8 @@ export interface WhitelistedProof {
    * the reviewer's own working directory. Node itself is the reviewer process's runtime and so
    * needs no entry here; Vitest is a pinned dependency the checkout must actually contain. */
   runner?: "vitest";
+  /** (W1-T10675) How the last owned Vitest cache for this proof was released; absent when none was made. */
+  proofCacheRelease?: ProofCacheRelease;
   /** Test files named by the PR diff; used to focus a bare title when its source is known. */
   diffTestFiles?: readonly string[];
   /** Bounded diagnostic from a runner whose test files failed to load. */
@@ -1672,6 +1675,8 @@ export interface ProofExecutionDeps {
   loadRetried?: boolean;
   /** Internal: setup was awaited by the async executor; reuse the one verdict classifier. */
   preparedArgs?: readonly string[];
+  /** Internal: the async executor already spawned the child and settled its owned cache. */
+  cacheSettled?: boolean;
 }
 
 // The proof timeout is a POLICY READ (plan/policy.yaml's `proofTimeoutMs`), never a source literal (W1-T253, P37
@@ -2426,6 +2431,38 @@ function argsWithCheckoutRunner(whitelisted: WhitelistedProof, args: readonly st
   const rooted = [runner, ...args.slice(1)];
   // Vite bundles config into node_modules/.vite-temp; a shared proof install is mounted read-only.
   return lstatSync(join(cwd, "node_modules")).isSymbolicLink() ? [...rooted, "--configLoader", "native"] : rooted;
+}
+
+/** Bind each fresh shared-install cache to the exact scoped argv, proof label, source root and pinned install. */
+function ownedVitestCache(whitelisted: WhitelistedProof, cwd: string, args: readonly string[]): ProofCache | undefined {
+  if (whitelisted.kind !== "test" || whitelisted.runner !== "vitest") return undefined;
+  const cache = createProofCache({ cwd, identity: [whitelisted.label, whitelisted.command, ...args] });
+  if (cache.kind === "unavailable") {
+    if (cache.cleanup !== undefined) whitelisted.proofCacheRelease = cache.cleanup;
+    throw new ProofCacheUnavailableError(cache.reason);
+  }
+  return cache.kind === "owned" ? cache : undefined;
+}
+
+/** A passing child cannot acknowledge an unsuccessful cache cleanup; genuine proof failures retain their verdict. */
+function cacheAwareProofResult(whitelisted: WhitelistedProof, result: ReturnType<ProofExecutor>): ReturnType<ProofExecutor> {
+  if (result === "pass" && whitelisted.proofCacheRelease?.released === false) {
+    throw new ProofCacheUnavailableError("cleanup failed: " + (whitelisted.proofCacheRelease.error ?? "unavailable"));
+  }
+  return result;
+}
+
+/** The argv with the owned cache's flag placed right after the runner's `run` subcommand. */
+function argsWithOwnedCache(args: readonly string[], cache: ProofCache): readonly string[] {
+  return [...args.slice(0, 2), ...cache.args, ...args.slice(2)];
+}
+
+/** Release an owned cache after its child settled. Never throws: a cleanup failure is recorded on the proof and
+ *  must not replace the proof's own error or verdict. */
+function releaseOwnedCache(whitelisted: WhitelistedProof, cache: ProofCache | undefined): void {
+  if (cache === undefined) return;
+  const outcome: ProofCacheRelease = cache.release();
+  whitelisted.proofCacheRelease = outcome;
 }
 
 /** Refresh a reviewer-owned checkout once after measured module-load failure. Worktrees link the
@@ -3255,12 +3292,20 @@ export function execWhitelistedProof(
   args = withProofJudge(whitelisted, args);
   delete whitelisted.failureOutput;
   delete whitelisted.failureTail;
+  // A replayed (async) run was already spawned with its own owned cache, released and recorded by that caller.
+  if (!deps.cacheSettled) delete whitelisted.proofCacheRelease;
+  const cache = deps.cacheSettled ? undefined : ownedVitestCache(whitelisted, cwd, args);
+  if (cache !== undefined) args = argsWithOwnedCache(args, cache);
+  const runChild = (): string => {
+    try { return spawn(whitelisted.command, args, cwd, timeoutMs); }
+    finally { releaseOwnedCache(whitelisted, cache); }
+  };
   const recordFailure = (status: number, stdout: string, stderr = ""): "fail" => {
     recordFailureTail(whitelisted, shownArgs, status, stdout, stderr);
     return "fail";
   };
   try {
-    const { stdout, tallyText } = splitProofOutput(args, spawn(whitelisted.command, args, cwd, timeoutMs));
+    const { stdout, tallyText } = splitProofOutput(args, runChild());
     // Read before every verdict: an unfinished file can hide the very failure, or the very title, the verdict reads.
     const unfinished = whitelisted.kind === "test" ? unfinishedProofRun(args, cwd, tallyText) : undefined;
     if (whitelisted.nameFiltered) {
@@ -3276,7 +3321,7 @@ export function execWhitelistedProof(
         recordLoadError(whitelisted, stdout);
         throw new ProofCannotLoadError(whitelisted.loadError!, stdout);
       }
-      return outcome;
+      return cacheAwareProofResult(whitelisted, outcome);
     }
     if (unfinished !== undefined) return recordFailure(0, `${stdout}\n${unfinished}`);
     // W1-T3208: a dialect grep's own compiled pattern/path names the exact self-declaration text to
@@ -3292,7 +3337,7 @@ export function execWhitelistedProof(
     if (whitelisted.kind === "grep" && dialectPath !== undefined) {
       whitelisted.matchedLines = dialectGrepOutputLines(stdout);
     }
-    return "pass";
+    return cacheAwareProofResult(whitelisted, "pass");
   } catch (e) {
     const err = e as NodeJS.ErrnoException & { status?: number | null; stdout?: string | Buffer | null; stderr?: string | Buffer | null };
     // A TIMEOUT IS NOT A VERDICT, AND THE GUARD BELOW CANNOT SEE ONE (W1-T2742). `execFileSync` kills the child with
@@ -3316,7 +3361,7 @@ export function execWhitelistedProof(
         recordLoadError(whitelisted, `${stdout}\n${stderr}`);
         throw new ProofCannotLoadError(whitelisted.loadError!, `${stdout}\n${stderr}`);
       }
-      return outcome === "fail" ? recordFailure(err.status, stdout, stderr) : outcome;
+      return outcome === "fail" ? recordFailure(err.status, stdout, stderr) : cacheAwareProofResult(whitelisted, outcome);
     }
     // grep exit 2 means it could not even LOOK — a renamed or missing target, a read error — distinct from exit 1's
     // "looked, found nothing" (W1-T219, recon R-13(iv)). Only the latter is evidence of absence.
@@ -3423,6 +3468,10 @@ export async function execWhitelistedProofAsync(
     assertGrepTargetIsFile(args, cwd);
   }
   args = withProofJudge(whitelisted, args);
+  const replayArgs = args;
+  delete whitelisted.proofCacheRelease;
+  const cache = ownedVitestCache(whitelisted, cwd, args);
+  if (cache !== undefined) args = argsWithOwnedCache(args, cache);
   let output: string | undefined;
   let failure: unknown;
   try {
@@ -3430,6 +3479,8 @@ export async function execWhitelistedProofAsync(
   } catch (error) {
     // Replay the failed child result through the existing proof classifier below.
     failure = error;
+  } finally {
+    releaseOwnedCache(whitelisted, cache);
   }
   try {
     const replay: ProofSpawner = () => {
@@ -3437,7 +3488,8 @@ export async function execWhitelistedProofAsync(
       return output!;
     };
     return execWhitelistedProof(whitelisted, cwd, timeoutMs, replay, {
-      preparedArgs: args,
+      preparedArgs: replayArgs,
+      cacheSettled: true,
       loadRetried: true,
     });
   } catch (error) {
