@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { withTempDir } from "#src/lib/tmp.js";
 import { inboxThreadId } from "#src/lib/inbox-thread.js";
-import { readCodeHealthInventory, readCodeHealthRelatedWork } from "#src/lib/code-health-view.js";
+import { CODE_HEALTH_SCOPE_KEY, CODE_HEALTH_VIEW_NAME, createCodeHealthView, readCodeHealthInventory, readCodeHealthRelatedWork, validateCodeHealthRequest } from "#src/lib/code-health-view.js";
 import * as store from "#src/lib/code-health-store.js";
 
 function roster(dir: string) {
@@ -63,5 +63,37 @@ test("code health refuses contradictory configured source expectations", async (
       const changed = structuredClone(valid); mutate(changed); writeFileSync(path, JSON.stringify(changed));
       assert.throws(() => readCodeHealthInventory(dir), /configured repository list/, "an invalid scope must not publish another portfolio");
     }
+  });
+});
+
+test("code health related work is unavailable when its saved sources cannot be read", async () => {
+  await withTempDir("code-health-related-unreadable", dir => {
+    const { repository, inventory } = roster(dir), now = Date.parse("2026-11-02T12:00:00.000Z");
+    assert.equal(readCodeHealthRelatedWork(dir, inventory, repository, now).state, "not_collected", "control: a readable scope with no saved work");
+    writeFileSync(join(dir, "read-model", "repositories-sources.json"), "{broken");
+    const result = readCodeHealthRelatedWork(dir, inventory, repository, now);
+    assert.deepEqual([result.state, result.work, result.asOf], ["unavailable", [], null], "an unreadable scope withholds completeness; it never certifies no existing work");
+    assert.match(result.reason ?? "", /could not be read or verified/);
+  });
+});
+
+test("code health answers not ready until the configured repository list is held, and builds nothing it cannot read", async () => {
+  await withTempDir("code-health-not-ready", dir => {
+    const wanted: Array<[string, string]> = [];
+    const source = (body?: unknown) => ({ body: () => body as never, want: (view: string, key: string) => void wanted.push([view, key]) });
+    const notReady = { error: "view_not_ready", status: 503, detail: "Code health is waiting for the configured repository list." };
+    assert.deepEqual(validateCodeHealthRequest(new URLSearchParams(""), source(undefined) as never, Date.parse("2026-11-02T12:00:00.000Z")), notReady);
+    const staleScope = { body: { data: { version: "code-health-view-v1", repository: "all", expectedRepositories: ["acme/atlas"] },
+      sources: [{ name: "repositories:code-health-scope", asOf: "2026-11-02T11:00:00.000Z" }] } };
+    assert.deepEqual(validateCodeHealthRequest(new URLSearchParams("repository=acme/atlas"), source(staleScope) as never, Date.parse("2026-11-02T12:00:00.000Z")), notReady,
+      "an hour-old repository list is not current scope evidence");
+    assert.deepEqual(wanted, [[CODE_HEALTH_VIEW_NAME, ""], [CODE_HEALTH_VIEW_NAME, ""]], "each refusal asks for the repository list to be built");
+
+    const view = createCodeHealthView({ stateDir: dir, keys: () => ["repository=acme/unknown"] });
+    assert.deepEqual(view.materialize({ now: Date.parse("2026-11-02T12:00:00.000Z"), instances: [] }), [], "with no saved repository list there is no body to build");
+    const { repository } = roster(dir);
+    const built = view.materialize({ now: Date.parse("2026-11-02T12:00:00.000Z"), instances: [] });
+    assert.deepEqual(built.map(entry => [entry.key, entry.data.repository]), [["", "all"], [CODE_HEALTH_SCOPE_KEY, "all"]],
+      `an unknown repository request builds nothing, while the configured ${repository} portfolio is built`);
   });
 });

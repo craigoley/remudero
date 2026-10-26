@@ -847,6 +847,148 @@ test("code health bounded evidence reads refuse a pipe without blocking the work
   });
 });
 
+test("code health resolves configured CodeQL languages from a language matrix or the analysis init step", async () => {
+  const sha = "a".repeat(40), uses = (action: string) => `      - uses: github/codeql-action/${action}@${"f".repeat(40)}\n`;
+  const read = async (workflow: string) => {
+    const downloads: string[] = [];
+    const result = readCodeHealthQualityEvidence("acme/atlas", async (args) => {
+      const route = args[0] === "api" ? args[1] ?? "" : "";
+      if (route.endsWith("/commits/main")) return JSON.stringify({ sha });
+      if (route.includes("/actions/workflows/codeql.yml/runs")) return JSON.stringify({ workflow_runs: [{ id: 123, head_sha: sha, head_branch: "main", status: "completed", path: ".github/workflows/codeql.yml" }] });
+      if (route.includes("/contents/.github/workflows/codeql.yml")) return JSON.stringify({ type: "file", encoding: "base64", size: Buffer.byteLength(workflow), content: Buffer.from(workflow).toString("base64") });
+      if (route.includes("/actions/runs/123/artifacts")) return JSON.stringify({ total_count: 2, artifacts: ["actions", "python"].map((language, n) => ({ id: n + 1, name: `code-health-quality-${language}`,
+        expired: false, size_in_bytes: 1000, workflow_run: { id: 123, head_sha: sha, head_branch: "main", repository_id: 1, head_repository_id: 1 } })) });
+      if (args[0] === "run" && args[1] === "download") {
+        const dir = args[args.indexOf("--dir") + 1]!; downloads.push(args[args.indexOf("--name") + 1]!);
+        mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, "code-health-quality.json"), "{}"); return "";
+      }
+      throw new Error("fixture stops after the configured artifacts were selected");
+    });
+    await assert.rejects(result);
+    return downloads;
+  };
+  const both = ["code-health-quality-actions", "code-health-quality-python"];
+  assert.deepEqual(await read(`jobs:\n  analyze:\n    strategy:\n      matrix:\n        language: [python, actions]\n    steps:\n${uses("analyze")}`), both,
+    "a plain language matrix names the configured analyses");
+  assert.deepEqual(await read(`jobs:\n  analyze:\n    steps:\n${uses("init")}        with:\n          languages: python, actions\n${uses("analyze")}`), both,
+    "without a matrix, the init step's literal language list names them");
+  for (const languages of ["${{ matrix.language }}", ""]) {
+    const workflow = `jobs:\n  analyze:\n    steps:\n${uses("init")}        with:\n          languages: "${languages}"\n${uses("analyze")}`;
+    await assert.rejects(readCodeHealthQualityEvidence("acme/atlas", async (args) => {
+      const route = args[1] ?? "";
+      if (route.endsWith("/commits/main")) return JSON.stringify({ sha });
+      if (route.includes("/runs?")) return JSON.stringify({ workflow_runs: [{ id: 123, head_sha: sha, head_branch: "main", status: "completed", path: ".github/workflows/codeql.yml" }] });
+      return JSON.stringify({ type: "file", encoding: "base64", size: Buffer.byteLength(workflow), content: Buffer.from(workflow).toString("base64") });
+    }), /CodeQL languages (could not be resolved|cannot be resolved safely)/, `an unresolved init language list (${JSON.stringify(languages)}) is not guessed`);
+  }
+});
+
+test("code health records unreadable saved coverage as an unavailable source", async () => {
+  await withTempDir("code-health-coverage-unavailable", async stateDir => {
+    const repository = "acme/atlas", sha = "a".repeat(40), at = "2026-11-02T05:00:00.000Z", sarifId = "12345678-1234-1234-1234-123456789012";
+    const clock = clockFromMillisFn(() => Date.parse(at) + 60_000);
+    const artifact = { version: "code-health-source-v1", kind: "quality", repository, analyzedSha: sha, ref: "refs/heads/main", runId: "123", runAttempt: "1", observedAt: at,
+      language: "actions", sarifId, scanId: `codeql:123:1:actions:${sarifId}`, state: "complete", reasons: [], toolVersion: "2.23.0", rulesVersion: "b".repeat(64), configHash: "c".repeat(64), ruleCount: 12,
+      exclusions: ["test/**"], scope: { kind: "explicit-analysis-targets", fileCount: 2, hash: "d".repeat(64) }, completion: { kind: "workflow-analysis-step", state: "success", at } };
+    const evidence = { currentSha: sha, quality: { analyzedSha: sha, runId: "123", requiredLanguages: ["actions"], artifacts: [artifact], analyses: [{ sarifId, analyzedSha: sha,
+      category: "/language:actions", toolVersion: "2.23.0", analysisKey: ".github/workflows/codeql.yml:analyze", environmentHash: "e".repeat(64), createdAt: at, rulesCount: 12, error: "", warning: "" }] } };
+    mkdirSync(join(stateDir, "code-health"), { recursive: true });
+    writeFileSync(join(stateDir, "code-health", "coverage-source.json"), "{not json");
+    const result = await collectCodeHealth({ stateDir, repository, clock, source: { ok: true, alerts: [], analysisInstances: [] }, readQualityEvidence: async () => evidence });
+    assert.equal(result.state, "published");
+    const saved = readCodeHealthSnapshot(stateDir, repository); assert(saved.state === "observed");
+    const coverage = saved.snapshot.input.scans.find(scan => scan.kind === "coverage");
+    assert.deepEqual([coverage?.state, coverage?.scanId, coverage?.reason], ["unavailable", "unavailable:coverage", readCodeHealthCoverageSource(stateDir, repository).reason],
+      "a broken saved coverage source is named unavailable, never silently treated as not collected");
+  });
+});
+
+test("code health publication stops when its lock ownership can no longer be proven", async () => {
+  await withTempDir("code-health-lock-lost", async stateDir => {
+    const lockPath = join(stateDir, "code-health", "locks", "publication.lock");
+    let calls = 0;
+    const result = publishFixture({ stateDir, input: input(), expectedSnapshotId: null, mayPublish: () => {
+      // The second check runs after the snapshot is staged: the lock disappears before the pointer moves.
+      if (++calls === 2) unlinkSync(lockPath);
+      return true;
+    } });
+    assert.equal(result.state, "unavailable", "an unreadable lock cannot prove ownership, so nothing is published");
+    assert.equal(existsSync(join(stateDir, "code-health", "latest.json")), false, "the pointer never moves without proven ownership");
+    assert.equal(readCodeHealthSnapshot(stateDir, "acme/atlas").state === "observed", false);
+  });
+});
+
+test("code health publication yields when another publisher takes a reclaimed lock first", async () => {
+  await withTempDir("code-health-lock-race", async dir => {
+    const stateDir = join(dir, "state"), lockDir = join(stateDir, "code-health", "locks"), lockPath = join(lockDir, "publication.lock"); mkdirSync(lockDir, { recursive: true });
+    const deadPid = Number(execFileSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }));
+    writeFileSync(lockPath, JSON.stringify({ pid: deadPid, run_id: "completed-own-fixture", host: hostname(), startedAt: new Date().toISOString() }));
+    const rival = JSON.stringify({ pid: process.pid, run_id: "rival-publisher", host: hostname(), startedAt: new Date().toISOString() });
+    // The hook lets the stale-lock delete happen, then a rival creates the lock before this publisher retries.
+    const hook = join(dir, "rival-after-reclaim.mjs");
+    writeFileSync(hook, `import fs from "node:fs"; import { syncBuiltinESMExports } from "node:module";
+const { unlinkSync, writeFileSync } = fs; const [target, rival] = JSON.parse(process.env.CODE_HEALTH_LOCK_RACE);
+fs.unlinkSync = (path, ...rest) => { unlinkSync(path, ...rest); if (path === target) writeFileSync(target, rival, { flag: "wx" }); };
+syncBuiltinESMExports();\n`);
+    const script = 'import {publishCodeHealthSnapshot} from "#src/lib/code-health-store.js";import {fixedClock} from "#src/lib/clock.js";' +
+      'process.stdout.write(JSON.stringify(publishCodeHealthSnapshot({stateDir:process.argv[1],input:JSON.parse(process.argv[2]),expectedSnapshotId:null,clock:fixedClock(Date.parse("2026-11-02T06:00:00.000Z"))})));';
+    const out = execFileSync(process.execPath, ["--import", "tsx", "--import", pathToFileURL(hook).href, "--input-type=module", "-e", script, stateDir, JSON.stringify(input())],
+      { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, CODE_HEALTH_LOCK_RACE: JSON.stringify([lockPath, rival]) } });
+    assert.equal(JSON.parse(out).state, "busy", "the publisher that lost the reacquire race reports busy instead of writing");
+    assert.equal(readFileSync(lockPath, "utf8"), rival, "the rival's lock is left untouched");
+    assert.equal(existsSync(join(stateDir, "code-health", "latest.json")), false);
+  });
+});
+
+test("code health marks an open finding with unusable location evidence as incomplete", () => {
+  const sha = "a".repeat(40), sarifId = "12345678-1234-1234-1234-123456789012";
+  const artifact = { version: "code-health-source-v1", kind: "quality", repository: "acme/atlas", analyzedSha: sha, ref: "refs/heads/main", runId: "123", runAttempt: "1",
+    observedAt: "2026-11-02T05:00:00.000Z", language: "actions", sarifId, scanId: `codeql:123:1:actions:${sarifId}`, state: "complete", reasons: [], toolVersion: "2.23.0",
+    rulesVersion: "b".repeat(64), configHash: "c".repeat(64), ruleCount: 12, exclusions: [], scope: { kind: "explicit-analysis-targets", fileCount: 2, hash: "d".repeat(64) },
+    completion: { kind: "workflow-analysis-step", state: "success", at: "2026-11-02T05:00:00.000Z" } };
+  const analysis = { sarifId, analyzedSha: sha, category: "/language:actions", toolVersion: "2.23.0", analysisKey: ".github/workflows/codeql.yml:analyze",
+    environmentHash: "e".repeat(64), createdAt: "2026-11-02T04:59:00.000Z", rulesCount: 12, error: "", warning: "" };
+  const scan = (path: string) => qualityScanFromCollectedEvidence({ repository: "acme/atlas", analyzedSha: sha, runId: "123", requiredLanguages: ["actions"], artifacts: [artifact], analyses: [analysis],
+    source: { ok: true as const, alerts: [{ source: "code-scanning" as const, id: "42", severity: "high" as const, state: "open", createdAt: "2026-11-01T05:00:00.000Z",
+      summary: "Repeated work is hard to change.", url: "https://github.com/acme/atlas/security/code-scanning/42", toolName: "CodeQL", ruleId: "js/repeated-work",
+      ruleTags: ["quality", "maintainability"], location: { path } }],
+      analysisInstances: [{ alertId: "42", analyzedSha: sha, toolVersion: "2.23.0", ref: "refs/heads/main", analysisKey: analysis.analysisKey,
+        category: analysis.category, environmentHash: analysis.environmentHash, instanceState: "open" }] } });
+  const control = scan("src/example.ts");
+  assert.deepEqual([control.state, control.findings.length], ["complete", 1], "control: the same finding with a repository path is complete evidence");
+  for (const path of ["src/../outside.ts", "/abs/example.ts"]) {
+    const escaped = scan(path);
+    assert.deepEqual([escaped.state, escaped.findings.length], ["partial", 0], `an open finding at ${path} cannot make the check look clean`);
+  }
+});
+
+test("code health provenance refuses unresolvable measured files and malformed rule inventories", async () => {
+  await withTempDir("code-health-provenance-invalid", async dir => {
+    const raw = { repository: "acme/atlas", analyzedSha: "a".repeat(40), ref: "refs/heads/main", runId: "123", runAttempt: "1",
+      observedAt: "2026-11-02T05:00:00.000Z", language: "javascript-typescript", sarifId: "12345678-1234-1234-1234-123456789012", config: "paths-ignore: []", exclusions: [],
+      sarif: { version: "2.1.0", runs: [{ tool: { driver: { name: "CodeQL", version: "2.23.0", rules: [{ id: "js/example" }] as Array<{ id?: string }> } },
+        artifacts: [{ location: { uri: "src/example.ts" }, roles: ["analysisTarget"] }, { location: { uri: "src/second.ts" }, roles: ["analysisTarget"] }],
+        invocations: [{ executionSuccessful: true, endTimeUtc: "2026-11-02T04:59:00.000Z" }] }] } };
+    let index = 0;
+    const run = (value: unknown) => {
+      const inputPath = join(dir, `input-${index}.json`), output = join(dir, `output-${index++}.json`);
+      writeFileSync(inputPath, JSON.stringify(value));
+      execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--input", inputPath, "--output", output], { stdio: "pipe" });
+      return JSON.parse(readFileSync(output, "utf8"));
+    };
+    const control = run(raw);
+    assert.deepEqual([control.state, control.scope.fileCount], ["complete", 2], "control: two resolvable measured files are a complete scope");
+    for (const uri of ["../outside.ts", "%2Fetc%2Fpasswd"]) {
+      const escaped = structuredClone(raw); escaped.sarif.runs[0]!.artifacts[1]!.location.uri = uri;
+      const result = run(escaped);
+      assert.deepEqual([result.state, result.scope.hash], ["partial", null], `a measured file at ${uri} makes the scope unresolved, not smaller`);
+      assert(result.reasons.includes("A measured file cannot be resolved within this repository."));
+    }
+    const unnamed = structuredClone(raw); unnamed.sarif.runs[0]!.tool.driver.rules = [{}];
+    assert.throws(() => run(unnamed), /evidence export failed/, "a rule without an identity is an invalid inventory, not a smaller one");
+  });
+});
+
 /** On a branch before this feature exists, fail the behavior test with its normal test summary.
  * A missing dependency of an existing module remains a load error, never a false discrimination. */
 async function featureModule<T extends object>(load: Promise<T>, leaf: string): Promise<T> {
