@@ -25566,19 +25566,6 @@ export async function runPostFixReverification(
       continue;
     }
 
-    let fixInHead: boolean | undefined;
-    try {
-      fixInHead = await deps.fixInHead?.(pr, cls);
-    } catch (error) {
-      log("sweep.post_fix_ancestry_unavailable", { pr_number: pr.prNumber, fix_pr_number: cls.fixPrNumber, error: String(error) });
-    }
-    if (fixInHead !== false) {
-      const outcome = fixInHead === true ? "fix-already-in-head" : "fix-presence-unknown";
-      log("sweep.post_fix_held", { pr_number: pr.prNumber, fix_pr_number: cls.fixPrNumber, outcome });
-      results.push({ prNumber: pr.prNumber, taskId: pr.taskId, outcome, fixClassId: cls.id });
-      continue;
-    }
-
     if (deps.dryRun) {
       results.push({ prNumber: pr.prNumber, taskId: pr.taskId, outcome: "redriven", fixClassId: cls.id });
       redriven++;
