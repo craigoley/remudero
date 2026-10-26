@@ -8,7 +8,8 @@
  * `GIT_*` environment, repeatedly, and asserts every run reaches the same outcome.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -23,6 +24,35 @@ const HERMETIC = {
   GIT_COMMITTER_NAME: "t",
   GIT_COMMITTER_EMAIL: "t@t",
 };
+
+test("W1-T10407: ambient global git config (diff.renames=false) cannot change the added-test set", () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), "t10407-cfg-"));
+  const cfg = join(cfgDir, "gitconfig");
+  writeFileSync(cfg, "[diff]\n\trenames = false\n");
+  const saved = { ...Object.fromEntries(Object.keys(HERMETIC).map((k) => [k, process.env[k]])) };
+  Object.assign(process.env, HERMETIC, { GIT_CONFIG_GLOBAL: cfg });
+  const repo = gitRepo({ seedCommit: false, kind: "t10407-ren" });
+  const { dir, git } = repo;
+  try {
+    mkdirSync(join(dir, "test"), { recursive: true });
+    writeFileSync(join(dir, "test/old.test.ts"), "// renamed body\n".repeat(20));
+    git("add", "-A");
+    git("commit", "--quiet", "-m", "base");
+    git("update-ref", "refs/remotes/origin/main", "HEAD");
+    git("mv", "test/old.test.ts", "test/new.test.ts");
+    git("commit", "--quiet", "-m", "rename");
+    const built = buildBaseProofDir([{ proof: "grep: renamed in test/new.test.ts" }], dir);
+    try {
+      assert.deepEqual([...built.addedTestFiles], [], "a rename is not an add, whatever the host's diff.renames says");
+    } finally {
+      if (built.baseCheckoutDir) rmSync(built.baseCheckoutDir, { recursive: true, force: true });
+    }
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    repo.cleanup();
+    rmSync(cfgDir, { recursive: true, force: true });
+  }
+});
 
 test("W1-T10407: check:test:test/base-blob-read-failure.test.ts:flaky is prevented, not retried", () => {
   const saved: Record<string, string | undefined> = {};
