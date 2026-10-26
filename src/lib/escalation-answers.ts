@@ -307,6 +307,14 @@ export function answerTextFor(replyText: string, issueBody: string): string {
   return optionLabelNamed(replyText, issueBody) ?? replyText.trim();
 }
 
+/** Whether a reply is ONLY the option label {@link answerTextFor} records for it (case-insensitive, trailing punctuation
+ *  ignored). A reply that names an option and adds text (`revise-pr, but only the test`) is a QUALIFIED answer whose
+ *  recorded text is still the bare label, so a reader that acts on the label alone (fix-progress-judge.ts
+ *  `unfiledScopeGrant`, #14217) reads this, ledgered as `bare_option`, to tell the two apart. */
+function replyIsBareOption(replyText: string, issueBody: string): boolean {
+  return replyText.trim().split(/\s+/).length === 1 && optionLabelNamed(replyText, issueBody) !== undefined;
+}
+
 /** The issue's option label the reply's FIRST WORD names (case-insensitive, trailing punctuation ignored), else undefined. */
 function optionLabelNamed(replyText: string, issueBody: string): string | undefined {
   const firstWord = replyText.trim().split(/\s+/)[0]?.replace(/[.,!:;]+$/, "");
@@ -570,7 +578,8 @@ export async function readEscalationAnswers(
   const recordedOrigins = recordedQuestionStoreOrigins(root);
   /** Land one ACCEPTED answer (a comment or a reaction) in the shared store — design (ii)'s "one
    *  sink, whichever channel answered", now three channels deep. */
-  const landAnswer = async (taskId: string, origin: string, answer: string, authorLogin: string, subject?: FeedbackAdmissionSubject) => {
+  const landAnswer = async (taskId: string, origin: string, answer: string, authorLogin: string, subject?: FeedbackAdmissionSubject,
+    replyFields: { bare_option?: boolean } = {}) => {
     const observation = gateway.admission === undefined || subject === undefined ? undefined
       : await observeFeedbackSource(gateway.admission, subject, "question-answer", (step, fields) =>
         writeLedger(deps.ledgerPath, { ...fields, step, run_id: runId, task_id: taskId }), gateway.sourceRead, clock);
@@ -591,6 +600,7 @@ export async function readEscalationAnswers(
       authority: gateway.operatorLogins === undefined ? "repository-owner" : "configured-operator",
       flows_to: "plan/questions.ndjson",
       recorded_to_question_store: recordedToQuestionStore,
+      ...replyFields,
       ...(contribution === undefined ? {} : { contribution }),
     });
     accepted++;
@@ -637,7 +647,8 @@ export async function readEscalationAnswers(
       }
       const answer = answerTextFor(comment.body, issue.body ?? "");
       if (!answer) continue;
-      await landAnswer(taskId, origin, answer, comment.authorLogin, comment.sourceSubject);
+      await landAnswer(taskId, origin, answer, comment.authorLogin, comment.sourceSubject,
+        { bare_option: replyIsBareOption(comment.body, issue.body ?? "") });
       accepted();
       try {
         gateway.reactPlusOne(comment.id);

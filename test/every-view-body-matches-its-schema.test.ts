@@ -34,6 +34,9 @@ import { EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "../src/lib/ledger.js";
 import { OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_SETTINGS_STEP } from "../src/lib/operator-agent.js";
 import { VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH } from "../src/lib/view-events.js";
 import { createWorkstreamsView, type WorkstreamsData } from "../src/lib/workstreams-view.js";
+import { CODE_HEALTH_VIEW_NAME, createCodeHealthView, type CodeHealthViewData } from "../src/lib/code-health-view.js";
+import { codeHealthRepositoryStateDir, publishCodeHealthSnapshot } from "../src/lib/code-health-store.js";
+import type { CodeHealthProjectionInput } from "../src/lib/code-health-projection.js";
 import { createActionsView, type ActionsData } from "../src/lib/actions-view.js";
 import { createTaskView, taskViewKey, type TaskViewData } from "../src/lib/task-view.js";
 import { createDemandBook, TASK_VIEW_NAME } from "../src/lib/view-demand.js";
@@ -126,7 +129,7 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
 /** One worker tick over core with every view switched to `serve`, so each materializes a body into the read model. */
 async function materializeAll(root: string, stateDir: string, deps: ServeDeps): Promise<void> {
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", workstreams: "serve", actions: "serve", host: "serve", agent: "serve", incidents: "serve", task: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", workstreams: "serve", actions: "serve", host: "serve", agent: "serve", incidents: "serve", task: "serve", "code-health": "serve" } }));
   // W1-T5051: an operator-agent proposal and scoped settings, so the agent view's parts carry items to validate.
   appendFileSync(join(stateDir, "ledger.ndjson"), [
     { ts: iso(120_000), step: OPERATOR_AGENT_PROPOSAL_STEP, task_id: "operator-agent", proposal: { proposalId: "operator-agent:schema:fix:slow-runs", repo: "craigoley/remudero", proposalText: "t", confidence: 0.95, reasoning: "r", category: "fix", status: "pending", createdAt: iso(120_000), evidence: [] } },
@@ -162,7 +165,13 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
   const demand = createDemandBook({ clock });
   demand.want(TASK_VIEW_NAME, taskViewKey("core", "W1-T1"));
   const task = createTaskView({ instances: [{ name: "core", ledgerDir: stateDir, planPath: deps.panelGraph.planPath, repo: "craigoley/remudero" }], ledgerSource, demand, clock });
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, actions, host, agent, incidents, task], demand, clock, holder: "schema-test", post: () => {} });
+  // The code-health view reads the configured repository list the repositories publisher saved above, and one
+  // saved measurement with a finding, so the selected-repository body carries an assessment and an opportunity.
+  const published = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(stateDir, CODE_HEALTH_REPOSITORY), input: codeHealthInput(), expectedSnapshotId: null, clock });
+  assert.equal(published.state, "published", JSON.stringify(published));
+  demand.want(CODE_HEALTH_VIEW_NAME, CODE_HEALTH_QUERY.slice(1));
+  const codeHealth = createCodeHealthView({ stateDir, keys: () => demand.keys(CODE_HEALTH_VIEW_NAME) });
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, actions, host, agent, incidents, task, codeHealth], demand, clock, holder: "schema-test", post: () => {} });
   ticker.tick();
   // W1-T5055: core's analytics refresh, committed as the slow lane hands it over, so the analytics body carries an instance's metrics.
   const analytics = deriveAnalyticsSnapshot([], clock.iso());
@@ -186,8 +195,26 @@ async function listen(t: TestCtx, server: Server): Promise<string> {
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
+const CODE_HEALTH_REPOSITORY = "craigoley/remudero";
+const CODE_HEALTH_QUERY = `?repository=${encodeURIComponent(CODE_HEALTH_REPOSITORY)}`;
+
+/** One complete quality and coverage measurement of the fixture's repository at its current revision. */
+function codeHealthInput(): CodeHealthProjectionInput {
+  const sha = "a".repeat(40);
+  const scans: CodeHealthProjectionInput["scans"] = (["quality", "coverage"] as const).map((kind) => ({
+    kind, repository: CODE_HEALTH_REPOSITORY, scanId: `${kind}:schema`, analyzedSha: sha, observedAt: iso(3_600_000), state: "complete",
+    scopeHash: "scope1", toolVersion: "tool1", rulesVersion: "rules1", configHash: "config1", exclusions: [], reason: null,
+    findings: kind === "quality" ? [{ id: "41", ruleId: "js/repeated-work", status: "open", severity: "high", category: "maintainability", path: "src/first.ts",
+      title: "Repeated work makes this function difficult to change.", effortMinutes: 10 }] : [],
+    checks: [{ id: kind, met: kind !== "quality", reason: kind === "quality" ? "One open finding in the measured maintainability subset." : "Meets the configured coverage baseline." }],
+  }));
+  return { repository: CODE_HEALTH_REPOSITORY, currentSha: sha, analyzedSha: sha, observedAt: iso(3_000_000), nextDueAt: null, scans, baseline: null,
+    registry: { version: "checks1", checks: [{ id: "quality", sourceKind: "quality", category: "maintainability", description: "No findings in the measured maintainability subset." },
+      { id: "coverage", sourceKind: "coverage", category: "tests", description: "Meets the existing coverage baseline." }] } };
+}
+
 /** The query each routed view is read with; a view missing here fails the corpus check below. */
-const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "", task: `?${taskViewKey("core", "W1-T1")}` };
+const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "", task: `?${taskViewKey("core", "W1-T1")}`, [CODE_HEALTH_VIEW_NAME]: CODE_HEALTH_QUERY };
 
 test("every registered view body validates against its declared schema", async (t) => {
   t.mock.method(systemClock, "now", clock.now);
@@ -247,6 +274,15 @@ test("every registered view body validates against its declared schema", async (
   const incidents = bodies.get("incidents")!.data as IncidentsViewData;
   assert.deepEqual([incidents.store.state === "ok" && incidents.store.incidents.length, incidents.instances.map((i) => [i.instance, i.emergency.active.length, i.liveness.state])],
     [1, [["core", 1, "up"]]], JSON.stringify(incidents));
+  // CONTROL: a measured repository body, so the assessment, summary and opportunity schemas were really validated.
+  const codeHealth = bodies.get(CODE_HEALTH_VIEW_NAME)!.data as CodeHealthViewData;
+  assert.deepEqual([codeHealth.repository, codeHealth.isCurrentSnapshot, codeHealth.assessment?.findings.length, codeHealth.opportunities.length,
+    codeHealth.urgentFindings.value, codeHealth.repositories[0]?.summary === null], [CODE_HEALTH_REPOSITORY, true, 1, 1, 1, false], JSON.stringify(codeHealth));
+  // The portfolio is the route's other body shape; its measured repository summary is validated too.
+  const portfolio = (await (await fetch(`${url}/v1/views/${CODE_HEALTH_VIEW_NAME}`, { headers: READ })).json()) as Record<string, unknown>;
+  assert.deepEqual(violations(portfolio, declaredBody(`/v1/views/${CODE_HEALTH_VIEW_NAME}`, "GET", 200)), [], JSON.stringify(portfolio));
+  assert.deepEqual((portfolio.data as CodeHealthViewData).repositories.map((r) => [r.repository, r.snapshotId === codeHealth.snapshotId, r.summary !== null]),
+    [[CODE_HEALTH_REPOSITORY, true, true]], "the portfolio summarizes the same measured snapshot");
   const needsYou = bodies.get("needs-you")!.data as NeedsYouData;
   assert.deepEqual([needsYou.decisions.map((d) => d.id), needsYou.inbox?.items.length, needsYou.instances[0]?.counts?.actions], [now.decisions.map((d) => d.id), 1, now.actions.length], JSON.stringify(needsYou));
 

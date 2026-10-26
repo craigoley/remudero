@@ -64,6 +64,7 @@ KEEP_MARKERS = (".rmd-janitor-keep", ".rmd-scratch-keep", ".rmd-dependency-seed-
 HOME_PRUNE = {"Library", "Documents", "Desktop", "Pictures", "Music", "Movies", "Applications", ".Trash",
               "node_modules", ".git"}
 # Shared infrastructure stores (object pools other checkouts borrow from) are never discovered home-wide.
+PER_WORKTREE_REFS = ("refs/worktree/", "refs/bisect/", "refs/rewritten/")
 HOME_PRUNE_PATHS = (".local/share/remudero/git-pools", ".local/share/remudero/repositories")
 MAX_DEPTH = 8
 CENSUS_PRUNE = {"Library", ".Trash", "Music", "Movies", "Pictures", "node_modules"}
@@ -624,7 +625,8 @@ def copy_git(repo, *args, inp=None):
 
 
 def git_snapshot(repo):
-    """Freeze all named refs, not just branches/tags or commits unpublished upstream."""
+    """Freeze all named refs, not just branches/tags or commits unpublished upstream. A worktree's
+    removal loses only its HEAD and per-worktree refs; its branches stay in the common store."""
     fmt = copy_git(repo, "rev-parse", "--show-object-format")
     shallow = copy_git(repo, "rev-parse", "--is-shallow-repository")
     if fmt.returncode or fmt.stdout.strip() != b"sha1" or shallow.returncode or shallow.stdout.strip() != b"false":
@@ -637,7 +639,8 @@ def git_snapshot(repo):
         parts = line.split(" ", 1)
         if len(parts) != 2 or not re.fullmatch("[0-9a-f]{40}", parts[0]) or not parts[1].startswith("refs/"):
             raise Hold("refs-unreadable")
-        entries.append(parts)
+        if repo.kind != "worktree" or parts[1].startswith(PER_WORKTREE_REFS):
+            entries.append(parts)
     head = copy_git(repo, "rev-parse", "--verify", "HEAD")
     symbolic = copy_git(repo, "symbolic-ref", "-q", "HEAD")
     if head.returncode or not re.fullmatch(b"[0-9a-f]{40}\n?", head.stdout):
@@ -687,16 +690,21 @@ def save_git_copy(repo, snapshot, work, cfg):
     oids = objects.stdout.splitlines()
     if not oids or any(not re.fullmatch(b"[0-9a-f]{40}", oid) for oid in oids):
         raise Hold("git-copy-closure-unreadable")
-    sizes = copy_git(repo, "cat-file", "--batch-check=%(objectname) %(objectsize)", inp=objects.stdout)
+    sizes = copy_git(repo, "cat-file", "--batch-check=%(objectname) %(objectsize) %(objectsize:disk) %(deltabase)",
+                     inp=objects.stdout)
     total = 0
     try:
         rows = [line.split() for line in sizes.stdout.splitlines()]
-        if sizes.returncode or len(rows) != len(oids) or any(len(row) != 2 or row[0] != oid for row, oid in zip(rows, oids)):
+        if sizes.returncode or len(rows) != len(oids) or any(len(row) != 4 or row[0] != oid for row, oid in zip(rows, oids)):
             raise ValueError()
-        total = sum(int(row[1]) for row in rows)
+        closure = set(oids)
+        # A stored form whose delta base is in the closure is reused as is; any other object
+        # is recompressed whole, which zlib can grow by at most a sliver.
+        total = sum(int(disk) if base.strip(b"0") == b"" or base in closure else int(size) + int(size) // 100 + 64
+                    for _, size, disk, base in rows)
     except ValueError:
         raise Hold("git-copy-size-unreadable")
-    # Uncompressed, un-deltified pack plus index overhead, twice: bundle and verifier store.
+    # Bundle plus index overhead, twice: bundle and verifier store.
     bound = total + total // 100 + len(oids) * 256 + 65536
     if free_bytes(cfg["preserve_root"]) < MIN_FREE_BYTES + 2 * bound:
         raise Hold("git-copy-disk-floor (complete independent copy would not fit)")
@@ -711,12 +719,14 @@ def save_git_copy(repo, snapshot, work, cfg):
         prefix = ["git", "--git-dir", repo.path] if repo.kind == "bare" else ["git", "-C", repo.path]
         try:
             made = subprocess.run(prefix + ["pack-objects", "--stdout", "--revs", "--no-use-bitmap-index",
-                "--no-reuse-object", "--no-reuse-delta", "--window=0", "--threads=1"], input=root_input,
+                "--depth=4095", "--threads=1"], input=root_input,
                 stdout=output, stderr=subprocess.PIPE, env=copy_git_env(), timeout=600)
         except (OSError, subprocess.TimeoutExpired):
             raise Hold("git-copy-pack-failed")
         if made.returncode:
             raise Hold(f"git-copy-pack-failed ({git_reason(made)})")
+    if free_bytes(cfg["preserve_root"]) < MIN_FREE_BYTES + os.path.getsize(bundle) + len(oids) * 256 + 65536:
+        raise Hold("git-copy-disk-floor (verifier store would not fit)")
     verify_git_copy(bundle, snapshot, oids, work)
     return len(set(oids))
 
@@ -750,6 +760,8 @@ def preserve(repo, published, cfg, home, now):
         excl = published.excludes(repo)
         if repo.kind == "bare":
             revs = ["--all"]
+        elif repo.kind == "worktree":
+            revs = ["HEAD"] + [ref for _, ref in snapshot["refs"]]
         else:
             revs = ["--branches", "--tags", "HEAD"]
             if repo.git("rev-parse", "--verify", "-q", "refs/stash").returncode == 0:
@@ -1203,6 +1215,7 @@ def main_authorized():
                 keep[r.path] = "activity-unverified-before-retire"
         keep_closure(repos, keep, borrowers, lenders_ok)
     order = sorted((r for r in repos if r.path not in keep), key=lambda r: (r.kind != "worktree", -r.path.count("/")))
+    removing = set()
     for r in order:
         if r.path in keep:
             say("HOLD", keep[r.path], r.path)
@@ -1220,6 +1233,7 @@ def main_authorized():
                 raise Hold(f"{why} (declared before retire)")
             if git_snapshot(r) != saved[r.path][1]["git_snapshot"]:
                 raise Hold("refs-changed-before-retire")
+            removing.add(r.path)
             remove(r, cfg["roots"], protected, repos, home)
             retired += 1
             say("RETIRED", r.kind, r.path)
@@ -1231,6 +1245,12 @@ def main_authorized():
             keep[r.path] = f"remove-failed ({error.__class__.__name__})"
             keep_closure(repos, keep, borrowers, lenders_ok)
             say("HOLD", f"remove-failed ({error.__class__.__name__})", r.path)
+    # A copy of a source that stays protects nothing; a removal that started keeps its copy.
+    for path, (final, _) in sorted(saved.items()):
+        if path in keep and path not in removing and not keep_scope(final):
+            require_action_authorized()
+            shutil.rmtree(final)
+            say("DISCARDED", "source kept", final)
     if a.apply:  # a dry run plans only: pruning stale worktree records is a write
         prune_worktrees(sorted({r.store for r in order if r.kind == "worktree" and r.store and os.path.isdir(r.store)}), repos)
     tidy = housekeeping(cfg, protected, repos, fresh, now, a.apply)
