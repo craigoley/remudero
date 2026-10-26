@@ -5,6 +5,10 @@ import {
   PRODUCT_REPOSITORY_LIMITS, PRODUCT_REPOSITORY_VERSION, ProductRepositoryService,
   type ProductRepositoryCode, type ProductRepositoryProvider,
 } from "./product-repository.js";
+import {
+  PRODUCT_BUILD_LIMITS, PRODUCT_BUILD_VERSION, ProductBuildService,
+  type ProductBuildCode, type ProductBuildOptions,
+} from "./product-build.js";
 import { PRODUCT_INTENT_LIMITS, PRODUCT_INTENT_VERSION, type ProductStoreCode } from "./product-intent.js";
 
 const status: Record<ProductStoreCode, number> = {
@@ -82,6 +86,38 @@ export function buildProductRepositoryRoutes(options: { root?: string; provider?
       }
       const result = await service.execute(actor, command);
       if (!result.ok) { reply(repositoryStatus[result.code], { error: result.code }); return; }
+      reply(200, result.value);
+    } },
+  ];
+}
+
+const buildStatus: Record<ProductBuildCode, number> = {
+  invalid_identity: 403, invalid_input: 400, not_found: 404, stale_revision: 409, idempotency_conflict: 409,
+  capacity: 409, busy: 503, corrupt: 503, unavailable: 503, outcome_unknown: 503, recovery_required: 503,
+  repository_missing: 409, repository_not_found: 404, repository_conflict: 409, provider_unreadable: 503,
+  plan_not_approved: 409, target_not_enrolled: 409, target_unreadable: 503, runner_missing: 409,
+  bootstrap_unverified: 409, task_not_found: 404, task_unreadable: 503, task_stale: 409, task_claimed: 409,
+  task_merged: 409, budget_exceeded: 409, fleet_halted: 409, kick_failed: 503,
+};
+
+/** Start one approved product task through the existing guarded target-repo kick. HIGH tier: it spends. */
+export function buildProductBuildRoutes(options: ProductBuildOptions): Route[] {
+  const service = new ProductBuildService(options);
+  return [
+    { method: "POST", path: "/v1/products/build", scope: "write", tier: "high", async handler(req, res) {
+      res.setHeader("Cache-Control", "private, no-store");
+      const reply = (code: number, body: Record<string, unknown>) => sendJson(res, code, { version: PRODUCT_BUILD_VERSION, ...body });
+      const actor = verifiedActor(req);
+      if (!actor) { reply(403, { error: "invalid_identity" }); return; }
+      let command: unknown;
+      try { command = JSON.parse(await readBoundedRawBody(req, PRODUCT_BUILD_LIMITS.requestBytes)); }
+      catch (error) {
+        const tooLarge = error instanceof RawBodyTooLargeError;
+        reply(tooLarge ? 413 : 400, { error: tooLarge ? "request_too_large" : "invalid_input" });
+        return;
+      }
+      const result = await service.execute(actor, command);
+      if (!result.ok) { reply(buildStatus[result.code], { error: result.code }); return; }
       reply(200, result.value);
     } },
   ];

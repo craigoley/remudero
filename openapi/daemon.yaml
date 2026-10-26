@@ -372,6 +372,81 @@ components:
         error: { type: string, enum: [unauthorized, forbidden, confirm_nonce_required] }
         required_scope: { type: string, enum: [write] }
         required_tier: { type: string, enum: [high] }
+    ProductBuildCommand:
+      type: object
+      additionalProperties: false
+      description: >
+        At most 4096 raw request bytes. Names one task the target repository's own plan filed for the
+        product's approved plan evidence. Reusing requestId with the same command replays its receipt;
+        a changed command conflicts. Ownership comes only from verifiedActor.
+      required: [version, requestId, productId, planEvidenceId, taskId, expectedRevision, expectedObjectiveRevision]
+      properties:
+        version: { type: string, enum: [product-build-v1] }
+        requestId: { $ref: "#/components/schemas/ProductRequestId" }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        planEvidenceId: { type: string, minLength: 1, maxLength: 128 }
+        taskId: { type: string, minLength: 1, maxLength: 64 }
+        expectedRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        expectedObjectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+    ProductBuildEvidence:
+      type: object
+      additionalProperties: false
+      required: [outcome, observedAt]
+      properties:
+        outcome: { type: string, enum: [queued, admitted, running] }
+        observedAt: { type: string, format: date-time }
+    ProductBuildReceipt:
+      type: object
+      additionalProperties: false
+      description: outcome is the furthest independently recorded phase; queued is never reported as running.
+      required: [operationId, productId, taskId, planEvidenceId, outcome, repository, objectiveRevision, payloadDigest, queuedAt, evidence]
+      properties:
+        operationId: { type: string, minLength: 70, maxLength: 70, pattern: '^pbuild_[a-f0-9]{64}$' }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        taskId: { type: string, minLength: 1, maxLength: 64 }
+        planEvidenceId: { type: string, minLength: 1, maxLength: 128 }
+        outcome: { type: string, enum: [queued, admitted, running] }
+        repository:
+          type: object
+          additionalProperties: false
+          required: [id, owner, name]
+          properties:
+            id: { type: integer, minimum: 1, maximum: 9007199254740991 }
+            owner: { type: string, minLength: 1, maxLength: 39 }
+            name: { type: string, minLength: 1, maxLength: 100 }
+        objectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        payloadDigest: { type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$' }
+        queuedAt: { type: string, format: date-time }
+        evidence:
+          type: array
+          maxItems: 3
+          items: { $ref: "#/components/schemas/ProductBuildEvidence" }
+    ProductBuildResponse:
+      type: object
+      additionalProperties: false
+      required: [version, receipt, replayed]
+      properties:
+        version: { type: string, enum: [product-build-v1] }
+        receipt: { $ref: "#/components/schemas/ProductBuildReceipt" }
+        replayed: { type: boolean }
+    ProductBuildError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-build-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, request_too_large, repository_missing, repository_not_found, repository_conflict, provider_unreadable, plan_not_approved, target_not_enrolled, target_unreadable, runner_missing, bootstrap_unverified, task_not_found, task_unreadable, task_stale, task_claimed, task_merged, budget_exceeded, fleet_halted, kick_failed]
+    ProductBuildAccessError:
+      type: object
+      additionalProperties: false
+      description: The service's scope, tier or confirmation gate refused access before the build handler.
+      required: [error]
+      properties:
+        error: { type: string, enum: [unauthorized, forbidden, confirm_nonce_required] }
+        required_scope: { type: string, enum: [write] }
+        required_tier: { type: string, enum: [high] }
     OperatorAgentAnswer:
       type: object
       description: Bounded read-only answer-v1; missing evidence is explicit and citations are dated.
@@ -14645,6 +14720,79 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+  /v1/products/build:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Browser owner fields, actor headers and
+          shared bearers cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema: { type: string, minLength: 1 }
+      - name: x-confirm-nonce
+        in: header
+        required: true
+        description: Server-issued HIGH-tier confirmation bound to this exact method, path and body.
+        schema: { type: string, minLength: 1 }
+    post:
+      summary: Start one approved product task through the existing guarded target-repository path.
+      description: >
+        Requires the verified operator, the write scope and the high tier with a bound confirmation.
+        Immediately before acting the service re-verifies repository identity and head, the approved
+        plan evidence, target enrollment, the registered acceptance runner, README-only bootstrap
+        receipts at the exact head, task provenance, claims, merged credit and the inherited budget.
+        It writes only the existing repo-scoped kick marker; the daemon's own admission still decides.
+        The receipt reports queued until admitted or running is independently observed with real
+        evidence. A refusal writes nothing. Responses use Cache-Control private, no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductBuildCommand" }
+      responses:
+        "200":
+          description: The durable receipt, or the same original receipt on an identical retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildResponse" }
+        "400":
+          description: Malformed JSON or an invalid command.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildAccessError" }
+        "403":
+          description: The verified operator identity, write grant, high tier or confirmation is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductBuildError"
+                  - $ref: "#/components/schemas/ProductBuildAccessError"
+        "404":
+          description: The product, repository or task does not exist for this operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
+        "409":
+          description: A refused precondition - stale revision or ownership, unapproved plan, missing runner or bootstrap, claimed or merged task, budget, or halted fleet.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
+        "413":
+          description: The raw request exceeds 4096 bytes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
+        "503":
+          description: busy, corrupt, unavailable or an unreadable provider, target or task; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
   /v1/analytics:
     get:
       summary: Read the internal benchmark evidence-quality or routing-pool projection.
