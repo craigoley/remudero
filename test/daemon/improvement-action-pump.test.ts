@@ -55,9 +55,9 @@ test("saved improvement production wiring reaches the fresh gateway from the dae
   assert.equal(typeof wire, "function", "the daemon CLI must supply the real saved-action discovery and handoff");
   const wired = (wire as (state: string, gateway: unknown) => { pendingImprovementActions(): AsyncIterable<ReturnType<typeof target>>; runImprovementAction(request: ReturnType<typeof target>): Promise<unknown> })("/fleet/state", { improvement: async (request: ReturnType<typeof target>) => { handed.push(request); return { outcome: "queued" }; } });
   const handed: ReturnType<typeof target>[] = [];
-  const plan = loadPlanFromYaml("[]", "improvement-pump-fixture"); let stop = false;
+  const plan = loadPlanFromYaml("[]", "improvement-pump-fixture"); let stop = false, polls = 0;
   const loop = daemon.runDaemon(plan, { ...wired, pendingImprovementActions: async function* () { yield target("c"); }, refreshMerged: () => () => true,
-    runOne: async () => { throw new Error("no build is part of a planning request"); }, checkStop: () => stop ? "test complete" : undefined,
+    runOne: async () => { throw new Error("no build is part of a planning request"); }, checkStop: () => stop || ++polls > 50 ? "test complete" : undefined,
     sleep: async () => { await turn(); if (handed.length) stop = true; }, log: () => {} }, { pollIntervalMs: 1 });
   await loop; assert.deepEqual(handed, [target("c")]);
 });
