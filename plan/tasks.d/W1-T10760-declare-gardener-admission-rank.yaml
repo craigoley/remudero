@@ -2,10 +2,12 @@
   title: "Declare the gardener admission-rank reason already emitted by the runtime"
   repo: remudero
   depends_on: []
+  plan_refs: [W1-T10572]
   type: implement
   verify: auto
   priority: 2.5
-  risk: low
+  risk: high
+  band_meaning: span
   status: queued
   attempts: 0
   author_class: machine
@@ -16,15 +18,16 @@
     - test/gardener-runtime.test.ts
   acceptance:
     - claim: "The published gardener reason enum includes admission-rank and preserves every existing supported reason"
-      proof: "unit test: gardener runtime contract declares the emitted admission-rank reason in test/gardener-runtime.test.ts"
+      proof: "unit test: W1-T10760: gardener runtime contract declares the emitted admission-rank reason"
     - claim: "An actual idle admission deferral from the existing runtime writer validates against the published response contract"
-      proof: "unit test: idle admission deferral validates against the published gardener schema in test/gardener-runtime.test.ts"
+      proof: "unit test: W1-T10760: idle admission deferral validates against the published gardener schema"
     - claim: "The reconciled closed contract admits the current reason while refusing unsupported reasons and retaining terminal controls"
-      proof: "unit test: gardener contract accepts current admission but refuses unsupported reasons in test/gardener-runtime.test.ts"
+      proof: "unit test: W1-T10760: gardener contract accepts current admission but refuses unsupported reasons"
     - claim: "The mechanically generated client contains the same admission-rank member in its reason union"
-      proof: 'grep: reason:.*"admission-rank" in packages/api-client/src/schema.d.ts'
+      proof: 'grep: "admission-rank" | null in packages/api-client/src/schema.d.ts'
   rationale: |
     Observed in the existing production gardener inventory: HTTP200 returned21 registered gardeners, six idle entries carrying reason admission-rank with executionMs and exit null. The unchanged closed Console parser refused the entire otherwise valid inventory. On a private diagnostic copy, replacing only those six reason values with null made that same parser accept; foreign repositories, unsupported reasons and invalid counts still refused. This was a causal diagnostic, not permission to erase reasons in production.
+    High/span records the three-concern declaration, generated-client and regression breadth required by Rule19; it adds no operational authority. W1-T10572 documented the independent source clock and is already implemented; this task adds only the missing reason member and does not replace its source semantics.
     Core src/lib/gardener-runtime.ts already declares, validates and emits admission-rank. The authoritative OpenAPI GardenerRuntimeEntry.reason enum and mechanically generated API client omit it. A later generation without that reason can render successfully, which does not repair the contract and must not be counted as closure.
     Add exactly admission-rank to that existing enum and regenerate packages/api-client/src/schema.d.ts with the maintained generator. Add real runtime-writer and declared-response validation in the existing physical gardener-runtime test suite using maintained strict OpenAPI helpers. Preserve the old reason members, nullable fields, phase semantics, inventory bounds, source attribution and all unrelated schemas. Treat an admission deferral as no completed child or measured execution; do not create prices or outcomes, widen arbitrary string acceptance, filter rejected gardens or change scheduling.
     Tests must verify the exact reason population, actual writer-to-route output and strict declared response validation, with unsupported-reason, existing-terminal, foreign-scope and invalid-counter controls. Remove only the enum addition and rerun the same positive contract regressions to observe failure; restore the exact source and require success. The generated-union proof must resolve on one physical line and fail against the base. Compare parsed OpenAPI before and after removing only the added member to prove all other declaration content unchanged; generator --check must pass. Do not hand-edit generated types.
@@ -36,10 +39,10 @@
   risk_ruling:
     verdict: "low"
     action: proceed
-    confidence: 0.92
+    confidence: 0.9
     reasons:
-      - "The description shows a narrow contract fix: adding one enum member to GardenerRuntimeEntry.reason, regenerating the client, and adding tests across three declared files that exist at base."
-      - "Nothing described touches secrets, auth, permissions, data deletion, merge/deploy/review policy, or irreversible actions. The description explicitly excludes production settings, deployment, spending and scheduling."
-      - "The acceptance criteria are verifiable with unit tests and a grep, and the family has a strong record (6 merged, 0 declined)."
-    judged_at: "2026-10-26T20:08:31.675Z"
-    pin: "a84df1c00680ce290715d2be8e41764e56b1f1f400f3651894910c528bffdf9e"
+      - "The description shows a single-member enum addition to the published contract plus a regenerated client and tests, within three declared existing files. It touches no auth, secrets, deploy or merge policy, and deletes no data."
+      - "The description says the runtime already emits admission-rank, so the change aligns the contract with existing behaviour. It states no scheduling, filtering or spending changes, and the plan reference W1-T10572 is already implemented."
+      - "The acceptance criteria are verifiable by unit tests and a grep proof, and the family track record is 6 merged and 0 declined. The gates state shows no concerns."
+    judged_at: "2026-10-26T20:14:18.608Z"
+    pin: "dc12f5cb551a796637ce27a0a843fba26128a7451c93531f33740d11dd8b5320"
