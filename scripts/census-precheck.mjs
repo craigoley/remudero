@@ -1165,12 +1165,6 @@ export const PRECHECK_TRIGGERED_SUITES = [
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
-  { testFile: "test/rules/private-improvement-worker-registration.test.ts",
-    trigger: ({ changed }) => changed.some((p) => [
-      "scripts/console-parity-ratchet.mjs", "scripts/console-parity-baseline.json",
-      "scripts/census-precheck.mjs", "test/rules/private-improvement-worker-registration.test.ts",
-    ].includes(p)),
-    remedy: "preserve the named private-worker reason, real route distinction and recorded-set guard" },
   { testFile: "test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts", gitFree: true,
     trigger: ({ changed }) => changed.some((p) => [
       "src/lib/gate-gardener.ts", "scripts/census-precheck.mjs",
