@@ -107,6 +107,16 @@ test("dirty fix-owner preservation still refuses an ignored working copy hidden 
     assert.equal(git(ownerPath, ["status", "--porcelain=v1"]), status);
     assert.deepEqual(readFileSync(indexPath), index);
     assert.equal(git(repoDir, ["for-each-ref", "--format=%(refname)", "refs/rmd-recovery/fix-dirty"]), "");
+    // Once the concealed copy is explicitly indexed again, preservation must recover it
+    // together with a newly indexed ignored addition. The prior refusal remains load-bearing.
+    const addedPath = "coverage/recovered-addition.txt";
+    writeFileSync(join(ownerPath, addedPath), "explicitly indexed addition\n");
+    git(ownerPath, ["add", "--force", "--", path, addedPath]);
+    const reviewedIndex = readFileSync(indexPath);
+    const recovery = preserveTrackedDirtyFixOwner(repoDir, ownerPath, branch, localSha);
+    assert.equal(git(repoDir, ["show", `${recovery}:${path}`]), "unpublished working bytes\n");
+    assert.equal(git(repoDir, ["show", `${recovery}:${addedPath}`]), "explicitly indexed addition\n");
+    assert.deepEqual(readFileSync(indexPath), reviewedIndex, "recovering an explicitly indexed copy leaves its live index unchanged");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -132,5 +142,16 @@ test("an empty owner index cannot turn preservation into staging ignored untrack
     assert.equal(readFileSync(join(ownerPath, "untracked.txt"), "utf8"), "unpublished ignored bytes\n");
     assert.deepEqual(readFileSync(indexPath), index);
     assert.equal(git(repoDir, ["for-each-ref", "--format=%(refname)", "refs/rmd-recovery/fix-dirty"]), "");
+    // Populating the index with explicit paths must enable their recovery without adopting
+    // the ignored untracked copy that the empty-index refusal just protected.
+    const addedPath = "reviewed-addition.txt";
+    writeFileSync(join(ownerPath, addedPath), "explicitly indexed recovery bytes\n");
+    git(ownerPath, ["add", "--force", "--", "seed.txt", addedPath]);
+    const reviewedIndex = readFileSync(indexPath);
+    const recovery = preserveTrackedDirtyFixOwner(repoDir, ownerPath, branch, localSha);
+    assert.equal(git(repoDir, ["show", `${recovery}:${addedPath}`]), "explicitly indexed recovery bytes\n");
+    assert.equal(git(repoDir, ["ls-tree", "--name-only", recovery, "--", "untracked.txt"]), "");
+    assert.equal(readFileSync(join(ownerPath, "untracked.txt"), "utf8"), "unpublished ignored bytes\n");
+    assert.deepEqual(readFileSync(indexPath), reviewedIndex, "only the caller's explicit indexing changes the live index");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
