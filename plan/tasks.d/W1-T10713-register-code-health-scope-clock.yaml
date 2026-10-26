@@ -47,7 +47,7 @@
     - claim: existing Code health scope clocks have a source-pinned consumer-specific census registration
       proof: "unit test: Code health scope clocks are registered without weakening the fixture census"
     - claim: the cached scope refusal fixture derives its stale reading from one current clock
-      proof: "grep: const scopeNow = Date.now() in test/console-api/views/code-health-cached-view.test.ts"
+      proof: 'grep: const scopeNow = Date\.now() in test/console-api/views/code-health-cached-view.test.ts'
   note: >-
     Reserved from the operator checkout for codex/register-code-health-scope-clock-20261026.
     The dependency added to W1-T10683 requires this separate instrument correction to merge before
