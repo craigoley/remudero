@@ -7299,15 +7299,21 @@ export async function runDaemon(
       if (freshness.stale && decideFreshness(freshness, true) === "restart") decideRestart(freshness);
       wakeParkedLanes();
     };
-    const onDispatchTick = checkFreshness ? (): void | Promise<void> => {
+    const onDispatchTick = checkFreshness || deps.reloadPlan ? (): void | Promise<void> => {
       wakeParkedLanes();
-      if (restartDecided || inFlightTasks.size === 0 || deps.checkPause?.()) return;
-      const read = checkFreshness!();
-      if (!isPendingFreshness(read)) return actOnDispatchFreshness(read);
-      // The pool can settle while the fetch is in flight; a reading for a finished dispatch is the next tick's.
+      if (inFlightTasks.size === 0 || deps.checkPause?.()) return;
+      // The light sweep reads this live binding; admitted workers retain their captured planForBatch.
+      const reload = (): void | Promise<void> => deps.reloadPlan ? reloadPlanBinding() : undefined;
+      if (restartDecided || !checkFreshness) return reload();
+      const read = checkFreshness();
+      if (!isPendingFreshness(read)) {
+        actOnDispatchFreshness(read);
+        return reload();
+      }
+      // Refresh after the freshness fetch, so a newly observed origin/main also updates review contracts.
       return read.then((freshness) => {
         if (!restartDecided && inFlightTasks.size > 0) actOnDispatchFreshness(freshness);
-      });
+      }).then(reload);
     } : undefined;
     sweepRetrigger.onDispatchTick = onDispatchTick;
     const lanes = { inFlight: 0 };
