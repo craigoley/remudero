@@ -677,12 +677,17 @@ export function readBootId(path: string = BOOT_ID_PATH): string | undefined {
   }
 }
 
-function parseTestSlotHolder(raw: string): TestSlotHolder | null {
+/** A stored holder record, or null when it names no holder; a malformed `cgroupScope` is dropped, never trusted. */
+export function parseTestSlotHolder(raw: string): TestSlotHolder | null {
   try {
     const h = JSON.parse(raw);
     if (typeof h !== "object" || h === null) return null;
     if (!Number.isSafeInteger(h.pid) || typeof h.host !== "string" || typeof h.startedAt !== "string" ||
         typeof h.heartbeatAt !== "string" || !Number.isFinite(Date.parse(h.heartbeatAt))) return null;
+    const scope = h.cgroupScope;
+    if (scope !== undefined && (typeof scope !== "object" || scope === null || typeof scope.path !== "string" || typeof scope.dedicated !== "boolean")) {
+      delete h.cgroupScope; // Unproven scope evidence is no evidence: the holder stays live-by-default.
+    }
     return h as TestSlotHolder;
   } catch {
     // An unparseable record names no holder at all; reclaimStaleLock treats null as reclaimable.

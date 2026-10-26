@@ -1,0 +1,40 @@
+- id: W1-T10674
+  title: Select verified target repository quality checks for consumer preflight
+  repo: remudero
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: operator-request#wreckterra-console-product-2026-10-25
+  status: queued
+  attempts: 0
+  depends_on:
+    - W1-T10614
+  plan_refs:
+    - W1-T10614
+    - W1-T10612
+    - W1-T9338
+  files:
+    - src/lib/ci-project-preflight.ts
+    - src/run-task.ts
+    - src/cli/registry.ts
+    - test/ci/parity/project-preflight.test.ts
+    - test/preflight-fast-mode.test.ts
+    - test/preflight-ci-parity.test.ts
+    - test/preflight-help-is-derived-not-retyped.test.ts
+  rationale: CONSOLE-T147 run CONSOLE-T147-1792981752145 published source d59e8ec899b450b2804ab81fd12b1a3ded79eab3, then its native preopen gate invoked Core-only commitlint/tool paths and console-parity/command-registry/deps-interface checks inside the Console checkout. PR opening then refused a real Vitest test-load error at node_modules/.vitest-cache. These are observed execution failures, not failed game or Console acceptance. The subject sweep inspected all 14 open head trees against e9271652611dd473c0a8540bdb5d3945a0392add with 144 main matches and zero added subject lines in every head; no competing repair was observed. Keep active jobs, existing claims, all budgets, admission, source/receipt identity and actual quality gates. No source PR may be opened merely by suppressing an error. W1-T9338 shares the monolithic command file for an unrelated sweep extraction; this task changes only preflight selection and its real callers, not that extraction. A new ci-project-preflight leaf maps its new tests to ci/parity; compute placement from actual imports before writing.
+  design: Add a bounded closed quality-profile selector for the verified canonical repository target and wire resolveProjectPreflight into the actual preflight command. Resolve shared harness tooling from its installed harness root and consumer commands/configuration from the verified target checkout. Preserve Core default argv, commit policy, coverage/static/census and failure semantics. Console runs its actual declared contract/read/write-parity, plan-dependency, TypeScript and unit checks; Wreckterra uses its existing declared test/typecheck/build/security commands under the existing cost and admission policy. Inspect the current repository CI definitions and package scripts before pinning each profile. Do not run the Core CLI COMMANDS/deps census against a Next.js consumer. Target identity must use the existing canonical owner/repo resolution, checked against the actual checkout; an arbitrary package name, cwd shape, browser field or --repo assertion cannot select a weaker profile. An unregistered target, missing command/config/tool, unreadable identity or unknown measurement returns an explicit unavailable/refused result, never a skipped PASS or a Core fallback. Retain required hosted CI, normal first-push author checks, test-slot/resource/timeout guards, receipt freshness, source identity and partial-result semantics. Prove real default subprocess commands in disposable target fixtures as well as injected failures. Do not edit consumer repositories, dependencies, ignore lists, scanner exclusions, workflows or budgets in this task. This repairs construction/qualification; it grants no product execution or deployment authority.
+  acceptance:
+    - claim: consumer preflight runs the target checkout declared quality commands
+      proof: "unit test: W1-T10674: consumer preflight runs the target checkout declared quality commands"
+    - claim: Core and unknown targets preserve their quality boundaries
+      proof: "unit test: W1-T10674: Core and unknown targets preserve their quality boundaries"
+    - claim: consumer failures and unavailable checks never become success
+      proof: "unit test: W1-T10674: consumer failures and unavailable checks never become success"
+    - claim: the production preflight command calls the target selector
+      proof: "grep: resolveProjectPreflight( in src/run-task.ts"
+  falsifier: Independently remove canonical target binding, consumer command selection and unknown/failure refusal. The matching behavioral proof must fail and pass after restoration. The positive Core control must retain its real declared gates and argv. Run at least one real default subprocess and each distinct catch/failure arm, with physical paths and nonzero test summaries. Validate the actual Console published head through native preopen after merge; unit fixtures, hosted source checks and live adoption are separate evidence.
