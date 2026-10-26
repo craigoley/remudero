@@ -374,7 +374,7 @@ test("an unreadable remote preserves the existing direction without certifying a
   assert.ok(r.logs.some(row => row.step === "fix.evidence_head_unread"));
 });
 
-test("a fresh snapshot of the published tip reaches the ordinary worker without resetting history", async () => {
+test("a fresh snapshot of the published tip reaches the ordinary worker", async () => {
   const r = await observeAdvancedEvidenceRound("fresh");
   assert.equal(r.spawned, 1);
   assert.equal(r.headAfter, r.advanced);
