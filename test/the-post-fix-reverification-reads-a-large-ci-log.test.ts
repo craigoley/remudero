@@ -67,6 +67,7 @@ test("unit test: test/the-post-fix-reverification-reads-a-large-ci-log.test.ts",
   try {
     const pushes: string[] = [];
     const summary = await sweepPostFixReverification("o", "r", [pendingPr()], join(ledgerDir, "ledger.ndjson"), "SWEEP-T5856", () => {}, {
+      fixInHead: () => false,
       isMergedByNumber: (n) => n === CI_GATE_TIMEOUT_FIX_CLASS.fixPrNumber,
       pushEmptyCommit: (_root, branch) => {
         pushes.push(branch);

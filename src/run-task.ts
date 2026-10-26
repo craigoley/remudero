@@ -31741,7 +31741,7 @@ export async function sweepEscalationTriage(
  * THE W1-T474 CALL SITE for W1-T124's post-fix re-verification rung (`runPostFixReverification`,
  * src/lib/sweep.ts) — built and unit-tested (test/post-fix-reverification.test.ts) but callerless
  * until this task. For every open PR whose recorded failure matches a {@link DEFAULT_FIX_CLASSES}
- * row whose `fixPrNumber` has MERGED, mints a fresh head via the SAME `pushEmptyCommit` leaf the
+ * row whose `fixPrNumber` has MERGED and is positively absent from the PR head, mints a fresh head via the SAME `pushEmptyCommit` leaf the
  * ABSENT remedy (`repushAbsent` in {@link buildSweepEffects}) already uses — never a check
  * re-run: W1-T474's rationale (7) measured that the `pull_request` default checkout is the
  * PINNED merge ref, so re-requesting the same check-run replays the identical stale tree. Only a
@@ -31770,6 +31770,7 @@ export async function sweepPostFixReverification(
     dryRun?: boolean;
     classes?: readonly FixClass[];
     pushEmptyCommit?: typeof gitPushEmptyCommit;
+    fixInHead?: (pr: OpenPrView, cls: FixClass) => boolean | undefined | Promise<boolean | undefined>;
     isMergedByNumber?: (prNumber: number) => boolean;
     readCiFailures?: (pr: OpenPrView) => CiFailure[] | undefined | Promise<CiFailure[] | undefined>;
   } = {},
@@ -31777,6 +31778,32 @@ export async function sweepPostFixReverification(
   const classes = opts.classes ?? DEFAULT_FIX_CLASSES;
   const pushEmptyCommitImpl = opts.pushEmptyCommit ?? gitPushEmptyCommit;
   const isMergedByNumber = opts.isMergedByNumber ?? ((n) => ghLiveStateByNumber(owner, repo, n) === "MERGED");
+  const fixMergeShas = new Map<number, string | undefined>();
+  const fixInHead = opts.fixInHead ?? ((pr: OpenPrView, cls: FixClass): boolean | undefined => {
+    if (!/^[a-f0-9]{40}$/i.test(pr.headSha ?? "")) return undefined;
+    try {
+      if (!fixMergeShas.has(cls.fixPrNumber)) {
+        const fix = ghJson(["pr", "view", String(cls.fixPrNumber), "--repo", `${owner}/${repo}`, "--json", "state,mergeCommit"]) as {
+          state?: string; mergeCommit?: { oid?: string };
+        };
+        const sha = fix.state === "MERGED" ? fix.mergeCommit?.oid : undefined;
+        fixMergeShas.set(cls.fixPrNumber, sha && /^[a-f0-9]{40}$/i.test(sha) ? sha : undefined);
+      }
+      const fixSha = fixMergeShas.get(cls.fixPrNumber);
+      if (!fixSha) return undefined;
+      const comparison = ghJson(["api", `repos/${owner}/${repo}/compare/${fixSha}...${pr.headSha}?per_page=1`]) as {
+        status?: string; base_commit?: { sha?: string }; merge_base_commit?: { sha?: string };
+      };
+      const mergeBase = comparison.merge_base_commit?.sha;
+      if (comparison.base_commit?.sha !== fixSha || !mergeBase || !/^[a-f0-9]{40}$/i.test(mergeBase)) return undefined;
+      if ((comparison.status === "ahead" || comparison.status === "identical") && mergeBase === fixSha) return true;
+      if ((comparison.status === "behind" || comparison.status === "diverged") && mergeBase !== fixSha) return false;
+      return undefined;
+    } catch (error) {
+      log("sweep.post_fix_ancestry_unavailable", { pr_number: pr.prNumber, fix_pr_number: cls.fixPrNumber, error: String(error) });
+      return undefined;
+    }
+  });
   // W1-T977: the rung's own read for a PR still pending — see `PostFixReverificationDeps.
   // readCiFailures`'s own doc (sweep.ts) for why the shared `OpenPrView.ciFailures` snapshot is
   // undefined for exactly this case. Mirrors the `fetchCiFailures` dep already wired below (line
@@ -31820,6 +31847,7 @@ export async function sweepPostFixReverification(
         );
         return {};
       },
+      fixInHead,
       readCiFailures: readCiFailuresImpl,
       ledgerPath,
       runId,

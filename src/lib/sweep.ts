@@ -25479,6 +25479,8 @@ export interface PostFixReverificationDeps {
    *  the check-run in place or pushing a refresh commit is the effect's own decision; this module
    *  never calls gh or git directly. */
   redrive: (pr: OpenPrView, fixClass: FixClass) => RedriveResult | Promise<RedriveResult>;
+  /** Only a positively absent fix permits a new head. Unknown ancestry holds this rung. */
+  fixInHead?: (pr: OpenPrView, fixClass: FixClass) => boolean | undefined | Promise<boolean | undefined>;
   ledgerPath: string;
   runId: string;
   readLedger?: (path: string) => Array<Record<string, unknown>>;
@@ -25497,7 +25499,7 @@ export interface PostFixReverificationDeps {
 export interface PostFixReverificationResult {
   prNumber: number;
   taskId?: string;
-  outcome: "redriven" | "unmatched" | "already-redriven" | "redrive-failed";
+  outcome: "redriven" | "unmatched" | "already-redriven" | "redrive-failed" | "fix-already-in-head" | "fix-presence-unknown";
   fixClassId?: string;
   /** Present only when outcome === "redriven" AND the redrive returned a fresh, settled view
    *  (design note ii — "re-dispose on the fresh result"). */
@@ -25561,6 +25563,19 @@ export async function runPostFixReverification(
     const already = lines.some((l) => l.step === "sweep.post_fix_redriven" && l.redrive_key === redriveKey);
     if (already) {
       results.push({ prNumber: pr.prNumber, taskId: pr.taskId, outcome: "already-redriven", fixClassId: cls.id });
+      continue;
+    }
+
+    let fixInHead: boolean | undefined;
+    try {
+      fixInHead = await deps.fixInHead?.(pr, cls);
+    } catch (error) {
+      log("sweep.post_fix_ancestry_unavailable", { pr_number: pr.prNumber, fix_pr_number: cls.fixPrNumber, error: String(error) });
+    }
+    if (fixInHead !== false) {
+      const outcome = fixInHead === true ? "fix-already-in-head" : "fix-presence-unknown";
+      log("sweep.post_fix_held", { pr_number: pr.prNumber, fix_pr_number: cls.fixPrNumber, outcome });
+      results.push({ prNumber: pr.prNumber, taskId: pr.taskId, outcome, fixClassId: cls.id });
       continue;
     }
 

@@ -18,6 +18,8 @@ import { DEFAULT_SWEEP_POLICY, runSweep, type SweepDeps } from "./helpers/sweep-
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { sweepPostFixReverification } from "../src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { rmSync } from "node:fs";
 
 // ── W1-T124 — POST-FIX RE-VERIFICATION, the drainage-side complement to the
 // W1-T121 queue governor: once a systemic fix merges, stale reds of that class
@@ -114,6 +116,7 @@ function fakeDeps(
   const redriveCalls: Array<{ pr: OpenPrView; cls: FixClass }> = [];
   return {
     redriveCalls,
+    fixInHead: () => false,
     redrive: (p, cls) => {
       redriveCalls.push({ pr: p, cls });
       return { fresh: { ...p, checksState: "green" } };
@@ -429,6 +432,7 @@ test("W1-T474 — sweepPostFixReverification pushes an empty commit (never a che
   const candidate = ciGateTimeoutPr({ prNumber: 1780, prUrl: "url/1780", headRefName: "run-W1-T1780-1" });
 
   const summary = await sweepPostFixReverification("o", "r", [candidate], ledgerPath(), "SWEEP-WIRE-2", () => {}, {
+    fixInHead: () => false,
     isMergedByNumber: (n) => n === 820,
     pushEmptyCommit: (_repoRoot, branch, head, message) => {
       pushes.push({ branch, head, message });
@@ -448,6 +452,7 @@ test("W1-T474 — sweepPostFixReverification never pushes for a class whose fix 
   const candidate = ciGateTimeoutPr({ prNumber: 1781, prUrl: "url/1781", headRefName: "run-W1-T1781-1" });
 
   const summary = await sweepPostFixReverification("o", "r", [candidate], ledgerPath(), "SWEEP-WIRE-3", () => {}, {
+    fixInHead: () => false,
     isMergedByNumber: () => false,
     pushEmptyCommit: () => {
       pushes++;
@@ -471,6 +476,7 @@ test("W1-T474 — the ordering the rationale requires: a PR redriven this pass i
   const openPrs = [matched, unrelated];
 
   const reverifySummary = await sweepPostFixReverification("o", "r", openPrs, ledgerPath(), "SWEEP-WIRE-4", () => {}, {
+    fixInHead: () => false,
     isMergedByNumber: (n) => n === 820,
     pushEmptyCommit: () => "newsha",
   });
@@ -683,7 +689,8 @@ test("BEHAVIORAL (W1-T977): sweepPostFixReverification's own default reader does
     const candidate = pendingCiGateTimeoutPr({ prNumber: 1977, prUrl: "url/1977", headRefName: "run-W1-T1977-1" });
 
     const summary = await sweepPostFixReverification("o", "r", [candidate], ledgerPath(), "SWEEP-WIRE-977", () => {}, {
-      isMergedByNumber: (n) => n === 820,
+      fixInHead: () => false,
+    isMergedByNumber: (n) => n === 820,
       pushEmptyCommit: (_repoRoot, branch, head) => {
         pushes.push({ branch, head });
         return "newsha";
@@ -711,5 +718,45 @@ test("a merged fix already contained in the PR head never mints another CI head"
     assert.deepEqual(deps.redriveCalls, []);
     assert.equal(readLedgerLines(deps.ledgerPath).some(row => row.step === "sweep.post_fix_redriven"), false,
       "a held head receives neither a push receipt nor strike credit");
+  }
+});
+
+
+test("post-fix default ancestry transport holds contained, missing, contradictory and unread evidence", async () => {
+  const fix = "7a8ee5844540024dc938fe5ff67b901a067d9b9b";
+  const head = "742a056f17595660339bec8f75572462a7eea15f";
+  const other = "1111111111111111111111111111111111111111";
+  const cases = [
+    { name: "contained", comparison: { status: "ahead", base_commit: { sha: fix }, merge_base_commit: { sha: fix } }, expected: 0 },
+    { name: "identical", comparison: { status: "identical", base_commit: { sha: fix }, merge_base_commit: { sha: fix } }, expected: 0 },
+    { name: "absent", comparison: { status: "diverged", base_commit: { sha: fix }, merge_base_commit: { sha: other } }, expected: 1 },
+    { name: "behind", comparison: { status: "behind", base_commit: { sha: fix }, merge_base_commit: { sha: other } }, expected: 1 },
+    { name: "missing", comparison: {}, expected: 0 },
+    { name: "contradictory", comparison: { status: "ahead", base_commit: { sha: fix }, merge_base_commit: { sha: other } }, expected: 0 },
+    { name: "wrong base", comparison: { status: "diverged", base_commit: { sha: other }, merge_base_commit: { sha: other } }, expected: 0 },
+    { name: "unread", comparison: {}, exit: 1, expected: 0 },
+    { name: "missing fix", comparison: {}, missingFix: true, expected: 0 },
+  ];
+  for (const row of cases) {
+    const shim = ghShim([
+      { when: "pr view 820 --repo o/r --json state,mergeCommit", stdout: JSON.stringify({ state: "MERGED", mergeCommit: row.missingFix ? null : { oid: fix } }) },
+      { when: `compare/${fix}...${head}?per_page=1`, stdout: JSON.stringify(row.comparison), exit: row.exit },
+    ], { kind: "post-fix-ancestry" });
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${shim.dir}:${savedPath}`;
+    let pushes = 0;
+    try {
+      const result = await sweepPostFixReverification("o", "r", [ciGateTimeoutPr({ headSha: head })], ledgerPath(), "ANCESTRY", () => {}, {
+        isMergedByNumber: n => n === 820,
+        pushEmptyCommit: () => { pushes++; return "newsha"; },
+      });
+      assert.equal(pushes, row.expected, row.name);
+      assert.equal(result.redriven, row.expected, row.name);
+      assert.ok(shim.calls().some(call => call.includes("state,mergeCommit")), "the real default reads the merged identity");
+      assert.equal(shim.calls().some(call => call.includes("compare/")), !row.missingFix, row.name);
+    } finally {
+      process.env.PATH = savedPath;
+      rmSync(shim.dir, { recursive: true, force: true });
+    }
   }
 });
