@@ -1,0 +1,87 @@
+- id: W1-T10738
+  title: "A MANUAL APPROVE COUNTS AS AN ACTED ESCALATION — escalationClassPrecision counts only `panel.escalation_marked_handled` rows, so the `panel.manual_approved` check-off that IS the act for a MANUAL escalation is never a sample; on 2026-10-26 marking #14475-#14477 false_positive reported MANUAL precision 0, built only from false positives and blind to every real MANUAL resolution"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 5.00
+  risk: medium  # Rule 19: one concern, which ledger rows count as a MANUAL acted-on sample; tiers, NEVER_DEMOTE and every route are unchanged
+  band_meaning: span
+  priority: 3
+  status: queued
+  attempts: 0
+  origin: "coordinator 2026-10-26: the operator's mark-handled response for #14475-#14477 read MANUAL `precision: 0`; re-verified by the filing agent the same day"
+  plan_refs: [W1-T4677, W1-T182, W1-T10735, "issues #14475-#14477"]
+  files:
+    - src/lib/escalation-precision.ts
+    - test/inbox/a-manual-approve-counts-as-an-acted-escalation.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main 3c0e6a00d. src/lib/escalation-precision.ts and src/lib/panel-actions.ts
+    are unchanged since 1e7188db5.
+
+    THE DEFECT.
+    - src/lib/escalation-precision.ts:77-79 `isMarkedHandledRow` admits only `step === "panel.escalation_marked_handled"`
+      rows with the class and a string disposition. :87-96 `escalationClassPrecision` counts those alone:
+      `acted` rows over every disposed row of the class. :102-110 `escalationClassesInLedger` also reads only
+      those rows.
+    - src/lib/panel-actions.ts:729-743 `buildApproveManualRoute` (POST /v1/manual/approve) closes the issue and
+      ledgers `panel.manual_approved` with `issue_url` and no class or disposition (:739). Its doc (:726-728) says
+      closing the issue IS the MANUAL check-off. That is the act a MANUAL escalation asks for, and precision never
+      sees it.
+    - So for MANUAL, the denominator holds only what the operator explicitly marked through mark-handled, which
+      in practice is the false alarms. Every real resolution goes through Approve and is invisible.
+
+    THE OBSERVATION.
+    - The operator marked #14475, #14476 and #14477 (class MANUAL, cause stage-stall; W1-T10736 files the clock
+      defect) `false_positive` through POST /v1/escalation/mark-handled. GitHub shows them CLOSED at 17:16:26Z,
+      17:16:37Z and 17:16:42Z.
+    - The route's response (panel-actions.ts:803-814) reported MANUAL `precision: 0`.
+    - The filing agent did not find those panel rows in the tail of the core instance's live ledger. They are
+      written to the serving process's `deps.ledgerPath`. The precision figure above is the coordinator's
+      reading of the response.
+
+    WHY IT MATTERS, AND WHY THE BLAST RADIUS IS SMALL.
+    - MANUAL is in NEVER_DEMOTE_CLASSES (:36, :120), so its tier stays `issue` whatever the precision. No alarm
+      is silenced or promoted.
+    - The MANUAL precision that the mark-handled response, a retro or a console reads is still wrong, and it
+      gets worse with every false alarm while real approvals never offset it.
+    - The other readers (src/lib/escalate.ts:1594 and src/run-task.ts:3271, via `escalationClassSignal`) take
+      only the tier, and their output is unchanged.
+  design: |
+    1. A `panel.manual_approved` row with an `issue_url` is one ACTED sample. Its class is the class of the
+       newest `escalation.issue_opened` row with that `issue_url` when one is in the lines read. Otherwise its
+       class is MANUAL, which is the route's own meaning.
+    2. One sample per (class, issue_url). When the same issue also has a disposed
+       `panel.escalation_marked_handled` row, that row's explicit disposition is the sample, not the approve.
+       A mark-handled row with no `issue_url` stays its own sample, as today.
+    3. `escalationClassesInLedger` also names a class that has only approve samples.
+    4. Every other class's arithmetic, the tiers, MIN_SAMPLE_FOR_DEMOTION, both thresholds and
+       NEVER_DEMOTE_CLASSES are unchanged. No route or ledger row shape changes.
+  prompt: |
+    Write test/inbox/a-manual-approve-counts-as-an-acted-escalation.test.ts first. That is the folder
+    `rmd test-place` computes for an escalation-precision suite: keep this exact path, because the proofs grep it.
+    Import through `#src/*`, and watch the test fail at base: restore the base code with
+    `git show origin/main:src/lib/escalation-precision.ts`, never stash. Every new test title starts with
+    `W1-T10738: ` exactly as in the acceptance proofs.
+    Fixtures are plain ledger-row arrays:
+    - two MANUAL issues approved, plus one MANUAL issue marked `false_positive`, gives
+      `{ sampleSize: 3, actedCount: 2, precision: 2/3 }`. At base this reads 0/1;
+    - one issue both approved and marked `false_positive` gives one sample, and that sample is not acted.
+    Keep test/a-dismissed-escalation-records-why.test.ts green unchanged. Run both suites, then
+    `rmd preflight --fast` on the committed tree before the first push.
+  acceptance:
+    - claim: "two approved MANUAL escalations and one marked false_positive read MANUAL precision 2/3 (sample 3, acted 2), not 0/1"
+      proof: 'grep: test("W1-T10738: a manual approve counts as an acted sample for its class" in test/inbox/a-manual-approve-counts-as-an-acted-escalation.test.ts'
+    - claim: "an issue that was both approved and marked handled counts once, by its explicit disposition, and a class with only approve samples is named by escalationClassesInLedger"
+      proof: 'grep: test("W1-T10738: an approve and a mark-handled for one issue are one sample" in test/inbox/a-manual-approve-counts-as-an-acted-escalation.test.ts'
+  falsifier: |
+    Ignore `panel.manual_approved` again, and the 2/3 case must fail at 0/1. Count both rows for one issue, and
+    the one-sample case must fail at two.
+    GUARDS that held at base and must still hold:
+    - a non-MANUAL class's precision is unchanged;
+    - `precision` is null with no samples;
+    - MANUAL and HARD_STOP never demote;
+    - a class under MIN_SAMPLE_FOR_DEMOTION stays `issue`.
+    These guards are in test/a-dismissed-escalation-records-why.test.ts, which stays unchanged. Remove each
+    guard's production branch in turn, and its case must fail. Restore everything and require zero failures.

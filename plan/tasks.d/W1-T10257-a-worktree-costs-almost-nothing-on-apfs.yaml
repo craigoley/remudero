@@ -4,12 +4,12 @@
   depends_on: []
   type: implement
   verify: auto
-  principles: {tdd: strict}
+  principles: { tdd: strict }
   budget_usd: 8.00
-  risk: high  # Rule 19: one concern — how a worktree's tracked files are materialized; branch naming, dependency linking and retirement are unchanged
+  risk: high # Rule 19: one concern — how a worktree's tracked files are materialized; branch naming, dependency linking and retirement are unchanged
   band_meaning: span
   origin: "operator 2026-10-20: the janitor should be doing a better job of cleaning up; find ways to reduce the space each worktree needs"
-  plan_refs: [W1-T5533, W1-T2622, W1-T10256]
+  plan_refs: [ W1-T5533, W1-T2622, W1-T10256 ]
   files:
     - src/lib/cow-worktree.ts
     - src/lib/hand-worktree.ts
@@ -19,8 +19,12 @@
     - deploy/mac/JANITOR.md
     - doctrine/plan-and-task-hygiene/finish-owned-work.md
     - test/worker/a-worktree-costs-almost-nothing-on-apfs.test.ts
+    - scripts/console-parity-ratchet.mjs
+    - scripts/console-parity-baseline.json
+    - test/worktree-creation-census.test.ts
+    - test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
   status: queued
-  priority: 1  # operator-2026-10-20: the Mac sits under 4 GB free; every agent worktree is a full checkout
+  priority: 1 # operator-2026-10-20: the Mac sits under 4 GB free; every agent worktree is a full checkout
   attempts: 0
   rationale: |
     READ 2026-10-20 at origin/main 4c83ace0f, on the Mac (APFS, `diskutil info /`: File System Personality APFS).

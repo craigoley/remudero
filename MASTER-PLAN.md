@@ -4623,6 +4623,64 @@ prompt); task content last in the prompt; the "missed todos" sweep (`promisedFol
 (the zero-needs-a-positive-control doctrine); vault-style secret injection (`secret-boundary.ts`); scheduled agents
 that back off and escalate (gardener backoff and the overseer).
 
+## 4H. External scan (2026-10-26): Swamp — taken, refused, parked, already held
+
+[research: swamp-scan-2026-10-26] Read at source from clones: `swamp-club/swamp` (7e1aad0, AGPL-3.0),
+`swamp-club/swamp-extensions` (eb3833d), `adamhjk/adamhjk-blog` (9c19638), `adamhjk/garfield-extension` and the two
+trip-planner demos. swamp-club.com and the press coverage could not be reached from the session; nothing here rests
+on them. Swamp is a CLI an agent drives: the agent works a task out once, encodes it as typed behaviors wired into
+deterministic workflows, and a model is called only inside a method that needs judgment. As in §4F and §4G, every
+row taken is this repo's own code; no text is copied and nothing is installed.
+**THE MEASURED FINDING:** Swamp's headline number is its Garfield code review: 4,639,565 tokens as a skill against
+506,484 as a workflow, 8.1×. The company measured it with one repetition per case, and both arms failed the harder
+case, so the ratio is an anecdote. The useful part is how each arm failed. The skill failed OPEN: it cleared the
+change as "verified" with the defect still present. The workflow failed CLOSED: it reported `blocked`. This repo
+already holds the fail-closed half: `VERDICT:` markers, executable proofs and `reviewContractDigest`. What it lacks is
+a way to tell which of its procedures are mechanical enough to stop paying model tokens for. The retro drafts each
+procedure as SKILL.md text, and every worker then re-reads it and re-runs it in tokens. Swamp also audits its trust-root
+files on every change, because agents write them (`claude-review-integrity` in its ci.yml). Here, machine lanes write
+the trust root every day (the retro, the gardeners and the triage lane), and nothing refused an invisible character
+in it. On 2026-10-26 the 4,634 trust-root files held none.
+**BUILT IN THE SCAN SESSION (operator-session builds, unfiled):** #14487 refuses a zero-width, bidirectional, tag
+or stray variation-selector character, or a word that mixes Latin with Cyrillic or Greek, in any file that instructs
+an agent. It is deterministic, so no model is asked, and `plan/feedback/` stays out because it holds external input ·
+#14473 `rmd procedures` reports, per task type, how often clean merged runs repeat the same tool-call sequence and
+which steps repair never needed. It is the measure that says whether any procedure is mechanical enough to compile,
+and it compiles nothing.
+**TAKEN — TWO SHARDS, FILED 2026-10-26:** **W1-T10727** the transcript miner compares normalized tool-call signatures
+(`Bash:git`, `Edit:<path>`), not bare tool names, under which every run shares `Bash` and `Read` and nothing
+separates a clean run from a repaired one. It is held until `rmd procedures` on the host shows a distinguishing step
+· **W1-T10728** the gardener overseer reads `retro.error` and `retro_aborted_integrity` as the retro's failures. Today
+a retro that fails on every fire is read by nothing, and W1-T9119 names only a persisting deferral.
+**REFUSED, WITH THE REASON:**
+- local attestation in place of hosted CI re-runs (Swamp's verification-conventions.md): Swamp's own document says
+  "nothing yet stops a document being posted that it did not write", and the workers here are autonomous. The useful
+  part, a digest of what shaped a verdict, is held as `reviewContractDigest`.
+- pinned set-equality ratchets (`assertPinnedSet`, "a count-only ratchet lets one violation be traded for another"):
+  scripts/cycle-baseline.json is at 0 and `no-circular` has been an error since W1-T2895, so no ring can be traded.
+  The other counted ratchets count anonymous call sites per file, which have no identity to pin.
+- adopting Swamp as the workflow engine: it is AGPL, it requires a Swamp Club account for every subcommand since #2777,
+  and the daemon's ledger, plan and gates already do this job here.
+**PARKED, WITH WHAT EACH WAITS FOR:**
+- the model half of Swamp's integrity review (instructions injected into readable text, must→should weakening,
+  narrowed guards). It waits for #14487 to run a month on main, and for one measured case where a machine lane
+  weakened a headline or guard that review missed.
+- trigger, routing and sufficiency evals for the CLAUDE.md index (Swamp's three skill-eval phases: `claude -p`, no
+  tools, a schema enum answer). Workers run with `settingSources: []` and never load CLAUDE.md; their instruction
+  channel is learnings injection, which `rmd wipe-test` already measures end to end. It waits for evidence that an
+  operator session broke a headline it had read.
+- a deterministic per-task dossier (software-factory's no-LLM `summary`): `rmd trace <id>` already renders the
+  provenance chain. File one only if a retro or operator session is measured rebuilding a task's history from raw
+  NDJSON.
+- the factory's cycle-scoped evidence (a finding is cleared only by a review recorded this cycle, and CI evidence is
+  bound to the run id). It waits for two falsifier tests against the fix lane; file a shard only if one fails.
+**ALREADY HELD:** review reuse keyed on the PR's own-diff digest (W1-T3704; Garfield memoizes the same snapshot); the
+`VERDICT:` marker rule; the per-part prompt manifest; the prompt-surface golden gate; risk-tiered review; input
+pinning, since `reviewContractDigest` hashes the acceptance a verdict was given against; a reason on every skip row;
+resume from a durable checkpoint (`implement.resumed`); scheduled flake detection (selector-shadow and the
+flake-incident gardener); session learnings (the retro and learnings/*.yaml); an audit trail of every agent tool call
+(`worker.activity` rows).
+
 ## 5. Principles engine
 
 Remudero's CI today is typecheck + tests. That is the FLOOR, not the bar. The operator's fleet
