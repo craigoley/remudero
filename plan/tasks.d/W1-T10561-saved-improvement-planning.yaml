@@ -27,6 +27,7 @@
     - src/lib/daemon.ts
     - src/cli/commands/daemon.ts
     - src/run-task.ts
+    - src/lib/ledger.ts
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
     - test/**/improvement-thread.test.ts
@@ -67,6 +68,12 @@
     is never repeated without its native recovery receipt. A saved or queued request is not worker
     admission, a completed draft, a filed task, a merge or deployment. The named regression must refuse
     direct service execution and fail if production daemon-pump wiring or recovery is removed.
+    Receipt retention: the saved filing reader uses approve.id_materialized to recover the actual filed
+    task identities. Register that deciding receipt in the existing ledger retention set so rotation keeps
+    it under the unchanged retention bounds. Exercise the real rotation and filing-receipt reader; an
+    unregistered receipt must lose the identities and fail the regression. No retention cap, admission,
+    source-evidence or ownership guard may be weakened. This is implementation scope, not task credit.
+
   falsifier: Remove idempotency, source/scope validation and action boundary separately; repeated creation,
     cross-repository substitution and no-dispatch assertions must fail. Exercise actual persistence
     interruption and restart. A local React conversation or feedback-only ID cannot pass the saved-thread
@@ -82,6 +89,8 @@
       proof: "grep: buildImprovementThreadRoutes( in src/lib/serve.ts"
     - claim: saved planning actions use daemon-owned execution and normal admission with durable recovery
       proof: "unit test: saved improvement actions start only through the daemon-owned handoff"
+    - claim: saved filing receipts retain their task identities across ledger rotation
+      proof: "unit test: improvement filing receipts retain task identities across ledger rotation"
   note: Reviewed core c18e7e4c48cee7cb19d2fc96fa93273ef63d85a5 and console
     c57646ea3636341cc1fad8847df8b144e169d3f1. Before filing, all 10 open core PR heads and main were compared
     by subject; each head had the same subject counts as main, with more than 4,370 plan shards as corpus
