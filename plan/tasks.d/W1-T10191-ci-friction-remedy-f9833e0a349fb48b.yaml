@@ -6,7 +6,8 @@
   verify: auto
   risk: low
   priority: 1.26
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "ci-friction:fix_refusal:census-precheck"
@@ -81,3 +82,16 @@
       - "The family's track record is middling (36 merged vs 40 declined), but the change is narrow and goes through normal CI and review."
     judged_at: "2026-10-20T00:44:35.628Z"
     pin: "1d3cff1ff4990bdccf0809029f1486e2349bf708f121cfc5d2e1438496f88cc5"
+  amendment: |
+    Operator disposition proposed 2026-10-26: withdraw this unqualified diagnostic-only
+    remedy without remedy credit. Preserve all original observations, criteria, proof,
+    scope and ruling as historical evidence. PR #14249 at 1f4c040078f4a43f718298a191349813dfcb804b
+    now clamps its suggested baseline to the recorded ceilings; it does not raise them.
+    Required review still correctly rejects prevention: printing measurements does not
+    prevent dispatch or self-heal the distinct branch failures. The later saved worker
+    proposal only enables that printer in snapshot mode and remains unqualified.
+    The original census-precheck class mixes importer reach, coverage, comments and fixture
+    findings. A reporter label does not establish one failing mechanism or source owner.
+    Do not weaken a gate or claim all those failures repaired. Any replacement needs
+    per-round causal evidence and an executable regression of the actual remedy.
+    This disposition grants no retry, claim deletion, worker stop or runtime action.
