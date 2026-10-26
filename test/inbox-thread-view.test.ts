@@ -17,6 +17,7 @@ import { persistedInboxPath, readPersistedInbox } from "../src/lib/fleet-lane.js
 import type { PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import type { Proposal } from "../src/lib/inbox.js";
+import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
 
 const T0 = Date.parse("2026-10-02T12:00:00.000Z");
 const PROPOSAL = "ruling-w1-t1";
@@ -73,7 +74,7 @@ function fixture(t: TestCtx, lane = "ready"): Fixture {
   mkdirSync(join(f.stateDir, "read-model"), { recursive: true });
   writeFileSync(readModelSwitchesPath(f.stateDir), JSON.stringify({ views: { "inbox-thread": "serve" } }));
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: [instance], clock, holder: "inbox-thread-view", oracle: "off", demand, views: [view], post: (m) => void messages.push(m) });
-  t.after(() => { ticker.release(); rmSync(root, { recursive: true, force: true }); });
+  t.after(async () => { ticker.release(); await flushReadModelTransactions(); rmSync(root, { recursive: true, force: true }); });
   ticker.start();
   ticker.want(INBOX_THREAD_VIEW_NAME, KEY);
   f.tick = (times = 1) => {
@@ -190,7 +191,7 @@ test("a key whose build throws answers unavailable and is logged, and the other 
   const inboxRoot = join(root, "inbox");
   mkdirSync(join(inboxRoot, "state"), { recursive: true });
   const db = openProjectorReadModel(stateDir, "core");
-  t.after(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
+  t.after(async () => { db.close(); await flushReadModelTransactions(); rmSync(root, { recursive: true, force: true }); });
   db.exec(`CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL,
     generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view, key)) WITHOUT ROWID;`);
   // A page whose body is not JSON: reading the proposal's item off it throws inside the build.
@@ -224,7 +225,7 @@ async function classifiedFixture(t: TestCtx, count = 80) {
     inboxMainSha:()=>"a".repeat(40),inboxGrepAnchor:()=>true,ratify:{approve:()=>undefined,reframe:()=>undefined},
     inboxAuditScope:{instance:"core",repository:"owner/core"}};
   const db=openProjectorReadModel(join(root,"read-model-state"),"core");
-  t.after(()=>{db.close();rmSync(root,{recursive:true,force:true});});
+  t.after(async()=>{db.close();await flushReadModelTransactions();rmSync(root,{recursive:true,force:true});});
   db.exec(`CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL,key TEXT NOT NULL,version INTEGER NOT NULL,
     generation INTEGER NOT NULL,etag TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(view,key)) WITHOUT ROWID;`);
   const demand=createDemandBook({clock:fixedClock(T0)});demand.want(INBOX_THREAD_VIEW_NAME,KEY);

@@ -103,7 +103,9 @@ test("W1-T9050: git wrappers retain executable argv and repository scope", () =>
 test("W1-T9050: rule-checks still runs every suite whose census row the recognizer change removed", () => {
   const suites = new Set(listRuleSuites(REPO_ROOT));
   const members = new Set(CENSUS_POPULATION.map((member) => member.testFile));
-  assert.equal(RETAINED_RULE_SUITES.length, 26, "the 26 suites the row removals dropped from listRuleSuites");
+  assert.equal(RETAINED_RULE_SUITES.length, 27, "the original 26 suites plus the concurrent gate-repair suite");
+  assert.ok(suites.has("test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts"),
+    "W1-T9049's fixture-only suite must keep running after its stale census row leaves");
   assert.equal(new Set(RETAINED_RULE_SUITES).size, RETAINED_RULE_SUITES.length, "no retained suite is listed twice");
   for (const path of RETAINED_RULE_SUITES) {
     assert.ok(existsSync(join(REPO_ROOT, path)), `${path} must exist`);

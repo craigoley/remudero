@@ -1,0 +1,25 @@
+- id: W1-T10667
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — plan-proof-unrunnable:plan-only PR is red on ci-shard (<n>/<n>), lint-plan, remudero-review cost 4.29 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.27
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:plan-proof-unrunnable:plan-only PR is red on ci-shard (<n>/<n>), lint-plan, remudero-review"
+  files:
+    - src/lib/pr-blocker.ts
+    - test/github/flow-plan-proof-unrunnable-plan-only-pr-is-red-on-ci-shard-n-n-lint-plan-remudero-rev.test.ts
+  acceptance:
+    - claim: "plan-proof-unrunnable:plan-only PR is red on ci-shard (<n>/<n>), lint-plan, remudero-review is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T10667: flow-plan-proof-unrunnable-plan-only-pr-is-red-on-ci-shard-n-n-lint-plan-remudero-rev clears without a person\" in test/github/flow-plan-proof-unrunnable-plan-only-pr-is-red-on-ci-shard-n-n-lint-plan-remudero-rev.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    plan-proof-unrunnable:plan-only PR is red on ci-shard (<n>/<n>), lint-plan, remudero-review cost 4.29 PR-hours; owner NONE
+    Owner NONE is absent.
+    Source owner: src/lib/pr-blocker.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #14215: 4.38 PR-hours — plan-only PR is red on ci-shard (2/8), lint-plan, remudero-review — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair — its log names: W1-T10431 [machine-filing-admission] task W1-T10431 is not selectable by runnableCandidates under the current releasedIds: task W1-T10431 is verify:human — not auto-runnable by the proto-runner
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.

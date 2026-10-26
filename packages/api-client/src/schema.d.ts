@@ -3838,6 +3838,173 @@ export interface components {
       ready: boolean;
       reason: string;
     };
+    CodeHealthView: {
+      view: "code-health";
+      version: 1;
+      generatedAt: string;
+      asOf: (string) | (null);
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: CodeHealthViewData;
+    };
+    CodeHealthViewData: {
+      version: "code-health-view-v1";
+      /** all, or a configured owner/repository */
+      repository: string;
+      expectedRepositories: (string)[];
+      unresolvedInstances: (string)[];
+      repositories: ({
+        repository: string;
+        snapshotId: (string) | (null);
+        state: "measured" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized" | "rate_limited";
+        summary: ({
+          met: number;
+          assessed: number;
+          expected: number;
+          healthy: (boolean) | (null);
+        }) | (null);
+        urgentFindings: {
+          value: (number) | (null);
+          precision: "exact" | "at_least" | "unavailable";
+          /** The measured CodeQL scope; this is not a comprehensive security assessment. */
+          scope: string;
+        };
+        measuredAt: (string) | (null);
+        analyzedSha: (string) | (null);
+        currentSha: (string) | (null);
+        freshness: "fresh" | "stale" | "unavailable";
+        lastAttemptAt: (string) | (null);
+        nextCheckDueAt: (string) | (null);
+        collection: ({
+          state: "none";
+        }) | ({
+          state: "failed";
+          startedAt: string;
+          finishedAt: string;
+          snapshotId: (string) | (null);
+          reason: string;
+          failureKind?: "unauthorized" | "rate_limited" | "unavailable";
+        }) | ({
+          state: "unavailable";
+          reason: string;
+        });
+        reason: (string) | (null);
+        sourceClocks: ({
+          kind: string;
+          state: "complete" | "partial" | "stale" | "not_collected" | "unavailable";
+          measuredAt: (string) | (null);
+          analyzedSha: (string) | (null);
+        })[];
+      })[];
+      snapshotId: (string) | (null);
+      isCurrentSnapshot: (boolean) | (null);
+      assessment: ({
+        version: "code-health-v1";
+        repository: string;
+        analyzedSha: string;
+        currentSha: string;
+        baselineSha: (string) | (null);
+        policyVersion: string;
+        observedAt: string;
+        nextDueAt: (string) | (null);
+        state: "measured" | "partial" | "stale" | "not_collected" | "unavailable";
+        sources: ({
+          id: string;
+          kind: string;
+          required: boolean;
+          state: "complete" | "partial" | "stale" | "not_collected" | "unavailable";
+          analyzedSha: (string) | (null);
+          observedAt: (string) | (null);
+          scopeHash: (string) | (null);
+          toolVersion: (string) | (null);
+          rulesVersion: (string) | (null);
+          configHash: (string) | (null);
+          baseline: ({
+            sha: string;
+            scopeHash: string;
+            toolVersion: string;
+            rulesVersion: string;
+            configHash: string;
+          }) | (null);
+          exclusions: (string)[];
+          reason: (string) | (null);
+        })[];
+        checks: ({
+          id: string;
+          category: "maintainability" | "security" | "reliability" | "tests";
+          state: "met" | "not_met" | "not_measured";
+          sourceIds: (string)[];
+          reason: string;
+        })[];
+        findings: ({
+          fingerprint: string;
+          sourceId: string;
+          severity: "critical" | "high" | "medium" | "low";
+          category: string;
+          status: "new" | "existing" | "unknown";
+          path: string;
+          title: string;
+          effortMinutes: (number) | (null);
+          estimateKind: ("modeled") | (null);
+        })[];
+        summary: {
+          met: number;
+          assessed: number;
+          expected: number;
+          healthy: (boolean) | (null);
+        };
+      }) | (null);
+      findingCount: (number) | (null);
+      urgentFindings: {
+        value: (number) | (null);
+        precision: "exact" | "at_least" | "unavailable";
+        /** The measured CodeQL scope; this is not a comprehensive security assessment. */
+        scope: string;
+      };
+      opportunities: ({
+        id: string;
+        snapshotId: string;
+        repository: string;
+        proposalId: string;
+        ruleId: string;
+        title: string;
+        consequence: string;
+        expectedResult: string;
+        acceptanceIdeas: (string)[];
+        uncertainty: (string)[];
+        mayPlan: boolean;
+        /** Total stable findings in this group; evidence entries may be paged. Effort estimates describe the whole group. */
+        evidenceCount: number;
+        evidence: ({
+          fingerprint: string;
+          sourceId: string;
+          scanId: string;
+          analyzedSha: (string) | (null);
+          observedAt: (string) | (null);
+          severity: "critical" | "high" | "medium" | "low";
+          title: string;
+          path: string;
+        })[];
+        effortMinutes: (number) | (null);
+        estimateKind: ("modeled") | (null);
+        relatedWork: ({
+          repository: string;
+          proposalId: string;
+          taskId?: string;
+          prUrl?: string;
+          threadId?: string;
+        })[];
+      })[];
+      relatedWorkState: "reported" | "partial" | "stale" | "unavailable" | "not_collected";
+      relatedWorkAsOf: (string) | (null);
+      relatedWorkReason: (string) | (null);
+      /** Current source evidence can support a planning conversation; this does not approve, file or execute work. */
+      planningAvailable: boolean;
+      freshness: "fresh" | "stale" | "unavailable";
+      page: {
+        nextCursor: (string) | (null);
+      };
+    };
     /** GET /v1/views/repositories (docs/views.md, src/lib/repositories-view.ts): the repository portfolio across every instance serve holds, in one body. Each instance's `summary` IS its GET /v1/i/<instance>/repos/summary body, computed by the read-model worker from that instance's projected `repo_row` table; `projects` precomputes the console's grouping and its "worst is <repo>" line. Dark until state/read-model/switches.json sets `repositories` to `serve`. Version 2 carries no clock stamp in `data`: each summary's `generated_at` is its `repositories:<instance>` source's `asOf`, so the ETag moves only when the content does. */
     RepositoriesView: {
       view: "repositories";
@@ -7132,6 +7299,19 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": undefined;
+        };
+    };
+  };
+  "/v1/views/code-health": {
+    get: {
+      responses: {
+          "200": CodeHealthView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+          "503": undefined;
         };
     };
   };

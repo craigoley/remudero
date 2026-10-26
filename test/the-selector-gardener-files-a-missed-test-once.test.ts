@@ -123,3 +123,38 @@ test("W1-T4839: an unreadable edge falls back to the head sha and still files no
   const state = JSON.parse(readFileSync(join(h.root, "state", "selector-shadow-gardener.json"), "utf8")) as { edges: Record<string, string[]> };
   assert.ok(state.edges[TEST_FILE]!.includes(`head-2 -> ${TEST_FILE}`));
 });
+
+
+test("selector shadow preserves the exact missed subject while executable proofs avoid filename concern collisions", async () => {
+  const { selectorShadowMissTask, selectorShadowStructuralTask } = await import("#src/lib/selector-shadow-gardener.js");
+  const { machineShardFilingRefusal } = await import("#src/lib/machine-filing.js");
+  const { buildReviewPrompt, reviewTaskNarrative } = await import("#src/lib/review.js");
+  const file = "test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts";
+  const miss = { runId: 40134584545, headSha: "fb0cfeee8fcff6b3737c283bff094044e1df0341",
+    baseSha: "3f79e0b85db5a588f810d73b9a9d062378760d9b", prNumber: 14013, selection: "floor" as const, file };
+  for (const structural of [false, true]) {
+    const id = structural ? "W1-T9003" : "W1-T9002";
+    const edge = `src/lib/gate-repair-observations.ts -> ${file}`;
+    const text = structural ? selectorShadowStructuralTask(file, id, [edge], "W1-T9001") :
+      selectorShadowMissTask(miss, id, ["src/lib/gate-repair-observations.ts"]);
+    const task = loadPlanFromYaml(text, `${id.toLowerCase()}-selector-shadow-miss.yaml`).tasks[0]!;
+    assert.equal(task.risk, "low");
+    assert.equal(task.verify, "human", "the machine judge still owns release");
+    assert.ok(task.note?.includes(file), "the full exact test subject remains in the contract");
+    assert.ok(task.note?.includes(edge), "the exact observed edge remains in the contract");
+    const narrative = reviewTaskNarrative(task);
+    const reviewPrompt = buildReviewPrompt({ task: { id, acceptance: task.acceptance, ...narrative },
+      prUrl: "https://github.com/owner/repo/pull/1", owner: "owner", repo: "repo", headSha: miss.headSha });
+    assert.ok(reviewPrompt.includes(file), "the exact suite reaches the real reviewer prompt through its task narrative");
+    assert.ok(reviewPrompt.includes(edge), "the exact edge reaches the real reviewer prompt through its task narrative");
+    assert.ok(task.acceptance);
+    assert.ok(task.acceptance.every(c => c.proof?.startsWith(`unit test: ${id}:`)));
+    assert.ok(task.note?.includes(task.acceptance[0]!.proof!.slice("unit test: ".length)),
+      "the author is told the exact executable proof title");
+    assert.equal(machineShardFilingRefusal(text, `${id.toLowerCase()}-selector-shadow-miss.yaml`,
+      { pathExists: () => true }), undefined, "the real machine-filing guard admits the selector repair");
+    const widened = text.replace("src/lib/affected-suites.ts,", "src/lib/affected-suites.ts, src/lib/daemon.ts,");
+    assert.match(machineShardFilingRefusal(widened, `${id.toLowerCase()}-selector-shadow-miss.yaml`,
+      { pathExists: () => true }) ?? "", /sizing:.*daemon/, "a real second implementation concern still blocks");
+  }
+});
