@@ -114,7 +114,7 @@ test("W1-T9950: the first waiter to arrive is the first admitted", t => {
   // The falsifier's own shape: holder 6 s; A arrives at 1.6 s polling every 3 s; B at 4.1 s polling every 200 ms.
   const dir = slotDir(t, "fifo"), time = fakeClock(), alive = new Set(Object.values(PID));
   const base: Partial<TestSlotOptions> = { dir, slots: 1, load: IDLE, hostname, bootId: () => "boot-1", pidNamespace: () => "ns-1",
-    isPidAlive: pid => alive.has(pid), waitBoundMs: 60 * MIN };
+    isPidAlive: pid => alive.has(pid), waitBoundMs: 60 * MIN, queue: true };
   const holder = acquireTestSlot("holder", { ...base, clock: time.clock, pid: PID.holder, log: () => {}, say: () => {} });
   assert.equal(holder.outcome, "acquired");
   const s = scheduler(t, time, base);
@@ -155,7 +155,7 @@ test("W1-T9950: a dead ticket is reaped and the queue moves up", t => {
   }) as typeof process.kill;
   t.after(() => { process.kill = real; });
   const base: Partial<TestSlotOptions> = { dir, slots: 1, load: IDLE, hostname, bootId: () => "boot-1", pidNamespace: () => "ns-1",
-    isPidAlive: pid => alive.has(pid), waitBoundMs: 60 * MIN };
+    isPidAlive: pid => alive.has(pid), waitBoundMs: 60 * MIN, queue: true };
   const holder = acquireTestSlot("holder", { ...base, clock: time.clock, pid: PID.holder, log: () => {}, say: () => {} });
   // Two earlier arrivals: X on this host (pid probe) and F on another host (its own 1 s cadence × 3 beats).
   const x = writeTicket(dir, time.start - 20_000, { pid: PID.x, label: "X" });
@@ -201,7 +201,7 @@ test("W1-T9950: a waiter reports its position and a measured ETA", t => {
     recordTestSlotHold(dir, { label: "preflight-author", heldMs, concurrency: 1, endedAt: new Date(time.start).toISOString() }, 1);
   }
   const base: Partial<TestSlotOptions> = { dir, slots: 1, load: IDLE, hostname, bootId: () => "boot-1", pidNamespace: () => "ns-1",
-    isPidAlive: pid => alive.has(pid), waitBoundMs: 60 * MIN };
+    isPidAlive: pid => alive.has(pid), waitBoundMs: 60 * MIN, queue: true };
   const holder = acquireTestSlot("preflight-author", { ...base, clock: time.clock, pid: PID.holder, log: () => {}, say: () => {} });
   const s = scheduler(t, time, base);
   const a = s.arrive(MIN, "check", { pid: PID.a, pollMs: 5_000 });
@@ -242,7 +242,7 @@ test("W1-T9950: a waiter reports its position and a measured ETA", t => {
 test("W1-T9950: a ticket never outlives its waiter", t => {
   const dir = slotDir(t, "lifetime"), time = fakeClock(), alive = new Set(Object.values(PID));
   const base: Partial<TestSlotOptions> = { dir, slots: 1, load: IDLE, hostname, bootId: () => "boot-1", pidNamespace: () => "ns-1",
-    isPidAlive: pid => alive.has(pid), waitBoundMs: 60 * MIN };
+    isPidAlive: pid => alive.has(pid), waitBoundMs: 60 * MIN, queue: true };
   const holder = acquireTestSlot("holder", { ...base, clock: time.clock, pid: PID.holder, log: () => {}, say: () => {} });
   const s = scheduler(t, time, base);
   // On acquire.
@@ -274,7 +274,7 @@ test("W1-T9950: a ticket never outlives its waiter", t => {
   const module = pathToFileURL(join(REPO_ROOT, "src/lib/test-slot.ts")).href;
   const script = `import { acquireTestSlot } from ${JSON.stringify(module)};
 import { readdirSync, writeSync } from "node:fs";
-const opts = { dir: ${JSON.stringify(dir)}, slots: 1, load: () => ({ cores: 8, load1: 0 }), log: () => {}, say: () => {} };
+const opts = { dir: ${JSON.stringify(dir)}, queue: true, slots: 1, load: () => ({ cores: 8, load1: 0 }), log: () => {}, say: () => {} };
 acquireTestSlot("child-holder", opts);
 acquireTestSlot("child-waiter", { ...opts, sleep: () => {
   writeSync(1, JSON.stringify(readdirSync(${JSON.stringify(testSlotQueueDir(dir))}).filter(n => n.endsWith(".json"))));
@@ -293,7 +293,14 @@ acquireTestSlot("child-waiter", { ...opts, sleep: () => {
 test("W1-T9950: a queue that cannot be used degrades to unqueued polling and says why", t => {
   const time = fakeClock(), alive = new Set(Object.values(PID));
   const opts = (dir: string): Partial<TestSlotOptions> => ({ dir, slots: 1, load: IDLE, hostname, bootId: () => "boot-1", pidNamespace: () => "ns-1",
-    isPidAlive: pid => alive.has(pid), waitBoundMs: 60 * MIN });
+    isPidAlive: pid => alive.has(pid), waitBoundMs: 60 * MIN, queue: true });
+  // (0) An injected fixture dir does not queue unless it opts in: nothing is created beside a dir its owner cleans.
+  const plain = slotDir(t, "plain");
+  const first = acquireTestSlot("holder", { ...opts(plain), queue: undefined, clock: time.clock, pid: PID.holder, log: () => {}, say: () => {} });
+  const unqueued = acquireTestSlot("late", { ...opts(plain), queue: undefined, waitBoundMs: 0, clock: time.clock, pid: PID.a, log: () => {}, say: () => {} });
+  assert.equal(unqueued.outcome, "wait_bound_exceeded");
+  first.release();
+  assert.equal(existsSync(testSlotQueueDir(plain)), false, "no queue and no hold history beside an injected dir by default");
   // (1) The queue path is a FILE: listing it fails, so the waiter polls unqueued and names why.
   const listed = slotDir(t, "queue-file");
   writeFileSync(testSlotQueueDir(listed), "not a directory");

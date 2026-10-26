@@ -14,7 +14,7 @@
  * A ticket carries NO authority over any slot record; it orders waiters and nothing else.
  */
 import { randomUUID } from "node:crypto";
-import { chmodSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
@@ -164,6 +164,22 @@ function writeWhole(path: string, body: string): void {
 }
 
 /**
+ * Run `write` inside the queue dir, created world-writable like the slot dir. The last waiter to leave removes
+ * the dir while it is EMPTY, so a peer's rmdir can land between our mkdir and our write: that one ENOENT is
+ * retried once, and after `write` our own entry keeps the dir non-empty.
+ */
+function inQueueDir(queueDir: string, write: () => void): void {
+  for (let attempt = 0; ; attempt += 1) {
+    mkdirSync(queueDir, { recursive: true, mode: 0o777 });
+    if ((statSync(queueDir).mode & 0o777) !== 0o777 && statSync(queueDir).uid === process.getuid?.()) chmodSync(queueDir, 0o777);
+    try { write(); return; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || attempt > 0) throw error;
+    }
+  }
+}
+
+/**
  * Join the queue. The ticket is written to a dot-temp name and LINKED into place, so it appears whole
  * or not at all. A process `exit` handler removes it if the waiter ends without leaving the queue; a
  * waiter killed by a signal leaves a ticket whose pid is dead, which the next waiter reaps.
@@ -176,19 +192,25 @@ export function takeTestSlotTicket(slotDir: string, fields: Omit<TestSlotTicket,
     return () => void process.removeListener("exit", handler);
   }): OwnTicket {
   const queueDir = testSlotQueueDir(slotDir);
-  mkdirSync(queueDir, { recursive: true, mode: 0o777 });
-  if ((statSync(queueDir).mode & 0o777) !== 0o777 && statSync(queueDir).uid === process.getuid?.()) chmodSync(queueDir, 0o777);
   const nonce = randomUUID();
   ticketSequence += 1;
   const name = testSlotTicketName(Date.parse(fields.arrivedAt), ticketSequence, nonce), path = join(queueDir, name);
   const temp = join(queueDir, `.${nonce}.tmp`);
   let current: TestSlotTicket = { ...fields, nonce };
-  writeWhole(temp, JSON.stringify(current));
-  try { linkSync(temp, path); } finally { unlinkSync(temp); }
+  inQueueDir(queueDir, () => {
+    writeWhole(temp, JSON.stringify(current));
+    try { linkSync(temp, path); } finally { unlinkSync(temp); }
+  });
   let dropped = false;
   const unlinkOwn = (): void => {
     try { unlinkSync(path); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    try { rmdirSync(queueDir); }
+    catch (error) {
+      // rmdir removes only an EMPTY dir: waiting peers, a hold history, another uid's dir or one already gone all
+      // keep it, for whoever empties it last. Nothing is lost by keeping it.
+      void error;
+    }
   };
   const detach = onExit(unlinkOwn);
   return {
@@ -196,8 +218,10 @@ export function takeTestSlotTicket(slotDir: string, fields: Omit<TestSlotTicket,
     beat(heartbeatAt: string): void {
       if (dropped) return;
       current = { ...current, heartbeatAt };
-      writeWhole(temp, JSON.stringify(current));
-      renameSync(temp, path);
+      inQueueDir(queueDir, () => {
+        writeWhole(temp, JSON.stringify(current));
+        renameSync(temp, path);
+      });
     },
     drop(): void {
       if (dropped) return;

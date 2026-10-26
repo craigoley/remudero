@@ -875,6 +875,9 @@ export interface TestSlotOptions {
   pid?: number;
   load?: () => HostLoad;
   log?: (line: string) => void;
+  /** Join the FIFO waiter queue (W1-T9950). Default: on for the host's resolved shared slot dir; off for an
+   *  injected `dir` or a per-test-process dir, whose owner (a fixture) owns nothing beside it to clean up. */
+  queue?: boolean;
   /** The human line a queued waiter prints when where it stands changes; default stderr unless `log` is injected. */
   say?: (line: string) => void;
   /** Which priority binaries exist, for the caller's {@link lowPriorityCommand}. */
@@ -1169,7 +1172,8 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
   };
   let announced = false;
   // W1-T9950: a FIFO ticket per waiter, so admission follows arrival. An explicit protected parent gets no new entry.
-  let queueing = !parentPolicy, ticket: OwnTicket | undefined, lastQueued = "";
+  const queueEnabled = !parentPolicy && (opts.queue ?? (opts.dir === undefined && scope !== "test-process"));
+  let queueing = queueEnabled, ticket: OwnTicket | undefined, lastQueued = "";
   const say = opts.say ?? (opts.log ? undefined : (line: string) => void process.stderr.write(`${line}\n`));
   const judge: TicketJudge = { now: () => clock.now(), hostname: host, bootId, pidNamespace, isPidAlive, silentBeats: TEST_SLOT_SILENT_BEATS };
   const dropTicket = (): void => {
@@ -1250,7 +1254,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     return { fields: { position, ahead: aheadOf, holding, etaMs: eta.etaMs, etaBasis: eta.basis, message }, message };
   };
   const recordHold = (acquiredAt: number, held: number): void => {
-    if (parentPolicy) return;
+    if (!queueEnabled) return;
     try { recordTestSlotHold(dir, { label, heldMs: clock.now() - acquiredAt, concurrency: held, endedAt: clock.iso() }, slots); }
     catch (error) { cleanupLog({ step: "test_slot.hold_history_failed", label, error: String(error) }); }
   };
