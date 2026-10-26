@@ -1,0 +1,113 @@
+- id: W1-T10777
+  title: "AN ENGINE TREE IS NEVER AN UNMANAGED LANE — the ad-hoc lane reaper lists every <state>/engines/<hash> worktree as an unmanaged lane and has removed about 180 of them since 10-16, including the two whose removal failed core's state snapshot on 10-23 and 10-26; engines belong to pruneEngineTrees, which alone knows which one a live run names"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, which reaper owns an engine tree; no grace, arming, census, engine-retention or snapshot change
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: found while filing W1-T10766 (#14598); measured read-only on the Azure host's core ledger rotations 10-13..10-26"
+  plan_refs: [W1-T2847, W1-T2962, W1-T4065, W1-T9077, W1-T9738, W1-T10766, W1-T10086]
+  files:
+    - src/lib/worker.ts
+    - src/lib/engine-tree.ts
+    - test/deploy/an-engine-tree-is-never-an-unmanaged-lane.test.ts
+  rationale: |
+    READ 2026-10-26 on origin/main 4e339a938, and read-only on the Azure host (core ledger
+    /mnt/rmd/state2/state, every rotation from 2026-10-13 plus the live file).
+
+    THE DEFECT.
+    - Engine trees are detached git worktrees of the managed checkout at
+      `<config.root>/state/engines/<sourceHash>/` (engine-tree.ts:41-47, cut by ensureEngineTree), plus
+      in-flight `.build-<hash12>-<pid>-<ms>` siblings.
+    - `unmanagedWorktreeLanes` (worker.ts:7403-7427) lists every worktree git registers that is under
+      neither worktreesDir (`<root>/worktrees`) nor adhocLaneRoot (`<root>/lanes`). The engines root is
+      neither, so every engine is an "unmanaged lane".
+    - `runAdhocLaneReapRung` (worker.ts:7349-7364) hands those paths to reapStaleWorktreesAsync as
+      `candidatePaths`. laneWorkKeepReason (worker.ts:7232) keeps only a live run lock, an inflight lock
+      named by a `run-<id>-<ms>` basename, or an unpushed commit. None of them describes an engine, so
+      an engine whose newest mtime is older than the grace is removed. The grace is
+      ADHOC_LANE_REAP_GRACE_MS (14 d) scaled by the free fraction (W1-T4065): the 23:12Z census today
+      reads free_fraction 0.16, grace_ms 195,748,721 (about 54 h).
+    - The rung is armed in core (every `adhoc_lane.unmanaged` row since 10-14 reads dry_run false).
+
+    MEASURED (539 `adhoc_lane.unmanaged` rows, de-duplicated across rotations).
+    - In every row but the first two (10-14), the engines are the whole population or all but one
+      `/tmp/rmd-proof-base-*` / `/tmp/claude-1000/*` entry: e.g. 10-26T21:49Z count 54, 54 engines.
+    - 90 rows reaped something, 183 removals in total. Where count equals the engine count, every
+      removal was an engine. The largest: 10-23T05:14:49Z, 30 reaped of 37 (all engines).
+    - 10-23T05:14:49Z listed engine 77b7dd63 and 10-26T04:20:48Z (1 reaped) listed a1b89b5a; each was
+      the engine core's snapshot then failed on (W1-T10766's rationale, reclaim.log). W1-T10766 makes
+      the snapshot survive any remover. It leaves this one in place by design.
+    - The census also runs `du -sk` (laneSizeBytes, through onCandidate) on every candidate BEFORE its
+      keep decision, so each pass sizes every engine: 54 trees, about 11 GB and 587k files (W1-T10766's
+      count). That is I/O the 2026-10-08 ruling ("remove I/O") argues against.
+
+    HAS A RUN FAILED BECAUSE ITS ENGINE VANISHED? Not observed. Every verdict, run.error and
+    run_child.* row since 10-13 that names a `/engines/` path was read (173 rows). The module-resolution
+    failures among them are 9 rows over 4 runs on 10-16 15:15-15:25Z (engine 6a34d2fd) and 10-17 01:36Z
+    (a2e1cf65): `Cannot find module 'tsx'` / `Cannot find package 'yaml'` under the engine. Both
+    engines were still listed by later `adhoc_lane.unmanaged` rows (6a34d2fd until 10-19, a2e1cf65
+    until 02:04Z), so they had not vanished. These are the W1-T9738 class (a node_modules link into a
+    removed worker worktree; #12345 merged 10-16 16:00Z). The rest are container-identity and
+    pre-push refusals that only cite the engine's hooks path. So the count is 0. The exposure is real all
+    the same: a worker worktree's node_modules links through its run's engine (preopen-gate.ts:334-337),
+    the age gate reads mtimes, which reading files does not advance, and nothing in this rung asks
+    whether a run names the engine.
+
+    THE OWNER ALREADY DECIDES CORRECTLY. `pruneEngineTrees` (engine-tree.ts:384) keeps the newest safe
+    engine, the newest current one (`keep`) and every engine a non-terminal run directory names by
+    sourceHash or sha (namedByLiveRuns, :355). It defers the whole pass when a live run names no
+    engine, and it clears orphan `.build-` siblings and unrecorded directories itself.
+
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d for unmanagedWorktreeLanes, adhoc_lane.unmanaged,
+    `state/engines` and `engine tree`. W1-T10766 names this item as out of its scope. W1-T9077, W1-T9738,
+    W1-T9838, W1-T9906, W1-T10025 and W1-T10086 own engine building, trust, qualification, the gate
+    sandbox and backup. None touches the lane reaper. Open PRs read at 23:53Z: none touches worker.ts's
+    reap rung or engine-tree.ts.
+  design: |
+    1. ONE OWNER. The engines root, `<config.root>/state/engines`, is owned by engine-tree.ts. Every
+       registered worktree at or under it, a published engine or a `.build-` sibling, is left to
+       pruneEngineTrees. Decide it by that path, not by engine.json alone: an in-flight build has no
+       record yet, and pruneEngineTrees already clears unrecorded ones. Compare paths with the trailing
+       separator rule the managed roots already use (worker.ts:7421-7423).
+    2. NO CYCLE. engine-tree.ts imports worker.ts (linkWorktreeNodeModules), and depcruise holds
+       no-circular at zero (W1-T2895). So worker.ts must not import engine-tree.ts. Give worker.ts the
+       engines root from engine-tree.ts's own definition through a seam that keeps one definition, or
+       from a leaf both can import. Never write a second copy of the `engines` name.
+    3. THE CENSUS, NOT THE REAPER, CHANGES. `unmanagedWorktreeLanes` stops returning engine paths. The
+       `adhoc_lane.unmanaged` row gains a count of the registrations it left to the engine owner, so
+       the survey still shows them. Because they are no longer candidates, the rung neither sizes nor
+       removes them. reapStaleWorktrees, laneWorkKeepReason, the grace, the headroom scaling and arming
+       are unchanged. A non-engine unmanaged lane is reaped exactly as today.
+    4. AN ENGINE IN USE IS NEVER REMOVED BY EITHER PATH. The lane reaper no longer removes any engine.
+       pruneEngineTrees keeps its namedByLiveRuns guard and its defer-on-undecidable rule unchanged.
+    5. The tests use a real git repository, a registered detached engine worktree with an engine.json,
+       a `.build-` sibling and a stale out-of-root detached control lane, all aged past the grace with
+       utimes. The armed rung runs through the real unmanagedWorktreeLanes and reapStaleWorktreesAsync,
+       with `sizeBytes` recording what it was asked to size. Put them in the suite whose path
+       `rmd test-place` computed (test/deploy/, confidence high).
+  acceptance:
+    - claim: "a published engine tree and an in-flight .build- sibling registered under <state>/engines are not unmanaged lanes, while an ordinary worktree outside every managed root still is"
+      proof: 'grep: test("W1-T10777: an engine tree registered outside the lane roots is not an unmanaged lane" in test/deploy/an-engine-tree-is-never-an-unmanaged-lane.test.ts'
+    - claim: "an armed ad-hoc reap pass past its grace leaves every engine tree on disk and registered, never sizes one, reports them as left to the engine owner, and still reaps the stale non-engine control lane"
+      proof: 'grep: test("W1-T10777: an armed ad-hoc reap pass never removes or sizes an engine tree" in test/deploy/an-engine-tree-is-never-an-unmanaged-lane.test.ts'
+  falsifier: |
+    At base both cases fail: unmanagedWorktreeLanes returns the engine and the `.build-` sibling, and
+    the armed rung sizes and removes the aged engine.
+    - Exclude only directories holding engine.json: the `.build-` sibling is listed again, and the first
+      case fails.
+    - Keep listing engines but add a keep reason for them: the second case sees the engine sized.
+    - Drop engines from the candidates everywhere, including the control lane's root: the control lane
+      survives, and the second case fails.
+    GUARDS that held at base and must still hold:
+    - W1-T2847/W1-T2962's suites in test/adhoc-lane-reap.test.ts (disarmed survey, live-branch keep,
+      removal through the parent, unregistered directories never candidates);
+    - W1-T9077's prune suite in test/a-run-child-runs-from-an-engine-tree-pinned-to-its-revision.test.ts
+      (a run directory that names no engine defers the prune; a named engine is kept);
+    - depcruise no-circular stays at zero.
