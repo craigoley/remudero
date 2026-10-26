@@ -85,4 +85,3 @@ test("gather phase duration uses the supplied clock and never reports a negative
   observe("report", () => null);
   assert.deepEqual(rows.map(r => r.duration_ms), [0, 12, 0, 0]);
 });
-
