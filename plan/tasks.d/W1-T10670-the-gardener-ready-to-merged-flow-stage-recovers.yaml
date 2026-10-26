@@ -1,0 +1,24 @@
+- id: W1-T10670
+  title: "THE GARDENER PR ready_to_merged STAGE SLOWED ON THE LIGHT SURFACE — p50 12.1 min against a 4.2 min baseline over the last 24 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-regression:gardener:ready_to_merged:light"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/the-gardener-ready-to-merged-flow-stage-recovers.test.ts
+  acceptance:
+    - claim: "the gardener ready_to_merged stage on the light surface returns under 2x its baseline p50"
+      proof: "grep: test(\"the gardener ready_to_merged stage recovers\" in test/sweep/the-gardener-ready-to-merged-flow-stage-recovers.test.ts"
+  note: "Filed by the flow gardener (W1-T5904). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not re-file this stage while this task is open."
+  rationale: |
+    gardener PRs, stage ready_to_merged on the light surface: p50 12.1 min against a 4.2 min baseline (rolling).
+    Last 24 h: n 15, p50 12.1, p90 22 min.
+    Slowest PRs: #14082 (30.7 min), #14253 (22 min), #14257 (19 min).
+    Find what these PRs share at this stage before changing a bound.

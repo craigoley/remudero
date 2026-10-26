@@ -60,6 +60,14 @@ const stageEvidenceSchema = z.object({
   references: z.array(z.object({ label: text(120), url: httpUrl }).strict()).max(16),
 }).strict();
 
+/** Trusted mechanisms only: never reachable from the browser brief schema; grants no execution authority. */
+export const productTransitionSchema = z.object({
+  version: z.literal(PRODUCT_INTENT_VERSION), requestId: productRequestIdSchema, id: productIdSchema,
+  expectedRevision: revision, expectedObjectiveRevision: revision,
+  repository: repositoryIdentitySchema.optional(),
+  stageEvidence: z.array(stageEvidenceSchema).min(1).max(16).optional(),
+}).strict().refine((value) => value.repository !== undefined || value.stageEvidence !== undefined);
+
 export const storedProductSchema = z.object({
   version: z.literal(PRODUCT_INTENT_VERSION), id: productIdSchema, revision, objectiveRevision: revision,
   createdAt: instant, updatedAt: instant, brief: productBriefSchema,
@@ -103,6 +111,7 @@ export const productOwnerStateSchema = z.object({
 
 export type ProductBrief = z.infer<typeof productBriefSchema>;
 export type ProductWrite = z.infer<typeof productWriteSchema>;
+export type ProductTransition = z.infer<typeof productTransitionSchema>;
 export type StoredProduct = z.infer<typeof storedProductSchema>;
 export type ProductReceipt = z.infer<typeof productReceiptSchema>;
 export type ProductOwnerState = z.infer<typeof productOwnerStateSchema>;
