@@ -3574,6 +3574,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixOwnerReclaimableAtHold: (pr, decline) => {
       const { worktree_path: ownerPath, branch, task_id: taskId } = decline;
       if (typeof ownerPath !== "string" || typeof branch !== "string" || typeof taskId !== "string") return false;
+      if (decline.owner_recovery_reason === "owner_dirty_recovery_preserve_failed" &&
+          (branch !== pr.headRefName || taskId !== fixLedgerTaskIdFor(pr))) return false;
       try {
         const snapshot = registeredOwnerRecovery.capture({
           repoDir, worktreesRoot: worktreesDir(config), ownerPath, taskId, branch,
