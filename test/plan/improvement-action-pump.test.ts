@@ -69,7 +69,7 @@ test("saved improvement daemon command supplies durable discovery and the owned 
     let captured: daemon.DaemonDeps | undefined;
     try {
       const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
-        daemonBoot: () => undefined,
+        daemonBoot: async () => ({ env_clean: true, billing_mode: "subscription", node_path: process.execPath, node_version: process.version }),
         runDaemon: async (_plan, deps) => { captured = deps; return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 }; },
       });
       assert.equal(code, 0); assert(captured);
