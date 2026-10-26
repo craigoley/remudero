@@ -38,6 +38,7 @@
     - src/lib/views.ts
     - src/lib/serve.ts
     - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
     - test/**/code-health-projection.test.ts
     - test/**/code-health-opportunities.test.ts
   rationale: Existing quality and coverage intake discovers useful debt but exposes no comparable per-repository
