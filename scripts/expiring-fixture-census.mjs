@@ -75,6 +75,16 @@ export const STALE_DAYS_OFFSET = "sweep.staleDays";
  */
 export const AGED_FIELDS = [
   {
+    field: "observedAt",
+    threshold: "code health finding-source freshness (24 hours)",
+    source: "src/lib/codeql-quality-intake.ts",
+    evidence: ["const observedAt = Date.parse(scan.observedAt)", "observedAt <= now", "now - observedAt <= 86_400_000"],
+    offsetDays: 1,
+    // Pure projections take an injected clock. Measure fixtures reaching the view or saved-chat
+    // entry points that can evaluate this source against the current service clock.
+    consumers: ["readCodeHealthReport", "createImprovementThread", "readImprovementThread", "buildImprovementThreadRoutes", "requestImprovementAction", "runImprovementAction"],
+  },
+  {
     field: "lastActivityAt",
     threshold: "sweep.staleDays",
     source: "src/lib/sweep.ts",

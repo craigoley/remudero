@@ -8885,6 +8885,717 @@ components:
         ready: {type: boolean}
         reason: {type: string}
 
+    CodeHealthView:
+      type: object
+      additionalProperties: false
+      required:
+        - view
+        - version
+        - generatedAt
+        - asOf
+        - stale
+        - sources
+        - data
+      properties:
+        view:
+          type: string
+          enum:
+            - code-health
+        version:
+          type: integer
+          enum:
+            - 1
+        generatedAt:
+          type: string
+          format: date-time
+        asOf:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        stale:
+          type: boolean
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+          maxItems: 32
+        data:
+          $ref: "#/components/schemas/CodeHealthViewData"
+    CodeHealthViewData:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - repository
+        - expectedRepositories
+        - unresolvedInstances
+        - repositories
+        - snapshotId
+        - isCurrentSnapshot
+        - assessment
+        - findingCount
+        - urgentFindings
+        - opportunities
+        - relatedWorkState
+        - relatedWorkAsOf
+        - relatedWorkReason
+        - planningAvailable
+        - freshness
+        - page
+      properties:
+        version:
+          type: string
+          enum:
+            - code-health-view-v1
+        repository:
+          type: string
+          description: all, or a configured owner/repository
+        expectedRepositories:
+          type: array
+          items:
+            type: string
+          maxItems: 256
+        unresolvedInstances:
+          type: array
+          items:
+            type: string
+          maxItems: 256
+        repositories:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - repository
+              - snapshotId
+              - state
+              - summary
+              - urgentFindings
+              - measuredAt
+              - analyzedSha
+              - currentSha
+              - freshness
+              - lastAttemptAt
+              - nextCheckDueAt
+              - collection
+              - reason
+              - sourceClocks
+            properties:
+              repository:
+                type: string
+              snapshotId:
+                oneOf:
+                  - type: string
+                    pattern: ^[a-f0-9]{64}$
+                  - type: "null"
+              state:
+                type: string
+                enum:
+                  - measured
+                  - partial
+                  - stale
+                  - not_collected
+                  - unavailable
+                  - unauthorized
+                  - rate_limited
+              summary:
+                oneOf:
+                  - &a1
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - met
+                      - assessed
+                      - expected
+                      - healthy
+                    properties:
+                      met:
+                        type: integer
+                        minimum: 0
+                      assessed:
+                        type: integer
+                        minimum: 0
+                      expected:
+                        type: integer
+                        minimum: 0
+                      healthy:
+                        oneOf:
+                          - type: boolean
+                            description: Check policy result for the saved code version. Current access, source age and urgent findings
+                              remain separate.
+                          - type: "null"
+                  - type: "null"
+              urgentFindings: &a2
+                type: object
+                additionalProperties: false
+                required:
+                  - value
+                  - precision
+                  - scope
+                properties:
+                  value:
+                    oneOf:
+                      - type: integer
+                        minimum: 0
+                      - type: "null"
+                  precision:
+                    type: string
+                    enum:
+                      - exact
+                      - at_least
+                      - unavailable
+                  scope:
+                    type: string
+                    description: The measured CodeQL scope; this is not a comprehensive security assessment.
+              measuredAt:
+                oneOf:
+                  - type: string
+                    format: date-time
+                  - type: "null"
+              analyzedSha:
+                oneOf:
+                  - type: string
+                    pattern: ^[a-f0-9]{40}$
+                  - type: "null"
+              currentSha:
+                oneOf:
+                  - type: string
+                    pattern: ^[a-f0-9]{40}$
+                  - type: "null"
+              freshness:
+                type: string
+                enum:
+                  - fresh
+                  - stale
+                  - unavailable
+              lastAttemptAt:
+                oneOf:
+                  - type: string
+                    format: date-time
+                  - type: "null"
+              nextCheckDueAt:
+                oneOf:
+                  - type: string
+                    format: date-time
+                  - type: "null"
+              collection:
+                oneOf:
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - state
+                    properties:
+                      state:
+                        type: string
+                        enum:
+                          - none
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - state
+                      - startedAt
+                      - finishedAt
+                      - snapshotId
+                      - reason
+                    properties:
+                      state:
+                        type: string
+                        enum:
+                          - failed
+                      startedAt:
+                        type: string
+                        format: date-time
+                      finishedAt:
+                        type: string
+                        format: date-time
+                      snapshotId:
+                        oneOf:
+                          - type: string
+                            pattern: ^[a-f0-9]{64}$
+                          - type: "null"
+                      reason:
+                        type: string
+                      failureKind:
+                        type: string
+                        enum:
+                          - unauthorized
+                          - rate_limited
+                          - unavailable
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - state
+                      - reason
+                    properties:
+                      state:
+                        type: string
+                        enum:
+                          - unavailable
+                      reason:
+                        type: string
+              reason:
+                oneOf:
+                  - type: string
+                  - type: "null"
+              sourceClocks:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                    - kind
+                    - state
+                    - measuredAt
+                    - analyzedSha
+                  properties:
+                    kind:
+                      type: string
+                    state:
+                      type: string
+                      enum:
+                        - complete
+                        - partial
+                        - stale
+                        - not_collected
+                        - unavailable
+                    measuredAt:
+                      oneOf:
+                        - type: string
+                          format: date-time
+                        - type: "null"
+                    analyzedSha:
+                      oneOf:
+                        - type: string
+                          pattern: ^[a-f0-9]{40}$
+                        - type: "null"
+                maxItems: 128
+          maxItems: 256
+        snapshotId:
+          oneOf:
+            - type: string
+              pattern: ^[a-f0-9]{64}$
+            - type: "null"
+        isCurrentSnapshot:
+          oneOf:
+            - type: boolean
+              description: Whether these are the latest saved results. Historical evidence never enables current planning.
+            - type: "null"
+        assessment:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required:
+                - version
+                - repository
+                - analyzedSha
+                - currentSha
+                - baselineSha
+                - policyVersion
+                - observedAt
+                - nextDueAt
+                - state
+                - sources
+                - checks
+                - findings
+                - summary
+              properties:
+                version:
+                  type: string
+                  enum:
+                    - code-health-v1
+                repository:
+                  type: string
+                analyzedSha:
+                  type: string
+                  pattern: ^[a-f0-9]{40}$
+                currentSha:
+                  type: string
+                  pattern: ^[a-f0-9]{40}$
+                baselineSha:
+                  oneOf:
+                    - type: string
+                      pattern: ^[a-f0-9]{40}$
+                    - type: "null"
+                policyVersion:
+                  type: string
+                observedAt:
+                  type: string
+                  format: date-time
+                nextDueAt:
+                  oneOf:
+                    - type: string
+                      format: date-time
+                    - type: "null"
+                state:
+                  type: string
+                  enum:
+                    - measured
+                    - partial
+                    - stale
+                    - not_collected
+                    - unavailable
+                sources:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - id
+                      - kind
+                      - required
+                      - state
+                      - analyzedSha
+                      - observedAt
+                      - scopeHash
+                      - toolVersion
+                      - rulesVersion
+                      - configHash
+                      - baseline
+                      - exclusions
+                      - reason
+                    properties:
+                      id:
+                        type: string
+                      kind:
+                        type: string
+                      required:
+                        type: boolean
+                      state:
+                        type: string
+                        enum:
+                          - complete
+                          - partial
+                          - stale
+                          - not_collected
+                          - unavailable
+                      analyzedSha:
+                        oneOf:
+                          - type: string
+                            pattern: ^[a-f0-9]{40}$
+                          - type: "null"
+                      observedAt:
+                        oneOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      scopeHash:
+                        oneOf:
+                          - type: string
+                          - type: "null"
+                      toolVersion:
+                        oneOf:
+                          - type: string
+                          - type: "null"
+                      rulesVersion:
+                        oneOf:
+                          - type: string
+                          - type: "null"
+                      configHash:
+                        oneOf:
+                          - type: string
+                          - type: "null"
+                      baseline:
+                        oneOf:
+                          - type: object
+                            additionalProperties: false
+                            required:
+                              - sha
+                              - scopeHash
+                              - toolVersion
+                              - rulesVersion
+                              - configHash
+                            properties:
+                              sha:
+                                type: string
+                                pattern: ^[a-f0-9]{40}$
+                              scopeHash:
+                                type: string
+                              toolVersion:
+                                type: string
+                              rulesVersion:
+                                type: string
+                              configHash:
+                                type: string
+                          - type: "null"
+                      exclusions:
+                        type: array
+                        items:
+                          type: string
+                        maxItems: 128
+                      reason:
+                        oneOf:
+                          - type: string
+                          - type: "null"
+                  maxItems: 128
+                checks:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - id
+                      - category
+                      - state
+                      - sourceIds
+                      - reason
+                    properties:
+                      id:
+                        type: string
+                      category:
+                        type: string
+                        enum:
+                          - maintainability
+                          - security
+                          - reliability
+                          - tests
+                      state:
+                        type: string
+                        enum:
+                          - met
+                          - not_met
+                          - not_measured
+                      sourceIds:
+                        type: array
+                        items:
+                          type: string
+                        maxItems: 128
+                      reason:
+                        type: string
+                  maxItems: 256
+                findings:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - fingerprint
+                      - sourceId
+                      - severity
+                      - category
+                      - status
+                      - path
+                      - title
+                      - effortMinutes
+                      - estimateKind
+                    properties:
+                      fingerprint:
+                        type: string
+                      sourceId:
+                        type: string
+                      severity:
+                        type: string
+                        enum:
+                          - critical
+                          - high
+                          - medium
+                          - low
+                      category:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - new
+                          - existing
+                          - unknown
+                      path:
+                        type: string
+                      title:
+                        type: string
+                      effortMinutes:
+                        oneOf:
+                          - type: number
+                            minimum: 0
+                          - type: "null"
+                      estimateKind:
+                        oneOf:
+                          - type: string
+                            enum:
+                              - modeled
+                          - type: "null"
+                  maxItems: 100
+                summary: *a1
+              description: Checks and totals describe the entire saved evidence set. Only findings are paged; findingCount
+                names the complete population. Each source retains its own measurement time and code revision.
+            - type: "null"
+        findingCount:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: "null"
+        urgentFindings: *a2
+        opportunities:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - id
+              - snapshotId
+              - repository
+              - proposalId
+              - ruleId
+              - title
+              - consequence
+              - expectedResult
+              - acceptanceIdeas
+              - uncertainty
+              - mayPlan
+              - evidenceCount
+              - evidence
+              - effortMinutes
+              - estimateKind
+              - relatedWork
+            properties:
+              id:
+                type: string
+              snapshotId:
+                type: string
+                pattern: ^[a-f0-9]{64}$
+              repository:
+                type: string
+              proposalId:
+                type: string
+              ruleId:
+                type: string
+              title:
+                type: string
+              consequence:
+                type: string
+              expectedResult:
+                type: string
+              acceptanceIdeas:
+                type: array
+                items:
+                  type: string
+                maxItems: 16
+              uncertainty:
+                type: array
+                items:
+                  type: string
+                maxItems: 16
+              mayPlan:
+                type: boolean
+              evidenceCount:
+                type: integer
+                minimum: 0
+                description: Total stable findings in this group; evidence entries may be paged. Effort estimates describe the
+                  whole group.
+              evidence:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                    - fingerprint
+                    - sourceId
+                    - scanId
+                    - analyzedSha
+                    - observedAt
+                    - severity
+                    - title
+                    - path
+                  properties:
+                    fingerprint:
+                      type: string
+                    sourceId:
+                      type: string
+                    scanId:
+                      type: string
+                    analyzedSha:
+                      oneOf:
+                        - type: string
+                          pattern: ^[a-f0-9]{40}$
+                        - type: "null"
+                    observedAt:
+                      oneOf:
+                        - type: string
+                          format: date-time
+                        - type: "null"
+                    severity:
+                      type: string
+                      enum:
+                        - critical
+                        - high
+                        - medium
+                        - low
+                    title:
+                      type: string
+                    path:
+                      type: string
+                maxItems: 100
+              effortMinutes:
+                oneOf:
+                  - type: number
+                    minimum: 0
+                  - type: "null"
+              estimateKind:
+                oneOf:
+                  - type: string
+                    enum:
+                      - modeled
+                  - type: "null"
+              relatedWork:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                    - repository
+                    - proposalId
+                  properties:
+                    repository:
+                      type: string
+                    proposalId:
+                      type: string
+                    taskId:
+                      type: string
+                    prUrl:
+                      type: string
+                      format: uri
+                    threadId:
+                      type: string
+                maxItems: 512
+          maxItems: 100
+        relatedWorkState:
+          type: string
+          enum:
+            - reported
+            - partial
+            - stale
+            - unavailable
+            - not_collected
+        relatedWorkAsOf:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        relatedWorkReason:
+          oneOf:
+            - type: string
+            - type: "null"
+        planningAvailable:
+          type: boolean
+          description: Current source evidence can support a planning conversation; this does not approve, file or
+            execute work.
+        freshness:
+          type: string
+          enum:
+            - fresh
+            - stale
+            - unavailable
+        page:
+          type: object
+          additionalProperties: false
+          required:
+            - nextCursor
+          properties:
+            nextCursor:
+              oneOf:
+                - type: string
+                  maxLength: 512
+                - type: "null"
+
     RepositoriesView:
       type: object
       description: >
@@ -17413,6 +18124,62 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The view is switched off (`view_disabled`) or has no body yet (`view_not_ready`).
+
+  /v1/views/code-health:
+    get:
+      summary: Saved code checks and improvement suggestions for one repository or the fleet.
+      description: "Authenticated cached reads only: no scanner, model, ranking or filing runs on a request. All
+        configured repositories remain in the consolidated view, with missing measurements explicit. Check
+        counts and urgent findings are separate from delivery friction. The existing view switch defaults to
+        off; shadow and auto policy remain unchanged. Repository and cursor scope are checked before ETags.
+        Finding pages use the returned snapshot and cursor together, so a newer collection cannot move a page.
+        nextCheckDueAt is a due time, not a guarantee of execution under admission. Saved work links report
+        existing records, not independently verified delivery or benefit."
+      security:
+        - bearerRead: []
+      parameters:
+        - name: repository
+          in: query
+          required: false
+          schema:
+            type: string
+            default: all
+            maxLength: 140
+          description: all, or a server-configured owner/repository.
+        - name: snapshot
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: ^[a-f0-9]{64}$
+          description: Saved snapshot for the selected repository. Required with page.
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 512
+          description: Opaque cursor returned by this repository snapshot; never an offset into a newer result.
+      responses:
+        "200":
+          description: Saved checks, source clocks and paged findings. Totals cover the full evidence set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodeHealthView"
+        "304":
+          description: The scope-validated request matches the cached ETag.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is off or shadowed under existing policy.
+        "503":
+          description: The configured repository scope or selected cached result is not ready; retry without treating
+            missing evidence as zero.
 
   /v1/views/repositories:
     get:

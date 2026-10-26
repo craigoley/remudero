@@ -1,10 +1,12 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { createGhCallPacer, ghExec, paceGhEntry } from "./github-transport.js";
+import { createHash } from "node:crypto";
+import { fixedClock } from "./clock.js";
+import { createGhCallPacer, ghExec, ghTextAsync, paceGhEntry } from "./github-transport.js";
 import { join } from "node:path";
 import { appendLedger } from "./ledger.js";
 import { escalate, splitConcatenatedJsonPages, type Escalation, type IssueGateway } from "./escalate.js";
 import type { LandFeedbackOpts } from "./feedback-landing.js";
-import { isGhRateLimitError, readLedgerLines } from "./status.js";
+import { classifyGhFailure, isGhRateLimitError, readLedgerLines } from "./status.js";
 import { feedbackCaptured, feedbackDir, setFeedbackStatus, stageFeedbackCapture, type FeedbackEntry, type FeedbackOrigin } from "./feedback.js";
 import { isTestRunner } from "./live-write-guard.js";
 
@@ -130,10 +132,18 @@ export interface GhCodeScanningAlertJson {
   number?: number;
   state?: string;
   created_at?: string;
+  fixed_at?: string | null;
+  dismissed_at?: string | null;
   html_url?: string;
   rule?: { id?: string; description?: string; security_severity_level?: string; severity?: string; tags?: string[] };
-  tool?: { name?: string };
+  tool?: { name?: string; version?: string };
   most_recent_instance?: {
+    commit_sha?: string;
+    ref?: string;
+    analysis_key?: string;
+    category?: string;
+    environment?: string;
+    state?: string;
     location?: { path?: string; start_line?: number; end_line?: number };
     message?: { text?: string };
   };
@@ -245,9 +255,46 @@ export interface AlertGateway {
   secretScanning(owner: string, repo: string): RawAlert[];
 }
 
+export type CodeScanningReadFailureKind = "unauthorized" | "rate_limited" | "unavailable";
+
+export function codeScanningReadFailureKind(error: unknown): CodeScanningReadFailureKind {
+  if (!error || typeof error !== "object") return "unavailable";
+  const failed = error as { status?: unknown; code?: unknown; stderr?: unknown };
+  if (!(typeof failed.stderr === "string" || Buffer.isBuffer(failed.stderr)) ||
+      !(typeof failed.status === "number" || typeof failed.code === "number" || typeof failed.code === "string")) return "unavailable";
+  const stderr = String(failed.stderr), reason = classifyGhFailure(typeof failed.status === "number" ? failed.status : undefined, stderr,
+    typeof failed.code === "string" ? failed.code : undefined);
+  if (reason === "rate_limit") return "rate_limited";
+  if (reason === "auth" || /\(HTTP (?:401|403)\)/.test(stderr)) return "unauthorized";
+  return "unavailable";
+}
+
 export type CodeScanningAlertsRead =
-  | { ok: true; alerts: RawAlert[] }
-  | { ok: false; error: string };
+  | { ok: true; alerts: RawAlert[]; analysisInstances?: CodeScanningAnalysisInstance[] }
+  | { ok: false; error: string; failureReason?: CodeScanningReadFailureKind };
+
+/** Retained only for the evidence collector; normal alert reads keep their existing shape. */
+export interface CodeScanningAnalysisInstance {
+  alertId: string;
+  analyzedSha: string | null;
+  toolVersion: string | null;
+  ref: string | null;
+  analysisKey: string | null;
+  category: string | null;
+  environmentHash: string | null;
+  instanceState: string | null;
+  fixedAt?: string | null;
+  dismissedAt?: string | null;
+}
+
+function analysisInstance(raw: GhCodeScanningAlertJson): CodeScanningAnalysisInstance {
+  const bounded = (value: unknown, max = 256): string | null => typeof value === "string" && value.length > 0 && value.length <= max && !value.includes("\0") ? value : null;
+  const ownTime = (value: unknown): string | null => typeof value === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(value) && Number.isFinite(Date.parse(value)) ? fixedClock(Date.parse(value)).iso() : null;
+  const instance = raw.most_recent_instance, sha = bounded(instance?.commit_sha), environment = bounded(instance?.environment, 4096);
+  return { alertId: String(raw.number ?? "?"), analyzedSha: sha !== null && /^[a-f0-9]{40}$/i.test(sha) ? sha.toLowerCase() : null,
+    toolVersion: bounded(raw.tool?.version), ref: bounded(instance?.ref), analysisKey: bounded(instance?.analysis_key), category: bounded(instance?.category),
+    environmentHash: environment === null ? null : createHash("sha256").update(environment).digest("hex"), instanceState: bounded(instance?.state), fixedAt: ownTime(raw.fixed_at), dismissedAt: ownTime(raw.dismissed_at) };
+}
 
 const codeScanningReadPacer = createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {});
 
@@ -260,7 +307,7 @@ function codeScanningReadError(error: unknown): string {
   return stderr ? `${message}: ${stderr}` : message;
 }
 
-export function readCodeScanningAlerts(owner: string, repo: string): CodeScanningAlertsRead {
+export function readCodeScanningAlerts(owner: string, repo: string, options: { includeAnalysisInstances?: boolean } = {}): CodeScanningAlertsRead {
   try {
     const raw = paceGhEntry(
       codeScanningReadPacer,
@@ -271,14 +318,9 @@ export function readCodeScanningAlerts(owner: string, repo: string): CodeScannin
           { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
         ),
     );
-    const pages = splitConcatenatedJsonPages(raw).map((chunk) => {
-      const parsed = JSON.parse(chunk) as unknown;
-      if (!Array.isArray(parsed)) throw new Error("GitHub returned a non-array code-scanning response");
-      return parsed as GhCodeScanningAlertJson[];
-    });
-    return { ok: true, alerts: pages.flat().map(normalizeCodeScanningAlert) };
+    return parseCodeScanningAlerts(raw, options);
   } catch (error) {
-    return { ok: false, error: codeScanningReadError(error) };
+    return { ok: false, error: codeScanningReadError(error), ...(options.includeAnalysisInstances ? { failureReason: codeScanningReadFailureKind(error) } : {}) };
   }
 }
 
@@ -632,4 +674,22 @@ export async function pollAlerts(owner: string, repo: string, deps: OpsPollDeps)
   }
 
   return { summary, newCritical, escalated, feedbackCreated, reconciled };
+}
+
+
+function parseCodeScanningAlerts(raw: string, options: { includeAnalysisInstances?: boolean }): CodeScanningAlertsRead {
+  const pages = splitConcatenatedJsonPages(raw).map((chunk) => {
+    const parsed = JSON.parse(chunk) as unknown;
+    if (!Array.isArray(parsed)) throw new Error("GitHub returned a non-array code-scanning response");
+    return parsed as GhCodeScanningAlertJson[];
+  });
+  const alerts = pages.flat();
+  return { ok: true, alerts: alerts.map(normalizeCodeScanningAlert), ...(options.includeAnalysisInstances ? { analysisInstances: alerts.map(analysisInstance) } : {}) };
+}
+
+/** Same paginated read and normalization, with the native async transport so lease messages stay live. */
+export async function readCodeScanningAlertsAsync(owner: string, repo: string): Promise<CodeScanningAlertsRead> {
+  try {
+    return parseCodeScanningAlerts(await ghTextAsync(["api", `repos/${owner}/${repo}/code-scanning/alerts`, "--paginate"], { maxBuffer: 16 * 1024 * 1024, timeout: 10_000 }), { includeAnalysisInstances: true });
+  } catch (error) { return { ok: false, error: codeScanningReadError(error), failureReason: codeScanningReadFailureKind(error) }; }
 }

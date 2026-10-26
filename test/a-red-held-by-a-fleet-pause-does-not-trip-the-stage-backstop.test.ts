@@ -89,3 +89,78 @@ test("W1-T9433: an acted pass and an unrelated stand-down are not held time", ()
   ];
   assert.equal(fleetWithheldStageMs(rows, now), 10 * 60_000);
 });
+
+test("semantic review admission waits retain the original unheld stage backstop", async () => {
+  // #14277: all three passes withheld this exact head, but its 35-minute stage opened a human ask.
+  const observedNow = Date.UTC(2026, 9, 26, 1, 12, 44, 548);
+  const since = "2026-10-26T00:37:30.912Z";
+  const view: OpenPrView = { ...pr, prNumber: 14277,
+    prUrl: "https://github.com/craigoley/remudero/pull/14277", taskId: "unfiled",
+    headSha: "8600214ec3b6384c7e55ab18d85bf82183e929df", headRefName: "run-unfiled-1",
+    checksState: "green", ciFailures: [], lastActivityAt: since };
+  const rows = [
+    ["2026-10-26T00:37:39.000Z", "not admitted this pass: semantic post-review admission bound 0, in-flight 4"],
+    ["2026-10-26T00:47:02.000Z", "not admitted this pass: semantic post-review admission bound 0, in-flight 2"],
+    ["2026-10-26T01:03:21.000Z", "not admitted this pass: semantic post-review admission bound 0, in-flight 4"],
+  ].map(([ts, stand_down_reason]) => ({ ts, step: "sweep.disposed", pr_number: view.prNumber,
+    head_sha: view.headSha, task_id: view.taskId, blocker: "awaiting-review", blocker_since: since,
+    disposition: "post-review", acted: false, reason: "checks green, review never posted — running the review lane",
+    stand_down_reason }));
+  assert.equal(fleetWithheldStageMs(rows, observedNow), observedNow - Date.parse(rows[0].ts));
+  const held = fixture(rows, undefined);
+  await runSweep([view], { ...held.deps, now: () => observedNow });
+  assert.equal(held.stuck().length, 0);
+  assert.deepEqual(held.escalations, []);
+
+  // Once capacity is available, the same unchanged backstop still diagnoses a genuinely idle owner.
+  const free = fixture([...rows, { ...rows[0], ts: "2026-10-26T01:05:00.000Z",
+    stand_down_reason: "review setup refused: missing input" }], undefined);
+  await runSweep([view], { ...free.deps, now: () => observedNow + 31 * 60_000 });
+  assert.equal(free.stuck().length, 1);
+  assert.equal(free.escalations.length, 1);
+});
+
+test("only an unacted exact semantic admission refusal is fleet-withheld time", () => {
+  const admission = "not admitted this pass: semantic post-review admission bound 1, in-flight 2; admitted #14013 ahead";
+  const row = { step: "sweep.disposed", ts: ago(10), acted: false, stand_down_reason: admission };
+  assert.equal(fleetWithheldStageMs([row], now), 10 * 60_000);
+  assert.equal(fleetWithheldStageMs([{ ...row, acted: true }], now), 0);
+  assert.equal(fleetWithheldStageMs([{ ...row, acted: undefined }], now), 0);
+  assert.equal(fleetWithheldStageMs([{ ...row, stand_down_reason: undefined, reason: admission }], now), 0);
+  assert.equal(fleetWithheldStageMs([{ ...row, stand_down_reason: admission + "; unreadable" }], now), 0);
+  assert.equal(fleetWithheldStageMs([{ ...row, stand_down_reason: "not admitted this pass: semantic post-review admission bound UNKNOWN" }], now), 0);
+});
+
+test("unstarted scheduler-held reviews exclude only positively recorded admission waits", () => {
+  // These exact producer decisions occurred on 2026-10-26; an already-running review is different.
+  const holds = [
+    "overtaken by a repair queued before it — this review keeps its place in the queue, re-derived next pass",
+    "review lanes taken by repairs queued before their reviews — re-derived next pass",
+    "not admitted this pass: at most 3 plan-filing post-review admissions per light pass",
+    "not admitted this pass: at most 0 plan-filing post-review admissions available across light passes",
+    "not admitted this pass: restart latched, and the review would outlast its drain",
+  ];
+  for (const hold of holds) {
+    const row = { step: "sweep.disposed", ts: ago(10), acted: false, stand_down_reason: hold };
+    assert.equal(fleetWithheldStageMs([row], now), 10 * 60_000, hold);
+    assert.equal(fleetWithheldStageMs([{ ...row, acted: true }], now), 0);
+    assert.equal(fleetWithheldStageMs([{ ...row, acted: undefined }], now), 0);
+    assert.equal(fleetWithheldStageMs([{ ...row, stand_down_reason: undefined, reason: hold }], now), 0);
+    assert.equal(fleetWithheldStageMs([{ ...row, stand_down_reason: hold + "; unreadable" }], now), 0);
+  }
+  for (const hold of [
+    "review already in flight for this head (admitted by an overlapping light pass)",
+    "checks green, remudero-review pending 7m (< 60m ceiling) — a review is already in flight, waiting",
+    "not admitted this pass: at most UNKNOWN plan-filing post-review admissions per light pass",
+    "review admissions stopped — re-derived next pass",
+  ]) assert.equal(fleetWithheldStageMs([{ step: "sweep.disposed", ts: ago(10), acted: false,
+    stand_down_reason: hold }], now), 0, hold);
+});
+
+test("fleet-withheld stage intervals never include time after the sweep clock", () => {
+  const row = { step: "sweep.disposed", ts: ago(20), acted: false, stand_down_reason: PAUSE };
+  const futureFree = { ...row, ts: ago(-10), acted: true };
+  assert.equal(fleetWithheldStageMs([row, futureFree], now), 20 * 60_000);
+  assert.equal(fleetWithheldStageMs([{ ...row, ts: ago(-10) }, { ...row, ts: ago(-15) }], now), 0);
+  assert.equal(fleetWithheldStageMs([{ ...row, ts: ago(5), acted: true }, row, futureFree], now), 15 * 60_000);
+});
