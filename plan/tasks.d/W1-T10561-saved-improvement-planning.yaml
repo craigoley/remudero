@@ -30,6 +30,9 @@
     - src/lib/ledger.ts
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
+    - scripts/console-parity-ratchet.mjs
+    - scripts/console-parity-baseline.json
+    - docs/operator-guide.md
     - test/**/improvement-thread.test.ts
     - test/**/improvement-thread-route.test.ts
     - test/**/improvement-action-pump.test.ts
@@ -98,3 +101,13 @@
     merged-task credit and dispatch/run claims before implementation. Reservations belong to
     codex/file-console-improvement-20261024; preserve contested claims. Reserved W1-T10561 through rmd
     next-task-id; this filing does not claim implementation or deployment.
+  amendment: |
+    Companion declaration 2026-10-26 for the daemon-owned improvement-action handoff.
+    Add one reasoned CLI_ONLY declaration and its one recorded baseline name, plus the
+    missing operator-guide command row. The HTTP draft/file routes persist requests;
+    they do not execute the admitted daemon handoff and are not action-equivalent routes.
+    No source behavior, existing mapping, original assertion, acceptance criterion,
+    falsifier, budget, admission guard or other limit changes. The three paths above
+    are the only additional companions. Normal plan/ruling qualification and protected
+    CI remain required; native repair retains ownership unless a separately bounded
+    conditional publication handoff is approved.
