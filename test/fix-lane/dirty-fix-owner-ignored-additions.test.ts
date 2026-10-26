@@ -25,69 +25,77 @@ function seedUpstream(root: string, scope: test.TestContext) {
   return upstream;
 }
 
-for (const [merging, deleting] of [[false, false], [false, true], [true, false], [true, true]]) {
-  test(`dirty fix-owner preservation retains staged additions under ignored paths${merging ? " during an interrupted merge" : ""}${deleting ? " with an unstaged deletion" : ""}`, (t) => {
-    const root = tmp();
-    try {
-      const upstream = seedUpstream(root, t);
-      const repoDir = join(root, "repo");
-      cloneOf(upstream, repoDir);
-      const git = (path: string, args: string[]) => execFileSync("git", ["-C", path, ...args], { encoding: "utf8", stdio: "pipe" });
-      git(repoDir, ["config", "user.email", "probe@example.invalid"]);
-      git(repoDir, ["config", "user.name", "probe"]);
-      writeFileSync(join(repoDir, ".gitignore"), "coverage/\n");
-      git(repoDir, ["add", ".gitignore"]);
-      git(repoDir, ["commit", "--quiet", "-m", "chore: fixture ignore policy"]);
-      const branch = "run-W1-T3822-1789876999000";
-      git(repoDir, ["branch", branch]);
-      const ownerPath = join(root, "owner");
-      git(repoDir, ["worktree", "add", "--quiet", ownerPath, branch]);
-      const ignored = "coverage/staged.txt";
-      const ignoredBytes = Buffer.from("a tracked addition remains recoverable under an ignore rule\n\0\xff", "latin1");
-      if (merging) {
-        git(repoDir, ["checkout", "--quiet", "-b", "incoming"]);
-        mkdirSync(join(repoDir, "coverage"));
-        writeFileSync(join(repoDir, ignored), ignoredBytes);
-        writeFileSync(join(repoDir, "seed.txt"), "incoming\n");
-        git(repoDir, ["add", "-f", ignored]);
-        git(repoDir, ["add", "seed.txt"]);
-        git(repoDir, ["commit", "--quiet", "-m", "chore: incoming fixture"]);
-        writeFileSync(join(ownerPath, "seed.txt"), "owner\n");
-        git(ownerPath, ["add", "seed.txt"]);
-        git(ownerPath, ["commit", "--quiet", "-m", "chore: owner fixture"]);
-        assert.throws(() => git(ownerPath, ["merge", "incoming"]));
-        assert.ok(git(ownerPath, ["ls-files", "--unmerged"]).includes("seed.txt"));
-      } else {
-        mkdirSync(join(ownerPath, "coverage"));
-        writeFileSync(join(ownerPath, ignored), ignoredBytes);
-        git(ownerPath, ["add", "-f", ignored]);
-        writeFileSync(join(ownerPath, "seed.txt"), "unstaged owner work\n");
-      }
-      if (deleting) rmSync(join(ownerPath, "seed.txt"));
-      assert.match(git(ownerPath, ["check-ignore", "--no-index", "-v", ignored]), /coverage\//);
-      const localSha = sha(ownerPath, "HEAD");
-      const indexPath = git(ownerPath, ["rev-parse", "--path-format=absolute", "--git-path", "index"]).trim();
-      const status = git(ownerPath, ["status", "--porcelain=v1"]);
-      const index = readFileSync(indexPath);
-      const working = deleting ? undefined : readFileSync(join(ownerPath, "seed.txt"), "utf8");
-      const mergeHeadPath = git(ownerPath, ["rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"]).trim();
-      const mergeHead = merging ? readFileSync(mergeHeadPath) : undefined;
-      const recovery = preserveTrackedDirtyFixOwner(repoDir, ownerPath, branch, localSha);
-      assert.deepEqual(execFileSync("git", ["-C", repoDir, "show", `${recovery}:${ignored}`]), ignoredBytes);
-      if (deleting) assert.equal(git(repoDir, ["ls-tree", "--name-only", recovery, "--", "seed.txt"]), "");
-      else assert.equal(git(repoDir, ["show", `${recovery}:seed.txt`]), working);
-      assert.equal(sha(repoDir, `${recovery}^1`), localSha);
-      assert.equal(sha(ownerPath, "HEAD"), localSha);
-      assert.equal(git(ownerPath, ["status", "--porcelain=v1"]), status);
-      assert.deepEqual(readFileSync(indexPath), index, "preservation never edits the live index");
-      assert.equal(preserveTrackedDirtyFixOwner(repoDir, ownerPath, branch, localSha), recovery);
-      assert.deepEqual(readFileSync(indexPath), index, "repeated preservation leaves the live index unchanged");
-      assert.deepEqual(readFileSync(join(ownerPath, ignored)), ignoredBytes);
-      assert.equal(existsSync(join(ownerPath, "seed.txt")), !deleting);
-      if (!deleting) assert.equal(readFileSync(join(ownerPath, "seed.txt"), "utf8"), working);
-      if (merging) assert.deepEqual(readFileSync(mergeHeadPath), mergeHead);
-    } finally { rmSync(root, { recursive: true, force: true }); }
-  });
+for (const ignored of ["coverage/staged.txt", ":(glob)staged.txt", "coverage/[owned].txt", "coverage/*.txt"]) {
+  for (const [merging, deleting] of [[false, false], [false, true], [true, false], [true, true]]) {
+    test(`dirty fix-owner preservation retains staged additions under ignored paths${merging ? " during an interrupted merge" : ""}${deleting ? " with an unstaged deletion" : ""} (${ignored})`, (t) => {
+      const root = tmp();
+      try {
+        const upstream = seedUpstream(root, t);
+        const repoDir = join(root, "repo");
+        cloneOf(upstream, repoDir);
+        const git = (path: string, args: string[]) => execFileSync("git", ["-C", path, ...args], { encoding: "utf8", stdio: "pipe" });
+        git(repoDir, ["config", "user.email", "probe@example.invalid"]);
+        git(repoDir, ["config", "user.name", "probe"]);
+        writeFileSync(join(repoDir, ".gitignore"), "coverage/\n:(glob)staged.txt\n");
+        git(repoDir, ["add", ".gitignore"]);
+        git(repoDir, ["commit", "--quiet", "-m", "chore: fixture ignore policy"]);
+        const branch = "run-W1-T3822-1789876999000";
+        git(repoDir, ["branch", branch]);
+        const ownerPath = join(root, "owner");
+        git(repoDir, ["worktree", "add", "--quiet", ownerPath, branch]);
+        const ignoredBytes = Buffer.from("a tracked addition remains recoverable under an ignore rule\n\0\xff", "latin1");
+        if (merging) {
+          git(repoDir, ["checkout", "--quiet", "-b", "incoming"]);
+          mkdirSync(join(repoDir, "coverage"));
+          writeFileSync(join(repoDir, ignored), ignoredBytes);
+          writeFileSync(join(repoDir, "seed.txt"), "incoming\n");
+          git(repoDir, ["--literal-pathspecs", "add", "-f", "--", ignored]);
+          git(repoDir, ["add", "seed.txt"]);
+          git(repoDir, ["commit", "--quiet", "-m", "chore: incoming fixture"]);
+          writeFileSync(join(ownerPath, "seed.txt"), "owner\n");
+          git(ownerPath, ["add", "seed.txt"]);
+          git(ownerPath, ["commit", "--quiet", "-m", "chore: owner fixture"]);
+          assert.throws(() => git(ownerPath, ["merge", "incoming"]));
+          assert.ok(git(ownerPath, ["ls-files", "--unmerged"]).includes("seed.txt"));
+        } else {
+          mkdirSync(join(ownerPath, "coverage"));
+          writeFileSync(join(ownerPath, ignored), ignoredBytes);
+          git(ownerPath, ["--literal-pathspecs", "add", "-f", "--", ignored]);
+          writeFileSync(join(ownerPath, "seed.txt"), "unstaged owner work\n");
+        }
+        const untracked = "coverage/o.txt";
+        const untrackedBytes = Buffer.from("unpublished ignored work\n\0\xff", "latin1");
+        mkdirSync(join(ownerPath, "coverage"), { recursive: true });
+        writeFileSync(join(ownerPath, untracked), untrackedBytes);
+        if (deleting) rmSync(join(ownerPath, "seed.txt"));
+        assert.ok(git(ownerPath, ["check-ignore", "--no-index", "-v", `./${ignored}`]).includes(ignored));
+        assert.match(git(ownerPath, ["check-ignore", "--no-index", "-v", untracked]), /coverage\//);
+        const localSha = sha(ownerPath, "HEAD");
+        const indexPath = git(ownerPath, ["rev-parse", "--path-format=absolute", "--git-path", "index"]).trim();
+        const status = git(ownerPath, ["status", "--porcelain=v1"]);
+        const index = readFileSync(indexPath);
+        const working = deleting ? undefined : readFileSync(join(ownerPath, "seed.txt"), "utf8");
+        const mergeHeadPath = git(ownerPath, ["rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"]).trim();
+        const mergeHead = merging ? readFileSync(mergeHeadPath) : undefined;
+        const recovery = preserveTrackedDirtyFixOwner(repoDir, ownerPath, branch, localSha);
+        assert.deepEqual(execFileSync("git", ["-C", repoDir, "show", `${recovery}:${ignored}`]), ignoredBytes);
+        assert.equal(git(repoDir, ["ls-tree", "--name-only", recovery, "--", untracked]), "");
+        if (deleting) assert.equal(git(repoDir, ["ls-tree", "--name-only", recovery, "--", "seed.txt"]), "");
+        else assert.equal(git(repoDir, ["show", `${recovery}:seed.txt`]), working);
+        assert.equal(sha(repoDir, `${recovery}^1`), localSha);
+        assert.equal(sha(ownerPath, "HEAD"), localSha);
+        assert.equal(git(ownerPath, ["status", "--porcelain=v1"]), status);
+        assert.deepEqual(readFileSync(indexPath), index, "preservation never edits the live index");
+        assert.equal(preserveTrackedDirtyFixOwner(repoDir, ownerPath, branch, localSha), recovery);
+        assert.deepEqual(readFileSync(indexPath), index, "repeated preservation leaves the live index unchanged");
+        assert.deepEqual(readFileSync(join(ownerPath, ignored)), ignoredBytes);
+        assert.deepEqual(readFileSync(join(ownerPath, untracked)), untrackedBytes);
+        assert.equal(existsSync(join(ownerPath, "seed.txt")), !deleting);
+        if (!deleting) assert.equal(readFileSync(join(ownerPath, "seed.txt"), "utf8"), working);
+        if (merging) assert.deepEqual(readFileSync(mergeHeadPath), mergeHead);
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    });
+  }
 }
 
 test("dirty fix-owner preservation still refuses an ignored working copy hidden by a staged deletion", (t) => {

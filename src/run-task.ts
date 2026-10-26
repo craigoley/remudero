@@ -30151,7 +30151,7 @@ function preserveTrackedDirtyPatch(
   const ownerTree = ownerTreeOf ? ownerTreeOf() : temporaryIndexTree(ownerPath, localSha, (env) => {
     const tracked = hostWorktreeGit(ownerPath, ["ls-files", "--cached", "-z"], { maxBuffer: 1 << 26 });
     if (tracked.length > 0) hostWorktreeGit(ownerPath,
-      ["add", "--force", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"], { env, input: tracked, maxBuffer: 1 << 26 });
+      ["--literal-pathspecs", "add", "--force", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"], { env, input: tracked, maxBuffer: 1 << 26 });
     hostWorktreeGit(ownerPath, ["add", "-A"], { env });
   });
   const patchTree = temporaryIndexTree(repoDir, localSha, (env) => {
