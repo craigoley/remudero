@@ -533,6 +533,7 @@ test("W1-T10613: POST /v1/products/repository is high tier, confirmed, and journ
         requestId: "wiring-product-0002", expectedRevision: 0, brief: { idea: "private repository wiring fixture" } }) });
       const { receipt } = await saved.json() as { receipt: { productId: string } };
       const payload = JSON.stringify({ version: "product-repository-v1", requestId: "wiring-repository-01", productId: receipt.productId,
+        expectedRevision: 1, expectedObjectiveRevision: 1,
         action: "adopt", owner: "craigoley", name: "wreckterra", visibility: "public", repositoryId: 1432832754 });
       const refused = await fetch(`${h.base}/v1/products/repository`, { method: "POST", headers, body: payload });
       assert.equal(refused.status, 403);
