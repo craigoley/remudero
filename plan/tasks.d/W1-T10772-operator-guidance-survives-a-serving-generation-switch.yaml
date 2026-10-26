@@ -1,0 +1,47 @@
+- id: W1-T10772
+  title: "OPERATOR GUIDANCE ACCEPTED BY THE CONSOLE IS WRITTEN UNDER THE IMMUTABLE SERVING GENERATION'S OWN ROOT, NOT THE STORE THE DAEMON'S FIX LANE READS — qualify the real producer/consumer store, write to a verified common persistent boundary, and make the 200 distinguish recorded from delivered (and answer-question's 200 ok:true even when appendQuestionAnswer returns false)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  files: [src/lib/serve.ts, src/lib/operator-notes.ts, src/lib/panel-actions.ts, src/commands/serve.ts, test/operator-guidance-survives-a-serving-generation-switch.test.ts]
+  origin: "feedback#console-operator-guidance-generation-store-20261026"
+  plan_refs: ["W1-T3351", "W1-T3348"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED (untrusted report, to be re-verified by the implementer against current main): serveCommand
+    passes the module repoRoot as ServeDeps.questionsRoot, so operator-notes and answer-question handlers
+    write plan/operator-notes.ndjson under an immutable serving-generation directory, while the fix lane
+    reads task notes from the daemon's canonical repoRoot. A note accepted (POST 200 ok:true, exact GET
+    readback) in generation a was absent from generation b and from the daemon's file. Separately the
+    answer-question route returns 200 ok:true even when appendQuestionAnswer returns false.
+    Narrow gap; not a claim that all Inbox or daemon questions share one cause.
+  design: |
+    (i) QUALIFY FIRST: on current main, identify the real producer root, consumer root, task/repo scope
+    and any existing shared persistent mount; choose the authoritative guidance store from those, never
+    from a source-code generation directory. If no verified common store exists, refuse or expose an
+    honest pending/failed state rather than success.
+    (ii) The 200 distinguishes durably recorded from delivered/consumed; absent/unwritable/unverified
+    sinks refuse. answer-question returns a failure when appendQuestionAnswer returns false.
+    (iii) Preserve write tiers, attribution, actor checks, read-only behavior, idempotency, approval
+    semantics, and every original note/question/origin/failed receipt. No migration, copying of files,
+    live-write redirection, mount/permission/service change, restart or deployment.
+    (iv) Private real-store fixtures: the SAME note stays readable to the correct native task across a
+    generation switch; controls for write failure, foreign repo/task, duplicate, prior history; and a
+    source-only removal falsifier.
+  acceptance:
+    - claim: "a note written through the route stays readable to its native task after an immutable generation switch"
+      proof: "unit test: test/operator-guidance-survives-a-serving-generation-switch.test.ts"
+    - claim: "an unwritable or unverified sink refuses instead of returning 200 ok:true, for notes and answer-question"
+      proof: "unit test: test/operator-guidance-survives-a-serving-generation-switch.test.ts"
+    - claim: "foreign repo/task, duplicate and prior-history controls leave other notes untouched"
+      proof: "unit test: test/operator-guidance-survives-a-serving-generation-switch.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if current main already roots both handlers and the fix-lane reader at
+    one verified shared store and answer-question already refuses on a false append. Each arm must redden
+    when its source change is removed.
