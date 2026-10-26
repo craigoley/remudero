@@ -5,7 +5,6 @@ import {
   buildSweepHook as buildSweepHookFromModule,
   buildSweepLightHook as buildSweepLightHookFromModule,
   type SweepCommandHost,
-  type LightPassReadPorts,
 } from "./cli/commands/sweep.js";
 import {
   runFixRung as runFixRungFromModule,
@@ -32498,6 +32497,63 @@ export function reviewOnlyLightPassDeps(scope?: LightPassScope): Pick<SweepDeps,
 }
 
 
+interface LightPassReadPorts {
+  openPrViews?: () => Promise<OpenPrView[]>;
+  effects?: (deps: Parameters<typeof buildSweepEffects>[0]) => SweepDeps;
+  readCompare?: (args: string[]) => Promise<unknown>;
+  clock?: Pick<Clock, "now">;
+}
+
+function createLightPassCompareReader(owner: string, repo: string, read: (args: string[]) => Promise<unknown>) {
+  type Facts = { behindBy: number; baseFiles?: BaseChangedFiles };
+  const memo = new Map<number, { head: string; main: string | undefined; value: Promise<Facts | undefined> }>();
+  return {
+    retain: (prs: readonly OpenPrView[]) => {
+      const heads = new Map(prs.map((pr) => [pr.prNumber, pr.headSha]));
+      for (const [number, entry] of memo) if (heads.get(number) !== entry.head) memo.delete(number);
+    },
+    read: async (prs: readonly OpenPrView[], main: string | undefined, timing: LightPassPreReviewTiming) => {
+      const behindMainByPr = new Map<number, number>();
+      const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
+      await timing.measure("compare", () => Promise.all(distanceRefreshProbeTargets(prs).map(async (pr) => {
+        const start = timing.clock.now();
+        let entry = memo.get(pr.prNumber);
+        const cacheHit = main !== undefined && entry?.head === pr.headSha && entry.main === main;
+        if (!cacheHit) {
+          const value = Promise.resolve().then(async (): Promise<Facts | undefined> => {
+            const compare = await read(["api", `repos/${owner}/${repo}/compare/${pr.headSha}...${main ?? "main"}`]) as {
+              ahead_by?: unknown; files?: unknown;
+            };
+            if (typeof compare?.ahead_by !== "number" || !Number.isFinite(compare.ahead_by)) return undefined;
+            return { behindBy: compare.ahead_by, ...(Array.isArray(compare.files) ? { baseFiles: {
+              files: compare.files.flatMap((f) => typeof f?.filename === "string" ? [f.filename] : []),
+              truncated: compare.files.length >= GITHUB_COMPARE_FILES_LISTED,
+            } } : {}) };
+          });
+          entry = { head: pr.headSha, main, value };
+          if (main !== undefined) memo.set(pr.prNumber, entry);
+        }
+        const row: Record<string, unknown> = { pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: main ?? null, cache_hit: cacheHit };
+        try {
+          const facts = await entry!.value;
+          row.outcome = facts ? "read" : "unreadable";
+          if (facts) {
+            behindMainByPr.set(pr.prNumber, facts.behindBy);
+            if (facts.baseFiles) baseChangedFilesByPr.set(pr.prNumber, facts.baseFiles);
+          } else if (memo.get(pr.prNumber) === entry) memo.delete(pr.prNumber);
+        } catch (error) {
+          Object.assign(row, { outcome: "error", error: String(error) });
+          if (memo.get(pr.prNumber) === entry) memo.delete(pr.prNumber);
+        } finally {
+          row.elapsed_ms = timing.clock.now() - start;
+          timing.compareReads.push(row);
+        }
+      })));
+      return { behindMainByPr, baseChangedFilesByPr };
+    },
+  };
+}
+
 export function buildSweepLightHook(
   owner: string,
   repo: string,
@@ -42479,5 +42535,6 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     blockedFixableIsRequeueOnly,
     lightPassActionable,
     reviewOnlyLightPassDeps,
+    createLightPassCompareReader,
   };
 }

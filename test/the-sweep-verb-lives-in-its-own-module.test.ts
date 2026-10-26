@@ -13,15 +13,17 @@ import type { Config } from "#src/lib/config.js";
 import type { Plan } from "#src/lib/plan.js";
 import type { GitHub } from "#src/lib/status.js";
 import type { OpenPrView, SweepDeps, BuildSweepEffectsDeps } from "#src/lib/sweep.js";
-import type { SweepCommandHost, LightPassReadPorts } from "#src/cli/commands/sweep.js";
+import type { SweepCommandHost } from "#src/cli/commands/sweep.js";
 import { systemClock } from "#src/lib/clock.js";
 
 // Avoid the argv module's checkout discovery: these fixtures do not need a git executable.
 const savedArgv = [...process.argv];
 process.argv.push("--repo-root", REPO_ROOT);
-const { buildSweepEffects, buildSweepHook, buildSweepLightHook, sweepCommand } =
+const { buildSweepEffects, buildSweepHook, sweepCommand } =
   await import("#src/cli/commands/sweep.js");
+const { buildSweepLightHook: buildSweepLightHookFromEntrypoint } = await import("#src/run-task.js");
 process.argv.splice(0, process.argv.length, ...savedArgv);
+type LightPassReadPorts = NonNullable<Parameters<typeof buildSweepLightHookFromEntrypoint>[12]>;
 
 // @source-text-subject: this extraction's subject is declaration ownership and import direction.
 const runTaskSrc = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
@@ -38,6 +40,11 @@ function topLevelFunction(source: string, header: string): string {
 
 test("W1-T9338: sweepCommand is defined in its module and src/run-task.ts only delegates to it", () => {
   assert.match(sweepSrc, /^export interface SweepCommandHost \{/m);
+  assert.ok(/^interface LightPassReadPorts \{/m.test(runTaskSrc), "the original read-ports type stays in the entrypoint");
+  assert.equal(runTaskSrc.match(/^function createLightPassCompareReader\(/gm)?.length, 1);
+  assert.equal(/^(?:export )?(?:interface LightPassReadPorts|function createLightPassCompareReader)\b/m.test(sweepSrc), false);
+  assert.ok(/createLightPassCompareReader,[\s\S]*?\} = host;/.test(sweepSrc), "the module reads the helper from its host");
+  assert.ok(/function sweepCommandHost\([\s\S]*?\n    createLightPassCompareReader,/.test(runTaskSrc), "the entrypoint supplies its helper");
   for (const [name, declaration, minimumLines] of [
     ["sweepCommand", "export async function", 100],
     ["buildSweepEffects", "export function", 300],
@@ -205,7 +212,7 @@ test("W1-T9338: light hook compares ready heads through its default subprocess r
         ["acme", "fixture", f.config, f.plan, f.ledgerPath, "LIGHT"]);
       return { ...f.effects, ledgerPath: f.ledgerPath, runId: "LIGHT", readMainTip: async () => "main-sha" };
     } };
-  const hook = buildSweepLightHook(f.host, "acme", "fixture", f.config, f.ledgerPath, "LIGHT", f.plan,
+  const hook = buildSweepLightHookFromEntrypoint("acme", "fixture", f.config, f.ledgerPath, "LIGHT", f.plan,
     f.log, undefined, undefined, undefined, undefined, undefined, io);
   await hook();
   await hook();
@@ -223,10 +230,34 @@ test("W1-T9338: light hook keeps the main-tip failure reason and uses symbolic m
     effects: () => ({ ...f.effects, ledgerPath: f.ledgerPath, runId: "LIGHT",
       readMainTip: async () => { if (mainReads++ === 0) throw new Error("main unavailable"); return "main-sha"; } }),
     readCompare: async (args) => { reads.push(args); return { ahead_by: 0, files: [] }; } };
-  await buildSweepLightHook(f.host, "acme", "fixture", f.config, f.ledgerPath, "LIGHT", f.plan,
+  await buildSweepLightHookFromEntrypoint("acme", "fixture", f.config, f.ledgerPath, "LIGHT", f.plan,
     f.log, undefined, undefined, undefined, undefined, undefined, io)();
   assert.deepEqual(reads, [["api", `repos/acme/fixture/compare/${pr().headSha}...main`]]);
   assert.equal(f.logs.find((row) => row.step === "sweep_light.main_tip_unreadable")?.error, "Error: main unavailable");
+  assert.deepEqual(f.logs.filter((row) => row.step === "sweep_light.error"), []);
+});
+
+test("W1-T9338: the entrypoint compare reader retries errors and unreadable facts before caching success", async (t) => {
+  const f = sweepFixture(t);
+  let reads = 0;
+  const io: LightPassReadPorts = { openPrViews: async () => [pr()],
+    effects: () => ({ ...f.effects, ledgerPath: f.ledgerPath, runId: "LIGHT",
+      readMainTip: async () => "main-sha" }),
+    readCompare: async () => {
+      reads++;
+      if (reads === 1) throw new Error("compare unavailable");
+      if (reads === 2) return { ahead_by: "unknown", files: [] };
+      return { ahead_by: 0, files: [] };
+    } };
+  const hook = buildSweepLightHookFromEntrypoint("acme", "fixture", f.config, f.ledgerPath, "LIGHT", f.plan,
+    f.log, undefined, undefined, undefined, undefined, undefined, io);
+  for (let pass = 0; pass < 4; pass++) await hook();
+  assert.equal(reads, 3, "failures are retried; only valid facts can be reused");
+  const comparisons = f.logs.filter((row) => row.step === "sweep_light.pre_review_timing")
+    .flatMap((row) => row.compare_reads as Array<Record<string, unknown>>);
+  assert.deepEqual(comparisons.map((row) => [row.outcome, row.cache_hit]),
+    [["error", false], ["unreadable", false], ["read", false], ["read", true]]);
+  assert.equal(comparisons[0]!.error, "Error: compare unavailable");
   assert.deepEqual(f.logs.filter((row) => row.step === "sweep_light.error"), []);
 });
 
