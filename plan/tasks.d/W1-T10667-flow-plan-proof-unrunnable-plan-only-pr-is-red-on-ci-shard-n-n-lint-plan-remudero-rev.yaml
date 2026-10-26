@@ -23,3 +23,11 @@
     Source owner: src/lib/pr-blocker.ts. Top five PRs by observed hours, with original blocker reasons:
     - PR #14215: 4.38 PR-hours — plan-only PR is red on ci-shard (2/8), lint-plan, remudero-review — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair — its log names: W1-T10431 [machine-filing-admission] task W1-T10431 is not selectable by runnableCandidates under the current releasedIds: task W1-T10431 is verify:human — not auto-runnable by the proto-runner
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The rationale identifies a verify:human task rejected by machine-filing admission, while acceptance requires automatic clearance without a person; the record does not specify a remedy that preserves that human decision boundary.; on the change's description/files alone, no diff was read — The record states “Owner NONE is absent” and that the blocker needs a plan repair, but declares only pr-blocker.ts and a new test. Ownership and the proposed repair cannot be verified from the supplied record."
+    judged_at: "2026-10-26T03:12:26.979Z"
+    pin: "2befba2de23016fb20e1e199f081b0a11e49c14e60b8c8d3a7a38126bfadbe8c"
