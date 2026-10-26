@@ -13610,10 +13610,15 @@ export function fleetWithheldStageMs(rows: ReadonlyArray<Record<string, unknown>
   let held = 0;
   passes.forEach(({ row, at }, i) => {
     const text = `${String(row.stand_down_reason ?? "")} ${String(row.reason ?? "")}`;
-    const semanticAdmissionHeld = row.acted === false && typeof row.stand_down_reason === "string" &&
-      /^not admitted this pass: semantic post-review admission bound \d+(?:, in-flight \d+)?(?:; admitted #\d+(?:, #\d+)* ahead)?$/.test(row.stand_down_reason);
-    if (row.acted === true || !(FLEET_WITHHELD_STAND_DOWN.test(text) || semanticAdmissionHeld)) return;
-    held += Math.max(0, (passes[i + 1]?.at ?? nowMs) - at);
+    const admissionHeld = row.acted === false && typeof row.stand_down_reason === "string" && (
+      /^not admitted this pass: semantic post-review admission bound \d+(?:, in-flight \d+)?(?:; admitted #\d+(?:, #\d+)* ahead)?$/.test(row.stand_down_reason) ||
+      /^not admitted this pass: at most \d+ plan-filing post-review admissions (?:per light pass|available across light passes)$/.test(row.stand_down_reason) ||
+      row.stand_down_reason === "not admitted this pass: restart latched, and the review would outlast its drain" ||
+      row.stand_down_reason === "overtaken by a repair queued before it — this review keeps its place in the queue, re-derived next pass" ||
+      row.stand_down_reason === "review lanes taken by repairs queued before their reviews — re-derived next pass"
+    );
+    if (row.acted === true || !(FLEET_WITHHELD_STAND_DOWN.test(text) || admissionHeld)) return;
+    held += Math.max(0, Math.min(passes[i + 1]?.at ?? nowMs, nowMs) - at);
   });
   return held;
 }
