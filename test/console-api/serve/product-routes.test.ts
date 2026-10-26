@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { buildProductRoutes } from "#src/lib/product-routes.js";
 import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
 import { createService, type IdentityProvider } from "#src/lib/service.js";
@@ -179,5 +180,76 @@ test("W1-T10613: the served product repository operation matches the authenticat
     assert.equal((await send("alice", { ...adopt(productId), extra: true })).status, 400);
     assert.equal((await send("alice", undefined, "{broken")).status, 400);
     assert.equal((await send("alice", undefined, JSON.stringify({ padding: "x".repeat(5000) }))).status, 413);
+  } finally { await new Promise<void>((resolve, reject) => instance.close((error) => error ? reject(error) : resolve())); }
+});
+
+test("W1-T10615: the served product build operation matches the authenticated API contract", async (t) => {
+  const HEAD = "c".repeat(40);
+  const shim = ghShim([
+    { when: "commits/main", stdout: JSON.stringify({ sha: HEAD }) },
+    { when: `contents?ref=${HEAD}`, stdout: JSON.stringify([{ name: "src" }, { name: "README.md" }]) },
+    { when: "contents/plan/tasks.d?ref=main", stdout: JSON.stringify([{ name: "W9-T1-first.yaml" }]) },
+    { when: "contents/plan/tasks.d/W9-T1-first.yaml", stdout: "PLACEHOLDER" },
+    { when: "matching-refs/rmd-dispatch/W9-T1", stdout: JSON.stringify([{ ref: "refs/rmd-dispatch/W9-T1" }]) },
+    { when: "matching-refs/heads/run-W9-T1-", stdout: JSON.stringify([{ ref: "refs/heads/run-W9-T1-17" }]) },
+    { when: "search/issues", stdout: JSON.stringify({ total_count: 0 }) },
+    { when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra",
+      owner: { login: "craigoley" }, private: false, default_branch: "main" }) },
+  ]);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  t.after(() => { process.env.PATH = originalPath; });
+  const root = ownedFixtureDir(t, "product-build-http").dir;
+  mkdirSync(join(root, ".remudero"), { recursive: true });
+  writeFileSync(join(root, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
+  const store = new ProductIntentStore({ root });
+  const saved = store.write("clerk:alice", command);
+  assert.ok(saved.ok);
+  const productId = saved.value.receipt.productId;
+  assert.ok(store.transition("clerk:alice", { version: "product-intent-v1", requestId: "route-build-seed-01", id: productId, expectedRevision: 1, expectedObjectiveRevision: 1,
+    repository: { provider: "github", id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public", verifiedAt: "2026-10-26T00:00:00.000Z" },
+    stageEvidence: [{ id: "plan-approved-1", stage: "plan", outcome: "succeeded", objectiveRevision: 1, observedAt: "2026-10-26T00:00:01.000Z", references: [] }] }).ok);
+  const shard = `- id: W9-T1\n  origin: product-plan#${productId}/plan-approved-1\n  status: queued\n  budget_usd: 10\n`;
+  shim.addRoute({ when: "contents/plan/tasks.d/W9-T1-first.yaml", stdout: shard });
+  const products = assembled(root);
+  const mounted = assembled(root, "/v1/products/build");
+  assert.equal(mounted[0]?.tier, "high", "starting a build is a high-tier action");
+  assert.equal(mounted[0]?.scope, "write");
+  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes: [...products, ...mounted] });
+  await new Promise<void>((resolve) => instance.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(instance.address() as AddressInfo).port}`;
+  const build = { version: "product-build-v1", requestId: "route-build-000001", productId, planEvidenceId: "plan-approved-1", taskId: "W9-T1",
+    expectedRevision: 2, expectedObjectiveRevision: 1 };
+  const send = async (session: "alice" | "bob" | undefined, body: unknown, raw?: string) => {
+    const result = await fetch(`${base}/v1/products/build`, { method: "POST", headers: { authorization: "Bearer fixture-write",
+      "content-type": "application/json", ...(session ? { "x-test-session": session } : {}) }, body: raw ?? JSON.stringify(body) });
+    const reply = await result.json() as { version: string; error?: string; replayed?: boolean; receipt?: { outcome: string; evidence: unknown[] } };
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/build", "POST", result.status)), [],
+      `the real build response (${result.status}) must match its declared contract`);
+    assert.match(result.headers.get("cache-control") ?? "", /no-store/);
+    return { status: result.status, body: reply };
+  };
+  try {
+    assert.equal((await send(undefined, build)).status, 403);
+    assert.equal((await send("alice", { ...build, extra: true })).status, 400);
+    assert.equal((await send("alice", undefined, "{broken")).status, 400);
+    assert.equal((await send("alice", undefined, JSON.stringify({ padding: "x".repeat(5000) }))).status, 413);
+    assert.equal((await send("bob", build)).status, 404);
+    assert.equal((await send("alice", { ...build, planEvidenceId: "unapproved" })).status, 409);
+    assert.equal(shim.calls().length, 1, "only the unapproved plan reached the transport, and only for the repository identity read");
+    // The task is already claimed by another lane, so the assembled operation refuses it explicitly.
+    const claimed = await send("alice", build);
+    assert.equal(claimed.status, 409);
+    assert.equal(claimed.body.error, "task_claimed");
+    assert.ok(!existsSync(join(root, "state", "KICK_REQUESTED-wreckterra:W9-T1")), "a refused start writes no marker");
+    // Free the claim: the real default target and kick now start the build, queued then observed running.
+    shim.addRoute({ when: "matching-refs/rmd-dispatch/W9-T1", stdout: JSON.stringify([]) });
+    const started = await send("alice", { ...build, requestId: "route-build-000002" });
+    assert.equal(started.status, 200);
+    assert.equal(started.body.receipt?.outcome, "queued");
+    assert.equal(started.body.replayed, false);
+    assert.ok(existsSync(join(root, "state", "KICK_REQUESTED-wreckterra:W9-T1")), "the existing repo-scoped kick marker was written");
+    assert.ok(!shim.calls().some((call) => call.includes("-X POST")), "starting a build makes no provider write");
+    assert.equal((await send("alice", { ...build, requestId: "route-build-000002" })).body.replayed, true);
   } finally { await new Promise<void>((resolve, reject) => instance.close((error) => error ? reject(error) : resolve())); }
 });

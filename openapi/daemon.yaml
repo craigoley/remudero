@@ -401,7 +401,7 @@ components:
       description: outcome is the furthest independently recorded phase; queued is never reported as running.
       required: [operationId, productId, taskId, planEvidenceId, outcome, repository, objectiveRevision, payloadDigest, queuedAt, evidence]
       properties:
-        operationId: { type: string, minLength: 70, maxLength: 70, pattern: '^pbuild_[a-f0-9]{64}$' }
+        operationId: { type: string, minLength: 71, maxLength: 71, pattern: '^pbuild_[a-f0-9]{64}$' }
         productId: { $ref: "#/components/schemas/ProductId" }
         taskId: { type: string, minLength: 1, maxLength: 64 }
         planEvidenceId: { type: string, minLength: 1, maxLength: 128 }
