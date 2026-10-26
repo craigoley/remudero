@@ -228,6 +228,8 @@ test("W1-T9950: a waiter reports its position and a measured ETA", t => {
   for (let i = 0; i < 10; i += 1) recordTestSlotHold(dir, { label: "preflight-author", heldMs: i, concurrency: 1, endedAt: "x" }, 2);
   recordTestSlotHold(dir, { label: "check", heldMs: 1, concurrency: 1, endedAt: "x" }, 2);
   assert.equal(holdRetention(2), 5);
+  writeFileSync(join(testSlotQueueDir(dir), "hold-history.ndjson"), `{torn\n${readFileSync(join(testSlotQueueDir(dir), "hold-history.ndjson"), "utf8")}`);
+  assert.ok(readHoldHistory(dir).length > 0, "a torn row is skipped; the measured rows beside it still count");
   assert.deepEqual(readHoldHistory(dir).filter(row => row.label === "preflight-author").map(row => row.heldMs), [5, 6, 7, 8, 9]);
   assert.equal(readHoldHistory(dir).filter(row => row.label === "check").length, 1, "one label's retention never evicts another's");
 });
@@ -341,4 +343,18 @@ test("W1-T9950: a queue that cannot be used degrades to unqueued polling and say
   assert.equal(d.outcome, "acquired");
   d.release();
   assert.match(String(rows(releaseLines, "test_slot.hold_history_failed")[0]?.error), /EISDIR/, releaseLines.join("\n"));
+  // (4) A ticket that cannot be removed (its queue dir turned read-only) is named, never silently kept.
+  if (process.getuid?.() !== 0) {
+    const stuck = slotDir(t, "stuck");
+    const blocker = acquireTestSlot("holder", { ...opts(stuck), clock: time.clock, pid: PID.holder, log: () => {}, say: () => {} });
+    const e = s.arrive(time.now - time.start, "E", { ...opts(stuck), pid: PID.w, pollMs: 1_000, waitBoundMs: 1_000 });
+    s.runUntil(time.now - time.start);
+    assert.equal(tickets(stuck).length, 1);
+    chmodSync(testSlotQueueDir(stuck), 0o555);
+    try { s.runUntil(time.now - time.start + 1_000); }
+    finally { chmodSync(testSlotQueueDir(stuck), 0o777); }
+    assert.equal(e.lease?.outcome, "wait_bound_exceeded");
+    assert.match(String(rows(e.lines, "test_slot.ticket_cleanup_failed")[0]?.error), /EACCES|EPERM/, e.lines.join("\n"));
+    blocker.release();
+  }
 });
