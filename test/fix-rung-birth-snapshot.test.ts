@@ -319,7 +319,7 @@ test("runFixRung: missing birth snapshot never manufactures a foreign-tree stand
   }
 });
 
-async function observeAdvancedEvidenceRound(mode: "published" | "local" | "unreadable") {
+async function observeAdvancedEvidenceRound(mode: "published" | "local" | "unreadable" | "fresh") {
   const { root, worktreePath, branch } = await initFixRungRepo();
   try {
     const before = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -334,7 +334,7 @@ async function observeAdvancedEvidenceRound(mode: "published" | "local" | "unrea
     const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
     const outcome = await runFixRung({ ...fixRungBaseOpts(worktreePath), branch, strikeCap: 1,
       birthWorktreeSnapshot: birth,
-      initialReview: fakeReview("failure", [criterion({ claim: "old-head failure", met: false })], before),
+      initialReview: fakeReview("failure", [criterion({ claim: "old-head failure", met: false })], mode === "fresh" ? advanced : before),
       deps: { spawn: async () => { spawned++; return result({ text: "NEEDS_DESIGN: missing old-head security evidence" }); },
         waitForCiGreen: async () => "red", runReview: async () => fakeReview("failure", []), push: () => { pushed++; },
         issues, ledgerPath: tmpLedgerPath(), log: (step, extra) => logs.push({ step, extra }), say: () => {}, account: r => r,
@@ -372,4 +372,11 @@ test("an unreadable remote preserves the existing direction without certifying a
   assert.equal(r.headAfter, r.advanced);
   assert.equal(r.logs.some(row => row.step === "fix.evidence_head_superseded"), false);
   assert.ok(r.logs.some(row => row.step === "fix.evidence_head_unread"));
+});
+
+test("a fresh snapshot of the published tip reaches the ordinary worker without resetting history", async () => {
+  const r = await observeAdvancedEvidenceRound("fresh");
+  assert.equal(r.spawned, 1);
+  assert.equal(r.headAfter, r.advanced);
+  assert.equal(r.logs.some(row => row.step === "fix.evidence_head_superseded"), false);
 });
