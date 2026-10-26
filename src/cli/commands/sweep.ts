@@ -597,7 +597,7 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
   const self = resolveOwnerRepo();
   const repo = flagValue(rest, "--repo") ?? self.repo;
   const owner = self.owner;
-  const runId = `SWEEP-${Date.now()}`;
+  const runId = `SWEEP-${systemClock.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "SWEEP", step, lane: "sweep", ...extra });
   const triageRuntime = buildEscalationTriageRuntime({ root: repoRoot, config, owner, repo });
@@ -1051,7 +1051,7 @@ export function buildSweepHook(
       // W1-T2575 — the mount-headroom sweep's missing recommendation leg: turns
       // scripts/mount-headroom-sweep.mjs's measured (type, risk, class) cells into ratifiable
       // inbox proposals (or, far more often, a named refusal) via `recommendMounts`. Own
-      // try/catch inside the rung; never mutates `.remudero/mounts.yaml` itself.
+      // try/catch inside the rung; never mutates the target's mounts configuration itself.
       await runMountRecommenderRung(config, runId, log);
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
