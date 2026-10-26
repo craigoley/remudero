@@ -466,19 +466,19 @@ export type ProductRepositoryPreviewResult =
  * the mutation rechecks every prerequisite itself, so a "ready" here authorizes nothing.
  */
 export async function inspectProductRepository(
-  deps: { store: ProductIntentStore; provider: ProductRepositoryProvider; clock?: Clock },
+  seam: Required<Pick<ProductRepositoryOptions, "store" | "provider">> & Pick<ProductRepositoryOptions, "clock">,
   actor: string, query: unknown,
 ): Promise<ProductRepositoryPreviewResult> {
   if (typeof actor !== "string" || !actor.trim() || actor.length > 512) return { ok: false, code: "invalid_identity" };
   const parsed = productRepositoryPreviewQuerySchema.safeParse(query);
   if (!parsed.success) return { ok: false, code: "invalid_input" };
   const input = parsed.data;
-  const product = deps.store.read(actor, input.id);
+  const product = seam.store.read(actor, input.id);
   if (!product.ok) return { ok: false, code: product.code };
   const { revision, objectiveRevision, repository: bound } = product.value;
   const requested = product.value.brief.requestedRepository;
   const same = (owner: string, name: string) => owner.toLowerCase() === input.owner.toLowerCase() && name.toLowerCase() === input.name.toLowerCase();
-  const observedAt = (deps.clock ?? systemClock).iso();
+  const observedAt = (seam.clock ?? systemClock).iso();
   const outcome = (state: ProductRepositoryPreviewState, reasons: ProductRepositoryPreviewReason[],
     repository: ProductRepositoryPreview["repository"] = null, creation: ProductRepositoryPreviewCreation = "not_checked"): ProductRepositoryPreviewResult => ({
     ok: true, value: { version: PRODUCT_REPOSITORY_PREVIEW_VERSION, productId: input.id, revision, objectiveRevision, action: input.action,
@@ -492,11 +492,11 @@ export async function inspectProductRepository(
   if (bound && input.action === "adopt" && !same(bound.owner, bound.name)) return outcome("conflict", ["bound_repository_mismatch"]);
 
   let before: ProviderRead;
-  try { before = await deps.provider.read(input.owner, input.name); }
+  try { before = await seam.provider.read(input.owner, input.name); }
   catch { before = { state: "unreadable" }; /* a throwing provider is unreadable, never absent and never ready */ }
   if (before.state === "unreadable") return outcome("unavailable", ["provider_unreadable"]);
   let creation: ProductRepositoryPreviewCreation;
-  try { creation = await deps.provider.capability(input.owner); }
+  try { creation = await seam.provider.capability(input.owner); }
   catch { creation = "unknown"; /* an unreadable capability is unknown, never a denial */ }
   if (before.state === "found") {
     const { id, owner, name, defaultBranch, visibility } = before.repository;
