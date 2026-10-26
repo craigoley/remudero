@@ -64,6 +64,7 @@
     "pr-checks",
     "pr-owner",
     "preflight",
+    "procedures",
     "progress-watchdog",
     "project",
     "proof-queue-audit",
