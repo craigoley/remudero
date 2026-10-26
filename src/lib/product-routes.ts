@@ -68,6 +68,7 @@ export function buildProductResearchRoutes(options: { root?: string; provider?: 
       let command: unknown;
       try { command = JSON.parse(await readBoundedRawBody(req, PRODUCT_RESEARCH_LIMITS.requestBytes)); }
       catch (error) {
+        // An oversize body and malformed JSON are distinct refusals: 413 request_too_large vs 400 invalid_input.
         const tooLarge = error instanceof RawBodyTooLargeError;
         fail(tooLarge ? 413 : 400, tooLarge ? "request_too_large" : "invalid_input");
         return;

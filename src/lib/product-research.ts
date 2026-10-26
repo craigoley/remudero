@@ -321,6 +321,7 @@ export class ProductResearchService {
     try {
       raw = await provider.research({ objective: product.brief.objective ?? product.brief.idea, objectiveRevision: product.objectiveRevision, sources: sources.map(({ label, url }) => ({ label, url })) });
     } catch {
+      // The provider's own message is untrusted text: only the closed failure code is recorded.
       return make("failed", { failure: "provider_error" });
     }
     const output = providerOutputSchema.safeParse(raw);
