@@ -559,3 +559,45 @@ test("improvement planning preserves a qualified finding when another check is m
     assert.equal(created.state, "saved", "the existing service qualifies the finding's current source; it does not require every other health check to be complete");
   });
 });
+
+test("saved improvement decisions remain queued across process restart without a browser handoff", async () => {
+  const planning = await planningModule();
+  await withTempDir("improvement-daemon-queue", async dir => {
+    const { deps, request } = sourceFixture(dir);
+    const saved = await planning.createImprovementThread(request, deps); assert(saved.state === "saved");
+    const view = planning.readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
+    const requested = await planning.requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest,
+      idempotencyKey: "daemon-queue-request-00001" }, deps);
+    assert.equal(requested.state, "requested", "saving a decision needs no service-side process launcher"); assert(requested.state === "requested");
+    const script = 'import {pendingImprovementActions} from "#src/lib/improvement-thread.js";const rows=[];for await(const row of pendingImprovementActions(process.argv[1]))rows.push(row);process.stdout.write(JSON.stringify(rows));';
+    const rows = JSON.parse(execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, deps.stateDir],
+      { cwd: repoRoot(), encoding: "utf8", timeout: 15000 }));
+    assert.deepEqual(rows, [{ operationId: requested.operation.operationId, stateDir: deps.stateDir,
+      repoRoot: join(dir, "atlas-instance", "repos", "atlas") }]);
+    assert.equal(planning.readImprovementThread(saved.requestId, deps).state, "saved");
+  });
+});
+
+test("saved improvement discovery visits the full action population and reports corrupt records", async () => {
+  const planning = await planningModule();
+  assert.equal(typeof (planning as unknown as Record<string, unknown>).pendingImprovementActions, "function");
+  await withTempDir("improvement-complete-discovery", async dir => {
+    const { createHash } = await import("node:crypto");
+    const { deps, request } = sourceFixture(dir), actionsDir = join(deps.stateDir, "improvement-threads", "actions");
+    mkdirSync(actionsDir, { recursive: true });
+    for (let i = 0; i < 1025; i++) {
+      const action = { version: "improvement-action-v1", operationId: i.toString(16).padStart(64, "0"), kind: "draft", state: "completed",
+        requestId: "a".repeat(64), goalDigest: "b".repeat(64), payloadHash: "c".repeat(64) };
+      writeFileSync(join(actionsDir, `${action.operationId}.json`), JSON.stringify({ ...action, contentHash: createHash("sha256").update(JSON.stringify(action)).digest("hex") }));
+    }
+    const saved = await planning.createImprovementThread(request, deps); assert(saved.state === "saved");
+    const view = planning.readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
+    const requested = await planning.requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest,
+      idempotencyKey: "complete-daemon-queue-0001" }, deps); assert(requested.state === "requested");
+    const discover = (planning as unknown as { pendingImprovementActions(stateDir: string): AsyncIterable<{ operationId: string }> }).pendingImprovementActions;
+    const ids: string[] = []; for await (const row of discover(deps.stateDir)) ids.push(row.operationId);
+    assert.deepEqual(ids, [requested.operation.operationId], "terminal records cannot silently truncate pending discovery");
+    writeFileSync(join(actionsDir, `${"f".repeat(64)}.json`), "{corrupt");
+    await assert.rejects(async () => { for await (const _row of discover(deps.stateDir)) { /* inspect the complete pass */ } }, /JSON|saved|action|Unexpected/i);
+  });
+});
