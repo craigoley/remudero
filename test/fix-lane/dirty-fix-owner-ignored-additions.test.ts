@@ -108,3 +108,28 @@ test("dirty fix-owner preservation still refuses an ignored working copy hidden 
     assert.equal(git(repoDir, ["for-each-ref", "--format=%(refname)", "refs/rmd-recovery/fix-dirty"]), "");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("an empty owner index cannot turn preservation into staging ignored untracked work", () => {
+  const root = tmp();
+  try {
+    const upstream = seedUpstream(root), repoDir = join(root, "repo"), ownerPath = join(root, "owner");
+    cloneOf(upstream, repoDir);
+    const git = (path: string, args: string[]) => execFileSync("git", ["-C", path, ...args], { encoding: "utf8" });
+    const branch = "run-W1-T3822-1789876999002";
+    git(repoDir, ["branch", branch]);
+    git(repoDir, ["worktree", "add", "--quiet", ownerPath, branch]);
+    const exclude = join(root, "exclude");
+    writeFileSync(exclude, "*\n");
+    git(ownerPath, ["config", "core.excludesFile", exclude]);
+    git(ownerPath, ["rm", "--cached", "--", "seed.txt"]);
+    writeFileSync(join(ownerPath, "untracked.txt"), "unpublished ignored bytes\n");
+    assert.equal(git(ownerPath, ["ls-files", "--cached", "-z"]), "");
+    const localSha = sha(ownerPath, "HEAD");
+    const indexPath = git(ownerPath, ["rev-parse", "--path-format=absolute", "--git-path", "index"]).trim();
+    const index = readFileSync(indexPath);
+    assert.throws(() => preserveTrackedDirtyFixOwner(repoDir, ownerPath, branch, localSha), /dirty recovery patch tree .* does not match owner tree/);
+    assert.equal(readFileSync(join(ownerPath, "untracked.txt"), "utf8"), "unpublished ignored bytes\n");
+    assert.deepEqual(readFileSync(indexPath), index);
+    assert.equal(git(repoDir, ["for-each-ref", "--format=%(refname)", "refs/rmd-recovery/fix-dirty"]), "");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
