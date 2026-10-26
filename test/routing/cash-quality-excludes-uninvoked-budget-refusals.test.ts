@@ -37,7 +37,8 @@ async function workerOutcome(result?: WorkerResult) {
     const savedHome = process.env.HOME;
     process.env.HOME = root;
     try {
-      const worker = await spawnWorker({ cwd: REPO_ROOT, settingsFile, config, prompt: "Classify fixture only.",
+      const worker = await spawnWorker({ cwd: REPO_ROOT, permissionMode: "bypassPermissions", settingsFile, config,
+        prompt: "Classify fixture only.",
         model: "haiku", effort: "low", mountProvider: "cash", maxTurns: 1, tools: [],
         onSelectionAssignment: (assignment) => rows.push({ step: "worker.selection.assigned", assignment }),
         routingTrial: { id: "quality-fixture", arm: "cash", reason: "fixture", models: [deployment] },
