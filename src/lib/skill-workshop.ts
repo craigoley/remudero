@@ -260,7 +260,7 @@ export function workerAllowlistFromCapabilityContext(settings: unknown, context:
     if (!consumer || typeof consumer.lane !== "string" || !(TASK_TYPES as readonly string[]).includes(consumer.lane) && consumer.lane !== SKILL_FIX_TASK_TYPE
       || typeof consumer.provider !== "string" || !(WORKER_PROVIDER_IDS as readonly string[]).includes(consumer.provider)
       || typeof consumer.source !== "string" || consumer.source.length === 0
-      || !Array.isArray(consumer.tools) || !consumer.tools.every(tool => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_]*$/.test(tool))) return unknown("malformed-or-unbounded-consumer");
+      || !Array.isArray(consumer.tools) || !consumer.tools.every((tool: unknown) => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_]*$/.test(tool))) return unknown("malformed-or-unbounded-consumer");
     const identity = `${consumer.lane}/${consumer.provider}`;
     if (identities.has(identity)) return unknown("ambiguous-consumer");
     identities.add(identity);
@@ -269,7 +269,7 @@ export function workerAllowlistFromCapabilityContext(settings: unknown, context:
   const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === "string");
   const allow = s?.permissions?.allow, deny = s?.permissions?.deny, hosts = s?.sandbox?.network?.allowedDomains, denyRead = s?.sandbox?.filesystem?.denyRead;
   if (!strings(allow) || !strings(deny) || !strings(hosts) || !strings(denyRead)) return unknown("settings-unavailable-or-malformed");
-  const tools = context.consumers[0]!.tools.filter(tool => context.consumers.every(c => c.tools.includes(tool))
+  const tools = context.consumers[0]!.tools.filter((tool: string) => context.consumers.every(c => c.tools.includes(tool))
     && !deny.includes(tool) && !deny.includes("*"));
   const paths = [...denyRead, ...deny.flatMap(entry => entry.match(READ_WRAPPER_RE)?.[1] ?? [])];
   return { allowedHosts: [...hosts], deniedPathPatterns: [...new Set(paths)], allowedTools: [...tools],
