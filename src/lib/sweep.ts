@@ -3574,8 +3574,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixOwnerReclaimableAtHold: (pr, decline) => {
       const { worktree_path: ownerPath, branch, task_id: taskId } = decline;
       if (typeof ownerPath !== "string" || typeof branch !== "string" || typeof taskId !== "string") return false;
-      if (decline.owner_recovery_reason === "owner_dirty_recovery_preserve_failed" &&
-          (branch !== pr.headRefName || taskId !== fixLedgerTaskIdFor(pr))) return false;
+      const failed = revalidatedOwnerPreservation(decline.owner_recovery_reason);
+      if (failed && (branch !== pr.headRefName || taskId !== fixLedgerTaskIdFor(pr))) return false;
       try {
         const snapshot = registeredOwnerRecovery.capture({
           repoDir, worktreesRoot: worktreesDir(config), ownerPath, taskId, branch,
@@ -3585,15 +3585,35 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath), spawnWallClockBoundMs), // ledger-read-intent: live
         });
         const decision = decideRegisteredFixOwnerRecovery(snapshot);
-        if (decline.owner_recovery_reason !== "owner_dirty_recovery_preserve_failed") return decision.kind !== "keep";
-        if (decision.kind !== "preserve-tracked-dirty" || typeof snapshot.localSha !== "string") return false;
-        // The ordinary preservation helper proves parent and exact-tree identity before returning
-        // this immutable ref. Revalidation never clears the index, removes the owner or starts work.
-        const ref = registeredOwnerRecovery.preserveTrackedDirty?.(repoDir, ownerPath, branch, snapshot.localSha);
-        const prefix = `refs/rmd-recovery/fix-dirty/${branch}/${snapshot.localSha}/`;
+        if (!failed) return decision.kind !== "keep";
+        const localSha = snapshot.localSha;
+        if (decision.kind !== failed.kind || typeof localSha !== "string") return false;
+        // Each arm re-runs the claim path's own preservation helper, which proves what it saved before
+        // returning. Revalidation never resets, clears the index, removes the owner or starts work.
+        if (failed.helper === "preserveStaleDirty") {
+          // The helper re-reads every file it saves byte for byte; its result is the directory it made.
+          const saved = registeredOwnerRecovery.preserveStaleDirty?.(config.root, repoDir, ownerPath, branch, localSha);
+          if (typeof saved !== "string" || dirname(saved) !== join(config.root, "recovery", "fix-owner", branch) ||
+              !basename(saved).startsWith(`${localSha}-`)) return false;
+          log("sweep.fix.checkout_owner_stale_dirty_preserved", { pr_number: pr.prNumber, task_id: taskId, branch,
+            worktree_path: snapshot.path, local_sha_prefix: localSha.slice(0, 12), head_sha: pr.headSha,
+            at_current_head: localSha === snapshot.remoteSha, preserved_path: saved, from_backstop_revalidation: true });
+          return true;
+        }
+        // Both ref helpers prove parent and exact-tree identity before returning this immutable ref.
+        const ref = registeredOwnerRecovery[failed.helper]?.(repoDir, ownerPath, branch, localSha);
+        const prefix = `refs/rmd-recovery/fix-dirty/${branch}/${localSha}/`;
         if (typeof ref !== "string" || !ref.startsWith(prefix) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref.slice(prefix.length))) return false;
-        log("sweep.fix.checkout_owner_dirty_preserved", { pr_number: pr.prNumber, task_id: taskId, branch,
-          local_sha_prefix: snapshot.localSha.slice(0, 12), recovery_ref: ref.slice(0, 512), from_backstop_revalidation: true });
+        if (failed.helper === "preserveTrackedDirty") {
+          log("sweep.fix.checkout_owner_dirty_preserved", { pr_number: pr.prNumber, task_id: taskId, branch,
+            local_sha_prefix: localSha.slice(0, 12), recovery_ref: ref.slice(0, 512), from_backstop_revalidation: true });
+          return true;
+        }
+        // The claim path's own receipt choice for a preserved staged residue.
+        const superseded = snapshot.remoteSha !== null && snapshot.remoteSha !== localSha && snapshot.historyState === "contained";
+        log(superseded ? "sweep.fix.checkout_owner_dirty_preserved" : "sweep.fix.owner_residue_preserved", {
+          pr_number: pr.prNumber, task_id: taskId, branch, head_sha: pr.headSha, local_sha_prefix: localSha.slice(0, 12),
+          recovery_ref: ref.slice(0, 512), staged_only: true, from_backstop_revalidation: true });
         return true;
       } catch {
         // An unreadable owner has the remedy a kept one has: the hold and its single escalation stand.
@@ -13709,6 +13729,24 @@ export const FIX_DISPATCH_FAILED_BACKSTOP = 3;
  *  three is the first attempt plus two retries, time for an exiting owner to clear. */
 export const FIX_CLAIM_DECLINE_BACKSTOP = 3;
 
+/** PR 14405 and its follow-up: each failed owner recovery `declineClaim` names, keyed to the decision
+ *  that must still admit it and the ordinary helper whose verified result lifts its backstop hold.
+ *  A failed stale-dirty RESET re-proves only its preservation: the claim path then redoes both. */
+const REVALIDATED_OWNER_PRESERVATIONS: Readonly<Record<string, {
+  kind: "preserve-tracked-dirty" | "preserve-stale-dirty";
+  helper: "preserveTrackedDirty" | "preserveStagedResidue" | "preserveStaleDirty";
+}>> = {
+  owner_dirty_recovery_preserve_failed: { kind: "preserve-tracked-dirty", helper: "preserveTrackedDirty" },
+  owner_staged_residue_preserve_failed: { kind: "preserve-tracked-dirty", helper: "preserveStagedResidue" },
+  owner_stale_dirty_preserve_failed: { kind: "preserve-stale-dirty", helper: "preserveStaleDirty" },
+  owner_stale_dirty_reset_failed: { kind: "preserve-stale-dirty", helper: "preserveStaleDirty" },
+};
+
+function revalidatedOwnerPreservation(reason: unknown) {
+  return typeof reason === "string" && Object.hasOwn(REVALIDATED_OWNER_PRESERVATIONS, reason)
+    ? REVALIDATED_OWNER_PRESERVATIONS[reason] : undefined;
+}
+
 /** A fix dispatch the backstop holds at this head, read from the ledger alone so EVERY pass (the light
  *  pass included, which never reaches the action arm) classifies it the same way. */
 export interface FixDispatchHold {
@@ -13755,7 +13793,8 @@ export function ownEscalationAtHead(
  *  re-attempts the claim, so clearing the cause never also needs a hand-pushed head (#10551, 2026-10-10:
  *  a dirty `sweep-` owner held a conflicted PR at one head with nothing able to lift it). A decline
  *  that named no path cannot be re-probed and keeps holding. W1-T7998: a decline the owner DECISION
- *  kept is re-asked through `ownerReclaimable`; once it admits recovery the hold lifts this pass. */
+ *  kept is re-asked through `ownerReclaimable`; once it admits recovery the hold lifts this pass.
+ *  A failed recovery in {@link REVALIDATED_OWNER_PRESERVATIONS} lifts only on a re-verified preservation. */
 export function fixDispatchHoldAtHead(
   pr: OpenPrView,
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -13765,9 +13804,15 @@ export function fixDispatchHoldAtHead(
   const declines = lines.filter((l) => isOwnerClaimDecline(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
   const last = declines[declines.length - 1];
   const ownerPath = typeof last?.worktree_path === "string" ? last.worktree_path : undefined;
+  // Revalidation re-proves a failed RESET's preservation but never tries the reset, so a reset that keeps
+  // failing would lift and re-decline forever with no escalation. It is re-asked once per head: after a
+  // revalidation lifted this head, a reset that fails again holds and escalates.
+  const resetRelifted = last?.owner_recovery_reason === "owner_stale_dirty_reset_failed" &&
+    lines.slice(0, lines.lastIndexOf(last)).some((l) => l.from_backstop_revalidation === true &&
+      l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
   if (declines.length >= FIX_CLAIM_DECLINE_BACKSTOP && (ownerPath === undefined || ownerWorktreeExists(ownerPath)) &&
-      !(ownerPath !== undefined && (last.owner_recovery_decision === "keep" ||
-        last.owner_recovery_reason === "owner_dirty_recovery_preserve_failed") && ownerReclaimable?.(pr, last) === true)) {
+      !(ownerPath !== undefined && !resetRelifted && (last.owner_recovery_decision === "keep" ||
+        revalidatedOwnerPreservation(last.owner_recovery_reason) !== undefined) && ownerReclaimable?.(pr, last) === true)) {
     const why = String(last.owner_recovery_reason);
     // W1-T5974: a staged-only refusal names the paths an operator must inspect before clearing it.
     const staged = Array.isArray(last.staged_paths) && last.staged_paths.length > 0
