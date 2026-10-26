@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { preserveTrackedDirtyFixOwner } from "#src/run-task.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const tmp = () => makeTempDir("fix-owner-ignored-index");
 const sha = (root: string, ref: string) => execFileSync("git", ["-C", root, "rev-parse", ref], { encoding: "utf8" }).trim();
@@ -13,9 +14,9 @@ function cloneOf(upstream: string, path: string) {
   execFileSync("git", ["-C", path, "config", "user.email", "probe@example.invalid"]);
   execFileSync("git", ["-C", path, "config", "user.name", "probe"]);
 }
-function seedUpstream(root: string) {
-  const upstream = join(root, "upstream.git"), seed = join(root, "seed");
-  execFileSync("git", ["init", "--quiet", "--bare", "--initial-branch=main", upstream]);
+function seedUpstream(root: string, scope: test.TestContext) {
+  const upstream = gitRepo({ scope, bare: true, kind: "fix-owner-origin" }).dir;
+  const seed = join(root, "seed");
   cloneOf(upstream, seed);
   writeFileSync(join(seed, "seed.txt"), "base\n");
   execFileSync("git", ["-C", seed, "add", "seed.txt"]);
@@ -25,10 +26,10 @@ function seedUpstream(root: string) {
 }
 
 for (const merging of [false, true]) {
-  test(`dirty fix-owner preservation retains staged additions under ignored paths${merging ? " during an interrupted merge" : ""}`, () => {
+  test(`dirty fix-owner preservation retains staged additions under ignored paths${merging ? " during an interrupted merge" : ""}`, (t) => {
     const root = tmp();
     try {
-      const upstream = seedUpstream(root);
+      const upstream = seedUpstream(root, t);
       const repoDir = join(root, "repo");
       cloneOf(upstream, repoDir);
       const git = (path: string, args: string[]) => execFileSync("git", ["-C", path, ...args], { encoding: "utf8", stdio: "pipe" });
@@ -80,10 +81,10 @@ for (const merging of [false, true]) {
   });
 }
 
-test("dirty fix-owner preservation still refuses an ignored working copy hidden by a staged deletion", () => {
+test("dirty fix-owner preservation still refuses an ignored working copy hidden by a staged deletion", (t) => {
   const root = tmp();
   try {
-    const upstream = seedUpstream(root), repoDir = join(root, "repo"), ownerPath = join(root, "owner");
+    const upstream = seedUpstream(root, t), repoDir = join(root, "repo"), ownerPath = join(root, "owner");
     cloneOf(upstream, repoDir);
     const git = (path: string, args: string[]) => execFileSync("git", ["-C", path, ...args], { encoding: "utf8" });
     writeFileSync(join(repoDir, ".gitignore"), "coverage/\n");
@@ -109,10 +110,10 @@ test("dirty fix-owner preservation still refuses an ignored working copy hidden 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("an empty owner index cannot turn preservation into staging ignored untracked work", () => {
+test("an empty owner index cannot turn preservation into staging ignored untracked work", (t) => {
   const root = tmp();
   try {
-    const upstream = seedUpstream(root), repoDir = join(root, "repo"), ownerPath = join(root, "owner");
+    const upstream = seedUpstream(root, t), repoDir = join(root, "repo"), ownerPath = join(root, "owner");
     cloneOf(upstream, repoDir);
     const git = (path: string, args: string[]) => execFileSync("git", ["-C", path, ...args], { encoding: "utf8" });
     const branch = "run-W1-T3822-1789876999002";
