@@ -6,7 +6,8 @@
   verify: auto
   risk: low
   priority: 1.49
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/the-open-weight-unit-test-check-loads-the-suite-guards.test.ts:flaky"
@@ -42,3 +43,18 @@
       - "The family's track record is mixed (39 merged, 58 declined, Beta mean 0.67), which raises the chance of an ineffective fix, but the PR still goes through CI and review, so this is not a danger signal."
     judged_at: "2026-10-22T16:57:26.454Z"
     pin: "e5f9d9b0bbb45c4d85675d1b850f61c55789c4d675a82b32daed94fa4b4f9b8c"
+  amendment: |
+    Disposition record 2026-10-26: withdraw this unqualified selector-timeout remedy
+    without remedy credit. Preserve every original observation, criterion, proof,
+    scope and ruling as historical evidence. PR #14387 at cd4d694828a0fc48b1fa0cf06a1dda6839c78b0e
+    adds a retry for a killed selector child, but the retained observations do not
+    establish that a selector timeout caused the named guard-suite failures.
+    The cited merged #13109 changes bounded Azure HTTP diagnostic evidence and
+    explicitly grants no new retry. Merged #10814 implements bounded fallback
+    test selection; sharing worker-provider.ts does not establish one mechanism.
+    Required semantic review correctly finds the canned killed-then-success
+    proof non-responsive. Do not grant another retry or weaken the criterion.
+    Any replacement must first preserve per-PR dispositions and qualify the
+    actual failure mechanism, using a bounded observation proposal rather than
+    recurrence or a shared import path as a diagnosis. Preserve the source branch.
+    No worker stop, claim deletion, numeric limit or runtime change is granted.
