@@ -6,7 +6,8 @@
   verify: auto
   risk: high
   priority: 1.27
-  status: queued
+  status: blocked
+  retirement: retired
   dispatch_hold: true
   attempts: 0
   author_class: machine
@@ -28,7 +29,15 @@
     Operator subsequently chose the independently merged PR14405 verified-preservation path.
     Hold this overlapping task while native recovery is pending; do not build a second recovery policy.
     Retire this task only after native recovery is actually confirmed, through a separate governed plan change.
+    Native recovery confirmed on 2026-10-26 at 14:53:24.535Z after immutable preservation verification.
+    The operator chose PR14405; retire this overlapping proposal without building it or claiming improvement credit.
   rationale: |
+    Retirement decision: native recovery for PR14176 reclaimed its recorded owner at 14:53:24.535Z,
+    retaining exact branch, remote head, contained local history and no-live-owner checks. The
+    preserved commit has parent 08042277282973fc3c493f52a2f74120a5ceba11 and exact tree
+    c76e1a98085723895dbf0f027bb10e87a96e63ed, independently read back from its immutable recovery ref.
+    Keep independently merged PR14405 and the existing dispatch hold. Original criteria and design
+    below remain historical proposal evidence; they are not implemented or credited by retirement.
     escalated:merge conflict (mergeState dirty) cost 6.23 PR-hours; owner NONE
     Owner NONE is absent.
     Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
