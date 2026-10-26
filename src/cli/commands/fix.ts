@@ -4063,7 +4063,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     const admitUnfiledOwnDiff = (action: ReturnType<typeof decideFixOutcomeAction>): ReturnType<typeof decideFixOutcomeAction> => {
       if (unfiledScope && action.kind === "scope-needed" &&
           action.paths.every((path) => baselineDiffFiles?.includes(path) || unfiledGrant?.paths.includes(path))) {
-        const granted = action.paths.filter((path) => !baselineDiffFiles?.includes(path));
+        const granted = action.paths.filter((path) => baselineDiffFiles?.includes(path) !== true);
         deps.log("fix.scope_amendment", { outcome: granted.length > 0 ? "unfiled-granted" : "unfiled-own-diff", paths: action.paths,
           head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId,
           ...(granted.length > 0 ? { granted_paths: granted, issue_url: unfiledGrant!.issueUrl, grant_origin: unfiledGrant!.origin } : {}) });
