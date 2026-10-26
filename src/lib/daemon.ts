@@ -3330,16 +3330,7 @@ export { checkDispatchGovernors, type DispatchGovernorVerdict } from "./dispatch
  * flagged and skipped, a fixable blocker gets a bounded fix attempt (W1-T174), and a genuine blocker escalates once
  * and parks until its PR ownership materially changes. Idling is an in-process state, never a process exit.
  * Forensics: docs/forensics/daemon.md. */
-/**
- * W1-T4077 — THE CONSOLE'S "REVIEW NOW" / "FIX NOW", RUN ON THEIR OWN TIMER.
- *
- * These requests used to be read once per main-loop iteration and AWAITED there. Measured 2026-09-22: one
- * iteration began at 19:33 and the next after 20:16, so a nudge could wait ~43 minutes, and a fix nudge then held
- * dispatch for the length of a fix round. A timer fires during awaited work, so this pump starts a request within one
- * interval whatever the loop is doing, and never awaits it: each request runs detached, at most once at a time per
- * (action, PR). The marker is cleared when its run settles, exactly as before, so an unfinished request survives a
- * restart and is picked up again.
- */
+/** Runs saved planning requests serially without blocking dispatch or interrupting an active child. */
 export function startImprovementActionPump(
   deps: Pick<DaemonDeps, "pendingImprovementActions" | "runImprovementAction" | "checkStop" | "checkPause">,
   intervalMs: number,
@@ -3368,6 +3359,16 @@ export function startImprovementActionPump(
   return { stop: () => { stopped = true; clearInterval(timer); }, settled: async () => { await pass; }, isBusy: () => pass !== undefined };
 }
 
+/**
+ * W1-T4077 — THE CONSOLE'S "REVIEW NOW" / "FIX NOW", RUN ON THEIR OWN TIMER.
+ *
+ * These requests used to be read once per main-loop iteration and AWAITED there. Measured 2026-09-22: one
+ * iteration began at 19:33 and the next after 20:16, so a nudge could wait ~43 minutes, and a fix nudge then held
+ * dispatch for the length of a fix round. A timer fires during awaited work, so this pump starts a request within one
+ * interval whatever the loop is doing, and never awaits it: each request runs detached, at most once at a time per
+ * (action, PR). The marker is cleared when its run settles, exactly as before, so an unfinished request survives a
+ * restart and is picked up again.
+ */
 export function startPrActionPump(
   deps: Pick<DaemonDeps, "pendingPrActions" | "runPrAction" | "clearPrAction">,
   intervalMs: number,
