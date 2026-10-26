@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync,
+  closeSync, constants, fchmodSync, fstatSync, fsyncSync, mkdirSync, openSync, readSync,
   realpathSync, renameSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
@@ -146,6 +146,17 @@ class Fault extends RmdError {
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const errno = (error: unknown, code: string) => (error as NodeJS.ErrnoException | undefined)?.code === code;
 
+/** Creates, writes and flushes a fresh 0600 stage through its one exclusive descriptor. */
+function writeStage(path: string, body: string, sync: (fd: number) => void): void {
+  const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+  try { fchmodSync(fd, 0o600); writeFileSync(fd, body, "utf8"); sync(fd); }
+  finally { closeSync(fd); }
+}
+/** Removes a stage that will never be renamed; one already gone is the outcome wanted. */
+function discardStage(path: string): void {
+  try { unlinkSync(path); } catch (cleanup) { if (!errno(cleanup, "ENOENT")) throw new Fault("unavailable"); }
+}
+
 export interface ProductRepositoryOptions {
   root?: string;
   provider?: ProductRepositoryProvider;
@@ -223,17 +234,23 @@ export class ProductRepositoryService {
     return { root, directory, state: join(directory, `${ownerKey}.json`), locks: join(directory, "locks"), ownerKey };
   }
 
+  /** Each level is qualified through ONE no-follow descriptor, never checked and then re-used by name. */
   private ensureDirectory(paths: ReturnType<ProductRepositoryService["paths"]>): void {
-    let current = paths.root;
-    for (const part of ["state", "products", "v1", "repositories"]) {
-      current = join(current, part);
-      if (part !== "state") {
-        try { mkdirSync(current, { mode: 0o700 }); chmodSync(current, 0o700); }
+    const parts = ["state", "products", "v1", "repositories"];
+    for (const [index, directory] of parts.map((_, at) => join(paths.root, ...parts.slice(0, at + 1))).entries()) {
+      const owned = index > 0;
+      let created = false;
+      if (owned) {
+        try { mkdirSync(directory, { mode: 0o700 }); created = true; }
         catch (error) { if (!errno(error, "EEXIST")) throw error; }
-      } else { mkdirSync(current, { recursive: true }); }
-      const info = lstatSync(current);
-      if (!info.isDirectory() || (part !== "state" && (info.isSymbolicLink() || (info.mode & 0o077) !== 0))) throw new Fault("unavailable");
-      this.syncDirectory(dirname(current));
+      } else { mkdirSync(directory, { recursive: true }); }
+      const fd = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try {
+        if (created) fchmodSync(fd, 0o700);
+        const info = fstatSync(fd);
+        if (!info.isDirectory() || (owned && (info.mode & 0o077) !== 0)) throw new Fault("unavailable");
+      } finally { closeSync(fd); }
+      this.syncDirectory(dirname(directory));
     }
   }
 
@@ -272,23 +289,14 @@ export class ProductRepositoryService {
     const body = JSON.stringify(journal);
     if (Buffer.byteLength(body) > PRODUCT_REPOSITORY_LIMITS.stateBytes) throw new Fault("capacity");
     const temporary = join(paths.directory, `.${paths.ownerKey}.${randomUUID()}.pending`);
-    let fd: number | undefined;
     let renamed = false;
     try {
-      fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-      fchmodSync(fd, 0o600);
-      writeFileSync(fd, body, "utf8");
-      this.sync(fd);
-      closeSync(fd);
-      fd = undefined;
+      writeStage(temporary, body, this.sync);
       renameSync(temporary, paths.state);
       renamed = true;
       this.syncDirectory(paths.directory);
     } catch (error) {
-      if (fd !== undefined) closeSync(fd);
-      if (!renamed) {
-        try { unlinkSync(temporary); } catch (cleanup) { if (!errno(cleanup, "ENOENT")) throw new Fault("unavailable"); }
-      }
+      if (!renamed) discardStage(temporary);
       throw new Fault(renamed ? "outcome_unknown" : "unavailable");
     }
   }
