@@ -1,0 +1,43 @@
+- id: W1-T10726
+  title: Preview the exact product repository before create or adopt confirmation
+  repo: remudero
+  depends_on:
+    - W1-T10613
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: operator-request#wreckterra-console-product-2026-10-25
+  plan_refs:
+    - W1-T10612
+    - W1-T10613
+    - W1-T10615
+    - W1-T4264
+    - W1-T10572
+  files:
+    - src/lib/product-repository.ts
+    - src/lib/product-routes.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/infra/product-repository-preview.test.ts
+    - test/console-api/serve/product-routes.test.ts
+    - test/route-wiring.test.ts
+  status: queued
+  attempts: 0
+  rationale: The operator authorized the complete Console new-product flow using existing public craigoley/wreckterra. Console T148 needs actual repository identity and server-observed capabilities before create or adopt confirmation. W1-T10613 provides the mutation but no corresponding product preview; current onboarding inventory returns slugs and readiness checks rather than exact repository identity or namespace creation availability. A twenty-tree sweep of main f35a029a593a3465e2998f118bcfa03768da3c94 and all nineteen open PR heads found no competing product repository preview, with serve and plan positive controls in every tree. Reuse the existing repository provider read and capability operations. This fills the missing product read contract; it grants no new execution authority, service, credentials, spending cap, hold release or gameplay dispatch. If a sufficient existing read contract appears before implementation, compose it instead of duplicating it. W1-T10572 shares only the contract and generated client for its unrelated gardener description; this task supplies the product repository preview and does not supersede that Analytics work.
+  design: Add inspectProductRepository to the existing product repository module and call inspectProductRepository( from the existing src/lib/product-routes.ts composition. Serve a bounded read-only /v1/products/repository-preview operation through the existing product route builder and existing verified-owner product read boundary. For the current product and objective revisions, return observed repository owner/name, immutable provider repository ID, visibility and default branch, the selected create or adopt action, namespace creation availability, observation time and explicit readiness reasons. Use the same default provider transport and scoped reads as W1-T10613, never a new credential path or a browser assertion that a repository exists. Creation readiness requires an absent target and available creation capability; adoption readiness requires the exact existing target, and must remain usable when creation capability alone is unavailable. A product already bound to a repository cannot become a fresh create candidate. Preserve absent, conflicting, stale and unavailable outcomes as distinct states; unreadable metadata must never become a success-shaped ready response. Preview writes no product record, operation journal, repository, enrollment or resource. Actual mutation independently rechecks its current prerequisites; preview is informational and cannot authorize it. Declare the bounded operation and explicit response states in openapi/daemon.yaml and regenerate packages/api-client/src/schema.d.ts with the maintained generator. Add an assembled HTTP proof in the existing product route suite and its route-wiring registration. Exercise the actual default transport through a controlled gh executable in addition to injected provider fixtures, including failed reads, fresh service instances, exact repository mismatch and unknown creation capability. Verify test placement with rmd test-place. Do not release Console T148 or later task holds in this implementation; use observed prerequisites for those separate decisions.
+  acceptance:
+    - claim: preview observes the exact repository without mutation
+      proof: "unit test: W1-T10726: preview observes the exact repository without mutation"
+    - claim: unavailable and conflicting metadata never reads ready
+      proof: "unit test: W1-T10726: unavailable and conflicting metadata never reads ready"
+    - claim: served preview matches the public product contract
+      proof: "unit test: W1-T10726: served preview matches the public product contract"
+    - claim: the production product route invokes the preview
+      proof: "grep: inspectProductRepository( in src/lib/product-routes.ts"
+  falsifier: Remove one readiness distinction or exact identity check and prove its corresponding behavioral test fails with the same fixture, then passes when restored. In success and failure cases assert zero provider mutation calls and byte-identical canonical product and operation-journal files. Test the real default transport and each catch arm, with a verified physical file list and nonzero test summaries. Fixtures are not live repository, deployment or gameplay receipts.

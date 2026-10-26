@@ -11,7 +11,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
-import { baseProbeSetupFailure, baseReproductionFiles, type BaseProbeResult } from "./base-reproduction.js";
+import { baseProbeSetupFailure, baseReproductionFiles, boundedBaseProbeReason, type BaseProbeFile, type BaseProbeResult } from "./base-reproduction.js";
 import { selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { judgeFixProgress, type FixProgressInput, type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
 import {
@@ -250,6 +250,9 @@ export interface MainHealthRungDeps {
   readAffectedInput?: (changed: readonly string[]) => Awaitable<AffectedSuitesInput>;
   /** W1-T6403: the PR openers of the red-main repair lane. Absent, a red main only escalates. */
   repair?: MainRepairLane;
+  /** W1-T9930: the local base-reproduction runner a red decided below the head is re-judged by at the
+   *  head. Defaults to the repair lane's `reproduceAt`; absent both, such a red stands as before. */
+  reproduceAt?: MainRepairLane["reproduceAt"];
   /** One failing check's job log, reduced by {@link mainCeilingLogReducer}; undefined when unread. */
   readCeilingVerdict?: (check: RollupCheckEntry) => MainCeilingLogVerdict | undefined | Promise<MainCeilingLogVerdict | undefined>;
 }
@@ -1460,6 +1463,56 @@ export function buildMainHealthRung(
   let lastSuccessfulObservationAtMs: number | undefined;
   let inFlight: Promise<void> | undefined;
   const localProbes = new Set<string>();
+  // W1-T9930 — a red decided BELOW the head, re-judged at the head by its own failing test files run
+  // locally there: outcomes per (head, file), the files each deciding commit's red named, the files in
+  // flight. Only main's current head is kept: a new head is a new question.
+  let headRepro: { head: string; outcomes: Map<string, BaseProbeFile>; filesBy: Map<string, readonly string[]>; running: Set<string>; noted: Set<string> } | undefined;
+  const headReproFor = (head: string) => {
+    if (headRepro?.head !== head) headRepro = { head, outcomes: new Map(), filesBy: new Map(), running: new Set(), noted: new Set() };
+    return headRepro;
+  };
+  /** What the head reproduction of the red `decided` decided says at `head`; undefined until every file concluded. */
+  const headReproductionAt = (head: string, decided: string): { verdict: MainProbeVerdict; files: readonly string[]; outcomes: BaseProbeResult } | undefined => {
+    if (headRepro?.head === head && headRepro.noted.has(decided)) return { verdict: "inconclusive", files: [], outcomes: [] };
+    const files = headRepro?.head === head ? headRepro.filesBy.get(decided) : undefined;
+    if (!files || files.length === 0 || files.some((file) => !headRepro!.outcomes.has(file))) return undefined;
+    const outcomes: BaseProbeResult = files.map((file) => headRepro!.outcomes.get(file)!);
+    return { verdict: localProbeVerdict(files, outcomes), files, outcomes };
+  };
+  /** Run the red's failing test files at the head, never awaited; an unrunnable red is recorded once and stands. */
+  const reproduceRedAtHead = (head: string, decided: string, files: readonly string[]): void => {
+    const state = headReproFor(head);
+    const row = { head_sha: head, decided_by_sha: decided };
+    const reproduce = deps.reproduceAt ?? deps.repair?.reproduceAt?.bind(deps.repair);
+    const unrunnable = files.length === 0 ? "the red's CI log names no failing test file"
+      : reproduce === undefined ? "no local test runner is wired" : undefined;
+    if (unrunnable !== undefined) {
+      if (!state.noted.has(decided)) deps.log("main.health.head_reproduction", { ...row, files: [...files], outcomes: [], verdict: "unrunnable", reason: unrunnable });
+      state.noted.add(decided);
+      return;
+    }
+    state.filesBy.set(decided, [...files]);
+    const missing = files.filter((file) => !state.outcomes.has(file) && !state.running.has(file));
+    if (missing.length === 0) return;
+    missing.forEach((file) => state.running.add(file));
+    void Promise.resolve().then(() => reproduce!(head, missing))
+      .catch((error: unknown) => {
+        // A runner that threw ran nothing: every file is unrunnable at the head, and the row carries why.
+        const reason = String(error);
+        return baseProbeSetupFailure(missing, reason);
+      })
+      .then((result) => {
+        const byFile = new Map(result.map((outcome) => [outcome.file, outcome]));
+        const why = boundedBaseProbeReason(result.setup_error ?? result.reason ?? "the runner returned no outcome for it");
+        const outcomes = missing.map((file): BaseProbeFile => byFile.get(file) ?? { file, outcome: "unrunnable", duration_ms: 0, cached: false, reason: why });
+        for (const outcome of outcomes) state.outcomes.set(outcome.file, outcome);
+        const failed = { ...(result.setup_error ? { setup_error: result.setup_error } : {}), ...(result.reason ? { reason: result.reason } : {}) };
+        deps.log("main.health.head_reproduction", { ...row, files: [...missing], outcomes,
+          verdict: localProbeVerdict(missing, Object.assign([...outcomes], failed)), ...failed });
+      })
+      .finally(() => missing.forEach((file) => state.running.delete(file)))
+      .catch((error: unknown) => deps.log("main.health.head_reproduction_unrecorded", { ...row, error: String(error) }));
+  };
   let runHistoryCache: RunHistoryCache | undefined;
   let metPrCache: { sha: string; lookup: MetPrLookup } | undefined;
   // Which push workflows carry ci-gate's required checks, learned from the jobs pages read below and
@@ -2567,6 +2620,27 @@ export function buildMainHealthRung(
           failingChecks: [...observation.failingChecks, ...guardNames.filter((name) => !observation.failingChecks.includes(name))],
         };
       }
+      // W1-T9930: a red decided below the head is re-judged at the head by its own failing tests, once they ran
+      // there. All passing reads undetermined, never green: only a completed run says green. Any failing stands.
+      const redBelowHead = observation.state === "red" && decidedBySha !== sha && guardFailures.length === 0;
+      const headReading = redBelowHead ? headReproductionAt(sha, decidedBySha) : undefined;
+      if (headReading?.verdict === "green") {
+        observation = {
+          ...observation,
+          state: "undetermined",
+          reason: `red at ${decidedBySha} cleared at the head by its own failing tests; awaiting a completed run (${observation.reason})`,
+        };
+      } else if (headReading) {
+        const failing = headReading.files.filter((file) => headReading.outcomes.some((o) => o.file === file && o.outcome === "fails"));
+        observation = {
+          ...observation,
+          reason: headReading.verdict === "red"
+            ? `${observation.reason}; proven at the head ${sha}: ${failing.join(", ")} still fail(s) there`
+            : `${observation.reason}; its failing tests could not be run at the head ${sha}, so the red stands`,
+        };
+      }
+      const headReproduction = !redBelowHead ? undefined : headReading === undefined ? "pending"
+        : headReading.verdict === "green" ? "cleared" : headReading.verdict === "red" ? "held" : "unrunnable";
       // W1-T9690: a red head never walked back, so its own completed runs teach the set the boundary reads.
       const learned = observation.state === "red" && runHistory ? learnedFor(required) : undefined;
       if (learned && learned.carries.size === 0) {
@@ -2645,6 +2719,7 @@ export function buildMainHealthRung(
             }
           : decidedBySha === sha && observation.state !== "undetermined" ? { evidence_depth: 0, evidence_freshness: "head" } : {}),
         ...(walkedPast > 0 ? { walked_past_runs: walkedPast } : {}),
+        ...(headReproduction ? { head_reproduction: headReproduction } : {}),
         pending_checks: observation.pendingChecks,
         non_evidence_checks: observation.nonEvidenceChecks,
         judged_against: required.size > 0 ? "ci-gate-required" : "all-checks",
@@ -2807,6 +2882,7 @@ export function buildMainHealthRung(
             shards.length > 0 && shardFailures.length > 0 ? shardFailures : failures,
           );
         }
+        if (headReproduction === "pending") reproduceRedAtHead(sha, decidedBySha, baseReproductionFiles(repairFailures));
         answerHints(sha, "red", { signature: mainRedSignature([...observation.failingChecks], repairFailures), failures: repairFailures });
         if (deps.repair && (await repairRedMain(deps.repair, observation, sha, branch, repairFailures, startedAtMs))) {
           repairedSignature = signature;
