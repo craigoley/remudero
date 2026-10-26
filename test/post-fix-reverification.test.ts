@@ -747,7 +747,7 @@ test("post-fix default ancestry transport holds contained, missing, contradictor
     let pushes = 0;
     const observations: unknown[] = [];
     try {
-      const result = await sweepPostFixReverification("o", "r", [ciGateTimeoutPr({ headSha: head })], ledgerPath(), "ANCESTRY", (step, extra) => observations.push({ step, extra }), {
+      const result = await sweepPostFixReverification("o", "r", [ciGateTimeoutPr({ headSha: head, headRefName: "run-W1-TX-1" })], ledgerPath(), "ANCESTRY", (step, extra) => observations.push({ step, extra }), {
         isMergedByNumber: n => n === 820,
         pushEmptyCommit: () => { pushes++; return "newsha"; },
       });
