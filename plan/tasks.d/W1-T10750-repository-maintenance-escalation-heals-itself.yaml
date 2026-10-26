@@ -1,0 +1,265 @@
+- id: W1-T10750
+  title: "REPOSITORY MAINTENANCE HALTS FOREVER AFTER THREE FAILURES AND NOTHING RECLAIMS WHAT STOPS IT — an escalated store is never surveyed again, the leftover reclaim is dead code, a gc.log store under load runs nothing at all, and git's fixed 2-week prune window guarantees the gc.log comes back; all four daemon trees and core's managed checkout sat escalated for 3 to 17 days"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 24.00
+  risk: high  # Rule 19: one concern, how the repository-maintenance controller recovers an escalated store; no other reaper, rung or escalation class changes
+  band_meaning: span
+  priority: 1
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: operator host review 18:40-19:00Z found every fleet daemon tree carrying gc.log and core's repos/remudero holding 1.66 GB of loose objects behind stale locks"
+  plan_refs: [W1-T2529, W1-T3090, W1-T3116, W1-T5119, W1-T9651]
+  files:
+    - src/lib/object-reaper.ts
+    - src/run-task.ts
+    - src/lib/escalate.ts
+    - test/daemon/repository-maintenance-escalation-heals-itself.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main 550128607, and read-only on the Azure host (Git 2.39.5 in
+    the containers).
+
+    THE INCIDENT (host, read-only).
+    - The operator found a `gc.log` reading "There are too many unreachable loose objects; run 'git
+      prune' to remove them" in the daemon tree (`/home/node/Remudero/remudero/.git`) of
+      remudero-daemon, -console-daemon, -site-daemon and -serve. Each held 630-862 MB of loose
+      objects. The logs were rewritten at 15:07, 16:23 and 17:54Z, and on 10-25 at 23:18. An approved
+      manual `git gc --prune=1.day.ago` per tree took 15-28 s, left 44-167 MB and freed about 2.5 GB
+      in total. At 18:55Z the core daemon tree held 1,744 loose objects.
+    - Core's managed `repos/remudero` held 1.66 GB in 35,120 loose objects behind four leftovers:
+      - `objects/maintenance.lock` and `gc.pid` from 2026-10-22 10:17. The pid file names host
+        `e84626218311`. That container no longer exists: the live remudero-daemon (0df2b0180ea9) and
+        remudero-serve (89cd2d9a4a7c) were both created on 10-26.
+      - `objects/pack/tmp_pack_yrAjKD` from 2026-10-22T09:56, left by a crashed repack. The survey
+        has already seen it: one defer row's reason is "warning: garbage found:
+        .git/objects/pack/tmp_pack_yrAjKD".
+      - `refs/remotes/origin/run-unfiled-1791721700000.lock` and its `logs/refs/...` twin, from
+        10-22T10:17. They make `git reflog expire` fail, so `git gc` dies with "fatal: failed to run
+        reflog".
+      At 18:55Z the maintenance.lock and gc.pid were gone. The tmp_pack and both ref locks remain.
+    - The maintenance state files (`<config.root>/state/repository-maintenance-<sha16(repo)>.json`)
+      read `"failures":3,"escalated":true` with lastReason "warning: lock file
+      '.git/objects/maintenance' exists, skipping maintenance":
+      - the daemon tree (80a88a980ba0f380) in core, console and site;
+      - core's `repos/remudero` (254c8fcc6c696371).
+
+    THE ESCALATION TIMELINE (October ledger rotations plus the live ledger, per instance; rows
+    de-duplicated to the minute).
+    - site daemon tree: its last two gc attempts, at 2026-10-09T06:03 and 06:06, fail on the lock, and it
+      escalates at 06:06. It has been silent for 17 days.
+    - console daemon tree:
+      - a full gc starts at 2026-10-14T06:49;
+      - at 06:56 the next row reads "daemon stopped during maintenance". A daemon stop SIGKILLs the
+        maintenance child's process group (`runMaintenanceGit`, object-reaper.ts:733-734), which
+        strands its `objects/maintenance.lock`;
+      - the next two attempts, at 09:35 and 09:44, fail on that lock, and it escalates at 09:44.
+      The controller's own teardown made the leftover that halted it.
+    - core daemon tree: three incremental attempts at 2026-10-15T15:45, 15:57 and 16:02 fail on the
+      lock, and it escalates at 16:02, 17 minutes after the first failure. The lock's origin is
+      unrecorded.
+    - core repos/remudero:
+      - gc.log appears by 2026-10-16T15:46, and from then on every survey defers with "full GC
+        requires quiet admission" (4,204 rows from 10-16T15:46 to 10-23T09:03);
+      - the quiet gate opened at 10-21T23:30, and that gc completed and was verified;
+      - the 10-22 crash left the leftovers above. No `repository_maintenance.start` row exists on
+        10-22, so a git gc outside the controller owned them: an auto gc, or a process in serve,
+        which mounts the same `repos/` (see THE SHARED STORE);
+      - the gate opened three more times, at 10-23T05:51, 08:33 and 09:04. Each gc failed on the
+        lock, and it escalated at 09:04. No row has been written since.
+    - HOW OFTEN THE QUIET GATE OPENED: 4 times in 7 days on core repos/remudero, and the first came
+      5.3 days after gc.log appeared. Console's daemon tree reached it 3 times (after 67 quiet
+      defers), and site's twice (after 3).
+    - Across those 7 days core's `repos/remudero` ran no maintenance at all, not even incremental.
+      With gc.log present, `decideRepositoryMaintenance` (:679-682) returns `deferred` before it
+      reaches the incremental branch (:683-684).
+
+    THE DEFECT (origin/main 550128607, src/lib/object-reaper.ts).
+    - ESCALATION IS TERMINAL.
+      - `runRepositoryMaintenance` returns at :799 while `state.escalated`, before any survey, and
+        `decideRepositoryMaintenance` answers `escalate` at :676. `escalated = failures >=
+        maxFailures` at :804 and :856. `maxFailures` defaults to 3 (policy.ts:902).
+      - Only a verified success clears it (:843), and no success can run once it is set. So after
+        three failures nothing re-surveys, retries or clears the state. With `backoffMs` 60 s and
+        `maxBackoffMs` 1 h, three failures took 3 to 17 minutes (core daemon tree, site) and at most
+        3 h 13 min (core repos/remudero).
+      - This breaks the operator's standing rule of tiered, self-healing responses with no hard
+        stops.
+    - A CONTENDED LOCK COUNTS AS A FAILURE. `runMaintenanceGit` maps git's zero-exit "lock file ...
+      exists, skipping maintenance" to `ok: false` (:745, #10212). The controller cannot tell a live
+      contender from a dead one, so a dead owner's lock burns all three retries.
+    - THE LEFTOVER RECLAIM IS DEAD CODE ON THE LIVE PATH.
+      - `reclaimStaleMaintenanceLocks` (:307) is reached only through `commitToPrune` (:513), which
+        only `reapGitObjects` (:457) and `reapGitObjectsAsync` (:580) call. No module under src/
+        calls either one since W1-T3116 retired the raw prune. So no leftover is ever reclaimed,
+        escalated or not.
+      - Its gate is an age threshold (`STALE_MAINTENANCE_LOCK_AGE_MS`, 1 h, :267), not evidence.
+      - `MAINTENANCE_LEFTOVERS` (:272) has no entry for `objects/pack/tmp_pack_*` / `tmp_idx_*` or
+        for `refs/**.lock` / `logs/refs/**.lock`. Its own doc says ref locks "are never touched
+        here".
+    - THE QUIET GATE CAN STARVE. A full gc needs `activeLanes === 0 && !queueBusy` (:680). The
+      daemon passes `queueBusy: true` on every dispatch tick that admits work (daemon.ts:7468) and
+      `false` only when nothing is runnable (daemon.ts:6761). A busy fleet seldom reaches that
+      state: 4 times in 7 days, as measured above.
+    - THE PRUNE WINDOW GUARANTEES THE GC.LOG RECURS. `maintenance run --task=gc` runs `git gc` at
+      git's default `gc.pruneExpire` of 2 weeks. At 18:55Z, core repos/remudero's 35,143 loose objects
+      were all dated 10-14 to 10-26, so none was old enough to prune. They grew by 3,761, 3,842,
+      5,115 and 5,524 a day over 10-23 to 10-26. Git's `gc.auto` limit of 6,700 is passed in under
+      two days, so every gc leaves more unreachable loose objects than the limit and writes the
+      warning back. Only a prune window narrower than the fleet's churn can stop it.
+      `OBJECT_PRUNE_EXPIRY` ("24.hours.ago", :14) is used only by the dead raw-prune path.
+
+    WHERE THE ESCALATIONS WENT.
+    - One `repository_maintenance.escalate` ledger row per episode: site 10-09T06:06, console
+      10-14T09:44, core 10-15T16:02 and 10-23T09:04.
+    - The status board's "repository maintenance" section (status-board.ts:598). It shows the last
+      row per repo, which is that escalate row with `retry_pending: false`, frozen.
+    - No Remudero issue: a search for maintenance, gc.log, loose objects or repository maintenance
+      finds none.
+    - The W1-T2529 off-box heartbeat does not cover these trees either. `fleet-heartbeat.sh` reads
+      `${INSTALL_DIR}/.git/gc.log` (:1308), and INSTALL_DIR is the host-side
+      `/home/craigoleyagent/rmd-state2/remudero` (:121, the cron's script path). That is a different
+      tree (stat device 66311) from the bind-mounted `/mnt/scratch/rmd/rmd-state2/remudero`
+      (device 66312) that the container's daemon uses. It reads `gc_verdict=ok`, and
+      `fleet-heartbeat-watch.yml` has no gc_verdict rule anyway. That signal is REPORTED here as its
+      own item and is NOT in this task's scope.
+
+    THE SHARED STORE. remudero-serve also mounts core's `/mnt/scratch/rmd/rmd-state2/repos` (host
+    `docker inspect` Mounts, 10-26). A git process in serve can hold a lock in core's
+    `repos/remudero` that core's `ps` cannot see. An owner-gone proof for that store must account
+    for every container that mounts it. That is why the rule below is evidence, not age.
+
+    PRIOR WORK. W1-T3116 (merged) built this controller and chose "escalate once" for repeated
+    failure. W1-T2529 built the heartbeat signal. W1-T3090/W1-T5119 built the raw-prune path, now
+    retired. No open PR or run- branch touches maintenance escalation, leftovers or the prune window
+    (swept plan/tasks.d, 22 open PRs and the run-* refs on 10-26).
+  design: |
+    MEASURE FIRST, read-only, and put the findings in the PR body:
+    - which containers mount each maintained store (host `docker inspect` Mounts only, never Env or
+      Cmd);
+    - whether serve ever runs git maintenance, gc or fetch in core's `repos/`;
+    - the loose-object age histogram of core repos/remudero;
+    - how long `maintenance run --task=gc` takes beside one live lane, from its own past
+      `repository_maintenance.complete` duration_ms rows.
+    Do not pick the shape of (d) before reading that.
+
+    (a) ESCALATION IS NEVER TERMINAL.
+    - `escalated` stays as the "the operator has been told" tier, not a stop. An escalated state is
+      re-surveyed on a backoff that keeps growing past `maxFailures`, on the same jittered doubling
+      capped at `maxBackoffMs`. There is no new fixed number.
+    - Each re-survey runs the leftover reclaim in (b) first, then the normal decision.
+    - One verified success clears `escalated` and `failures` exactly as :843 does today.
+    - A lock held by a LIVE owner (proven as in (b)) is a deferral: no failure count, retry on the
+      probe cadence. Only a run that actually executed and failed counts as a failure.
+    - A daemon stop still SIGKILLs the child (W1-T9651). The leftover it strands is then reclaimed
+      by (b) on the next survey, because its owner is provably gone.
+
+    (b) LEFTOVERS ARE RECLAIMED ON OWNER-GONE EVIDENCE, NOT AGE.
+    - Wire the reclaim into `runRepositoryMaintenance`'s live path, before the survey. It now runs
+      only on the dead raw-prune path.
+    - The set gains `objects/pack/tmp_pack_*` and `tmp_idx_*` (a crashed repack), plus
+      `refs/**/*.lock` and `logs/refs/**/*.lock` (stale ref and reflog locks).
+    - Remove a leftover only when its owner is provably gone:
+      - no git process that could own it is alive in this PID namespace (today's MAINTENANCE_PROCESS
+        scan, widened to fetch, update-ref, commit and reflog for ref locks);
+      - `gc.pid`, when present, names a pid that is not alive here, or a host other than this one;
+      - the leftover's mtime predates the start of every process that could own it, which covers
+        every container that mounts the store. For a store only this container mounts, that is this
+        namespace's boot (PID 1's start time). For a shared store, use a boot receipt each mounting
+        instance writes beside the store (for example under the git dir, which git ignores), or a
+        mechanism the measurement shows is better.
+      If any part cannot be read, the leftover is KEPT and the reason names what could not be read.
+    - Replace `STALE_MAINTENANCE_LOCK_AGE_MS` as the gate. Rmd still never writes, removes or
+      rewrites `gc.log` (W1-T3116 (iv)).
+
+    (c) THE PRUNE WINDOW COMES FROM THE FLEET'S LIVE STATE.
+    - A gc run passes `-c gc.pruneExpire=<instant>`, still through `git maintenance run --task=gc`.
+      Never raw `git gc`, `git prune` or `--prune=now` (W1-T3116 (iii)).
+    - `<instant>` is the earliest of:
+      - every registered worktree's lane start (worktrees register in the store's own git dir, so
+        every sharing instance sees them);
+      - every inflight lock (`<config.root>/state/inflight`);
+      - every live `--shared` borrower clone: review.ts:260, ci-parity.ts:149 and
+        synthetic-tasks.ts:124. A shared clone's refs can name objects the source holds unreachable.
+    - If any input is unreadable, or a sharing instance's state cannot be read, the run uses git's
+      own default. It is never narrower than the evidence allows.
+    - The ledger row records the chosen instant and which input set it.
+
+    (d) THE FULL GC CANNOT STARVE.
+    - With gc.log present, the incremental pass runs under its normal load limit (`maxActiveLanes`)
+      instead of deferring everything. Its `loose-objects` task packs loose objects, which bounds
+      the store meanwhile.
+    - Once (c) holds, a gc deletes only objects older than every live consumer. Admit the full gc on
+      the same evidence that permits the incremental pass, or, if the measurement shows a gc beside
+      a lane is too heavy, in a measured lull the controller learns from its own row history.
+    - The bound is derived, never a fixed number. A test pins that a store which is never fully quiet
+      still gets its gc.
+
+    (e) THE ESCALATION REACHES THE OPERATOR CHANNEL AND CLOSES ITSELF.
+    - When a store becomes escalated, open one Remudero issue through the escalate.ts gateway (no
+      new issue writer). It is keyed by repo path, so re-escalations do not duplicate it. It names
+      the repo, every kept leftover with its kept reason, the last failure reason and the next
+      re-survey time.
+    - On the first verified success the controller closes the issue with a comment carrying
+      before/after loose counts.
+    - The ledger rows stay as they are.
+
+    Nothing else. No change to the heartbeat script, other reapers, the W1-T9651 child bound, the
+    escalation classes or the policy keys' meaning.
+  prompt: |
+    Do the MEASURE FIRST step and put its findings in the PR body. Then write
+    test/daemon/repository-maintenance-escalation-heals-itself.test.ts. Keep that exact path,
+    because the proofs grep it. Import through `#src/*`.
+    - Every new test title starts with `W1-T10750: ` exactly as in the acceptance proofs.
+    - Drive `runRepositoryMaintenance` with its injected clock, survey, run and context seams over a
+      real temporary git dir. Use the repo's gitRepo fixture helpers, not a raw `git init`, because
+      of the fixture-copy census.
+    - The escalated case writes the state file `{"failures":3,"escalated":true,...}` and plants
+      `objects/maintenance.lock` plus a `gc.pid` naming a host that is not this one. Every mtime
+      predates the injected boot evidence, and the injected process list shows no git. Assert three
+      things:
+      - the leftover is gone;
+      - the injected runner was called with a maintenance gc argv;
+      - the saved state reads `escalated: false, failures: 0`.
+    - The leftover case plants `objects/pack/tmp_pack_X` and
+      `refs/remotes/origin/run-x.lock` with its `logs/` twin, once with a gone owner and once with a
+      live one (injected process list) or unreadable boot evidence. Assert removal only in the first.
+    - The prune-window case asserts the gc argv carries `gc.pruneExpire` equal to the oldest injected
+      live input, and git's default when one input is unreadable.
+    - The starvation case keeps `activeLanes` at 1 for every survey with gc.log present. Assert that
+      the incremental pass ran and the full gc was admitted within the derived bound.
+    - The operator case injects the issue gateway. Assert one open on escalation, no duplicate on a
+      second escalation, and a close on recovery.
+    Restore base code with `git show origin/main:<path>`, never stash, and watch every case fail.
+    Run the suite, `npm run -s lint-plan:fast` and `rmd preflight --fast` on the committed tree
+    before the first push.
+  acceptance:
+    - claim: "an escalated repository is re-surveyed on a growing backoff, a maintenance lock whose owner is provably gone is reclaimed, maintenance runs, and one verified success clears the escalation"
+      proof: 'grep: test("W1-T10750: an escalated store with a gone-owner lock is reclaimed, maintained and cleared" in test/daemon/repository-maintenance-escalation-heals-itself.test.ts'
+    - claim: "crashed-repack tmp_pack and tmp_idx files and stale ref and reflog locks are reclaimed only on owner-gone evidence; a live or unprovable owner keeps them, and a lock a live owner holds is a deferral, not a failure"
+      proof: 'grep: test("W1-T10750: tmp packs and ref locks are reclaimed only when their owner is provably gone" in test/daemon/repository-maintenance-escalation-heals-itself.test.ts'
+    - claim: "a maintenance gc prunes at an expiry derived from the oldest live worktree, inflight lock and shared borrower, and at git's default when any of them is unreadable"
+      proof: 'grep: test("W1-T10750: the gc prune window is derived from the fleet live state" in test/daemon/repository-maintenance-escalation-heals-itself.test.ts'
+    - claim: "a store with gc.log that is never fully quiet still runs its incremental pass and gets its full gc within a derived bound"
+      proof: 'grep: test("W1-T10750: a gc-log store under constant load is not starved" in test/daemon/repository-maintenance-escalation-heals-itself.test.ts'
+    - claim: "an escalation opens one Remudero issue naming the repo, the kept leftover and the reason, and the first verified success closes it"
+      proof: 'grep: test("W1-T10750: an escalation opens one operator issue and recovery closes it" in test/daemon/repository-maintenance-escalation-heals-itself.test.ts'
+  falsifier: |
+    - Restore `if (state.escalated ...) return` at object-reaper.ts:799: the escalated case must fail
+      on the runner call.
+    - Drop the reclaim call from the live path: the escalated case must fail on the surviving lock.
+    - Remove the tmp_pack or ref-lock entries: the leftover case must fail.
+    - Make the owner check ignore the live process list: the live-owner half must fail.
+    - Pass no `gc.pruneExpire`: the prune-window case must fail.
+    - Restore the gc.log `deferred` branch ahead of the incremental branch: the starvation case must
+      fail.
+    - Skip the issue close on success: the operator case must fail.
+    GUARDS that held at base and must still hold:
+    - rmd never writes or removes gc.log, and success still needs the marker gone;
+    - no raw `git gc`, `git prune` or `--prune=now`;
+    - an unreadable survey never authorizes an action;
+    - cadence and backoff survive a restart.
+    Each guard's existing case in test/repository-maintenance-controller.test.ts must fail when its
+    production branch is removed, and pass again with zero failures once it is restored.
