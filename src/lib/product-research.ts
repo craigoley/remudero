@@ -342,7 +342,21 @@ export class ProductResearchService {
       this.commit(paths, { ...state, receipts: Object.fromEntries(Object.entries(state.receipts)
         .map(([key, value]) => [key, key === requestKey ? { ...value, canonicalTransition: transition } : value])) });
     }
-    const saved = this.store.transition(actor, transition);
+    let saved = this.store.transition(actor, transition);
+    // A stale revision proves this attempt wrote no receipt. Rebind once only when another
+    // trusted stage changed the record while the objective stayed fixed; never rerun research.
+    if (!saved.ok && saved.code === "stale_revision") {
+      const latest = this.store.read(actor, productId);
+      if (!latest.ok) throw new ResearchFault(latest.code);
+      if (latest.value.objectiveRevision === run.objectiveRevision && !latest.value.stageEvidence.some((item) => item.id === run.id)) {
+        const revised = { ...transition, expectedRevision: latest.value.revision,
+          requestId: `prsrch_${digest(`${run.id}:${latest.value.revision}`).slice(0, 40)}` };
+        const state = this.read(paths);
+        this.commit(paths, { ...state, receipts: Object.fromEntries(Object.entries(state.receipts)
+          .map(([key, value]) => [key, value.productId === productId && value.runId === run.id ? { ...value, canonicalTransition: revised } : value])) });
+        saved = this.store.transition(actor, revised);
+      }
+    }
     if (!saved.ok) throw new ResearchFault(saved.code);
   }
 

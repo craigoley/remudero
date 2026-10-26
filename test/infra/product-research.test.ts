@@ -350,3 +350,29 @@ test("a later clarification heals the original canonical research transition wit
   await ok(service, command(id, 1));
   assert.equal(store.read(ACTOR, id).ok, true);
 });
+
+test("canonical research can reconcile a competing trusted stage at the same objective", async (t) => {
+  const { root, store, id } = seed(t);
+  let competing = true;
+  const raced = Object.create(store, { transition: { value: (actor: string, input: unknown) => {
+    if (competing) {
+      competing = false;
+      const current = store.read(actor, id); assert.ok(current.ok);
+      assert.ok(store.transition(actor, { version: "product-intent-v1", requestId: rid("competing-stage"), id,
+        expectedRevision: current.value.revision, expectedObjectiveRevision: 1,
+        stageEvidence: [{ id: "competing-plan", stage: "plan", outcome: "proposed", objectiveRevision: 1,
+          observedAt: clock.iso(), references: [] }] }).ok);
+    }
+    return store.transition(actor, input);
+  } } });
+  const { fixture, inputs } = provider();
+  const service = new ProductResearchService({ root, store: raced, provider: fixture, clock });
+  const body = command(id, 1);
+  await ok(service, body);
+  const product = store.read(ACTOR, id); assert.ok(product.ok);
+  assert.equal(product.value.stageEvidence.length, 2);
+  await ok(service, body);
+  const replayed = store.read(ACTOR, id); assert.ok(replayed.ok);
+  assert.equal(replayed.value.revision, product.value.revision);
+  assert.equal(inputs.length, 1);
+});
