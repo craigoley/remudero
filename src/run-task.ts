@@ -358,6 +358,7 @@ import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPor
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
+import { queueJudgeGardenSpec, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
 import { scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
@@ -460,7 +461,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout", "review-replay"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout", "review-replay", "queue-judge"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -1279,6 +1280,7 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { proceduresCommand, proceduresProductionInput } from "./lib/procedures-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
@@ -27319,6 +27321,25 @@ export function issueRevalidationRunTaskPorts(
   };
 }
 
+/** W1-T9925: the queue judge's ports that live here: its judge is the escalation judge's tool-less spawn (one per pass,
+ *  on the mount the issue-revalidation garden already uses), and its open-PR set is the daemon's persisted board, a file
+ *  read with no remote call. `seams` stand in for the spawn and the board read in tests. */
+export function queueJudgeRunTaskPorts(
+  ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; root: string; log: (step: string, extra?: Record<string, unknown>) => void },
+  seams: { spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"]; openBoard?: typeof readOpenBoardSnapshot } = {},
+): Pick<QueueJudgeSources, "judgeText" | "openPrNumbers"> {
+  const { owner, repo, repoRoot, stateDir, root, log } = ctx;
+  const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }, { spawn: seams.spawn });
+  return {
+    judgeText: (prompt) => judge.judgeText(prompt, 0),
+    openPrNumbers: () => {
+      const open = (seams.openBoard ?? readOpenBoardSnapshot)(root, owner, repo);
+      if (!open.ok) throw new Error(`queue judge: the open-PR snapshot is unavailable (${open.reason})`);
+      return new Set(open.snapshot.rows.map((row) => row.number));
+    },
+  };
+}
+
 /** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
 
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
@@ -27389,6 +27410,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       // A filing streak escalates once (gardener.ts), so a refused change reaches a person rather than looping.
       const d = deps("backlog", raiseDuplicate);
       return gardenPass(backlogGardenSpec(d), d);
+    }
+    // W1-T9925: the queue judge re-ranks queued tasks by measured cost of delay through its own reviewed plan PR.
+    case "queue-judge": {
+      const d = deps("queue-judge", raiseDuplicate);
+      return gardenPass(queueJudgeGardenSpec(d, queueJudgeRunTaskPorts({ owner, repo, repoRoot, stateDir, root: config.root, log })), d);
     }
     // W1-T5454: the scout looks for work nobody asked for -- a recurring failure-shaped ledger step no task
     // or scorecard covers is filed through the machine-filing path, bounded by the queue and the day's merges.
@@ -41529,6 +41555,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "Phase 4 of the held-out skill eval: the production caller of runSkillEval (src/lib/skill-eval-command.ts). It SPENDS: without --confirm-spend it prints why and exits 2 having read nothing. It loads the proposal from <root>/state/inbox-proposals.json and refuses (exit 2, one skill_eval.refused ledger row) one that is absent, carries no skill file, names an unsafe skill or has no skillFileStagedAt stamp, which the skill workshop's next pass sets. A text is judged once: a proposal whose current text already carries a recorded verdict refuses as already-judged, since a second draw of the same text could only launder the first; a run that measured too few tasks judged nothing and may run again. The drafter mines every merged run in its window, so the hold-out is time: from the ledger union (every rotation form; an unread source refuses) and the plan it derives the golden corpus, excludes every task merged at or before the stamp, and draws K held-out tasks of the draft's applies-to type (a refused draw exits 1 and writes nothing). Merge credit is ledger rows only, which under-credits: a missed task is absent, never wrongly admitted. The without-skill arm gets the skills part production renders for the task today; the with-skill arm the part it would render were the draft approved, loaded from a temp tree by the same loader. A draft that part would not inject for some task refuses before any dispatch (draft-not-injected). Each task runs R trials per arm through a sealed, never-pushed paired attempt at its base on one pinned stack, only while the fleet is idle in quiet mode with measured headroom. The verdict is written to the proposal's skillEval only while its staged text is still the one evaluated; otherwise skill_eval.stale is logged and nothing is written. Exit 0 on a recorded pass, 1 on a recorded refusal or a stale run, 2 on any refusal before dispatch.",
   },
   {
+    name: "procedures",
+    syntax: "rmd procedures [--days <n>] [--json]",
+    summary: "Report which tool-call steps clean merged runs repeat, per task type, against repaired runs.",
+    detail: "A read-only procedure census (src/lib/procedure-census.ts) over the merged runs that started in the last N days (--days, an integer from 1 to 60, default 14; the window ends now). Each task type splits into CLEAN runs (zero fix rounds) and REPAIRED runs (one or more, attributed as the retro attributes them). A step is a worker tool call's tool_signature from its worker.activity row, coarsened so one file is not one step (Read:src/lib/review.ts reads as Read:src/lib/*.ts; Bash signatures and top-level paths stay verbatim), or the bare tool name on a row that carries no signature. Per type it reports each step's share of clean and repaired runs and their difference (lift), the universal steps (in at least 80% of clean runs, once a type has 5 clean runs), and the contiguous 2- and 3-step sequences at least half the clean runs share. It reports first how many tool-call rows carry a signature at all, and warns when none do, so missing signatures never read as nothing recurring. It reads the ledger union once, filtered to the steps it needs, and exits 2 naming each unread source when the union is incomplete, since an unread rotation can hide a run's fix rounds. --json prints the census object instead of the markdown report. It writes nothing of its own: no ledger row, no state file (the one cli.invoked row the dispatcher ledgers for every verb is all an invocation adds). Exit 0 on a report, 2 on a usage error or an incomplete union.",
+  },
+  {
     name: "check-acceptance",
     syntax: "rmd check-acceptance <body-file>",
     summary: "Report what the reviewer's own parser actually resolves from a PR body file.",
@@ -42600,6 +42632,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["replay-goldens", async (rest) => await replayGoldensCommand(rest)],
   ["skill-eval", async (rest) => await skillEvalCommand(rest,
     skillEvalProductionInput(repoRoot, workerBoundaryStack.harnessRevision, readUsageSnapshotPreferSdk))],
+  ["procedures", (rest) => proceduresCommand(rest, proceduresProductionInput())],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await withGhTransportFloorMode("wait", () => nextTaskIdCommand(rest))],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],

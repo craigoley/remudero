@@ -31,6 +31,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
+import { isTrustRootPath, scanTrustRootText, trustRootFor } from "../src/lib/trust-root-text.ts";
 import { createHash } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
@@ -1185,6 +1186,24 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
     trigger: ({ changed }) => changed.some((p) => [".gitignore", "scripts/census-precheck.mjs",
       "test/rules/the-root-scratch-ignore-stays-root-only.test.ts"].includes(p)),
     remedy: "preserve the operator-approved root-only scratch ignore and existing or tracked contents" },
+  // The trust-root census joins a push that changes the scanner, or a file that instructs an agent whose new text the
+  // same scanner refuses. A clean plan or doctrine push starts no child.
+  { testFile: "test/rules/trust-root-hidden-text-census.test.ts",
+    trigger: ({ changed, readHead }) => {
+      let root;
+      return changed.some((p) => {
+        if (["src/lib/trust-root-text.ts", "test/rules/trust-root-hidden-text-census.test.ts"].includes(p)) return true;
+        // The house layout, which test/repo-layout.test.ts pins as what resolveRepoLayout returns here: the hook's
+        // plain-node runtime cannot load repo-layout.ts, whose relative imports name `.js`.
+        const house = fileURLToPath(new URL("..", import.meta.url));
+        root ??= trustRootFor({ root: house, planDir: join(house, "plan"), masterPlan: join(house, "MASTER-PLAN.md"),
+          learningsDir: join(house, "learnings") });
+        if (!isTrustRootPath(root, p)) return false;
+        const text = readHead?.(p);
+        return typeof text === "string" && scanTrustRootText(p, text).length > 0;
+      });
+    },
+    remedy: "delete the hidden character, or retype the mixed-script word in one script; a file that instructs an agent needs neither" },
   { testFile: "test/every-ci-census-is-asked-before-the-push.test.ts",
     recognizer: "src/lib/ci-parity.ts", symbol: "censusCandidateWalks", gateRegex: /ls-files|readdirSync|globSync/,
     ownFiles: ["scripts/census-precheck-parity-baseline.json", "src/lib/rule-suites.ts", "scripts/census-precheck.mjs"],

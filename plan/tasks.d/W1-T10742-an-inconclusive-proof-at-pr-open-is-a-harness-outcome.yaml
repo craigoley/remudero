@@ -1,0 +1,189 @@
+- id: W1-T10742
+  title: "AN INCONCLUSIVE PROOF RUN AT PR OPEN IS A HARNESS OUTCOME, NEVER A WORKER STRIKE — the pre-open gate refuses a check-proof exec_error (exit 4) as `branch-gap` and the run ends `verdict failed`, while a CONCLUSIVE failure (exit 1) is opened with its proof named; 4 such refusals plus one harness continuation error tripped CONSOLE-T127's breaker for 11 days"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern, how the PR-open gate and the strike classifiers read an inconclusive proof run; no conclusive verdict, refusal class or breaker bound changes
+  band_meaning: span
+  priority: 1
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: console issue #2147 (CONSOLE-T127 circuit-broken since 2026-10-15T12:17Z) and #2287 (console queue starved)"
+  plan_refs: [W1-T227, W1-T3525, W1-T4660, W1-T7742, W1-T8240, W1-T8241, W1-T4691, W1-T6034, CONSOLE-T127]
+  files:
+    - src/lib/pr-open.ts
+    - src/lib/check-proof.ts
+    - src/lib/non-worker-verdict.ts
+    - src/lib/stranded-task-detector.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/review/an-inconclusive-proof-at-pr-open-is-a-harness-outcome.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main a4d8281f6 and remudero-console origin/main 2200b28.
+
+    THE INCIDENT (console instance ledger, read-only on the host,
+    /mnt/rmd/remudero-console-state/state/ledger.ndjson plus its 2026-10-13..15 rotations).
+    - CONSOLE-T127 ran 11 times between its last reset and the trip. 6 were `handed_off`
+      (freshness_yield) and are already excluded. The 5 counted strikes were:
+      - CONSOLE-T127-1791906469218 (2026-10-13T16:02:50Z), -1791913053570 (18:23:18Z),
+        -1791923809011 (21:13:26Z) and -1791968576526 (2026-10-14T09:21:09Z): `verdict failed`,
+        stage `pr_open.refused`, cause `base-proof-refused`, refusal_class `branch-gap`. Each reason
+        is check-proof's own report for `unit test: CONSOLE-T127: needs-you without a filter redirects
+        to now with its repository scope`: argv `node …/vitest/vitest.mjs run --reporter=tap -t <title>
+        tests/`, `exit: 1`, `hits: 0`, `verdict: exec_error — name-filtered Vitest proof run was
+        truncated before its TAP plan count completed — inconclusive, not evidence the named test is
+        missing`.
+      - CONSOLE-T127-1792021524707 (2026-10-14T23:57:14Z): `verdict failed` at
+        `implement.preopen_continued`, subtype `error_during_execution`, 0 turns (see THE CONTINUATION
+        STRIKE below).
+    - The breaker tripped 2026-10-15T12:17:33Z (freshCount 5, excludedByReason {handed_off: 6}) and
+      escalated console #2147. The live console ledger holds 191 `dispatch.circuit_broken` rows for
+      CONSOLE-T127 (221 overall). The operator released it by hand on 2026-10-26 (~17:58Z).
+    - The refusal was not the worker's. The named test exists at the refused head 1e10757e
+      (branch run-CONSOLE-T127-1791968576526, kept on origin):
+      tests/unit/now-is-the-one-needs-you-list.test.tsx:49-50, `describe("CONSOLE-T127")` then
+      `it("needs-you without a filter redirects to now with its repository scope")`.
+    - It is not one task's problem. The same exec_error refusal ended 12 console runs over six tasks
+      between 2026-10-12T00:31Z and 2026-10-15T11:11Z: CONSOLE-T122, T123, T126 (x4), T127 (x4),
+      T130 and T131.
+    - `exit: 1` above is Vitest's own exit code. check-proof itself exits 4 for this.
+
+    THE DEFECT (core).
+    - src/lib/review.ts:3665 `vitestNameFilteredOutcome` throws at :3687 when no non-skipped leaf was
+      seen and the TAP plan is missing or unmet. `hits: 0` means Vitest wrote NO stdout line at all:
+      no `1..N` plan, so the run ended before its reporter started. It was not cut off mid-stream.
+    - src/lib/check-proof.ts:611-641 maps that throw to `verdict: exec_error` and returns
+      `CHECK_PROOF_EXIT.execError` (4, :308). So (a) of the ask, "never exit 1", already holds.
+      Exit 4 also covers a timeout, a spawn failure and grep's exit 2: every "could not even look"
+      result (W1-T219).
+    - src/lib/pr-open.ts:371 `proofFailed = status !== 0 || error`. :434-444 rejects every such
+      result with refusal class `branch-gap`. It attaches `failingProof` only when
+      `status === EXECUTED_PROOF_FAILURE` (1, :374).
+    - The daemon opens with `openOnFailingProof = true`. run-task-verb.ts:1763-1790
+      `ghPrCreateFillCommandAsync` then OPENS a branch whose only defect is a conclusively failing
+      proof (exit 1, `pr.opened_with_failing_proof`, `bodyWithFailingProofAtOpen` pr-open.ts:203).
+      An exit-4 result has no `failingProof`, so it is rethrown. run-task-verb.ts:7250-7262 then writes
+      `verdict failed` / `pr_open.refused`. The harness treats "could not look" WORSE than "looked
+      and failed".
+    - The inconclusive run is also the most expensive shape. check-proof.ts:423-427 sends a
+      name-filtered Vitest proof to the whole registered `tests/` root ("candidates: delegated to the
+      registered Vitest suite root"; the console has 389 files under tests/). W1-T227's
+      `resolveNameFilteredCandidates` narrowing (review.ts:3003) is node-only, because it greps core's
+      test/ root. A Vitest full name joins describe and it, so the proof's `CONSOLE-T127: ` prefix is
+      not a string any file contains. A fixed-string search for the whole label finds nothing, and
+      the leaf title is what locates the file.
+    - The strike classifiers have no class for it. src/lib/non-worker-verdict.ts:50 `streakRefusal`
+      and src/lib/stranded-task-detector.ts:66-80 `nonWorkerVerdictClass` return undefined for a
+      `pr_open.refused` verdict. So the breaker counts it (status.ts `dispatchStreakTally`), and
+      breaker-release.ts:150 `readBreakerStrikes` reads it as the worker's. The W1-T8241
+      `release-non-worker-breaker` runbook can therefore never release a breaker these strikes
+      tripped.
+    - W1-T4660 (merged) counts only runs that could have opened a PR. These runs could, and did not,
+      so W1-T4660 does not cover them.
+
+    THE CAUSE OF THE EMPTY RUN IS UNRECORDED. The 10-13/14 rows predate #12819 (2026-10-18, "surface
+    bounded runner failure evidence") and #12813 (stderr retention), so no output tail was kept.
+    Candidates fixed since, but not proven to be the cause: #12845 (2026-10-18, "load shared Vitest
+    configs without dependency writes"; the runs used a reused shared install, `deps.reused` and
+    `worktree.node_modules_cross_package`) and #14393 (2026-10-26, shared-install Vitest proof caches).
+    No exec_error refusal has been ledgered since 2026-10-15T11:11Z, but console dispatch has been
+    sparse since, so that silence is not evidence of a fix. The harness defect stands whatever the
+    cause: any future exec_error at open is still a worker strike.
+
+    THE CONTINUATION STRIKE (reported, deliberately NOT classed here). In run -1792021524707
+    `implement.done` ran on codex (gpt-5.6-terra, session 01a13ccf-…). The pre-open repair
+    continuation then re-ran the headroom auction (`worker.assignment` 23:57:05Z selected claude) and
+    resumed that codex session id on claude. It ended in 7 s with 0 turns and 0 tokens. That is a
+    harness continuation failure, not the worker's. #12794 (2026-10-18, "keep routed continuations
+    provider-safe", src/lib/worker.ts `workerExecutionForProvider`) now turns a provider change into
+    a fresh handoff (receipt reason `provider-changed`), so this cause cannot recur on main. Classing
+    it would need a cross-row read that only historical rows exercise, and the breaker it fed is
+    already released. That would be a guardrail with no future input, so it is out of scope.
+  design: |
+    MEASURE FIRST. Do not pick the remedy's shape from the hypothesis above.
+    0. In the console instance (the sanctioned `rmd` in the remudero-console daemon container), replay
+       `rmd check-proof --base <merge-base> 'unit test: CONSOLE-T127: needs-you without a filter
+       redirects to now with its repository scope'` against kept branch
+       run-CONSOLE-T127-1791968576526 (1e10757e). Main now prints the `head output:` tail (#12819).
+       Record the cause in the PR body: a Vitest startup or config error, a timeout (the exit line
+       would read `killed by`), or the output bound. Also record whether the scoped run in 1 below
+       completes where the root run did not. If the replay now passes, say so; the steps below still
+       apply.
+    1. check-proof.ts: a name-filtered Vitest proof gets the same candidate narrowing node proofs got
+       under W1-T227.
+       - Resolve the candidate files under the registered target's own suite root (not core's test/),
+         by fixed string, from the proof's leaf title: the label with any leading `<task-id>: `
+         describe prefix removed, and the whole label too.
+       - Scope the argv to the resolved files. Print `candidates: N file(s) — …` as the node branch does.
+       - Unresolvable or absent keeps today's root-wide run and wording. Absence is never a fast-fail
+         for Vitest, because an interpolated or describe-joined title can render to the label.
+    2. pr-open.ts: split a proof result into CONCLUSIVE and INCONCLUSIVE.
+       - Conclusive: exit 0, 1, 2, 3 and 5.
+       - Inconclusive: exit 4, a null status, a signal, or `error` set. That includes the sync
+         answer's "proof was not pre-run off the daemon loop".
+       - `prerunPullRequestProofs` re-runs an inconclusive proof once more, through the same runner.
+         A conclusive second result stands as that proof's result.
+       - A proof still inconclusive does NOT refuse the open. `openPullRequestChecked` throws a refusal
+         with a new `inconclusiveProof` payload (proof, detail tail, checkedBody, attempts). Any other
+         defect still refuses exactly as today.
+    3. run-task-verb.ts `ghPrCreateFillCommandAsync`: with `openOnFailingProof`, an `inconclusiveProof`
+       refusal opens the PR, exactly as a failing proof does. The body gets a `## Pre-open proof
+       inconclusive` section naming the proof and its bounded tail. The step is
+       `pr.opened_with_inconclusive_proof` {branch, proof, attempts}. Review re-executes every proof
+       and already refuses to arm on zero executed proofs, so nothing merges on this.
+       WHY OPEN, NOT RE-DISPATCH: a re-dispatch re-ran a worker build that cost $19.66
+       (-1791923809011), for a proof that never executed.
+    4. The strike classifiers read the old rows.
+       - Every refusal the harness still writes for an inconclusive proof carries `proof_exec:
+         "exec_error"` on its `verdict` row (run-task-verb.ts:7250-7262).
+       - non-worker-verdict.ts `streakRefusal` returns `proof_inconclusive` for a `failed` verdict at
+         stage `pr_open.refused` that has that field. For rows written before the field, it matches
+         check-proof's own `verdict:    exec_error` line in `reason`.
+       - stranded-task-detector.ts `nonWorkerVerdictClass` maps it to class `proof_inconclusive`, not
+         `toolchain`. The breaker then stops counting such runs, and `readBreakerStrikes` lets the
+         W1-T8241 runbook release a breaker that only they and other non-worker runs tripped.
+    5. Nothing else. No conclusive verdict, refusal class, breaker bound, runbook governor or
+       continuation rule changes.
+  prompt: |
+    Do design step 0 first and put its finding in the PR body. Then write
+    test/review/an-inconclusive-proof-at-pr-open-is-a-harness-outcome.test.ts (the folder
+    `rmd test-place` computes for these imports; keep this exact path, because the proofs grep it).
+    Import through `#src/*`, and watch every case fail at base. Restore base code with
+    `git show origin/main:<path>`, never stash.
+    - Every new test title starts with `W1-T10742: ` exactly as in the acceptance proofs.
+    - Drive the open case through `openPullRequestCheckedAsync` and the daemon's
+      `ghPrCreateFillCommandAsync` with an injected async runner. The runner returns exit 4 twice for
+      one case, and exit 4 then exit 0 for another. Assert the runner saw the second call. Assert the
+      returned argv's body holds the inconclusive section, or the plain checked body.
+    - The narrowing case writes a tiny Vitest-shaped tests/ fixture with
+      `describe("X-T1", () => it("leaf title", …))` beside a second file. Assert the printed argv names
+      only the first file. Use the repo's gitRepo fixture helpers, not a raw `git init` (the
+      fixture-copy census).
+    - The classifier case feeds the four CONSOLE-T127 verdict rows' exact shape, both with and without
+      `proof_exec`. Assert `streakRefusal`, `nonWorkerVerdictClass` and `readBreakerStrikes` agree.
+    Run the suite, `npm run -s lint-plan:fast` and `rmd preflight --fast` on the committed tree before
+    the first push.
+  acceptance:
+    - claim: "a proof check-proof reports inconclusive (exit 4) at PR open is re-run once, and a still-inconclusive proof opens the PR with a Pre-open proof inconclusive section instead of refusing it as branch-gap"
+      proof: 'grep: test("W1-T10742: an inconclusive proof at pr open is re-run and then opens the pr with the proof named" in test/review/an-inconclusive-proof-at-pr-open-is-a-harness-outcome.test.ts'
+    - claim: "a name-filtered Vitest proof runs only the test files under its suite root that contain its leaf title"
+      proof: 'grep: test("W1-T10742: a name-filtered vitest proof runs only the files that contain its leaf title" in test/review/an-inconclusive-proof-at-pr-open-is-a-harness-outcome.test.ts'
+    - claim: "a pr_open.refused verdict for an inconclusive proof, with or without proof_exec, is the non-worker class proof_inconclusive: the breaker does not count it and the release runbook reads it as the harness's"
+      proof: 'grep: test("W1-T10742: an inconclusive-proof refusal is a non-worker strike" in test/review/an-inconclusive-proof-at-pr-open-is-a-harness-outcome.test.ts'
+  falsifier: |
+    - Restore `proofFailed`'s single branch-gap refusal for exit 4: the first case must fail, because
+      the open throws.
+    - Drop the re-run: the exit-4-then-0 case must fail on the runner's call count.
+    - Leave check-proof.ts:423-427 delegating to the root: the narrowing case must fail on the argv.
+    - Return undefined from `streakRefusal` for the old-shape row: the classifier case must fail.
+    GUARDS that held at base and must still hold:
+    - an exit-1 proof still opens with `pr.opened_with_failing_proof`;
+    - exit 5 still refuses `stale-proof`;
+    - exit 3 still refuses `branch-gap`;
+    - a node name-filtered proof narrows exactly as before;
+    - a conclusive `pr_open.refused` verdict (a real miss) is still counted and still reads as the
+      worker's.
+    Remove each guard's production branch in turn: its existing case must fail. Then restore it and
+    require zero failures.

@@ -1560,7 +1560,7 @@ export function ciFrictionLadder(input: {
     const details = remedyRounds.filter((r) => r.causeKey === key && r.detail).map((r) => r.detail!);
     const located = locateCiFrictionOwner(key, details, input.ownerSearch);
     const owner = located && !located.files.every(isCiFrictionTestFile) ? located : undefined;
-    const testAlone = located && !owner ? `; the failing test ${located.failingTest ?? located.files[0]} imports no src/ or scripts/ module` : "";
+    const testAlone = located && !owner ? `; the failing test ${located.failingTest ?? located.files[0]} imports no src/ or scripts/ module at runtime (no located runtime import)` : "";
     const evidence = input.ownerSearch.evidence?.(key, details, owner);
     let reconsideration: CiFrictionOwnershipReconsideration | undefined;
     if (held) {
