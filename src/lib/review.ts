@@ -8945,6 +8945,7 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * {@link INSTRUMENT_SURFACE_EXCLUSIONS} plus
  * test/instrument-surface-completeness.test.ts derive candidates from the live tree on every run. */
 export const INSTRUMENT_SURFACE: readonly string[] = [
+  "^scripts/code-health-provenance\\.mjs$",
   "^plan/credit-overrides\\.yaml$",
   "^scripts/lib/ci-dependency-evidence\\.mjs$",
   "^scripts/preflight-author\\.mjs$",

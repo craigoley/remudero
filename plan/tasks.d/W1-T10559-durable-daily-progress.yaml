@@ -19,6 +19,9 @@
     - src/lib/daily-progress-calendar.ts
     - scripts/expiring-fixture-census.mjs
     - test/view-etags-are-deterministic.test.ts
+    - test/a-view-lane-constructs-only-the-views-it-owns.test.ts
+    - test/every-view-body-matches-its-schema.test.ts
+    - test/read-model-worker.test.ts
     - src/lib/daily-progress-store.ts
     - src/lib/daily-progress-collector.ts
     - src/lib/daily-progress-view.ts
@@ -67,6 +70,22 @@
     Use deterministic summaries; distinguish merged work, independently evidenced releases, observed day
     activity and present open work. No request-time scans, second GitHub fetcher, paid summarizer, cron,
     daemon restart, gate change or borrowed test slot.
+
+
+    Backlog fixture input-pass evidence: a coverage failure in
+    test/the-backlog-gardener-stops-re-placing-one-task.test.ts is inherited from the sampled main
+    67f331bc97b94ecccffe743568d6b36ba898cb07, where an admitted isolated run also reports six tests
+    with one failure. Diagnostic passes observe identical cheap fingerprints after the fixture adds
+    another task; the real garden driver correctly returns ran:false before PR creation. A fixture-only
+    control shares its controlled source clock with the driver, uses seed:1 like the existing backlog
+    tests, and advances that clock by one hour for the new-input pass. That control passes all six tests;
+    removing only the explicit pass advance restores the one failure. Preserve the production
+    unchanged-input and open-decision ownership guards and every original assertion. Do not infer a
+    wall-clock date failure or weaken guards from this evidence. Qualify any fixture repair through the
+    current CI repair owner and its existing scope/admission rules, or route a bounded main repair if
+    those rules refuse it. This context grants no new file scope. A successful main coverage job that
+    explicitly skips real tests on push is not a contradicting unit-test pass.
+
   falsifier: Keep the new tests and independently remove durable retention, calendar arithmetic, expected scope
     or ownership fencing. The >200/restart, DST, missing-source and stale-writer tests respectively must fail.
     Use a real filesystem persistence failure, browser-closed worker integration, known fleet/non-fleet PR

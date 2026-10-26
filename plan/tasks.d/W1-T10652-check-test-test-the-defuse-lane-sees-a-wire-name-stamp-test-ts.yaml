@@ -1,0 +1,51 @@
+- id: W1-T10652
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/the-defuse-lane-sees-a-wire-name-stamp.test.ts cost 21.5 PR minute(s) across 2 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.28
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/the-defuse-lane-sees-a-wire-name-stamp.test.ts"
+  files:
+    - src/lib/clock.ts
+    - test/infra/check-test-test-the-defuse-lane-sees-a-wire-name-stamp-test-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/the-defuse-lane-sees-a-wire-name-stamp.test.ts"
+      proof: "unit test: W1-T10652: check:test:test/the-defuse-lane-sees-a-wire-name-stamp.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/the-defuse-lane-sees-a-wire-name-stamp.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/the-defuse-lane-sees-a-wire-name-stamp.test.ts cost 21.5 PR minute(s) (seven-day half-life) across 2 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/clock.ts: test/the-defuse-lane-sees-a-wire-name-stamp.test.ts imports it
+    - test/the-defuse-lane-sees-a-wire-name-stamp.test.ts: named by the failing check
+    - the rounds name a failing test: test/the-defuse-lane-sees-a-wire-name-stamp.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13920 (https://github.com/craigoley/remudero/pull/13920) at 2026-10-24T08:12:12.252Z: ci-log round — comment-load-ratchet: test/the-defuse-lane-sees-a-wire-name-stamp.test.ts
+        log excerpt:
+          | - test/the-sweeps-plan-pr-preflight-runs-off-the-daemon-loop.test.ts:160
+          | ##[error]expiring-fixture-census: BLOCKED -- 16 fixture(s) CROSS their threshold within 7 day(s):
+          |   - test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts:207  lastActivityAt="2026-10-16T21:35:51.000Z" vs sweep.staleDays  --  goes red 2026-10-30 (6.6d)  [inherited from the base -- NOT this diff]
+          |   - test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts:302  lastActivityAt="2026-10-16T21:35:51.000Z" vs sweep.staleDays  --  goes red 2026-10-30 (6.6d)  [inherited from the base -- NOT this d
+    - PR #12390 (https://github.com/craigoley/remudero/pull/12390) at 2026-10-17T00:20:35.972Z: ci-log round — Scan; coverage-shard (5/8): test/the-defuse-lane-sees-a-wire-name-stamp.test.ts; security-merge-policy
+        failing tests: leaf, W1-T6036: the census pins both renames against their mapping sources; W1-T6036: the census pins both renames against their mapping sources
+        log excerpt:
+          | Path does not exist: semgrep.sarif
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares test/infra/check-test-test-the-defuse-lane-sees-a-wire-name-stamp-test-ts.test.ts, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-25T22:29:33.012Z"
+    pin: "9084585aec65b3d9570ddcc2b49a3159c9b935820f3ac7cb9d46b16f7281b7bb"

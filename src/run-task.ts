@@ -191,7 +191,7 @@ import {
   type CaptureSurfaceFireRecord,
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
-import { boundChildByLoopTime, execFileLoopBounded, type LoopBound } from "./lib/loop-bounded-child.js";
+import { boundChildByLoopTime, execFileLoopBounded, LoopBoundedChildTimeout, type LoopBound } from "./lib/loop-bounded-child.js";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
@@ -12260,6 +12260,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       registryDir: dirname(holdStatePath), owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "",
       body: view.body ?? "", headSha: view.headRefOid, author: input.author, commits: view.commits, result, nowMs: clock.now(), log,
       capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
+      checks: selectedChecks,
+      escalate: (escalation) => escalate(escalation, { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
     });
     if (refused === "failed") {
       // W1-T9797: the sweep dedups every outcome but hold, so an unfiled remedy must read as hold.
@@ -15188,7 +15190,7 @@ const gardenMintBudgets = new Map<string, GardenMintBudget>();
  *  Budgets survive rebuilding a spec; a timeout never releases an id that may already be held. */
 
 export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
-  executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL"; signal: AbortSignal }) => Promise<{ stdout: string; stderr?: string }> = (file, args, options) => execFileLoopBounded(file, args, { ...options, encoding: "utf8" }),
+  executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string; stderr?: string }> = (file, args, options) => execFileLoopBounded(file, args, { ...options, encoding: "utf8" }),
   opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
     loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> } } = {}):
   ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string>; heldSha: (taskId: string) => string | undefined } & GardenTaskIdRelease {
@@ -15254,22 +15256,10 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
     async: async (filingBranch: string): Promise<string> => {
       const started = now();
       const bound = mintBudget.boundMs();
-      const controller = new AbortController();
-      let timer: ReturnType<typeof setTimeout>;
-      const expired = new Promise<never>((_, reject) => {
-        const expire = () => {
-          const remaining = bound - (now() - started);
-          if (remaining > 0) {
-            timer = setTimeout(expire, Math.ceil(remaining));
-            return;
-          }
-          reject(new GardenMintTimedOutError(now() - started, bound));
-          controller.abort();
-        };
-        timer = setTimeout(expire, Math.ceil(bound));
-      });
       try {
-        const { stdout, stderr } = await Promise.race([executeAsync(process.execPath, ["--import", import.meta.resolve("tsx"),
+        // W1-T9703: the child alone is awaited. Its bound is the loop-available budget the default executeAsync arms
+        // (execFileLoopBounded, `timeout`); a hand-rolled wall-clock race counted a held loop as a timeout.
+        const { stdout, stderr } = await executeAsync(process.execPath, ["--import", import.meta.resolve("tsx"),
           "--input-type=module", "--eval",
           `import { format } from "node:util";
            const rows = [];
@@ -15283,7 +15273,7 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
              process.stdout.write(JSON.stringify({ id, sha: minter.heldSha(id), rows }));
            } catch (error) {
              process.stdout.write(JSON.stringify({ error: String(error?.message ?? error), timedOut: error?.name === "GardenMintTimedOutError", rows }));
-           }`, root, filingBranch], { maxBuffer: 1 << 26, timeout: Math.ceil(bound), killSignal: "SIGKILL", signal: controller.signal }), expired]);
+           }`, root, filingBranch], { maxBuffer: 1 << 26, timeout: Math.ceil(bound), killSignal: "SIGKILL" });
         const result = JSON.parse(stdout) as { id: string; sha?: string; error?: string; timedOut?: boolean;
           rows: Array<{ say: string } | { step: string; fields: Record<string, unknown> }> };
         if (stderr) process.stderr.write(stderr);
@@ -15291,17 +15281,14 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
           if ("say" in row) console.log(row.say);
           else log?.(row.step, row.fields);
         }
-        if (now() - started >= bound) throw new GardenMintTimedOutError(now() - started, bound);
         if (result.timedOut) throw new GardenMintTimedOutError(now() - started, bound);
         if (result.error !== undefined) throw new Error(result.error);
         if (result.sha) held.set(result.id, result.sha);
         mintBudget.observe(now() - started);
         return result.id;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException)?.code === "ETIMEDOUT" || (error as { killed?: boolean })?.killed) throw new GardenMintTimedOutError(now() - started, bound);
+        if (error instanceof LoopBoundedChildTimeout || (error as NodeJS.ErrnoException)?.code === "ETIMEDOUT" || (error as { killed?: boolean })?.killed) throw new GardenMintTimedOutError(now() - started, bound);
         throw error;
-      } finally {
-        clearTimeout(timer!);
       }
     },
   });
@@ -30516,9 +30503,21 @@ export function commitWorkerEdits(
     .map((entry) => entry.slice(3)).filter((path) => !existsSync(join(repoDir, path))));
   const withoutStagedDeletions = staged.filter((path) => !alreadyStagedDeletion.has(path));
 
+  // `add -A -- <tracked path>` can refuse an ignored parent directory. Update existing
+  // entries separately; new paths still use Git's ordinary ignore checks, without force.
+  // Read tracking from the index being committed, including the fix round's private index.
+  const stageWorkerPaths = (paths: readonly string[], git: (args: string[]) => string): void => {
+    if (paths.length === 0) return;
+    const tracked = new Set(nulPaths(git(["ls-files", "--cached", "-z", "--", ...paths])));
+    const updates = paths.filter(path => tracked.has(path));
+    const additions = paths.filter(path => !tracked.has(path));
+    if (updates.length > 0) git(["add", "-u", "--", ...updates]);
+    if (additions.length > 0) git(["add", "-A", "--", ...additions]);
+  };
+
   let sha: string;
   if (roundRef === undefined) {
-    if (withoutStagedDeletions.length > 0) runGit(["add", "-A", "--", ...withoutStagedDeletions]);
+    stageWorkerPaths(withoutStagedDeletions, runGit);
     runGit(["commit", "-m", commitMessage]);
     sha = runGit(["rev-parse", "HEAD"]).trim();
   } else {
@@ -30527,7 +30526,7 @@ export function commitWorkerEdits(
     // an unseeded temporary index starts from the prior head, where `add -A` must still stage the removal.
     const addable = mergeHead === undefined ? staged : withoutStagedDeletions;
     const tree = temporaryIndexTree(repoDir, options.priorHeadSha!, (env) => {
-      if (addable.length > 0) hostWorktreeGit(repoDir, ["add", "-A", "--", ...addable], { env });
+      stageWorkerPaths(addable, args => hostWorktreeGit(repoDir, args, { env }));
     }, mergeHead === undefined ? undefined : resolve(repoDir, runGit(["rev-parse", "--git-path", "index"]).trim()));
     if (mergeHead === undefined && tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
       return { committed: false, undeclared, reason: "the worker changed nothing" };

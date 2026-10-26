@@ -42,7 +42,7 @@ import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, extractTaskTrailer
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
 import { ghRequiredStatusCheckContexts, readLedgerLines, taskIdFromRunBranch } from "../../lib/status.js";
-import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, checksStateFromRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause } from "../../lib/sweep.js";
+import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause } from "../../lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "../../lib/refresh-value.js";
 import { detectReviewFalseBlock, detectCiLogVerdictUnchanged, shouldSelfHealNothingChanged } from "../../lib/fix-rung-classify.js";
 import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
@@ -1945,6 +1945,7 @@ async function routeFix(
     const judge = deps.fixProgressJudge ?? formerBoundStandIn(() => (pr.priorStrikes ?? 0) >= policy.strikeCap, log,
       (line) => console.error(line));
     const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+      ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined,
       strikesSpent: pr.priorStrikes,
       currentRed: isBlockedCi(pr) || securityFix ? ciFailures.map((f) => f.name)
         : pr.unmetCriteria.filter((c) => !c.met).map((c) => `review:${c.claim}`),
@@ -2369,6 +2370,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   const consultAtSite = async (parkedReason: string, forJudge = true) => {
     const persisted = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
     const input = buildFixProgressInput({ taskId: opts.taskId, prNumber,
+      ciFailures: currentCiFailures, reviewFailures: currentMergeConflict === undefined && !noReviewYet ? review.criteria : undefined,
       headSha: review.headSha, currentRed: currentMergeConflict !== undefined
         ? (conflictedFilePaths(currentMergeConflict) ?? []).map(path => `conflict:${path}`)
         : noReviewYet ? (currentCiFailures ?? []).map(f => f.name)
@@ -2676,6 +2678,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
             isHarnessPath: isCiHarnessPath, matchedPaths: decision.matchingBaseFiles }),
           priorRefresh: refreshedOnSameRed(refreshRecordsFromLedger((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))()),
             prNumber, refreshChecks, refreshTestFiles),
+          // The same reach rule over the PR's own diff: a path it changes that reaches the red needs a clear trial merge.
+          ...(facts.prAddedLines === undefined ? {} : { ownReach: mainPathsReachingRed({ failingTestFiles: refreshTestFiles,
+            mainChangedFiles: Object.keys(facts.prAddedLines), closure: undefined, isHarnessPath: isCiHarnessPath })!.counted }),
         }, probeMerge && refreshMainSha !== undefined
           ? () => probeMerge({ prNumber, headSha: review.headSha } as OpenPrView, refreshTestFiles, refreshMainSha!) : undefined)
           : undefined;
@@ -2727,6 +2732,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     if (!consultedThisRound && (roundRows.some(row => row.step === "fix.dispatch" || row.step === "fix.retrigger") || !opts.progressDecision)) {
       const persisted = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
       const input = buildFixProgressInput({ taskId: opts.taskId, prNumber,
+      ciFailures: currentCiFailures, reviewFailures: currentMergeConflict === undefined && !noReviewYet ? review.criteria : undefined,
         headSha: review.headSha,
         strikesSpent: Math.max(strikes, priorStrikesFor([...persisted, ...roundRows], opts.taskId,
           strikeRegimeForDispatch(review.criteria), review.headSha)),
@@ -5379,7 +5385,8 @@ export async function fixCommand(
     autoMergeArmed: raw.autoMergeRequest != null,
     reviewSummary: reviewState === "failure" ? reviewSummaryFromLedger(ledger, reviewLedgerKeyFor(taskId, raw.number), raw.url, raw.headRefOid) : undefined,
     // W1-T100: the ci-log fix mode's input — see buildOpenPrViews.
-    ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, raw.statusCheckRollup)
+    ciFailures: checksState === "red" || redRequiredChecks.length > 0
+      ? fetchCiFailures(owner, repo, checksState === "red" ? raw.statusCheckRollup : earlyRedEvidenceRollup(raw.statusCheckRollup, redRequiredChecks))
       : codeqlHeadAlerts ? [{ name: CODEQL_CHECK_NAME, logTail: "The CodeQL results check failed at this head." }] : undefined,
     codeqlHeadAlerts,
     redRequiredChecks,

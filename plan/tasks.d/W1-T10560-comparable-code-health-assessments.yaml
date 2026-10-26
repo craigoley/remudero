@@ -20,6 +20,8 @@
     - src/lib/review.ts
     - scripts/expiring-fixture-census.mjs
     - test/**/code-health-cached-view.test.ts
+    - test/a-view-lane-constructs-only-the-views-it-owns.test.ts
+    - test/every-view-body-matches-its-schema.test.ts
     - src/lib/code-health-store.ts
     - src/lib/code-health-view.ts
     - src/lib/code-health-collector.ts
@@ -36,6 +38,7 @@
     - src/lib/views.ts
     - src/lib/serve.ts
     - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
     - test/**/code-health-projection.test.ts
     - test/**/code-health-opportunities.test.ts
   rationale: Existing quality and coverage intake discovers useful debt but exposes no comparable per-repository
@@ -59,6 +62,18 @@
     scanners, licensing, model mounts or silently repair repositories. Publish authenticated cached
     code-health read/view contract and OpenAPI; gate activation through normal policy. Delivery-friction facts
     retain their own windows/units and never offset code quality.
+
+
+    Provenance exporter file safety: keep the opened descriptor, regular-file check, actual-byte limit
+    and owned close/error handling together. A pipe or other nonregular input must be refused without
+    blocking before the file-type check; a valid regular source must still publish sanitized provenance.
+    The real CLI pipe regression reproduced at 7863428cbe258d1e35f9a1e50bb4dcb3f6584cc6 under normal
+    test admission (24 tests, one failure), while restoring the earlier exporter passed all 24 tests.
+    Later 84c5d791850c2a9da6b6a1144aa7b76b0db9cd93 bounds actual bytes but retains the blocking open.
+    Add the named real CLI regression in the existing declared opportunities suite. Do not restore
+    path-check/read races, drop byte limits, relax file-type or scope guards, raise a timeout to hide a
+    blocking read, or add scanner exclusions. This criterion strengthens validation of the existing
+    bounded provenance mechanism; it adds no scanner, source path, activation permission or budget.
   falsifier: "Remove source SHA/coverage validation, comparable-scope guard and stable finding identity in
     separate legs: their dedicated tests must fail while positive real-source fixture controls still pass.
     Repeated page loads must not trigger scanning, ranking/model spend or filing. Restore and verify actual
@@ -72,6 +87,8 @@
       proof: "unit test: code health deduplicates opportunities and preserves urgent findings"
     - claim: the evidence mechanism is reached by its production caller
       proof: "grep: createCodeHealthView( in src/lib/read-model-worker.ts"
+    - claim: provenance exporter refuses pipe input without blocking and keeps valid regular input publishable
+      proof: "unit test: code health provenance CLI refuses a pipe before a blocking open"
   note: Reviewed core c18e7e4c48cee7cb19d2fc96fa93273ef63d85a5 and console
     c57646ea3636341cc1fad8847df8b144e169d3f1. Before filing, all 10 open core PR heads and main were compared
     by subject; each head had the same subject counts as main, with more than 4,370 plan shards as corpus

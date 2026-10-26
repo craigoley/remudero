@@ -1723,6 +1723,7 @@ def report():
         expand = getattr(helper, 'expand_roots', lambda h, roots: [os.path.join(h, r) for r in roots])
         cfg['roots'] = expand(home, cfg['roots'])
         cfg['preserve_root'] = os.path.join(home, cfg['preserve_root'])
+        cfg['home'] = home  # home-wide managed-remote and registered-worktree discovery walk this home
         repos = helper.discover(cfg, helper.protected_paths(home, cfg)); keep = {}
         snap = helper.process_snapshot()
         for repo in repos:
