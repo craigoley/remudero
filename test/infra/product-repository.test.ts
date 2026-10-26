@@ -337,3 +337,35 @@ test("product repository serializes per operator: a live lock is busy and an unu
   writeFileSync(locks, "not a directory");
   assert.deepEqual(await service.execute(actor, f.command({ action: "adopt", repositoryId: 7 })), { ok: false, code: "unavailable" });
 });
+
+
+test("repository adoption reconciles a competing trusted stage without repeating provider work", async (t) => {
+  const f = fixture(t), provider = new FakeProvider();
+  provider.repos.set("craigoley/wreckterra", { id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" });
+  const store = new ProductIntentStore({ root: f.root });
+  let competing = true;
+  const raced = Object.create(store, { transition: { value: (owner: string, input: unknown) => {
+    if (competing) {
+      competing = false;
+      const current = store.read(owner, f.productId); assert.ok(current.ok);
+      assert.ok(store.transition(owner, { version: "product-intent-v1", requestId: "repository-competing-stage", id: f.productId,
+        expectedRevision: current.value.revision, expectedObjectiveRevision: current.value.objectiveRevision,
+        stageEvidence: [{ id: "competing-plan", stage: "plan", outcome: "proposed", objectiveRevision: current.value.objectiveRevision,
+          observedAt: new Date().toISOString(), references: [] }] }).ok);
+    }
+    return store.transition(owner, input);
+  } } });
+  const request = f.command({ action: "adopt", repositoryId: WRECKTERRA_ID });
+  const service = f.service(provider, { store: raced });
+  const first = await service.execute(actor, request); assert.ok(first.ok);
+  const saved = store.read(actor, f.productId); assert.ok(saved.ok);
+  assert.equal(saved.value.repository?.id, WRECKTERRA_ID);
+  assert.deepEqual(saved.value.stageEvidence.map((entry) => entry.stage).sort(), ["plan", "repository"]);
+  const calls = [...provider.calls];
+  const replay = await service.execute(actor, request); assert.ok(replay.ok);
+  assert.equal(replay.value.replayed, true);
+  const again = store.read(actor, f.productId); assert.ok(again.ok);
+  assert.equal(again.value.revision, saved.value.revision);
+  assert.deepEqual(provider.calls, calls);
+  assert.deepEqual(provider.creates(), []);
+});
