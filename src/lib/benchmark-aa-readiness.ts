@@ -110,8 +110,16 @@ export function runtimePinRefusals(pins: RuntimePins, stack: AaTrialManifest["st
     if ("state" in pin) return [`runtime-pin-unknown:${field}:${pin.state === "unavailable"
       && typeof pin.reason === "string" && pin.reason.length > 0 ? pin.reason : "malformed-runtime-pin"}`];
     const entries = Array.isArray(pin) ? pin : [pin];
-    if (entries.some(entry => entry === null || typeof entry !== "object" || !("revision" in entry)
+    if (entries.length === 0 || entries.some(entry => entry === null || typeof entry !== "object" || !("revision" in entry)
       || typeof entry.revision !== "string")) return [`runtime-pin-unknown:${field}:malformed-runtime-pin`];
+    const sources = ["executing-module-git", "image-build-stamp", "resolved-artifact", "trial-manifest"];
+    if (entries.some(entry => typeof (entry as { source?: unknown }).source !== "string"
+      || !sources.includes((entry as { source: string }).source))) return [`runtime-pin-unknown:${field}:pin-source-invalid`];
+    if (entries.some(entry => {
+      const source = (entry as { source: string }).source;
+      return ((source === "executing-module-git" || source === "image-build-stamp") !== (field === "harnessRevision"))
+        && source !== "trial-manifest";
+    })) return [`runtime-pin-unknown:${field}:pin-source-invalid-for-field`];
     const revisions = new Set(entries.map(entry => entry.revision.toLowerCase()));
     const [revision] = [...revisions];
     if (revisions.size !== 1 || revision === undefined || !IMMUTABLE_REVISION_RE.test(revision)) return [`runtime-pin-unknown:${field}:not-one-immutable-id`];

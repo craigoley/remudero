@@ -518,6 +518,28 @@ test("runtime pin refusals leave prospective registration untouched", async () =
   }
 });
 
+test("matching revisions with malformed source provenance leave registration untouched", async () => {
+  for (const field of Object.keys(REVISIONS) as Array<keyof typeof REVISIONS>) {
+    const good = field === "harnessRevision" ? pins().harnessRevision : pins().revisions[field];
+    const revision = (good as { revision: string }).revision;
+    const wrongSource = field === "harnessRevision" ? "resolved-artifact" : "executing-module-git";
+    for (const bad of [{ revision }, { source: "bogus", revision }, { source: 5, revision }, { source: wrongSource, revision },
+      [{ source: "bogus", revision }]]) {
+      const stateDir = root();
+      const calls: PairedAttemptRequest<string>[] = [];
+      const runtime = pins();
+      if (field === "harnessRevision") runtime.harnessRevision = bad as never;
+      else runtime.revisions[field] = bad as never;
+      const result = await runBenchmarkAaReadiness(input(stateDir, calls, { manifest: manifest(), runtimePins: () => runtime }));
+      assert.equal(result.state, "refused", `${field}: ${JSON.stringify(bad)}`);
+      assert.ok(result.refusals.some(reason => reason.startsWith(`runtime-pin-unknown:${field}:pin-source-invalid`)), result.refusals.join(","));
+      assert.equal(existsSync(join(stateDir, "benchmark-aa-prospective")), false);
+      assert.equal(calls.length, 0);
+      assert.deepEqual(listProspectiveAaRegistrations(stateDir), { state: "read", registrations: [] });
+    }
+  }
+});
+
 test("pre-registration pin validation preserves valid registration and registered-owner controls", async () => {
   const stateDir = root();
   const calls: PairedAttemptRequest<string>[] = [];
