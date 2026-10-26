@@ -30149,10 +30149,7 @@ function preserveTrackedDirtyPatch(
   const treesMatch = deps.treesMatch ?? ((a: string, b: string) => a === b);
   const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
   const ownerTree = ownerTreeOf ? ownerTreeOf() : temporaryIndexTree(ownerPath, localSha, (env) => {
-    const tracked = hostWorktreeGit(ownerPath, ["ls-files", "--cached", "-z"], { maxBuffer: 1 << 26 });
     hostWorktreeGit(ownerPath, ["add", "-A"], { env });
-    if (tracked.length > 0) hostWorktreeGit(ownerPath,
-      ["add", "--force", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"], { env, input: tracked, maxBuffer: 1 << 26 });
   });
   const patchTree = temporaryIndexTree(repoDir, localSha, (env) => {
     hostWorktreeGit(repoDir, ["apply", "--cached", "--binary", "--whitespace=nowarn"], { input: patch, env, maxBuffer: 1 << 26 });
