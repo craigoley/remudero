@@ -29050,7 +29050,6 @@ export async function serveCommand(
       root: repoRoot,
       planPath,
       ledgerPath,
-      ratify: fleetRatifyGateway(repoRoot, join(config.root, "state", "logs"), ledgerPath, { stateRoot: config.root }),
       github: ghTraceGateway(self.owner, self.repo),
       statusGithub: boardGithub,
       // W1-T191: arm the real feedback-landing bridge for POST /v1/feedback/decision — an
@@ -41772,6 +41771,12 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd plan --mode=create|clarify|expand [<brief>...]",
     summary: "The unified Architect PLAN skill: create, clarify or expand plan tasks.",
     detail: "the unified Architect PLAN skill (MASTER-PLAN §5B, W1-T45) — ONE ground→research→clear-or-grill-or-propose code path shared by all three modes (Refine=clarify, Expand=expand): create scaffolds new plan/tasks.yaml task(s) for the REQUIRED <brief> initiative; clarify grills (or silently resolves) ambiguous/underspecified existing tasks, <brief> optionally narrowing the focus; expand proposes gap-filling tasks that each cite a research source. CLEAR/GRILL touch nothing and open no PR; PROPOSED opens a plan-only PR (plan/** + MASTER-PLAN.md) gated by ci-gate+remudero-review",
+  },
+  {
+    name: "improvement-action",
+    syntax: "rmd improvement-action <operation-id> --state-dir <path>",
+    summary: "Resume one saved planning action through the daemon's admitted workflow.",
+    detail: "Daemon-owned handoff for an exact saved improvement action. Refuses an unowned process before reading execution configuration, verifies the configured fleet and repository, and revalidates the saved source, goal and reviewed draft. Uses the native bounded Inbox draft and governed filing paths; recovers filing from its native receipt rather than repeating ambiguous work. Saving or queuing a request does not admit a worker or complete, file, merge or deploy a task.",
   },
   {
     name: "inbox",

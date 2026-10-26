@@ -711,6 +711,7 @@ test("W1-T2269: arming (or not arming) the credential refresh changes NOTHING ab
   assert.deepEqual(highPaths, [
     "/v1/drain/kick",
     "/v1/drain/run",
+    "/v1/improvements/threads/file",
     "/v1/inbox/approve",
     "/v1/manual/approve",
     "/v1/merge-hold",

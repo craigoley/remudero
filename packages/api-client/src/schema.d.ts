@@ -6171,7 +6171,7 @@ export interface paths {
           "202": ImprovementActionRequested;
           "400": (ImprovementFailure) | (Error);
           "401": Error;
-          "403": Error;
+          "403": HighTierRefusal;
           "409": ImprovementFailure;
           "500": Error;
           "503": ImprovementFailure;

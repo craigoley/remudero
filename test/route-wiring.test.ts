@@ -304,6 +304,10 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([
+  // Assembled HTTP, distinct stores and durable decisions: test/console-api/serve/improvement-thread-route.test.ts.
+  "POST /v1/improvements/threads",
+  "POST /v1/improvements/threads/draft",
+  "POST /v1/improvements/threads/file",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts, W1-T10612 identity/mount test.
   "POST /v1/products",
   "POST /v1/control/assistant-action",

@@ -15123,6 +15123,8 @@ paths:
         and uses the existing governed plan filing path. A plan pull request is not merged tasks or execution.
         Write tier: HIGH. All existing authentication, admission, ownership, reservation and review guards
         remain in force."
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
       security:
         - bearerWrite: []
       requestBody:
@@ -15154,11 +15156,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "403":
-          description: The existing service authentication or request handler refused the request.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
+          $ref: "#/components/responses/HighTierForbidden"
         "409":
           description: The source, goal, draft, request identity or writer changed. Review the stated reason.
           content:

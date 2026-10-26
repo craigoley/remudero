@@ -147,7 +147,12 @@ function requestLock(root: string, key: string): InflightLockHandle | undefined 
   const dir = join(root, "locks"), path = join(dir, `${key}.lock`);
   const acquire = () => acquireInflightLock(dir, key, { run_id: `improvement:${randomUUID()}`, reclaim: false });
   try { return acquire(); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-  const stat = lstatSync(path); if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+  try {
+    const stat = lstatSync(path); if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+  } catch (error) {
+    // The holder can release between the exclusive-create refusal and this observation.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   const reclaimed = reclaimStaleLock(path, { parseHolder: raw => ({ info: parseInflightLockInfo(raw) }),
     isStale: held => held.info !== null && Number.isSafeInteger(held.info.pid) && held.info.pid > 0 && typeof held.info.host === "string" &&
       Number.isFinite(Date.parse(held.info.startedAt)) && isHolderStale(held.info, { isPidAlive: defaultIsPidAlive }) });

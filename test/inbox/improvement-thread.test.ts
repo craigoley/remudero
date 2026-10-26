@@ -4,12 +4,11 @@ import { join } from "node:path";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync, execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { sourceFixture } from "#test/helpers/improvement-thread-fixture.js";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { fixedClock } from "#src/lib/clock.js";
-import { CODE_HEALTH_POLICY_VERSION } from "#src/lib/code-health-collector.js";
 import { codeHealthRepositoryStateDir, publishCodeHealthSnapshot } from "#src/lib/code-health-store.js";
 import { buildCodeHealthOpportunities } from "#src/lib/codeql-quality-intake.js";
-import type { CodeHealthProjectionInput } from "#src/lib/code-health-projection.js";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { inboxThreadIdentity, readThread, appendThreadMessage } from "#src/lib/inbox-thread.js";
@@ -116,26 +115,6 @@ test("improvement chat concurrent processes and reload keep one message per writ
 });
 
 
-function sourceFixture(dir: string, options: { findingTitle?: string; findingCount?: number; repository?: string; planPath?: string; stateDir?: string } = {}) {
-  const stateDir = options.stateDir ?? join(dir, "fleet-state"), inboxRoot = join(dir, "atlas-instance"), repository = options.repository ?? "acme/atlas", instance = "atlas";
-  const now = Date.parse("2026-11-02T06:00:00.000Z"), clock = fixedClock(now), sha = "a".repeat(40);
-  const finding = { id: "42", ruleId: "js/repeated-work", status: "open" as const, severity: "medium" as const, category: "maintainability",
-    path: "src/example.ts", title: options.findingTitle ?? "Repeated work makes this function difficult to change.", effortMinutes: null };
-  const scans: CodeHealthProjectionInput["scans"] = ["quality", "coverage"].map(kind => ({ kind: kind as "quality" | "coverage", repository, scanId: `${kind}:new`, componentIds: [`${kind}:new`], analyzedSha: sha,
-    observedAt: "2026-11-02T05:00:00.000Z", state: "complete", scopeHash: `${kind}:scope`, toolVersion: "tool1", rulesVersion: "rules1", configHash: "config1", exclusions: [], reason: null,
-    checks: [{ id: kind === "quality" ? "quality-maintainability-open" : "coverage-existing-tier", met: kind !== "quality", reason: kind === "quality" ? "A known code-maintenance finding remains open." : "Meets the existing coverage tier." }], findings: kind === "quality" ? Array.from({ length: options.findingCount ?? 1 }, (_, index) => ({ ...finding, id: String(42 + index) })) : [] }));
-  const input: CodeHealthProjectionInput = { repository, analyzedSha: sha, currentSha: sha, observedAt: "2026-11-02T05:01:00.000Z", nextDueAt: null,
-    registry: { version: CODE_HEALTH_POLICY_VERSION, checks: [{ id: "quality-maintainability-open", sourceKind: "quality", category: "maintainability", description: "No unresolved findings in the measured maintainability scope." },
-      { id: "coverage-existing-tier", sourceKind: "coverage", category: "tests", description: "Meets the existing instrumented coverage tier." }] }, scans,
-    baseline: { analyzedSha: "b".repeat(40), policyVersion: CODE_HEALTH_POLICY_VERSION, scans: scans.map(scan => ({ ...structuredClone(scan), scanId: `${scan.kind}:old`, componentIds: [`${scan.kind}:old`], analyzedSha: "b".repeat(40), observedAt: "2026-11-01T05:00:00.000Z" })) } };
-  mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [{ instanceId: instance, options: { root: inboxRoot, controlRoot: inboxRoot, ledgerPath: join(inboxRoot, "state", "ledger.ndjson"), planPath: options.planPath ?? join(inboxRoot, "repos", "atlas", "plan", "tasks.yaml") } }], improvementEvidence: {
-    version: "repository-evidence-inventory-v1", measurementState: "not_collected", repositories: [{ repository, instanceIds: [instance], expectedDailySources: ["pull_requests", "ledger_activity", "deployments"], expectedQualitySources: ["quality", "coverage"] }], unresolvedInstances: [] } }));
-  const saved = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(stateDir, repository), input, expectedSnapshotId: null, clock });
-  assert(saved.state === "published"); const opportunity = buildCodeHealthOpportunities(input)[0]!; assert(opportunity.mayPlan);
-  return { deps: { stateDir, actorId: "operator:test", clock }, request: { repository, instance, opportunityId: opportunity.id, snapshotId: saved.snapshotId,
-    goal: "Simplify the repeated work while preserving behavior.", constraints: ["Keep required checks passing."], idempotencyKey: "creation-request-00000001" }, inboxRoot, input };
-}
 
 async function planningModule() {
   const loaded = await import("#src/lib/improvement-thread.js").catch((error: unknown) => {
@@ -386,10 +365,62 @@ test("improvement concurrent creation processes recover one saved conversation",
     const script = 'import {createImprovementThread} from "#src/lib/improvement-thread.js";import {fixedClock} from "#src/lib/clock.js";const [request,deps]=JSON.parse(process.argv[1]);deps.clock=fixedClock(deps.now);process.stdout.write(JSON.stringify(await createImprovementThread(request,deps)));';
     const args = ["--import", "tsx", "--input-type=module", "-e", script, JSON.stringify([request, { stateDir: deps.stateDir, actorId: deps.actorId, now: deps.clock.now() }])];
     const children = await Promise.all([0, 1].map(() => run(process.execPath, args, { cwd: repoRoot(), encoding: "utf8", timeout: 15000 })));
-    const results = children.map(child => JSON.parse(child.stdout)); assert(results.some(result => result.state === "saved")); assert(results.every(result => ["saved", "busy"].includes(result.state)));
+    const results = children.map(child => JSON.parse(child.stdout)); assert(results.some(result => result.state === "saved"), JSON.stringify(results)); assert(results.every(result => ["saved", "busy"].includes(result.state)), JSON.stringify(results));
     const retry = await createImprovementThread(request, deps); assert(retry.state === "saved"); assert.equal(retry.reused, true);
     const thread = readThread(retry.threadId, { threadStorePath: join(inboxRoot, "state", "inbox-threads.jsonl") }); assert(thread.status === "ok"); assert.equal(thread.messages.length, 2);
     assert.equal(JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-proposals.json"), "utf8")).proposals.length, 1);
+  });
+});
+
+test("improvement creation recovers a lock released after exclusive acquisition refused it", async () => {
+  const { createImprovementThread } = await planningModule();
+  for (const observation of ["released", "unreadable"] as const) await withTempDir(`improvement-lock-${observation}`, async dir => {
+    const { deps, request, inboxRoot } = sourceFixture(dir);
+    const script = `
+      import fs from "node:fs";
+      import { syncBuiltinESMExports } from "node:module";
+      import { createImprovementThread } from "#src/lib/improvement-thread.js";
+      import { fixedClock } from "#src/lib/clock.js";
+      const [request, deps] = JSON.parse(process.argv[1]);
+      deps.clock = fixedClock(deps.now);
+      const open = fs.openSync;
+      const stat = fs.lstatSync;
+      let released = false;
+      fs.lstatSync = function(path, ...args) {
+        if (released && process.argv[2] === "unreadable" && String(path).includes("/locks/request-")) {
+          throw Object.assign(new Error("lock observation denied"), { code: "EACCES" });
+        }
+        return stat(path, ...args);
+      };
+      fs.openSync = function(path, flags, ...args) {
+        if (!released && flags === "wx" && String(path).includes("/locks/request-")) {
+          const held = open(path, flags, ...args);
+          fs.closeSync(held);
+          try { open(path, flags, ...args); }
+          catch (error) {
+            if (error.code !== "EEXIST") throw error;
+            fs.unlinkSync(path);
+            released = true;
+            throw error;
+          }
+        }
+        return open(path, flags, ...args);
+      };
+      syncBuiltinESMExports();
+      const result = await createImprovementThread(request, deps);
+      process.stdout.write(JSON.stringify({ result, released }));
+    `;
+    const child = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script,
+      JSON.stringify([request, { stateDir: deps.stateDir, actorId: deps.actorId, now: deps.clock.now() }]), observation],
+      { cwd: repoRoot(), encoding: "utf8", timeout: 15000 });
+    const observed = JSON.parse(child);
+    assert.equal(observed.released, true, "the real exclusive-create refusal preceded the holder's release");
+    assert.equal(observed.result.state, observation === "released" ? "saved" : "source_unavailable", JSON.stringify(observed.result));
+    if (observation === "unreadable") assert.equal(existsSync(join(inboxRoot, "state", "inbox-proposals.json")), false, "a denied observation cannot authorize writes");
+    const retry = await createImprovementThread(request, deps); assert(retry.state === "saved");
+    assert.equal(retry.requestId, observed.result.requestId); assert.equal(retry.reused, observation === "released");
+    const thread = readThread(retry.threadId, { threadStorePath: join(inboxRoot, "state", "inbox-threads.jsonl") });
+    assert(thread.status === "ok"); assert.equal(thread.messages.length, 2);
   });
 });
 
@@ -562,7 +593,7 @@ test("improvement follow-up reads the source saved for the original filing reque
   const module = await planningModule();
   await withTempDir("improvement-original-source", async dir => {
     const { deps, request, input } = sourceFixture(dir), first = await module.createImprovementThread(request, deps); assert(first.state === "saved");
-    const changed = structuredClone(input); changed.observedAt = "2026-11-02T05:03:00.000Z"; changed.scans = changed.scans.map(scan => ({ ...scan, observedAt: "2026-11-02T05:02:00.000Z", scanId: `${scan.scanId}:new`, componentIds: scan.componentIds?.map(id => `${id}:new`) }));
+    const changed = structuredClone(input); changed.observedAt = new Date(deps.clock.now() - 3_420_000).toISOString(); changed.scans = changed.scans.map(scan => ({ ...scan, observedAt: new Date(deps.clock.now() - 3_480_000).toISOString(), scanId: `${scan.scanId}:new`, componentIds: scan.componentIds?.map(id => `${id}:new`) }));
     const newer = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(deps.stateDir, request.repository), input: changed, expectedSnapshotId: request.snapshotId, clock: deps.clock }); assert(newer.state === "published");
     const latest = await module.createImprovementThread({ ...request, snapshotId: newer.snapshotId, idempotencyKey: "newer-source-request-00001" }, deps); assert(latest.state === "saved"); assert.equal(latest.threadId, first.threadId);
     const read = (module as unknown as { readSavedImprovementSource?: (id: string, deps: unknown) => { state: string; snapshotId?: string; threadId?: string; goal?: string } }).readSavedImprovementSource;
