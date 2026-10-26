@@ -536,7 +536,7 @@ test("ready refresh uses the maintained current-head CI producer", async () => {
         issuesImpl: { create: () => { throw new Error("no issue is filed here"); } } as never,
         stallNotice: undefined, armImpl: undefined, armSessionPrsOverride: undefined, updateBranchImpl: undefined,
         captureRepairFeedbackImpl: undefined, productionProgressJudge: false,
-        ghJsonImpl: ((args: string[]) => { reads.push(args); return { workflow_runs: [{ path: ".github/workflows/ci.yml", status }] }; }) as never,
+        readJsonImpl: ((args: string[]) => { reads.push(args); return { workflow_runs: [{ path: ".github/workflows/ci.yml", status }] }; }) as never,
       } as never);
       const h = harness({ behindMainByPr: one(7335, 2), baseChangedFilesByPr: one(7335, base(["src/mine.ts"])),
         readBranchProtectionStrict: () => false, liveCiRunForHead: effects.liveCiRunForHead,
