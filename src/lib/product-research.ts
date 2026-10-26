@@ -314,6 +314,26 @@ export class ProductResearchService {
       const needsRun = !prior && !here.some((run) => run.outcome === "completed" || run.outcome === "failed") && !(provider === undefined && here.some((run) => run.outcome === "unavailable"));
       if (!prior && (Object.keys(before.receipts).length >= PRODUCT_RESEARCH_LIMITS.receipts ||
         (needsRun && record.runs.length >= PRODUCT_RESEARCH_LIMITS.runs))) throw new ResearchFault("capacity");
+      if (!prior) {
+        const now = this.clock.iso();
+        const next = normalize(record, first.brief, now);
+        const answered: Answer[] = [];
+        for (const item of input.answers ?? []) {
+          const fields = dependsOf(item.questionId, next);
+          if (!fields) throw new ResearchFault("invalid_input");
+          const standing = next.answers.find((answer) => answer.questionId === item.questionId && validAnswer(answer, first.brief, next));
+          if (standing) {
+            if (standing.answer !== item.answer) throw new ResearchFault("already_answered");
+            continue;
+          }
+          answered.push({ questionId: item.questionId, answer: item.answer, objectiveRevision: first.objectiveRevision, scopeDigest: scopeDigest(first.brief, fields), status: "accepted", answeredAt: now });
+        }
+        if (next.answers.length + answered.length > PRODUCT_RESEARCH_LIMITS.answers) throw new ResearchFault("capacity");
+        // Validate the whole batch, then durably accept it before spending on provider work.
+        // A run receipt is saved only after research finishes; a retry can resume this checkpoint.
+        if (input.answers?.length) this.commit(paths, { ...before,
+          products: { ...before.products, [input.productId]: { ...next, answers: [...next.answers, ...answered] } } });
+      }
       const researchStartedAt = this.clock.iso();
       const draft = needsRun ? await this.runResearch(first, requestKey, paths.ownerKey, provider) : undefined;
 
@@ -337,19 +357,7 @@ export class ProductResearchService {
             .filter((item, index, all) => !known.has(item.id) && all.findIndex((other) => other.id === item.id) === index);
           next = { ...next, runs: [...next.runs, { ...draft.run, startedAt: researchStartedAt, finishedAt: now }], questions: [...next.questions, ...proposed] };
         }
-        const answered: Answer[] = [];
-        for (const item of input.answers ?? []) {
-          const fields = dependsOf(item.questionId, next);
-          if (!fields) throw new ResearchFault("invalid_input");
-          const standing = next.answers.find((answer) => answer.questionId === item.questionId && validAnswer(answer, product.brief, next));
-          if (standing) {
-            if (standing.answer !== item.answer) throw new ResearchFault("already_answered");
-            continue;
-          }
-          answered.push({ questionId: item.questionId, answer: item.answer, objectiveRevision: product.objectiveRevision, scopeDigest: scopeDigest(product.brief, fields), status: "accepted", answeredAt: now });
-        }
-        if (next.answers.length + answered.length > PRODUCT_RESEARCH_LIMITS.answers || next.questions.length > PRODUCT_RESEARCH_LIMITS.questions) throw new ResearchFault("capacity");
-        next = { ...next, answers: [...next.answers, ...answered] };
+        if (next.questions.length > PRODUCT_RESEARCH_LIMITS.questions) throw new ResearchFault("capacity");
         const currentRun = [...next.runs].reverse().find((run) => run.objectiveRevision === product.objectiveRevision);
         this.commit(paths, {
           ...state,

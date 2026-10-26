@@ -58,9 +58,23 @@ function replaceStateMode(file: string, body: string, mode: number): void {
 test("W1-T10617: product research retains sources answers and the objective revision", async (t) => {
   const { root, store, id } = seed(t);
   const { fixture, inputs } = provider();
-  const service = new ProductResearchService({ root, store, provider: fixture, clock });
+  let savedBeforeProvider: ReturnType<typeof JSON.parse>;
+  const service = new ProductResearchService({ root, store, provider: { ...fixture, research: async (input) => {
+    savedBeforeProvider = existsSync(researchFile(root)) ? JSON.parse(readFileSync(researchFile(root), "utf8")) : undefined;
+    return fixture.research(input);
+  } }, clock });
   const body = command(id, 1, { answers: [{ questionId: "q_constraints", answer: "mobile first, offline tolerant" }] });
+  const invalid = { ...body, answers: [...body.answers as { questionId: string; answer: string }[], { questionId: "q_nonexistent", answer: "x" }] };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.equal((await service.run(ACTOR, invalid)).code, "invalid_input");
+    assert.equal(inputs.length, 0, "an invalid first request or retry must never invoke the provider");
+    assert.equal(existsSync(researchFile(root)), false, "a rejected batch must not partially accept answers");
+  }
   const view = await ok(service, body);
+  assert.deepEqual(savedBeforeProvider.products[id].answers.map((item: { questionId: string; answer: string }) => [item.questionId, item.answer]),
+    [["q_constraints", "mobile first, offline tolerant"]], "valid answers are durable before provider execution");
+  assert.deepEqual(savedBeforeProvider.products[id].runs, [], "research starts after saving the answers");
+  assert.deepEqual(savedBeforeProvider.receipts, {}, "answer persistence alone does not acknowledge unfinished research");
   assert.equal(view.objectiveRevision, 1);
   assert.equal(view.run?.outcome, "completed");
   assert.equal(view.run?.objectiveRevision, 1);
@@ -93,6 +107,32 @@ test("W1-T10617: product research retains sources answers and the objective revi
   assert.equal((await service.run("clerk:bob", command(id, 1))).code, "not_found");
   assert.equal((await service.run(ACTOR, { ...command(id, 1), owner: "clerk:bob" })).code, "invalid_input");
   assert.equal((await service.run(ACTOR, command(id, 1, { answers: [{ questionId: "q_nonexistent", answer: "x" }] }))).code, "invalid_input");
+});
+
+test("product research refuses provider work until submitted answers are durable and retries safely", async (t) => {
+  for (const failAfterRename of [false, true]) {
+    const { root, store, id } = seed(t);
+    const { fixture, inputs } = provider({ throws: true });
+    const service = new ProductResearchService({ root, store, provider: fixture, clock, sync: (fd) => {
+      if (!failAfterRename || fstatSync(fd).isDirectory()) throw Error("answer persistence unavailable");
+      fsyncSync(fd);
+    } });
+    const body = command(id, 1, { answers: [{ questionId: "q_audience", answer: "commuters" }] });
+    assert.equal((await service.run(ACTOR, body)).code, failAfterRename ? "outcome_unknown" : "unavailable");
+    assert.equal(inputs.length, 0, "a failed answer durability barrier must prevent provider work");
+    const resumed = new ProductResearchService({ root, provider: fixture, clock });
+    if (failAfterRename) {
+      assert.equal((await resumed.run(ACTOR, { ...body, answers: [{ questionId: "q_audience", answer: "tourists" }] })).code, "already_answered");
+      assert.equal(inputs.length, 0, "an accepted answer conflict must be refused before provider work");
+    }
+    const view = await ok(resumed, body);
+    assert.deepEqual([view.run?.outcome, view.run?.failure], ["failed", "provider_error"]);
+    assert.deepEqual(view.accepted.map((item) => [item.questionId, item.answer]), [["q_audience", "commuters"]]);
+    assert.ok(!view.open.some((item) => item.id === "q_audience"));
+    assert.equal((await ok(new ProductResearchService({ root, clock }), body)).replayed, true);
+    assert.equal(inputs.length, 1, "resuming and replaying must not repeat a failed provider call");
+    assert.equal(JSON.parse(readFileSync(researchFile(root), "utf8")).products[id].answers.length, 1);
+  }
 });
 
 test("W1-T10617: a missing research provider is unavailable and fabricates no report", async (t) => {
@@ -201,8 +241,13 @@ test("product research fails explicitly on a corrupt, unreadable, locked or unwr
   const early = new ProductResearchService({ root, store, clock, sync: () => { throw new Error("disk full"); } });
   assert.equal((await early.run(ACTOR, command(id, 1, { answers: [{ questionId: "q_audience", answer: "x" }] }))).code, "unavailable");
   assert.deepEqual(pending(), [], "a failed save leaves no pending artifact");
-  let calls = 0;
-  const late = new ProductResearchService({ root, store, clock, sync: () => { if (++calls === 2) throw new Error("dir sync failed"); } });
+  const receiptsBefore = Object.keys(JSON.parse(good).receipts).length;
+  const late = new ProductResearchService({ root, store, clock, sync: (fd) => {
+    if (fstatSync(fd).isDirectory() && Object.keys(JSON.parse(readFileSync(file, "utf8")).receipts).length > receiptsBefore) {
+      throw new Error("dir sync failed after saving the run receipt");
+    }
+    fsyncSync(fd);
+  } });
   const retry = command(id, 1, { answers: [{ questionId: "q_audience", answer: "x" }] });
   assert.equal((await late.run(ACTOR, retry)).code, "outcome_unknown");
   const healed = await ok(service, retry);

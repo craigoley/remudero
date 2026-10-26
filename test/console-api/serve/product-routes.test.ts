@@ -238,19 +238,26 @@ writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmi
     const saved = await request(app.url, "/v1/products", "alice", command);
     assert.ok(saved.body.receipt);
     const body = { version: "product-research-v1", requestId: "research-process-0001",
-      productId: saved.body.receipt.productId, expectedObjectiveRevision: 1 };
-    const post = async (session?: "alice") => fetch(`${app.url}/v1/products/research`, {
+      productId: saved.body.receipt.productId, expectedObjectiveRevision: 1,
+      answers: [{ questionId: "q_audience", answer: "commuters" }] };
+    const post = async (session?: "alice", submitted = body) => fetch(`${app.url}/v1/products/research`, {
       method: "POST", headers: { authorization: "Bearer fixture-write", "content-type": "application/json", ...(session ? { "x-test-session": session } : { "x-rmd-actor": "clerk:alice" }) },
-      body: JSON.stringify(body),
+      body: JSON.stringify(submitted),
     });
     const refused = await post();
     assert.equal(refused.status, 403);
     assert.equal(calls, 0, "an unverified actor cannot start the transport");
+    const invalid = await post("alice", { ...body, answers: [...body.answers, { questionId: "q_nonexistent", answer: "x" }] });
+    assert.equal(invalid.status, 400);
+    assert.deepEqual(violations(await invalid.json(), declaredBody("/v1/products/research", "POST", 400)), []);
+    assert.equal(calls, 0, "an invalid first research request cannot start the real transport");
+    assert.equal(existsSync(output), false, "question validation precedes the transport process boundary");
     const response = await post("alice");
-    const reply = await response.json() as { run: { id: string; outcome: string; provider: string; spendUsd: number }; replayed: boolean };
+    const reply = await response.json() as { run: { id: string; outcome: string; provider: string; spendUsd: number }; replayed: boolean; accepted: { questionId: string; answer: string }[] };
     assert.equal(response.status, 200);
     assert.deepEqual(violations(reply, declaredBody("/v1/products/research", "POST", 200)), []);
     assert.deepEqual([reply.run.outcome, reply.run.provider, reply.run.spendUsd], ["completed", "claude:haiku", 0.02]);
+    assert.deepEqual(reply.accepted.map((item) => [item.questionId, item.answer]), [["q_audience", "commuters"]]);
     assert.equal(calls, 1);
     const receipts = () => readFileSync(join(fixture, "state", "ledger.ndjson"), "utf8").trim().split("\n")
       .map((line) => JSON.parse(line) as { step: string; lane?: string; run_id: string; task_id: string;
