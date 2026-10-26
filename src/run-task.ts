@@ -358,7 +358,7 @@ import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPor
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
-import { queueJudgeGardenSpec } from "./lib/queue-judge-gardener.js";
+import { queueJudgeGardenSpec, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
 import { scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
@@ -27320,6 +27320,25 @@ export function issueRevalidationRunTaskPorts(
   };
 }
 
+/** W1-T9925: the queue judge's ports that live here: its judge is the escalation judge's tool-less spawn (one per pass,
+ *  on the mount the issue-revalidation garden already uses), and its open-PR set is the daemon's persisted board, a file
+ *  read with no remote call. `seams` stand in for the spawn and the board read in tests. */
+export function queueJudgeRunTaskPorts(
+  ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; root: string; log: (step: string, extra?: Record<string, unknown>) => void },
+  seams: { spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"]; openBoard?: typeof readOpenBoardSnapshot } = {},
+): Pick<QueueJudgeSources, "judgeText" | "openPrNumbers"> {
+  const { owner, repo, repoRoot, stateDir, root, log } = ctx;
+  const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }, { spawn: seams.spawn });
+  return {
+    judgeText: (prompt) => judge.judgeText(prompt, 0),
+    openPrNumbers: () => {
+      const open = (seams.openBoard ?? readOpenBoardSnapshot)(root, owner, repo);
+      if (!open.ok) throw new Error(`queue judge: the open-PR snapshot is unavailable (${open.reason})`);
+      return new Set(open.snapshot.rows.map((row) => row.number));
+    },
+  };
+}
+
 /** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
 
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
@@ -27391,19 +27410,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const d = deps("backlog", raiseDuplicate);
       return gardenPass(backlogGardenSpec(d), d);
     }
-    // W1-T9925: the queue judge re-ranks queued tasks by measured cost of delay through its own reviewed plan PR. Its
-    // judge is the escalation judge's tool-less spawn; its open-PR set is the daemon's persisted board, no remote call.
+    // W1-T9925: the queue judge re-ranks queued tasks by measured cost of delay through its own reviewed plan PR.
     case "queue-judge": {
       const d = deps("queue-judge", raiseDuplicate);
-      const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log });
-      return gardenPass(queueJudgeGardenSpec(d, {
-        judgeText: (prompt) => judge.judgeText(prompt, 0),
-        openPrNumbers: () => {
-          const open = readOpenBoardSnapshot(config.root, owner, repo);
-          if (!open.ok) throw new Error(`queue judge: the open-PR snapshot is unavailable (${open.reason})`);
-          return new Set(open.snapshot.rows.map((row) => row.number));
-        },
-      }), d);
+      return gardenPass(queueJudgeGardenSpec(d, queueJudgeRunTaskPorts({ owner, repo, repoRoot, stateDir, root: config.root, log })), d);
     }
     // W1-T5454: the scout looks for work nobody asked for -- a recurring failure-shaped ledger step no task
     // or scorecard covers is filed through the machine-filing path, bounded by the queue and the day's merges.

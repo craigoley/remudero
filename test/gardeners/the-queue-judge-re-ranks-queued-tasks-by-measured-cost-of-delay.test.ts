@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import type { readOpenBoardSnapshot } from "#src/lib/board-snapshot-cache.js";
 import type { Clock } from "#src/lib/clock.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import type { Escalation } from "#src/lib/escalate.js";
 import { foldGardenEffects, gardenEffectsPath, gardenStatePath, initialGardenState, readGardenEffects, runGardenAsync, type GardenerDeps } from "#src/lib/gardener.js";
 import type { IncidentLifecycleRecord } from "#src/lib/incident-lifecycle.js";
@@ -12,8 +14,10 @@ import type { MainCommit } from "#src/lib/hot-file-gardener.js";
 import type { PlanInventory } from "#src/lib/plan-gardener.js";
 import { parseTasksFromYaml, type Task } from "#src/lib/plan.js";
 import {
-  buildQueueJudgeSources, classRecords, QUEUE_JUDGE_CLASSES, queueJudgeGardenSpec, queueJudgeInventory, QueueJudgeUnavailableError, rankingPath, type QueueJudgeSources,
+  applyQueueJudgeActions, buildQueueJudgeSources, classRecords, creditedCount, fsChurn, gitFilingDates, QUEUE_JUDGE_CLASSES, queueJudgeGardenSpec, queueJudgeInventory,
+  QueueJudgeUnavailableError, rankingPath, readRanking, type QueueJudgeSources,
 } from "#src/lib/queue-judge-gardener.js";
+import { queueJudgeRunTaskPorts } from "#src/run-task.js";
 
 const NOW = Date.parse("2026-10-26T12:00:00.000Z");
 const HOUR = 3_600_000;
@@ -384,4 +388,93 @@ test("W1-T9925: predictions are scored against outcomes and the record sets the 
   assert.equal(shadowRows.length, 3);
   assert.ok(shadowRows.every((l) => l.extra.pr_url === null));
   assert.equal(w.calls.workspace, 0);
+});
+
+test("W1-T9925: the default seams read the checkout's shard files, git history, ledger and incident store", async (t) => {
+  const repo = gitRepo({ kind: "queue-judge" });
+  t.after(() => repo.cleanup());
+  const stateDir = join(repo.dir, "state");
+  mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
+  mkdirSync(stateDir);
+  const one = join(repo.dir, "plan", "tasks.d", "W1-T1-first.yaml");
+  const two = join(repo.dir, "plan", "tasks.d", "W1-T2-second.yaml");
+  writeFileSync(one, shardText("W1-T1", { priority: "2" }));
+  writeFileSync(two, shardText("W1-T2", { priority: "2" }));
+  repo.git("add", "-A");
+  repo.git("commit", "-q", "-m", "file two tasks");
+  // Filing dates come from first-parent plan history, read through the async git leaf.
+  const filed = await gitFilingDates(repo.dir);
+  assert.deepEqual([...filed.keys()].sort(), ["W1-T1", "W1-T2"]);
+  assert.ok([...filed.values()].every((ms) => Number.isFinite(ms) && ms > 0));
+  // Churn reads the checkout's files: shards written after the ranking, plus the credit store's growth.
+  utimesSync(one, new Date(NOW - 2 * HOUR), new Date(NOW - 2 * HOUR));
+  utimesSync(two, new Date(NOW), new Date(NOW));
+  assert.equal(fsChurn(repo.dir, stateDir, undefined), 0, "no ranking, nothing to measure against");
+  assert.equal(fsChurn(repo.dir, stateDir, { atMs: NOW - HOUR }), 1);
+  assert.equal(creditedCount(stateDir), 0, "an absent credit store holds nothing");
+  writeFileSync(join(stateDir, "merge-credit.json"), JSON.stringify({ "W1-T1": { trailer: { source: "trailer", prUrl: "https://github.com/o/r/pull/1", prNumber: 1, prState: "MERGED" } } }));
+  assert.equal(creditedCount(stateDir), 1);
+  assert.equal(fsChurn(repo.dir, stateDir, { atMs: NOW - HOUR, credited: 0 }), 2, "one shard written and one task merged since");
+  assert.equal(fsChurn(join(repo.dir, "absent"), stateDir, { atMs: NOW }), 0);
+  // The production sources read the real ledger union and incident store, and refuse what is not wired.
+  const deps: GardenerDeps = { stateDir, repoRoot: repo.dir, log: () => {}, openWorkspace: () => { throw new Error("not opened"); } };
+  const sources = buildQueueJudgeSources(deps);
+  writeFileSync(join(stateDir, "ledger.ndjson"), [startRow("W1-T1", NOW - HOUR), { step: "other.step", ts: iso(NOW) }].map((r) => JSON.stringify(r)).join("\n") + "\n");
+  assert.deepEqual(sources.ledger(["run.start"]).map((r) => r.task_id), ["W1-T1"]);
+  assert.deepEqual(sources.ledger(["run.start"], iso(NOW)).map((r) => r.task_id), [], "a window excludes older rows");
+  assert.deepEqual(sources.incidents(), [], "no incident store is no incident");
+  writeFileSync(join(stateDir, "incident-lifecycle.json"), "{ not json");
+  assert.throws(() => sources.incidents(), /incident store is malformed/);
+  assert.match(sources.readShard("plan/tasks.d/W1-T1-first.yaml"), /id: W1-T1/);
+  assert.throws(() => sources.openPrNumbers(), /not wired/);
+  await assert.rejects(() => sources.judgeText("prompt"), /spawn is not wired/);
+  assert.equal(sources.credited(), 1);
+  assert.equal(sources.churn({ atMs: NOW - HOUR }), 1);
+  // A ranking record that cannot be read is an error naming the file, never a silent first pass.
+  assert.equal(readRanking(stateDir), undefined);
+  writeFileSync(rankingPath(stateDir), "{ not json");
+  assert.throws(() => readRanking(stateDir), /ranking record .* is unreadable/);
+  writeFileSync(rankingPath(stateDir), JSON.stringify({ at: "x" }));
+  assert.throws(() => readRanking(stateDir), /is malformed/);
+});
+
+test("W1-T9925: a shard that moved since the inventory read it is never written over", (t) => {
+  const w = world(t, { tasks: [["W1-T1", { priority: "2" }], ["W1-T2", { priority: "2" }], ["W1-T3", { priority: "2" }]] });
+  writeFileSync(join(w.root, w.shards.get("W1-T2")!), shardText("W1-T2", { priority: "1  # operator-2026-10-26: moved by hand" }));
+  writeFileSync(join(w.root, w.shards.get("W1-T3")!), `${shardText("W1-T3", { priority: "2" })}  priority: 5\n`);
+  const action = (target: string, from: number | null) => ({
+    class: "raise" as const, target, reason: "r", from, to: 1, evidence: ["age"], signature: "0123456789abcdef", expectedCostOfDelay: 1, pinned: false, heldBy: undefined,
+    expectedOutcome: { unblocks_tasks: [], ends_incidents: [], unsticks_prs: [], starts_within: 1 },
+  });
+  const read = (p: string) => readFileSync(p, "utf8");
+  const write = (p: string, text: string) => writeFileSync(p, text);
+  const before = [w.read("W1-T2"), w.read("W1-T3")];
+  // T2 was edited to a pin after the read (its `from` is stale), T3 carries two priority keys, T9 has no shard at all.
+  const paths = applyQueueJudgeActions(w.root, w.shards, [action("W1-T2", 2), action("W1-T3", 2), action("W1-T9", 2), action("W1-T1", 2)], new Date(NOW), read, write);
+  assert.deepEqual(paths, ["plan/tasks.d/W1-T1.yaml"]);
+  assert.deepEqual([w.read("W1-T2"), w.read("W1-T3")], before);
+  // A task with no declared priority gains one beneath its own reason, and a retired or blocked shard is left alone.
+  const none = world(t, { tasks: [["W1-T1", {}]] });
+  assert.deepEqual(applyQueueJudgeActions(none.root, none.shards, [{ ...action("W1-T1", null), to: 4 }], new Date(NOW), read, write), ["plan/tasks.d/W1-T1.yaml"]);
+  assert.match(none.read("W1-T1"), /^ {2}priority: 4 {2}# queue-judge-2026-10-26: r\n {2}status: queued\n {2}# queue judge: priority=4 evidence=0123456789abcdef$/m);
+  const retired = world(t, { tasks: [["W1-T1", { priority: "2" }]] });
+  writeFileSync(join(retired.root, retired.shards.get("W1-T1")!), `${shardText("W1-T1", { priority: "2" })}  retirement: closed\n`);
+  assert.deepEqual(applyQueueJudgeActions(retired.root, retired.shards, [action("W1-T1", 2)], new Date(NOW), read, write), []);
+});
+
+test("W1-T9925: the daemon's ports judge on the escalation mount and read the open PRs from the persisted board", async (t) => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-queue-judge-ports-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const spawned: Array<Record<string, unknown>> = [];
+  let board: ReturnType<typeof readOpenBoardSnapshot> = { ok: true, snapshot: { repository: "acme/remudero", savedAt: iso(NOW), rows: [{ number: 41 }, { number: 42 }] } } as never;
+  const ports = queueJudgeRunTaskPorts({ owner: "acme", repo: "remudero", repoRoot: process.cwd(), stateDir, root: stateDir, log: () => {} }, {
+    spawn: (async (args: Record<string, unknown>) => { spawned.push(args); return { text: '{"moves":[]}' }; }) as never,
+    openBoard: () => board,
+  });
+  assert.equal(await ports.judgeText("the prompt"), '{"moves":[]}');
+  assert.deepEqual(spawned[0]!.tools, [], "the judge is tool-less");
+  assert.equal(spawned[0]!.prompt, "the prompt");
+  assert.deepEqual([...ports.openPrNumbers()].sort(), [41, 42]);
+  board = { ok: false, reason: "open snapshot is incomplete" };
+  assert.throws(() => ports.openPrNumbers(), /open-PR snapshot is unavailable \(open snapshot is incomplete\)/);
 });
