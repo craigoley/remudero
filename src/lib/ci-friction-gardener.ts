@@ -1531,14 +1531,6 @@ export function ciFrictionLadder(input: {
       continue;
     }
     if (next) continue;
-    // File overlap is an observation to diagnose, never authority to invent an implementation remedy.
-    if (price.cause.kind === "hand_fix") {
-      line.state = held ? "escalated" : "escalate";
-      if (!held) next = { price, origin, rung: s.rung, decision: { kind: "escalate",
-        why: "Manual file-change signals do not identify a failure mechanism; preserve these observations and establish a bounded diagnosis before implementation.",
-        prior: s.prior, holdReason: "no-owner" } };
-      continue;
-    }
     if (s.state === "escalate") {
       next = { price, origin, rung: s.rung, decision: { kind: "escalate", why: `${s.rung - 1} remedy rung(s) did not move ${key}`, prior: s.prior, holdReason: "ladder-exhausted" } };
       continue;
