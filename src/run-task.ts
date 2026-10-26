@@ -12260,6 +12260,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       registryDir: dirname(holdStatePath), owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "",
       body: view.body ?? "", headSha: view.headRefOid, author: input.author, commits: view.commits, result, nowMs: clock.now(), log,
       capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
+      checks: selectedChecks,
+      escalate: (escalation) => escalate(escalation, { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
     });
     if (refused === "failed") {
       // W1-T9797: the sweep dedups every outcome but hold, so an unfiled remedy must read as hold.
