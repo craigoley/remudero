@@ -257,7 +257,7 @@ export function workerAllowlistFromCapabilityContext(settings: unknown, context:
   if (!Array.isArray(context.consumers) || context.consumers.length === 0) return unknown("no-consumers");
   const identities = new Set<string>();
   for (const consumer of context.consumers) {
-    if (!consumer || typeof consumer.lane !== "string" || ![...TASK_TYPES, SKILL_FIX_TASK_TYPE].includes(consumer.lane)
+    if (!consumer || typeof consumer.lane !== "string" || !(TASK_TYPES as readonly string[]).includes(consumer.lane) && consumer.lane !== SKILL_FIX_TASK_TYPE
       || typeof consumer.provider !== "string" || !(WORKER_PROVIDER_IDS as readonly string[]).includes(consumer.provider)
       || typeof consumer.source !== "string" || consumer.source.length === 0
       || !Array.isArray(consumer.tools) || !consumer.tools.every(tool => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_]*$/.test(tool))) return unknown("malformed-or-unbounded-consumer");
@@ -305,7 +305,7 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(out);
 }
 
-const KNOWN_TOOL_NAMES = ["Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Grep", "Glob", "RunCheck"] as const;
+const KNOWN_TOOL_NAMES = ["Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"] as const;
 
 /** Phrasings the untrusted envelope (W1-T2700) would fence as an instruction aimed at the reader
  *  rather than data describing a procedure — a small, curated set of classic injection shapes,
@@ -365,7 +365,8 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
         return { ok: false, offendingLine: line, reason: `names a path the worker's deny-floor already refuses ('${pattern.source}')` };
       }
     }
-    const toolMatches = line.matchAll(new RegExp(`\\b(${KNOWN_TOOL_NAMES.join("|")})\\b`, "g"));
+    const toolNames = allowlist.capabilityContext ? [...KNOWN_TOOL_NAMES, "Grep", "Glob", "RunCheck"] : KNOWN_TOOL_NAMES;
+    const toolMatches = line.matchAll(new RegExp(`\\b(${toolNames.join("|")})\\b`, "g"));
     for (const toolMatch of toolMatches) {
       if (!allowlist.allowedTools.some(t => t === toolMatch[1] || (!allowlist.capabilityContext && t.startsWith(`${toolMatch[1]}(`)))) {
         return { ok: false, offendingLine: line, reason: `names tool '${toolMatch[1]}' outside the worker allowlist` };

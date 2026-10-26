@@ -778,6 +778,8 @@ test("skill conformance names the real eligible execution context", () => {
   assert.ok(allow.allowedTools.includes("Read"));
   assert.equal(allow.allowedTools.includes("Bash"), false, "do not union provider surfaces into their most permissive list");
   assert.ok(allow.capabilityContext?.consumers.every(c => c.source.startsWith("src/lib/")));
+  const onlyCash = { root: dir, workerProviders: { enabled: ["cash"], harnessCommitsFix: false } } as Config;
+  assert.ok(skillDraftWorkerAllowlist(onlyCash, both, settingsPath).contextRefusal, "one known lane cannot stand in for a missing fix consumer");
 });
 
 test("skill context conformance regressions fail without the boundary repair", () => {

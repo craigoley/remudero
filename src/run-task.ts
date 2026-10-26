@@ -30679,23 +30679,13 @@ function worktreeGitRunner(worktreePath: string): GitRunner {
  * fallback push and PR creation carry the run home. No message, no commit: an invented subject
  * would attribute work to a run that never asked for it.
  */
-/**
- * W1-T3727: WHO HOLDS A FIX ROUND'S GIT, as one value both the prompt and the tool bound read.
- *
- * EXPORTED SO IT CAN BE ASSERTED BY CALLING IT. The two facts worth testing — that the shell-less
- * surface is offered only where the prompt already said the harness commits, and that nothing is
- * offered otherwise — were first written as tests that read `run-task.ts` AS TEXT, which
- * `source-text-assertion-census` refuses for good reason: such a test passes when the prose is
- * right and the behaviour is wrong. Returning the pair from one function makes the coherence rule
- * a property of the value rather than of two call sites that must be kept in step.
- */
 /** Reports the same lane/provider bounds a worker would receive, without changing or invoking it. */
 export function skillDraftWorkerAllowlist(config: Config, draft: SkillDraft, settingsPath = join(resolveInstallRoot(config), "settings", "worker.json")): WorkerAllowlist {
   const lanes = skillDraftConsumerLanes(draft);
   const providers = enabledWorkerProviders(config);
   const pin = workerBoundaryStack.harnessRevision;
   const current = executingHarnessRevision(fileURLToPath(import.meta.url));
-  const revision = (value: typeof pin): string => value && !Array.isArray(value) && "revision" in value ? value.revision : "";
+  const revision = (value: typeof pin): string => value && !Array.isArray(value) && "revision" in value && typeof value.revision === "string" ? value.revision : "";
   if (lanes.length === 0 || providers.length === 0 || new Set(providers).size !== providers.length) return workerAllowlistFromCapabilityContext(undefined, undefined);
   const consumers: SkillWorkerCapabilityContext["consumers"][number][] = [];
   for (const lane of lanes) {
@@ -30718,9 +30708,20 @@ export function skillDraftWorkerAllowlist(config: Config, draft: SkillDraft, set
       consumers.push({ lane, provider, source, tools: tools! });
     }
   }
+  if (lanes.some(lane => !consumers.some(c => c.lane === lane))) return workerAllowlistFromCapabilityContext(undefined, undefined);
   return workerAllowlistFromCapabilityContext(JSON.parse(readFileSync(settingsPath, "utf8")), { generation: revision(pin), currentGeneration: revision(current), consumers });
 }
 
+/**
+ * W1-T3727: WHO HOLDS A FIX ROUND'S GIT, as one value both the prompt and the tool bound read.
+ *
+ * EXPORTED SO IT CAN BE ASSERTED BY CALLING IT. The two facts worth testing — that the shell-less
+ * surface is offered only where the prompt already said the harness commits, and that nothing is
+ * offered otherwise — were first written as tests that read `run-task.ts` AS TEXT, which
+ * `source-text-assertion-census` refuses for good reason: such a test passes when the prose is
+ * right and the behaviour is wrong. Returning the pair from one function makes the coherence rule
+ * a property of the value rather than of two call sites that must be kept in step.
+ */
 export function fixRoundGitOwnership(
   config: Pick<Config, "workerProviders">,
 ): { harnessCommits: boolean; cashTools: string[] | undefined } {
