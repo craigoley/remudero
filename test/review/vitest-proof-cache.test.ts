@@ -216,8 +216,23 @@ test("W1-T10675: cache failures preserve proof errors and release only owned scr
     assert.match(refused.error ?? "", /owner marker changed/);
     assert.ok(existsSync(path), "a directory whose owner marker is not ours is never removed");
 
+    const swapped = createProofCache({ cwd: f.cwd, identity: [] });
+    assert.equal(swapped.kind, "owned");
+    const swappedPath = (swapped as { path: string }).path;
+    const markerFile = join(swappedPath, PROOF_CACHE_OWNER_FILE);
+    const markerBytes = readFileSync(markerFile, "utf8");
+    const outside = join(f.cwd, "outside-marker");
+    writeFileSync(outside, markerBytes);
+    rmSync(markerFile);
+    symlinkSync(outside, markerFile);
+    const symlinked = (swapped as { release(): { released: boolean; error?: string } }).release();
+    assert.equal(symlinked.released, false, "a marker swapped for a symlink is never followed");
+    assert.ok(existsSync(swappedPath));
+    rmSync(swappedPath, { recursive: true, force: true });
+    rmSync(outside, { force: true });
+
     const ok = createProofCache({ cwd: f.cwd, identity: [] });
-    const release = (ok as { release(): { released: boolean } }).release;
+    const release =(ok as { release(): { released: boolean } }).release;
     assert.equal(release().released, true);
     assert.equal(release().released, true, "release is idempotent");
 

@@ -1,6 +1,6 @@
 /** Proof-owned Vitest 5 module caches. Every invocation starts empty; shared installs stay untouched. */
 import { createHash, randomBytes } from "node:crypto";
-import { lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, type Stats } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, type Stats } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
@@ -97,8 +97,12 @@ export function createProofCache(input: ProofCacheInput, deps: Partial<Pick<type
       if (current === undefined) return { released: true };
       if (dirname(path) !== cwd || !basename(path).startsWith(PROOF_CACHE_DIR_PREFIX + identity + "-") || !sameDirectory(owner, current)) throw new Error("cache directory ownership changed");
       if (markerWritten) {
-        const markerPath = join(path, PROOF_CACHE_OWNER_FILE), info = lstatSync(markerPath);
-        if (!info.isFile() || info.isSymbolicLink() || info.uid !== owner.uid || info.nlink !== 1 || info.size > 1024 || readFileSync(markerPath, "utf8") !== marker) throw new Error("cache owner marker changed");
+        // One no-follow handle: the checks and the read observe the same inode.
+        const fd = openSync(join(path, PROOF_CACHE_OWNER_FILE), constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const info = fstatSync(fd);
+          if (!info.isFile() || info.uid !== owner.uid || info.nlink !== 1 || info.size > 1024 || readFileSync(fd, "utf8") !== marker) throw new Error("cache owner marker changed");
+        } finally { closeSync(fd); }
       }
       remove(path);
       if (lstatSync(path, { throwIfNoEntry: false }) !== undefined) throw new Error("cache cleanup did not remove its owned directory");
