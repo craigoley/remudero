@@ -1,0 +1,28 @@
+- id: W1-T10686
+  title: "Make the materialiseBaseGrepTree default showBlob hermetic"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=b648cbac4205fc89
+  # backlog gardener: placed=2026-10-26T09:20:26.839Z
+  attempts: 0
+  design: |
+    CREATES: test/review/make-the-materialisebasegreptree-default-showblob-hermetic.test.ts
+  files:
+    - src/lib/proof-base-stale.ts
+    - test/review/make-the-materialisebasegreptree-default-showblob-hermetic.test.ts
+  acceptance:
+    - claim: "The default showBlob used by materialiseBaseGrepTree reads only from the supplied hermetic base tree, not ambient checkout or host state."
+      proof: "unit test: the default showBlob reads blobs from the supplied base tree"
+  origin: "followup:DAEMON-1792976029862:2026-10-26T02:31:57.032Z:0"
+  rationale: >-
+    From the 2026-10-26 follow-up on https://github.com/craigoley/remudero/pull/14314, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: make the `materialiseBaseGrepTree` default `showBlob` in
+    `src/lib/proof-base-stale.ts` hermetic too. It is out of the declared scope. — from W1-T10407
+    (run DAEMON-1792976029862, https://github.com/craigoley/remudero/pull/14314)
