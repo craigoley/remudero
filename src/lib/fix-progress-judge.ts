@@ -55,7 +55,7 @@ export interface FixProgressCheckEvidence {
   unavailable?: string;
 }
 
-/** W1-T9297: `supplied` when at least one failing check carried a readable log; else why none did. Absent
+/** W1-T9297: `supplied` when at least one failing check carried readable log or commit-status evidence; else why none did. Absent
  *  evidence is never an empty `checks` list. */
 export type FixProgressFailureEvidence =
   | { supplied: true; checks: FixProgressCheckEvidence[] }
