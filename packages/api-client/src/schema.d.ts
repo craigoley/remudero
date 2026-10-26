@@ -133,7 +133,7 @@ export interface components {
         answer: string;
       })[];
     };
-    /** One durable research run. executionAuthority is always none; provider is the configured one or null. */
+    /** One durable research run. executionAuthority is always none; provider names the configured triage mount or is null when unresolved. Admission and budget refusals are unavailable. */
     ProductResearchRun: {
       id: string;
       objectiveRevision: ProductRevision;

@@ -335,7 +335,7 @@ components:
     ProductResearchRun:
       type: object
       additionalProperties: false
-      description: One durable research run. executionAuthority is always none; provider is the configured one or null.
+      description: One durable research run. executionAuthority is always none; provider names the configured triage mount or is null when unresolved. Admission and budget refusals are unavailable.
       required: [id, objectiveRevision, productRevision, outcome, provider, budgetUsd, spendUsd, sources, executionAuthority, startedAt, finishedAt]
       properties:
         id: { type: string, pattern: '^prun_[a-f0-9]{32}$' }
@@ -14623,7 +14623,11 @@ paths:
         16 answers. Sources come only from the saved brief and are recorded as data; their text is
         never an instruction. The run uses only the operator-configured provider and per-run ceiling:
         no request, source or provider text can select a provider or raise spending. A missing
-        provider records an unavailable run, never a fabricated report. At most one completed run
+        provider records an unavailable run, never a fabricated report. Production reuses the configured
+        synthesis.triage mount, ledgered worker transport and existing triage per-call budget with
+        normal provider admission, containment and cancellation. Admission or budget refusal is
+        unavailable. Model-authored spending cannot replace the transport receipt. No provider,
+        allowance, fallback policy or tool grant is added. At most one completed run
         exists per objective revision. An answer stays accepted while the brief fields it depends on
         are unchanged, so it is not asked again after resume; changing those fields invalidates only
         the affected answers and keeps them as history. Reusing requestId with the same command

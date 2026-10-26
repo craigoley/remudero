@@ -852,6 +852,7 @@ import { inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerb
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
+import { realProductResearchProvider, type ProductResearchProvider } from "./lib/product-research.js";
 import { planFilesIdentity } from "./lib/thread-plan.js";
 import {
   buildReadyServeServer,
@@ -28760,6 +28761,31 @@ export function boardColdStartGate(boardPath: string, clock: Clock = systemClock
   };
 }
 
+/** Resolve research from the existing triage mount, budget and ledgered worker transport. */
+export function productResearchServeDeps(config: Config, cwd: string, options: {
+  loadMounts?: typeof loadMounts; spawn?: typeof spawnWorker;
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): { productResearchProvider?: ProductResearchProvider; productResearchBudgetUsd?: number } {
+  try {
+    const mount = (options.loadMounts ?? loadMounts)(mountsPath(cwd)).synthesis.triage;
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", `serve-research-settings-${process.pid}.json`),
+    });
+    validateWorkerSettingsFile(settingsFile);
+    return { productResearchBudgetUsd: DEFAULT_BUDGET_USD,
+      productResearchProvider: realProductResearchProvider({ mount, budgetUsd: DEFAULT_BUDGET_USD,
+        cwd, settingsFile, config, spawn: options.spawn ?? ledgeredNonDispatchSpawn("product-research"),
+        tools: TRIAGE_WORKER_TOOLS.filter((tool) => tool === "WebSearch"),
+      }),
+    };
+  } catch (error) {
+    options.log("serve.product_research_unavailable", { error: String((error as Error)?.message ?? error) });
+    return {};
+  }
+}
+
 // ── rmd serve — the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B) ──
 //
 // Real business logic lives entirely in the four already-proven modules lib/serve.ts
@@ -29026,6 +29052,7 @@ export async function serveCommand(
   const supervised = supervisedRole(process.env);
   const channel = supervised && (deps.generation ?? processChannel());
   const server = await buildReadyServeServer({
+    ...productResearchServeDeps(config, repoRoot, { loadMounts: deps.loadMounts, spawn: deps.spawn, log }),
     selectedRegistryObservation: config.selectedRegistryMode?.mode === "shadow" ? {
       settings: { ...config.selectedRegistryMode }, input: { envPath: process.env.RMD_INSTANCE_REGISTRY }, record: log,
     } : undefined,

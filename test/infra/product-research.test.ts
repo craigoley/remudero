@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import { existsSync, fstatSync, fsyncSync, mkdirSync, readdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { test, type TestContext } from "node:test";
+import { join } from "node:path";
 import { fixedClock } from "#src/lib/clock.js";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { ProductIntentStore, productStatePaths } from "#src/lib/product-intent-store.js";
-import { ProductResearchService, type ProductResearchProvider, type ProductResearchView } from "#src/lib/product-research.js";
+import { PRODUCT_RESEARCH_TIMEOUT_MS, PRODUCT_RESEARCH_UNAVAILABLE, ProductResearchService, realProductResearchProvider, type ProductResearchProvider, type ProductResearchView } from "#src/lib/product-research.js";
+import { ClaudeToolchainBlockedError, SubscriptionOnlyRefusedError, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { CodexToolchainBlockedError, OpenWeightAllowanceExhaustedError, ProviderCapacityBlockedError } from "#src/lib/worker-provider.js";
+import { WorkerKeychainError } from "#src/lib/worker-home.js";
 import { declaredBody, violations } from "#test/helpers/openapi-strict.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
@@ -375,4 +379,63 @@ test("canonical research can reconcile a competing trusted stage at the same obj
   const replayed = store.read(ACTOR, id); assert.ok(replayed.ok);
   assert.equal(replayed.value.revision, product.value.revision);
   assert.equal(inputs.length, 1);
+});
+
+test("product research adapter preserves triage bounds cancellation and transport spending", async (t) => {
+  const { root } = seed(t);
+  const calls: SpawnWorkerArgs[] = [];
+  const config = { root, claudeBin: "/unused" };
+  const mount = { model: "sonnet", provider: "claude" as const, effort: "low", maxTurns: 7, contextBudget: 1000 };
+  const receipt = { text: JSON.stringify({ summary: "measured source", spendUsd: 999 }), costUsd: 0.25, subtype: "success" } as WorkerResult;
+  const make = (budgetUsd = 1) => realProductResearchProvider({ mount, budgetUsd, config, cwd: root,
+    settingsFile: join(root, "settings.json"), tools: ["WebSearch"], spawn: async (args) => { calls.push(args); return receipt; } });
+  const signal = new AbortController().signal;
+  const input = { objective: "fixed objective", objectiveRevision: 2, sources: SOURCES,
+    requestId: "adapter-request-0001", budgetUsd: 1, signal };
+  assert.deepEqual(await make().research(input), { summary: "measured source", spendUsd: 0.25 });
+  const call = calls[0]!;
+  assert.deepEqual([call.model, call.mountProvider, call.effort, call.maxTurns, call.maxBudgetUsd], ["sonnet", "claude", "low", 7, 1]);
+  assert.equal(call.config, config);
+  assert.equal(call.signal, signal);
+  assert.deepEqual(call.clockBound, { boundMs: PRODUCT_RESEARCH_TIMEOUT_MS });
+  assert.deepEqual(call.tools, ["WebSearch"]);
+  assert.equal(call.cashTools, undefined);
+  assert.equal(call.cashSqueezed, undefined);
+  assert.equal(call.routingFallback, undefined);
+  assert.equal(await make(0).research(input), PRODUCT_RESEARCH_UNAVAILABLE);
+  assert.equal(await make(Number.NaN).research(input), PRODUCT_RESEARCH_UNAVAILABLE);
+  assert.equal(await make().research({ ...input, budgetUsd: 2 }), PRODUCT_RESEARCH_UNAVAILABLE);
+  assert.equal(calls.length, 1, "unresolved or changed budgets never enter the transport");
+});
+
+test("product research records normal provider admission refusals as unavailable and transport errors as failed", async (t) => {
+  const { root, store, id } = seed(t);
+  const failures = [new ProviderCapacityBlockedError([]), new SubscriptionOnlyRefusedError("opus"),
+    new CodexToolchainBlockedError("missing executable"), new ClaudeToolchainBlockedError([]),
+    new WorkerKeychainError("credential-item-missing", "missing credential"),
+    new OpenWeightAllowanceExhaustedError({ committedUsd: 1, capUsd: 1, wantUsd: 0.1, utcDay: "2026-10-26" })];
+  const input = { objective: "fixed", objectiveRevision: 1, sources: SOURCES, requestId: "refused-request-0001",
+    budgetUsd: 1, signal: new AbortController().signal };
+  const receipt = { text: "null", costUsd: 0, subtype: "success" } as WorkerResult;
+  const adapter = (spawn: Parameters<typeof realProductResearchProvider>[0]["spawn"]) => realProductResearchProvider({
+    mount: { model: "sonnet", effort: "low", maxTurns: 7, contextBudget: 1000 }, budgetUsd: 1,
+    cwd: root, settingsFile: "unused", config: { root, claudeBin: "/unused" }, tools: [], spawn });
+  for (const error of failures) {
+    const provider = adapter(async () => { throw error; });
+    assert.equal(await provider.research(input), PRODUCT_RESEARCH_UNAVAILABLE);
+    const result = await ok(new ProductResearchService({ root, store, provider, budgetUsd: 1, clock }), command(id, 1));
+    assert.deepEqual([result.run?.outcome, result.run?.summary], ["unavailable", undefined]);
+  }
+  const refusals: Partial<WorkerResult>[] = [{ usageRefusal: { matched: "limit" } }, { budgetRefused: true }, { notStarted: "admission-abandoned" }];
+  for (const refusal of refusals) {
+    assert.equal(await adapter(async () => ({ ...receipt, ...refusal })).research(input), PRODUCT_RESEARCH_UNAVAILABLE);
+  }
+  const error = new Error("process transport failed");
+  await assert.rejects(adapter(async () => { throw error; }).research(input), (actual) => actual === error);
+  for (const failure of [{ isError: true }, { apiError: true }, { subtype: "error_max_turns" }]) {
+    await assert.rejects(adapter(async () => ({ ...receipt, ...failure })).research(input), /research worker failed/);
+  }
+  const failed = await ok(new ProductResearchService({ root, store, provider: adapter(async () => { throw error; }), budgetUsd: 1, clock }), command(id, 1));
+  assert.deepEqual([failed.run?.outcome, failed.run?.failure], ["failed", "provider_error"]);
+  assert.equal(await adapter(async () => ({ text: "null", subtype: "success" } as WorkerResult)).research(input), null);
 });
