@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, fstatSync, fsyncSync, mkdirSync, readdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { test, type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
@@ -47,6 +47,13 @@ async function ok(service: ProductResearchService, body: unknown): Promise<Produ
 }
 
 const researchFile = (root: string) => `${productStatePaths(root, ACTOR).directory}/research/${productStatePaths(root, ACTOR).ownerKey}.json`;
+
+/** Own the new fixture's exact stat bits even under a restrictive host umask; restore the mask synchronously. */
+function replaceStateMode(file: string, body: string, mode: number): void {
+  const mask = process.umask(0);
+  try { unlinkSync(file); writeFileSync(file, body, { mode }); }
+  finally { process.umask(mask); }
+}
 
 test("W1-T10617: product research retains sources answers and the objective revision", async (t) => {
   const { root, store, id } = seed(t);
@@ -185,9 +192,9 @@ test("product research fails explicitly on a corrupt, unreadable, locked or unwr
   writeFileSync(file, JSON.stringify({ ...JSON.parse(good), ownerKey: "0".repeat(64) }), { mode: 0o600 });
   assert.equal((await service.run(ACTOR, command(id, 1))).code, "corrupt");
   writeFileSync(file, good, { mode: 0o600 });
-  chmodSync(file, 0o644);
+  replaceStateMode(file, good, 0o644);
   assert.equal((await service.run(ACTOR, command(id, 1))).code, "unavailable");
-  chmodSync(file, 0o600);
+  replaceStateMode(file, good, 0o600);
   assert.equal((await new ProductResearchService({ clock }).run(ACTOR, command(id, 1))).code, "unavailable");
 
   const pending = () => readdirSync(`${paths.directory}/research`).filter((name) => name.endsWith(".pending"));
@@ -310,4 +317,36 @@ test("product research reports real pending-file cleanup failures and refuses st
   unlinkSync(file);
   symlinkSync("missing-private-state", file);
   assert.equal((await service.run(ACTOR, command(id, 1))).code, "unavailable", "O_NOFOLLOW filesystem errors must not become an empty successful state");
+});
+
+test("product research cannot acknowledge an unsynced canonical product transition on retry", async (t) => {
+  const { root, id } = seed(t);
+  const state = productStatePaths(root, ACTOR).state;
+  const broken = new ProductIntentStore({ root, sync: (fd) => {
+    if (fstatSync(fd).isDirectory() && JSON.parse(readFileSync(state, "utf8")).products[id].stageEvidence.length > 0) {
+      throw Error("persistent canonical directory sync failure after rename");
+    }
+    fsyncSync(fd);
+  } });
+  const service = new ProductResearchService({ root, store: broken, clock });
+  const body = command(id, 1);
+  assert.equal((await service.run(ACTOR, body)).code, "outcome_unknown");
+  assert.equal((await service.run(ACTOR, body)).code, "outcome_unknown", "an existing stage ID does not prove a canonical acknowledgement was durable");
+  assert.equal((await ok(new ProductResearchService({ root, clock }), body)).replayed, true);
+});
+
+test("a later clarification heals the original canonical research transition without rerunning the provider", async (t) => {
+  const { root, store, id } = seed(t);
+  let refuse = true;
+  const { fixture, inputs } = provider();
+  const flaky = Object.create(store, { transition: { value: (actor: string, input: unknown) => refuse ? { ok: false, code: "unavailable" } : store.transition(actor, input) } });
+  const service = new ProductResearchService({ root, store: flaky, provider: fixture, clock });
+  assert.equal((await service.run(ACTOR, command(id, 1))).code, "unavailable");
+  refuse = false;
+  await ok(service, command(id, 1, { answers: [{ questionId: "q_audience", answer: "mobile players" }] }));
+  const product = store.read(ACTOR, id); assert.ok(product.ok);
+  assert.equal(product.value.stageEvidence.length, 1);
+  assert.equal(inputs.length, 1);
+  await ok(service, command(id, 1));
+  assert.equal(store.read(ACTOR, id).ok, true);
 });

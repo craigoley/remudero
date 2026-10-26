@@ -6,8 +6,9 @@ import {
 import { join } from "node:path";
 import { z } from "zod";
 import { systemClock, type Clock } from "./clock.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
-import { productRequestIdSchema, productIdSchema, type ProductBrief, type ProductProjection, type ProductStoreCode } from "./product-intent.js";
+import { productRequestIdSchema, productIdSchema, productTransitionSchema, type ProductBrief, type ProductProjection, type ProductStoreCode } from "./product-intent.js";
 import { ProductIntentStore, productStatePaths } from "./product-intent-store.js";
 
 export const PRODUCT_RESEARCH_VERSION = "product-research-v1" as const;
@@ -68,7 +69,8 @@ const recordSchema = z.object({
 const stateSchema = z.object({
   version: z.literal(PRODUCT_RESEARCH_VERSION), ownerKey: hash,
   products: z.record(productIdSchema, recordSchema),
-  receipts: z.record(hash, z.object({ payloadDigest: hash, productId: productIdSchema, runId: z.string().nullable(), savedAt: instant }).strict()),
+  receipts: z.record(hash, z.object({ payloadDigest: hash, productId: productIdSchema, runId: z.string().nullable(), savedAt: instant,
+    canonicalTransition: productTransitionSchema.optional() }).strict()),
 }).strict();
 
 type State = z.infer<typeof stateSchema>;
@@ -87,8 +89,8 @@ export interface ProductResearchView {
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 
-class ResearchFault extends Error {
-  constructor(readonly code: ProductResearchCode) { super(`product research: ${code}`); }
+class ResearchFault extends RmdError {
+  constructor(readonly code: ProductResearchCode) { super("usage", GENERIC_EXIT_CODE, `product research: ${code}`); }
 }
 
 type CatalogQuestion = { id: string; text: string; dependsOn: (keyof ProductBrief)[]; satisfied: (brief: ProductBrief) => boolean };
@@ -299,34 +301,48 @@ export class ProductResearchService {
         }
         if (next.answers.length + answered.length > PRODUCT_RESEARCH_LIMITS.answers || next.questions.length > PRODUCT_RESEARCH_LIMITS.questions) throw new ResearchFault("capacity");
         next = { ...next, answers: [...next.answers, ...answered] };
+        const currentRun = [...next.runs].reverse().find((run) => run.objectiveRevision === product.objectiveRevision);
         this.commit(paths, {
           ...state,
           products: Object.fromEntries([...Object.entries(state.products).filter(([key]) => key !== input.productId), [input.productId, next] as const]),
-          receipts: Object.fromEntries([...Object.entries(state.receipts), [requestKey, { payloadDigest, productId: input.productId, runId: draft?.run.id ?? null, savedAt: now }] as const]),
+          receipts: Object.fromEntries([...Object.entries(state.receipts), [requestKey, { payloadDigest, productId: input.productId, runId: currentRun?.id ?? null, savedAt: now }] as const]),
         });
-        return { run: draft ? next.runs.find((run) => run.id === draft.run.id) : undefined, view: project(product.id, product.brief, product.objectiveRevision, next, false) };
+        return { run: currentRun, view: project(product.id, product.brief, product.objectiveRevision, next, false) };
       })();
 
       // Canonical record: the run is stage evidence in the product's own durable record. A retry heals a failure here.
-      if (outcome.run) this.recordEvidence(actor, input.productId, outcome.run);
+      if (outcome.run) this.recordEvidence(actor, input.productId, outcome.run, paths, requestKey);
       return outcome.view;
     } finally { lock.release(); }
   }
 
-  private recordEvidence(actor: string, productId: string, run: Run): void {
-    const result = this.store.read(actor, productId);
-    if (!result.ok) throw new ResearchFault(result.code);
-    const product = result.value;
-    if (run.objectiveRevision !== product.objectiveRevision || product.stageEvidence.some((item) => item.id === run.id)) return;
-    const saved = this.store.transition(actor, {
-      version: "product-intent-v1", requestId: `prsrch_${digest(run.id).slice(0, 40)}`, id: productId,
-      expectedRevision: product.revision, expectedObjectiveRevision: product.objectiveRevision,
-      stageEvidence: [{
-        id: run.id, stage: "research", outcome: run.outcome === "completed" ? "succeeded" : run.outcome === "failed" ? "failed" : "blocked",
-        objectiveRevision: run.objectiveRevision, observedAt: run.finishedAt,
-        references: run.sources.map(({ label, url }) => ({ label, url })),
-      }],
-    });
+  private recordEvidence(actor: string, productId: string, run: Run, paths: ReturnType<ProductResearchService["paths"]>, requestKey: string): void {
+    const state = this.read(paths);
+    const receipt = state.receipts[requestKey];
+    if (!receipt || receipt.productId !== productId || receipt.runId !== run.id) throw new ResearchFault("corrupt");
+    let transition = receipt.canonicalTransition ?? Object.values(state.receipts)
+      .find((other) => other.productId === productId && other.runId === run.id && other.canonicalTransition)?.canonicalTransition;
+    if (!transition) {
+      const result = this.store.read(actor, productId);
+      if (!result.ok) throw new ResearchFault(result.code);
+      const product = result.value;
+      if (run.objectiveRevision !== product.objectiveRevision) throw new ResearchFault("stale_revision");
+      if (product.stageEvidence.some((item) => item.id === run.id)) throw new ResearchFault("recovery_required");
+      transition = {
+        version: "product-intent-v1", requestId: `prsrch_${digest(run.id).slice(0, 40)}`, id: productId,
+        expectedRevision: product.revision, expectedObjectiveRevision: product.objectiveRevision,
+        stageEvidence: [{
+          id: run.id, stage: "research", outcome: run.outcome === "completed" ? "succeeded" : run.outcome === "failed" ? "failed" : "blocked",
+          objectiveRevision: run.objectiveRevision, observedAt: run.finishedAt,
+          references: run.sources.map(({ label, url }) => ({ label, url })),
+        }],
+      };
+      // Preserve the exact input before the canonical call: a lost acknowledgement must replay
+      // its original revision and digest through the store's durability barrier, never read-and-skip.
+      this.commit(paths, { ...state, receipts: Object.fromEntries(Object.entries(state.receipts)
+        .map(([key, value]) => [key, key === requestKey ? { ...value, canonicalTransition: transition } : value])) });
+    }
+    const saved = this.store.transition(actor, transition);
     if (!saved.ok) throw new ResearchFault(saved.code);
   }
 
