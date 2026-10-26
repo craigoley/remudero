@@ -4304,16 +4304,31 @@ export function openWeightUnitTestPlan(
 /** {@link selectOpenWeightUnitTestSuites} in a child process, so its git reads and listings never
  *  block the daemon's event loop. It runs THIS checkout's code (cwd {@link HARNESS_ROOT}) with the
  *  check's credential-free env; a child that fails or overruns is a FULL selection naming why. */
-export async function selectOpenWeightUnitTestSuitesOffLoop(cwd: string, env: Record<string, string>): Promise<AffectedSelection> {
+export async function selectOpenWeightUnitTestSuitesOffLoop(
+  cwd: string, env: Record<string, string>,
+  exec: (file: string, args: readonly string[], opts: Parameters<typeof execFileLoopBounded>[2]) =>
+    Promise<{ stdout: string; stderr: string }> = execFileLoopBounded,
+): Promise<AffectedSelection> {
   const code = "const m = await import(process.argv[1]);" +
     "process.stdout.write(JSON.stringify(m.selectOpenWeightUnitTestSuites(process.argv[2])));";
-  try {
-    const { stdout } = await execFileLoopBounded(
+  const attempt = async (): Promise<AffectedSelection> => {
+    const { stdout } = await exec(
       process.execPath,
       ["--import", "tsx", "--input-type=module", "--eval", code, import.meta.url, cwd],
       { cwd: HARNESS_ROOT, env, encoding: "utf8", timeout: OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
     );
     return JSON.parse(stdout) as AffectedSelection;
+  };
+  try {
+    try {
+      return await attempt();
+    } catch (first) {
+      // A host under load can overrun the cold tsx start once; that is prevented by one bounded
+      // retry (the child is read-only and idempotent), never by widening the timeout. Any other
+      // failure is real and is not retried.
+      if ((first as { killed?: boolean }).killed !== true) throw first;
+      return await attempt();
+    }
   } catch (err) {
     // A failed or overrun selection is never an empty one: it is FULL, so the check refuses.
     const e = err as { killed?: boolean; message?: string };

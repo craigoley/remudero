@@ -13,8 +13,33 @@ import {
   OPENWEIGHT_UNIT_TEST_NICE,
   TEST_PROCESS_GUARD_IMPORTS,
   openWeightUnitTestPlan,
+  selectOpenWeightUnitTestSuitesOffLoop,
 } from "#src/lib/worker-provider.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+
+test("W1-T10421: selector child overrun under load is retried once, then refuses (never empty)", async () => {
+  const good = { suites: ["test/a.test.ts"], fullRun: false, reasons: [], recentOnly: { floor: [] } };
+  const killed = () => Object.assign(new Error("timed out"), { killed: true });
+  let calls = 0;
+  const recovered = await selectOpenWeightUnitTestSuitesOffLoop("/x", {}, async () => {
+    calls += 1;
+    if (calls === 1) throw killed();
+    return { stdout: JSON.stringify(good), stderr: "" };
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(recovered.suites, ["test/a.test.ts"]);
+  assert.equal(recovered.fullRun, false);
+
+  let stuck = 0;
+  const refused = await selectOpenWeightUnitTestSuitesOffLoop("/x", {}, async () => { stuck += 1; throw killed(); });
+  assert.equal(stuck, 2, "exactly one retry");
+  assert.equal(refused.fullRun, true);
+
+  let broken = 0;
+  const failed = await selectOpenWeightUnitTestSuitesOffLoop("/x", {}, async () => { broken += 1; throw new Error("boom"); });
+  assert.equal(broken, 1, "a non-timeout failure is not retried");
+  assert.equal(failed.fullRun, true);
+});
 
 test("W1-T10421: check:test:test/the-open-weight-unit-test-check-loads-the-suite-guards.test.ts:flaky is prevented, not retried", () => {
   const cwd = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ow-plan-`));
