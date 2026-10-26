@@ -1,0 +1,61 @@
+id: console-core-analytics-timeout-20261026
+ts: 2026-10-26T17:38:09.373Z
+raw: >-
+  OBSERVED, not a class-wide root-cause conclusion: stable authenticated
+  before/after serving revision3c0e6a00d16ec98cae9a5be7c30ae4d07f4f7c4f
+  at2026-10-26T17:20:19 returned cached read-model and agent views in2-7ms. All
+  three ledger sources were fresh. Site and Console analytics/agent proposals
+  were independently fresh; Core analytics retained source16:26:44.378 with
+  phasefailed and reason analytics refresh exceeded120000ms. Core proposals were
+  stale; Core history was current. Signed-in agent page separately
+  displayed2verified/1stale sources and four Core proposal coverage gaps from
+  stale analytics, withholding new Core recommendations and keeping six other
+  drafts read-only. Native shadow495078samples/0realdiffs is only parity
+  readiness, not current analytics or action authority.
+
+
+  Reconcile the already-merged W1-T9523 bounded analytics continuation and
+  W1-T10461 independently-qualified gardener scan before any new task. This
+  recurrence does not prove those fixes were absent or establish that SQLite
+  contention, Azure memory, an old malformed archive row, or Code health
+  timeouts caused it. The existing readmark/contention findings remain separate;
+  do not duplicate them. The previous exact priced gardener parent54378730
+  and10canonical receipts have independently survived the natural
+  daemon-generation change with identical fingerprints/subtotal0.00548745.
+  Current-generation worker-call zeroes are not historical spend.
+
+
+  Prepare a bounded observation-led proposal using current source and all open
+  heads. Inspect existing analytics.source_snapshot_progress/built/failed
+  scan_mode, scan_reason, progress_refused and rotations_remaining records,
+  reported worker lifetime/ownership and checkpoint/resume behavior across
+  normal ticks. Distinguish a continuing bounded scan, a resumed scan that
+  restarts, unread source refusal, an abort within one rotation, and a
+  dead/replaced producer. Do not launch a live full-history scan or induced
+  gardener/model pass merely to diagnose this. No increase to the120000ms
+  timeout, source freshness budgets, memory/CI policy, permissions, providers,
+  prices or service settings; no restart, pause release, claim clearing, source
+  takeover or partial snapshot promoted to complete.
+
+
+  After the actual failing boundary is established, file the smallest normal
+  governed task and prove it in private deterministic fixtures: complete a
+  bounded multi-pass scan under unchanged timeout, preserve prior committed data
+  on incomplete/failed/ownership-changed runs, retain genuine
+  unread/malformed/source controls, and remove only the causal correction to
+  falsify the recovery. Native scope/risk/ownership/proofs/review/CI/protected
+  merge and separate deployment/live verification still apply. Queuing this
+  finding is not a task proposal or a built repair. This chat owns
+  Console/Inbox/agent data follow-ups; existing CI/qualified-intake and Azure
+  memory owners remain separate.
+attachments:
+  - https://github.com/craigoley/remudero/blob/8c1ad448ebd5cd8cb82bd65af54eec9c8ce27277/src/lib/read-model-slow-lane.ts
+  - https://github.com/craigoley/remudero/blob/8c1ad448ebd5cd8cb82bd65af54eec9c8ce27277/src/lib/analytics-view.ts
+origin: repair#console-core-analytics-timeout
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: console-followup:35a412e3-c31c-44bd-b5bc-a2286d8373cb
+thread_id: null

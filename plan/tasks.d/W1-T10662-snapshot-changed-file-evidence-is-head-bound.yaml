@@ -6,7 +6,7 @@
   type: implement
   principles: { tdd: strict }
   budget_usd: 12.00
-  verify: human
+  verify: auto
   priority: 2.5
   dispatch_hold: true
   risk: high
@@ -40,3 +40,13 @@
     The complete captured subject sweep covers 470 advertised heads, 267 distinct shard trees and 26 inline-plan variants, with W10625 and plan-task positive controls. Its two cache source variants differ only by the maintained loop-bounded child migration. W6259 owns the existing async cache; W9651 owns bounded transport. Neither provides this head-bound persisted snapshot evidence. Fresh open-PR subject/file scope and source checks are required again before publication.
     PR14176 owns daily-progress reporting and overlaps status.ts but does not own this cache-to-snapshot evidence concern; do not edit that branch or duplicate its collector. Source implementation is not authorized by this parked filing. Five necessary files span cache, gateway and snapshot boundaries, so high/span sizing is honest and any advisory is disclosed rather than hidden with a scanner or lint exception.
     No new GitHub fetcher, normal fetch schedule, policy, actual permissions, dispatch decision, feedback status mutation, trial registration, billing or runtime operation is approved. Serve and workers remain running, W7740 USER_HELD90 and SHADOW/independent holds remain. Foundation and Janitor retain their existing owners. Failure/refusal receipts and all original backlog identities stay retained.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The filed acceptance criteria scope the remedy to qualified read-only evidence through the existing cache and gateway, preserving legacy caller compatibility and existing fetch ownership and limits."
+      - "The record requires default-route fixtures, positive and negative controls, and guard-removal regression proof while retaining normal CI, security, review and merge gates."
+      - "The filing explicitly preserves independent holds and excludes feedback mutation, W10625 release, new network paths and production operation authority; this ruling does not authorize implementation or release those holds."
+    judged_at: "2026-10-26T18:03:26.738Z"
+    pin: "c67ea8fb63d14576ed6bbe164e477e443d3c376014e99ffcd2aa574e73a582cc"
