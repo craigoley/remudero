@@ -49,7 +49,22 @@ const HARNESS_CHECKPOINT_NO_PR_REASONS: ReadonlySet<string> = new Set(["restart_
  *  failure (two node_modules refusals, a claim race, a refused checkpoint push, two restart yields). */
 export function streakRefusal(line: Record<string, unknown>): string | undefined {
   return lifetimeInfrastructureRefusal(line) ??
-    (line.verdict === "no_pr" && typeof line.reason === "string" && HARNESS_CHECKPOINT_NO_PR_REASONS.has(line.reason) ? line.reason : undefined);
+    (line.verdict === "no_pr" && typeof line.reason === "string" && HARNESS_CHECKPOINT_NO_PR_REASONS.has(line.reason) ? line.reason : undefined) ??
+    (inconclusiveProofRefusal(line) ? PROOF_INCONCLUSIVE : undefined);
+}
+
+/** W1-T10742: the class of a PR-open refusal whose proof never reached a verdict (check-proof exit 4). */
+export const PROOF_INCONCLUSIVE = "proof_inconclusive";
+
+/** check-proof's own report line for an exec_error: `verdict:    exec_error — <why>`. */
+const EXEC_ERROR_VERDICT_LINE = /(?:^|\n)\s*verdict:\s+exec_error\b/;
+
+/** W1-T10742: a `failed` verdict at `pr_open.refused` for a proof that could not even be looked at. The row carries
+ *  `proof_exec: "exec_error"` when written after this task; a row written before it (CONSOLE-T127's four) carries
+ *  check-proof's own `verdict: exec_error` line in its `reason`. A conclusive miss matches neither. */
+function inconclusiveProofRefusal(line: Record<string, unknown>): boolean {
+  if (line.verdict !== "failed" || line.stage !== "pr_open.refused") return false;
+  return line.proof_exec === "exec_error" || (typeof line.reason === "string" && EXEC_ERROR_VERDICT_LINE.test(line.reason));
 }
 
 /** The liveness bound (W1-T179, 30 minutes): a dispatched run with no newer ledger line is no longer trusted as running.

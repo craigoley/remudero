@@ -27,6 +27,8 @@ export interface OpenPullRequestProofResult {
   error?: string;
   stdout?: string;
   stderr?: string;
+  /** How many times the proof was run to reach this result (W1-T10742); absent means once. */
+  attempts?: number;
 }
 
 export type OpenPullRequestProofRunner = (
@@ -183,19 +185,44 @@ export interface FailingProofAtOpen {
   checkedBody: string;
 }
 
+/** W1-T10742: a `branch-gap` refusal whose only defect is a filed proof that never reached a verdict (check-proof
+ *  exit 4, a signal, a spawn failure) even after one re-run. The body is otherwise fully checked, so the opener
+ *  can still open the finished work with the proof named; "could not look" is the harness's, never a worker's miss. */
+export interface InconclusiveProofAtOpen {
+  proof: string;
+  /** The bounded tail of the last run's output. */
+  detail: string;
+  checkedBody: string;
+  attempts: number;
+}
+
 export class PrOpenRefusedError extends RmdError {
   constructor(
     readonly refusalClass: PrOpenRefusalClass,
     reason: string,
     readonly failingProof?: FailingProofAtOpen,
+    readonly inconclusiveProof?: InconclusiveProofAtOpen,
   ) {
     super("plan", GENERIC_EXIT_CODE, `openPullRequestChecked: ${reason}`, { refusalClass });
     this.name = "PrOpenRefusedError";
   }
 }
 
-function reject(reason: string, refusalClass: PrOpenRefusalClass = "branch-gap", failingProof?: FailingProofAtOpen): never {
-  throw new PrOpenRefusedError(refusalClass, reason, failingProof);
+function reject(
+  reason: string,
+  refusalClass: PrOpenRefusalClass = "branch-gap",
+  failingProof?: FailingProofAtOpen,
+  inconclusiveProof?: InconclusiveProofAtOpen,
+): never {
+  throw new PrOpenRefusedError(refusalClass, reason, failingProof, inconclusiveProof);
+}
+
+/** `note` placed before the task trailer so the trailer stays the body's last paragraph. */
+function bodyWithNoteBeforeTrailer(checkedBody: string, note: string): string {
+  const body = checkedBody.trimEnd();
+  const trailer = /\n\nRemudero-Task: [^\n]+$/.exec(body);
+  if (!trailer) return `${body}\n\n${note}`;
+  return `${body.slice(0, trailer.index)}\n\n${note}${trailer[0]}`;
 }
 
 /** The checked body with the failing proof named as the PR's fix target, placed before the task trailer so the
@@ -206,10 +233,19 @@ export function bodyWithFailingProofAtOpen(failing: FailingProofAtOpen): string 
     `## Pre-open proof failure\n\nThe filed proof \`${failing.proof}\` did not pass when this PR was opened. ` +
     "The build is opened rather than stranded, so the fix lane takes this proof as its target.\n\n" +
     (detail ? `\`\`\`\n${detail}\n\`\`\`` : "(no output)");
-  const body = failing.checkedBody.trimEnd();
-  const trailer = /\n\nRemudero-Task: [^\n]+$/.exec(body);
-  if (!trailer) return `${body}\n\n${note}`;
-  return `${body.slice(0, trailer.index)}\n\n${note}${trailer[0]}`;
+  return bodyWithNoteBeforeTrailer(failing.checkedBody, note);
+}
+
+/** W1-T10742: the checked body with the inconclusive proof named, so review re-executes it. Opened rather than
+ *  re-dispatched: a re-dispatch re-runs a whole worker build for a proof that never executed. */
+export function bodyWithInconclusiveProofAtOpen(inconclusive: InconclusiveProofAtOpen): string {
+  const detail = inconclusive.detail.length > 1500 ? `…${inconclusive.detail.slice(-1500)}` : inconclusive.detail;
+  const note =
+    `## Pre-open proof inconclusive\n\nThe filed proof \`${inconclusive.proof}\` did not reach a verdict when this PR was ` +
+    `opened (${inconclusive.attempts} run${inconclusive.attempts === 1 ? "" : "s"}); that is not evidence the work is wrong. ` +
+    "Review re-executes every filed proof.\n\n" +
+    (detail ? `\`\`\`\n${detail}\n\`\`\`` : "(no output)");
+  return bodyWithNoteBeforeTrailer(inconclusive.checkedBody, note);
 }
 
 /** Where a refused open leaves the branch: already pushed, so it is named in the ledger rather than stranded. */
@@ -369,6 +405,12 @@ const runnableProof = (proof: string, target?: SuiteRegistryTarget): boolean =>
   proof.length > 0 && parseWhitelistedProof(proof, target) !== null;
 
 const proofFailed = (result: OpenPullRequestProofResult): boolean => result.status !== 0 || Boolean(result.error);
+/** `rmd check-proof` exit 4: the proof could not even be looked at (a timeout, spawn failure, truncated runner). */
+const INCONCLUSIVE_PROOF = 4;
+/** W1-T10742: a proof result that reached no verdict. Exit 0/1/2/3/5 are conclusive; exit 4, a null status, a
+ *  signal and a set `error` (including the sync answer's "not pre-run") are not. */
+const proofInconclusive = (result: OpenPullRequestProofResult): boolean =>
+  proofFailed(result) && (result.status === null || result.status === INCONCLUSIVE_PROOF || Boolean(result.signal) || Boolean(result.error));
 // `rmd check-proof` exits 1 only after an executed proof failed. Exit 2/3/4 is a
 // refusal, missing test, or execution error; exit 5 means the proof is stale at base.
 const EXECUTED_PROOF_FAILURE = 1;
@@ -434,12 +476,16 @@ export function openPullRequestChecked(
     if (proofFailed(result)) {
       const detail = [result.error, result.stderr, result.stdout].filter(Boolean).join("\n").trim();
       const stale = result.status === STALE_PROOF || /\bexecuted_stale\b/.test(detail);
+      const inconclusive: InconclusiveProofAtOpen | undefined = !stale && proofInconclusive(result)
+        ? { proof, detail: detail.length > 3000 ? detail.slice(-3000) : detail, checkedBody, attempts: result.attempts ?? 1 }
+        : undefined;
       return reject(
         `${taskId} proof did not pass ${proofBase === undefined ? "at head" : "against merge base"} (${proof})${detail ? `: ${detail}` : `: exit ${result.status ?? result.signal ?? "unknown"}`}`,
         stale ? "stale-proof" : "branch-gap",
         result.status !== EXECUTED_PROOF_FAILURE || result.error || result.signal || stale
           ? undefined
           : { proof, detail, checkedBody },
+        inconclusive,
       );
     }
   }
@@ -491,7 +537,10 @@ export async function prerunPullRequestProofs(
     const proof = criterion.proof.trim();
     if (!runnableProof(proof, target)) break;
     const proofBase = (criterion as { kind?: unknown }).kind === "guard" ? undefined : mergeBase;
-    const result = await runProofAsync(proof, proofBase, repoRoot, target);
+    let result = await runProofAsync(proof, proofBase, repoRoot, target);
+    // W1-T10742: a proof that reached no verdict is run once more through the same runner; a conclusive second
+    // answer stands as the proof's result, and a second inconclusive one is the last word.
+    if (proofInconclusive(result)) result = { ...(await runProofAsync(proof, proofBase, repoRoot, target)), attempts: 2 };
     results.set(key(proof, proofBase), result);
     if (proofFailed(result)) break;
   }

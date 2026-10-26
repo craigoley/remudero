@@ -39,8 +39,9 @@ test("check-proof runs a registered Vitest title without a core test/ corpus", (
     assert.equal(existsSync(join(dir, "test")), false, "positive control: only tests/ exists");
     const result = check(dir, "site proof title");
     assert.equal(result.code, CHECK_PROOF_EXIT.pass, result.out);
-    assert.match(result.out, /candidates: delegated to the registered Vitest suite root/);
-    assert.match(result.out, /argv:.*--reporter=tap -t site proof title tests\//);
+    // W1-T10742: a file under the registered root names the title, so the run is scoped to it.
+    assert.match(result.out, /candidates: 1 file\(s\) — tests\/unit\/sample\.test\.ts/);
+    assert.match(result.out, /argv:.*--reporter=tap -t site proof title tests\/unit\/sample\.test\.ts/);
     assert.doesNotMatch(result.out, /NOT EXECUTED|test\/\*\*\/\*\.test\.ts/);
     assert.match(result.out, /verdict:\s+pass/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -51,6 +52,7 @@ test("registered Vitest still reports an unmatched title as no-match", () => {
   try {
     const result = check(dir, "another title");
     assert.equal(result.code, CHECK_PROOF_EXIT.noMatch, result.out);
+    assert.match(result.out, /candidates: delegated to the registered Vitest suite root/);
     assert.match(result.out, /verdict:\s+no-match/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -60,6 +62,6 @@ test("the console's registered Vitest root reaches the same proof executor", () 
   try {
     const result = check(dir, "site proof title", "craigoley/remudero-console");
     assert.equal(result.code, CHECK_PROOF_EXIT.pass, result.out);
-    assert.match(result.out, /candidates: delegated to the registered Vitest suite root/);
+    assert.match(result.out, /candidates: 1 file\(s\) — tests\/unit\/sample\.test\.ts/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
