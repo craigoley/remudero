@@ -43,7 +43,11 @@ test("W1-T10191: fix_refusal:census-precheck is prevented, not retried", () => {
     assert.ok(parsed[metric] <= recorded[metric], `${metric} must not exceed the previous ceiling`);
   }
   assert.deepEqual(parsed.importers, recorded.importers, "growth's new importer is not recorded");
-  assert.deepEqual(affectedReachGrowth(measured, recorded), ["importerCount"], "the growth is named for removal");
+  // Rationale: the second importer reaches run-task too, so the median reach percent genuinely grows past the
+  // recorded 50 as well; the precheck must name EVERY metric over its ceiling, so both are named for removal.
+  assert.ok(measured.medianReachPercent > recorded.medianReachPercent, "the fixture's median reach genuinely grows");
+  assert.deepEqual(affectedReachGrowth(measured, recorded), ["importerCount", "medianReachPercent"],
+    "every grown metric is named for removal in the same round, so no fix round is spent re-deriving it");
 
   // A genuine shrink does move the ceiling down, to exactly the measured values.
   const shrunkMeasured = measureAffectedReach(new Map(FIXTURE).set("test/old.test.ts", "export {};"));

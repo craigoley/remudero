@@ -1014,25 +1014,28 @@ function loadGitSpawnShapes() {
 }
 
 /**
- * W1-T10191: the reach ratchet's own graph builder (src/lib/affected-suites.ts) is loaded the same way as
- * git-spawn-shapes above: on demand, with a kept load failure rather than one thrown at import time. A sparse
- * census fixture (e.g. test/a-census-this-branch-grows-is-refused-before-the-push.test.ts) copies only the
- * handful of files census-precheck.mjs is known to need, so a NEW static top-level import of a src/lib module
- * that fixture never copies would crash every such fixture at module load — this must stay lazy.
+ * W1-T10191: the reach ratchet's graph builder (src/lib/affected-suites.ts) loads only under tsx, so, like the
+ * instrument-surface derivation, it runs in a child, started only when a caller measures. A top-level import of
+ * it never loaded under plain `node`, and its src import edge joined test/cycle-ratchet.test.ts (a whole-tree
+ * cruise) to every push touching this file, inside the harness's one 60 s bound on the whole precheck child.
  */
-let affectedSuitesModule = null;
-let affectedSuitesError = null;
-try {
-  affectedSuitesModule = await import("../src/lib/affected-suites.ts");
-} catch (e) {
-  affectedSuitesError = e;
-}
-
-function loadAffectedSuitesGraph() {
-  if (affectedSuitesModule === null) {
-    throw new Error(`affected-suites graph builder (src/lib/affected-suites.ts) could not be loaded: ${affectedSuitesError?.message ?? affectedSuitesError}`);
-  }
-  return affectedSuitesModule;
+function loadAffectedSuitesGraph(run = spawnSync) {
+  const url = pathToFileURL(join(SCRIPT_REPO, "src", "lib", "affected-suites.ts")).href;
+  const code = `const { buildAffectedSuitesGraph } = await import(${JSON.stringify(url)});` +
+    "const graph = buildAffectedSuitesGraph(new Map(JSON.parse(process.getBuiltinModule('fs').readFileSync(0, 'utf8'))));" +
+    "const out = (m) => [...m].map(([k, v]) => [k, [...v]]);" +
+    "console.log(JSON.stringify({ dependencies: out(graph.dependencies), importers: out(graph.importers), directImports: out(graph.directImports) }));";
+  const back = (rows) => new Map(rows.map(([k, v]) => [k, new Set(v)]));
+  return { buildAffectedSuitesGraph: (files) => {
+    const res = run(process.execPath, ["--import", import.meta.resolve("tsx"), "--input-type=module", "-e", code],
+      { ...childOptions(SCRIPT_REPO), input: JSON.stringify([...files]) });
+    assertChildFinished(res, "affected-suites graph");
+    if (res.status !== 0) {
+      throw new Error(`the affected-suites graph child exited ${res.status}: ${String(res.stderr || "no diagnostic").trim().slice(0, 300)}`);
+    }
+    const graph = JSON.parse(String(res.stdout).trim());
+    return { dependencies: back(graph.dependencies), importers: back(graph.importers), directImports: back(graph.directImports) };
+  } };
 }
 
 /** True when the diff touches the leaf, the census, or the shared shapes, or adds a src/ git spawn of any shape the census counts. */
