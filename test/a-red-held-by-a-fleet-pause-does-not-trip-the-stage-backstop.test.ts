@@ -125,6 +125,7 @@ test("only an unacted exact semantic admission refusal is fleet-withheld time", 
   const row = { step: "sweep.disposed", ts: ago(10), acted: false, stand_down_reason: admission };
   assert.equal(fleetWithheldStageMs([row], now), 10 * 60_000);
   assert.equal(fleetWithheldStageMs([{ ...row, acted: true }], now), 0);
+  assert.equal(fleetWithheldStageMs([{ ...row, acted: undefined }], now), 0);
   assert.equal(fleetWithheldStageMs([{ ...row, stand_down_reason: undefined, reason: admission }], now), 0);
   assert.equal(fleetWithheldStageMs([{ ...row, stand_down_reason: admission + "; unreadable" }], now), 0);
   assert.equal(fleetWithheldStageMs([{ ...row, stand_down_reason: "not admitted this pass: semantic post-review admission bound UNKNOWN" }], now), 0);
