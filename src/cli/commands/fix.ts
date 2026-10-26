@@ -4007,6 +4007,21 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
 
     const censusCheck = await host.checkFixCensusSnapshotAsync(opts.worktreePath, await censusSnapshotForCheck(opts.worktreePath,
       censusSnapshotPath, currentMergeConflict !== undefined, deps.writeFixCensusSnapshot, deps.log), deps.log);
+    if (censusCheck?.refusal) {
+      const reason = censusCheck.refusal.text;
+      deps.log("fix.stood_down", { site: "rung.census_precheck", round_id: roundId, head_sha: priorHeadSha, reason });
+      deps.log("fix.done", { ...fixReceipt.ledgerFields(fixResult), round_id: roundId, head_sha: priorHeadSha,
+        ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
+        strike: attempt, round, session_id: fixResult.sessionId, subtype: "commit_refused",
+        worker_subtype: fixResult.subtype, cost_usd: fixResult.costUsd, num_turns: fixResult.numTurns,
+        elapsed_ms: spawnElapsedMs });
+      host.archiveWorkerTranscript({ root: opts.config.root, taskId: opts.taskId, runId: opts.runId,
+        rung: `fix-${attempt}-${fixRoundStartedAtMs}`, text: workerTranscript(fixResult), model: opts.mount.model,
+        verdict: "commit_refused", headSha: priorHeadSha, worker: fixResult }, deps.log);
+      deps.branchClaim?.release();
+      deps.say(`fix rung: census precheck REFUSED — no strike spent; saved work retained: ${reason}`);
+      return { outcome: "stood_down", review, strikes, retriggers, reason: "census precheck refused", standDownReason: reason };
+    }
     const workerHeadCreatedLocally = host.workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
     // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, here — before `readRoundCommits` decides
@@ -4020,10 +4035,6 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     let harnessCommitMarkerFiles: readonly string[] = [];
     let harnessCommittedSha: string | undefined;
     const harnessCommit = (report: string, options: Pick<Parameters<typeof host.harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit" | "fixOutcome"> = {}) => {
-      if (censusCheck?.refusal) {
-        harnessCommitRefusalReason = censusCheck.refusal.text;
-        return 0;
-      }
       return (deps.harnessCommitForShellLessWorker ?? host.harnessCommitForShellLessWorker)({
         harnessOwnsGit: fixHarnessOwnsGit,
         commitCount: opts.guardRoundHead && fixHarnessOwnsGit ? 0 : roundStartSha === undefined ? 0 : (deps.commitsAhead ?? host.commitsAhead)(opts.worktreePath, roundStartSha),
@@ -4233,7 +4244,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           `spending strike ${attempt}/${opts.strikeCap}: ${opts.prUrl}`,
       );
     } else {
-      if (fixAction.kind !== "scope-needed" && (!harnessCommitRefused || mergeCommitRefused || markerCommitRefused || censusCheck?.refusal !== undefined)) strikes = attempt;
+      if (fixAction.kind !== "scope-needed" && (!harnessCommitRefused || mergeCommitRefused || markerCommitRefused)) strikes = attempt;
       deps.log("fix.dispatch", {
         round_id: roundId,
         ...fixReceipt.joinFields(),
@@ -4583,15 +4594,6 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         amendProofs(proofDiscriminationNow);
       }
       logFixDone();
-      if (censusCheck?.refusal) {
-        pushRefusal = censusCheck.refusal;
-        currentCiFailures = [{ name: host.CENSUS_PUSH_CHECK, logTail: censusCheck.refusal.text }];
-        everRedCiCheckNames.add(host.CENSUS_PUSH_CHECK);
-        noReviewYet = true;
-        currentMergeConflict = undefined;
-        baseRefreshChecked = true;
-        continue;
-      }
       if (mergeCommitRefused || markerCommitRefused) continue;
       const refusedAtHead = fixRoundTally([...(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), ...roundRows], opts.taskId, priorHeadSha).refusals.length;
       // W1-T7748: a worker that reported FIXED yet left nothing to commit usually found the head already
