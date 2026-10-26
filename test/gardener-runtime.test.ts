@@ -8,6 +8,7 @@ import { createGardenerRuntimeWriter, GARDENER_RUNTIME_FILE, GARDENER_RUNTIME_MA
   readGardenerRuntime, type GardenerRuntimeEvent } from "../src/lib/gardener-runtime.js";
 import { buildGardenersRoute } from "../src/lib/gardeners-route.js";
 import type { Route } from "../src/lib/service.js";
+import { declaredBody, SPEC, violations, type Schema } from "#test/helpers/openapi-strict.js";
 
 const stamp = "2026-10-07T12:00:00.000Z";
 const clock = fixedClock(Date.parse(stamp));
@@ -193,4 +194,86 @@ test("a rank-deferred garden persists its actual refusal without claiming a memo
   assert.equal(response.status, 200);
   assert.equal(response.body.gardens[0].reason, "admission-rank");
   assert.equal(response.body.gardens[0].completions, 0);
+});
+
+test("W1-T10760: gardener runtime contract declares the emitted admission-rank reason", () => {
+  const supported: Record<NonNullable<GardenerRuntimeEvent["reason"]>, true> = {
+    "inputs-unchanged": true, "process-completed": true, "process-failed": true,
+    "signal-or-cancelled": true, "spawn-failed": true, "memory-budget-shortfall": true,
+    "admission-rank": true,
+  };
+  const properties = SPEC.components.schemas.GardenerRuntimeEntry!.properties as Record<string, Schema>;
+  assert.deepEqual(properties.reason!.enum, [...Object.keys(supported), null]);
+  for (const reason of [...Object.keys(supported), null]) {
+    assert.deepEqual(violations(reason, properties.reason!), []);
+  }
+  assert.ok(violations("unsupported-reason", properties.reason!).length > 0);
+});
+
+test("W1-T10760: idle admission deferral validates against the published gardener schema", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "rmd-gardener-rank-contract-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "boot-rank", clock,
+    gardens: inventory, log: () => {} });
+  writer.record(event("queued"));
+  writer.record({ ...event("idle"), reason: "admission-rank" });
+  await writer.flush();
+  const response = await invoke(buildGardenersRoute({ stateDir, repository: "acme/app", clock }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(violations(response.body, declaredBody("/v1/gardeners", "GET", 200)), []);
+  const garden = response.body.gardens[0];
+  assert.equal(garden.reason, "admission-rank");
+  assert.equal(garden.phase, "idle");
+  assert.equal(garden.executionMs, null);
+  assert.equal(garden.exit, null);
+  assert.equal(garden.attempts, 1);
+  assert.equal(garden.completions, 0);
+  assert.equal(garden.lastCompletedAt, null);
+  assert.equal(response.body.spend, null);
+  assert.equal(response.body.outcomeAssessment, "not_collected");
+});
+
+test("W1-T10760: gardener contract accepts current admission but refuses unsupported reasons", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "rmd-gardener-rank-controls-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "boot-rank", clock,
+    gardens: inventory, log: () => {} });
+  const route = buildGardenersRoute({ stateDir, repository: "acme/app", clock });
+  const success = declaredBody("/v1/gardeners", "GET", 200);
+  writer.record(event("queued"));
+  writer.record({ ...event("completed"), reason: "process-completed", exit: 0, executionMs: 40 });
+  await writer.flush();
+  const completed = await invoke(route);
+  assert.equal(completed.status, 200);
+  assert.deepEqual(violations(completed.body, success), []);
+  assert.equal(completed.body.gardens[0].executionMs, 40);
+  writer.record({ ...event("queued"), passId: "pass-2" });
+  writer.record({ ...event("idle"), passId: "pass-2", reason: "admission-rank" });
+  await writer.flush();
+  const deferred = await invoke(route);
+  assert.equal(deferred.status, 200);
+  assert.deepEqual(violations(deferred.body, success), []);
+  const garden = deferred.body.gardens[0];
+  assert.equal(garden.reason, "admission-rank");
+  assert.equal(garden.executionMs, null);
+  assert.equal(garden.exit, null);
+  assert.equal(garden.attempts, 2);
+  assert.equal(garden.completions, 1);
+  assert.equal(garden.lastCompletedAt, stamp);
+  assert.equal(garden.lastSuccessAt, stamp);
+  const unsupported = structuredClone(deferred.body);
+  unsupported.gardens[0].reason = "unsupported-reason";
+  assert.ok(violations(unsupported, success).some((problem) => problem.includes("reason") && problem.includes("enum")));
+  const snapshot = await readGardenerRuntime(stateDir);
+  for (const [mutate, reason] of [
+    [(value: any) => { value.gardens[0].reason = "unsupported-reason"; }, "unreadable"],
+    [(value: any) => { value.gardens[0].completions = value.gardens[0].attempts + 1; }, "unreadable"],
+    [(value: any) => { value.repository = "acme/other"; }, "repository_mismatch"],
+  ] as const) {
+    const invalid = structuredClone(snapshot); mutate(invalid);
+    await writeFile(join(stateDir, GARDENER_RUNTIME_FILE), JSON.stringify(invalid));
+    const refused = await invoke(route);
+    assert.deepEqual(refused, { status: 503, body: { error: "gardeners_unavailable", reason } });
+    assert.deepEqual(violations(refused.body, declaredBody("/v1/gardeners", "GET", 503)), []);
+  }
 });
