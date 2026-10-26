@@ -31779,11 +31779,11 @@ export async function sweepPostFixReverification(
   const pushEmptyCommitImpl = opts.pushEmptyCommit ?? gitPushEmptyCommit;
   const isMergedByNumber = opts.isMergedByNumber ?? ((n) => ghLiveStateByNumber(owner, repo, n) === "MERGED");
   const fixMergeShas = new Map<number, string | undefined>();
-  const fixInHead = opts.fixInHead ?? ((pr: OpenPrView, cls: FixClass): boolean | undefined => {
+  const fixInHead = opts.fixInHead ?? (async (pr: OpenPrView, cls: FixClass): Promise<boolean | undefined> => {
     if (!/^[a-f0-9]{40}$/i.test(pr.headSha ?? "")) return undefined;
     try {
       if (!fixMergeShas.has(cls.fixPrNumber)) {
-        const fix = ghJson(["pr", "view", String(cls.fixPrNumber), "--repo", `${owner}/${repo}`, "--json", "state,mergeCommit"]) as {
+        const fix = await ghJsonAsync(["pr", "view", String(cls.fixPrNumber), "--repo", `${owner}/${repo}`, "--json", "state,mergeCommit"]) as {
           state?: string; mergeCommit?: { oid?: string };
         };
         const sha = fix.state === "MERGED" ? fix.mergeCommit?.oid : undefined;
@@ -31791,7 +31791,7 @@ export async function sweepPostFixReverification(
       }
       const fixSha = fixMergeShas.get(cls.fixPrNumber);
       if (!fixSha) return undefined;
-      const comparison = ghJson(["api", `repos/${owner}/${repo}/compare/${fixSha}...${pr.headSha}?per_page=1`]) as {
+      const comparison = await ghJsonAsync(["api", `repos/${owner}/${repo}/compare/${fixSha}...${pr.headSha}?per_page=1`]) as {
         status?: string; base_commit?: { sha?: string }; merge_base_commit?: { sha?: string };
       };
       const mergeBase = comparison.merge_base_commit?.sha;
