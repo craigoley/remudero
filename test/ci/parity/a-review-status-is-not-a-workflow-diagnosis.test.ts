@@ -197,3 +197,39 @@ test("a census growth refusal retains its observations without assigning the rep
     assert.equal(searched.length, owned ? 2 : 0, "only concrete runner evidence enters each ownership search");
   });
 });
+
+test("mixed census findings retain the concrete runner owner through ledger pricing and the ladder", t => {
+  const f = fixture(t);
+  mkdirSync(join(f.repo.dir, "scripts"));
+  writeFileSync(join(f.repo.dir, "scripts/census-precheck.mjs"), 'export const refusal = "census-precheck: this branch grows";\n');
+  const message = "census snapshot reader crashed";
+  writeFileSync(join(f.repo.dir, "scripts/census-runner.mjs"), `throw new Error(${JSON.stringify(message)});\n`);
+  f.repo.git("add", "."); f.repo.git("commit", "-qm", "record distinct census reporter and failing runner");
+  f.repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const crash = spawnSync(process.execPath, [join(f.repo.dir, "scripts/census-runner.mjs")], { encoding: "utf8" });
+  assert.equal(crash.status, 1);
+  assert.ok(crash.stderr.includes(message));
+  const reasons = [
+    "census-precheck: this branch grows 1 census count(s) CI will refuse: fixture-copy: real branch finding",
+    `census-precheck: ${message}`,
+  ];
+  const records = reasons.flatMap((reason, index) => {
+    const run_id = `run-census-${index}`, head_sha = String(index).repeat(40), task_id = `W1-T${9000 + index}`;
+    return [
+      { step: "pr.opened", run_id, task_id, ts: new Date(NOW - 3000).toISOString(), pr_number: 13000 + index, pr_url: `https://github.com/acme/fixture/pull/${13000 + index}` },
+      { step: "fix.dispatch", run_id, task_id, ts: new Date(NOW - 2000).toISOString(), head_sha, round: 1, mode: "ci-log", elapsed_ms: 180000 },
+      { step: "fix.commit_refused", run_id, task_id, ts: new Date(NOW - 1000).toISOString(), head_sha, round: 1, reason },
+    ];
+  });
+  const retained = JSON.stringify(records);
+  const rounds = ciFrictionRoundsFromLedger(records), priced = priceCiFrictionCauses(rounds);
+  assert.equal(rounds.length, 2);
+  assert.equal(priced.length, 1, "the existing cost class is not renamed or split to fabricate a lower after-window");
+  assert.deepEqual(priced[0], { cause: { kind: "fix_refusal", name: "census-precheck" }, minutes: 6, rounds: 2, prs: 2 });
+  const result = ciFrictionLadder({ priced, rounds, tasks: [], receipts: new Set(), escalated: new Set(), ownerSearch: f.search(), nowMs: NOW });
+  assert.equal(result.next?.decision.kind, "draft");
+  assert.deepEqual(result.next?.decision.kind === "draft" ? result.next.decision.owner.files : [], ["scripts/census-runner.mjs"]);
+  assert.equal(result.next?.price.minutes, 6);
+  assert.equal(JSON.stringify(records), retained);
+  assert.deepEqual(locateCiFrictionOwner("fix_refusal:census-precheck", [reasons[1]!], f.search())?.files, ["scripts/census-runner.mjs"]);
+});
