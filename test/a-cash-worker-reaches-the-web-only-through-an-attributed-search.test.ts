@@ -20,8 +20,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
 import {
   CASH_WEB_SEARCH_KEY_ENV,
   CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS,
@@ -29,8 +29,8 @@ import {
   cashWebSearchEndpoint,
   cashWebSearchGrounding,
   performCashWebSearch,
-} from "../src/lib/cash-web-bridge.js";
-import { openWeightReservationUsd, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
+} from "#src/lib/cash-web-bridge.js";
+import { openWeightReservationUsd, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 
 const AT_ISO = "2026-09-16T10:00:00.000Z";
 const MODEL = "gpt-oss-120b";
