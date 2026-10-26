@@ -5758,6 +5758,8 @@ export function isReviewLaneDisposition(disposition: Disposition): boolean { // 
 export interface CiFailure {
   name: string;
   logTail: string;
+  /** Commit-status description observed in the rollup; separate from an Actions log or test result. */
+  statusDescription?: string;
   /** The check run's posted title, where the read carries it. A bundled check (W1-T3720) keeps its
    *  required NAME and titles itself by the gate(s) that refused — see {@link refusingGatesOf}. */
   title?: string;
