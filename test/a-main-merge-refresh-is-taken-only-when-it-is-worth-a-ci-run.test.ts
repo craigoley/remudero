@@ -494,7 +494,7 @@ test("a green summary does not erase active CI when a refresh settles", async ()
     const reads: string[] = [];
     const h = harness({ behindMainByPr: one(7333, 2), baseChangedFilesByPr: one(7333, base(["src/mine.ts"])),
       readBranchProtectionStrict: () => false,
-      liveCiRunForHead: async current => { reads.push(current.headSha); return true; },
+      refreshCiRunForHead: async current => { reads.push(current.headSha); return true; },
       refreshJudge: async question => { asked.push(question); return "independent"; } });
     if (light) assert.equal(await runLightPassReadyRefresh([ready], h.deps, POLICY), undefined);
     else await runSweep([ready], h.deps, POLICY);
@@ -512,7 +512,7 @@ test("the active-CI refresh guard preserves terminal-CI and judge-overlap decisi
     const ready = pr(7334);
     const asked: RefreshJudgeQuestion[] = [];
     const h = harness({ behindMainByPr: one(7334, 2), baseChangedFilesByPr: one(7334, base(["src/mine.ts"])),
-      readBranchProtectionStrict: () => false, liveCiRunForHead: () => active,
+      readBranchProtectionStrict: () => false, refreshCiRunForHead: () => active,
       refreshJudge: async question => { asked.push(question); return "overlap"; } });
     assert.equal(await runLightPassReadyRefresh([ready], h.deps, POLICY), 7334);
     assert.deepEqual(h.updated.map(x => x.prNumber), [7334]);
@@ -544,7 +544,7 @@ test("ready refresh uses the maintained current-head CI producer", async () => {
         reads.push(args); return { workflow_runs: [{ id: 1, path: ".github/workflows/ci.yml", status }] };
       });
       const h = harness({ behindMainByPr: one(7335, 2), baseChangedFilesByPr: one(7335, base(["src/mine.ts"])),
-        readBranchProtectionStrict: () => false, liveCiRunForHead: effects.liveCiRunForHead,
+        readBranchProtectionStrict: () => false, refreshCiRunForHead: effects.refreshCiRunForHead,
         refreshJudge: async question => { assert.equal(question.ciInFlight, true); return "independent"; } });
       assert.equal(await runLightPassReadyRefresh([ready], h.deps, POLICY), status === "completed" ? 7335 : undefined);
       assert.equal(h.updated.length, status === "completed" ? 1 : 0);
@@ -557,7 +557,7 @@ test("a throwing current-head CI read cannot press a ready refresh", async () =>
   const ready = pr(7336);
   const h = harness({ behindMainByPr: one(7336, 2), baseChangedFilesByPr: one(7336, base(["src/mine.ts"])),
     readBranchProtectionStrict: () => false,
-    liveCiRunForHead: async () => { throw new Error("current-head CI unavailable"); } });
+    refreshCiRunForHead: async () => { throw new Error("current-head CI unavailable"); } });
   assert.equal(await runLightPassReadyRefresh([ready], h.deps, POLICY), undefined);
   assert.deepEqual(h.updated, []);
   assert.equal(decided(h.rows)[0]!.ci_in_flight, null, "unread is not a fabricated no-CI decision");
@@ -587,7 +587,7 @@ test("the refresh CI reader distinguishes complete pages from unavailable eviden
         reads.push(args); return control.read(Number(args[1]!.match(/[?&]page=(\d+)/)?.[1] ?? 1));
       });
       const h = harness({ behindMainByPr: one(7337, 2), baseChangedFilesByPr: one(7337, base(["src/mine.ts"])),
-        readBranchProtectionStrict: () => false, liveCiRunForHead: effects.liveCiRunForHead,
+        readBranchProtectionStrict: () => false, refreshCiRunForHead: effects.refreshCiRunForHead,
         refreshJudge: async question => { assert.equal(question.ciInFlight, true); return "independent"; } });
       const result = await runLightPassReadyRefresh([ready], h.deps, POLICY);
       assert.equal(result, control.active === false ? 7337 : undefined, control.name);
@@ -604,7 +604,7 @@ test("unavailable refresh CI evidence recovers on the same head without resettin
   const ready = pr(7338);
   let active: boolean | undefined;
   const facts = { behindMainByPr: one(7338, 2), baseChangedFilesByPr: one(7338, base(["src/mine.ts"])),
-    readBranchProtectionStrict: () => false, liveCiRunForHead: () => active };
+    readBranchProtectionStrict: () => false, refreshCiRunForHead: () => active };
   const first = harness(facts);
   assert.equal(await runLightPassReadyRefresh([ready], first.deps, POLICY), undefined);
   assert.equal(decided(first.rows)[0]!.ci_in_flight, null);
