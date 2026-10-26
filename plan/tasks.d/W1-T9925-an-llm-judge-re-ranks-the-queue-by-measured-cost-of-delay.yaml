@@ -14,8 +14,8 @@
     - src/lib/queue-judge-gardener.ts
     - src/lib/garden-registry.ts
     - src/run-task.ts
-    - src/lib/config-gardener.ts
-    - test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts
+    - "src/lib/config-gardener.ts"
+    - "test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts"
   status: queued
   priority: 1  # operator-2026-10-16: priority has lost its meaning; protective P1s waited 15+ h behind 81 other plain P1s
   attempts: 0
@@ -214,7 +214,7 @@
        - W1-T9092 has no open dependency.
        The test fixture models this queue in miniature (design 8). A first live pass that ranks the chain low,
        with today's evidence, is a defect to report.
-    8. TESTS. A new file, test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts, with `test(`
+    8. TESTS. A new file, test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts, with `test(`
        titles verbatim as in the proofs.
        - Fixture: a temp plan root with shards; an injected ledger reader; an injected judge text function, with no
          spawn; and an injected clock.
@@ -225,21 +225,21 @@
          no file and opens no PR.
   acceptance:
     - claim: "the new test file passes"
-      proof: "unit test: test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts"
+      proof: "unit test: test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts"
     - claim: "an operator-pinned priority is never moved to a larger number; the judge's lowering becomes one escalation and the shard is unchanged"
-      proof: 'grep: test("W1-T9925: an operator-pinned priority is never lowered and a judged lowering escalates instead" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+      proof: 'grep: test("W1-T9925: an operator-pinned priority is never lowered and a judged lowering escalates instead" in test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
     - claim: "a pass over an empty queue calls no judge, writes no file and opens no PR"
-      proof: 'grep: test("W1-T9925: a pass over an empty queue is a no-op" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+      proof: 'grep: test("W1-T9925: a pass over an empty queue is a no-op" in test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
     - claim: "a re-rank writes the priority with a one-line queue-judge reason, a marker and a prediction row naming its evidence"
-      proof: 'grep: test("W1-T9925: a re-rank writes the priority with a one-line reason and the evidence it read" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+      proof: 'grep: test("W1-T9925: a re-rank writes the priority with a one-line reason and the evidence it read" in test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
     - claim: "the evidence pack carries dependents, incident and escalation links, stuck-PR citations, age, attempts and operator origin"
-      proof: 'grep: test("W1-T9925: the evidence pack names dependents, incidents, stuck-PR citations, age, attempts and operator origin" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+      proof: 'grep: test("W1-T9925: the evidence pack names dependents, incidents, stuck-PR citations, age, attempts and operator origin" in test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
     - claim: "a malformed judge answer, or one citing evidence missing from the pack, writes nothing and is asked again"
-      proof: 'grep: test("W1-T9925: a malformed or unsupported judge answer writes nothing and is asked again" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+      proof: 'grep: test("W1-T9925: a malformed or unsupported judge answer writes nothing and is asked again" in test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
     - claim: "a pass is due only once the queue has turned over its last ranked head, and a pass moves no more shards than its measured review cost and record allow"
-      proof: 'grep: test("W1-T9925: cadence follows measured churn and each diff is bounded by measured review cost" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+      proof: 'grep: test("W1-T9925: cadence follows measured churn and each diff is bounded by measured review cost" in test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
     - claim: "a scored hit credits and a scored miss debits the acting class and moves its allowance, and a task held by something other than its rank scores not_ranking"
-      proof: 'grep: test("W1-T9925: predictions are scored against outcomes and the record sets the allowance" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+      proof: 'grep: test("W1-T9925: predictions are scored against outcomes and the record sets the allowance" in test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
     - claim: "the gardener is registered"
       proof: 'grep: "queue-judge", in src/lib/garden-registry.ts'
     - claim: "the daemon's garden registry builds the queue judge's spec"
