@@ -355,18 +355,20 @@ test("W1-T9950: a queue that cannot be used degrades to unqueued polling and say
   assert.equal(d.outcome, "acquired");
   d.release();
   assert.match(String(rows(releaseLines, "test_slot.hold_history_failed")[0]?.error), /EISDIR/, releaseLines.join("\n"));
-  // (4) A ticket that cannot be removed (its queue dir turned read-only) is named, never silently kept.
-  if (process.getuid?.() !== 0) {
-    const stuck = slotDir(t, "stuck");
-    const blocker = acquireTestSlot("holder", { ...opts(stuck), clock: time.clock, pid: PID.holder, log: () => {}, say: () => {} });
-    const e = s.arrive(time.now - time.start, "E", { ...opts(stuck), pid: PID.w, pollMs: 1_000, waitBoundMs: 1_000 });
-    s.runUntil(time.now - time.start);
-    assert.equal(tickets(stuck).length, 1);
-    chmodSync(testSlotQueueDir(stuck), 0o555);
-    try { s.runUntil(time.now - time.start + 1_000); }
-    finally { chmodSync(testSlotQueueDir(stuck), 0o777); }
-    assert.equal(e.lease?.outcome, "wait_bound_exceeded");
-    assert.match(String(rows(e.lines, "test_slot.ticket_cleanup_failed")[0]?.error), /EACCES|EPERM/, e.lines.join("\n"));
-    blocker.release();
-  }
+  // (4) A ticket that cannot be removed (its path became a non-empty directory) is named, never silently kept.
+  const stuck = slotDir(t, "stuck");
+  const blocker = acquireTestSlot("holder", { ...opts(stuck), clock: time.clock, pid: PID.holder, log: () => {}, say: () => {} });
+  const e = s.arrive(time.now - time.start, "E", { ...opts(stuck), pid: PID.w, pollMs: 1_000 });
+  s.runUntil(time.now - time.start);
+  const [own] = tickets(stuck);
+  assert.ok(own);
+  unlinkSync(join(testSlotQueueDir(stuck), own));
+  mkdirSync(join(testSlotQueueDir(stuck), own, "occupant"), { recursive: true });
+  s.runUntil(time.now - time.start + 1_000);
+  assert.match(String(rows(e.lines, "test_slot.queue_unavailable")[0]?.error), /EISDIR|ENOTDIR|ENOTEMPTY|EEXIST/, e.lines.join("\n"));
+  assert.match(String(rows(e.lines, "test_slot.ticket_cleanup_failed")[0]?.error), /EISDIR|EPERM/, e.lines.join("\n"));
+  blocker.release();
+  s.runUntil(time.now - time.start + 1_000);
+  assert.equal(e.lease?.outcome, "acquired", "a waiter whose queue failed still takes the slot, unqueued");
+  e.lease!.release();
 });
