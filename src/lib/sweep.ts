@@ -2209,7 +2209,6 @@ export const SWEEP_EFFECT_SURFACE = [
   "readCiGateRollup",
   "readCiGateRequired", // W1-T5979
   "liveCiRunForHead",
-  "refreshCiRunForHead",
   "reaggregateCiGate",
   "readMainTip",
   "readMainRepair",
@@ -2376,7 +2375,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readCiGateRollup"
   | "readCiGateRequired"
   | "liveCiRunForHead"
-  | "refreshCiRunForHead"
   | "reaggregateCiGate"
   | "readMainTip"
   | "readMainRepair"
@@ -3263,35 +3261,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       } catch (e) {
         log("sweep.live_ci_run.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
         return false;
-      }
-    },
-    // Complete evidence for refreshes; the legacy repair guard above retains its positive-only behavior.
-    refreshCiRunForHead: async (pr) => {
-      try {
-        // A READ, so it rides readJsonImpl (the read seam), never ghRunImpl (the effect seam).
-        const seenRunIds = new Set<number>();
-        for (let page = 1; ; page++) {
-          const body = (await readJsonImpl(["api", `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=50` +
-            (page === 1 ? "" : `&page=${page}`)])) as { workflow_runs?: Array<{ id?: number; path?: string; status?: string }> } | undefined;
-          if (!Array.isArray(body?.workflow_runs)) throw new Error("CI workflow run listing unavailable");
-          let unread = false;
-          for (const run of body.workflow_runs) {
-            const id = run.id;
-            if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0 || seenRunIds.has(id)) {
-              throw new Error("CI workflow run identity unavailable or repeated across pages");
-            }
-            seenRunIds.add(id);
-            if (typeof run.path !== "string" || run.path.length === 0) { unread = true; continue; }
-            if (run.path !== ".github/workflows/ci.yml") continue;
-            if (typeof run.status !== "string" || run.status.length === 0) { unread = true; continue; }
-            if (run.status !== "completed") return true;
-          }
-          if (unread) throw new Error("CI workflow run identity or status unavailable");
-          if (body.workflow_runs.length < 50) return false;
-        }
-      } catch (e) {
-        log("sweep.live_ci_run.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
-        return undefined;
       }
     },
 
@@ -12210,7 +12179,7 @@ export interface RefreshValueGate {
 }
 
 export async function buildRefreshValueGate(
-  deps: Pick<SweepDeps, "runId" | "ledgerPath" | "readBranchProtectionStrict" | "refreshJudge" | "baseChangedFilesByPr" | "refreshCiRunForHead" | "log">,
+  deps: Pick<SweepDeps, "runId" | "ledgerPath" | "readBranchProtectionStrict" | "refreshJudge" | "baseChangedFilesByPr" | "log">,
   openPrs: readonly OpenPrView[],
   ledgerLines: readonly Record<string, unknown>[],
   nowMs: number,
@@ -12231,15 +12200,15 @@ export async function buildRefreshValueGate(
   }
   const memo = judgedVerdicts(ledgerLines);
   const rowKey = (l: Record<string, unknown>): string =>
-    JSON.stringify([l.pr_number, l.head_sha, l.path, l.decision, l.judge ?? null, l.ci_in_flight ?? null]);
+    JSON.stringify([l.pr_number, l.head_sha, l.path, l.decision, l.judge ?? null]);
   const written = new Set(ledgerLines.filter((l) => l.step === REFRESH_DECIDED_STEP).map(rowKey));
   const queueDepth = openPrs.filter((pr) => pr.checksState === "pending").length;
   const benefitWeight = observedRefreshBenefitWeight(ledgerLines);
   const ciMinutes = observedCiMinutes(ledgerLines);
-  const valueOf =(c: ArmedStalledPr, view: OpenPrView, path: RefreshPath, judge?: RefreshJudgeVerdict, liveCiInFlight = false) => {
+  const valueOf =(c: ArmedStalledPr, view: OpenPrView, path: RefreshPath, judge?: RefreshJudgeVerdict) => {
     const facts = refreshOverlapOf(c, view, deps.baseChangedFilesByPr?.get(view.prNumber));
     const repairNeeded = facts.repairNeeded || path === "base-red" || path === "plan-repair";
-    const ciInFlight = view.checksState === "pending" || liveCiInFlight;
+    const ciInFlight = view.checksState === "pending";
     const value = decideRefresh({ path, overlap: facts.overlap, overlapFiles: facts.files, repairNeeded, strict, ciInFlight,
       judge, queueDepth, benefitWeight, ciMinutes });
     return { facts, ciInFlight, value };
@@ -12263,27 +12232,7 @@ export async function buildRefreshValueGate(
       const key = `${view.prNumber}@${view.headSha}`;
       let judge: RefreshJudgeVerdict | undefined = memo.get(key);
       let judgeError: string | undefined;
-      // A green/red summary can coexist with a queued or running coverage leg at this exact head.
-      let liveCiInFlight: boolean | undefined = view.checksState === "pending";
-      if (!liveCiInFlight && deps.refreshCiRunForHead) {
-        try { liveCiInFlight = await deps.refreshCiRunForHead(view); }
-        catch (error) {
-          liveCiInFlight = undefined;
-          deps.log?.("sweep.live_ci_run.error", { pr_number: view.prNumber, error: String((error as Error)?.message ?? error) });
-        }
-        if (typeof liveCiInFlight !== "boolean") {
-          const { facts, value } = valueOf(c, view, path);
-          const row = refreshDecidedRow({ runId: deps.runId, taskId: c.taskId, prNumber: view.prNumber, headSha: view.headSha, path,
-            value: { ...value, decision: "skip", reason: "current-head CI activity unavailable — no refresh this pass", predictedBenefit: 0 },
-            overlapFiles: facts.files, strict, ciInFlight: undefined, requestId, forcedBy, updateReason: c.updateReason, nowMs });
-          if (requestId !== undefined || !written.has(rowKey(row))) {
-            written.add(rowKey(row));
-            appendLine(deps.ledgerPath, row as Record<string, unknown> & { run_id: string; task_id: string; step: string });
-          }
-          return false;
-        }
-      }
-      let decided = valueOf(c, view, path, judge, liveCiInFlight);
+      let decided = valueOf(c, view, path, judge);
       if (decided.value.decision === "ask-judge") {
         const base = deps.baseChangedFilesByPr?.get(view.prNumber);
         const asked = await askRefreshJudge(deps.refreshJudge, {
@@ -12293,7 +12242,7 @@ export async function buildRefreshValueGate(
         judge = asked.verdict;
         judgeError = asked.error;
         if (asked.verdict !== "judge-unavailable") memo.set(key, asked.verdict);
-        decided = valueOf(c, view, path, judge, liveCiInFlight);
+        decided = valueOf(c, view, path, judge);
       }
       const row = refreshDecidedRow({ runId: deps.runId, taskId: c.taskId, prNumber: view.prNumber, headSha: view.headSha, path,
         value: decided.value, overlapFiles: decided.facts.files, strict, ciInFlight: decided.ciInFlight, judge, judgeError,
@@ -14030,8 +13979,6 @@ export interface SweepDeps {
   /** W1-T4586: whether another CI run for this PR's head is still queued or in progress. Omitted, the
    *  sweep never waits on one (the behaviour before this field existed). */
   liveCiRunForHead?: (pr: OpenPrView) => boolean | Promise<boolean>;
-  /** Complete current-head CI activity for refreshes; undefined is unavailable, never observed inactivity. */
-  refreshCiRunForHead?: (pr: OpenPrView) => boolean | undefined | Promise<boolean | undefined>;
   /** W1-T1275 — re-drive `ci-gate`'s OWN job through the same per-job Actions route
    *  {@link requeueCheck} uses, when {@link staleCiGateTransition} names a sibling that reached a
    *  terminal success LATER than the gate's own verdict. AT MOST ONCE per (head, transition). */
