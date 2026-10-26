@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { preserveRetireFixtureArgs } from "#test/helpers/preserve-retire-fixture.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 const HELPER = join(REPO_ROOT, "deploy/mac/preserve-retire.py");
 const HOUR = 3600;
@@ -252,6 +253,6 @@ print(json.dumps({"elapsed": elapsed, "found": [[os.path.relpath(r.path, home), 
     const out = JSON.parse(r.stdout) as { elapsed: number; found: [string, string][] };
     console.log(`# discovery over the synthetic home took ${out.elapsed.toFixed(2)} s`);
     assert.deepEqual(out.found, [["Developer/p3/d4/managed", "managed-remote"]]);
-    assert.ok(out.elapsed < 30, `discovery took ${out.elapsed} s`);
+    assertWallClockBound(out.elapsed, 30, `discovery took ${out.elapsed} s`);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
