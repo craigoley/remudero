@@ -209,7 +209,9 @@ test("W1-T9618: the default remote read sees a landed round in a real remote", a
     assert.equal(run.rows.some((r) => r.step === "fix.strike_refunded"), false);
     assert.equal(run.ciWaits, 1);
     // A test double that never contacted a remote is recorded as unverified, never judged against one.
-    const stub = await round({ worktree: lane.dir, dispatchedHead: prior, committed, push: () => {} });
+    const stub = await round({ worktree: lane.dir, dispatchedHead: committed, committed, push: () => {} });
+    assert.equal(stub.done.length, 1, "fresh evidence lets the stubbed round finish");
+    assert.equal(stub.rows.find((r) => r.step === "fix.dispatch")?.head_sha, committed);
     assert.equal(stub.done[0]!.push_outcome, "unverified");
     assert.equal(stub.done[0]!.fix_outcome, "FIXED");
   } finally {
