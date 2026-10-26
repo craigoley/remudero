@@ -1,0 +1,36 @@
+- id: W1-T10657
+  title: Persist verified product facts in the canonical durable record
+  repo: remudero
+  depends_on:
+    - W1-T10612
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: operator-request#wreckterra-console-product-2026-10-25
+  plan_refs:
+    - W1-T10612
+    - W1-T10613
+    - W1-T10617
+  files:
+    - src/lib/product-intent.ts
+    - src/lib/product-intent-store.ts
+    - test/infra/product-intents.test.ts
+  status: queued
+  attempts: 0
+  rationale: The merged private product API at f3a1d7e2ac952d4336d7bb5815c017d0aff9ac5a persists only brief writes. ProductIntentStore exposes write/read/list/receipt; write preserves repository and stageEvidence without a capability for trusted mechanisms to update them. Repository adoption and research therefore need this shared persistence seam before their provider actions can become canonical product facts. A fresh subject sweep compared all 13 open PR head trees against main at 30a2a3279c0119f140e3b59cc8671061bee707c1, with 36 main matches as a positive control, and found no competing canonical product transition. Fresh remote refs showed no claimed or pushed adoption/research implementation. This is a bounded prerequisite for the authorized lifecycle, not a second product datastore or a second repository workflow.
+  design: Extend the existing ProductIntentStore so trusted product mechanisms can persist bounded repository identity and stage evidence in the same owner record, with a durable operation identity and receipt. Factor the existing brief save through the same lock, optimistic revision, record digest and atomic commit mechanism rather than maintaining two implementations of durability. Keep productWriteSchema brief-only and keep executionAuthority none; do not expose a generic HTTP patch, accept browser assertions of verified facts, or grant runner/provider authority from metadata. Validate actor ownership and expected product/objective revision before changing a record, and reconcile an identical operation after a lost response without another revision or duplicated stage evidence. Reject conflicting operation digests and stale objectives before writing. Preserve the existing store quotas, private namespaces, modes, no-follow/hardlink protections, bounded history, unknown/corrupt/recovery outcomes and default directory-fsync requalification on every receipt path. Test through real durable files and the default filesystem boundary, with a fresh store after restart, both while sync continues to fail and after it recovers. Prove that the current public brief write and its assembled callers retain their behavior and cannot forge the newly mutable facts. This task performs no GitHub or Vercel request, dispatch, deployment or payment. Repository adoption and research reuse this seam independently after it merges; research must not require repository creation.
+  acceptance:
+    - claim: trusted product facts survive restart in the canonical record
+      proof: "unit test: W1-T10657: trusted product facts survive restart in the canonical record"
+    - claim: browser brief writes cannot forge verified product facts
+      proof: "unit test: W1-T10657: browser brief writes cannot forge verified product facts"
+    - claim: product fact transitions refuse another actor and stale objective revisions
+      proof: "unit test: W1-T10657: product fact transitions refuse another actor and stale objective revisions"
+    - claim: trusted product transitions replay one durable revision after uncertain commit
+      proof: "unit test: W1-T10657: trusted product transitions replay one durable revision after uncertain commit"
+  falsifier: Remove the actor, revision, idempotency or directory-sync guard independently and rerun the corresponding physical behavioral test. The removed guard must make the proof fail, and restoration must return it to green. Exercise the production default filesystem and each failure arm; do not weaken the public request schema, quotas, permission assertions, hosted gates or authority separation.
