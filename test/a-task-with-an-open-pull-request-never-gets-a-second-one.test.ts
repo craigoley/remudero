@@ -142,6 +142,8 @@ async function drive(reader: OpenPrJsonReader): Promise<{ rows: Array<{ step: st
       runReviewFn: async () => { throw new Error("review is unreachable in this fixture"); },
       say: () => {},
       spawn: committingSpawn,
+      // Direct body callers declare the injected worker, as the normal runTask entry does.
+      spawnInjected: true,
       task: plan.byId.get(TASK_ID)!,
       taskId: TASK_ID,
       workerStateSensor: { observer: () => {}, startPolling: () => () => {}, setRunawayBound: () => {} },
