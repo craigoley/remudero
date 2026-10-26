@@ -84,7 +84,8 @@ function reasons(names, reason) {
 export const CLI_ONLY = {
   "improvement-action":
     "daemon-owned saved-action CLI: rmd improvement-action <operationId> --state-dir <dir> " +
-    "requires the daemon's admitted workflow; HTTP draft/file routes persist requests, " +
+    "executes a persisted request only after daemon ownership, repository identity and ordinary " +
+    "admission checks; HTTP draft/file routes persist requests, " +
     "they do not execute the handoff and are not action-equivalent console routes",
   "review-replay": "Refreshes a checked-in sample in the caller's local git checkout from its complete retained ledger and seeded reviewer-health projection; the remote console cannot write that checkout.",
   ...reasons(
