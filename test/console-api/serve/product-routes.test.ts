@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { buildProductRoutes } from "#src/lib/product-routes.js";
+import { realProductResearchProvider } from "#src/lib/product-research.js";
+import type { Config } from "#src/lib/config.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs } from "#src/lib/worker.js";
 import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
 import { createService, type IdentityProvider } from "#src/lib/service.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
@@ -185,4 +188,92 @@ test("W1-T10617: the served product research operation matches the authenticated
     assert.deepEqual([result.status, reply.run.outcome, reply.run.provider], [200, "completed", "fixture-research"]);
     assert.equal(inputs.length, 1);
   } finally { await configured.close(); }
+});
+
+test("W1-T10617: the assembled HTTP research route invokes the production worker adapter across a process boundary", async (t) => {
+  const fixture = ownedFixtureDir(t, "research-worker-process").dir;
+  const worker = join(fixture, "research-worker.cjs");
+  const output = join(fixture, "worker-output.json");
+  const settingsFile = join(fixture, "settings.json");
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
+  writeFileSync(worker, `
+const { writeFileSync } = require('node:fs');
+const input = JSON.parse(process.argv[2]);
+if (!input.prompt.includes('Objective revision: 1') || input.tools.join(',') !== 'WebSearch') process.exit(2);
+writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmish needs zone boundaries.', questions: [{ text: 'Which park zones are in scope?' }] }));
+`);
+  let calls = 0;
+  const provider = realProductResearchProvider({
+    mount: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1000, provider: "claude" },
+    config: { root: fixture } as Config, cwd: fixture, settingsFile,
+    spawn: (async (args) => {
+      calls++;
+      assert.equal(args.mountProvider, "claude");
+      assert.equal(args.maxBudgetUsd, 1);
+      assert.ok(args.signal, "the route's deadline reaches the worker transport");
+      const queryFn = ((params: { options: { env: Record<string, string>; spawnClaudeCodeProcess?: (opts: unknown) => unknown } }) => {
+        // Exercise spawnWorker's real contained child hook; only the SDK stream is a fixture.
+        params.options.spawnClaudeCodeProcess?.({ command: process.execPath,
+          args: [worker, JSON.stringify({ prompt: args.prompt, tools: args.tools }), output],
+          env: params.options.env, signal: new AbortController().signal });
+        return (async function* () {
+          const deadline = Date.now() + 5_000;
+          while (!existsSync(output) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+          assert.ok(existsSync(output), "the contained worker child produced its fixture output");
+          yield { type: "result", subtype: "success", is_error: false, result: readFileSync(output, "utf8"),
+            session_id: "research-process-fixture", total_cost_usd: 0.02, num_turns: 1 };
+        })();
+      }) as unknown as NonNullable<SpawnWorkerArgs["queryFn"]>;
+      return spawnWorker({ ...args, queryFn,
+        claudeExecutable: { cache: createClaudeExecutableCache(), deps: { env: { [CLAUDE_BIN_ENV_OVERRIDE]: "/fake/claude" },
+          home: fixture, exists: () => true, canExecute: () => true, locations: [] } },
+        keychain: { platform: "linux", readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "stub", expiresAt: 4102444800000 } }) },
+      });
+    }) as typeof import("#src/lib/worker.js").spawnWorker,
+  });
+  const app = await server(t, { mount: true, deps: { productResearchProvider: provider, productResearchBudgetUsd: 1 } });
+  try {
+    const saved = await request(app.url, "/v1/products", "alice", command);
+    assert.ok(saved.body.receipt);
+    const body = { version: "product-research-v1", requestId: "research-process-0001",
+      productId: saved.body.receipt.productId, expectedObjectiveRevision: 1 };
+    const post = async (session?: "alice") => fetch(`${app.url}/v1/products/research`, {
+      method: "POST", headers: { authorization: "Bearer fixture-write", "content-type": "application/json", ...(session ? { "x-test-session": session } : { "x-rmd-actor": "clerk:alice" }) },
+      body: JSON.stringify(body),
+    });
+    const refused = await post();
+    assert.equal(refused.status, 403);
+    assert.equal(calls, 0, "an unverified actor cannot start the transport");
+    const response = await post("alice");
+    const reply = await response.json() as { run: { id: string; outcome: string; provider: string; spendUsd: number }; replayed: boolean };
+    assert.equal(response.status, 200);
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/research", "POST", 200)), []);
+    assert.deepEqual([reply.run.outcome, reply.run.provider, reply.run.spendUsd], ["completed", "claude:haiku", 0.02]);
+    assert.equal(calls, 1);
+    const retry = await post("alice");
+    assert.equal((await retry.json() as { replayed: boolean }).replayed, true);
+    assert.equal(calls, 1, "a durable receipt does not start another worker");
+  } finally { await app.close(); }
+});
+
+test("research with no admitted per-call budget is explicitly unavailable without a worker", async (t) => {
+  const provider = realProductResearchProvider({
+    mount: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1000, provider: "claude" },
+    config: { root: "/unused" } as Config, cwd: "/unused", settingsFile: "/unused/settings.json",
+    spawn: (async () => assert.fail("no budget must not start a worker")) as typeof import("#src/lib/worker.js").spawnWorker,
+  });
+  const app = await server(t, { mount: true, deps: { productResearchProvider: provider, productResearchBudgetUsd: 0 } });
+  try {
+    const saved = await request(app.url, "/v1/products", "alice", command);
+    assert.ok(saved.body.receipt);
+    const response = await fetch(`${app.url}/v1/products/research`, { method: "POST",
+      headers: { "x-test-session": "alice", "content-type": "application/json" },
+      body: JSON.stringify({ version: "product-research-v1", requestId: "research-zero-budget-0001",
+        productId: saved.body.receipt.productId, expectedObjectiveRevision: 1 }) });
+    const reply = await response.json() as { run: { outcome: string; summary?: string } };
+    assert.equal(response.status, 200);
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/research", "POST", 200)), []);
+    assert.equal(reply.run.outcome, "unavailable");
+    assert.equal(reply.run.summary, undefined);
+  } finally { await app.close(); }
 });
