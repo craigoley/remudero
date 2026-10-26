@@ -8,13 +8,12 @@
  * `GIT_*` environment, repeatedly, and asserts every run reaches the same outcome.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { buildBaseProofDir } from "#src/lib/check-proof.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const HERMETIC = {
   GIT_CONFIG_GLOBAL: "/dev/null",
@@ -29,10 +28,9 @@ test("W1-T10407: check:test:test/base-blob-read-failure.test.ts:flaky is prevent
   const saved: Record<string, string | undefined> = {};
   for (const k of Object.keys(HERMETIC)) saved[k] = process.env[k];
   Object.assign(process.env, HERMETIC);
-  const dir = mkdtempSync(join(tmpdir(), "t10407-repo-"));
+  const repo = gitRepo({ seedCommit: false, kind: "t10407-repo" });
+  const { dir, git } = repo;
   try {
-    const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: process.env });
-    git("init", "--quiet", "-b", "main");
     mkdirSync(join(dir, "src"), { recursive: true });
     writeFileSync(join(dir, "src/app.ts"), "export const unrelated = 1;\n");
     git("add", "-A");
@@ -59,6 +57,6 @@ test("W1-T10407: check:test:test/base-blob-read-failure.test.ts:flaky is prevent
       "every run reads the base identically: absence is swallowed, never a read failure");
   } finally {
     for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-    rmSync(dir, { recursive: true, force: true });
+    repo.cleanup();
   }
 });
