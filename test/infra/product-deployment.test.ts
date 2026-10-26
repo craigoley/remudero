@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, fstatSync, fsyncSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import {
   ProductDeploymentService, vercelConfigFromEnv, vercelDeploymentProvider, VercelDenied,
   type ProductDeploymentProvider, type VercelConfig, type VercelProject, type VercelRead,
 } from "#src/lib/product-deployment.js";
+import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
@@ -238,6 +240,30 @@ test("product deployment fails closed on a corrupt, shared or unwritable journal
   // The root must be a real absolute directory.
   mkdirSync(join(f.root, "elsewhere"), { recursive: true });
   assert.deepEqual(await new ProductDeploymentService({ root: "relative/path", provider, store: f.intents }).execute(actor, f.command()), { ok: false, code: "unavailable" });
+});
+
+test("product deployment reports a held lock and a journal write that fails on either side of the rename", async (t) => {
+  const f = fixture(t), provider = new FakeVercel();
+  assert.ok((await f.service(provider).execute(actor, f.command())).ok);
+  const ownerKey = createHash("sha256").update(actor).digest("hex");
+  const held = acquireInflightLock(join(f.dir, "locks"), ownerKey, { run_id: "held-by-another-request" });
+  try { assert.deepEqual(await f.service(provider).execute(actor, f.command({ requestId: "deploy-request-000002" })), { ok: false, code: "busy" }); }
+  finally { held.release(); }
+  // A stage that cannot be flushed is discarded and nothing is renamed over the journal.
+  const staged = fixture(t);
+  const flushFails = staged.service(new FakeVercel(), { sync: (fd: number) => {
+    if (fstatSync(fd).isFile()) { for (const name of readdirSync(staged.dir)) if (name.endsWith(".pending")) unlinkSync(join(staged.dir, name)); throw new Error("flush failed"); }
+    fsyncSync(fd);
+  } });
+  assert.deepEqual(await flushFails.execute(actor, staged.command()), { ok: false, code: "unavailable" });
+  assert.deepEqual(staged.journalFiles(), [], "no journal exists after a failed stage");
+  // Once the rename happened, a failed directory flush is unknowable, never reported as a clean failure.
+  const renamed = fixture(t);
+  const dirFails = renamed.service(new FakeVercel(), { sync: (fd: number) => {
+    if (fstatSync(fd).isDirectory() && renamed.journalFiles().length > 0) throw new Error("directory flush failed");
+    fsyncSync(fd);
+  } });
+  assert.deepEqual(await dirFails.execute(actor, renamed.command()), { ok: false, code: "outcome_unknown" });
 });
 
 test("product deployment config accepts only a credentialed https or loopback origin", () => {
