@@ -168,7 +168,7 @@ function correspondenceItem(item: InboxThreadItem, pages: InboxPages, root: stri
   return { item: { ...item, causalScope: { instance: scope.instance, repository: scope.repository },
     ...(informational ? { informational: true } : {}),
     ...(classified[0]!.reframeHistory ? { reframeHistory: classified[0]!.reframeHistory } : {}),
-    ...(classification[0]!.retirement?.state === "restored_for_review" ? { requiresReview: true } : {}) } };
+    ...(classification[0]!.requiresReview || classification[0]!.retirement?.state === "restored_for_review" ? { requiresReview: true } : {}) } };
 }
 
 /** The proposal's item off the persisted `needsYou` pages: its lane is the thread's state. */

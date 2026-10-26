@@ -21,6 +21,12 @@ import { navBadgeView } from "#src/lib/nav-badge-view.js";
 import { inboxThreadListSources, peekSlowLaneClassification } from "#src/lib/panel-graph.js";
 import { listThreadViews } from "#src/lib/inbox-responder.js";
 import { backfillRecommendations, readRecommendationStore, recommendationFor, recommendationStorePath } from "#src/lib/inbox-recommendation.js";
+import { buildInboxThreadRoute } from "#src/lib/panel-graph.js";
+import { createInboxThreadView, INBOX_THREAD_VIEW_NAME, inboxThreadViewKey } from "#src/lib/inbox-thread-view.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
+import { createDemandBook } from "#src/lib/view-demand.js";
+import { inboxGardenerPath } from "#src/lib/inbox-retirement.js";
 
 type Ctx = { after(fn: () => void | Promise<void>): void };
 function world(t: Ctx, count = 80) {
@@ -66,7 +72,7 @@ async function served(t: Ctx, w: ReturnType<typeof world>, initial: InboxRefresh
   const inbox = options.boundInbox === false ? originalInbox : boundConsoleReadRoute(originalInbox, { fleetControlRoot: w.root } as ServeDeps, 1000, { setTimer: () => undefined, clock: fixedClock(w.at) });
   const census = buildInboxAttentionCensusRoute(deps);
   const native = buildReadModelViewRoutes({ legacy: [inboxLegacyView(deps, fixedClock(w.at))], readModel: handle, readModelViews: [INBOX_VIEW_NAME], clock: fixedClock(w.at) });
-  const threads = options.withWrites ? [buildInboxThreadsRoute(deps, undefined, { warm: false })] : [];
+  const threads = options.withWrites ? [buildInboxThreadsRoute(deps, undefined, { warm: false }), buildInboxThreadRoute(deps)] : [];
   const writes = options.withWrites ? [buildKeepProposalRoute(w.deps), buildInboxThreadReplyRoute(w.deps)] : [];
   const routes = [inbox, census, ...native, ...threads, ...writes, ...mountInstanceInboxRoutes({ instance: "core", repository: "owner/core", stateDir: join(w.root, "state"), routes: [inbox, census, ...threads, ...writes] })];
   const server = createService({ tokens: { read: "read", write: "write" }, routes });
@@ -165,6 +171,38 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
     "a stored recommendation does not grant authority after the question is answered");
   assert.equal((await recommend()).written, 0);
   assert.equal(recommendationCalls.length, 1);
+  const retainedMessages = readFileSync(store, "utf8");
+  writeFileSync(inboxGardenerPath(join(w.root, "state")), "{ unreadable lifecycle");
+  const unknown = await w.refresh(); s.put(unknown);
+  const unknownClassification = readPersistedInbox(join(w.root, "state"))!.classifications.find(c => c.proposalId === ageId)!;
+  assert.equal(unknownClassification.requiresReview, true, "the real classifier retains unknown lifecycle for review");
+  assert.equal(unknownClassification.displayOwner, "operator");
+  const unknownNeeds = await s.get("/v1/views/inbox?section=needsYou"), unknownBadge = await badge();
+  assert.ok(!("error" in unknownBadge));
+  assert.ok(ids(unknownNeeds.body.data.items).includes(ageId));
+  assert.equal(unknownBadge.data.inbox.needsYou, unknownNeeds.body.data.items.length);
+  const db = openProjectorReadModel(join(w.root, "read-model-state"), "core");
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL,key TEXT NOT NULL,version INTEGER NOT NULL,
+      generation INTEGER NOT NULL,etag TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(view,key)) WITHOUT ROWID;`);
+    for (const body of unknown.bodies) db.prepare("INSERT INTO view_body VALUES('inbox',?,1,1,?,?)")
+      .run(body.key, JSON.stringify(body), JSON.stringify(body));
+    const demand = createDemandBook({ clock: fixedClock(w.at) }), key = inboxThreadViewKey(threadId);
+    demand.want(INBOX_THREAD_VIEW_NAME, key);
+    const view = createInboxThreadView({ inboxRoot: w.root, demand, clock: fixedClock(w.at) });
+    const cached = view.materialize({ now: w.at, instances: [{ db }] })[0]!;
+    const legacyDetail = await s.get(`/v1/inbox/thread?id=${encodeURIComponent(threadId)}`);
+    assert.equal(legacyDetail.status, 200); assert.equal(cached.data.found, true, cached.data.reason);
+    assert.equal(legacyDetail.body.attention, "decision", "unknown lifecycle retains the existing human review obligation");
+    assert.equal(cached.data.thread?.attention, legacyDetail.body.attention, "cached detail must retain the classifier's review marker");
+    assert.deepEqual(cached.data.thread?.correspondence, legacyDetail.body.correspondence);
+    assert.deepEqual(cached.data.thread?.messages.slice(1), legacyDetail.body.messages.slice(1));
+    assert.deepEqual(cached.data.thread?.messages[0]?.actions, legacyDetail.body.messages[0].actions);
+    assert.equal(cached.data.thread?.messages[0]?.text, legacyDetail.body.messages[0].text);
+    assert.equal(cached.data.thread?.correspondence?.state, "unknown");
+    assert.equal(cached.data.thread?.correspondence?.pendingWork, null, "unknown correspondence cannot claim zero pending work");
+  } finally { db.close(); await flushReadModelTransactions(); }
+  assert.equal(readFileSync(store, "utf8"), retainedMessages, "review classification preserves every history byte");
   assert.equal(s.reads(),0,"neither lanes nor history can reclassify mutable inputs on the request");
 });
 

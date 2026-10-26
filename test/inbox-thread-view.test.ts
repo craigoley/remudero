@@ -309,6 +309,27 @@ test("W1-T10431: reclassified age history remains readable without action author
     const replies:Array<{status:number;body:unknown}>=[];
     await actions.reply({threadId,text:"Use the existing policy.",intentId:"w10431-question-answer"},{origin:"test",operator:"fixture"},(status,body)=>{replies.push({status,body});});
     assert.equal(replies[0]?.status,200,"a verified current question retains the existing reply flow");
+    const deliveredMessages = readFileSync(store, "utf8"), deliveredLedger = readFileSync(f.deps.ledgerPath, "utf8");
+    const replay = async (text = "Use the existing policy.", intentId = "w10431-question-answer") => {
+      const responses: Array<{ status: number; body: Record<string, unknown> }> = [];
+      await actions.reply({ threadId, text, intentId }, { origin: "test", operator: "fixture" },
+        (status, body) => responses.push({ status, body: body as Record<string, unknown> }));
+      assert.equal(responses.length, 1);
+      return responses[0]!;
+    };
+    const duplicate = await replay();
+    assert.equal(duplicate.status, 200, "answering the question cannot turn a stable-intent retry into informational_only");
+    assert.equal(duplicate.body.duplicate, true);
+    assert.equal(duplicate.body.replyId, (replies[0]!.body as { replyId: string }).replyId);
+    const answered = await f.refresh(); f.seed(answered.bodies, true);
+    assert.equal(f.build(key).data.thread?.attention, "awaiting_daemon", "cached history retains the delivered input");
+    assert.equal((await replay()).status, 200, "the same intent also survives reclassification to fleet information");
+    const conflict = await replay("A different payload.");
+    assert.equal(conflict.status, 409); assert.equal(conflict.body.error, "reply_intent_conflict");
+    const newIntent = await replay("Use the existing policy.", "w10431-new-informational-reply");
+    assert.equal(newIntent.status, 409); assert.equal(newIntent.body.error, "informational_only");
+    assert.equal(readFileSync(store, "utf8"), deliveredMessages, "retry and conflict cannot append correspondence");
+    assert.equal(readFileSync(f.deps.ledgerPath, "utf8"), deliveredLedger, "retry cannot duplicate its audit receipt");
     let decisions=0,work=0;
     const readItems=()=>registryThreadItems(join(f.root,"state"),f.deps.ledgerPath,{repository:"owner/core"});
     assert.equal(readItems().find(item=>item.proposalId===id)?.informational,true,"the default responder retains an actual reply without execution permission");

@@ -41,6 +41,11 @@ import { captureInboxOwner, classifiedInboxOwner } from "#src/lib/inbox-owner.js
 import { inboxGardenerPath, writeInboxGardenerStore, type InboxRetirementView } from "#src/lib/inbox-retirement.js";
 import type { Config } from "#src/lib/config.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { createInboxThreadView, INBOX_THREAD_VIEW_NAME, inboxThreadViewKey } from "#src/lib/inbox-thread-view.js";
+import { inboxThreadId } from "#src/lib/inbox-thread.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
+import { createDemandBook } from "#src/lib/view-demand.js";
 
 const A1 = "adoption:field-no-writer:src/lib/plan.ts:context:";
 const A2 = "adoption:export-no-caller:src/lib/plan.ts:loadPlanAtRef";
@@ -152,7 +157,7 @@ test("W1-T10431: age-only information preserves explicit unreadable and restored
   assert.deepEqual(drafted.pop(), [P1], "the production manual command grants no drafting work to verified information");
 });
 
-test("W1-T10431: informational routing grants no new fleet execution eligibility", (t) => {
+test("W1-T10431: informational routing grants no new fleet execution eligibility", async (t) => {
   assert.equal(inboxOwner(AGE_INFORMATION), "fleet", "exercise the changed display owner, not the old operator filter");
   const f = fx({ [AGE_INFORMATION.id]: "ready", [P1]: "ready", [VH]: "ready" }, [AGE_INFORMATION.id, P1, VH]);
   t.after(() => rmSync(dirname(f.stateDir), { recursive: true, force: true }));
@@ -176,6 +181,61 @@ test("W1-T10431: informational routing grants no new fleet execution eligibility
   assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},{...unknown,isDeclined:()=>"held by operator"}).length,0,"unknown lifecycle cannot bypass an existing decline");
   assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},{...unknown,retirement:()=>{throw Error("unavailable");}}).length,1);
   assert.equal(proposalsNeedingDraft([AGE_INFORMATION],{},{...unknown,isRatified:()=>true,retirement:()=>{throw Error("unavailable");}}).length,0,"a failed lifecycle read also retains ratification precedence");
+
+  const conflictId = "codeql-quality:js/conflicting-finding", independentId = "codeql-quality:js/independent-finding";
+  const mixed = fx({ [AGE_INFORMATION.id]: "not_ready", [conflictId]: "not_ready", [independentId]: "not_ready" }, [conflictId]);
+  const cachedDrafts = JSON.parse(readFileSync(join(mixed.stateDir, "inbox-drafts.json"), "utf8"));
+  cachedDrafts[conflictId].anchorFingerprint = "prior-evidence";
+  writeFileSync(join(mixed.stateDir, "inbox-drafts.json"), JSON.stringify(cachedDrafts));
+  const root = dirname(mixed.stateDir);
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "plan"));
+  const planPath = join(root, "plan/tasks.yaml");
+  writeFileSync(planPath, "[]\n"); writeFileSync(mixed.ledgerPath, "");
+  const proposals = [AGE_INFORMATION,
+    { id: conflictId, summary: "Existing fleet work conflicts with another open proposal.", evidenceAnchors: [], conflictsWith: [AGE_INFORMATION.id] },
+    { id: independentId, summary: "Existing independent fleet work.", evidenceAnchors: [] }];
+  writeFileSync(join(mixed.stateDir, "inbox-proposals.json"), JSON.stringify({ proposals }));
+  const deps = { root, inboxRoot: root, planPath, ledgerPath: mixed.ledgerPath, github: { prView: () => null },
+    statusGithub: fakeGitHub(), ratify: { approve: (id: string) => mixed.approved.push(id), reframe: () => assert.fail("information cannot request provider work") },
+    inboxMainSha: () => "a".repeat(40), inboxGrepAnchor: () => true,
+    inboxAuditScope: { instance: "core", repository: "owner/core" } };
+  const refreshed = await refreshInboxClassification(deps, {});
+  const captured = readPersistedInbox(mixed.stateDir)!;
+  assert.equal(captured.classifications.find(c => c.proposalId === AGE_INFORMATION.id)?.displayOwner, "fleet");
+  assert.ok(captured.classifications.find(c => c.proposalId === conflictId)?.reasons.some(r => r.predicate === "no_conflict"),
+    "positive control: the real classifier observed the conflicting proposal");
+  const db = openProjectorReadModel(join(root, "read-model-state"), "core");
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL,key TEXT NOT NULL,version INTEGER NOT NULL,
+      generation INTEGER NOT NULL,etag TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(view,key)) WITHOUT ROWID;`);
+    for (const body of refreshed.bodies) db.prepare("INSERT INTO view_body VALUES('inbox',?,1,1,?,?)")
+      .run(body.key, JSON.stringify(body), JSON.stringify(body));
+    const demand = createDemandBook(), key = inboxThreadViewKey(inboxThreadId(AGE_INFORMATION.id));
+    demand.want(INBOX_THREAD_VIEW_NAME, key);
+    const cached = createInboxThreadView({ inboxRoot: root, demand }).materialize({ now: Date.now(), instances: [{ db }] })[0]!;
+    assert.equal(cached.data.found, true, cached.data.reason);
+    assert.equal(cached.data.thread?.attention, "history");
+    assert.deepEqual(cached.data.thread?.messages[0]?.actions, []);
+  } finally { db.close(); await flushReadModelTransactions(); }
+  assert.deepEqual(triageFleetLane(mixed.deps(5)).filed, []);
+  assert.deepEqual(mixed.approved, []);
+  assert.equal(readFleetLaneStore(mixed.stateDir)[AGE_INFORMATION.id], undefined);
+  const batches: string[][] = [];
+  const draftBatch = async (due: Proposal[]) => {
+    batches.push(due.map(p => p.id));
+    return due.map(p => ({ proposalId: p.id, ok: false as const, error: "Controlled provider refusal." }));
+  };
+  const config = { root } as Config;
+  assert.equal(await inboxCommand([], { config, github: fakeGitHub(), draftBatch }), 0);
+  assert.deepEqual(batches.pop(), [conflictId, independentId], "manual force must preserve existing eligibility even beside conflicting information");
+  const hook = buildInboxDraftHook("owner", "core", config, "AGE-CONFLICT", () => {}, draftBatch, () => true, () => "a".repeat(40));
+  await hook();
+  assert.deepEqual(batches.pop(), [independentId], "the daemon retains its pre-existing conflict exclusion");
+  await hook();
+  assert.deepEqual(batches, [], "a failed provider attempt cannot grant information a retry or repeat existing work");
+  assert.equal(mixed.ledger().filter(row => row.task_id === AGE_INFORMATION.id && row.step !== "inbox.classified").length, 0,
+    "the mixed population produces no informational approval, filing, merge, decline, provider or retry receipt");
 });
 
 interface Fx {

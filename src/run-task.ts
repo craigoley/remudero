@@ -35983,8 +35983,9 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   // attempts every proposal `proposalsNeedingDraft` names, never consulting the daemon-only
   // DraftAttemptCache.
   const lifecycleContext = inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root });
+  // Manual force retains its existing conflict behavior while observing lifecycle uncertainty.
   const needsDraft = proposalsNeedingDraft(proposals, drafts, { retirement: lifecycleContext,
-    isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set(proposals.map(p => p.id)) });
+    isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set() });
 
   const runId = `INBOX-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "inbox", step, lane: "inbox", ...extra });

@@ -3901,19 +3901,20 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       // message the responder will silently have no item to answer.
       const classified = await inboxRead(deps);
       if (!classified) return void respond(503, { error: "inbox_not_ready", detail: "serve's slow lane has not persisted an inbox classification yet" }, { "retry-after": "5" });
+      const operator = caller.operator;
+      const actor = caller.origin;
+      const replyId = createHash("sha256").update(`${actor}\0${input.threadId}\0${input.intentId ?? randomUUID()}`).digest("hex");
       const proposal = classified.proposals.find(p => p.id === proposalId);
       if (proposal && isAgeOnlyInboxInformation(proposal)) {
         const thread = readThread(input.threadId, { threadStorePath: inboxThreadStorePath(deps.inboxRoot) });
         if (thread.status !== "ok") return void respond(503, { error: "thread_store_unreadable", detail: "The current question cannot be verified." });
-        if (!hasUnansweredInboxQuestion(thread.messages) && refuseInformationalProposal(classified.proposals, classified.classifications, proposalId, respond)) return;
+        const existingIntent = thread.messages.some(message => message.role === "reply" && message.extra?.replyId === replyId);
+        if (!existingIntent && !hasUnansweredInboxQuestion(thread.messages) && refuseInformationalProposal(classified.proposals, classified.classifications, proposalId, respond)) return;
       }
       if (!operatorThreadItems(deps, undefined, classified).some((item) => item.proposalId === proposalId && item.state !== "retired")) {
         respond(404, { error: "not_found", detail: "operator inbox thread is unavailable" });
         return;
       }
-      const operator = caller.operator;
-      const actor = caller.origin;
-      const replyId = createHash("sha256").update(`${actor}\0${input.threadId}\0${input.intentId ?? randomUUID()}`).digest("hex");
       const repository = causalScope?.repository ?? deps.inboxSourceIdentity?.repository ?? deps.inboxAuditScope?.repository;
       const inputReference = repository ? captureInboxInput({ repository }, proposalId, input.text, replyId) : undefined;
       const store = { threadStorePath: inboxThreadStorePath(deps.inboxRoot) };
