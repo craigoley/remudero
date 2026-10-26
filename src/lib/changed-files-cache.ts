@@ -19,7 +19,10 @@ import { dirname, join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS } from "./github-transport.js";
 
-const SCHEMA = 1;
+const SCHEMA = 2;
+/** kind: protocol -- GitHub's paginated pull-files endpoint returns at most 3,000 files.
+ * At the ceiling completeness is unknowable, including an exactly-3,000-file PR. */
+const PULL_FILES_RESPONSE_LIMIT = 3_000;
 const DEFAULT_MAX_ENTRIES = 5_000;
 const DEFAULT_MAX_BYTES = 32 * 1024 * 1024;
 const DEFAULT_CONCURRENCY = 2;
@@ -30,7 +33,9 @@ const DEFAULT_FAILURE_TTL_MS = 5 * 60_000;
 export interface ChangedFilesCache {
   /** Never blocks: a hit, or `undefined` (unreadable, fail open) with an async read scheduled. `state` is the
    *  PR's state as the caller knows it; only `MERGED`/`CLOSED` makes the answer durable. */
-  lookup(prUrl: string, state: string | undefined): string[] | undefined;
+  lookup(prUrl: string, state: string | undefined, headRefOid?: string): string[] | undefined;
+  /** Read-only qualification over an existing entry; never schedules a fetch. */
+  evidence?(prUrl: string, state: string | undefined, headRefOid: string | undefined): ChangedFileEvidence;
   /** Resolves once every scheduled read has finished and been persisted. */
   settle(): Promise<void>;
 }
@@ -39,7 +44,24 @@ interface Entry {
   files: string[];
   at: number;
   immutable: boolean;
+  evidence?: unknown;
 }
+
+/** Evidence exposure only: no feedback decision, merge credit or runtime-adoption claim. */
+export type ChangedFileEvidence = {
+  status: "complete";
+  repository: string;
+  prNumber: number;
+  headRefOid: string;
+  prState: "MERGED";
+  source: "github_rest_pull_files_paginated";
+  complete: true;
+  observedAt: number;
+  freshness: "immutable_merged_head";
+  files: string[];
+} | { status: "unknown"; reason: string };
+
+const isImmutableHead = (head: unknown): head is string => typeof head === "string" && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(head);
 
 export function changedFilesCachePath(root: string, owner: string, repo: string): string {
   const repository = `${owner}/${repo}`;
@@ -66,6 +88,8 @@ export function createChangedFilesCache(
     maxBytes?: number;
     concurrency?: number;
     failureTtlMs?: number;
+    /** Persisted snapshot consumers cannot fetch or write, including through legacy lookup. */
+    readOnly?: boolean;
     log?: (event: string, extra?: Record<string, unknown>) => void;
   } = {},
 ): ChangedFilesCache {
@@ -77,21 +101,25 @@ export function createChangedFilesCache(
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
   const failureTtlMs = options.failureTtlMs ?? DEFAULT_FAILURE_TTL_MS;
-  const fetchFiles =
+  const fetchFiles: (prNumber: string, bound?: boolean) => Promise<string[] | undefined> =
     options.fetch ??
-    (async (prNumber: string): Promise<string[] | undefined> => {
+    (async (prNumber: string, bound?: boolean): Promise<string[] | undefined> => {
       const { stdout } = await execFileLoopBounded(
         options.ghBin ?? "gh",
-        ["api", "--paginate", `repos/${owner}/${repo}/pulls/${prNumber}/files`, "--jq", ".[].filename"],
+        ["api", "--paginate", `repos/${owner}/${repo}/pulls/${prNumber}/files`, "--jq", bound ? ".[].filename | @json" : ".[].filename"],
         { encoding: "utf8", maxBuffer: 1 << 26, timeout: DEFAULT_GH_CALL_TIMEOUT_MS },
       );
-      const lines = stdout.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
-      return lines.length > 0 ? lines : undefined;
+      // JSON strings preserve valid filenames containing newlines or edge whitespace. Legacy reads retain
+      // their historical decoder; neither path adds an endpoint, cadence or pagination request.
+      const lines = bound ? stdout.split("\n").filter(l => l.length > 0).map(l => JSON.parse(l) as unknown)
+        : stdout.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+      return isFileList(lines) ? lines : undefined;
     });
 
   const entries = new Map<string, Entry>();
+  const ambiguous = new Set<string>();
   const failedAt = new Map<string, number>();
-  const queue: Array<{ url: string; immutable: boolean }> = [];
+  const queue: Array<{ url: string; immutable: boolean; headRefOid?: string }> = [];
   const pending = new Set<string>();
   let active = 0;
   let dirty = false;
@@ -117,13 +145,14 @@ export function createChangedFilesCache(
       log("changed_files_cache.load_refused", { repository, reason: "invalid_json" });
       return;
     }
-    if (doc?.schema !== SCHEMA || doc.repository !== repository || !Array.isArray(doc.entries)) {
+    if ((doc?.schema !== SCHEMA && doc?.schema !== 1) || doc.repository !== repository || !Array.isArray(doc.entries)) {
       log("changed_files_cache.load_refused", { repository, reason: "invalid_schema" });
       return;
     }
-    for (const e of doc.entries as Array<{ url?: unknown; files?: unknown; at?: unknown }>) {
+    for (const e of doc.entries as Array<{ url?: unknown; files?: unknown; at?: unknown; evidence?: unknown }>) {
       if (typeof e?.url === "string" && isFileList(e.files) && typeof e.at === "number") {
-        entries.set(e.url, { files: e.files, at: e.at, immutable: true });
+        if (entries.has(e.url)) ambiguous.add(e.url);
+        entries.set(e.url, { files: e.files, at: e.at, immutable: true, ...(doc.schema === SCHEMA ? { evidence: e.evidence } : {}) });
       }
     }
     log("changed_files_cache.loaded", { repository, entries: entries.size });
@@ -136,7 +165,7 @@ export function createChangedFilesCache(
     // Oldest first out: the board asks about recent PRs, and an evicted one is only ever re-fetched.
     const kept = durable.slice(Math.max(0, durable.length - maxEntries));
     for (const [url] of durable.slice(0, durable.length - kept.length)) entries.delete(url);
-    const body = JSON.stringify({ schema: SCHEMA, repository, entries: kept.map(([url, e]) => ({ url, files: e.files, at: e.at })) });
+    const body = JSON.stringify({ schema: SCHEMA, repository, entries: kept.map(([url, e]) => ({ url, files: e.files, at: e.at, evidence: e.evidence })) });
     const tmp = `${path}.${randomUUID()}.tmp`;
     try {
       fs.mkdirSync(dirname(path), { recursive: true });
@@ -150,17 +179,20 @@ export function createChangedFilesCache(
 
   const pump = (): void => {
     while (active < concurrency && queue.length > 0) {
-      const job = queue.shift() as { url: string; immutable: boolean };
+      const job = queue.shift() as { url: string; immutable: boolean; headRefOid?: string };
       active += 1;
       const number = job.url.match(/\/pull\/(\d+)/)?.[1] as string;
-      void fetchFiles(number)
+      void fetchFiles(number, job.headRefOid !== undefined)
         .then(
           (files) => {
             if (!files) {
               failedAt.set(job.url, clock.now());
               return;
             }
-            entries.set(job.url, { files, at: clock.now(), immutable: job.immutable });
+            entries.set(job.url, { files, at: clock.now(), immutable: job.immutable,
+              ...(job.headRefOid ? { evidence: { repository, prNumber: Number(number), headRefOid: job.headRefOid,
+                prState: "MERGED", source: "github_rest_pull_files_paginated", complete: true } } : {}) });
+            ambiguous.delete(job.url);
             failedAt.delete(job.url);
             if (job.immutable) dirty = true;
           },
@@ -182,13 +214,14 @@ export function createChangedFilesCache(
     }
   };
 
-  const schedule = (url: string, immutable: boolean): void => {
+  const schedule = (url: string, immutable: boolean, headRefOid?: string): void => {
+    if (options.readOnly) return;
     if (pending.has(url)) return;
     const failed = failedAt.get(url);
     if (failed !== undefined && clock.now() - failed < failureTtlMs) return;
     if (pending.size === 0) idle = new Promise<void>((resolve) => (wakeIdle = resolve));
     pending.add(url);
-    queue.push({ url, immutable });
+    queue.push({ url, immutable, headRefOid });
     // Deferred to a later tick so a board snapshot's synchronous derivation is never interleaved with a spawn.
     setImmediate(pump);
   };
@@ -196,14 +229,34 @@ export function createChangedFilesCache(
   load();
 
   return {
-    lookup(prUrl, state) {
+    lookup(prUrl, state, headRefOid) {
       if (!/\/pull\/\d+/.test(prUrl)) return undefined;
       const immutable = isImmutableState(state);
       const hit = entries.get(prUrl);
       // A list read while the PR was OPEN can predate its last push, so a now-terminal PR re-reads once to
       // make its durable copy — still answering the older list meanwhile, as the memo always did.
-      if (!hit || (immutable && !hit.immutable)) schedule(prUrl, immutable);
-      return hit?.files;
+      if (!hit || (immutable && !hit.immutable)) schedule(prUrl, immutable, state === "MERGED" && isImmutableHead(headRefOid) ? headRefOid : undefined);
+      return hit ? [...hit.files] : undefined;
+    },
+    evidence(prUrl, state, headRefOid) {
+      const unknown = (reason: string): ChangedFileEvidence => ({ status: "unknown", reason });
+      const number = prUrl.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/([1-9][0-9]*)$/);
+      if (!number || number[1] !== repository || !Number.isSafeInteger(Number(number[2]))) return unknown("invalid_pr_identity");
+      if (state !== "MERGED") return unknown("not_merged");
+      if (!isImmutableHead(headRefOid)) return unknown("missing_immutable_head");
+      const hit = entries.get(prUrl);
+      if (!hit) return unknown("missing_or_unreadable_cache");
+      if (ambiguous.has(prUrl)) return unknown("ambiguous_cache_entries");
+      if (!hit.evidence || typeof hit.evidence !== "object") return unknown("unbound_legacy_entry");
+      const binding = hit.evidence as Record<string, unknown>;
+      if (binding.repository !== repository || binding.prNumber !== Number(number[2]) || binding.prState !== "MERGED" ||
+          binding.source !== "github_rest_pull_files_paginated" || binding.complete !== true ||
+          !Number.isFinite(hit.at) || hit.at < 0 || hit.at > clock.now() || !isFileList(hit.files) ||
+          hit.files.length >= PULL_FILES_RESPONSE_LIMIT || new Set(hit.files).size !== hit.files.length) return unknown("invalid_or_incomplete_evidence");
+      if (binding.headRefOid !== headRefOid) return unknown("head_mismatch");
+      return { status: "complete", repository, prNumber: Number(number[2]), headRefOid, prState: "MERGED",
+        source: "github_rest_pull_files_paginated", complete: true, observedAt: hit.at,
+        freshness: "immutable_merged_head", files: [...hit.files] };
     },
     settle() {
       return pending.size === 0 ? Promise.resolve() : idle;

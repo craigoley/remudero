@@ -237,6 +237,7 @@ test("changed-files cache: the default read really shells out to gh asynchronous
 
 const evidenceHead = "a".repeat(40);
 type EvidenceGateway = GitHub & { changedFileEvidence?: (url: string) => { status: string; reason?: string; repository?: string; prNumber?: number; headRefOid?: string; prState?: string; source?: string; files?: readonly string[] } };
+type EvidenceDocument = { schema: number; repository: string; entries: Array<{ files: string[]; at: number; evidence: Record<string, unknown> }> };
 function readEvidence(gh: GitHub, number = 31) {
   const read = (gh as EvidenceGateway).changedFileEvidence;
   assert.equal(typeof read, "function", "the real gateway must expose qualified evidence");
@@ -257,6 +258,7 @@ test("changed file evidence binds repository pull request merged state and immut
   const restarted = boardGateway(rows, createChangedFilesCache(root, "o", "r", { fetch: async () => assert.fail("durable evidence must not refetch") }), []);
   assert.deepEqual(readEvidence(restarted), evidence);
   (evidence.files as string[]).push("tainted.ts");
+  gh.changedFiles!(url(31))!.push("legacy-taint.ts");
   assert.deepEqual(readEvidence(gh).files, ["src/fix.ts"], "callers cannot mutate cached evidence");
 });
 
@@ -277,16 +279,17 @@ test("changed file evidence refuses stale foreign incomplete and reopened heads"
     assert.ok(evidence.reason);
   }
   for (const change of [
-    (d: any) => { d.schema = 1; delete d.entries[0].evidence; },
-    (d: any) => { d.repository = "foreign/repo"; },
-    (d: any) => { d.entries[0].evidence.complete = false; },
-    (d: any) => { d.entries[0].evidence.headRefOid = "b".repeat(40); },
-    (d: any) => { d.entries[0].evidence.repository = "foreign/repo"; },
-    (d: any) => { d.entries[0].evidence.prNumber = 32; },
-    (d: any) => { d.entries[0].evidence.source = "ledger_marker"; },
-    (d: any) => { d.entries[0].files = Array.from({ length: 3000 }, (_, i) => `src/${i}.ts`); },
-    (d: any) => { d.entries[0].files = ["src/one.ts", "src/one.ts"]; },
-    (d: any) => { d.entries[0].at = -1; },
+    (d: EvidenceDocument) => { d.schema = 1; d.entries[0].evidence = {}; },
+    (d: EvidenceDocument) => { d.repository = "foreign/repo"; },
+    (d: EvidenceDocument) => { d.entries[0].evidence.complete = false; },
+    (d: EvidenceDocument) => { d.entries[0].evidence.headRefOid = "b".repeat(40); },
+    (d: EvidenceDocument) => { d.entries[0].evidence.repository = "foreign/repo"; },
+    (d: EvidenceDocument) => { d.entries[0].evidence.prNumber = 32; },
+    (d: EvidenceDocument) => { d.entries[0].evidence.source = "ledger_marker"; },
+    (d: EvidenceDocument) => { d.entries[0].files = Array.from({ length: 3000 }, (_, i) => `src/${i}.ts`); },
+    (d: EvidenceDocument) => { d.entries[0].files = ["src/one.ts", "src/one.ts"]; },
+    (d: EvidenceDocument) => { d.entries[0].at = -1; },
+    (d: EvidenceDocument) => { d.entries.push({ ...d.entries[0] }); },
   ]) {
     const doc = JSON.parse(body); change(doc); writeFileSync(path, JSON.stringify(doc));
     const evidence = read(); assert.equal(evidence.status, "unknown"); assert.ok(evidence.reason);
