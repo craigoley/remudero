@@ -154,9 +154,9 @@ export function createChangedFilesCache(
       log("changed_files_cache.load_refused", { repository, reason: "invalid_schema" });
       return;
     }
-    for (const e of doc.entries as Array<{ url?: unknown; files?: unknown; at?: unknown; evidence?: unknown }>) {
+    for (const e of doc.entries as Array<{ url?: unknown; files?: unknown; at?: unknown; evidence?: unknown; ambiguous?: unknown }>) {
       if (typeof e?.url === "string" && isFileList(e.files) && typeof e.at === "number") {
-        if (entries.has(e.url)) ambiguous.add(e.url);
+        if (entries.has(e.url) || e.ambiguous === true) ambiguous.add(e.url);
         entries.set(e.url, { files: e.files, at: e.at, immutable: true, evidence: e.evidence });
       }
     }
@@ -170,7 +170,7 @@ export function createChangedFilesCache(
     // Oldest first out: the board asks about recent PRs, and an evicted one is only ever re-fetched.
     const kept = durable.slice(Math.max(0, durable.length - maxEntries));
     for (const [url] of durable.slice(0, durable.length - kept.length)) entries.delete(url);
-    const body = JSON.stringify({ schema: SCHEMA, repository, entries: kept.map(([url, e]) => ({ url, files: e.files, at: e.at, evidence: e.evidence })) });
+    const body = JSON.stringify({ schema: SCHEMA, repository, entries: kept.map(([url, e]) => ({ url, files: e.files, at: e.at, evidence: e.evidence, ...(ambiguous.has(url) ? { ambiguous: true } : {}) })) });
     const tmp = `${path}.${randomUUID()}.tmp`;
     try {
       fs.mkdirSync(dirname(path), { recursive: true });
