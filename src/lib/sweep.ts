@@ -3575,13 +3575,24 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const { worktree_path: ownerPath, branch, task_id: taskId } = decline;
       if (typeof ownerPath !== "string" || typeof branch !== "string" || typeof taskId !== "string") return false;
       try {
-        return decideRegisteredFixOwnerRecovery(registeredOwnerRecovery.capture({
+        const snapshot = registeredOwnerRecovery.capture({
           repoDir, worktreesRoot: worktreesDir(config), ownerPath, taskId, branch,
           expectedRemoteSha: pr.headSha, observedRemoteSha: pr.headSha, inflightDir,
           claimKey: fixBranchClaimKey(owner, repo, branch),
           claimRoundEnded: (claimRunId: string) => fixRoundClaimEnded(ledgerPath, claimRunId),
           idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath), spawnWallClockBoundMs), // ledger-read-intent: live
-        })).kind !== "keep";
+        });
+        const decision = decideRegisteredFixOwnerRecovery(snapshot);
+        if (decline.owner_recovery_reason !== "owner_dirty_recovery_preserve_failed") return decision.kind !== "keep";
+        if (decision.kind !== "preserve-tracked-dirty" || typeof snapshot.localSha !== "string") return false;
+        // The ordinary preservation helper proves parent and exact-tree identity before returning
+        // this immutable ref. Revalidation never clears the index, removes the owner or starts work.
+        const ref = registeredOwnerRecovery.preserveTrackedDirty?.(repoDir, ownerPath, branch, snapshot.localSha);
+        const prefix = `refs/rmd-recovery/fix-dirty/${branch}/${snapshot.localSha}/`;
+        if (typeof ref !== "string" || !ref.startsWith(prefix) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref.slice(prefix.length))) return false;
+        log("sweep.fix.checkout_owner_dirty_preserved", { pr_number: pr.prNumber, task_id: taskId, branch,
+          local_sha_prefix: snapshot.localSha.slice(0, 12), recovery_ref: ref.slice(0, 512), from_backstop_revalidation: true });
+        return true;
       } catch {
         // An unreadable owner has the remedy a kept one has: the hold and its single escalation stand.
         return false;
@@ -13710,7 +13721,8 @@ export function fixDispatchHoldAtHead(
   const last = declines[declines.length - 1];
   const ownerPath = typeof last?.worktree_path === "string" ? last.worktree_path : undefined;
   if (declines.length >= FIX_CLAIM_DECLINE_BACKSTOP && (ownerPath === undefined || ownerWorktreeExists(ownerPath)) &&
-      !(ownerPath !== undefined && last.owner_recovery_decision === "keep" && ownerReclaimable?.(pr, last) === true)) {
+      !(ownerPath !== undefined && (last.owner_recovery_decision === "keep" ||
+        last.owner_recovery_reason === "owner_dirty_recovery_preserve_failed") && ownerReclaimable?.(pr, last) === true)) {
     const why = String(last.owner_recovery_reason);
     // W1-T5974: a staged-only refusal names the paths an operator must inspect before clearing it.
     const staged = Array.isArray(last.staged_paths) && last.staged_paths.length > 0
