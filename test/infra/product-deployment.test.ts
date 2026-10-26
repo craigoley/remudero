@@ -72,6 +72,13 @@ function fixture(t: TestContext, options: { bind?: boolean } = {}) {
     service: (provider: ProductDeploymentProvider, extra: object = {}) => new ProductDeploymentService({ root, provider, ...extra }) };
 }
 
+/** Recreates a file with an exact mode; the refusal under test is a stat-mode policy, the same at every uid. */
+function replaceWithMode(file: string, body: string, mode: number): void {
+  const mask = process.umask(0);
+  try { unlinkSync(file); writeFileSync(file, body, { mode }); }
+  finally { process.umask(mask); }
+}
+
 test("W1-T10616: deployment binding rejects a different repository or team", async (t) => {
   const f = fixture(t), provider = new FakeVercel();
   // A different repository (ID, owner or name) than the one the product is verified to be bound to.
@@ -223,10 +230,9 @@ test("product deployment fails closed on a corrupt, shared or unwritable journal
   assert.deepEqual(await f.service(provider).execute(actor, f.command()), { ok: false, code: "corrupt" });
   writeFileSync(file, JSON.stringify({ version: "product-deployment-v1", ownerKey: "0".repeat(64), operations: {} }), { mode: 0o600 });
   assert.deepEqual(await f.service(provider).execute(actor, f.command()), { ok: false, code: "corrupt" });
-  writeFileSync(file, good, { mode: 0o600 });
-  chmodSync(file, 0o644);
+  replaceWithMode(file, good, 0o644);
   assert.deepEqual(await f.service(provider).execute(actor, f.command()), { ok: false, code: "unavailable" });
-  chmodSync(file, 0o600);
+  replaceWithMode(file, good, 0o600);
   assert.ok((await f.service(provider).execute(actor, f.command())).ok);
   // A directory that others can read is never trusted.
   chmodSync(f.dir, 0o755);
