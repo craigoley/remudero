@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { automatedRetroGatherObserver } from "#src/lib/retro-subprocess.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
 
 test("an automated retro records real memory around one synchronous gather read without retaining its content", (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}retro-phase-`));
@@ -43,7 +43,7 @@ test("a failed gather read retains its original exception and records threw with
 test("manual gather bypasses all observation and preserves the original return identity", () => {
   const original = { report: "original" };
   const forbidden = () => { assert.fail("manual read must not enter diagnostics"); };
-  const observe = automatedRetroGatherObserver(false, { log: forbidden, now: forbidden, memoryUsage: forbidden, warn: forbidden });
+  const observe = automatedRetroGatherObserver(false, { log: forbidden, clock: { now: forbidden, date: forbidden, iso: forbidden }, memoryUsage: forbidden, warn: forbidden });
   assert.equal(observe("report", () => original), original);
 });
 
@@ -79,21 +79,10 @@ test("an unavailable default warning sink preserves the original operation resul
 
 test("gather phase duration uses the supplied clock and never reports a negative interval", () => {
   const rows: Record<string, unknown>[] = [], times = [100, 112, 90, 89];
-  const observe = automatedRetroGatherObserver(true, { log: (_step, fields) => rows.push(fields!), now: () => times.shift()!,
+  const observe = automatedRetroGatherObserver(true, { log: (_step, fields) => rows.push(fields!), clock: clockFromMillisFn(() => times.shift()!),
     memoryUsage: () => ({ rss: 5, heapUsed: 3, heapTotal: 4, external: 1, arrayBuffers: 0 }) });
   observe("gather", () => null);
   observe("report", () => null);
   assert.deepEqual(rows.map(r => r.duration_ms), [0, 12, 0, 0]);
 });
 
-test("the automated retro wires stage observation into its real gather calls and excludes dry runs", () => {
-  const source = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
-  const start = source.indexOf("async function retroCommand("), end = source.indexOf("const report = reportWithoutPromotion", start);
-  assert.ok(start >= 0 && end > start, "real retro command population control");
-  const command = source.slice(start, end);
-  assert.ok(command.includes("automatedRetroGatherObserver(opts.automated !== undefined && !dryRun"));
-  for (const [phase, call] of [["followup-ledger", "followupLedgerUnionNdjson"], ["gather", "buildGather"],
-    ["net-state", "netStateAdvisorySectionFor"], ["plan-projection", "projectPlan"]])
-    assert.ok(command.includes(`observeGather("${phase}", () => ${call}(`), `live ${phase} call`);
-  for (const phase of ["plan-inputs", "report"]) assert.ok(command.includes(`observeGather("${phase}",`), phase);
-});

@@ -22838,7 +22838,7 @@ async function retroCommand(
       const tasksYamlPath = join(checkoutRoot, "plan", "tasks.yaml");
       return { plan: existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath) : undefined };
     } catch (error) {
-      return { error };
+      return { error: error };
     }
   });
   const readGatherPlan = (): ReturnType<typeof loadPlan> | undefined => {
