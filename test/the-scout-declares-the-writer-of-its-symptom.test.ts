@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import type { GardenCheckout, GardenerDeps } from "#src/lib/gardener.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { taskRulingPin } from "#src/lib/task-linter.js";
 import { scoutGardenSpec, scoutShard } from "#src/lib/scout-gardener.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -177,8 +178,9 @@ test("the scout preserves an operator-ratified test-only contract", t => {
   mkdirSync(join(repo.dir, "src/lib"), { recursive: true });
   writeFileSync(join(repo.dir, "src/lib/inbox.ts"), 'log("inbox.draft_error");');
   repo.git("add", "src");
-  const original = scoutShard(symptom, "W1-T99051", [5]).text +
-    '  risk_ruling:\n    verdict: operator\n    action: proceed\n    confidence: 1\n    reasons: ["explicit existing operator decision"]\n';
+  const base = scoutShard(symptom, "W1-T99051", [5]).text.replace("  verify: human", "  verify: auto");
+  const pin = taskRulingPin(loadPlanFromYaml(base, "operator-base.yaml").tasks[0]!);
+  const original = base + `  risk_ruling:\n    verdict: operator\n    action: proceed\n    confidence: 1\n    reasons: ["explicit existing operator decision"]\n    judged_at: "${new Date().toISOString()}"\n    pin: "${pin}"\n`;
   const path = "plan/tasks.d/W1-T99051.yaml";
   mkdirSync(join(repo.dir, "plan/tasks.d"), { recursive: true });
   writeFileSync(join(repo.dir, path), original);
