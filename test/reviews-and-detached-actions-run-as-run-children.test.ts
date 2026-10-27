@@ -12,7 +12,8 @@ import {
   adoptRunChildren, DETACHED_WORK_INVENTORY, DETACHED_WORK_KINDS, detachedWorkPlacement, measureDrainCosts, readWorkSpec,
   type DetachedWorkEvidence, type DetachedWorkKind, type DetachedWorkSpec,
 } from "#src/lib/run-child.js";
-import { childIdentity, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
+import { childIdentity, readStatus, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
+import { runChildMain } from "#src/run-child-main.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import { adoptChildWork, childWorkCount, childWorkLeftRunning, resetChildWork, reviewAdmissionBound, type DetachedActionKind } from "#src/lib/sweep.js";
 
@@ -93,6 +94,50 @@ test("W1-T9114: a spec that cannot be read is malformed, never a build run", () 
     assert.equal(readWorkSpec(torn), "malformed", "a torn spec.json is malformed");
     writeFileSync(join(torn, "spec.json"), "{}");
     assert.equal(readWorkSpec(torn), undefined, "a spec without work is a build run");
+  } finally { f.cleanup(); }
+});
+
+test("W1-T9114: the run child hosts detached work and maps every ending to a status", async () => {
+  const f = fixture();
+  try {
+    const noSignals = { on() {}, off() {} };
+    const base = { env: {}, stderr: () => {}, heartbeatMs: 60_000, loadRunPath: async () => ({}) };
+    const read = (dir: string) => {
+      const status = readStatus(dir);
+      assert.ok(status.ok);
+      return status.value;
+    };
+
+    // A spec whose work this entry cannot read ends as a contract mismatch, never a build run.
+    const bad = f.add("work-bad-1", { kind: "bogus" } as unknown as DetachedWorkSpec);
+    assert.equal(await runChildMain(["--run-dir", bad.dir], { ...base, signals: noSignals,
+      runTask: async () => { throw new Error("a malformed work spec must not run a build"); } }), 1);
+    assert.equal(read(bad.dir).state, "failed");
+    assert.equal(read(bad.dir).phase, "spec");
+
+    // Work that finishes: its result is the terminal status, hosted by runDetachedWork with the run id and task.
+    const ok = f.add("work-ok-1", review);
+    const seen: unknown[] = [];
+    assert.equal(await runChildMain(["--run-dir", ok.dir], { ...base, signals: noSignals,
+      runDetachedWork: async (work, ctx) => { seen.push(work, ctx); return result("A"); } }), 0);
+    assert.deepEqual(seen, [review, { runId: "work-ok-1", taskId: "A" }]);
+    assert.equal(read(ok.dir).state, "done");
+    assert.equal(read(ok.dir).phase, "done");
+
+    // Work that throws is a failed status through the closed failure union.
+    const boom = f.add("work-boom-1", review);
+    assert.equal(await runChildMain(["--run-dir", boom.dir], { ...base, signals: noSignals,
+      runDetachedWork: async () => { throw new Error("review blew up"); } }), 1);
+    assert.equal(read(boom.dir).state, "failed");
+
+    // A SIGTERM mid-work ends it as aborted at once, without waiting for the work.
+    const term = f.add("work-term-1", review);
+    const handlers: Array<() => void> = [];
+    const signals = { on: (_s: "SIGTERM", h: () => void) => { handlers.push(h); }, off() {} };
+    assert.equal(await runChildMain(["--run-dir", term.dir], { ...base, signals,
+      runDetachedWork: () => { for (const h of handlers) h(); return new Promise<RunResult>(() => {}); } }), 3);
+    assert.equal(read(term.dir).state, "aborted");
+    assert.equal(read(term.dir).failure?.class, "aborted");
   } finally { f.cleanup(); }
 });
 
