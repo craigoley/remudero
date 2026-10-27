@@ -662,6 +662,7 @@ import {
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
 import { createDaemonClient, type DaemonClient } from "../packages/api-client/src/client.js";
 import { newTriagePass, parseEscalationTriagePolicy } from "./lib/escalation-triage.js";
+import { realProductResearchProvider, type ProductResearchProvider } from "./lib/product-research.js";
 import { escalationClassSignal } from "./lib/escalation-precision.js";
 import {
   deliversRealtime,
@@ -28957,6 +28958,29 @@ export async function serveCommand(
     log("serve.feedback_expander_unavailable", { error: String((e as Error)?.message ?? e) });
   }
 
+  // Product research uses the already configured triage synthesis mount and the same
+  // ledgered, contained worker transport. A failed mount/settings resolution leaves the
+  // HTTP operation explicitly unavailable; it never invents another provider.
+  let productResearchProvider: ProductResearchProvider | undefined;
+  try {
+    const mountsTable = (deps.loadMounts ?? loadMounts)(mountsPath(repoRoot));
+    const mount = mountsTable.synthesis.triage;
+    if (!mount) throw new Error("triage synthesis mount unavailable");
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", `serve-research-settings-${runId}.json`),
+    });
+    validateWorkerSettingsFile(settingsFile);
+    productResearchProvider = realProductResearchProvider({
+      mount, config, cwd: repoRoot, settingsFile,
+      spawn: deps.spawn,
+    });
+    log("serve.product_research_resolved", { provider: productResearchProvider.id, budget_usd: DEFAULT_BUDGET_USD });
+  } catch (error) {
+    log("serve.product_research_unavailable", { reason: String((error as Error)?.message ?? error) });
+  }
+
   // `inflightHolder` wires deriveStatus's THIRD liveness disjunct (lib/status.ts) to the real
   // lock directory — the same `<config.root>/state/inflight` path `acquireInflightLock` writes
   // and the sweep rung reaps, never a second notion of where locks live. Without this the
@@ -29041,6 +29065,8 @@ export async function serveCommand(
     // differ: fleet-control flag files must match what `rmd daemon`/`rmd drain` check
     // (config.root); plan/questions.ndjson must match where `appendQuestion` writes (repoRoot).
     fleetControlRoot: config.root,
+    productResearchProvider,
+    productResearchBudgetUsd: productResearchProvider ? DEFAULT_BUDGET_USD : undefined,
     assistantRepository: `${self.owner}/${self.repo}`,
     questionsRoot: repoRoot,
     tokens,
