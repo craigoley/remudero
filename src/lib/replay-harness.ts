@@ -31,6 +31,7 @@ import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { z } from "zod";
 import { loadConfig, type Config } from "./config.js";
+import { cashDeploymentEndpoint } from "./config-schema.js";
 import { withTempDir } from "./tmp.js";
 import { verifyReviewerCaseEvidence } from "./review-finding-evidence.js";
 import { CashResponsesConversation } from "./cash-responses.js";
@@ -191,11 +192,18 @@ const reviewerOutputSchema = z.object({ verdict: z.enum(["pass", "fail", "unknow
 
 export function reviewerReplayStack(config: Config): PinnedReviewStack {
   const source = (file: string) => readFileSync(new URL(file, import.meta.url), "utf8");
+  // W1-T10837: the sealed reviewer always rides "gpt-6.1-sol" (sealedReviewer refuses any other
+  // `arm.requestedModel`), so the environment pin resolves THAT deployment's own endpoint through
+  // the one resolver -- a mapped reviewer account changing its endpoint must invalidate this pin,
+  // exactly as the default account changing cashEndpoint always has. Endpoint only: a fingerprint
+  // must stay computable with no key present (unlike a live spawn), so this never calls the
+  // key-requiring `cashDeploymentTarget`.
+  const endpoint = cashDeploymentEndpoint(config, "gpt-6.1-sol");
   return { harness: digest([source("./replay-harness.ts"), source("./paired-review-eval.ts"), source("../run-task.ts")]),
     prompt: digest([REVIEWER_PROMPT, OPENWEIGHT_OUTPUT_CONTRACT]), tool: digest(REVIEWER_TOOLS),
     scorer: digest(source("./review-finding-evidence.ts")),
     environment: digest([process.version, process.platform, process.arch, source("./worker-provider.ts"),
-      source("./cash-responses.ts"), config.workerProviders?.cashEndpoint ?? config.workerProviders?.openweightEndpoint]) };
+      source("./cash-responses.ts"), endpoint]) };
 }
 
 function sourceGit(sourceDir: string, args: string[]): string {
