@@ -1865,6 +1865,9 @@ jobs:
             fi
           fi
           echo "$SELECTION" > coverage-selection.txt
+          # W1-T5891: the selector-shadow gardener reads job logs, not the staged marker; a narrowed
+          # run is recorded but is never evidence about the selector's misses.
+          echo "COVERAGE-SELECTION: ${SELECTION}"
           # W1-T5923: weigh the split on this lane's own instrumented durations.
           if [ "$SELECTION" = "all" ] && ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/8 --base HEAD^1 \
             --instrumented-manifest scripts/test-tier-coverage-manifest.json --snapshot coverage/ledger-snapshot.manifest \
