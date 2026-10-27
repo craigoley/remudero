@@ -273,8 +273,7 @@ test("the slow lane refuses a trace read rather than calling github", () => {
   assert.throws(() => slowLaneTraceGithub.prView(1), /the slow lane makes no GitHub call/);
 });
 
-test("hand-route feedback reconciliation reuses the existing slow-lane snapshot and writer", async (t) => {
-  const shim = recordGh(t);
+async function handRouteLaneWorld(t: TestCtx) {
   const time = manualTime(T0);
   const root = coreRoot(t);
   const entry = captureFeedback(root, { raw: "The merged source repair resolves this entry", origin: "cli" });
@@ -288,7 +287,12 @@ test("hand-route feedback reconciliation reuses the existing slow-lane snapshot 
   assert.equal(files.lookup(row.url, row.state, row.headRefOid), undefined);
   await files.settle();
   assert.equal(files.evidence!(row.url, row.state, row.headRefOid).status, "complete", "the maintained producer writes exact-head evidence");
-  const world = laneWorld(t, time, root);
+  return { time, root, entry, other, row, world: laneWorld(t, time, root) };
+}
+
+test("hand-route feedback reconciliation reuses the existing slow-lane snapshot and writer", async (t) => {
+  const shim = recordGh(t);
+  const { root, entry, other, row, world } = await handRouteLaneWorld(t);
   await world.hold();
   const queued = readQueuedFeedbackRecords(root);
   const proposed = queued.get(feedbackEntryRepoPath(entry.id)) as unknown as FeedbackEntry;
@@ -300,4 +304,20 @@ test("hand-route feedback reconciliation reuses the existing slow-lane snapshot 
   await world.pass();
   assert.deepEqual(readQueuedFeedbackRecords(root), queued, "the next ordinary pass is idempotent");
   assert.equal(shim.calls().length, 0, "the production default snapshot and qualification reader spawn no second GitHub fetcher");
+});
+
+test("hand-route stale slow-lane evidence remains unknown until its owner refreshes it", async (t) => {
+  const shim = recordGh(t);
+  const { time, root, entry, world } = await handRouteLaneWorld(t);
+  time.advance(NOW_GITHUB_STALE_MS + 1);
+  await world.hold();
+  assert.equal(world.laneSource()?.state, "stale");
+  assert.equal(readQueuedFeedbackRecords(root).size, 0);
+  assert.equal(readFeedbackEntry(root, entry.id).status, "new");
+  const board = createBoardSnapshotCache(root, "o", "r");
+  assert.equal(board.commitOpen!([], time.clock.now()), true);
+  await world.pass();
+  assert.equal(world.laneSource()?.state, "fresh");
+  assert.equal(readQueuedFeedbackRecords(root).get(feedbackEntryRepoPath(entry.id))?.status, "accepted");
+  assert.deepEqual(shim.calls(), []);
 });
