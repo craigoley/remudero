@@ -17,6 +17,8 @@
     - src/run-task.ts
     - test/reviews-and-detached-actions-run-as-run-children.test.ts
     - "src/run-child-main.ts"
+    - src/cli/commands/fix.ts
+    - src/cli/commands/sweep.ts
   # refusal-amendment (W1-T9114, run DAEMON-1793124401411@cf7bde8fb7653d0ecf428a66f21d8a94fa773723, 2026-10-27T20:45:15.210Z): the worker refused criterion 5 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: The remedy is to rewrite criterion 5's claim to name only review children, and to point its proof at a real test title. Both edits are criteria text in `plan/`. That is Architect-only under standing rule 15, and it is outside this task's declared scope.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
@@ -77,6 +79,17 @@
     5. BEHIND THE EXISTING SWITCH. Moved kinds follow `sweep.runChild.mode` (W1-T9082/W1-T9087): `shadow` spawns a
        probe that round-trips the contract for one review and records its cost; `auto` promotes on the same
        boot-cycle evidence W1-T9087 uses, and demotes on a lost or misidentified child.
+    6. FIX DISPATCH USES THE GOVERNED PRODUCER. The two CLI companions permit the existing fix producer and
+       child callee to share a typed, serializable decision envelope. Do not serialize a claim keeper, dependency
+       function or phase callback. Spawn before taking the fix-branch claim; the child takes its own claim through
+       the existing native helper and identity checks, reconstructs live dependencies, and rechecks the current PR
+       head, canonical task/risk, merged/retired state, holds, admission and all existing gates before the normal
+       rung. Preserve phase evidence through the existing owned run/status/ledger protocol and adoption identity.
+       Do not invoke the operator/bootstrap `rmd fix` route or `--requested` as automatic authority: that route
+       intentionally lacks board-wide merged/retired projections. An unread identity, grant or reconstruction
+       refuses; it is not a successful child. No manual claim transfer, retry reset or new admission exception.
+       Criterion 5 still requires actual child FIX dispatches as well as reviews. A review-only label or renamed
+       proof is not the repair; all original acceptance claims, proofs and falsifiers remain unchanged.
     Tests go in test/reviews-and-detached-actions-run-as-run-children.test.ts, with `test(` titles verbatim as in the
     proofs below, over a temp state dir, a fake spawn and a fake clock.
   acceptance:
