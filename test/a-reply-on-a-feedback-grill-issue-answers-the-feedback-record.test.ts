@@ -8,7 +8,6 @@
 // (`captureFeedbackReply`), once, only while it is still grilling, picking the option-naming reply, for any id shape.
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -32,6 +31,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const FB_ID = "fb-1789382125003-abdb87";
 
@@ -40,8 +40,7 @@ function tmpDir(label: string): string {
 }
 
 /** A checkout-shaped root holding one feedback record, a separate state root for the landing queue, and a ledger. */
-function fixture(id = FB_ID, status = "grilling") {
-  const root = tmpDir("root");
+function fixture(id = FB_ID, status = "grilling", root = tmpDir("root")) {
   const stateRoot = tmpDir("state");
   const ledgerPath = join(tmpDir("ledger"), "ledger.ndjson");
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
@@ -345,7 +344,8 @@ test("W1-T8511: a stored question answer reaches the record's answered status en
 });
 
 function queuedGrillFixture() {
-  const f = fixture();
+  const repo = gitRepo({ seedCommit: false, kind: "w10789-root" });
+  const f = fixture(FB_ID, "grilling", repo.dir);
   const rel = `plan/feedback/${FB_ID}.yaml`;
   const path = join(f.root, rel);
   const capture = { ...parseYaml(readFileSync(path, "utf8")), status: "new", submission_key: "original-capture",
@@ -361,10 +361,7 @@ function queuedGrillFixture() {
   mkdirSync(dirname(pendingPath), { recursive: true });
   writeFileSync(pendingPath, stringifyYaml(pending));
   writeFileSync(path, stringifyYaml(canonical));
-  const git = (...args: string[]) => execFileSync("git", ["-C", f.root, ...args], { encoding: "utf8", stdio: "pipe" });
-  git("init", "-b", "main");
-  git("config", "user.name", "Feedback fixture");
-  git("config", "user.email", "feedback@example.invalid");
+  const git = repo.git;
   git("add", "plan/feedback");
   git("-c", "core.hooksPath=/dev/null", "commit", "-m", "fixture canonical grill");
   git("update-ref", "refs/remotes/origin/main", "HEAD");
@@ -409,7 +406,7 @@ test("W1-T10789: continuation retains the canonical proposal and source metadata
     assert.ok(reply);
     const target = readQueuedFeedbackRecords(f.stateRoot).get(f.rel);
     assert.deepEqual(target, { ...f.canonical, status: "answered", answered_by: reply.id });
-    assert.equal(f.git("show", `origin/main:${f.rel}`), stringifyYaml(f.canonical));
+    assert.equal(f.git("show", `origin/main:${f.rel}`), stringifyYaml(f.canonical).trim());
   });
 });
 
