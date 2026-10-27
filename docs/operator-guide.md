@@ -2025,6 +2025,22 @@ Then carry the named key itself (`RMD_CASH_EASTUS_API_KEY`) into the daemon envi
 way the existing `RMD_OPENWEIGHT_API_KEY`/`RMD_FOUNDRY_CLAUDE_API_KEY` secrets are carried (see
 "Foundry Opus cash emergency" above) — never as a config field.
 
+W1-T10838 carries it the same way: the launcher and `deploy/recycle-container.sh` read a durable,
+single-line, mode-0600 host file, `~/.local/share/remudero/secrets/cash-eastus-api-key` (override
+with `RMD_CASH_EASTUS_API_KEY_PATH`), and pass `RMD_CASH_EASTUS_API_KEY` to the container by name,
+never as a value in docker argv, a unit file or any report. A missing or unsafe file never blocks a
+boot or a recycle; only that deployment stays unavailable. Write the file from a machine where `az`
+is logged in to the subscription. The key goes from `az` straight into the host file over ssh, is
+never echoed, and the write refuses (leaving any existing file untouched) unless exactly one key
+line arrived:
+
+```bash
+az cognitiveservices account keys list -g synthwatch-rg -n synthwatch-foundry-eus --query key1 -o tsv | ssh remudero 'set -e; umask 077; d="$HOME/.local/share/remudero/secrets"; t="$d/.cash-eastus-api-key.tmp"; cat > "$t"; [ "$(awk "NF{n++} END{print n+0}" "$t")" = 1 ] || { rm -f "$t"; echo "refused: expected exactly one key line" >&2; exit 1; }; chmod 600 "$t"; mv "$t" "$d/cash-eastus-api-key"; stat -c "%a %s %n" "$d/cash-eastus-api-key"'
+```
+
+It prints only mode, byte size and path. After the next relaunch or recycle, verify by name only:
+`docker exec remudero-daemon sh -c 'test -n "$RMD_CASH_EASTUS_API_KEY" && echo set || echo unset'`.
+
 ### One fleet cash cap across core, site, and console
 
 The shared cash allowance is opt-in and requires a stopped-writer migration. Until it is

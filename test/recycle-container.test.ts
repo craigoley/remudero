@@ -63,6 +63,8 @@ const DECLARED_RUNTIME_FIXTURE: Record<string, string> = {
   RMD_OPENWEIGHT_API_KEY: "openweight-key-fixture-3f9c1d",
   RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.test/anthropic",
   RMD_FOUNDRY_CLAUDE_API_KEY: "foundry-key-fixture-6b84d2",
+  // W1-T10838: the eastus account's key, passed to docker by name (the value rides the environment).
+  RMD_CASH_EASTUS_API_KEY: "eastus-key-fixture-7d21ae",
 };
 
 /** The image env plus every declared runtime var at its fixture value, one override or drop applied. */
@@ -1088,7 +1090,7 @@ test("W1-T1069: MUTANT: a fallback array edited out of sync with deploy/runtime-
   // Proves the consistency test above actually discriminates, rather than passing on any six names.
   const recycleSrc = readFileSync(SCRIPT, "utf8");
   const mutated = recycleSrc.replace(
-    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY)",
+    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY RMD_CASH_EASTUS_API_KEY)",
     "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S)",
   );
   assert.notEqual(mutated, recycleSrc, "the mutation target must actually be present and unique");

@@ -377,7 +377,12 @@ if [ -z "${RMD_FOUNDRY_CLAUDE_ENDPOINT:-}" ]; then
   RMD_FOUNDRY_CLAUDE_ENDPOINT="$(read_cash_boot_secret "${RMD_FOUNDRY_CLAUDE_ENDPOINT_PATH:-$CASH_SECRET_DIR/foundry-claude-endpoint}")" ||
     echo "rmd-relaunch: Foundry endpoint unavailable; cash Opus remains unavailable" >&2
 fi
-export RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT
+# W1-T10838: the eastus Foundry account's own key. A missing file never blocks boot.
+if [ -z "${RMD_CASH_EASTUS_API_KEY:-}" ]; then
+  RMD_CASH_EASTUS_API_KEY="$(read_cash_boot_secret "${RMD_CASH_EASTUS_API_KEY_PATH:-$CASH_SECRET_DIR/cash-eastus-api-key}")" ||
+    echo "rmd-relaunch: eastus cash key unavailable; that deployment stays unavailable" >&2
+fi
+export RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_CASH_EASTUS_API_KEY
 CASH_BOOT_SECRETS
 }
 
@@ -1597,6 +1602,7 @@ docker run -d --name ${CONTAINER_NAME} \\
   -e RMD_OPENWEIGHT_API_KEY \\
   -e RMD_FOUNDRY_CLAUDE_API_KEY \\
   -e RMD_FOUNDRY_CLAUDE_ENDPOINT \\
+  -e RMD_CASH_EASTUS_API_KEY \\
   -v ${CODEX_DIR}:/home/node/.codex \\
   "\${CODEX_SESSIONS_ARGS[@]+"\${CODEX_SESSIONS_ARGS[@]}"}" \\
   -v ${CONTAINER_CONFIG_DIR}:/home/node/.config/remudero \\

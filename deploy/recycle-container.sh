@@ -118,7 +118,7 @@ set -euo pipefail
 # purpose, to drive a single script in isolation); test/recycle-container.test.ts asserts this
 # fallback, host-update.sh's own fallback, and deploy/runtime-env-vars.sh's real array never
 # disagree, so the fallback cannot silently go stale either.
-RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY)
+RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY RMD_CASH_EASTUS_API_KEY)
 RMD_DERIVED_RUNTIME_ENV_VARS=(RMD_READ_MODEL_DB_DIR RMD_WORKER_HOME_DIR RMD_TEST_SLOT_DIR)
 RUNTIME_ENV_VARS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/runtime-env-vars.sh" || true
 if [ -n "${RUNTIME_ENV_VARS_FILE:-}" ] && [ -f "${RUNTIME_ENV_VARS_FILE}" ]; then
@@ -128,6 +128,7 @@ fi
 # The isolated-script fixtures intentionally have no sibling runtime-env-vars.sh. Keep
 # their host-only key path deterministic without making it a container runtime name.
 : "${RMD_OPENWEIGHT_API_KEY_PATH:=${HOME:-/root}/.local/share/remudero/secrets/openweight-api-key}"
+: "${RMD_CASH_EASTUS_API_KEY_PATH:=${HOME:-/root}/.local/share/remudero/secrets/cash-eastus-api-key}"
 
 REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
@@ -1093,6 +1094,31 @@ if [ "${CASH_KEY_REQUIRED}" -eq 1 ]; then
   CAPTURED_SOURCE_set RMD_OPENWEIGHT_API_KEY "durable-host-secret"
 fi
 
+# W1-T10838: the eastus Foundry account's own key. Unlike the open-weight key it is NOT required:
+# an outgoing container that carries it wins; otherwise a safe durable file supplies it; an absent
+# or unsafe file leaves only that deployment unavailable and refuses nothing. Value never printed.
+if [ -z "$(CAPTURED_get RMD_CASH_EASTUS_API_KEY)" ]; then
+  EASTUS_KEY_PATH="${RMD_CASH_EASTUS_API_KEY_PATH}"
+  EASTUS_KEY_MODE=""
+  EASTUS_KEY_LINE=""
+  if [ -f "${EASTUS_KEY_PATH}" ] && [ ! -L "${EASTUS_KEY_PATH}" ] && [ -r "${EASTUS_KEY_PATH}" ]; then
+    if EASTUS_KEY_MODE="$(stat -c '%a' "${EASTUS_KEY_PATH}" 2>/dev/null)"; then :
+    elif EASTUS_KEY_MODE="$(stat -f '%Lp' "${EASTUS_KEY_PATH}" 2>/dev/null)"; then :
+    else EASTUS_KEY_MODE=""; fi
+    if [ "${EASTUS_KEY_MODE}" = "600" ]; then
+      EASTUS_KEY_LINE="$(awk 'NF { count++; last=$0 } END { if (count == 1) print last; else exit 1 }' "${EASTUS_KEY_PATH}" 2>/dev/null || true)"
+      EASTUS_KEY_LINE="${EASTUS_KEY_LINE%$'\r'}"
+    fi
+  fi
+  if [ -n "${EASTUS_KEY_LINE}" ]; then
+    CAPTURED_set RMD_CASH_EASTUS_API_KEY "${EASTUS_KEY_LINE}"
+    CAPTURED_SOURCE_set RMD_CASH_EASTUS_API_KEY "durable-host-secret"
+  else
+    echo "recycle-container: NOTE — eastus cash key unavailable at ${EASTUS_KEY_PATH}; that deployment stays unavailable (nothing refused)." >&2
+  fi
+  unset EASTUS_KEY_LINE
+fi
+
 # ── APP AUTH IS A DURABLE CREDENTIAL, SO THE GH_TOKEN REFUSAL DOES NOT APPLY TO IT ──────────────
 # The refusal below exists for exactly ONE reason, stated in its own text: GH_TOKEN lives only in
 # the outgoing container's environment and is never written to disk, so removing that container
@@ -1233,6 +1259,16 @@ RUN_ENV_ARGS=()
 for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
   if [ "${name}" = "GH_TOKEN" ]; then
     RUN_ENV_ARGS+=(-e "GH_TOKEN=")
+  elif [ "${name}" = "RMD_CASH_EASTUS_API_KEY" ]; then
+    # W1-T10838: passed by NAME, the value riding this process's environment, so it never enters
+    # docker's argv. An empty value exports nothing and docker carries nothing.
+    if [ -n "$(CAPTURED_get "${name}")" ]; then
+      printf -v "${name}" '%s' "$(CAPTURED_get "${name}")"
+      export "${name?}"
+      RUN_ENV_ARGS+=(-e "${name}")
+    else
+      RUN_ENV_ARGS+=(-e "${name}=")
+    fi
   else
     RUN_ENV_ARGS+=(-e "${name}=$(CAPTURED_get "${name}")")
   fi
