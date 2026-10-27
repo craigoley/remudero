@@ -447,6 +447,11 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
     assert.equal(capability.headContractRefreshFor?.(pr()), f.deps.updateBranch,
       "rotating a positively recorded hold must not make its answered amendment undiscoverable");
     assert.equal(historyReads, 1);
+    await runSweepLightPass([pr()], { ...f.deps, updateBranch: undefined, ...capability,
+      readHeadContractRefreshHistory: async () => ({ complete: true, lines: [archived] }) });
+    assert.deepEqual([f.state.refreshed, f.state.dispatched, f.state.admissions], [1, 0, 0]);
+    f.state.revision = "contract-C";
+    assert.equal(capability.headContractHoldEvidenceFor?.(pr()), undefined);
   });
 
   test("a fix round's NEEDS_DESIGN row records the contract it worked on", async (t) => {
