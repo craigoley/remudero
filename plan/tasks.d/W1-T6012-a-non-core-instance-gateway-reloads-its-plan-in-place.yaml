@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 3.00
   risk: high  # two coupled source concerns: gateway plan publication and retained recent replay
@@ -51,3 +51,13 @@
   falsifier: |
     Keep the single boot loadPlan: the fixture files a task in the instance plan after building the routes, the
     status board does not list it, and the test fails.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The description shows an in-memory plan reload for non-core gateways, mirroring established core practice (reloadServePlan W1-T4481, #8784); no secrets, auth, deletion, deploy/merge policy, or irreversible action is named."
+      - "Declared files are limited to instance-gateway.ts, board.ts and one test file, all existing at base. Four acceptance criteria each name a unit test, so the result is verifiable."
+      - "The family has no track record (0 merged/declined), which is neutral, and the filed rationale states there is no conflicting open PR or branch touching the file."
+    judged_at: "2026-10-27T16:48:24.648Z"
+    pin: "62319651ee9e8fb28944e90a7c415cdc1a7bebda22b225c7a281d72faa2d56b3"
