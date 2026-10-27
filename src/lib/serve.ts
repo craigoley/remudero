@@ -3597,8 +3597,10 @@ export function serveGeneration(server: Server): ServeGenerationHooks | undefine
   return serveGenerations.get(server);
 }
 
-export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "instances" | "assistantRepository"> & { panelGraph?: Pick<ServeDeps["panelGraph"], "planPath"> }): ReadModelInstance[] {
-  const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), boardRoot: deps.questionsRoot, feedbackRoot: deps.questionsRoot,
+export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "fleetControlRoot" | "instances" | "assistantRepository"> & { panelGraph?: Pick<ServeDeps["panelGraph"], "planPath"> }): ReadModelInstance[] {
+  // Board snapshots live under config.root, where the PR collector writes them (`createBoardSnapshotCache(config.root, …)`
+  // in tick-read-worker.ts); `questionsRoot` is the serving checkout, which holds feedback but never snapshots.
+  const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), boardRoot: deps.fleetControlRoot, feedbackRoot: deps.questionsRoot,
     ...(deps.assistantRepository ? { repo: deps.assistantRepository } : {}), ...(deps.panelGraph?.planPath ? { planPath: deps.panelGraph.planPath } : {}) };
   const others = livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances });
   return [core, ...others.map((instance) => {

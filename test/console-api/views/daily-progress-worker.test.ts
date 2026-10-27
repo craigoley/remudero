@@ -20,8 +20,12 @@ import { mapBoardPr, type BoardPrRest } from "#src/lib/open-prs-rest.js";
 
 test("daily progress uses server board roots instead of guessing from ledger locations", async () => {
   await withTempDir("daily-roots", async root => {
-    const core = readModelInstances({ ledgerPath: join(root, "independent-ledger", "ledger.ndjson"), questionsRoot: join(root, "operator-root"), assistantRepository: "acme/app" })[0]!;
-    assert.equal(core.boardRoot, join(root, "operator-root"));
+    // Production's two roots differ: serve passes config.root as fleetControlRoot and the serving checkout as questionsRoot.
+    const core = readModelInstances({ ledgerPath: join(root, "independent-ledger", "ledger.ndjson"), fleetControlRoot: join(root, "operator-root"),
+      questionsRoot: join(root, "serving-checkout"), assistantRepository: "acme/app" })[0]!;
+    assert.equal(core.boardRoot, join(root, "operator-root"), "board snapshots are read where the PR collector writes them: config.root");
+    assert.notEqual(core.boardRoot, join(root, "serving-checkout"), "the serving checkout holds feedback, never board snapshots");
+    assert.equal(core.feedbackRoot, join(root, "serving-checkout"));
     assert.notEqual(core.boardRoot, root, "a separately configured ledger parent is not the board snapshot root");
     assert.equal(core.ledgerDir, join(root, "independent-ledger"));
   });
