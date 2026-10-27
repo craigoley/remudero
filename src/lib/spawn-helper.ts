@@ -2,6 +2,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { createInterface } from "node:readline";
 import { clockFromMillisFn, type Clock } from "./clock.js";
+import { boundChildByLoopTime, type LoopBound } from "./loop-bounded-child.js";
 
 /** The sub-millisecond reading a spawn's loop time is measured with, through the Clock port. */
 const monotonicClock = (): Clock => clockFromMillisFn(() => performance.now());
@@ -111,19 +112,25 @@ export function runDirect(request: SpawnRequest, clock: Clock = monotonicClock()
   const began = now();
   let syncMs = 0;
   return new Promise((resolve) => {
-    const answer = (err: (Error & { code?: unknown; signal?: unknown }) | null, stdout: unknown, stderr: unknown): void =>
+    let bound: LoopBound | undefined;
+    const answer = (err: (Error & { code?: unknown; signal?: unknown }) | null, stdout: unknown, stderr: unknown): void => {
+      bound?.cancel();
       resolve({ ...settled(err?.code, err?.signal, String(stdout ?? ""), String(stderr ?? "")), via: "direct",
         ...(reason === undefined ? {} : { reason }), sync_ms: syncMs });
+    };
     let child: ChildProcess;
     try {
+      // No execFile `timeout`: that is a wall-clock timer, which on a held loop destroys a finished child's stdout.
       child = execFile(request.file, [...(request.args ?? [])], { cwd: request.cwd, env: request.env,
-        timeout: request.timeoutMs, killSignal: request.killSignal, maxBuffer: request.maxBuffer, encoding: "utf8" },
-      answer);
+        maxBuffer: request.maxBuffer, encoding: "utf8" }, answer);
     } catch (error) {
       // Reason: execFile throws on an argument it refuses; that settles as its error code, never as a throw.
       syncMs = now() - began;
       answer(error as Error & { code?: unknown }, "", "");
       return;
+    }
+    if (request.timeoutMs !== undefined && request.timeoutMs > 0) {
+      bound = boundChildByLoopTime(child, request.timeoutMs, { killSignal: request.killSignal });
     }
     child.stdin?.on("error", () => { /* Reason: a child that exits before reading its input settles by its exit. */ });
     child.stdin?.end(request.input);
