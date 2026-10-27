@@ -26,9 +26,9 @@
     board-snapshot-cache stalls, broad Inbox decisions."
   acceptance:
     - claim: "a read mark with a configured slow lane succeeds without invoking any classifier or Git dependency"
-      proof: "unit test: test/an-inbox-item-is-a-conversation.test.ts"
+      proof: "unit test: read marks use the configured maintained Inbox snapshot without classification"
     - claim: "absent maintained evidence refuses the read mark without writing, and membership, seq and legacy behaviour are preserved"
-      proof: "unit test: test/an-inbox-item-is-a-conversation.test.ts"
+      proof: "unit test: read marks refuse unavailable maintained evidence and preserve legacy safeguards"
   risk: medium
   origin: feedback#fb-1793088336384-533ec6
   plan_refs: ["§7B"]
