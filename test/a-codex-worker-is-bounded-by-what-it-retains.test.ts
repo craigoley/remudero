@@ -19,7 +19,7 @@ import {
   spawnCodexWorker,
 } from "../src/lib/worker-provider.js";
 
-function fakeCodex(streamObserver?: Parameters<typeof spawnCodexWorker>[0]["streamObserver"]): { stdout: PassThrough; proc: EventEmitter; run: Promise<unknown>; home: string; teardowns: () => number } {
+function fakeCodex(streamObserver?: Parameters<typeof spawnCodexWorker>[0]["streamObserver"]): { stdout: PassThrough; proc: EventEmitter; run: Promise<unknown>; home: string; teardowns: () => number; spawned: Promise<void> } {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -27,6 +27,12 @@ function fakeCodex(streamObserver?: Parameters<typeof spawnCodexWorker>[0]["stre
   const home = mkdtempSync(join(tmpdir(), "rmd-w1t4595-home-"));
   let teardowns = 0;
   let exited = false;
+  // This call omits `tools`, which `codexReadOnly` treats as a writer, so `spawnCodexWorker` now
+  // awaits the async Git-worktree probe BEFORE calling `containment.spawn`. An `exit` emitted
+  // before that callback runs has no listener yet and is lost, hanging `await run` forever —
+  // `spawned` lets every call site wait for the real attach point first.
+  let markSpawned!: () => void;
+  const spawned = new Promise<void>((resolve) => { markSpawned = resolve; });
   const run = spawnCodexWorker(
     {
       workerHome: home,
@@ -35,7 +41,7 @@ function fakeCodex(streamObserver?: Parameters<typeof spawnCodexWorker>[0]["stre
       prompt: "retention budget",
       settingsFile: join(process.cwd(), "settings", "worker.json"),
       containment: {
-        spawn: () => ({ process: proc as never, pid: 45_950 }),
+        spawn: () => { markSpawned(); return { process: proc as never, pid: 45_950 }; },
         teardown: () => {
           teardowns += 1;
           if (!exited) {
@@ -47,12 +53,13 @@ function fakeCodex(streamObserver?: Parameters<typeof spawnCodexWorker>[0]["stre
     },
     { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna" } },
   );
-  return { stdout, proc, run, home, teardowns: () => teardowns };
+  return { stdout, proc, run, home, teardowns: () => teardowns, spawned };
 }
 
 test("W1-T4595: a Codex worker streaming several MiB of ordinary events completes with its normal result", async () => {
   const codex = fakeCodex();
   try {
+    await codex.spawned;
     codex.stdout.write('{"type":"thread.started","thread_id":"long-run"}\n{"type":"turn.started"}\n');
     // 3 MiB of ordinary completed command output: parsed and discarded, never retained.
     const output = "x".repeat(64 * 1024);
@@ -77,6 +84,7 @@ test("W1-T4595: an oversized unfinished line spills and fails on exit, and the s
   assert.ok(CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES >= 32 * CODEX_WORKER_STDOUT_MAX_BYTES, "the stream backstop sits far above the retention budget");
   const codex = fakeCodex();
   try {
+    await codex.spawned;
     codex.stdout.write('{"type":"turn.started"');
     codex.stdout.write("x".repeat(CODEX_WORKER_STDOUT_MAX_BYTES + 1));
     assert.equal(codex.teardowns(), 0, "retention pressure does not terminate the worker");
@@ -141,6 +149,7 @@ test("completed Codex messages reach the retained native fix tail without raw co
   const pending = receipt.spawn({ cwd: root, prompt: "fixture", settingsFile: join(root, "settings.json"), permissionMode: "default" });
   const f = await started;
   try {
+    await f.spawned;
     f.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "command_execution", aggregated_output: "DO_NOT_RETAIN_RAW_COMMAND_OUTPUT" } }) + "\n");
     const wire = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "SWC validation remains unmeasured" } }) + "\n";
     f.stdout.write(wire.slice(0, 19));
