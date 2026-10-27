@@ -149,8 +149,13 @@ test("W1-T9484: every suite declared gitFree runs with git absent from PATH", ()
 function reachFixture(headValue = 2, baseValue = 1, baseExpected = 1) {
   const f = fixture();
   const snapshot = JSON.parse(readFileSync(f.snapshot, "utf8"));
-  snapshot.instrumentSurface = [];
+  snapshot.instrumentSurface = ["^scripts/citation-anchor-census\\.mjs$"];
   snapshot.instrumentExclusions = {};
+  const pkg = JSON.parse(readFileSync(join(f.root, "package.json"), "utf8"));
+  pkg.scripts = { fixture: "node scripts/citation-anchor-census.mjs" };
+  const packageText = JSON.stringify(pkg);
+  writeFileSync(join(f.root, "package.json"), packageText);
+  snapshot.baseBlobs["package.json"] = packageText;
   const suite = "test/the-affected-suite-reach-ratchet.test.ts";
   const module = "src/lib/affected-suites.ts";
   const baseline = "scripts/affected-reach-baseline.json";
