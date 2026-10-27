@@ -583,8 +583,11 @@ export function fleetPruneInputs(inflightDir: string, scratchDir: string = tmpdi
       }
       for (const child of children) cloneRoots.push({ label: `${name}/${child}`, root: join(scratchDir, name, child) });
     }
+    // A clone's own `.git` dir is also a child of its parent root, so the same alternates file is reachable twice: count it once.
+    const seen = new Set<string>();
     for (const { label, root } of cloneRoots) {
       for (const alternates of [join(root, ".git", "objects", "info", "alternates"), join(root, "objects", "info", "alternates")]) {
+        if (seen.has(alternates)) continue;
         let text: string;
         try {
           text = await readFile(alternates, "utf8");
@@ -593,6 +596,7 @@ export function fleetPruneInputs(inflightDir: string, scratchDir: string = tmpdi
           throw err;
         }
         if (!text.split("\n").includes(join(gitDir, "objects"))) continue;
+        seen.add(alternates);
         inputs.push({ source: `borrower:${label}`, at: (await stat(alternates)).mtimeMs });
       }
     }
