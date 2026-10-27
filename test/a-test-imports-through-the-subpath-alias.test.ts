@@ -39,7 +39,7 @@ const imp = (spec: string, name = "x"): string => `import { ${name} } from ${JSO
 const dyn = (spec: string): string => `const m = await import(${JSON.stringify(spec)});`;
 
 function aliasFixtureRoot(): string {
-  return mkdtempSync(join(tmpdir(), "rmd-alias-fixture-"));
+  return realpathSync(mkdtempSync(join(tmpdir(), "rmd-alias-fixture-")));
 }
 
 function populateAliasPackage(dir: string): void {
