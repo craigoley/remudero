@@ -332,11 +332,12 @@ fi
 # when it is empty — run by hand, or by this repo's own tests — fall back to the checked-out branch.
 head_ref=""
 head_sha=""
+head_old_sha=""
 while read -r _local_ref _local_sha remote_ref _remote_sha; do
   # W1-T8000: a deletion line names a ref that no longer carries content; never select it as the head.
   [ "$_local_sha" = "$zero_sha" ] && continue
   case "$remote_ref" in
-    refs/heads/*) head_ref="${remote_ref#refs/heads/}"; head_sha="$_local_sha"; break ;;
+    refs/heads/*) head_ref="${remote_ref#refs/heads/}"; head_sha="$_local_sha"; head_old_sha="$_remote_sha"; break ;;
   esac
 done <<EOF_PUSH_LINES
 $push_lines
@@ -438,6 +439,27 @@ else
   echo "pre-push: scripts/proof-resolve-precheck.mjs absent — skipped, NOT passed" >&2
 fi
 # END proof-resolve precheck
+
+# BEGIN open-PR body proof precheck (W1-T9235) — a push that falsifies its OPEN PR's own stored body proof.
+# OBSERVED 2026-10-13: #11328's follow-up push broke its own `## Acceptance` grep proof; it surfaced as a review FAIL ~20 min
+# later because the precheck above judges PLAN criteria only. Runs only for an UPDATE to an existing remote branch (old sha
+# non-zero; an empty stdin — run by hand or by tests — has no old sha and is skipped), reads the stored body at most once and
+# only when the shared gh read floor is clear, and refuses only a proof newly falsified against a body read fresh.
+if [ -n "$head_old_sha" ] && [ "$head_old_sha" != "$zero_sha" ] && [ "$head_sha" != "HEAD" ]; then
+  if has open-pr-body-proof-precheck.mjs tsx; then
+    node --import "$tsx_loader" "$gate_root/scripts/open-pr-body-proof-precheck.mjs" \
+      --head-ref "$head_ref" --old-sha "$head_old_sha" --new-sha "$head_sha" --remote-url "${2:-}"
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      echo "pre-push: open-pr-body-proof-precheck could not read this push — not blocking on an unreadable check" >&2
+    elif [ "$rc" -ne 0 ]; then
+      fail=1
+    fi
+  else
+    echo "pre-push: scripts/open-pr-body-proof-precheck.mjs absent — skipped, NOT passed" >&2
+  fi
+fi
+# END open-PR body proof precheck
 
 if [ "$fail" -ne 0 ]; then
   echo "" >&2

@@ -114,7 +114,7 @@ test("a copy failure that is not a vanished file still fails the snapshot", () =
 
 for (const listing of [1, 2]) {
   test(listing === 1
-    ? "a source engine lost during the initial snapshot inventory remains a loud failure"
+    ? "a source engine lost during the initial snapshot inventory is recorded as vanished"
     : "the late archive check never revisits an already copied engine directory", (t) => {
     const { state, backups } = liveState(WHOLE);
     t.after(() => rmSync(join(state, ".."), { recursive: true, force: true }));
@@ -132,11 +132,6 @@ for (const listing of [1, 2]) {
     syncBuiltinESMExports();
     let snap: ReturnType<typeof snapshotState>;
     try {
-      if (listing === 1) {
-        assert.throws(() => snapshotState(state, backups), StateBackupError);
-        assert.deepEqual(readdirSync(backups), []);
-        return;
-      }
       snap = snapshotState(state, backups);
     } finally {
       t.mock.restoreAll();
@@ -145,6 +140,14 @@ for (const listing of [1, 2]) {
     assert.equal(visits, 1, "the archive catch-up must not walk engine directories again");
     assert.equal(readFileSync(join(snap.archiveDir, "ledger.ndjson"), "utf8"), WHOLE);
     assert.equal(readFileSync(join(snap.archiveDir, "inbox-proposals.json"), "utf8"), "{}\n");
+    if (listing === 1) {
+      assert.deepEqual(snap.vanished, [engineRel]);
+      assert.equal(fs.existsSync(join(snap.archiveDir, engineRel)), false);
+      assert.deepEqual(snap.entries, ["inbox-proposals.json", "ledger.ndjson"]);
+      assert.equal(readdirSync(backups).length, 1, "only the completed archive remains");
+      return;
+    }
+    assert.deepEqual(snap.vanished, []);
     assert.ok(snap.entries.includes(join(engineRel, "engine.json")), "the copied engine is retained, not excluded");
     assert.equal(readFileSync(join(snap.archiveDir, engineRel, "engine.json"), "utf8"), "{}\n");
   });
