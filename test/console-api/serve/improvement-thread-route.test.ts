@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -100,6 +100,14 @@ test("improvement routes persist conversations and reviewed decisions through pr
       assert.equal(readFileSync(ledgerPath, "utf8"), "");
       assert.equal(existsSync(join(questionsRoot, "state", "improvement-threads")), false);
       assert.equal(existsSync(join(inboxRoot, "repos", "atlas", "plan", "tasks.yaml")), false);
+      // Damaged saved records behind the read routes are uncertain: never an absent decision or an unsaved chat.
+      writeFileSync(join(deps.stateDir, "improvement-threads", "actions", `${filed.body.operation.operationId}.json`), "{corrupt");
+      const damagedAction = await send<{ state: string }>(`/v1/improvements/action?operationId=${filed.body.operation.operationId}`);
+      assert.equal(damagedAction.status, 503); assert.equal(damagedAction.body.state, "uncertain");
+      const linkDir = join(deps.stateDir, "improvement-threads", "thread-links"), links = readdirSync(linkDir);
+      assert.equal(links.length, 1, "the saved link corpus was observed"); writeFileSync(join(linkDir, links[0]!), "{corrupt");
+      const damagedLink = await send<{ state: string }>(`/v1/improvements/thread?threadId=${encodeURIComponent(threadId)}`);
+      assert.equal(damagedLink.status, 503); assert.equal(damagedLink.body.state, "uncertain");
     } finally { await app.close(); }
   });
 });

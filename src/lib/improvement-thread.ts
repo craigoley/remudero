@@ -536,6 +536,19 @@ function actionTarget(intent: Intent): { operationId: string; stateDir: string; 
   return { operationId: "", stateDir: "", repoRoot: dirname(dirname(intent.scope.planPath)) };
 }
 
+/** Mark the saved goal draftable for the native selector. Idempotent: the request route and the daemon's recovery both call it. */
+function fireDraftTrigger(intent: Intent, goalDigest: string, owns: () => boolean): void {
+  const registryPath = join(intent.scope.inboxStateDir, "inbox-proposals.json");
+  strictRegistry(registryPath);
+  updateProposalRegistry(registryPath, current => {
+    strictRegistry(registryPath); if (!owns()) throw new Error("Improvement action ownership changed.");
+    const proposal = current.find(row => row.id === intent.proposalId);
+    if (!proposal || !proposal.improvement || proposal.improvement.goalDigest !== goalDigest || !proposal.improvement.conversationReady) throw new Error("The conversation changed before drafting was requested.");
+    return current.map(row => row.id === intent.proposalId ? { ...row, trigger: { fired: true, description: "Plan drafting explicitly requested for this saved goal." } } : row);
+  }, { maxWaitMs: 0 });
+  syncProposalRegistryEntry(registryPath, intent.proposalId);
+}
+
 /** Save a sealed decision for the daemon. Filing binds the exact reviewed draft. */
 export async function requestImprovementAction(kind: ImprovementAction["kind"], value: unknown, deps: ImprovementThreadContext, afterActionPersist?: (stage: "prepared" | "indexed" | "requested") => void): Promise<ImprovementActionResult> {
   const input = actionInput(value, kind);
@@ -595,17 +608,7 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
       writeActionIndex(deps.stateDir, { ...index, [kind]: operationId }, owns); wrote = true; afterActionPersist?.("indexed");
       action.state = "requested"; writeAction(deps.stateDir, action, owns); afterActionPersist?.("requested");
     }
-    if (kind === "draft" && ["requested", "waiting"].includes(action.state)) {
-      const registryPath = join(intent.scope.inboxStateDir, "inbox-proposals.json");
-      strictRegistry(registryPath);
-      updateProposalRegistry(registryPath, current => {
-        strictRegistry(registryPath); if (!owns!()) throw new Error("Improvement action ownership changed.");
-        const proposal = current.find(row => row.id === intent.proposalId);
-        if (!proposal || !proposal.improvement || proposal.improvement.goalDigest !== input.goalDigest || !proposal.improvement.conversationReady) throw new Error("The conversation changed before drafting was requested.");
-        return current.map(row => row.id === intent.proposalId ? { ...row, trigger: { fired: true, description: "Plan drafting explicitly requested for this saved goal." } } : row);
-      }, { maxWaitMs: 0 });
-      syncProposalRegistryEntry(registryPath, intent.proposalId);
-    }
+    if (kind === "draft" && ["requested", "waiting"].includes(action.state)) fireDraftTrigger(intent, input.goalDigest, owns);
     if (!owns()) return fail("uncertain", "The decision was saved, but its writer changed before handoff.");
     // The daemon discovers this durable request without a browser or a service-side launcher.
     return { state: "requested", operation: action, execution: { state: "not_requested" } };
@@ -686,6 +689,8 @@ export async function runImprovementAction(operationId: string, deps: Improvemen
     writeAction(deps.stateDir, action, owns);
     if (!owns()) return fail("uncertain", "The action writer changed before execution.");
     if (action.kind === "draft") {
+      // A request interrupted after its saved state never fired the trigger; the owned handoff repairs it before drafting.
+      fireDraftTrigger(intent, action.goalDigest, owns);
       await draft(target);
       if (!owns()) return fail("uncertain", "The draft writer changed before acknowledgement.");
       const after = readImprovementThread(action.requestId, deps);
