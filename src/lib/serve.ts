@@ -2962,7 +2962,11 @@ function assembleServeRoutes(
     ...buildProductRoutes({ root: deps.fleetControlRoot }),
     ...buildProductRepositoryRoutes({ root: deps.fleetControlRoot }),
     ...buildProductDeploymentRoutes({ root: deps.fleetControlRoot }),
-    ...buildProductBuildRoutes({ root: deps.fleetControlRoot, repoRoot: deps.panelGraph.root }),
+    // W1-T10615: the kick marker lands under the target's OWN daemon root, resolved through the same
+    // registry, state base and core instance this serve's instance gateway mounts.
+    ...buildProductBuildRoutes({ root: deps.fleetControlRoot, repoRoot: deps.panelGraph.root, instances: {
+      registryPath: deps.registry?.repoRegistryPath ?? deps.instances?.registryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
+      stateBase: deps.instances?.stateBase, coreInstance: deps.instances?.coreInstance, readText: deps.instances?.readText } }),
     withStatusNeedsYou(withFleetRuntimeHealth(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), readRuntimeHealth), needsYouGates),
     ...buildRepoDashboardRoutes({
       selectedRegistryObserver,

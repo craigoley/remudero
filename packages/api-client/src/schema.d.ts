@@ -254,7 +254,7 @@ export interface components {
     };
     ProductBuildError: {
       version: "product-build-v1";
-      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "fleet_halted" | "kick_failed";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "fleet_halted" | "kick_failed";
     };
     /** The service's scope, tier or confirmation gate refused access before the build handler. */
     ProductBuildAccessError: {

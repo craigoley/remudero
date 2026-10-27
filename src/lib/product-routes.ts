@@ -129,7 +129,7 @@ const buildStatus: Record<ProductBuildCode, number> = {
   invalid_identity: 403, invalid_input: 400, not_found: 404, stale_revision: 409, idempotency_conflict: 409,
   capacity: 409, busy: 503, corrupt: 503, unavailable: 503, outcome_unknown: 503, recovery_required: 503,
   repository_missing: 409, repository_not_found: 404, repository_conflict: 409, provider_unreadable: 503,
-  plan_not_approved: 409, target_not_enrolled: 409, target_unreadable: 503, runner_missing: 409,
+  plan_not_approved: 409, target_not_enrolled: 409, target_unreadable: 503, target_daemon_missing: 409, runner_missing: 409,
   bootstrap_unverified: 409, task_not_found: 404, task_unreadable: 503, task_stale: 409, task_claimed: 409,
   task_merged: 409, budget_exceeded: 409, fleet_halted: 409, kick_failed: 503,
 };

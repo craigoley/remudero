@@ -30,7 +30,7 @@ const identity: IdentityProvider = {
   },
 };
 
-function assembled(root: string, prefix = "/v1/products") {
+function assembled(root: string, prefix = "/v1/products", extra: Partial<ServeDeps> = {}) {
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan"), { recursive: true });
   const ledgerPath = join(root, "state/ledger.ndjson");
@@ -42,7 +42,7 @@ function assembled(root: string, prefix = "/v1/products") {
     panelGraph: { root, planPath, ledgerPath, github: { prView: () => null }, statusGithub: fakeGitHub(),
       ratify: { approve: () => {}, reframe: () => {} } },
     ledgerPath, issues: { close: () => {} }, fleetControlRoot: root, questionsRoot: root,
-    tokens: { read: "fixture-read", write: "fixture-write" },
+    tokens: { read: "fixture-read", write: "fixture-write" }, ...extra,
   };
   const before = readdirSync(root, { recursive: true });
   const routes = buildServeRoutes(deps).filter((route) => route.path === prefix);
@@ -203,6 +203,10 @@ test("W1-T10615: the served product build operation matches the authenticated AP
   const root = ownedFixtureDir(t, "product-build-http").dir;
   mkdirSync(join(root, ".remudero"), { recursive: true });
   writeFileSync(join(root, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
+  // The repo-tracked instance registry names Wreckterra's own daemon; its config root is mounted under the state base.
+  const registry = join(root, ".remudero", "daemon-instances.yaml");
+  const daemonState = join(root, "instances", "wreckterra", "state");
+  writeFileSync(registry, "instances:\n  core:\n    github_repo: craigoley/remudero\n");
   const store = new ProductIntentStore({ root });
   const saved = store.write("clerk:alice", command);
   assert.ok(saved.ok);
@@ -213,7 +217,7 @@ test("W1-T10615: the served product build operation matches the authenticated AP
   const shard = `- id: W9-T1\n  origin: product-plan#${productId}/plan-approved-1\n  status: queued\n  budget_usd: 10\n`;
   shim.addRoute({ when: "contents/plan/tasks.d/W9-T1-first.yaml", stdout: shard });
   const products = assembled(root);
-  const mounted = assembled(root, "/v1/products/build");
+  const mounted = assembled(root, "/v1/products/build", { instances: { stateBase: join(root, "instances") } });
   assert.equal(mounted[0]?.tier, "high", "starting a build is a high-tier action");
   assert.equal(mounted[0]?.scope, "write");
   const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes: [...products, ...mounted] });
@@ -238,18 +242,24 @@ test("W1-T10615: the served product build operation matches the authenticated AP
     assert.equal((await send("bob", build)).status, 404);
     assert.equal((await send("alice", { ...build, planEvidenceId: "unapproved" })).status, 409);
     assert.equal(shim.calls().length, 1, "only the unapproved plan reached the transport, and only for the repository identity read");
+    // No live daemon instance drives the target yet: there is nowhere the kick could be delivered.
+    const undriven = await send("alice", build);
+    assert.equal(undriven.status, 409);
+    assert.equal(undriven.body.error, "target_daemon_missing");
+    writeFileSync(registry, "instances:\n  core:\n    github_repo: craigoley/remudero\n  wreckterra:\n    github_repo: craigoley/wreckterra\n");
     // The task is already claimed by another lane, so the assembled operation refuses it explicitly.
     const claimed = await send("alice", build);
     assert.equal(claimed.status, 409);
     assert.equal(claimed.body.error, "task_claimed");
-    assert.ok(!existsSync(join(root, "state", "KICK_REQUESTED-wreckterra:W9-T1")), "a refused start writes no marker");
+    assert.ok(!existsSync(join(daemonState, "KICK_REQUESTED-wreckterra:W9-T1")), "a refused start writes no marker");
     // Free the claim: the real default target and kick now start the build, queued then observed running.
     shim.addRoute({ when: "matching-refs/rmd-dispatch/W9-T1", stdout: JSON.stringify([]) });
     const started = await send("alice", { ...build, requestId: "route-build-000002" });
     assert.equal(started.status, 200);
     assert.equal(started.body.receipt?.outcome, "queued");
     assert.equal(started.body.replayed, false);
-    assert.ok(existsSync(join(root, "state", "KICK_REQUESTED-wreckterra:W9-T1")), "the existing repo-scoped kick marker was written");
+    assert.ok(existsSync(join(daemonState, "KICK_REQUESTED-wreckterra:W9-T1")), "the repo-scoped kick marker sits under Wreckterra's own daemon root");
+    assert.ok(!existsSync(join(root, "state", "KICK_REQUESTED-wreckterra:W9-T1")), "the core root, which no Wreckterra daemon reads, gets none");
     assert.ok(!shim.calls().some((call) => call.includes("-X POST")), "starting a build makes no provider write");
     assert.equal((await send("alice", { ...build, requestId: "route-build-000002" })).body.replayed, true);
   } finally { await new Promise<void>((resolve, reject) => instance.close((error) => error ? reject(error) : resolve())); }

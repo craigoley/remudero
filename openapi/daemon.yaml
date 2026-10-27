@@ -520,7 +520,7 @@ components:
         version: { type: string, enum: [product-build-v1] }
         error:
           type: string
-          enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, request_too_large, repository_missing, repository_not_found, repository_conflict, provider_unreadable, plan_not_approved, target_not_enrolled, target_unreadable, runner_missing, bootstrap_unverified, task_not_found, task_unreadable, task_stale, task_claimed, task_merged, budget_exceeded, fleet_halted, kick_failed]
+          enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, request_too_large, repository_missing, repository_not_found, repository_conflict, provider_unreadable, plan_not_approved, target_not_enrolled, target_unreadable, target_daemon_missing, runner_missing, bootstrap_unverified, task_not_found, task_unreadable, task_stale, task_claimed, task_merged, budget_exceeded, fleet_halted, kick_failed]
     ProductBuildAccessError:
       type: object
       additionalProperties: false
@@ -14895,9 +14895,11 @@ paths:
         Immediately before acting the service re-verifies repository identity and head, the approved
         plan evidence, target enrollment, the registered acceptance runner, README-only bootstrap
         receipts at the exact head, task provenance, claims, merged credit and the inherited budget.
-        It writes only the existing repo-scoped kick marker; the daemon's own admission still decides.
-        The receipt reports queued until admitted or running is independently observed with real
-        evidence. A refusal writes nothing. Responses use Cache-Control private, no-store.
+        It writes only the existing repo-scoped kick marker, under the config root of the one live
+        registry instance that drives the target, and that daemon's own admission still decides.
+        The receipt reports queued until admitted (a held dispatch claim) or running (a claim or run
+        branch with a sign of life inside two renewal intervals) is independently observed. A refusal
+        writes nothing. Responses use Cache-Control private, no-store.
       requestBody:
         required: true
         content:
@@ -14933,7 +14935,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ProductBuildError" }
         "409":
-          description: A refused precondition - stale revision or ownership, unapproved plan, missing runner or bootstrap, claimed or merged task, budget, or halted fleet.
+          description: A refused precondition - stale revision or ownership, unapproved plan, missing runner, target daemon or bootstrap, claimed or merged task, budget, or halted fleet.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductBuildError" }

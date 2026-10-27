@@ -1,12 +1,16 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { systemClock, type Clock } from "./clock.js";
+import { daemonInstanceRegistryPath } from "./deployer.js";
 import { CLAIM_SILENCE_FLOOR_MS, claimLastSignOfLife, dispatchClaimRef, parseClaimAnchorMessage, type RunBranchCommit } from "./dispatch-claim.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { isPaused, isSafeTaskId, isStopped, requestKick } from "./fleet-control.js";
 import { ghTextAsync } from "./github-transport.js";
+import { CORE_INSTANCE, DEFAULT_INSTANCE_STATE_BASE, instanceStateRoot } from "./instance-gateway.js";
+import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import { loadManagedRepos } from "./managed-repos.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import {
@@ -45,7 +49,7 @@ export interface ProductBuildReceipt {
 }
 export type ProductBuildCode = ProductStoreCode
   | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable"
-  | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "runner_missing" | "bootstrap_unverified"
+  | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified"
   | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded"
   | "fleet_halted" | "kick_failed";
 export type ProductBuildResult =
@@ -66,16 +70,59 @@ export interface ProductBuildTarget {
   observe(repository: BuildRepository, taskId: string): Promise<BuildObservation>;
 }
 
+/** Which daemon drives the target: its config root, the root that daemon's own kick port reads. */
+export type DaemonRootRead = { state: "found"; root: string; instance: string } | { state: "absent" } | { state: "unreadable" };
+
+/** Where the daemon instances live, as serve's own instance gateway names them. */
+export interface ProductBuildInstances {
+  /** The repo-tracked daemon instance registry; defaults to the one under `repoRoot`. */
+  registryPath?: string;
+  /** Where each non-core instance's config root is mounted for this process. */
+  stateBase?: string;
+  coreInstance?: string;
+  readText?: (path: string) => string;
+}
+
 export interface ProductBuildOptions {
+  /** This process's fleet root: the product store, and the core instance's daemon root. */
   root?: string;
-  /** The checkout whose reviewed managed-repository set enrolls targets. */
+  /** The checkout whose reviewed managed-repository set enrolls targets and whose registry names their daemons. */
   repoRoot?: string;
   provider?: Pick<ProductRepositoryProvider, "read">;
   target?: ProductBuildTarget;
   store?: ProductIntentStore;
-  /** The existing guarded repo-scoped kick marker; the daemon's own admission still decides. */
+  instances?: ProductBuildInstances;
+  /** The target's own daemon root; defaults to {@link registryDaemonRoot}. */
+  daemonRoot?: (repository: BuildRepository) => DaemonRootRead;
+  /** The existing guarded repo-scoped kick marker, written under the TARGET daemon's root; its admission still decides. */
   kick?: (root: string, taskId: string, origin: string, repo: string) => void;
   clock?: Clock;
+}
+
+/**
+ * The config root the target repository's OWN daemon reads kick markers from. The registry names one
+ * live instance per repository: core's root is this process's fleet root, and every other instance's is
+ * its state root under `stateBase`, the convention instance-gateway.ts reads that instance's ledger and
+ * control flags through. A repository no live instance drives has no daemon to deliver to.
+ */
+export function registryDaemonRoot(coreRoot: string | undefined, options: ProductBuildInstances & { repoRoot?: string }): (repository: BuildRepository) => DaemonRootRead {
+  return (repository) => {
+    const path = options.registryPath ?? (options.repoRoot === undefined ? undefined : daemonInstanceRegistryPath(options.repoRoot));
+    if (path === undefined) return { state: "unreadable" };
+    let instances: RegistryInstance[];
+    try {
+      instances = parseInstanceRegistry((options.readText ?? ((file: string) => readFileSync(file, "utf8")))(path)).instances;
+    } catch (error) {
+      // An unreadable or malformed registry is an unknown daemon, which the caller refuses; it is never "no daemon".
+      void error; return { state: "unreadable" };
+    }
+    const wanted = `${repository.owner}/${repository.name}`.toLowerCase();
+    const instance = instances.find((entry) => entry.live && entry.repo.toLowerCase() === wanted);
+    if (!instance) return { state: "absent" };
+    const root = instance.name === (options.coreInstance ?? CORE_INSTANCE) ? coreRoot
+      : instanceStateRoot(instance, options.stateBase ?? DEFAULT_INSTANCE_STATE_BASE).root;
+    return root === undefined ? { state: "unreadable" } : { state: "found", root, instance: instance.name };
+  };
 }
 
 class Fault extends RmdError {
@@ -189,6 +236,7 @@ export class ProductBuildService {
   private readonly target: ProductBuildTarget;
   private readonly store: ProductIntentStore;
   private readonly kick: NonNullable<ProductBuildOptions["kick"]>;
+  private readonly daemonRoot: NonNullable<ProductBuildOptions["daemonRoot"]>;
   private readonly clock: Clock;
   private chain: Promise<unknown> = Promise.resolve();
 
@@ -198,6 +246,7 @@ export class ProductBuildService {
     this.target = options.target ?? ghProductBuildTarget({ repoRoot: options.repoRoot, clock: this.clock });
     this.store = options.store ?? new ProductIntentStore({ root: options.root });
     this.kick = options.kick ?? ((root, taskId, origin, repo) => { requestKick(root, taskId, origin, repo); });
+    this.daemonRoot = options.daemonRoot ?? registryDaemonRoot(options.root, { ...options.instances, repoRoot: options.repoRoot });
   }
 
   async execute(actor: string, command: unknown): Promise<ProductBuildResult> {
@@ -258,6 +307,12 @@ export class ProductBuildService {
       if (inspected.enrolled === undefined) throw new Fault("target_unreadable");
       if (!inspected.enrolled) throw new Fault("target_not_enrolled");
       if (!this.target.runnerRegistered(subject)) throw new Fault("runner_missing");
+      // The marker goes where the target's OWN daemon reads it, and that daemon must not be halted either.
+      const daemon = this.daemonRoot(subject);
+      if (daemon.state === "unreadable") throw new Fault("target_unreadable");
+      if (daemon.state === "absent") throw new Fault("target_daemon_missing");
+      if (!isAbsolute(daemon.root)) throw new Fault("unavailable");
+      if (isStopped(daemon.root) || isPaused(daemon.root)) throw new Fault("fleet_halted");
       if (inspected.head === undefined || inspected.readmeOnly === undefined) throw new Fault("target_unreadable");
       if (!bootstrapConfirmed(product, inspected)) throw new Fault("bootstrap_unverified");
 
@@ -271,7 +326,7 @@ export class ProductBuildService {
       const budget = product.brief.resourceEnvelope?.budgetUsd;
       if (budget === undefined || task.budgetUsd === undefined || task.budgetUsd > budget) throw new Fault("budget_exceeded");
 
-      try { this.kick(root, input.taskId, `product:${product.id}`, subject.name); }
+      try { this.kick(daemon.root, input.taskId, `product:${product.id}`, subject.name); }
       catch (error) { throw Object.assign(new Fault("kick_failed"), { cause: error }); }
       const queued = this.append(actor, product, requestKey, { id: operationId, outcome: "queued", url: `https://github.com/${subject.owner}/${subject.name}` });
       product = queued;

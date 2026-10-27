@@ -3,11 +3,15 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
-  BOOTSTRAP_CHECKS, bootstrapConfirmed, bootstrapEvidenceId, ghProductBuildTarget, productPlanOrigin, ProductBuildService,
+  BOOTSTRAP_CHECKS, bootstrapConfirmed, bootstrapEvidenceId, ghProductBuildTarget, productPlanOrigin, ProductBuildService, registryDaemonRoot,
   type BuildObservation, type BuildTask, type ProductBuildOptions, type ProductBuildTarget, type TargetInspection, type TaskRead,
 } from "#src/lib/product-build.js";
+import { daemonKickPort } from "#src/cli/commands/daemon.js";
 import { fixedClock } from "#src/lib/clock.js";
+import { runDaemon } from "#src/lib/daemon.js";
 import { CLAIM_SILENCE_FLOOR_MS } from "#src/lib/dispatch-claim.js";
+import { requestKick } from "#src/lib/fleet-control.js";
+import { loadPlan } from "#src/lib/plan.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -19,6 +23,8 @@ const HEAD = "a".repeat(40);
 const ID = 1432832754;
 const identity = { provider: "github", id: ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public", verifiedAt: "2026-10-26T00:00:00.000Z" } as const;
 const planEvidence = { id: "plan-approved-1", stage: "plan", outcome: "succeeded", objectiveRevision: 1, observedAt: "2026-10-26T00:00:01.000Z", references: [] } as const;
+/** The repo-tracked registry shape: core drives remudero; Wreckterra has its own (shadow) daemon instance. */
+const REGISTRY = "instances:\n  core:\n    github_repo: craigoley/remudero\n  wreckterra:\n    github_repo: craigoley/wreckterra\n    mode: shadow\n";
 
 class FakeTarget implements ProductBuildTarget {
   inspection: TargetInspection = { enrolled: true, head: HEAD, readmeOnly: false };
@@ -57,12 +63,18 @@ function fixture(t: TestContext, over: { target?: FakeTarget; envelope?: boolean
     async read() { this.reads += 1; return this.next; },
   };
   const kicks: string[][] = [];
+  // The real registry resolver over a real registry file: the target's own daemon root sits under the state base.
+  const registryPath = join(root, "daemon-instances.yaml");
+  writeFileSync(registryPath, REGISTRY);
+  const stateBase = join(root, "instances");
+  const daemonRoot = join(stateBase, "wreckterra");
   const options: ProductBuildOptions = { root, store, target, provider, clock: fixedClock(Date.parse("2026-10-26T01:00:00.000Z")),
-    kick: (_root, taskId, origin, repo) => { kicks.push([taskId, origin, repo]); } };
+    instances: { registryPath, stateBase },
+    kick: (kickRoot, taskId, origin, repo) => { kicks.push([taskId, origin, repo]); assert.equal(kickRoot, daemonRoot, "the marker goes to the target's own daemon root"); } };
   const service = new ProductBuildService(options);
   const command = (extra: Record<string, unknown> = {}) => ({ version: "product-build-v1", requestId: "build-request-0001", productId,
     planEvidenceId: planEvidence.id, taskId: "W9-T1", expectedRevision: 2, expectedObjectiveRevision: 1, ...extra });
-  return { root, store, productId, target, provider, kicks, service, command, options };
+  return { root, daemonRoot, registryPath, stateBase, store, productId, target, provider, kicks, service, command, options };
 }
 const refused = async (promise: ReturnType<ProductBuildService["execute"]>) => { const result = await promise; assert.equal(result.ok, false); return result.code; };
 
@@ -146,14 +158,127 @@ test("W1-T10615: a product build writes the real repo-scoped kick marker by defa
   const service = new ProductBuildService({ ...f.options, kick: undefined });
   const started = await service.execute(actor, f.command());
   assert.ok(started.ok);
-  assert.ok(existsSync(kickMarker(f.root, "wreckterra", "W9-T1")));
-  assert.ok(!existsSync(join(f.root, "state", "KICK_REQUESTED-W9-T1")), "the unscoped marker of this repository's own task is untouched");
+  assert.ok(existsSync(kickMarker(f.daemonRoot, "wreckterra", "W9-T1")), "the marker sits under the target daemon's own config root");
+  assert.ok(!existsSync(kickMarker(f.root, "wreckterra", "W9-T1")), "the core root, which no Wreckterra daemon reads, gets no marker");
+  assert.ok(!existsSync(join(f.daemonRoot, "state", "KICK_REQUESTED-W9-T1")), "the unscoped marker of the self daemon is untouched");
   mkdirSync(join(f.root, "state"), { recursive: true });
   writeFileSync(join(f.root, "state", "PAUSE"), "{}");
   const halted = fixture(t);
   writeFileSync(join(halted.root, "state", "STOP"), "{}");
   assert.equal(await refused(halted.service.execute(actor, halted.command())), "fleet_halted");
   assert.equal(await refused(new ProductBuildService({ ...halted.options, root: undefined }).execute(actor, halted.command())), "unavailable");
+  // The target's own daemon being halted refuses too, before any marker.
+  const paused = fixture(t);
+  mkdirSync(join(paused.daemonRoot, "state"), { recursive: true });
+  writeFileSync(join(paused.daemonRoot, "state", "PAUSE"), "{}");
+  assert.equal(await refused(paused.service.execute(actor, paused.command())), "fleet_halted");
+  assert.deepEqual(paused.kicks, []);
+});
+
+/** The TARGET repository's own plan, as its daemon loads it: the product task, an ordinary one, and a human-only one. */
+const targetPlan = (productId: string) => `
+- id: W9-T0
+  title: an ordinary queued task
+  repo: wreckterra
+  type: implement
+  depends_on: []
+  status: queued
+- id: W9-T1
+  title: the product's first source task
+  repo: wreckterra
+  type: implement
+  depends_on: []
+  status: queued
+  origin: product-plan#${productId}/plan-approved-1
+  budget_usd: 10
+- id: W9-T2
+  title: a task only a human verifies
+  repo: wreckterra
+  type: implement
+  verify: human
+  depends_on: []
+  status: queued
+`;
+
+test("W1-T10615: a product build kick reaches only the target daemon's own admission, consumed once", async (t) => {
+  const f = fixture(t);
+  const service = new ProductBuildService({ ...f.options, kick: undefined });
+  assert.ok((await service.execute(actor, f.command())).ok);
+  const planDir = ownedFixtureDir(t, "product-build-target-plan").dir;
+  writeFileSync(join(planDir, "tasks.yaml"), targetPlan(f.productId));
+  const plan = loadPlan(join(planDir, "tasks.yaml"));
+  // One real daemon pass over the CLI's own kick binding: the daemon's admission is the only judge.
+  const drive = async (port: ReturnType<typeof daemonKickPort>) => {
+    const spawned: string[] = [];
+    const lines: { step: string; extra: Record<string, unknown> }[] = [];
+    await runDaemon(plan, {
+      refreshMerged: () => () => false,
+      runOne: async (id) => { spawned.push(id); return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }; },
+      ...port, sleep: async () => {}, log: (step, extra = {}) => { lines.push({ step, extra }); },
+    }, { headroomEnabled: false, max: 1 });
+    return { spawned, kicks: lines.filter((line) => line.step.startsWith("console.kick_")) };
+  };
+  const marker = kickMarker(f.daemonRoot, "wreckterra", "W9-T1");
+  assert.deepEqual(daemonKickPort(f.root, { repo: "remudero", isSelf: true }).pendingKicks(), [], "the core daemon's own root holds no such marker");
+  // Another repository's daemon, even over the same root, neither dispatches nor refuses (and so never clears) it.
+  for (const other of [{ repo: "remudero-site", isSelf: false }, { repo: "remudero", isSelf: true }]) {
+    const run = await drive(daemonKickPort(f.daemonRoot, other));
+    assert.deepEqual(run.kicks, [], `${other.repo} left another repository's kick alone`);
+    assert.deepEqual(run.spawned, ["W9-T0"], `${other.repo} ran its natural pick, not the kicked task`);
+    assert.ok(existsSync(marker), `${other.repo} left the marker in place`);
+  }
+  // The target daemon picks the task from its OWN plan, and its admission (assertRunnable) admits it.
+  const own = daemonKickPort(f.daemonRoot, { repo: "wreckterra", isSelf: false });
+  assert.deepEqual(own.pendingKicks().map((kick) => [kick.taskId, kick.repo, kick.origin]), [["W9-T1", "wreckterra", `product:${f.productId}`]]);
+  const dispatched = await drive(own);
+  assert.deepEqual(dispatched.spawned, ["W9-T1"], "the kicked task ran ahead of the plan's natural pick, W9-T0");
+  assert.deepEqual(dispatched.kicks, [{ step: "console.kick_dispatched", extra: { task: "W9-T1", origin: `product:${f.productId}`, repo: "wreckterra" } }]);
+  assert.ok(!existsSync(marker), "the exact marker was consumed");
+  assert.deepEqual((await drive(own)).kicks, [], "consumed once: the next pass finds no kick");
+  // A refused kick clears exactly its own marker; the unscoped and another repository's marker for the same id remain.
+  assert.ok((await service.execute(actor, f.command({ requestId: "build-request-0002", taskId: "W9-T2", expectedRevision: 3 }))).ok);
+  requestKick(f.daemonRoot, "W9-T2", "console-run");
+  requestKick(f.daemonRoot, "W9-T2", "escalation-triage", "remudero-site");
+  const refusal = await drive(own);
+  assert.deepEqual(refusal.kicks.map((line) => [line.step, line.extra.task, line.extra.repo]), [["console.kick_refused", "W9-T2", "wreckterra"]]);
+  assert.match(String(refusal.kicks[0]!.extra.reason), /verify:human/, "the daemon's own admission named the refusal");
+  assert.ok(!refusal.spawned.includes("W9-T2"), "a refused kick never dispatches");
+  assert.ok(!existsSync(kickMarker(f.daemonRoot, "wreckterra", "W9-T2")), "the refused marker was cleared");
+  assert.ok(existsSync(join(f.daemonRoot, "state", "KICK_REQUESTED-W9-T2")), "the unscoped marker is not this daemon's to clear");
+  assert.ok(existsSync(kickMarker(f.daemonRoot, "remudero-site", "W9-T2")), "nor is another repository's");
+  // A marker whose body names another repository than its file name is never offered, so no clear can miss it.
+  writeFileSync(kickMarker(f.daemonRoot, "wreckterra", "W9-T0"), JSON.stringify({ taskId: "W9-T0", origin: "hand", requestedAt: "2026-10-26T00:00:00.000Z" }));
+  assert.deepEqual(own.pendingKicks(), []);
+  assert.deepEqual(daemonKickPort(f.daemonRoot, { repo: "remudero", isSelf: true }).pendingKicks().map((kick) => kick.origin), ["console-run"]);
+});
+
+test("W1-T10615: a product build refuses a target no live daemon instance drives", async (t) => {
+  const f = fixture(t);
+  writeFileSync(f.registryPath, "instances:\n  core:\n    github_repo: craigoley/remudero\n  old:\n    github_repo: craigoley/wreckterra\n    retired: true\n");
+  assert.equal(await refused(f.service.execute(actor, f.command())), "target_daemon_missing", "a retired instance drives nothing");
+  writeFileSync(f.registryPath, "instances:\n  core:\n  wreckterra:\n");
+  assert.equal(await refused(f.service.execute(actor, f.command())), "target_unreadable", "a malformed registry is unknown, never no daemon");
+  assert.equal(await refused(new ProductBuildService({ ...f.options, instances: undefined }).execute(actor, f.command())), "target_unreadable",
+    "no registry path and no checkout is unknown");
+  assert.equal(await refused(new ProductBuildService({ ...f.options, daemonRoot: () => ({ state: "found", root: "relative/state", instance: "wreckterra" }) })
+    .execute(actor, f.command())), "unavailable", "a daemon root that is not absolute is never written to");
+  assert.deepEqual(f.kicks, [], "no refusal wrote a marker");
+  // The resolver itself: core's daemon root is this process's fleet root; any other is its state root under the base.
+  const repo = { id: ID, owner: "CraigOley", name: "Wreckterra", defaultBranch: "main" };
+  writeFileSync(f.registryPath, REGISTRY);
+  assert.deepEqual(registryDaemonRoot(f.root, { registryPath: f.registryPath, stateBase: f.stateBase })(repo),
+    { state: "found", root: f.daemonRoot, instance: "wreckterra" }, "repository identity is matched without case");
+  assert.deepEqual(registryDaemonRoot(f.root, { registryPath: f.registryPath })({ ...repo, owner: "craigoley", name: "remudero" }),
+    { state: "found", root: f.root, instance: "core" });
+  assert.deepEqual(registryDaemonRoot(undefined, { registryPath: f.registryPath })({ ...repo, name: "remudero" }), { state: "unreadable" });
+  assert.deepEqual(registryDaemonRoot(f.root, { registryPath: f.registryPath })({ ...repo, name: "elsewhere" }), { state: "absent" });
+  assert.equal((registryDaemonRoot(f.root, { registryPath: f.registryPath })(repo) as { root: string }).root, "/home/node/rmd-instances/wreckterra",
+    "the default state base is the instance gateway's own");
+  // With only a checkout, the registry is the repo-tracked one under it.
+  const checkout = ownedFixtureDir(t, "product-build-registry").dir;
+  mkdirSync(join(checkout, ".remudero"), { recursive: true });
+  writeFileSync(join(checkout, ".remudero", "daemon-instances.yaml"), REGISTRY);
+  assert.deepEqual(registryDaemonRoot(f.root, { repoRoot: checkout, stateBase: f.stateBase })(repo), { state: "found", root: f.daemonRoot, instance: "wreckterra" });
 });
 
 test("W1-T10615: queued and refused product work never reads as running", async (t) => {
