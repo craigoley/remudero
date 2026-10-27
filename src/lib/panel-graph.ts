@@ -344,7 +344,7 @@ export function proposeHandRouteFeedback(
       evidence = github.changedFileEvidence?.(pr.url) ?? { status: "unknown", reason: "qualified_cache_unavailable" };
     } catch {
       const reason = "source_evidence_read_failed";
-    return uncertain(reason);
+      return uncertain(reason);
     }
     if (evidence.status !== "complete") return uncertain(evidence.reason);
     if (evidence.repository !== repository || evidence.prNumber !== pr.number || evidence.headRefOid !== pr.headRefOid || evidence.prState !== "MERGED" || evidence.complete !== true || evidence.source !== "github_rest_pull_files_paginated" || evidence.freshness !== "immutable_merged_head" || !Number.isFinite(evidence.observedAt)) return uncertain("source_evidence_binding_mismatch");
@@ -364,7 +364,9 @@ export function proposeHandRouteFeedback(
     });
     if (!summary) return refuse("source_receipt_exceeds_existing_summary_contract");
     const result = landFeedbackStatusContent(root, relPath, stringifyYaml({ ...entry, status: "accepted", proposal_pr: pr.url, summary }), land);
-    if (result.error || !result.queued?.includes(relPath)) return uncertain("landing_queue_not_confirmed: " + (result.error ?? "no queue acknowledgement"));
+    if (result.error) return uncertain("landing_queue_not_confirmed: " + result.error);
+    if (result.queued === undefined) return uncertain("landing_queue_acknowledgement_missing");
+    if (!result.queued.includes(relPath)) return uncertain("landing_queue_expected_path_absent");
     return { id: entry.id, outcome: "proposed", reason: "verified_source_queued_for_review", evidence: receipt };
   });
 }
