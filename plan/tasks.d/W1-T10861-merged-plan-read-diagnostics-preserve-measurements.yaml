@@ -43,3 +43,11 @@
     Use the existing trusted repository/cwd and available main/head/merged-tree identity without logging blob stdout, credentials or credential-bearing arguments. Keep stderr redacted and within its existing cap. Attribute budget expiry only from the existing typed loop-bound evidence, not from signal presence. Unknown causes remain named unknown.
 
     Actual real-Git default-factory positive, missing-cwd, nonrepository and nonzero controls must run alongside each rejection/catch mapping. Reuse the existing shared timeout mechanism's qualification and exercise its caller boundary; do not invent a successful timeout reproduction, add a production timeout override or replace every default with fakes. Use committed guard-removal controls and exact restoration. Full normal author/CI/coverage/security/semantic review and ordinary merge remain; this parked filing is not source delivery, a gate waiver, retry allowance or production authority.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares src/lib/arm-auto-merge.ts, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-27T17:52:48.443Z"
+    pin: "9dfa462eb8858f9c5088192e1d2cce63a82c1028e588306d5b0ec90438c15e0f"
