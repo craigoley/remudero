@@ -5,11 +5,13 @@
 // budget now bounds what is RETAINED; a large backstop bounds the stream against a runaway process.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
+import { fixWorkerReceipt, WORKER_TAIL_MAX_BYTES } from "#src/run-task.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 import {
   CODEX_WORKER_STDOUT_MAX_BYTES,
   CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES,
@@ -17,7 +19,7 @@ import {
   spawnCodexWorker,
 } from "../src/lib/worker-provider.js";
 
-function fakeCodex(): { stdout: PassThrough; proc: EventEmitter; run: Promise<unknown>; home: string; teardowns: () => number } {
+function fakeCodex(streamObserver?: Parameters<typeof spawnCodexWorker>[0]["streamObserver"]): { stdout: PassThrough; proc: EventEmitter; run: Promise<unknown>; home: string; teardowns: () => number } {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -28,6 +30,7 @@ function fakeCodex(): { stdout: PassThrough; proc: EventEmitter; run: Promise<un
   const run = spawnCodexWorker(
     {
       workerHome: home,
+      streamObserver,
       cwd: process.cwd(),
       prompt: "retention budget",
       settingsFile: join(process.cwd(), "settings", "worker.json"),
@@ -121,4 +124,39 @@ test("W1-T4595: the stream backstop refuses runaway ordinary events after they a
   } finally {
     rmSync(codex.home, { recursive: true, force: true });
   }
+});
+
+
+test("completed Codex messages reach the retained native fix tail without raw command output", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-tail-"));
+  let start!: (f: ReturnType<typeof fakeCodex>) => void;
+  const started = new Promise<ReturnType<typeof fakeCodex>>(resolve => { start = resolve; });
+  const receipt = fixWorkerReceipt(async args => {
+    const f = fakeCodex(args.streamObserver);
+    start(f);
+    const parsed = await f.run as Awaited<ReturnType<typeof spawnCodexWorker>>;
+    return { ...parsed, costUsd: 0, stderr: "", apiError: false, permissionDenials: [], childEnvKeys: [],
+      model: "fixture", effort: "default", modelUsage: {}, compactionEvents: [], qualitySuspect: false } as WorkerResult;
+  }, () => {}, "fixture-worker", {}, undefined, { root });
+  const pending = receipt.spawn({ cwd: root, prompt: "fixture", settingsFile: join(root, "settings.json"), permissionMode: "default" });
+  const f = await started;
+  try {
+    f.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "command_execution", aggregated_output: "DO_NOT_RETAIN_RAW_COMMAND_OUTPUT" } }) + "\n");
+    const wire = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "SWC validation remains unmeasured" } }) + "\n";
+    f.stdout.write(wire.slice(0, 19));
+    f.stdout.write(wire.slice(19));
+    f.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "Final diagnosis requires retained evidence" } }) + "\n");
+    f.stdout.end(); f.proc.emit("exit", 0);
+    const result = await pending;
+    const path = join(root, "state", "runs", "fixture-worker.tail");
+    assert.ok(existsSync(path), "the actual fix receipt writes the provider's completed message text");
+    const tail = readFileSync(path, "utf8");
+    assert.match(tail, /SWC validation remains unmeasured/);
+    assert.match(tail, /Final diagnosis requires retained evidence/);
+    assert.doesNotMatch(tail, /DO_NOT_RETAIN_RAW_COMMAND_OUTPUT/);
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.ok(statSync(path).size <= WORKER_TAIL_MAX_BYTES);
+    assert.equal(result.text, "Final diagnosis requires retained evidence");
+    assert.equal(result.isError, false);
+  } finally { rmSync(f.home, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }); }
 });

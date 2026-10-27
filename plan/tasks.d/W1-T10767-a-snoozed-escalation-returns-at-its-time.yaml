@@ -1,0 +1,131 @@
+- id: W1-T10767
+  title: "A SNOOZED ESCALATION RETURNS TO NEEDS-YOU AT ITS TIME, INSTEAD OF BEING CLOSED FOR GOOD — POST /v1/escalation/mark-handled closes the issue for every disposition, snoozed_until included, and only ledgers the time; nothing reads that time back or reopens the issue, and the board drops a closed escalation, so a snooze is a silent dismissal"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern spanning the route, the now view and its contract: what a snoozed_until mark-handled does to the issue and to the now view's decisions; no other disposition, route, tier or precision rule changes
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: CONSOLE-T153 (console #2293, merged as a filing) reported it as a core gap while fixing the console half of the snooze answer"
+  plan_refs: [W1-T182, W1-T4677, W1-T8831, W1-T283, W1-T10735, W1-T10738, "P4-T08 (now decisions)", CONSOLE-T153]
+  files:
+    - src/lib/panel-actions.ts
+    - src/lib/now-decisions.ts
+    - src/lib/now-view.ts
+    - src/lib/panel-graph.ts
+    - openapi/daemon.yaml
+    - test/console-api/a-snoozed-escalation-returns-at-its-time.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main 7b75a38f7.
+
+    THE DEFECT (core).
+    - src/lib/panel-actions.ts:787-816 `buildEscalationMarkHandledRoute`. Its handler calls
+      `deps.issues.close(input.issueUrl)` at :795 for EVERY disposition, then ledgers
+      `panel.escalation_marked_handled` with `snoozed_until` (:797-802).
+    - `validateMarkEscalationHandled` (:758-780) requires `snoozedUntil` for `snoozed_until` and refuses it
+      for the other three, but never parses it. openapi/daemon.yaml:1807-1809 types it as a bare string.
+    - Nothing reads `snoozed_until` back. Its only readers count the disposition for precision:
+      escalation-precision.ts:78 and :105, escalate.ts:1590 `ledgerClassTier`, and the sweep's triage
+      evidence slice (sweep.ts:25392).
+    - Nothing reopens an escalation issue: no `reopen` call on any issue gateway in src/lib.
+    - A closed issue leaves the board. status.ts:3774 `resolveEscalation` joins the newest escalation row
+      to the issue's state, and a confirmed-closed issue yields no row (:4336, "confirmed closed ... no
+      row"). So `needsHuman` and `escalationIssueUrl` drop. now-decisions.ts:138-140 `escalationDecisions`
+      offers only rows with `needsHuman && escalationIssueUrl`.
+    - escalate.ts's dedup searches OPEN issues only (its header above :1572). A recurrence of the same
+      condition therefore opens a NEW issue. A one-shot escalation, such as a breaker trip or a
+      stage-stall alarm, never recurs, and its snooze is a permanent dismissal that the precision
+      ledger records as "not yet due".
+
+    THE CONSOLE HALF IS FILED SEPARATELY. CONSOLE-T153 (console #2293, merged 18:20:44Z as a filing) makes
+    /now post `snoozedUntil` as an RFC 3339 UTC instant in the future (core's inbox-snooze form,
+    panel-graph.ts `RFC3339_UTC`). Its rationale names this gap as core's and out of its scope. This task
+    accepts exactly that form, so the two are compatible in either merge order.
+
+    NOT MEASURED. How many past snoozes closed an issue: the bounded ledger count on the host was not run
+    in this filing. The build counts `panel.escalation_marked_handled` rows with `snoozed_until` on each
+    instance's ledger and reports it in the PR body. Repairing those issues is a separate item.
+
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d on origin/main for snoozed_until, snoozedUntil, mark-handled
+    and escalation reopen. The neighbours are:
+    - W1-T8831 (merged): the INBOX snooze, a different store and route.
+    - W1-T10735 (queued): offers mark-handled for a MANUAL escalation, in the same `escalationDecisions`.
+    - W1-T10738 (queued): counts a manual approve as acted, in escalation-precision.ts.
+    - follow-up-policy.ts's snooze: follow-up candidates, not escalations.
+    Neither queued neighbour changes what a snooze does. W1-T10735 and this task both edit
+    `escalationDecisions`, so there is no depends_on, and whichever lands second merges main. Read the 14
+    open core PRs' titles at 22:15Z: none touches mark-handled. No run- branch for this id exists.
+  design: |
+    1. A SNOOZE KEEPS THE ISSUE OPEN. In `buildEscalationMarkHandledRoute`, `snoozed_until` does NOT
+       call `deps.issues.close`. `acted`, `false_positive` and `duplicate` close exactly as today.
+       - The ledger row is unchanged: step, class, disposition and `snoozed_until`, so precision keeps
+         counting it the same way.
+       - Because the issue stays open, escalate.ts's open-issue dedup folds a recurrence into it as a
+         comment instead of a second issue.
+    2. THE TIME IS VALIDATED. `snoozedUntil` must be an RFC 3339 UTC instant and must be after the
+       request's own instant. Export panel-graph.ts:3567 `RFC3339_UTC` and reuse it; never write a second
+       pattern. Otherwise the
+       route answers 400 naming the reason, and it closes and ledgers nothing. Update
+       openapi/daemon.yaml's `snoozedUntil` to `format: date-time` with that description.
+    3. THE NOW VIEW HIDES IT UNTIL THEN, AND ONLY UNTIL THEN.
+       - `escalationDecisions` takes the snoozes as an input: each issue's newest
+         `panel.escalation_marked_handled` row with `snoozed_until`, keyed by issue URL. now-view.ts
+         derives them from the rows it already reads.
+       - It also takes the judging instant. It reads no clock of its own, which follows the module
+         header's "no clock in data" rule.
+       - An escalation whose issue has a snooze still ahead of the instant is left out of the decisions.
+         The now view's decisions data lists it under `snoozed` with `taskId`, `issueUrl` and
+         `snoozedUntil`, so a reader can show it. Add that field to openapi/daemon.yaml.
+       - At or after `snoozed_until` it is offered again, exactly as an unsnoozed one.
+       - A NEWER birth for the same task wakes it early: an `escalation.issue_opened` row, or a dedup
+         row naming the same issue, dated after the snooze row. A snooze hides the alarm it was given
+         for, never a later one.
+       - An unparsable stored time never hides anything.
+       - The now view's decisions are recomputed once the earliest snooze still ahead has passed, even
+         when no ledger row has changed (the W1-T8831 `nextSnoozeWakeAt` pattern). The escalation
+         therefore returns at its time and not at the next unrelated write.
+    4. Nothing else. The board's `needsHuman` is unchanged: the task is still blocked while snoozed. No
+       change to the other dispositions, the manual approve route, tiers or precision.
+  prompt: |
+    Write test/console-api/a-snoozed-escalation-returns-at-its-time.test.ts. `rmd test-place` computed that
+    folder on 2026-10-26 for these imports. Keep this exact path, because the proofs grep it. Import
+    through `#src/*`. Every new test title starts with `W1-T10767: `, exactly as in the acceptance proofs.
+    - Route case: build the route with a recording issue closer and a temp ledger. Post a valid future
+      `snoozed_until`, and assert no close call, one ledger row carrying `snoozed_until`, and 200. Post
+      `acted`, and assert exactly one close, as today.
+    - Validation case: a non-RFC 3339 time, a zoned non-UTC time and a past time each answer 400, with no
+      close and no ledger row.
+    - Now case: drive `escalationDecisions` with one board row that needs a human, its
+      `escalation.issue_opened` row and a snooze row. Before `snoozed_until` the decision is absent, and
+      the `snoozed` list names it with its time. At and after `snoozed_until` it is present. A newer
+      `escalation.issue_opened` for the task, dated after the snooze, makes it present before the time.
+    - Count the base snoozes as described in the rationale, and put the numbers in the PR body.
+    Restore base code with `git show origin/main:<path>`, never stash, and watch every new case fail. Run
+    the suite, `npm run -s lint-plan:fast` and `rmd preflight --fast` on the committed tree before the
+    first push.
+  acceptance:
+    - claim: "mark-handled with disposition snoozed_until ledgers the snooze and leaves the escalation issue open, while acted, false_positive and duplicate still close it"
+      proof: 'grep: test("W1-T10767: a snoozed escalation keeps its issue open" in test/console-api/a-snoozed-escalation-returns-at-its-time.test.ts'
+    - claim: "a snoozed_until whose time is not an RFC 3339 UTC instant after the request is refused 400 before any close or ledger row"
+      proof: 'grep: test("W1-T10767: a snooze without a future UTC time is refused" in test/console-api/a-snoozed-escalation-returns-at-its-time.test.ts'
+    - claim: "the now view leaves a snoozed escalation out of its decisions until snoozed_until and offers it again at that time, or earlier on a newer birth for the task"
+      proof: 'grep: test("W1-T10767: a snoozed escalation returns to the decisions at its time" in test/console-api/a-snoozed-escalation-returns-at-its-time.test.ts'
+  falsifier: |
+    At base the route calls `deps.issues.close` for `snoozed_until`, accepts any non-empty string, and
+    `escalationDecisions` takes no snoozes, so each case fails as follows.
+    - Keep the unconditional close: the first case's zero-close assertion fails.
+    - Drop the time validation: the second case sees a 200.
+    - Ignore the instant and hide a snoozed escalation forever: the at-time half of the third case fails.
+    - Ignore the newer birth: the wake-early half of the third case fails.
+    GUARDS that held at base and must still hold:
+    - `acted`, `false_positive` and `duplicate` still close the issue and ledger the same row
+      (test/panel-actions.test.ts, test/a-dismissed-escalation-records-why.test.ts);
+    - an unsnoozed escalation's decision is unchanged (test/now-decisions.test.ts);
+    - precision still counts a snoozed row as a disposition (escalation-precision's existing suite).
+    Remove each guard's production branch in turn, and its existing case must fail. Then restore it and
+    require zero failures.

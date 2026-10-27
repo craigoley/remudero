@@ -2,7 +2,7 @@ import { RawBodyTooLargeError, readBoundedRawBody, verifiedActor, type Route } f
 import { sendJson } from "./panel-actions.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import {
-  PRODUCT_REPOSITORY_LIMITS, PRODUCT_REPOSITORY_VERSION, ProductRepositoryService,
+  PRODUCT_REPOSITORY_LIMITS, PRODUCT_REPOSITORY_VERSION, ProductRepositoryService, ghProductRepositoryProvider, inspectProductRepository,
   type ProductRepositoryCode, type ProductRepositoryProvider,
 } from "./product-repository.js";
 import {
@@ -70,8 +70,22 @@ const repositoryStatus: Record<ProductRepositoryCode, number> = {
 
 /** Exact create-or-adopt of the product repository. HIGH tier: it may create a real GitHub repository. */
 export function buildProductRepositoryRoutes(options: { root?: string; provider?: ProductRepositoryProvider }): Route[] {
-  const service = new ProductRepositoryService(options);
+  const provider = options.provider ?? ghProductRepositoryProvider();
+  const service = new ProductRepositoryService({ ...options, provider });
+  const intents = new ProductIntentStore(options);
   return [
+    { method: "GET", path: "/v1/products/repository-preview", scope: "read", sensitivity: "sensitive", async handler(req, res) {
+      res.setHeader("Cache-Control", "private, no-store");
+      const reply = (code: number, body: Record<string, unknown>) => sendJson(res, code, { version: PRODUCT_REPOSITORY_VERSION, ...body });
+      const actor = verifiedActor(req);
+      if (!actor) { reply(403, { error: "invalid_identity" }); return; }
+      const params = new URL(req.url ?? "/", "http://rmd.local").searchParams;
+      const keys = [...params.keys()];
+      if (keys.length > 6 || new Set(keys).size !== keys.length) { reply(400, { error: "invalid_input" }); return; }
+      const result = await inspectProductRepository({ store: intents, provider }, actor, Object.fromEntries(params));
+      if (!result.ok) { reply(repositoryStatus[result.code], { error: result.code }); return; }
+      sendJson(res, 200, result.value);
+    } },
     { method: "POST", path: "/v1/products/repository", scope: "write", tier: "high", async handler(req, res) {
       res.setHeader("Cache-Control", "private, no-store");
       const reply = (code: number, body: Record<string, unknown>) => sendJson(res, code, { version: PRODUCT_REPOSITORY_VERSION, ...body });
