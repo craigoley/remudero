@@ -1,0 +1,38 @@
+- id: W1-T10788
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/a-fix-round-that-did-the-work-lands-it.test.ts cost 46 PR minute(s) across 18 round(s) on 18 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
+  risk: low
+  priority: 1.09
+  status: blocked
+  retirement: retired  # retired by rule 2 (cause stopped) of the operator's mechanical rulings (2026-10-21, W1-T10371): the symptom had 0 occurrence(s) across 7 day(s), never seen. Retired by the machine-filing judge, 2026-10-27T05:40:08.079Z
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/a-fix-round-that-did-the-work-lands-it.test.ts"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/check-test-test-a-fix-round-that-did-the-work-lands-it-test-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/a-fix-round-that-did-the-work-lands-it.test.ts"
+      proof: "unit test: W1-T10788: check:test:test/a-fix-round-that-did-the-work-lands-it.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/a-fix-round-that-did-the-work-lands-it.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/a-fix-round-that-did-the-work-lands-it.test.ts cost 46 PR minute(s) (seven-day half-life) across 18 fix round(s) on 18 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/sweep.ts: test/a-fix-round-that-did-the-work-lands-it.test.ts imports it
+    - test/a-fix-round-that-did-the-work-lands-it.test.ts: named by the failing check
+    - the rounds name a failing test: test/a-fix-round-that-did-the-work-lands-it.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13858 at 2026-10-24T00:32:21Z: hand fix PR #13858: src/lib/sweep.ts; minutes are the pass median proxy (5.552266666666666), not measured repair time
+    - PR #13819 at 2026-10-23T20:43:14Z: hand fix PR #13819: src/lib/sweep.ts; minutes are the pass median proxy (5.552266666666666), not measured repair time
+    - PR #13702 at 2026-10-23T05:00:42Z: hand fix PR #13702: src/lib/open-prs-rest.ts, src/lib/sweep.ts, src/lib/tick-read-worker.ts, src/lib/workflow-run.ts; minutes are the pass median proxy (5.552266666666666), not measured repair time
+    - PR #13668 at 2026-10-23T03:31:54Z: hand fix PR #13668: src/lib/sweep.ts; minutes are the pass median proxy (5.552266666666666), not measured repair time
+    - PR #13627 at 2026-10-22T18:58:47Z: hand fix PR #13627: src/lib/sweep.ts; minutes are the pass median proxy (5.552266666666666), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

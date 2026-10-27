@@ -22,6 +22,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { TASK_TYPES, type Task } from "./plan.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
+import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import {
   mineTranscriptWorkflows,
   renderTranscriptWorkflowSteps,
@@ -829,6 +830,12 @@ export const SKILL_FIX_TASK_TYPE = "fix";
 export const SKILL_EFFECTIVENESS_HORIZON = 10;
 /** A terminal worker failure is the named harm signal for this descriptive pilot. */
 export const SKILL_EFFECTIVENESS_HARM_OUTCOMES = ["failed"] as const;
+/** The steps {@link buildSkillEffectivenessReport} reads; every caller passes exactly this as its union read's
+ *  step filter. W1-T10764: a filter without the merge rows hands the report no merge, so both arms read
+ *  `merged_runs=0` by construction and only the harm signal can ever decide. Both merge-row steps
+ *  {@link isMergedLedgerRow} accepts are here: the sweep's `verdict.merged` credit backfill, and the
+ *  `pr.terminal` row the direct merge writes, which is the only record of most merges. */
+export const SKILL_EFFECTIVENESS_LEDGER_STEPS: readonly string[] = ["skills.selection", "verdict", "verdict.merged", PR_TERMINAL_STEP];
 
 export interface SkillEffectivenessCohort {
   observed_eligible_runs: number;
@@ -861,6 +868,12 @@ type SkillLedgerRow = Record<string, unknown>;
 const stringArray = (value: unknown): string[] =>
   Array.isArray(value) && value.every((item): item is string => typeof item === "string") ? value : [];
 
+/** A row's PR: its `pr_url` as `owner/repo#n`, else its `pr_number` on the row's own `repo`. A row naming
+ *  neither has no PR to match, so it is never credited a merge. */
+const effectivenessPrKey = (row: SkillLedgerRow): string | undefined =>
+  prUrlKey(row.pr_url) ??
+  (typeof row.repo === "string" && Number.isInteger(row.pr_number) ? `${row.repo}#${row.pr_number as number}` : undefined);
+
 const emptyCohort = (): SkillEffectivenessCohort => ({
   observed_eligible_runs: 0,
   terminal_runs: 0,
@@ -874,18 +887,29 @@ const emptyCohort = (): SkillEffectivenessCohort => ({
  * Deterministically joins `taskType`'s `skills.selection` row emitted at prompt assembly to the
  * terminal `verdict` row that carries the same run id.  It never reads or writes the approved
  * tree: results are evidence for an operator's later decision, not a lifecycle action.
+ *
+ * W1-T10764: a run's own `verdict` row never reads `merged` — it hands off (`handed_off`,
+ * `blocked_ci`) and the merge is recorded later under another run id: a `verdict.merged` credit
+ * backfill, or a `pr.terminal` row reading `merged`. So a run resolves to `merged` when its terminal
+ * `verdict` row names a PR that any {@link isMergedLedgerRow} row names. The join is by PR, never by
+ * `task_id`: a task can have several runs and only one PR merged.
  */
 export function buildSkillEffectivenessReport(
   rows: readonly SkillLedgerRow[],
   skillName: string,
   taskType: string = SKILL_EFFECTIVENESS_TASK_TYPE,
 ): SkillEffectivenessReport {
-  const terminalOutcomeByRun = new Map<string, string>();
+  const terminalVerdictByRun = new Map<string, { verdict: string; prKey: string | undefined }>();
+  const mergedPrKeys = new Set<string>();
   const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean }>();
 
   for (const row of rows) {
+    if (isMergedLedgerRow(row)) {
+      const prKey = effectivenessPrKey(row);
+      if (prKey !== undefined) mergedPrKeys.add(prKey);
+    }
     if (row.step === "verdict" && typeof row.run_id === "string" && typeof row.verdict === "string") {
-      terminalOutcomeByRun.set(row.run_id, row.verdict);
+      terminalVerdictByRun.set(row.run_id, { verdict: row.verdict, prKey: effectivenessPrKey(row) });
       continue;
     }
     if (
@@ -901,6 +925,14 @@ export function buildSkillEffectivenessReport(
     });
   }
 
+  // Resolved only after every row is read: the merge row is written after the run's verdict, but a union
+  // read need not return them in that order.
+  const terminalOutcome = (runId: string): string | undefined => {
+    const terminal = terminalVerdictByRun.get(runId);
+    if (terminal === undefined) return undefined;
+    return terminal.prKey !== undefined && mergedPrKeys.has(terminal.prKey) ? "merged" : terminal.verdict;
+  };
+
   // Once any randomized row exists for this skill, only randomized rows are compared: the arms are then
   // assigned, so a budget omission (which tracks how many skills a task drew) cannot bias them.
   const randomized = [...selectionByRun.values()].some((o) => o.withheld !== undefined);
@@ -912,7 +944,7 @@ export function buildSkillEffectivenessReport(
     for (const [runId, observation] of selectionByRun) {
       if (!inArm(observation, selected)) continue;
       cohort.observed_eligible_runs++;
-      const outcome = terminalOutcomeByRun.get(runId);
+      const outcome = terminalOutcome(runId);
       if (!outcome) continue;
       cohort.terminal_runs++;
       cohort.outcomes[outcome] = (cohort.outcomes[outcome] ?? 0) + 1;

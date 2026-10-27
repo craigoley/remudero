@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.36
   status: queued
@@ -21,10 +21,10 @@
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.94
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
     reasons:
-      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The supplied record reports 23 escalation rows but supplies no row reasons or identified cause establishing that those escalations were erroneous; the claimed defect cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The filing asks the builder to locate an unidentified writer and fix its cause, while declaring only a new test file. Its proposed remedy and production scope remain unspecified.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; that establishes text presence, not that the cause was fixed or recurrence stopped."
-    judged_at: "2026-10-13T19:07:28.576Z"
-    pin: "2337610b33e43d6632e670610ee6b5b561559a5af8480c26abd6697c049f0b40"
+      - "rule 3 (live and low-privilege): the symptom is live, 473 occurrence(s) across 7 day(s), last seen 2026-10-27T03:19:47.557Z, and the record declares no privileged path"
+    judged_at: "2026-10-27T05:40:05.137Z"
+    pin: "4abb54091c607d8937d3159a614888d0fb313e522131071049e6300383c347c6"

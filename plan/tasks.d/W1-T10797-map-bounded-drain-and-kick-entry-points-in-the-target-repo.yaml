@@ -1,0 +1,24 @@
+- id: W1-T10797
+  title: "Map bounded drain and kick entry points in the target repo"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  rationale: >-
+    From the 2026-10-26 follow-up on W1-T10615-1793034698650, ratified via rmd approve:
+  
+    One read-only mapping of the drain, daemon and runner entry points. Its acceptance asserts a
+    single cross-file invariant that cannot be satisfied piecewise, so it is risk high by span and
+    not by blast radius.
+  files:
+    - src/lib/drain.ts
+    - src/lib/daemon.ts
+    - src/run-task.ts
+  acceptance:
+    - claim: "The recon report identifies the target-repo bounded drain/kick entry points and exact production call sites, distinguishing the caller from the implementation and recording the relevant bounds and admission gates."
+      proof: "unit test: bounded drain and kick entry points are mapped to exact production call sites"
+  origin: "followup:W1-T10615-1793034698650:2026-10-26T17:17:46.305Z"

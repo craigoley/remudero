@@ -12,6 +12,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SNAPSHOT_ENV = "RMD_CENSUS_SNAPSHOT";
 const CITATION = "test/citation-anchor-census.test.ts";
 const SCRIPT = "scripts/citation-anchor-census.mjs";
+const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 const SHARD = "plan/tasks.d/W1-T9000-fixture.yaml";
 const SHARD_COUNT = 901; // the census's real-repo test refuses a corpus of 900 shards or fewer
 const HYGIENE = "./test/setup/tmp-hygiene.ts";
@@ -40,6 +41,8 @@ function fixture() {
   const real = [CITATION, SCRIPT, "scripts/lib/argv.mjs", "src/lib/tmp.ts", "src/lib/clock.ts", "package.json"];
   const texts: Record<string, string> = {
     "MASTER-PLAN.md": "# plan\n",
+    // The always-on skill census is gitFree and joins every nonempty diff; this tree carries a healthy stand-in for it.
+    [SKILL_CENSUS]: 'import { test } from "node:test";\ntest("skill census stand-in", () => undefined);\n',
   };
   for (let i = 0; i < SHARD_COUNT; i++) {
     texts[`plan/tasks.d/W1-T${9000 + i}-fixture.yaml`] = `id: W1-T${9000 + i}\nrationale: |\n  nothing cites a pull request here.\n`;

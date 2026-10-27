@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.04
   status: queued
@@ -36,10 +36,10 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.94
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
     reasons:
-      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The record supplies recurrence counts, PR references and an import relationship, but no failure details or root-cause diagnosis establishing what must be prevented or self-healed. Its causal finding cannot be verified from the supplied evidence, meeting the explicit escalation condition.; on the change's description/files alone, no diff was read — The filed acceptance requires preventing a fix round without specifying a repair mechanism. Repository instructions distinguish recurrence from root-cause diagnosis and require bounded observation before class-wide repair."
-    judged_at: "2026-10-26T19:16:51.714Z"
-    pin: "9403fa203506dcf89ed4a2b69e85a33afd68c7dff7fb80f10764c5e098ed0175"
+      - "rule 3 (live and low-privilege): the symptom is live, 1 occurrence(s) across 7 day(s), last seen 2026-10-24T09:09:14.466Z, and the record declares no privileged path"
+    judged_at: "2026-10-27T05:40:05.137Z"
+    pin: "2d5b71a158da94c7bf1a5ff56f28d195aef36db832201e832891bc762123f777"

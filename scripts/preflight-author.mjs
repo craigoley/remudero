@@ -20,6 +20,7 @@ import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
 import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
 import { guardedAuthorEntry, MacAuthorCapacityRefusal } from './lib/mac-author-admission.mjs';
+import { scanRepo as scanCoverageBlanking } from './coverage-session-blanking-check.mjs';
 
 /** The exit status of a run whose selection the host cannot carry: distinct from pass (0) and fail (1). */
 export const OVER_CAPACITY_EXIT = 3;
@@ -437,6 +438,24 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     }
     receipt.changedFiles = git(['diff', '--name-only', '-z', `${receipt.baseSha}...${receipt.headSha}`]).split('\0').filter(Boolean);
     if (receipt.changedFiles.length === 0) throw new Error('empty author diff: nothing to verify');
+    receipt.affectedTestsNotRunReason = 'coverage blanking refused before selection; changed-test evidence must be readable';
+    const changedTests = receipt.changedFiles.filter(file => file.startsWith('test/') && file.endsWith('.ts'))
+      .filter(file => {
+        try {
+          lstatSync(join(root, file));
+          return true;
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+          // A missing working-tree file is a deletion only with positive committed-tree evidence.
+          if (git(['ls-tree', '--name-only', '-z', receipt.headSha, '--', file]) === '') return false;
+          throw error;
+        }
+      });
+    receipt.coverageBlankingPrecheck = scanCoverageBlanking(root, changedTests);
+    if (receipt.coverageBlankingPrecheck.defects.length || receipt.coverageBlankingPrecheck.suspects.length) {
+      throw new Error('coverage blanking refused before selection; see coverageBlankingPrecheck findings');
+    }
+    delete receipt.affectedTestsNotRunReason;
     const selection = select(receipt.changedFiles, `${receipt.baseSha}...${receipt.headSha}`);
     // The narrow selection runs when it was computed and names a suite; else the floor; else all.
     const narrow = selection.fullRun ? undefined : selection.narrow;
@@ -550,7 +569,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if (!decision.fits) throw new Error(`runtime deadline does not fit admitted ${decision.workers}-worker pool: need ${decision.requiredMs}ms, have ${decision.availableMs}ms; expensive phase not started`);
           };
           admitRuntime('before-static', undefined, partial ? partial.suites : receipt.suites);
-          const staticCapacity = admitHost('static-preflight');
+          const staticCapacity = admitHost('static-preflight', { selection: receipt.selection, workers: 1 });
           if (staticCapacity) (receipt.hostCapacity ??= []).push(staticCapacity);
           // Its record names a cold tsc's peak; the nested typecheck sees this ancestor's record and inherits it.
           const staticAdmission = admitStaticWork(AUTHOR_STATIC_LABEL, { ...testSlot, memoryBytes: TYPECHECK_COLD_PEAK_BYTES });
@@ -646,7 +665,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             } else if (!notRun) {
             const testsName = receipt.tiered ? 'affected-tests-subset' : 'affected-tests';
             admitRuntime('before-tests', 0, ranSuites, executionWorkers);
-            const testCapacity = admitHost('affected-tests');
+            // An over-capacity subset is sized by the arm it was cut from: a narrow arm's subset is narrower still.
+            const testCapacity = admitHost('affected-tests', { selection: receipt.selectedArm ?? receipt.selection, workers: executionWorkers });
             if (testCapacity) (receipt.hostCapacity ??= []).push(testCapacity);
             // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
             // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).

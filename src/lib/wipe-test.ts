@@ -618,7 +618,10 @@ function ledgerPathForRoot(root: string): string {
   return join(root, "state", LEDGER_FILENAME);
 }
 
-function renderGeneratedSubjectTask(subject: WipeTestPairSubject, repo: string): string {
+/** The plan record a generated subject is dispatched from. It names its `origin:`, which the pre-dispatch linter
+ *  requires of every task (Rules 16/17): without it every cadence fire from 2026-09-25 to 2026-10-26 was refused
+ *  (`[provenance] missing origin:`), and the refusal's escalation then failed on a sandbox repo with issues disabled. */
+export function renderGeneratedSubjectTask(subject: WipeTestPairSubject, repo: string): string {
   const files = JSON.stringify([...(subject.files ?? [])]);
   return [
     `- id: ${JSON.stringify(subject.id)}`,
@@ -628,6 +631,7 @@ function renderGeneratedSubjectTask(subject: WipeTestPairSubject, repo: string):
     "  type: implement",
     "  verify: auto",
     "  risk: low",
+    `  origin: ${JSON.stringify(`wipe-test cadence: synthetic subject ${subject.id} generated from the learnings index (W1-T1256)`)}`,
     "  files: " + files,
     "  note: |",
     "    Synthetic wipe-test cadence subject, generated from the learnings index.",

@@ -41,6 +41,30 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "help" ]; then
 fi
 
 if [ "${1:-}" = "daemon" ]; then
+  # W1-T9106 (ADR 0007 decision C): the daemon verb starts under the heap ceiling the daemon learned, in place of the
+  # inherited --max-old-space-size, when <config root>/state/daemon-heap-ceiling.json is applied and current for this
+  # instance. Plain node, no tsx: the same rule as launchHeapCeiling (src/lib/daemon-memory-policy.ts), which the daemon
+  # re-reads to name ceiling_source. Absent, stale, shadow or unreadable prints nothing and the inherited value stays.
+  RMD_LEARNED_NODE_OPTIONS="$(node -e '
+const fs = require("fs"), path = require("path"), home = require("os").homedir();
+let root;
+try { root = JSON.parse(fs.readFileSync(path.join(home, ".config", "remudero", "config.json"), "utf8")).root; } catch (e) { root = ""; }
+const dir = path.join(typeof root === "string" && root !== "" ? root : path.join(home, "Remudero"), "state");
+const r = JSON.parse(fs.readFileSync(path.join(dir, "daemon-heap-ceiling.json"), "utf8")), mib = r && r.ceiling_mib;
+if (!r || r.version !== 1 || r.state_dir !== dir || !(Date.now() < r.valid_until) || r.mode !== "applied" || !Number.isInteger(mib) || mib < 256) process.exit(1);
+const words = (process.env.NODE_OPTIONS || "").split(/\s+/).filter(Boolean), kept = [];
+for (let i = 0; i < words.length; i++) {
+  const m = /^--max[-_]old[-_]space[-_]size(=.*)?$/.exec(words[i]);
+  if (!m) kept.push(words[i]);
+  else if (m[1] === undefined && /^\d+$/.test(words[i + 1] || "")) i++;
+}
+kept.push("--max-old-space-size=" + mib);
+process.stdout.write(kept.join(" "));
+' 2>/dev/null || true)"
+  if [ -n "$RMD_LEARNED_NODE_OPTIONS" ]; then
+    export NODE_OPTIONS="$RMD_LEARNED_NODE_OPTIONS"
+  fi
+  unset RMD_LEARNED_NODE_OPTIONS
   RMD_MAIN_CHOICE="$(node "$DIR/scripts/build-child-entries.mjs" --root "$DIR" --main-entry "$1" 2>/dev/null || true)"
   RMD_MAIN_KIND="$(printf '%s' "$RMD_MAIN_CHOICE" | cut -f1)"
   RMD_MAIN_REASON="$(printf '%s' "$RMD_MAIN_CHOICE" | cut -f2)"
