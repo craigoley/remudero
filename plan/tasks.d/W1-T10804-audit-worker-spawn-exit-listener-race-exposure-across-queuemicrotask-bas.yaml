@@ -30,3 +30,14 @@
     the same race. Examples are `test/no-worker-writes-a-git-config-the-host-push-honours.test.ts`
     and `test/codex-writable-resume-sandbox.test.ts`. They only check `args` today, so they pass.
     — from PR-14620 (run DAEMON-1793081348651, https://github.com/craigoley/remudero/pull/14620)
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.9
+    reasons:
+      - "The plan record is a recon/audit task whose deliverable is a report. Nothing in the description touches secrets, auth, deletion, merge/deploy/review policy, or irreversible actions."
+      - "The acceptance criteria are verifiable from what is shown, since each requires naming files, functions, lines, and a safe/needs-follow-up disposition per named test."
+      - "Gates state is clean: author_class is operator, filingTime is true, the family track record is 21 merged with a Beta mean of 0.86, and all 4 declared files exist at the base."
+      - "the judge said proceed, but W1-T10804: at verify: auto it fails lint (proof-dialect)"
+    judged_at: "2026-10-27T11:15:00.928Z"
+    pin: "9988fad34aca8d3b94d0bff09d73e989351e347e6b5408b654e4c7455382458f"

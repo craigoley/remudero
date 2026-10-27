@@ -187,6 +187,12 @@ test("a slot whose git link points at a pruned admin dir is recreated and the pr
   assert.equal(first.dir, join(gensDir, "a"));
   rmSync(join(serving.dir, ".git", "worktrees", "a"), { recursive: true, force: true });
   assert.match(readFileSync(join(first.dir, ".git"), "utf8"), /gitdir: .*worktrees\/a/, "the slot still carries its now-dangling link");
+  let probeDetail = "";
+  await assert.rejects(runCommand("git", ["-C", first.dir, "rev-parse", "--git-dir"], first.dir), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    probeDetail = error.message;
+    return true;
+  });
   const sha = bump(origin, "3");
   const again = await prepare(join(gensDir, "b"));
   assert.equal(again.dir, first.dir);
@@ -196,7 +202,7 @@ test("a slot whose git link points at a pruned admin dir is recreated and the pr
   const last = steps.filter((s) => s.step === "serve.slot_prepare").at(-1);
   assert.equal(last?.extra?.path, "recreated");
   assert.equal(last?.extra?.reason, "dangling_git_link");
-  assert.match(String(last?.extra?.detail), /not a git repository/);
+  assert.equal(last?.extra?.detail, probeDetail, "the failed probe's complete diagnostic is preserved across Git versions");
 });
 
 test("a slot that is a worktree of a different clone is recreated in the serve clone", async () => {

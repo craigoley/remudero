@@ -1,0 +1,85 @@
+- id: W1-T10822
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/a-test-imports-through-the-subpath-alias.test.ts cost 32.6 PR minute(s) across 15 round(s) on 14 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.15
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/a-test-imports-through-the-subpath-alias.test.ts"
+  files:
+    - scripts/test-location-codemod.mjs
+    - test/ci/suites/check-test-test-a-test-imports-through-the-subpath-alias-test-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/a-test-imports-through-the-subpath-alias.test.ts"
+      proof: "unit test: W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/a-test-imports-through-the-subpath-alias.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/a-test-imports-through-the-subpath-alias.test.ts cost 32.6 PR minute(s) (seven-day half-life) across 15 fix round(s) on 14 pull request(s).
+
+    WHERE IT COMES FROM:
+    - scripts/test-location-codemod.mjs: test/a-test-imports-through-the-subpath-alias.test.ts imports it
+    - test/a-test-imports-through-the-subpath-alias.test.ts: named by the failing check
+    - the rounds name a failing test: test/a-test-imports-through-the-subpath-alias.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #14066 (https://github.com/craigoley/remudero/pull/14066) at 2026-10-25T06:46:53.318Z: ci-log round — ci-shard (7/8): test/a-test-imports-through-the-subpath-alias.test.ts
+        failing tests: W1-T9864: location-relative test files never rise above the merge base
+        log excerpt:
+          | grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-7.log" || : > "$FLAKE_RETRY_DIR/shard-7.log"
+          | not ok 186 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 180.617279
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-test-imports-through-the-subpath-alias.test.ts:3:187'
+          |   failureType: 'testCodeFailure'
+          |   error: '3538 test files carry a location-relative specifier at HEAD, 3537 at merge base c22353fcc — import through #src/*, #scripts/* and #test/* (scripts/test-location-codemod.mjs rewrites a file
+    - PR #12865 (https://github.com/craigoley/remudero/pull/12865) at 2026-10-19T01:34:42.283Z: ci-log round — ci-shard (6/8): test/a-test-imports-through-the-subpath-alias.test.ts
+        failing tests: W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier
+          | not ok 3 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 176.189479
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-test-imports-through-the-subpath-alias.test.ts:3:187'
+          |   failureType: 'testCodeFailure'
+          |   error: '3551 test files carry a location-relative specifier at HEAD, 3550 at merge base ae7cfba1d — import through #src/*, #scripts/* and #test/* (script
+    - PR #12861 (https://github.com/craigoley/remudero/pull/12861) at 2026-10-19T01:29:23.777Z: ci-log round — ci-shard (6/8): test/a-test-imports-through-the-subpath-alias.test.ts
+        failing tests: W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier
+          | not ok 3 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 263.728618
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-test-imports-through-the-subpath-alias.test.ts:3:187'
+          |   failureType: 'testCodeFailure'
+          |   error: '3551 test files carry a location-relative specifier at HEAD, 3550 at merge base a1e7ca374 — import through #src/*, #scripts/* and #test/* (script
+    - PR #12841 (https://github.com/craigoley/remudero/pull/12841) at 2026-10-18T22:54:55.022Z: ci-log round — coverage-shard (6/8): test/a-test-imports-through-the-subpath-alias.test.ts
+        failing tests: W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier
+          | not ok 3 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 287.959063
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-test-imports-through-the-subpath-alias.test.ts:87:1'
+          |   failureType: 'testCodeFailure'
+          |   error: '3551 test files carry a location-relative specifier at HEAD, 3550 at merge base efd946a50 — import through #src/*, #scripts/* and #test/* (scripts
+    - PR #12829 (https://github.com/craigoley/remudero/pull/12829) at 2026-10-18T21:07:44.250Z: ci-log round — coverage-shard (6/8): test/a-test-imports-through-the-subpath-alias.test.ts; coverage-shard (8/8): test/sweep.test.ts
+        failing tests: W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier, leaf, R-50: setup caches npm unless it only bootstraps guarded dependency-free admission, R-50: every job in every PR-firing workflow declares a positive timeout-minutes, W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; a red required check (CodeQL) with a PASSING review verdict on the same head ALSO routes to ci-log fixable, never straight to escalate (the \\#292/\\#315 fix)"]
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier, leaf, R-50: setup caches npm unless it only bootstraps guarded dependency-free admission, R-50: every job in every PR-firing workflow declares a positive timeout-minutes, W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame
+          | not ok 3 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 331.100946
+          |   type: 'test'
+          |   location: '/home/runner
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

@@ -394,7 +394,7 @@ test("W1-T3379 criterion 4: zero selection, no improvement, and named harm retir
   assert.equal(noImprovement.basis, "not-better-than-control");
 
   const harmful = buildSkillEffectivenessReport(effectivenessRows(
-    [...Array(9).fill("merged"), "failed"],
+    [...Array(5).fill("merged"), ...Array(5).fill("failed")],
     controls,
   ), "procedure");
   assert.equal(harmful.status, "RETIRE-CANDIDATE");
