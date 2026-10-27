@@ -1,3 +1,4 @@
+// @census-reads: test/read-model-oracle-never-blocks-projection.test.ts test/a-read-model-upgrade-never-re-reads-the-corpus.test.ts test/a-view-body-is-behind-only-by-the-rows-it-reads.test.ts test/a-view-unit-s-measured-cost-survives-a-restart.test.ts test/inbox-thread-evidence.test.ts test/now-view-bounded-steps.test.ts — the fixtures whose teardown wiring it pins.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
