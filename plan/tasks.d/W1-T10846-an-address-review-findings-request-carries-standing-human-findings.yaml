@@ -1,0 +1,173 @@
+- id: W1-T10846
+  title: "AN OPERATOR CANNOT ASK THE FIX RUNG TO ADDRESS A STANDING HUMAN REVIEW — a green, natively-passed PR whose reviewer requested functional changes is refused as having no block evidence, because the requested fix view only resets strikes and the one-PR view never carries the review: add an explicitly selected address-review-findings request that binds the real review and current head, routes through the same maintained dispatchFix under every existing gate, and records one durable at-most-once outcome"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 30.00
+  risk: high # Rule 19: one concern — a new explicitly selected request kind on the existing fix entrypoint; the default sweep, plain requested fix, review gate and human hold are all unchanged
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T4077, W1-T9682, W1-T5019, W1-T3980, W1-T4657, W1-T10645]
+  files:
+    - src/cli/commands/fix.ts
+    - src/lib/sweep.ts
+    - src/lib/prompt-render.ts
+    - src/lib/fleet-control.ts
+    - src/lib/panel-actions.ts
+    - src/lib/daemon.ts
+    - src/cli/commands/daemon.ts
+    - test/fix-lane/a-requested-fix-carries-standing-human-findings.test.ts
+    - test/daemon/fleet-control-hands-an-address-findings-request-to-fix-once.test.ts
+    - scripts/test-tier-manifest.json
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED (issue https://github.com/craigoley/remudero/issues/14829): Console PR2319 at
+    e6a8f62b49898f42f680c3fc3f880d9ff5897aaa has native PASS, green required checks and a standing
+    human CHANGES_REQUESTED review 5665129562 naming functional recovery defects. One human-approved
+    operator repair was processed once as FIX-1793105698889 and REFUSED at 2026-10-27T12:55:08.626Z:
+    "review success, required checks green ... (no block evidence to drive the rung)". No worker ran.
+    Console2321's separately owned request hit the same guard. Both permits are CONSUMED; both holds stand.
+    READ on main 07dbdcc776160885cbd27dca698b146a161251d3:
+    - src/cli/commands/fix.ts requestedFixView returns {...pr, priorStrikes: 0} and nothing else.
+      routeFix reuses deriveDisposition; with no ci/review/conflict evidence it falls to
+      "refused ... (no block evidence to drive the rung)". That refusal is correct for an ordinary
+      request and W1-T4077 design (iii) deliberately preserves it.
+    - fixCommand builds its one-PR OpenPrView without scannerBlocker or any review listing, so a
+      person's standing review never reaches routeFix or the worker.
+    - src/lib/open-prs-rest.ts already has pullReviewsRestArgs and classifyChangesRequested (each human
+      reviewer's latest decisive review; an incomplete page is "unreadable", never "no hold").
+      src/lib/sweep.ts changesRequestedHold/changesRequestedReason describe a hold and state that no
+      automation can clear it. fixHeadAcceptable is the existing task-head ownership test.
+    - PrActionName is "fix" | "review"; the marker is keyed (action, PR); the daemon's runPrAction runs
+      `rmd fix <n> --repo <r> --requested`. armPrAction is shared by POST /v1/pr-actions and
+      action-executor.ts. The x-remudero-operator header is display-only (W1-T4077 design v).
+    The issue body itself states it is not a task id, implementation credit or a live retry grant.
+    Settled by lookup: is this already filed or already decided? -> no. No plan task names
+      changesRequestedHold, classifyChangesRequested, requestedFixView or a CHANGES_REQUESTED repair;
+      W1-T4077 keeps the no-failure refusal, W1-T9682 is dispatch-result honesty, W1-T5019 joins
+      native review.finding rows (not human reviews), W1-T3980 repairs one CodeQL thread and treats a
+      human thread as ambiguous, W1-T10645 mines independent red-check logs (plan/tasks.d). PR14788 is
+      separately owned advisory-policy propagation and is untouched. DECISIONS.md, LEARNINGS.md and
+      MASTER-PLAN.md carry no ruling on human-hold repair.
+    Settled by lookup: does this need a new authorization design? -> no. The request rides the existing
+      armPrAction ingestion at the existing route tier and token (W1-T4077 operator ruling 2026-09-22);
+      the operator header stays display-only (src/lib/panel-actions.ts operatorDisplayName).
+    Settled by lookup: can the request reuse the plain fix marker? -> no. prActionFilePath keys on
+      (action, PR) and requestPrAction overwrites, so a plain fix click would silently replace a bound
+      selection (src/lib/fleet-control.ts). A distinct action name keeps the two distinguishable.
+    Settled by lookup: is there an existing per-task remaining-allowance reader? -> no named one; the
+      per-row reader spendAmountUsd exists (src/lib/spend-rows.ts) and the plan task's budget_usd is
+      loaded by fixCommand. Unknown therefore means refusal, never the nominal budget.
+    Settled by lookup: can the approved-action executor bind a review id and head? -> no.
+      AutomationAction has no argument field and a pr target carries only the PR number
+      (src/lib/automation-action.ts, src/lib/action-executor.ts), so no catalogue entry is added here.
+    Settled by lookup: where do the new tests go? -> computed by hand from src/lib/test-placement.ts
+      (the architect lane has no shell to run `rmd test-place`). The fix-lane file imports exactly what
+      W1-T10645's placed test imports (run-task fixCommand, config type, tmp, sweep type, gh-shim), and
+      W1-T10645 records that set placing in fix-lane, high confidence. The daemon file imports
+      fleet-control and the daemon modules (daemon-loop), and its name prefix fleet-control earns the
+      name and prefix bonus. No token in either name is a name_keywords entry. The implementer runs
+      `rmd test-place` on both written files before publishing and keeps that receipt.
+  design: |
+    1. A DISTINCT, EXPLICIT REQUEST. Add PrActionName "address-review-findings" (marker
+       PR_ACTION_REQUESTED-address-review-findings-<n>, switch state/CONSOLE_PR_ACTION_OFF-address-review-findings).
+       Its marker additionally carries reviewId (positive int), expectedHeadSha (40 hex),
+       confirmCurrentHead (boolean, default false), clarificationCommentIds (at most 5 positive ints)
+       and requestId, minted once by requestPrAction. Re-arming an identical pending selection leaves the
+       marker and requestId unchanged; a different selection while one is pending is refused
+       "address_review_request_pending". POST /v1/pr-actions validates these fields for this action only
+       and keeps the unknown-field refusal for "fix"/"review". Same route tier, token and armPrAction path.
+       No action-executor catalogue entry and no Console UI.
+    2. DEFAULT TRANSPORT. The daemon's runPrAction maps this action to the SAME fixCommand:
+       `<n> --repo <r> --requested --address-review-findings <reviewId> --expected-head <sha>
+       --request-id <id> [--confirm-current-head] [--clarification <id>]...`. The mapping is one exported
+       function in fleet-control.ts, called by the closure in src/cli/commands/daemon.ts. The
+       src/lib/daemon.ts action types widen to PrActionName. Marker lifetime and detached execution are
+       unchanged (W1-T4077).
+    3. EVIDENCE, BOUND AND HONEST (fix.ts, address-review arm only). Refuse by name, before any
+       dispatch: missing --requested/--expected-head/--request-id ("address_review_selection_incomplete");
+       live head differs from expectedHeadSha ("address_review_head_moved"). Read the review listing with
+       pullReviewsRestArgs through the default gh transport and classify it with classifyChangesRequested:
+       unreadable or ambiguous ("address_review_evidence_unreadable"); reviewId is not a standing hold, is
+       a bot or is superseded ("address_review_not_standing"); the hold's commitId is not the current head
+       and confirmCurrentHead is false ("address_review_head_unconfirmed"). Then fetch that review's own
+       body and its comments. If both are empty: "address_review_findings_empty". Fetch each selected
+       clarification. It must be on this PR, by the holding reviewer, not a bot, and created at or after
+       the review. Otherwise: "address_review_clarification_unqualified". Unselected comments are never
+       read as findings or as approval. Bound every text field and keep it labelled untrusted.
+    4. ORDINARY OWNERSHIP, SCOPE AND BUDGET. The task head must pass fixHeadAcceptable
+       ("address_review_head_not_task_owned"). Remaining allowance is the plan task's budget_usd minus
+       its ledger spend summed with spendAmountUsd. If the task, its budget or any spend row is
+       unreadable: "address_review_allowance_unknown". If it is at or below zero:
+       "address_review_allowance_exhausted". The arm admits only when routeFix's ordinary disposition is
+       mergeable or the human-hold blocked-ambiguous row. A terminal PR is still refused. Ordinary
+       ci/review/conflict evidence returns "address_review_ordinary_evidence_present" and is left to the
+       plain requested fix; the two are never bundled.
+    5. SAME DISPATCH. Call the SAME deps.dispatchFix with
+       {unmetCriteria: [], humanReviewFindings, operation: "address-review-findings", requestId}. Add
+       those fields to FixDispatchEvidence/FixEvidence, plus one deriveFixMode row. The prompt renders the
+       findings as untrusted human review evidence. The worker's instruction is a code change within the
+       task's declared files only. It must not dismiss or resolve reviews, approve, arm or merge, post a
+       status, or edit plan/acceptance text. The result goes through fixDispatchResult unchanged. A
+       declined claim, capacity or admission refusal stays a refusal (W1-T9682). There is no second
+       launcher, no direct repair and no synthetic red check. The native verdict and the hold are never
+       written.
+    6. DURABLE, AT MOST ONCE. Before routing, fixCommand appends fix.address_review.requested
+       {request_id, pr_number, review_id, review_commit, expected_head, confirm_current_head,
+       clarification_ids}. After routing it appends exactly one terminal fix.address_review.dispatched or
+       fix.address_review.refused carrying the named reason. The rung's fix.dispatch row and its round
+       landing row carry operation and request_id through worker completion, including a scope
+       stand-down. If a request_id already has a terminal row, the call returns the recorded outcome and
+       exit code and appends fix.address_review.replayed. If it has a requested row but no terminal row
+       (lost response or restart), the call refuses "address_review_outcome_unknown" and dispatches
+       nothing. The default sweep and plain `--requested` never build this evidence.
+    7. TESTS: exact titles. Fix-lane file (drives the run-task fixCommand export through the shared gh
+       shim's real gh subprocess; the only recording seam is the maintained dispatchFix boundary;
+       `route` is never injected):
+       "W1-T10846: an address-review request dispatches the maintained fix rung once with the standing review's findings"
+       "W1-T10846: an ordinary requested fix on a green PR with a standing human review is still refused"
+       "W1-T10846: a green PR with no standing human review refuses the address-review request"
+       "W1-T10846: an old-head review needs explicit current-head confirmation"
+       "W1-T10846: a moved head, superseded review, unreadable listing or unqualified clarification is refused by name"
+       "W1-T10846: unknown or exhausted allowance and declined admission are refused by name"
+       "W1-T10846: the command dismisses no review and posts no status, approval or merge"
+       "W1-T10846: a replayed or restarted request returns its recorded outcome without a second dispatch"
+       Daemon file (real marker files in a temp state dir, the real pr-actions route handler and the
+       daemon's PR-action timer):
+       "W1-T10846: an address-review request reaches the fix command with its bound selection"
+       "W1-T10846: an address-review marker is distinct from a plain fix marker and runs at most once"
+       "W1-T10846: the pr-actions route refuses an incomplete address-review selection"
+       Use forbidden-effect traps: the gh-shim call log must contain no dismissals, statuses, reviews
+       POST, merge or auto-merge call. Keep the red receipt from the falsifier and the green receipt.
+       Do not edit coverage, census, ratchet or placement instruments to make a proof pass.
+    OUT OF SCOPE: the Console button and presentation (file separately only if strictly needed);
+    action-executor catalogue entries; Console148/149/150 and WRECK-T1..6; PR14788's advisory-policy
+    propagation; any live repair of PR2319 or PR2321 (both permits stay consumed, and a later attempt
+    needs fresh explicit human authority through this path); review dismissal; claim clearing; daemon
+    restarts; spend-limit, allowlist, credential or access changes.
+  acceptance:
+    - claim: "an explicitly selected address-review request on a green, natively-passed PR dispatches the maintained fix rung once carrying the standing human review's real findings, while ordinary requested fixes and green no-findings PRs are still refused, old-head reviews need explicit current-head confirmation, unknown allowance is refused, no hold or verdict is written, and a replay or restart never dispatches twice"
+      proof: "unit test: test/fix-lane/a-requested-fix-carries-standing-human-findings.test.ts"
+    - claim: "the existing pr-actions ingestion records a distinct address-review marker whose bound selection reaches the fix command through the daemon's default PR-action transport exactly once"
+      proof: "unit test: test/daemon/fleet-control-hands-an-address-findings-request-to-fix-once.test.ts"
+    - claim: "the fix command reads the standing review through the maintained latest-decisive classifier rather than a second reader"
+      proof: "grep: classifyChangesRequested( in src/cli/commands/fix.ts"
+    - claim: "the new request kind is a named, distinguishable PR action"
+      proof: "grep: address-review-findings in src/lib/fleet-control.ts"
+  falsifier: |
+    Each step below is executable against the implementation and must turn the named test red.
+    (a) Load-bearing guard: replace the standing-hold lookup in the address-review arm with an
+        always-found hold. The green-no-review and superseded-review tests then dispatch and fail.
+    (b) Remove the current-head confirmation check. The old-head test dispatches without
+        confirmCurrentHead and fails.
+    (c) Delete the request_id replay check. The restart test records two dispatchFix calls and fails.
+    (d) Route the request through plain requestedFixView. The positive test is refused with "no block
+        evidence" and fails.
+    (e) Treat unreadable spend as zero. The allowance test dispatches and fails.
+    Restoring each guard gives a genuine nonzero-test, zero-failure summary. The ordinary requested-fix
+    refusal test must stay green throughout every mutation; it is the positive control that the default
+    path is unchanged.
