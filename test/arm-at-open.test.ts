@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -1169,6 +1169,17 @@ for (const mode of ["live", "shadow"] as const) test(`W1-T975: a ${mode} run rec
 
   armOpenGitFixture(root);
 
+  // The real arm deps load the HOST config for the merge write's operator-hold fence, which fails
+  // closed on an absent ledger: point a fixture HOME's config at this run's own root, whose ledger
+  // the run writes, so the fence reads real "no hold recorded" evidence instead of the host's.
+  const fixtureHome = mkdtempSync(join(tmpdir(), "arm-verdict-merged-home-"));
+  mkdirSync(join(fixtureHome, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(fixtureHome, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  appendFileSync(join(root, "state", "ledger.ndjson"), "");
+  const savedHome = process.env.HOME;
+  process.env.HOME = fixtureHome;
+
   const FIXED_TS = 1785100000010;
   const branch = `run-T-ARM-OPEN-${FIXED_TS}`;
   const headSha = "feedface9999";
@@ -1268,6 +1279,9 @@ for (const mode of ["live", "shadow"] as const) test(`W1-T975: a ${mode} run rec
   } finally {
     dateNowSpy.mock.restore();
     process.env.PATH = savedPath;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    rmSync(fixtureHome, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
 });
