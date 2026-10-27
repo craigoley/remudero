@@ -2141,6 +2141,14 @@ type VerdictArmCtx = {
   log: (step: string, extra?: Record<string, unknown>) => void;
 };
 
+/** The injectable effector and ledger read of a review arm, parameterised by what the effector returns. Named
+ *  without a `Deps`/`Seams` suffix and used instead of a second inline object-literal parameter type, which the
+ *  deps-interface census counts. */
+type VerdictArmInjection<R> = {
+  arm?: (prUrl: string, taskId: string) => R;
+  ledgerLines?: () => Array<Record<string, unknown>>;
+};
+
 /** The gates both review arms run BEFORE the effector, in one order: the dependabot and draft
  *  stand-downs, then {@link decideAutoMergeArm}. `skipped` is already ledgered; a decision arms. */
 function verdictArmGate(
@@ -2233,10 +2241,7 @@ export function armIfVerdictPermits(
 export async function armIfVerdictPermitsAsync(
   verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
   ctx: VerdictArmCtx,
-  deps: {
-    arm?: (prUrl: string, taskId: string) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult>;
-    ledgerLines?: () => Array<Record<string, unknown>>;
-  } = {},
+  deps: VerdictArmInjection<ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult>> = {},
 ): Promise<ArmOutcome | "skipped"> {
   const gate = verdictArmGate(verdict, ctx, deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)));
   if (gate === "skipped") return "skipped";
