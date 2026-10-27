@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { createServer, connect } from "node:net";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { test, type TestContext } from "node:test";
 import {
   brokerGhRead, ghBrokerDir, ghBrokerDirLive, ghBrokerRouteFor, ghReadBrokerLive,
@@ -30,7 +31,8 @@ const HOOK = join(ROOT, "hooks/deny-floor.sh");
 const INSTALLER = join(ROOT, "deploy/mac/install-gh-read-broker.sh");
 
 function tmp(t: TestContext, tag: string): string {
-  const dir = mkdtempSync(join(tmpdir(), `rmd-ghb-${tag}-`));
+  // Keep the socket below macOS sun_path even under its long default temporary directory.
+  const dir = mkdtempSync(join(tmpdir(), `rmd-${tag[0] ?? "b"}-`));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
@@ -664,4 +666,27 @@ test("a fresh default JSON read cannot join an ordinary in-flight broker read", 
     if (saved.cache === undefined) delete process.env.RMD_GH_CACHE_HOME; else process.env.RMD_GH_CACHE_HOME = saved.cache;
     process.env.PATH = saved.path; rmSync(shim.dir, { recursive: true, force: true });
   }
+});
+
+
+test("a refused broker socket bind leaves no heartbeat timer keeping its process alive", (t) => {
+  const parent = tmp(t, "bind-failure");
+  const dir = join(parent, "x".repeat(180));
+  const source = pathToFileURL(join(ROOT, "src/lib/gh-read-broker.ts")).href;
+  const code = [
+    'import assert from "node:assert/strict";',
+    `import { GhReadBroker, serveGhReadBroker } from ${JSON.stringify(source)};`,
+    `const dir = ${JSON.stringify(dir)};`,
+    'const broker = new GhReadBroker(dir, async () => { throw new Error("no upstream request belongs to a failed bind"); });',
+    'await assert.rejects(serveGhReadBroker({ dir, broker }), /listen|ENAMETOOLONG|EINVAL/);',
+    'console.log("broker-bind-refused");',
+  ].join("\n");
+  // This child owns the deliberately invalid socket path; the timeout bounds the old leaked-timer falsifier.
+  const observed = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code], {
+    cwd: ROOT, encoding: "utf8", timeout: 30_000,
+  });
+  assert.ifError(observed.error);
+  assert.equal(observed.status, 0, observed.stderr);
+  assert.match(observed.stdout, /broker-bind-refused/);
+  assert.equal(existsSync(join(dir, "heartbeat")), false, "a broker that never listened cannot advertise liveness");
 });
