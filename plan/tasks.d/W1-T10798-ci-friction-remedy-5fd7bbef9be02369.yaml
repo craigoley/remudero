@@ -1,0 +1,78 @@
+- id: W1-T10798
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/every-ci-census-is-asked-before-the-push.test.ts cost 34.8 PR minute(s) across 7 round(s) on 3 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.14
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/every-ci-census-is-asked-before-the-push.test.ts"
+  files:
+    - scripts/census-precheck.mjs
+    - test/ci/gates/ci-friction-remedy-5fd7bbef9be02369.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/every-ci-census-is-asked-before-the-push.test.ts"
+      proof: "unit test: W1-T10798: check:test:test/every-ci-census-is-asked-before-the-push.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/every-ci-census-is-asked-before-the-push.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/every-ci-census-is-asked-before-the-push.test.ts cost 34.8 PR minute(s) (seven-day half-life) across 7 fix round(s) on 3 pull request(s).
+
+    WHERE IT COMES FROM:
+    - scripts/census-precheck.mjs: test/every-ci-census-is-asked-before-the-push.test.ts imports it
+    - test/every-ci-census-is-asked-before-the-push.test.ts: named by the failing check
+    - the rounds name a failing test: test/every-ci-census-is-asked-before-the-push.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #14007 (https://github.com/craigoley/remudero/pull/14007) at 2026-10-25T16:31:51.643Z: ci-log round — rule-checks: test/every-ci-census-is-asked-before-the-push.test.ts; coverage-shard (7/8): test/every-shard-on-main-is-lintable.test.ts; coverage-shard (8/8): the two triggered censuses
+        failing tests: W1-T5616: every census suite CI runs is asked by census-precheck or listed in the shrink-only baseline; W1-T3086: this ratchet is REGISTERED with the census, and the registration names this very file; ["W1-T5616: every census suite CI runs is asked by census-precheck or listed in the shrink-only baseline","W1-T3086: this ratchet is REGISTERED with the census, and the registration names this very file"]; the two triggered censuses have executable scripts, parity entries and CI population membership; ["the two triggered censuses have executable scripts, parity entries and CI population membership"]
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/every-ci-census-is-asked-before-the-push.test.ts:1:1230
+          | ✖ W1-T5616: every census suite CI runs is asked by census-precheck or listed in the shrink-only baseline (20.685595ms)
+          |   AssertionError [ERR_ASSERTION]: a baselined suite precheck now asks, or CI no longer runs, must leave scripts/census-precheck-parity-baseline.json
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts',
+          |   +   'test/checkout-writers.test.ts',
+          |   +   'test/config-fixture-path-parity.test.ts',
+          |   +   'test/deploy-scripts-use-mktemp.test.ts',
+          |   +
+    - PR #13657 (https://github.com/craigoley/remudero/pull/13657) at 2026-10-22T23:12:35.896Z: ci-log round — comment-load-ratchet: test/every-ci-census-is-asked-before-the-push.test.ts; rule-checks: test/every-ci-census-is-asked-before-the-push.test.ts; coverage-shard (7/8): test/every-test-fi
+        failing tests: W1-T5616: every census suite CI runs is asked by census-precheck or listed in the shrink-only baseline; W1-T5616 falsifier: deleting one baseline row names that suite; W1-T5616 falsifier: deleting one PRECHECK_PARITY entry names that suite; W1-T9863: no new test derives the repo root from its own folder; W1-T9863: the own-folder root count never rises above the merge base
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/every-ci-census-is-asked-before-the-push.test.ts:1:1230
+          | ✖ W1-T5616: every census suite CI runs is asked by census-precheck or listed in the shrink-only baseline (13.957215ms)
+          |   AssertionError [ERR_ASSERTION]: a CI census census-precheck does not ask: model it in PRECHECK_PARITY (scripts/census-precheck.mjs) — scripts/census-precheck-parity-baseline.json may only shrink
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'test/rules/scout-config-gardener-failed.test.ts'
+          |   + ]
+          |   - []
+          | 
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/every-ci-census-is-aske
+    - PR #12489 (https://github.com/craigoley/remudero/pull/12489) at 2026-10-17T02:30:26.371Z: ci-log round — rule-checks: test/architecture-fitness.test.ts; coverage-shard (6/8): pool defect: test/b.test.ts leaks into test/c.test.ts; coverage-shard (4/8): test/every-ci-census-is-asked-before-t
+        failing tests: W1-T5616: every census suite CI runs is asked by census-precheck or listed in the shrink-only baseline; W1-T5616: the population is what CI runs — ci.yml runs list-rule-suites, and each extra is a real suite; W1-T5616 falsifier: deleting one baseline row names that suite; the floor holds: no test file commits through real git with no identity anywhere in it; the walk excludes exactly ONE file — itself — so widening the hole is a visible change
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/every-ci-census-is-asked-before-the-push.test.ts:1:1230
+          | ✖ W1-T5616: every census suite CI runs is asked by census-precheck or listed in the shrink-only baseline (16.817702ms)
+          |   AssertionError [ERR_ASSERTION]: a CI census census-precheck does not ask: model it in PRECHECK_PARITY (scripts/census-precheck.mjs) — scripts/census-precheck-parity-baseline.json may only shrink
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'test/architecture-fitness.test.ts',
+          |   +   'test/orphan-sweep-names-the-third-party.test.ts',
+          |   +   'test/the-mutant-loader-resolves-every-relative-import.test.ts
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
