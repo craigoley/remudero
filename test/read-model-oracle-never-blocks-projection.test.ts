@@ -1,5 +1,6 @@
+import { closeReadModelFixture, readModelFixtureDir, type ReadModelFixtureScope } from "#test/helpers/read-model-fixture.js";
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { test } from "node:test";
@@ -20,16 +21,14 @@ import {
   type ReadModelOracle,
   type ReadModelWorkerMessage,
 } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
 
 const LIVE = "ledger.ndjson";
 const HOUR = 3_600_000;
 
-type TestCtx = { after: (fn: () => void) => void };
+type TestCtx = ReadModelFixtureScope;
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind);
   return dir;
 }
 
@@ -69,7 +68,7 @@ test("projection keeps advancing while an oracle slice runs on its own thread ov
     stateDir, instances: [{ name: "core", ledgerDir }], holder: "never-blocks", ingestSettleMs: 0, oracleSliceBudgetMs: 1e9, oracleRunner: oracle,
     post: (m) => void messages.push(m),
   });
-  t.after(() => ticker.release());
+  closeReadModelFixture(t, () => ticker.release());
   ticker.start();
   const state = () => {
     const last = messages.findLast((m) => m.type === "state");
@@ -114,7 +113,7 @@ function request(dbPath: string, extra: Partial<OracleSliceRequest> = {}): Oracl
 test("an oracle slice in flight when its thread dies fails and the next slice respawns the thread", async (t) => {
   const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const oracle = threadOracle({ workerUrl: brokenOracleModule(t), log: (step, extra) => logs.push({ step, extra }) });
-  t.after(() => oracle.close());
+  closeReadModelFixture(t, () => oracle.close());
   const results: OracleSliceResult[] = [];
   const once = async (): Promise<void> => {
     const before = results.length;
@@ -154,7 +153,7 @@ test("the oracle thread body attaches once per store and turns every failure int
   writeFileSync(join(ledgerDir, LIVE), `${[0, 1, 2].map((i) => line(at + i * 1_000, "body", i)).join("\n")}\n`);
   const clock = fixedClock(at + HOUR);
   const db = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => db.close());
+  closeReadModelFixture(t, () => db.close());
   const got = acquireLease(db, { holder: "body", clock });
   assert.ok(got.ok);
   createLedgerProjector({ ledgerDir, db, lease: got.lease, clock }).tick();
@@ -201,7 +200,7 @@ test("a slice that finishes after its slot was released changes nothing", (t) =>
   finish({ ok: true, rows: 3, elapsedMs: 1 });
   assert.deepEqual(logs.filter((step) => step.includes("fail")), [], "nothing failed");
   const db = openProjectorReadModel(stateDir, "core");
-  t.after(() => db.close());
+  closeReadModelFixture(t, () => db.close());
   assert.equal(db.meta("oracle_slice"), undefined, "the released slot's cursor did not move");
 
   const none = inProcessOracle(() => undefined, fixedClock(at));
@@ -220,9 +219,9 @@ test("a slice whose oracle thread died is retried at half the rate and never ski
   let outcome: OracleSliceResult = { ok: false, error: "the oracle thread exited with code 1", leaseLost: false, died: true };
   const dying: ReadModelOracle = { run: (req, done) => (windows.push([req.window.t0, req.window.t1]), done(outcome)), close: () => {} };
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock: fixedClock(at + HOUR), holder: "died", ingestSettleMs: 0, oracleRunner: dying, post: () => {} });
-  t.after(() => ticker.release());
+  closeReadModelFixture(t, () => ticker.release());
   const db = openProjectorReadModel(stateDir, "core");
-  t.after(() => db.close());
+  closeReadModelFixture(t, () => db.close());
   const rate = () => (JSON.parse(db.meta("oracle_slice") ?? "{}") as { rowsPerMs?: number }).rowsPerMs;
   for (let i = 0; i < 4 && windows.length === 0; i++) ticker.tick();
   assert.equal(windows.length, 1);
@@ -231,7 +230,7 @@ test("a slice whose oracle thread died is retried at half the rate and never ski
   outcome = { ok: true, rows: 3, elapsedMs: 1 };
   const later = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock: fixedClock(at + 2 * HOUR), holder: "died", ingestSettleMs: 0, oracleRunner: dying, post: () => {} });
   ticker.release();
-  t.after(() => later.release());
+  closeReadModelFixture(t, () => later.release());
   for (let i = 0; i < 4 && windows.length === 1; i++) later.tick();
   assert.equal(windows.length, 2);
   assert.equal(windows[1]![1], windows[0]![1], "the retry starts where the dead slice did: nothing was skipped");

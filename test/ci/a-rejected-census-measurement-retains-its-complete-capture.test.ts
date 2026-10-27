@@ -55,7 +55,7 @@ function observe(){
   observed.push({dir,hashes,native});
 }
 const times=mode==="timing"?[0,100,101,102,5102,5103,10103]:mode==="duration"?[0,100,101,102,NaN]:
-  mode==="calibration-budget"?[0,70000,70001]:mode==="calibration-duration"?[0,NaN,101]:[0,100,101,102,202];
+  mode==="calibration-budget"?[0,130000,130001]:mode==="calibration-duration"?[0,NaN,101]:[0,100,101,102,202];
 const now=()=>{
   clock++;if(clock===2||clock===5||clock===7)observe();
   if(clock===5&&mode.startsWith("fault-")&&mode!=="fault-cleanup"){

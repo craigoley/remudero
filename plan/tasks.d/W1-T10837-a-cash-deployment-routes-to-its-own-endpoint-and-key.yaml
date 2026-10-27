@@ -1,0 +1,80 @@
+- id: W1-T10837
+  title: "THE CASH LANE ROUTES EACH DEPLOYMENT TO ITS OWN ENDPOINT AND KEY — config maps a deployment id to {endpoint, keyEnv}, the existing cashEndpoint and RMD_OPENWEIGHT_API_KEY stay the default, and every cash endpoint reader resolves through one function"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling, Craig 2026-10-27, after GPT-6.1 Terra shipped 2026-10-26: \"Second account in eastus now\" — Foundry account synthwatch-foundry-eus (eastus) holds deployment gpt-6.1-terra; the fleet builds per-deployment endpoints because the cash lane supported only one"
+  plan_refs: [W1-T3607, W1-T10838, W1-T10839]
+  files:
+    - src/lib/config-schema.ts
+    - src/lib/worker-provider.ts
+    - src/lib/model-availability.ts
+    - src/lib/replay-harness.ts
+    - src/lib/cash-web-bridge.ts
+    - docs/operator-guide.md
+    - test/worker/spawn/a-cash-deployment-routes-to-its-own-endpoint.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED ON origin/main 07dbdcc77 (2026-10-27). The cash lane knows ONE Azure account. `openWeightEndpoint`
+    (src/lib/worker-provider.ts) reads `workerProviders.cashEndpoint`, falling back to the deprecated
+    `openweightEndpoint` (W1-T3607), and the key comes from the single env var `OPENWEIGHT_API_KEY_ENV`
+    = "RMD_OPENWEIGHT_API_KEY". The same `cashEndpoint ?? openweightEndpoint` read is RETYPED in four more places:
+    the web_search bridge in worker-provider.ts and src/lib/cash-web-bridge.ts, `readCashModelCatalog`
+    (src/lib/model-availability.ts) and the replay harness pin (src/lib/replay-harness.ts).
+    GPT-6.1 Terra is GA in Foundry but was not deployable in the existing account's region (eastus2), so on
+    2026-10-27 the operator created a SECOND account, synthwatch-foundry-eus in eastus, holding deployment
+    gpt-6.1-terra (model gpt-6.1-terra, version 2026-10-26, GlobalStandard, capacity 1000), endpoint
+    https://synthwatch-foundry-eus.cognitiveservices.azure.com/. Smoke-tested by the operator the same day:
+    Responses API /openai/v1/responses answers at reasoning none and low, and a strict function tool call returns
+    a correct function_call. Nothing in the fleet can reach it until a deployment can name its own account.
+    Because the catalog reader also reads only the one endpoint, the successor watcher can never see a
+    deployment on the second account as "listed by cash", so it would read Terra 6.1 as "announced" forever.
+  design: |
+    (i) CONFIG. Add `workerProviders.cashDeploymentEndpoints?: Record<string, { endpoint: string; keyEnv: string }>`
+    to src/lib/config-schema.ts (config.json, beside cashEndpoint). A deployment absent from the map uses
+    cashEndpoint (then openweightEndpoint) and RMD_OPENWEIGHT_API_KEY exactly as today, so a host with no map is
+    byte-identical in behaviour. No deployment id, endpoint or env name is hard-coded in source: the map is data.
+    (ii) ONE RESOLVER. Add one exported function (for example `cashDeploymentTarget(config, deployment, env)`)
+    returning {endpoint, key, keyEnv} for a deployment, and route EVERY reader above through it: the chat and
+    Responses transport URL in `openWeightEndpoint`, the key read in `spawnOpenWeightWorker`, both web_search
+    readers, the replay-harness pin and the model catalog. The catalog reads every distinct configured endpoint
+    with that endpoint's own key and returns the union, so a deployment on the second account counts as
+    "listed by cash" in `classifySuccessors`; one unreadable account is reported by name and does not hide the
+    other account's listing.
+    (iii) SAFETY OF THE MAP. A config-named env var is a way to send ANY daemon secret to a URL, so the map is
+    refused at config load, with a named error, when a keyEnv is neither RMD_OPENWEIGHT_API_KEY nor of the
+    cash-key shape RMD_CASH_<NAME>_API_KEY, or an endpoint is not https on an Azure Cognitive Services or Azure
+    OpenAI host (the host shape `unbilledAzureOpenAi429Policy` already checks). A mapped deployment whose keyEnv
+    is unset is NOT READY (selection skips it with a named reason); it never falls back to the default key, which
+    belongs to a different account.
+    (iv) SECRECY. The key value never enters a ledger row, a log line, an error message or a worker environment;
+    errors name the keyEnv, never the value. The allowance, the 429 policy and the served-model receipt key on
+    the deployment exactly as now.
+    (v) DOCS. docs/operator-guide.md gains the map, its refusal rules and this host's exact edit. The edit is run
+    by the operator ONLY AFTER this task is deployed on the daemon (an unknown config field before then is
+    not a supported state). Through the container's mounted config directory, keeping the file's mode and inode:
+      ssh remudero 'set -e; umask 077; f="$HOME/.config/remudero-container/config.json"; t="$f.tmp-eastus"; jq --arg e "https://synthwatch-foundry-eus.cognitiveservices.azure.com/" --arg k RMD_CASH_EASTUS_API_KEY ".workerProviders.cashDeploymentEndpoints[\"gpt-6.1-terra\"] = {endpoint: \$e, keyEnv: \$k}" "$f" > "$t"; cat "$t" > "$f"; rm -f "$t"; jq -c ".workerProviders.cashDeploymentEndpoints" "$f"'
+    (dry-run 2026-10-27 on a private copy: the merged object kept every existing field and the file kept mode
+    0600). The key itself is carried by W1-T10838.
+  acceptance:
+    - claim: "A deployment named in cashDeploymentEndpoints is sent to its own endpoint with the key read from its own keyEnv, and a deployment the map does not name keeps cashEndpoint (then openweightEndpoint) and RMD_OPENWEIGHT_API_KEY"
+      proof: 'grep: test("W1-T10837: a mapped deployment uses its own endpoint and key and an unmapped one keeps the default" in test/worker/spawn/a-cash-deployment-routes-to-its-own-endpoint.test.ts'
+    - claim: "The chat and Responses transport, both web_search readers, the replay-harness pin and the model catalog all resolve the endpoint through the one per-deployment resolver"
+      proof: 'grep: test("W1-T10837: every cash endpoint reader resolves through the per-deployment resolver" in test/worker/spawn/a-cash-deployment-routes-to-its-own-endpoint.test.ts'
+    - claim: "The cash model catalog reads every configured endpoint with its own key and returns the union, naming an unreadable account without hiding the other"
+      proof: 'grep: test("W1-T10837: the cash model catalog reads every configured endpoint" in test/worker/spawn/a-cash-deployment-routes-to-its-own-endpoint.test.ts'
+    - claim: "A map entry whose keyEnv is outside the cash-key shape, or whose endpoint is not https on an Azure host, is refused at config load by name; a mapped deployment with an unset keyEnv is not ready and never borrows the default key"
+      proof: 'grep: test("W1-T10837: a mapping that could send another secret or reach a non-Azure host is refused" in test/worker/spawn/a-cash-deployment-routes-to-its-own-endpoint.test.ts'
+    - claim: "The per-deployment key value never reaches a ledger row, a log line, an error message or a worker environment"
+      proof: 'grep: test("W1-T10837: the per-deployment key never reaches a ledger row, log or worker environment" in test/worker/spawn/a-cash-deployment-routes-to-its-own-endpoint.test.ts'
+  falsifier: |
+    Make the resolver ignore the map and return cashEndpoint: the first test sends the mapped deployment to the
+    default account with the default key and fails. CLOSE IF origin/main already resolves a cash endpoint per
+    deployment.

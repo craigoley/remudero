@@ -1,0 +1,111 @@
+- id: W1-T10839
+  title: "GPT-6.1 TERRA JOINS THE CASH LANE ON ITS EASTUS DEPLOYMENT — readiness rows, one declared Responses-deployment set, Terra ahead of Sol in cash balanced, Terra 6.1 for 5.6 Terra in cash frontier, a Sonnet-fallback candidate and inbox bake-off rows"
+  repo: remudero
+  depends_on: [W1-T10837, W1-T10838]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling, Craig 2026-10-27: \"Router: cash balanced puts Terra 6.1 ahead of Sol 6.1. Cash frontier replaces 5.6 Terra with Terra 6.1. Terra 6.1 joins the inbox-draft bake-off. Cash economy is unchanged. Codex frontier stays Sol 6.1.\" Prices from Microsoft's GA post https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/gpt-6-1-terra-now-generally-available-in-microsoft-foundry-build-agents-that-see/4567769"
+  plan_refs: [W1-T4079, W1-T4081, W1-T4926, W1-T10837, W1-T10838, W1-T10840]
+  files:
+    - .remudero/mounts.yaml
+    - src/lib/worker-provider.ts
+    - src/lib/cash-responses.ts
+    - src/lib/worker.ts
+    - src/lib/inbox-bakeoff.ts
+    - src/run-task.ts
+    - docs/model-routing.md
+    - test/routing/terra61-router-switch.test.ts
+    - test/mounts-wiring.test.ts
+    - test/frontier-work-prefers-opus-and-gpt-6-leads-codex.test.ts
+    - test/sol61-router-switch.test.ts
+    - test/the-balanced-codex-fallback-leads-with-sol-6-1.test.ts
+    - test/a-cash-deployment-is-priced-shaped-and-bounded.test.ts
+    - test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts
+    - test/the-top-tier-is-not-claude-only.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED ON origin/main 07dbdcc77 (2026-10-27). Template: the Sol 6.1 switch, PR #8650 (17 files: mounts,
+    DECISIONS, model-routing, cash-responses, routing-experiments, worker-provider, worker, and the pinning tests).
+    - READINESS. `openWeightDeploymentReady` (src/lib/worker-provider.ts) requires a row in all three of
+      OPENWEIGHT_PRICES (with cache and long-context fields and `unbilledAzureOpenAi429`), OPENWEIGHT_TEMPERATURE and
+      OPENWEIGHT_CONTEXT_WINDOWS. gpt-6.1-terra has none. CODEX_NOTIONAL_PRICES spreads OPENWEIGHT_PRICES, so the
+      Terra row also gives Codex analytics a notional price. OPENWEIGHT_RESPONSE_FORMATS admits json_object only
+      once measured (Sol 6.1 has it), so Terra gets NO row there until a measurement says so.
+    - THE RESPONSES PATH IS HARD-CODED TO SOL. `openWeightEndpoint` has `if (model === "gpt-6.1-sol")` for the
+      /openai/v1/responses URL; `spawnOpenWeightWorker` has `usesResponses = selection.model === "gpt-6.1-sol"` and
+      the toolLineage provider "cash-responses" keyed the same way. `CashResponsesConversation.body`
+      (src/lib/cash-responses.ts) admits low, medium, high, xhigh and max and its error says "cash Sol 6.1 does not
+      support reasoning effort". The operator's 2026-10-27 smoke test ran Terra at reasoning none and low, and the
+      GA post says Terra tunes reasoning "including a none setting for latency-sensitive calls".
+    - ROWS (.remudero/mounts.yaml `cash`). balanced low/medium/high = [gpt-5-nano, gpt-oss-120b, gpt-6-luna,
+      gpt-5.6-luna, gpt-6.1-sol]; frontier = [gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra]; economy is unchanged by
+      ruling. `FALLBACK_OPENWEIGHT_MODELS` and `FALLBACK_CODEX_MODELS` mirror the YAML.
+    - `cashSonnetAlternatives` (src/lib/worker.ts) returns only ["gpt-6.1-sol"].
+    - `BAKEOFF_CANDIDATES` (src/lib/inbox-bakeoff.ts) is a hard-coded list (nano, oss, luna with and without
+      tools, Sonnet 5.5) with no effort field; the replay's `spawnFor` in `inboxBakeoffCommand` (src/run-task.ts)
+      pins the deployment, not the effort.
+    - `classifySuccessors` (src/lib/model-availability.ts) records gpt-6.1-terra as "announced" (reported by the
+      M1 code map; this filing did not re-read the live ledger) whose next step reads "deploy gpt-6.1-terra on
+      the Azure cash lane"; W1-T10837 lets the catalog see the eastus account.
+    - docs/model-routing.md still says a $25 daily ceiling (lines on "fixed $25 UTC daily ceiling" and "$25/day
+      operator cap"); the live host config read 2026-10-27 says dailyCapUsd 50 and the fleet allowance file says
+      fleetCapUsd 50.
+    - Pinning tests that must change truthfully include mounts-wiring, frontier-work-prefers-opus-and-gpt-6-leads-codex
+      (its "Terra is in no Codex row" stays TRUE: no Codex row changes here), sol61-router-switch,
+      the-balanced-codex-fallback-leads-with-sol-6-1, a-cash-deployment-is-priced-shaped-and-bounded,
+      the-trial-deployment-is-the-cheaper-compliant-one and the-top-tier-is-not-claude-only; run the census suites
+      (`rmd census-membership`) for the rest.
+    - W1-T4081 (queued) later retires gpt-5.6-terra from the cash ladder; this task keeps it TRAILING frontier.
+  design: |
+    (i) READINESS ROWS for gpt-6.1-terra, each with readAt 2026-10-27 and a comment citing the GA post:
+    OPENWEIGHT_PRICES Global Standard short context input $1.00, cachedInput $0.05, cacheWrite $1.25, output $5.00 per
+    1M; longContext input $2.00, cachedInput $0.10, cacheWrite $2.50, output $7.50; `unbilledAzureOpenAi429: true`
+    (the same Azure OpenAI billing property every Azure row carries); a reservation input rate on the Sol 6.1 shape.
+    THE GA POST DOES NOT STATE THE LONG-CONTEXT THRESHOLD (read 2026-10-27). Cite it from a Microsoft source (Azure
+    pricing page or model card) in the comment; if none publishes it, set the row so every request reserves and
+    bills at the long-context rates and say so — never copy Sol's 272K by assumption. OPENWEIGHT_TEMPERATURE null.
+    OPENWEIGHT_CONTEXT_WINDOWS from the deployment's own model metadata (the post says "Up to 1M input tokens"),
+    with readAt. No OPENWEIGHT_RESPONSE_FORMATS row.
+    (ii) ONE DECLARED RESPONSES-DEPLOYMENT SET, keyed by table lookup like the other readiness tables, carrying each
+    deployment's allowed reasoning efforts: gpt-6.1-sol low through max (unchanged), gpt-6.1-terra none through max.
+    `openWeightEndpoint`, `usesResponses`, the toolLineage provider and `CashResponsesConversation.body` all read it;
+    no model-id equality test remains. The effort error names the deployment and its allowed set, never "Sol".
+    The Responses URL is built on the deployment's own endpoint (W1-T10837).
+    (iii) ROWS. Cash balanced low/medium/high insert gpt-6.1-terra immediately AHEAD of gpt-6.1-sol. Cash frontier
+    low/medium/high become [gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-5.6-terra] (5.6 Terra trailing, not
+    deleted). Economy unchanged; every Codex row unchanged. Mirror both in FALLBACK_OPENWEIGHT_MODELS.
+    (iv) `cashSonnetAlternatives` returns, in order, gpt-6.1-terra then gpt-6.1-sol, each only when
+    `openWeightDeploymentReady` and `openWeightDeploymentHolds` admit it — behind claude-sonnet-5-5, which the caller
+    already pushes first.
+    (v) BAKE-OFF. Add an optional effort to BakeoffCandidate, make the replay's spawn pin it, and add three
+    BAKEOFF_CANDIDATES rows for cash gpt-6.1-terra at low, medium and high (ids distinct, tools on).
+    (vi) DOCS. docs/model-routing.md: the new rows, the Responses set, Terra's price table with its source, and the
+    $50 cap (dailyCapUsd 50 and fleetCapUsd 50 on the live host, 2026-10-27) in place of every stale $25 statement;
+    the separate $5/$10 Foundry Claude sublimit stays. The DECISIONS.md entry for this ruling is NOT in this task: a DECISIONS.md edit makes a task ruling-shaped (verify: human, ruling-verify lint), so it goes in a separate docs(decisions) change.
+    (vii) The successor watcher reads gpt-6.1-terra as "ready" once the eastus catalog lists it and the rows exist.
+  acceptance:
+    - claim: "gpt-6.1-terra has a cited price row (short and long context, cache, unbilled-429), a context window and a null temperature, and openWeightDeploymentReady admits it"
+      proof: 'grep: test("W1-T10839: Terra 6\.1 is priced, shaped and ready on the cash lane" in test/routing/terra61-router-switch.test.ts'
+    - claim: "Sol 6.1 and Terra 6.1 both ride the Responses transport through one declared set with per-deployment efforts (Terra none through max), and the effort error names the deployment rather than Sol"
+      proof: 'grep: test("W1-T10839: the Responses deployment set carries Sol and Terra and its errors name the deployment" in test/routing/terra61-router-switch.test.ts'
+    - claim: "Cash balanced lists gpt-6.1-terra immediately ahead of gpt-6.1-sol, cash frontier lists gpt-6.1-terra ahead of a trailing gpt-5.6-terra, and cash economy and every Codex row are unchanged"
+      proof: 'grep: test("W1-T10839: cash balanced puts Terra ahead of Sol and cash frontier swaps in Terra 6\.1" in test/routing/terra61-router-switch.test.ts'
+    - claim: "The Sonnet cash fallback offers gpt-6.1-terra before gpt-6.1-sol, each only when ready and able to hold the prompt"
+      proof: 'grep: test("W1-T10839: the Sonnet fallback offers Terra 6\.1 before Sol 6\.1" in test/routing/terra61-router-switch.test.ts'
+    - claim: "The inbox bake-off carries Terra 6.1 at low, medium and high and the replay pins each candidate's effort"
+      proof: 'grep: test("W1-T10839: the inbox bake-off trials Terra at low, medium and high" in test/routing/terra61-router-switch.test.ts'
+    - claim: "The successor watcher reads a deployed and priced gpt-6.1-terra as ready"
+      proof: 'grep: test("W1-T10839: the successor watcher reads a deployed Terra 6\.1 as ready" in test/routing/terra61-router-switch.test.ts'
+    - claim: "docs/model-routing.md documents the Terra 6.1 rows and the Responses-deployment set"
+      proof: 'grep: gpt-6\.1-terra in docs/model-routing.md'
+    - claim: "docs/model-routing.md states the live $50 cap (dailyCapUsd 50, fleetCapUsd 50) in place of the stale $25 statements"
+      proof: 'grep: fleetCapUsd 50 in docs/model-routing.md'
+  falsifier: |
+    Restore `usesResponses = selection.model === "gpt-6.1-sol"`: Terra goes to the chat-completions URL and the
+    Responses-set test fails. CLOSE IF origin/main's cash balanced row already names gpt-6.1-terra ahead of gpt-6.1-sol.
