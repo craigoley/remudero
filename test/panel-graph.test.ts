@@ -1921,15 +1921,6 @@ test("hand-route reconciliation preserves operator decisions and is idempotent",
   assert.equal(readFeedbackEntry(w.root, unrelated.id).status, "new");
 });
 
-test("the hand-route feedback closure regression fails without the reconciliation fix", (t) => {
-  const w = handRouteWorld(t);
-  const projected = projectReconciledFeedback([w.entry], w.github);
-  assert.equal(projected[0]?.status, "new", "a read does not turn a marker into a decision");
-  assert.equal(w.run()[0]?.outcome, "proposed");
-  assert.equal(readQueuedFeedbackRecords(w.stateRoot).size, 1, "the real status-landing queue, not a fake acceptance return, holds the regression witness");
-  assert.equal(readFeedbackEntry(w.root, w.entry.id).status, "new");
-});
-
 test("hand-route queue failure remains unknown and does not claim a proposal", (t) => {
   const w = handRouteWorld(t);
   const blocked = join(w.root, "queue-file");

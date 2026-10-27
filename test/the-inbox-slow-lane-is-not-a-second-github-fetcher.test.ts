@@ -290,7 +290,7 @@ async function handRouteLaneWorld(t: TestCtx) {
   return { time, root, entry, other, row, world: laneWorld(t, time, root) };
 }
 
-test("hand-route feedback reconciliation reuses the existing slow-lane snapshot and writer", async (t) => {
+test("hand-route feedback reconciliation reuses the existing slow-lane snapshot and writer; the hand-route feedback closure regression fails without the reconciliation fix", async (t) => {
   const shim = recordGh(t);
   const { root, entry, other, row, world } = await handRouteLaneWorld(t);
   await world.hold();
