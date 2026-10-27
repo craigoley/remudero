@@ -1,0 +1,54 @@
+- id: W1-T10828
+  title: Give the private Daily source validator an unambiguous name
+  repo: remudero
+  type: implement
+  verify: human
+  principles:
+    tdd: strict
+  risk: low
+  band_meaning: impact
+  author_class: machine
+  origin: "cockpit-source-readability: exact Effects integration census exposes an unrelated private function name collision, 2026-10-27"
+  status: queued
+  attempts: 0
+  priority: 1
+  budget_usd: 6
+  depends_on: []
+  plan_refs: [W1-T10558, W1-T10559, W1-T10562]
+  files:
+    - src/lib/daily-progress-contract.ts
+  rationale: >-
+    At Effects head ab42625b8f376522bdd8164e2beea9233c3f3710 the unchanged native loop census
+    reports sourceGit. Its maintained walk traces readImprovementThread through the quality
+    contract to the Daily contract's private sourceIdentity predicate, then resolves the same
+    name to replay-harness.ts's unrelated Git-reading sourceIdentity function. The Daily
+    predicate performs only source shape validation. This is a concrete name collision, not
+    evidence that the Daily predicate executes Git. The separate genuine synchronous evidence
+    default in Effects is being repaired asynchronously in that task; this rename cannot
+    substitute for that repair.
+  design: >-
+    Rename only the private sourceIdentity predicate in daily-progress-contract.ts and its two
+    local references to dailyProgressSourceIdentity. Preserve its body, every field, type
+    predicate, ordering, caller and refusal exactly. No exports, API schema, source acceptance,
+    inventory, coverage, clock, parsing bound or public behavior changes. Keep all existing tests
+    and the native census implementation and baseline unchanged; add no skip, alias to hide a
+    call, exclusion, allowance or exemption. Verify all references before changing the name,
+    then run the actual existing Daily contract suite and source census through normal admission.
+    This is a distinct producer prerequisite: do not edit or push the root-owned private Effects
+    branch or another owner's source. Qualification, hosted checks and native review still gate
+    publication and merge.
+  falsifier: >-
+    The literal proof must be absent on the actual base and present at the qualified head.
+    Restore the previous private name in the current Effects integration to reproduce the
+    sourceGit reach path; preserve the exact path receipt. Do not call ordinary contract tests
+    base-discriminating: they verify unchanged validation behavior. A changed predicate body,
+    weakened refusal or census baseline change fails the bounded scope.
+  acceptance:
+    - claim: The private Daily source guard has a domain-specific name while its validation behavior is preserved
+      proof: 'grep: function dailyProgressSourceIdentity( in src/lib/daily-progress-contract.ts'
+  note: >-
+    Native reservation refs/rmd-id/W1-T10828 belongs to codex/file-cockpit-runtime-followups-20261027.
+    Actual current-main source and 15 open PR head trees were audited with positive source
+    populations; no public source overlap. Exact source-walk receipt is preserved in cockpit
+    receipts/effects-census-reach.json. Parked at verify human until the configured native filing
+    judge records a genuine ruling; no ruling or approval is invented.
