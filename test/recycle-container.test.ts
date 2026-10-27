@@ -1692,6 +1692,8 @@ test("selected diagnostic stream healthy completion remains private and closes i
       'source "$1"',
       "SELECTED_REGISTRY_ACTIVE=1; SELECTED_REGISTRY_CALLER=fixture",
       "selected_registry_diagnostics",
+      "( selected_registry_cleanup_diagnostics 0 )",
+      '[ -d "${SELECTED_REGISTRY_DIAGNOSTIC_DIR}" ] || exit 98',
       "printf 'synthetic-private-diagnostic-canary\\n'",
       "selected_registry_finish_diagnostics 0",
     ].join("\n"), "fixture", SCRIPT], {
@@ -1708,7 +1710,11 @@ test("selected diagnostic stream healthy completion remains private and closes i
   } finally { if (closed) rmSync(root, { recursive: true, force: true }); }
 });
 
-test("selected diagnostic EXIT cleanup removes a directory allocated by a failing mktemp command", () => {
+for (const [title, failSetup] of [
+  ["selected diagnostic EXIT cleanup removes a directory allocated by a failing mktemp command", 'mktemp() { command mktemp "$@"; return 91; }'],
+  ["selected diagnostic EXIT cleanup removes its directory after FIFO creation fails", 'mkfifo() { return 91; }'],
+  ["selected diagnostic EXIT cleanup closes descriptors when completion identity is unavailable", 'node() { return 91; }'],
+] as const) test(title, () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-diagnostic-failed-allocation-`));
   const scratch = join(root, "tmp"), bin = join(root, "bin"), effects = join(root, "forbidden-effects");
   mkdirSync(scratch); mkdirSync(bin);
@@ -1720,8 +1726,8 @@ test("selected diagnostic EXIT cleanup removes a directory allocated by a failin
     const result = spawnSync("bash", ["-c", [
       'source "$1"',
       "SELECTED_REGISTRY_ACTIVE=1; SELECTED_REGISTRY_CALLER=fixture",
-      // A real directory is returned, then the allocator reports failure. No FIFO/filter exists yet.
-      'mktemp() { command mktemp "$@"; return 91; }',
+      // Exercise the real setup arm; refused setup starts no lifecycle operation.
+      failSetup,
       "if selected_registry_diagnostics; then exit 99; else exit 2; fi",
     ].join("\n"), "fixture", SCRIPT], {
       cwd: REPO_ROOT, encoding: "utf8", timeout: 10000,
