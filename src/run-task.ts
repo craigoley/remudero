@@ -1,4 +1,4 @@
-import { isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
+import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
   runFixRung as runFixRungFromModule,
@@ -35845,7 +35845,9 @@ export function buildInboxDraftHook(
 
       const draftLane = resolvedInboxDraftLane(repoRoot);
       // Explicit saved-conversation drafting narrows selection; every cadence, retry, ownership and spend guard stays the same.
-      const population = onlyProposalId === undefined ? proposals : proposals.filter(proposal => proposal.id === onlyProposalId);
+      // The ordinary cadence never selects a saved improvement: only its daemon-owned handoff names it here.
+      const population = onlyProposalId === undefined ? proposals.filter(proposal => !isImprovementBoundProposal(proposal))
+        : proposals.filter(proposal => proposal.id === onlyProposalId);
       const due = draftsDueOnDaemon(population, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftSelection, draftLane);
       if (due.length === 0) return;
 
@@ -36171,8 +36173,9 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   // attempts every proposal `proposalsNeedingDraft` names, never consulting the daemon-only
   // DraftAttemptCache.
   const lifecycleContext = inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root });
-  // Manual force retains its existing conflict behavior while observing lifecycle uncertainty.
-  const needsDraft = proposalsNeedingDraft(proposals, drafts, { retirement: lifecycleContext,
+  // Manual force retains its existing conflict behavior while observing lifecycle uncertainty. A saved
+  // improvement drafts only through its daemon-owned handoff, never this manual force.
+  const needsDraft = proposalsNeedingDraft(proposals.filter(proposal => !isImprovementBoundProposal(proposal)), drafts, { retirement: lifecycleContext,
     isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set() });
 
   const runId = `INBOX-${Date.now()}`;

@@ -536,7 +536,12 @@ function actionTarget(intent: Intent): { operationId: string; stateDir: string; 
   return { operationId: "", stateDir: "", repoRoot: dirname(dirname(intent.scope.planPath)) };
 }
 
-/** Mark the saved goal draftable for the native selector. Idempotent: the request route and the daemon's recovery both call it. */
+/** Ordinary and manual Inbox sweeps never draft these; only the daemon-owned handoff's targeted draft selects one. */
+export function isImprovementBoundProposal(proposal: Pick<Proposal, "id" | "improvement">): boolean {
+  return proposal.improvement !== undefined || proposal.id.startsWith("improvement:");
+}
+
+/** Mark the saved goal draftable for the native selector. Idempotent; only the daemon-owned handoff calls it. */
 function fireDraftTrigger(intent: Intent, goalDigest: string, owns: () => boolean): void {
   const registryPath = join(intent.scope.inboxStateDir, "inbox-proposals.json");
   strictRegistry(registryPath);
@@ -608,9 +613,9 @@ export async function requestImprovementAction(kind: ImprovementAction["kind"], 
       writeActionIndex(deps.stateDir, { ...index, [kind]: operationId }, owns); wrote = true; afterActionPersist?.("indexed");
       action.state = "requested"; writeAction(deps.stateDir, action, owns); afterActionPersist?.("requested");
     }
-    if (kind === "draft" && ["requested", "waiting"].includes(action.state)) fireDraftTrigger(intent, input.goalDigest, owns);
     if (!owns()) return fail("uncertain", "The decision was saved, but its writer changed before handoff.");
-    // The daemon discovers this durable request without a browser or a service-side launcher.
+    // The daemon discovers this durable request without a browser or a service-side launcher. Saving
+    // never requests native drafting: the owned handoff alone fires the trigger, before its targeted draft.
     return { state: "requested", operation: action, execution: { state: "not_requested" } };
   } catch {
     // A saved decision can precede a failed handoff. Recovery must inspect the operation, not invent success.
@@ -689,7 +694,7 @@ export async function runImprovementAction(operationId: string, deps: Improvemen
     writeAction(deps.stateDir, action, owns);
     if (!owns()) return fail("uncertain", "The action writer changed before execution.");
     if (action.kind === "draft") {
-      // A request interrupted after its saved state never fired the trigger; the owned handoff repairs it before drafting.
+      // Only this owned handoff requests native drafting, immediately before its targeted draft.
       fireDraftTrigger(intent, action.goalDigest, owns);
       await draft(target);
       if (!owns()) return fail("uncertain", "The draft writer changed before acknowledgement.");

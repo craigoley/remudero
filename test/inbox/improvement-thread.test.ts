@@ -485,7 +485,7 @@ test("improvement creation recovers a lock released after exclusive acquisition 
 
 
 test("improvement draft handoff narrows the native selector and preserves the attempt guard", async () => {
-  const { createImprovementThread, readImprovementThread, requestImprovementAction } = await planningModule();
+  const { createImprovementThread, readImprovementThread, requestImprovementAction, runImprovementAction } = await planningModule();
   const { buildInboxDraftHook } = await import("#src/run-task.js");
   const { updateProposalRegistry } = await import("#src/lib/inbox.js");
   await withTempDir("improvement-draft-selection", async dir => {
@@ -498,8 +498,12 @@ test("improvement draft handoff narrows the native selector and preserves the at
     const hook = buildInboxDraftHook("acme", "atlas", { root: inboxRoot } as import("#src/lib/config.js").Config, "IMPROVEMENT-TEST", () => {},
       async proposals => { batches.push(proposals.map(proposal => proposal.id)); return proposals.map(proposal => ({ ok: false as const, proposalId: proposal.id, error: "ordinary test failure" })); },
       undefined, () => "a".repeat(40), undefined, undefined, saved.proposalId);
-    await hook(); assert.deepEqual(batches, [[saved.proposalId]], "the explicit request does not draft unrelated queued proposals");
-    await hook(); assert.equal(batches.length, 1, "the normal one-attempt-per-cause guard still applies");
+    await hook(); assert.deepEqual(batches, [], "a saved request is not yet a native draft request");
+    const owned = () => runImprovementAction(requested.operation.operationId, deps, async () => { await hook(); }, async () => assert.fail("a draft action never files"), () => undefined);
+    const first = await owned(); assert("kind" in first); assert.equal(first.state, "waiting");
+    assert.deepEqual(batches, [[saved.proposalId]], "the owned handoff does not draft unrelated queued proposals");
+    const second = await owned(); assert("kind" in second); assert.equal(second.state, "waiting");
+    assert.equal(batches.length, 1, "the normal one-attempt-per-cause guard still applies");
     const attempts = JSON.parse(readFileSync(join(inboxRoot, "state", "inbox-draft-attempts.json"), "utf8")); assert.equal(typeof attempts[saved.proposalId], "string"); assert.equal(attempts["P-UNRELATED"], undefined);
   });
 });
@@ -677,7 +681,7 @@ test("improvement CLI preserves fleet execution config when selecting a reposito
 });
 
 test("improvement drafting preserves occupied fleet and repository locks and both refusal windows", async () => {
-  const { createImprovementThread, readImprovementThread, requestImprovementAction } = await planningModule();
+  const { createImprovementThread, readImprovementThread, requestImprovementAction, runImprovementAction } = await planningModule();
   const { buildInboxDraftHook } = await import("#src/run-task.js");
   const { acquireDrainLock } = await import("#src/lib/drain-lock.js");
   for (const guard of ["fleet-lock", "repository-lock", "fleet-deferral", "repository-deferral"] as const) await withTempDir(`improvement-${guard}`, async dir => {
@@ -685,7 +689,8 @@ test("improvement drafting preserves occupied fleet and repository locks and bot
     const { deps, request, inboxRoot } = sourceFixture(dir, { stateDir });
     const saved = await createImprovementThread(request, deps); assert(saved.state === "saved");
     const view = readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
-    assert.equal((await requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: `preserve-native-${guard}` }, { ...deps })).state, "requested");
+    const requested = await requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest, idempotencyKey: `preserve-native-${guard}` }, { ...deps });
+    assert(requested.state === "requested");
     const ledgerPath = join(inboxRoot, "state", "ledger.ndjson"); writeFileSync(ledgerPath, "");
     const guardRoot = guard.startsWith("fleet") ? root : inboxRoot;
     const path = join(guardRoot, "state", guard.endsWith("lock") ? "inbox-draft.lock" : "inbox-draft-deferred-until.json");
@@ -696,9 +701,10 @@ test("improvement drafting preserves occupied fleet and repository locks and bot
     const hook = buildInboxDraftHook("acme", "atlas", config, "IMPROVEMENT-LOCK-TEST", () => {}, async (proposals, receivedConfig) => {
       batches++; assert.equal(receivedConfig, config); return proposals.map(proposal => ({ ok: false as const, proposalId: proposal.id, error: "ordinary test failure" }));
     }, undefined, () => "a".repeat(40), undefined, undefined, saved.proposalId, { root: inboxRoot, ledgerPath });
-    try { await hook(); assert.equal(batches, 0, `${guard} must prevent spending`); assert.equal(readFileSync(path, "utf8"), prior, "the existing holder or refusal is unchanged"); }
+    const owned = () => runImprovementAction(requested.operation.operationId, deps, async () => { await hook(); }, async () => assert.fail("a draft action never files"), () => undefined);
+    try { assert.equal((await owned()).state, "waiting"); assert.equal(batches, 0, `${guard} must prevent spending`); assert.equal(readFileSync(path, "utf8"), prior, "the existing holder or refusal is unchanged"); }
     finally { if (held) held.release(); else unlinkSync(path); }
-    await hook(); assert.equal(batches, 1, "the same native selection runs once its guard permits it");
+    assert.equal((await owned()).state, "waiting"); assert.equal(batches, 1, "the same native selection runs once its guard permits it");
     assert.equal(existsSync(join(root, "state", "inbox-draft.lock")), false); assert.equal(existsSync(join(inboxRoot, "state", "inbox-draft.lock")), false);
   });
 });
@@ -761,7 +767,7 @@ test("saved improvement actions start only through the daemon-owned handoff: int
     assert.equal(interrupted.state, "uncertain");
     const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
     const trigger = () => JSON.parse(readFileSync(registryPath, "utf8")).proposals.find((p: { id: string }) => p.id === saved.proposalId).trigger;
-    assert.equal(trigger().fired, false, "the interruption precedes the request route's trigger write");
+    assert.equal(trigger().fired, false, "saving the request never requests native drafting");
     // No client retry: only the daemon's own discovery and handoff run from here.
     const pending: string[] = []; for await (const row of planning.pendingImprovementActions(deps.stateDir)) pending.push(row.operationId);
     assert.equal(pending.length, 1, "the daemon rediscovers the saved request");
@@ -782,6 +788,62 @@ test("saved improvement actions start only through the daemon-owned handoff: int
     const after = planning.readImprovementThread(saved.requestId, deps); assert(after.state === "saved"); assert.equal(after.drafting.state, "ready");
     const remaining: string[] = []; for await (const row of planning.pendingImprovementActions(deps.stateDir)) remaining.push(row.operationId);
     assert.deepEqual(remaining, [], "a recovered action is not rediscovered forever");
+  });
+});
+
+test("saved improvement actions start only through the daemon-owned handoff: the ordinary draft sweep never selects one", async () => {
+  const planning = await planningModule();
+  const { buildInboxDraftHook, inboxCommand } = await import("#src/run-task.js");
+  const { captureInboxDraftSnapshot, updateProposalRegistry } = await import("#src/lib/inbox.js");
+  const { fakeGitHub } = await import("#test/helpers/fake-github.js");
+  await withTempDir("improvement-ordinary-sweep", async dir => {
+    const { deps, request, inboxRoot } = sourceFixture(dir);
+    const saved = await planning.createImprovementThread(request, deps); assert(saved.state === "saved");
+    const view = planning.readImprovementThread(saved.requestId, deps); assert(view.state === "saved");
+    const requested = await planning.requestImprovementAction("draft", { requestId: saved.requestId, goalDigest: view.goalDigest,
+      idempotencyKey: "ordinary-sweep-draft-0001" }, deps); assert(requested.state === "requested");
+    const stateDir = join(inboxRoot, "state"), registryPath = join(stateDir, "inbox-proposals.json");
+    const trigger = () => JSON.parse(readFileSync(registryPath, "utf8")).proposals.find((p: { id: string }) => p.id === saved.proposalId).trigger;
+    assert.equal(trigger().fired, false, "the HTTP request saves the decision without requesting native drafting");
+    updateProposalRegistry(registryPath, current => [...current, { id: "P-UNRELATED", summary: "Other work", evidenceAnchors: [] }]);
+    writeFileSync(join(stateDir, "ledger.ndjson"), "");
+    const batches: string[][] = [];
+    const draftBatch = async (proposals: import("#src/lib/inbox.js").Proposal[]) => {
+      batches.push(proposals.map(proposal => proposal.id));
+      return proposals.map(proposal => {
+        if (proposal.id !== saved.proposalId) return { ok: false as const, proposalId: proposal.id, error: "ordinary test failure" };
+        const snapshot = captureInboxDraftSnapshot(proposal, { repository: request.repository });
+        return { ok: true as const, proposalId: proposal.id, snapshot, candidate: { proposalId: proposal.id, fragmentYaml: "- id: W1-T99999\n  title: Simplify repeated work\n",
+          stampLine: "Owned improvement draft", anchorFingerprint: "", completion: { snapshot, lintClean: true, violations: [] } } };
+      });
+    };
+    const config = { root: inboxRoot } as import("#src/lib/config.js").Config;
+    const ordinary = () => buildInboxDraftHook("acme", "atlas", config, "ORDINARY-SWEEP-TEST", () => {}, draftBatch, undefined, () => "a".repeat(40))();
+    await ordinary();
+    assert.deepEqual(batches, [["P-UNRELATED"]], "the ordinary sweep is live, and a saved request alone is never drafted by it");
+    // Observed inside the owned handoff, after it fired the trigger; asserted after it returns.
+    const observed: { fired?: boolean; ordinary?: string[][]; manual?: string[][]; manualCode?: number; owned?: string[][] } = {};
+    const draft = async (target: { proposalId: string; controlRoot: string; ledgerPath: string }) => {
+      observed.fired = trigger().fired;
+      writeFileSync(join(stateDir, "inbox-draft-attempts.json"), "{}");
+      batches.length = 0; await ordinary(); observed.ordinary = [...batches];
+      writeFileSync(join(stateDir, "inbox-draft-attempts.json"), "{}");
+      batches.length = 0;
+      const quiet = console.log; console.log = () => {};
+      try { observed.manualCode = await inboxCommand([], { config, github: fakeGitHub(), draftBatch }); } finally { console.log = quiet; }
+      observed.manual = [...batches]; batches.length = 0;
+      await buildInboxDraftHook("acme", "atlas", config, "OWNED-DRAFT-TEST", () => {}, draftBatch, undefined, () => "a".repeat(40),
+        undefined, undefined, target.proposalId, { root: target.controlRoot, ledgerPath: target.ledgerPath })();
+      observed.owned = [...batches];
+    };
+    const ran = await planning.runImprovementAction(requested.operation.operationId, deps, draft, async () => assert.fail("a draft action never files"), () => undefined);
+    assert.equal(observed.fired, true, "the owned handoff requests native drafting before its targeted draft");
+    assert.deepEqual(observed.ordinary, [["P-UNRELATED"]], "the ordinary cadence never selects a fired saved improvement");
+    assert.equal(observed.manualCode, 0);
+    assert.deepEqual(observed.manual, [["P-UNRELATED"]], "the manual Inbox force never drafts a fired saved improvement");
+    assert.deepEqual(observed.owned, [[saved.proposalId]], "only the owned handoff's targeted draft selects the saved improvement");
+    assert("kind" in ran); assert.equal(ran.state, "completed");
+    const after = planning.readImprovementThread(saved.requestId, deps); assert(after.state === "saved"); assert.equal(after.drafting.state, "ready");
   });
 });
 

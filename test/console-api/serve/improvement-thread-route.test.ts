@@ -72,6 +72,7 @@ test("improvement routes persist conversations and reviewed decisions through pr
       const stateDir = join(inboxRoot, "state");
       assert.equal(existsSync(join(stateDir, "inbox-drafts.json")), false, "the service never drafts queued work itself");
       const proposal = (JSON.parse(readFileSync(join(stateDir, "inbox-proposals.json"), "utf8")) as { proposals: Proposal[] }).proposals.find(row => row.id === proposalId)!;
+      assert.equal(proposal.trigger?.fired, false, "the HTTP request saves the decision; only the daemon-owned handoff requests drafting");
       const snapshot = captureInboxDraftSnapshot(proposal, { repository: request.repository });
       const candidate = { proposalId, fragmentYaml: "- id: W1-T99999\n  title: Simplify repeated work\n", stampLine: "Saved draft", anchorFingerprint: "",
         completion: { snapshot, lintClean: true, violations: [] } };
