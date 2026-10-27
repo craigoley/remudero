@@ -392,6 +392,49 @@ test("selected runtime Codex spawn denies private bytes without adding them to c
   } finally { fixture.cleanup(); }
 });
 
+for (const privateInput of ["selected-file", "invocation-profile"] as const) {
+  test(`selected Codex native-cache grants refuse overlapping ${privateInput} before spawn`, {
+    skip: process.platform === "win32" ? "native-cache grants are POSIX-only" : false,
+  }, async () => {
+    const fixture = runtimeRegistryFixture(), repo = gitRepo({ seedCommit: false });
+    const home = join(fixture.root, "operator-home"), codexHome = join(fixture.root, "codex-home");
+    mkdirSync(home, { mode: 0o700 }); mkdirSync(codexHome, { mode: 0o700 });
+    const cache = join(home, ".cache", "remudero", "swc-native"), priorHome = process.env.HOME;
+    let spawns = 0;
+    const config: Config = { root: fixture.root, claudeBin: "/unused", workerProviders: {
+      enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome,
+    } };
+    const enter = () => runtimeRegistryRunner()(() => spawnCodexWorker({
+      cwd: repo.dir, workerHome: fixture.root, prompt: "native cache privacy fixture",
+      settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: ["Read", "Edit", "Bash"],
+      containment: { spawn: options => {
+        spawns++;
+        assert.ok(options.args.some((value, index) => value === "--add-dir" && options.args[index + 1] === cache),
+          "the real verified-writer branch must grant its native cache");
+        assert.equal(options.env.SWC_NATIVE_BINDING_CACHE, cache);
+        assert.equal(options.env.SWC_NATIVE_BINDING_CACHE_SKIP_SECURITY_CHECK, undefined);
+        const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough();
+        const child = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
+        stdin.on("finish", () => { stdout.end(JSON.stringify({ type: "turn.completed", usage: {} }) + "\n");
+          queueMicrotask(() => child.emit("exit", 0)); });
+        return { process: child as never, pid: 9876 };
+      }, teardown: () => {} },
+    }, config), { envPath: fixture.selected });
+    try {
+      process.env.HOME = home;
+      await enter(); assert.equal(spawns, 1, "a disjoint private selection and actual cache grant remain compatible");
+      if (privateInput === "selected-file") {
+        const nested = join(cache, "private-selection.yaml"); renameSync(fixture.selected, nested); fixture.selected = nested;
+      } else config.workerProviders!.codexHome = cache;
+      await assert.rejects(enter(), /worker_scope_contains_private_file/);
+      assert.equal(spawns, 1, "an overlapping grant never reaches even the intercepted contained spawn");
+    } finally {
+      if (priorHome === undefined) delete process.env.HOME; else process.env.HOME = priorHome;
+      repo.cleanup(); fixture.cleanup();
+    }
+  });
+}
+
 test("selected Codex writer retains public linked metadata and host-slot writes without private overlap", async () => {
   const fixture = runtimeRegistryFixture(), repo = gitRepo();
   const cwd = join(fixture.root, "checkout"), codexHome = join(fixture.root, "codex-home"), slots = join(fixture.root, "public-slots");
