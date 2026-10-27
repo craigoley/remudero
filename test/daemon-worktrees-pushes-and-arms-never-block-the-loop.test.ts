@@ -49,6 +49,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { addLaneWorktree, createDaemonLaneWorktree, createFixRungWorktree, pushFixRound } from "../src/run-task.js";
 import { worktreeAddAsync } from "../src/lib/worker.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { emptyHoldLedger } from "./helpers/empty-hold-ledger.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 
 type Log = (step: string, extra?: Record<string, unknown>) => void;
@@ -505,8 +506,9 @@ test("W1-T5284: arming auto merge lets a timer fire while gh is in flight", asyn
   );
   const savedPath = process.env.PATH;
   process.env.PATH = `${shim.dir}:${savedPath}`;
+  const holdLedger = emptyHoldLedger();
   try {
-    const real = realArmDepsAsync();
+    const real = realArmDepsAsync(holdLedger.config);
     const said: string[] = [];
     const { inFlightTicks, value } = await ticksWhileInFlight(
       () => shim.calls().some((call) => call.startsWith("pr merge")) && !existsSync(done),
@@ -530,6 +532,7 @@ test("W1-T5284: arming auto merge lets a timer fire while gh is in flight", asyn
   } finally {
     process.env.PATH = savedPath;
     rmSync(scratch, { recursive: true, force: true });
+    holdLedger.dispose();
   }
 
   // THE SAME OUTCOME: every arm class, through both drivers.
@@ -602,10 +605,10 @@ test("W1-T5284: the async arm's real transport carries each gh write and the cac
   );
   const savedPath = process.env.PATH;
   process.env.PATH = `${shim.dir}:${savedPath}`;
+  // the merge writes fence on present, untorn hold evidence: an empty ledger is "no hold recorded".
+  const holdLedger = emptyHoldLedger();
   try {
-    const real = realArmDepsAsync(() => {
-      throw new Error("no config");
-    });
+    const real = realArmDepsAsync(holdLedger.config);
     const url = (n: number) => `https://github.com/craigoley/remudero/pull/${n}`;
     assert.equal(await real.mergeQueue!(url(7001)), true);
     assert.equal(await real.mergeQueue!(url(7001)), true, "a second read inside the TTL is served from the cache");
@@ -632,6 +635,7 @@ test("W1-T5284: the async arm's real transport carries each gh write and the cac
     assert.ok(calls.includes(`pr merge ${url(7004)} --disable-auto`));
     await assert.rejects(mergeDirectViaRestAsync("not a pr url"), /refusing to merge blind/);
   } finally {
+    holdLedger.dispose();
     process.env.PATH = savedPath;
   }
 });

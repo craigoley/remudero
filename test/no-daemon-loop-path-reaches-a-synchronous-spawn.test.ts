@@ -120,7 +120,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   ensureTaskTrailer: 2,
   ensureWorktreeConfigEnabled: 2,
   execGhPrReview: 1,
-  execGhStatusPost: 1,
   execWhitelistedProof: 1,
   executeWorktreeRemoval: 1,
   extractReviewFindings: 1,

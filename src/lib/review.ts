@@ -1,7 +1,7 @@
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { boundChildByLoopTime, execFileLoopBounded } from "./loop-bounded-child.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
+import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { refreshInstallationToken, type RefreshOptions } from "./github-app.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -1285,10 +1285,31 @@ function dialectGrepMatchedLineIsComment(line: string): boolean {
 interface MatchedLineCommentContext {
   pattern: string;
   fileText: string;
+  /** The matched file's repo-relative path. Its extension picks the comment grammar
+   *  (W1-T10372); omitted, the legacy JavaScript reading applies. */
+  path?: string;
 }
 
-function commentMaskByLine(fileText: string): boolean[][] {
+/** Which characters count as a comment in a file (W1-T10372): `js` reads `//` and `/* *\/`,
+ *  `yaml` reads an unquoted `#` to end of line, and `none` (Markdown, or any extension with no
+ *  known grammar) masks nothing. */
+type CommentGrammar = "js" | "yaml" | "none";
+
+const JS_COMMENT_EXTENSIONS = new Set(["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]);
+const YAML_COMMENT_EXTENSIONS = new Set(["yaml", "yml"]);
+
+function commentGrammarForPath(path: string | undefined): CommentGrammar {
+  if (path === undefined) return "js";
+  const ext = /\.([^./\\]+)$/.exec(path)?.[1]?.toLowerCase();
+  if (ext !== undefined && JS_COMMENT_EXTENSIONS.has(ext)) return "js";
+  if (ext !== undefined && YAML_COMMENT_EXTENSIONS.has(ext)) return "yaml";
+  return "none";
+}
+
+function commentMaskByLine(fileText: string, grammar: CommentGrammar = "js"): boolean[][] {
   const lines = fileText.split("\n").map((line) => line.replace(/\r$/, ""));
+  if (grammar === "yaml") return yamlCommentMaskByLine(lines);
+  if (grammar === "none") return lines.map((line) => Array.from({ length: line.length }, () => false));
   const masks: boolean[][] = [];
   let block = false;
   let quote: '"' | "'" | "`" | undefined;
@@ -1335,6 +1356,74 @@ function commentMaskByLine(fileText: string): boolean[][] {
   return masks;
 }
 
+/** A block-scalar header (`key: |`, `- >-`, `|2+`) at the end of a line's non-comment text. */
+export const YAML_BLOCK_SCALAR_HEADER_RE = /(?:^|\s)[|>][-+1-9]{0,2}$/;
+
+/** YAML's comment grammar: a `#` at line start or after whitespace runs to end of line, unless it
+ *  sits inside a quoted scalar (which may span lines) or a block scalar's content. A quote opens a
+ *  scalar only where a scalar may start, so `it's` in a plain scalar opens nothing. */
+function yamlCommentMaskByLine(lines: readonly string[]): boolean[][] {
+  const masks: boolean[][] = [];
+  let quote: '"' | "'" | undefined;
+  let escaped = false;
+  let blockIndent: number | undefined;
+  for (const line of lines) {
+    const mask = Array.from({ length: line.length }, () => false);
+    const indent = line.length - line.trimStart().length;
+    if (blockIndent !== undefined) {
+      if (line.trim() === "" || indent > blockIndent) {
+        masks.push(mask);
+        continue;
+      }
+      blockIndent = undefined;
+    }
+    let prevNonSpace: string | undefined;
+    let contentEnd = line.length;
+    for (let i = 0; i < line.length; i += 1) {
+      const ch = line[i]!;
+      if (quote === '"') {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') quote = undefined;
+        prevNonSpace = ch;
+        continue;
+      }
+      if (quote === "'") {
+        if (ch === "'" && line[i + 1] === "'") i += 1;
+        else if (ch === "'") quote = undefined;
+        prevNonSpace = ch;
+        continue;
+      }
+      if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]!))) {
+        for (let j = i; j < line.length; j += 1) mask[j] = true;
+        contentEnd = i;
+        break;
+      }
+      if ((ch === '"' || ch === "'") && (prevNonSpace === undefined || ":-?[{,".includes(prevNonSpace))) quote = ch;
+      if (!/\s/.test(ch)) prevNonSpace = ch;
+    }
+    if (quote === undefined && YAML_BLOCK_SCALAR_HEADER_RE.test(line.slice(0, contentEnd).trimEnd())) blockIndent = indent;
+    masks.push(mask);
+  }
+  return masks;
+}
+
+/** The no-literal-occurrence fallback, read in the file's own grammar: JavaScript keeps its
+ *  displayed-shape test; YAML asks whether the line's first non-blank character is masked;
+ *  a grammar with no comments never reads a line as one. */
+function matchedLineIsCommentInGrammar(
+  line: string,
+  grammar: CommentGrammar,
+  sourceLine?: string,
+  mask?: readonly boolean[],
+): boolean {
+  if (grammar === "js") return dialectGrepMatchedLineIsComment(line);
+  if (grammar === "none") return false;
+  if (sourceLine === undefined || mask === undefined) return dialectGrepMatchedSourceText(line).startsWith("#");
+  const first = sourceLine.length - sourceLine.trimStart().length;
+  return first < sourceLine.length && mask[first] === true;
+}
+
 function allLiteralOccurrencesAreComments(line: string, mask: readonly boolean[], pattern: string): boolean | undefined {
   if (!pattern) return undefined;
   let found = false;
@@ -1354,14 +1443,15 @@ export function matchedLinesAreAllComments(
   if (matchedLines.length === 0) return false;
   if (context !== undefined) {
     const sourceLines = context.fileText.split("\n").map((line) => line.replace(/\r$/, ""));
-    const masks = commentMaskByLine(context.fileText);
+    const grammar = commentGrammarForPath(context.path);
+    const masks = commentMaskByLine(context.fileText, grammar);
     return matchedLines.every((line) => {
       const lineNumber = dialectGrepMatchedLineNumber(line);
-      if (lineNumber === undefined) return dialectGrepMatchedLineIsComment(line);
+      if (lineNumber === undefined) return matchedLineIsCommentInGrammar(line, grammar);
       const sourceLine = sourceLines[lineNumber - 1];
       const mask = masks[lineNumber - 1];
-      if (sourceLine === undefined || mask === undefined) return dialectGrepMatchedLineIsComment(line);
-      return allLiteralOccurrencesAreComments(sourceLine, mask, context.pattern) ?? dialectGrepMatchedLineIsComment(line);
+      if (sourceLine === undefined || mask === undefined) return matchedLineIsCommentInGrammar(line, grammar);
+      return allLiteralOccurrencesAreComments(sourceLine, mask, context.pattern) ?? matchedLineIsCommentInGrammar(line, grammar, sourceLine, mask);
     });
   }
   return matchedLines.every(dialectGrepMatchedLineIsComment);
@@ -1371,7 +1461,7 @@ function matchedLineCommentContext(w: WhitelistedProof, cwd: string): MatchedLin
   const path = dialectGrepTargetPath(w);
   if (path === undefined) return undefined;
   const fullPath = join(cwd, path);
-  return existsSync(fullPath) ? { pattern: w.args[2]!, fileText: readFileSync(fullPath, "utf8") } : undefined;
+  return existsSync(fullPath) ? { pattern: w.args[2]!, fileText: readFileSync(fullPath, "utf8"), path } : undefined;
 }
 
 /** Compile a `unit test:` dialect body — either a literal test-file path (reusing the exact-file
@@ -10547,8 +10637,15 @@ export interface PostReviewStatusRetryOpts {
   backoffMs?: (failedAttempt: number) => number;
   /** Injectable sleep (tests skip real waiting). Default: a real `setTimeout`. */
   sleep?: (ms: number) => Promise<void>;
-  /** Injectable `gh` invocation — the "gh gateway" a unit test simulates without shelling out. Defaults to the real `ghExec(...)` POST below. */
-  exec?: (args: string[], env: NodeJS.ProcessEnv) => void;
+  /** Injectable `gh` invocation — the "gh gateway" a unit test simulates without shelling out. Defaults to the
+   *  awaited {@link execGhStatusPostAsync} POST below (W1-T9549). */
+  exec?: (args: string[], env: NodeJS.ProcessEnv) => void | Promise<void>;
+}
+
+/** W1-T9549 — the status POST {@link postReviewStatus} and the repair lease make by default, AWAITED over
+ *  {@link ghTextAsync} with the poster's own env (the reviewer token), so a daemon review's post leaves the loop free. */
+export async function execGhStatusPostAsync(args: string[], env: NodeJS.ProcessEnv): Promise<void> {
+  await ghTextAsync(args, { env });
 }
 
 /** Exported, not just internal, so a unit test can PATH-stub `gh` and drive this exact real invocation directly — the
@@ -10604,11 +10701,11 @@ export async function postReviewStatus(
   const maxAttempts = retryOpts.maxAttempts ?? POST_REVIEW_STATUS_MAX_ATTEMPTS;
   const backoffMs = retryOpts.backoffMs ?? ((failedAttempt) => POST_REVIEW_STATUS_BASE_DELAY_MS * 2 ** (failedAttempt - 1));
   const sleep = retryOpts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const exec = retryOpts.exec ?? execGhStatusPost;
+  const exec = retryOpts.exec ?? execGhStatusPostAsync;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      exec(args, env);
+      await exec(args, env);
       return;
     } catch (e) {
       const transient = classifyFailure({ text: ghErrorText(e) }) === "transient";
@@ -10809,10 +10906,25 @@ export function fetchPrLifecycle(
         "back to `gh pr view --json state`, whose GraphQL budget exhaustion is the defect this read was moved off",
     );
   }
+  return prLifecycleFromRow(fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow, engineRevision);
+}
+
+/** W1-T9549 — {@link fetchPrLifecycle} with its REST read AWAITED over {@link ghJsonAsync}: the same request and
+ *  the same fold, so a daemon review's lifecycle read before its status post leaves the loop free. */
+export async function fetchPrLifecycleAsync(
+  prUrl: string,
+  fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+  engineRevision: string = REVIEW_ENGINE_REVISION,
+): Promise<PrLifecycleState> {
+  const target = prLifecycleUrlTarget(prUrl);
+  if (!target) throw new Error(`fetchPrLifecycleAsync: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)}`);
+  return prLifecycleFromRow(await fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow, engineRevision);
+}
+
+function prLifecycleFromRow(row: RestPullRow, engineRevision: string): PrLifecycleState {
   // W1-T2793: retain the head and body identity from this SAME response before folding lifecycle. This adds no GitHub
   // call and stores or logs neither body nor transcript. The optional spread keeps malformed or legacy fixtures on
   // their historical lifecycle-only contract.
-  const row = fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow;
   const state = prStateFromRest(row);
   const headSha = row.head?.sha;
   const baseRef = (row.base as { ref?: unknown } | undefined)?.ref;
@@ -10835,7 +10947,7 @@ export function fetchPrLifecycle(
 async function readReviewLifecycle(fetch: PostReviewStatusGuardedOpts["fetchLifecycle"]): Promise<PrLifecycleState> {
   for (let attempt = 1; ; attempt++) {
     try {
-      return fetch();
+      return await fetch();
     } catch (error) {
       const waitMs = POST_REVIEW_STATUS_BASE_DELAY_MS * 2 ** (attempt - 1);
       // Pacing and longer server-requested waits retain their existing outer recovery owner.
@@ -11197,7 +11309,7 @@ export interface PostReviewStatusGuardedOpts {
   reviewerCodeFreshness?: ReviewerCodeFreshness;
   /** Fresh lifecycle read for THIS attempt — real callers pass `() => fetchPrLifecycle(prUrl)`,
    * tests inject a fake. Called INSIDE the lock, never before (see the module doc above). */
-  fetchLifecycle: () => PrLifecycleState;
+  fetchLifecycle: () => PrLifecycleState | Promise<PrLifecycleState>;
   /** Latest GitHub commit status for this context, read inside the lock on a decision replay.
    * A later pending claim can replace the status even though the ledger's terminal decision remains final. */
   fetchCurrentStatus?: () => PostableReviewState | ReviewStatusEntry | undefined;
@@ -11508,7 +11620,7 @@ export interface PostReviewPendingOpts {
   prUrl?: string;
   reviewInputDigest?: string;
   reviewEngineRevision?: string;
-  fetchLifecycle: () => PrLifecycleState;
+  fetchLifecycle: () => PrLifecycleState | Promise<PrLifecycleState>;
   /** Combined commit-status reader; the default observes claims from every host. */
   fetchStatus?: GhApiFetcher;
   /** Injected raw poster (tests) — forwarded to {@link postReviewStatusGuarded} unchanged. */
@@ -11757,7 +11869,7 @@ export interface PostRepairLeaseOpts {
   runId: string;
   ledgerPath: string;
   /** Injected raw poster (tests). Defaults to a real `gh api` status POST under {@link
-   *  REPAIR_LEASE_CONTEXT}, reusing {@link execGhStatusPost} unchanged. */
+   *  REPAIR_LEASE_CONTEXT}, through the awaited {@link execGhStatusPostAsync} (W1-T9549). */
   post?: (o: { owner: string; repo: string; sha: string; description?: string }) => void | Promise<void>;
 }
 
@@ -11815,5 +11927,5 @@ async function defaultPostRepairLeaseStatus(o: { owner: string; repo: string; sh
     "state=success",
   ];
   if (o.description) args.push("-f", `description=${o.description.slice(0, 140)}`);
-  execGhStatusPost(args, process.env);
+  await execGhStatusPostAsync(args, process.env);
 }

@@ -121,7 +121,7 @@ import { judgementFamily } from "./machine-filing-judge.js";
 import { currentVerifyHumanRulings, currentDeclineState, declineLapse, observedStateOfProposalSummary } from "./verify-human-judge.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, servePlainOptions, type InboxOptionLane, type PlainInboxMessage, type PlainStore, type ServedPlainInboxMessage } from "./inbox-plain.js";
-import { readRecommendationStore, recommendationFor, recommendationStorePath, type RecommendationStore, type ServedRecommendation } from "./inbox-recommendation.js";
+import { narrowQualification, readRecommendationSource, readRecommendationStore, recommendationFor, recommendationStorePath, type RecommendationQualification, type RecommendationStore, type ServedRecommendation } from "./inbox-recommendation.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
 import {
   listThreadViews,
@@ -2410,6 +2410,8 @@ export interface InboxStores {
   triage?: Record<string, InboxTriage>;
   /** W1-T8950: the stored recommendations; absent from a file written before they were served. */
   recommendations?: RecommendationStore;
+  /** The current repository evidence captured by the writer's pinned pass; stored advice is served only against it. */
+  recommendationSource?: RecommendationQualification;
 }
 
 /** W1-T8831: one item the operator set aside. A snooze is carried only while it is still ahead of the pass that read it. */
@@ -2604,6 +2606,8 @@ const ACTIVITY_STEPS: ReadonlySet<string> = new Set(["panel.proposal_reframe_req
 export interface InboxProvenanceEvidence {
   /** W1-T8831: the instant a snooze is judged against; the system clock when absent. */
   nowMs?: number;
+  /** The repository whose captured source may qualify stored advice; a source captured for another reads as none. */
+  recommendationRepository?: string;
   plan?: Pick<Plan, "byId">;
   ledgerLines?: ReadonlyArray<Record<string, unknown>>;
 }
@@ -2639,7 +2643,9 @@ export function readInboxStores(inboxRoot: string, proposals: ReadonlyArray<{ id
   const stateDir = join(inboxRoot, "state");
   const ids = new Set(proposals.map((p) => p.id));
   const narrow = <T>(store: Record<string, T>): Record<string, T> => Object.fromEntries(Object.entries(store).filter(([id]) => ids.has(id)));
-  return { fleetDecisions: narrow(fleetLaneStoreForDisplay(stateDir)), plainMessages: narrow(readPlainStore(plainStorePath(stateDir))), recommendations: narrow(readRecommendationStore(recommendationStorePath(stateDir))), provenance: inboxProvenance(inboxRoot, proposals, evidence), triage: activeTriage(stateDir, ids, evidence.nowMs ?? systemClock.now()) };
+  const captured = readRecommendationSource(stateDir);
+  const recommendationSource = captured && (evidence.recommendationRepository === undefined || captured.repository === evidence.recommendationRepository) ? narrowQualification(captured, ids) : undefined;
+  return { fleetDecisions: narrow(fleetLaneStoreForDisplay(stateDir)), plainMessages: narrow(readPlainStore(plainStorePath(stateDir))), recommendations: narrow(readRecommendationStore(recommendationStorePath(stateDir))), ...(recommendationSource ? { recommendationSource } : {}), provenance: inboxProvenance(inboxRoot, proposals, evidence), triage: activeTriage(stateDir, ids, evidence.nowMs ?? systemClock.now()) };
 }
 
 export type InboxSnapshotAttention =
@@ -2692,7 +2698,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     isAgeOnlyInboxInformation(proposal) && classifiedInboxOwner(proposal, capturedById.get(proposal.id) ?? {}) === "fleet");
   // W1-T8950: an operator item's recommended decision, current for its summary and lane, with its route attached here.
   const recommended = (proposal: { id: string; summary: string }, lane: InboxOptionLane): { recommendation?: ServedRecommendation } => {
-    const recommendation = recommendationFor(proposal, lane, stores.recommendations ?? {}, capturedById.get(proposal.id));
+    const recommendation = recommendationFor(proposal, lane, stores.recommendations ?? {}, capturedById.get(proposal.id), stores.recommendationSource);
     return recommendation ? { recommendation } : {};
   };
 

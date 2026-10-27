@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { emptyHoldLedger } from "./helpers/empty-hold-ledger.js";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1255,6 +1256,7 @@ test("arm merge: the head ref is absent after a merge with no local delete", () 
 test("arm merge: an immediate merge from a detached HEAD does not ask for a current branch", () => {
   const repo = mkdtempSync(join(tmpdir(), "w1t1050-detached-"));
   const shimDir = mkdtempSync(join(tmpdir(), "w1t1050-detached-shim-"));
+  const holdLedger = emptyHoldLedger();
   const savedPath = process.env.PATH;
   const savedCwd = process.cwd();
   try {
@@ -1293,7 +1295,7 @@ test("arm merge: an immediate merge from a detached HEAD does not ask for a curr
     process.env.PATH = `${shimDir}:${savedPath}`;
     process.chdir(repo);
 
-    const d = realArmDeps();
+    const d = realArmDeps(holdLedger.config);
     assert.doesNotThrow(
       () => withLiveWritesAllowed(() => d.mergeDirect("https://github.com/acme/sandboxrepo/pull/1050")),
       "an immediate merge from a detached HEAD must not fail asking gh for a current branch",
@@ -1301,6 +1303,7 @@ test("arm merge: an immediate merge from a detached HEAD does not ask for a curr
   } finally {
     process.chdir(savedCwd);
     process.env.PATH = savedPath;
+    holdLedger.dispose();
     for (const d of [repo, shimDir]) rmSync(d, { recursive: true, force: true });
   }
 });
@@ -1308,12 +1311,13 @@ test("arm merge: an immediate merge from a detached HEAD does not ask for a curr
 test("arm merge: the auto arm no longer asks the local git for a branch it does not have", () => {
   const shimDir = mkdtempSync(join(tmpdir(), "w1t1111-auto-shim-"));
   const logPath = join(shimDir, "argv.log");
+  const holdLedger = emptyHoldLedger();
   const savedPath = process.env.PATH;
   try {
     recordingGhShim(shimDir, logPath);
     process.env.PATH = `${shimDir}:${savedPath}`;
 
-    const d = realArmDeps();
+    const d = realArmDeps(holdLedger.config);
     withLiveWritesAllowed(() => d.armAuto("https://github.com/acme/sandboxrepo/pull/1051"));
 
     const argv = readFileSync(logPath, "utf8").trim();
@@ -1328,6 +1332,7 @@ test("arm merge: the auto arm no longer asks the local git for a branch it does 
         `branch server-side via delete_branch_on_merge once the deferred merge lands — argv was ${argv}`,
     );
   } finally {
+    holdLedger.dispose();
     process.env.PATH = savedPath;
     rmSync(shimDir, { recursive: true, force: true });
   }
@@ -1336,6 +1341,7 @@ test("arm merge: the auto arm no longer asks the local git for a branch it does 
 test("arm merge: an auto arm from a detached HEAD does not ask for a current branch", () => {
   const repo = mkdtempSync(join(tmpdir(), "w1t1111-detached-"));
   const shimDir = mkdtempSync(join(tmpdir(), "w1t1111-detached-shim-"));
+  const holdLedger = emptyHoldLedger();
   const savedPath = process.env.PATH;
   const savedCwd = process.cwd();
   try {
@@ -1374,7 +1380,7 @@ test("arm merge: an auto arm from a detached HEAD does not ask for a current bra
     process.env.PATH = `${shimDir}:${savedPath}`;
     process.chdir(repo);
 
-    const d = realArmDeps();
+    const d = realArmDeps(holdLedger.config);
     assert.doesNotThrow(
       () => withLiveWritesAllowed(() => d.armAuto("https://github.com/acme/sandboxrepo/pull/1051")),
       "arming auto-merge from a detached HEAD must not fail asking gh for a current branch",
@@ -1382,6 +1388,7 @@ test("arm merge: an auto arm from a detached HEAD does not ask for a current bra
   } finally {
     process.chdir(savedCwd);
     process.env.PATH = savedPath;
+    holdLedger.dispose();
     for (const d of [repo, shimDir]) rmSync(d, { recursive: true, force: true });
   }
 });
@@ -1389,12 +1396,13 @@ test("arm merge: an auto arm from a detached HEAD does not ask for a current bra
 test("arm merge: both immediate call sites drop the local branch delete", () => {
   const shimDir = mkdtempSync(join(tmpdir(), "w1t1050-both-shim-"));
   const logPath = join(shimDir, "argv.log");
+  const holdLedger = emptyHoldLedger();
   const savedPath = process.env.PATH;
   try {
     recordingGhShim(shimDir, logPath);
     process.env.PATH = `${shimDir}:${savedPath}`;
 
-    withLiveWritesAllowed(() => realArmDeps().mergeDirect("https://github.com/acme/sandboxrepo/pull/1055"));
+    withLiveWritesAllowed(() => realArmDeps(holdLedger.config).mergeDirect("https://github.com/acme/sandboxrepo/pull/1055"));
     withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1056", CLEAN_GUARD));
 
     const lines = readFileSync(logPath, "utf8").trim().split("\n");
@@ -1414,6 +1422,7 @@ test("arm merge: both immediate call sites drop the local branch delete", () => 
       );
     }
   } finally {
+    holdLedger.dispose();
     process.env.PATH = savedPath;
     rmSync(shimDir, { recursive: true, force: true });
   }
