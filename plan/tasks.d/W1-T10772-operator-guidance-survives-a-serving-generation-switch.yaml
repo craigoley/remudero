@@ -8,7 +8,7 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 12.00
-  files: [src/lib/serve.ts, src/lib/operator-notes.ts, src/lib/panel-actions.ts, src/commands/serve.ts, test/operator-guidance-survives-a-serving-generation-switch.test.ts]
+  files: [src/lib/serve.ts, src/lib/operator-notes.ts, src/lib/panel-actions.ts, src/run-task.ts, test/console-api/operator-guidance-generation-switch.test.ts, test/console-api/operator-guidance-store-refusal.test.ts, test/console-api/operator-guidance-scope-history.test.ts, test/console-api/answer-question-append-refusal.test.ts]
   origin: "feedback#console-operator-guidance-generation-store-20261026"
   plan_refs: ["W1-T3351", "W1-T3348"]
   status: queued
@@ -34,14 +34,26 @@
     (iv) Private real-store fixtures: the SAME note stays readable to the correct native task across a
     generation switch; controls for write failure, foreign repo/task, duplicate, prior history; and a
     source-only removal falsifier.
+    (v) EDIT THE EXISTING ENTRY POINT: serveCommand lives in src/run-task.ts, not
+    src/commands/serve.ts. Exercise its real producer wiring and the native task reader in the
+    generation-switch fixture; do not make a disconnected new command module to satisfy this plan.
+    (vi) One dedicated fixture suite per criterion, using #src/* and #test/* imports and the shared
+    REPO_ROOT/repoRoot() helper. The planned console-api paths reflect the serving route imports;
+    confirm each with rmd test-place from its actual imports before adding it. These path-form
+    proofs are future implementation requirements, not evidence that this filing repairs runtime.
   acceptance:
     - claim: "a note written through the route stays readable to its native task after an immutable generation switch"
-      proof: "unit test: test/operator-guidance-survives-a-serving-generation-switch.test.ts"
-    - claim: "an unwritable or unverified sink refuses instead of returning 200 ok:true, for notes and answer-question"
-      proof: "unit test: test/operator-guidance-survives-a-serving-generation-switch.test.ts"
+      proof: "unit test: test/console-api/operator-guidance-generation-switch.test.ts"
+    - claim: "an unwritable or unverified note sink refuses instead of returning 200 ok:true or claiming delivery"
+      proof: "unit test: test/console-api/operator-guidance-store-refusal.test.ts"
     - claim: "foreign repo/task, duplicate and prior-history controls leave other notes untouched"
-      proof: "unit test: test/operator-guidance-survives-a-serving-generation-switch.test.ts"
+      proof: "unit test: test/console-api/operator-guidance-scope-history.test.ts"
+    - claim: "answer-question refuses when appendQuestionAnswer returns false and distinguishes recorded from delivered guidance"
+      proof: "unit test: test/console-api/answer-question-append-refusal.test.ts"
   falsifier: |
     CLOSE WITHOUT IMPLEMENTATION if current main already roots both handlers and the fix-lane reader at
     one verified shared store and answer-question already refuses on a false append. Each arm must redden
     when its source change is removed.
+    Run each dedicated suite against the implementation and with only its corresponding source fix
+    removed: retain the same fixtures and assertions, require a real failing assertion on removal and
+    # fail 0 after restoration. A missing file/import or zero selected tests is not discrimination.
