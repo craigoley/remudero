@@ -8,6 +8,7 @@ import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { constants as fsConstants, accessSync, appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
+import { prepareWorkerNativeCache } from "./worker-native-cache.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
@@ -32,7 +33,7 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { fixedClock, loopAvailableDeadline, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
-import { hostWorktreeGit, recordedWorktreeGitDir } from "./worktree-git.js";
+import { hostWorktreeGit, hostWorktreeGitAsync, recordedWorktreeGitDir } from "./worktree-git.js";
 import { aliasRewriteFields, rewriteAddedTestImports, type AddedTestAliasRewrite } from "./added-test-alias-rewrite.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
@@ -45,6 +46,7 @@ import { makeTempDir, withTempDir } from "./tmp.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
+import { cashDeploymentEndpoint, cashDeploymentTarget } from "./config-schema.js";
 import {
   hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, seedFromCanonical, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES,
   TYPECHECK_WARM_PEAK_BYTES, typecheckEnv,
@@ -2542,7 +2544,7 @@ type CodexSpawnEnvArgs = Pick<
   "cwd" | "prompt" | "workerHome" | "zdotdir" | "env" | "runId" | "taskId"
 >;
 
-function codexSpawnEnv(config: Config, args: CodexSpawnEnvArgs): Record<string, string | undefined> {
+function codexSpawnEnv(config: Config, args: CodexSpawnEnvArgs, nativeCacheRoot?: string): Record<string, string | undefined> {
   const allowed = ["PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME", "SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN"];
   const env: Record<string, string | undefined> = {};
   for (const key of allowed) if (process.env[key] !== undefined) env[key] = process.env[key];
@@ -2564,6 +2566,7 @@ function codexSpawnEnv(config: Config, args: CodexSpawnEnvArgs): Record<string, 
   // So neither exclusion above is wrong and neither is edited here — this is the missing THIRD
   // boundary, not a replacement for the two that already work.
   env.HOME = args.workerHome;
+  if (nativeCacheRoot !== undefined) env.SWC_NATIVE_BINDING_CACHE = nativeCacheRoot;
   if (args.zdotdir !== undefined) env.ZDOTDIR = args.zdotdir;
   Object.assign(env, workerMarkerEnv(args.runId, args.taskId, workerInstallationScope(config.root)));
   return env;
@@ -2790,7 +2793,7 @@ export function codexTestSlotArgs(env: NodeJS.ProcessEnv = process.env): string[
   return args;
 }
 
-function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
+function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">, nativeCacheRoot?: string): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
   if (!model) throw new Error("refusing a Codex spawn with no model: the account default would run unreviewed");
@@ -2834,6 +2837,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     //
     "-c", 'shell_environment_policy.inherit="core"',
     "-c", 'shell_environment_policy.exclude=["CODEX_HOME","OPENAI_API_KEY","ANTHROPIC_API_KEY"]',
+    ...(nativeCacheRoot === undefined ? [] : ["-c", `shell_environment_policy.set.SWC_NATIVE_BINDING_CACHE=${JSON.stringify(nativeCacheRoot)}`]),
     // W1-T3135/W1-T3267 — THE CODEX LANE'S PROJECT-DOC ROUTE, AND BOTH FLAGS OR NEITHER.
     // The generated AGENTS.md is the preferred, compact index; CLAUDE.md stays in the same list as
     // the maintained fallback for a checkout that lacks the generated file. The cap is unchanged:
@@ -2867,6 +2871,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     ...(readOnly || disposableReview ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
     // Writers only: a reader or review runs no typecheck that needs the host slot.
     ...(readOnly || disposableReview ? [] : codexTestSlotArgs()),
+    ...(nativeCacheRoot === undefined ? [] : ["--add-dir", nativeCacheRoot]),
     "-C", args.cwd,
     "-",
   ];
@@ -2877,9 +2882,30 @@ export async function spawnCodexWorker(
   config: Config,
   selection?: Pick<ProviderCapacity, "model" | "effort">,
 ): Promise<CodexWorkerResult> {
-  return withTempDir("codex-worker", (privateTmpDir) =>
-    spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection),
-  );
+  return withTempDir("codex-worker", async (privateTmpDir) => {
+    // The native-cache namespace and its `--add-dir` write grant exist only for a writer whose cwd the
+    // hardened Git adapter POSITIVELY verifies as a worktree. Anything else gets neither the setting,
+    // the grant, nor a created directory.
+    const nativeCacheRoot = process.platform !== "win32" && !codexReadOnly(args) && args.sandboxIntent !== "disposable-review" &&
+      await verifiedGitWorktree(args.cwd)
+      ? prepareWorkerNativeCache() : undefined;
+    return spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, nativeCacheRoot);
+  });
+}
+
+/**
+ * Native-cache eligibility: the trusted (pinned, config-vetted) Git adapter must answer
+ * `rev-parse --is-inside-work-tree` with `true`. A missing `git`, a refused pointer, a non-repository
+ * or a timed-out probe is NOT an answer, so eligibility stays closed (fail closed on every doubt).
+ */
+async function verifiedGitWorktree(cwd: string): Promise<boolean> {
+  try {
+    return (await hostWorktreeGitAsync(cwd, ["rev-parse", "--is-inside-work-tree"])).trim() === "true";
+  } catch {
+    // The probe is unavailable or refused (git absent, pointer refused, not a repository, timeout): the
+    // repository is unverified, so no cache grant or namespace is created.
+    return false;
+  }
 }
 
 /** Azure deployment authentication is process-local to the daemon. It is deliberately not a
@@ -3249,6 +3275,21 @@ export class OpenWeightDeploymentNotFoundError extends RmdError {
     super("usage", 1, `openweight deployment ${JSON.stringify(deployment)} does not exist on the endpoint (HTTP 404)`, { deployment });
     this.name = "OpenWeightDeploymentNotFoundError";
     this.deployment = deployment;
+  }
+}
+
+/** W1-T10837 design (iii): `deployment` is named in `workerProviders.cashDeploymentEndpoints` but
+ *  its own `keyEnv` is unset in the daemon environment. Distinct from the plain "requires
+ *  RMD_OPENWEIGHT_API_KEY" refusal an UNMAPPED deployment gets: this deployment is NOT READY and
+ *  must never fall back to the default key, which bills a different Azure account. */
+export class CashDeploymentNotReadyError extends RmdError {
+  readonly deployment: string;
+  readonly keyEnv: string;
+  constructor(deployment: string, keyEnv: string) {
+    super("usage", 1, `cash deployment ${JSON.stringify(deployment)} maps to ${keyEnv}, which is unset in the daemon environment`, { deployment, keyEnv });
+    this.name = "CashDeploymentNotReadyError";
+    this.deployment = deployment;
+    this.keyEnv = keyEnv;
   }
 }
 
@@ -4058,7 +4099,11 @@ export interface OpenWeightCheckInput {
 export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = process.env,
   extra: Record<string, string> = {}): Record<string, string> {
   for (const key of Object.keys(extra)) {
-    if (/^(ANTHROPIC_|RMD_(OPENWEIGHT|FOUNDRY_CLAUDE)_API_KEY$|CLAUDE_CODE_OAUTH_TOKEN$|GH_TOKEN$)/i.test(key)) {
+    // W1-T10837: widened to `RMD_CASH_.*_API_KEY$` so a MAPPED deployment's own key (and the
+    // existing shared `CASH_WEB_SEARCH_KEY_ENV`, the same shape) trips this boundary exactly like
+    // the default `RMD_OPENWEIGHT_API_KEY` always has -- design (iv) names the worker environment
+    // as one of the four places a cash key value must never reach.
+    if (/^(ANTHROPIC_|RMD_OPENWEIGHT_API_KEY$|RMD_FOUNDRY_CLAUDE_API_KEY$|RMD_CASH_[A-Z0-9_]*API_KEY$|CLAUDE_CODE_OAUTH_TOKEN$|GH_TOKEN$)/i.test(key)) {
       throw new Error(`openWeightCheckEnv: credential/billing-boundary violation: ${key}`);
     }
   }
@@ -4730,9 +4775,11 @@ export function assertOpenWeightToolBoundary(
  * gap (W1-T3695).
  */
 function openWeightEndpoint(config: Config, model: string): string {
-  // W1-T3607: canonical `cashEndpoint` first, falling back to the deprecated `openweightEndpoint`
-  // spelling so an already-deployed host's config.json need not be hand-edited the moment this ships.
-  const raw = config.workerProviders?.cashEndpoint ?? config.workerProviders?.openweightEndpoint;
+  // W1-T10837: resolves THIS deployment's own endpoint when `workerProviders.cashDeploymentEndpoints`
+  // names it, else W1-T3607's canonical `cashEndpoint` falling back to the deprecated
+  // `openweightEndpoint` spelling -- so an already-deployed host's config.json with no map need not
+  // be hand-edited the moment this ships.
+  const raw = cashDeploymentEndpoint(config, model);
   if (typeof raw !== "string" || raw.trim() === "") throw new Error("cash provider requires workerProviders.cashEndpoint");
   const endpoint = new URL(raw.endsWith("/") ? raw : `${raw}/`);
   if (endpoint.protocol !== "https:") throw new Error("cash endpoint must use https");
@@ -5136,8 +5183,18 @@ export async function spawnOpenWeightWorker(
     const checkEnv = openWeightCheckEnv(args.workerHome, env, args.workerEnv);
     const webSearchConsented = cashWebSearchEnabled(config);
     const tools = openWeightTools(args.tools, webSearchConsented);
-    const key = env[OPENWEIGHT_API_KEY_ENV];
-    if (!key) throw new Error(`openweight provider requires ${OPENWEIGHT_API_KEY_ENV} in the daemon environment`);
+    // W1-T10837: THE ONE RESOLVER, read here for the key (and again below, beside price, for the
+    // endpoint -- see `openWeightEndpoint`). A deployment named in `cashDeploymentEndpoints` is
+    // NOT READY when its own `keyEnv` is unset: it must never borrow the default key, which bills a
+    // different account (design iii), so that case is a DISTINCT, named refusal rather than the
+    // plain "requires RMD_OPENWEIGHT_API_KEY" message an unmapped deployment gets.
+    const cashTarget = cashDeploymentTarget(config, selection.model, env);
+    if (!cashTarget.ok) {
+      if (cashTarget.reason === "no-endpoint") throw new Error("cash provider requires workerProviders.cashEndpoint");
+      if (cashTarget.mapped) throw new CashDeploymentNotReadyError(selection.model, cashTarget.keyEnv);
+      throw new Error(`openweight provider requires ${cashTarget.keyEnv} in the daemon environment`);
+    }
+    const key = cashTarget.key;
     const declaredNames = new Set(tools.map((tool) => String((tool.function as { name?: unknown }).name)));
     const messages: OpenWeightMessage[] = [
       { role: "system", content: OPENWEIGHT_OUTPUT_CONTRACT },
@@ -5401,7 +5458,9 @@ async function brokerCashWebSearch(input: {
   // A declared-but-unusable tool must refuse loudly rather than return an empty result the model
   // would read as "the web knows nothing about this".
   if (!searchKey) throw new Error(`web_search requires ${CASH_WEB_SEARCH_KEY_ENV} in the daemon environment`);
-  const rawEndpoint = input.config.workerProviders?.cashEndpoint ?? input.config.workerProviders?.openweightEndpoint;
+  // W1-T10837: THIS deployment's own endpoint (the search credential itself stays the daemon's
+  // single shared `CASH_WEB_SEARCH_KEY_ENV`, deliberately not per-deployment -- see that const's doc).
+  const rawEndpoint = cashDeploymentEndpoint(input.config, input.model);
   const endpoint = cashWebSearchEndpoint(typeof rawEndpoint === "string" ? rawEndpoint : "", input.model);
   const body = JSON.stringify({ model: input.model, input: query, tools: [{ type: "web_search" }] });
   let reservation: { reservedUsd: number; committedUsd: number; capUsd: number };
@@ -5457,6 +5516,7 @@ async function spawnCodexWorkerInPrivateTemp(
   config: Config,
   privateTmpDir: string,
   selection?: Pick<ProviderCapacity, "model" | "effort">,
+  nativeCacheRoot?: string,
 ): Promise<CodexWorkerResult> {
   const bin = resolveCodexBin(config);
   const startedAt = Date.now();
@@ -5491,9 +5551,9 @@ async function spawnCodexWorkerInPrivateTemp(
     );
     if (pidRef.pid !== undefined) teardownOnce(pidRef.pid);
   };
-  const childEnv = { ...codexSpawnEnv(config, args), TMPDIR: privateTmpDir };
+  const childEnv = { ...codexSpawnEnv(config, args, nativeCacheRoot), TMPDIR: privateTmpDir };
   const contained = spawn(
-    { command: bin, args: codexExecArgs(args, config, selection), cwd: args.cwd, env: childEnv },
+    { command: bin, args: codexExecArgs(args, config, selection, nativeCacheRoot), cwd: args.cwd, env: childEnv },
     (chunk) => {
       if (outputLimit || timedOut) return;
       // W1-T8203: stderr past its bound is truncated (head + tail), never a teardown and never a verdict.

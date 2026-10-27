@@ -132,7 +132,27 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 20_000, stepMs = 
   }
 }
 
+// THE FIRST WORKER START IN A PROCESS PAYS A ONE-TIME, SYNCHRONOUS DECISION COST. `startWorker`
+// (lib/child-entry-argv.ts) decides once per module, for the process's life, whether to start a
+// bundle or the tsx source — and that first decision hashes the source tree and may consult the
+// shared child-entry store, all on the calling thread. On a host shared with instrumented
+// coverage shards that took ~340ms (CI run on head 1c8f0d8: "warm() took 337ms" against a 250ms
+// bound), which says nothing about whether the WALK moved off-thread — the walk is what this
+// file pins. So the timed test below first drives one untimed warm to completion, leaving
+// `startWorker`'s per-module decision made; the timed warm() then measures the steady state every
+// scheduled warm after the first one actually runs in, through the SAME real production path
+// (no `workerUrl` override, no injected closure). The one-time decision cost is deliberately not
+// asserted here; it is `child-entry-argv`'s own concern.
+async function primeWorkerStartDecision(): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-board-prewarm-prime-"));
+  const gh: GitHub = buildBatchedGithub("o", "r", { ghBin: writeFakeGh(dir, join(dir, "calls.log")) });
+  gh.warm?.();
+  await waitUntil(() => gh.readState?.() !== "in_flight");
+  assert.equal(gh.readState?.(), "ok", "the priming warm must land through the real worker path, or it primed nothing");
+}
+
 test("W1-T2440: warm() returns immediately, and a request arriving during the walk is served without waiting for it", async () => {
+  await primeWorkerStartDecision();
   const dir = mkdtempSync(join(tmpdir(), "rmd-board-prewarm-"));
   const counterFile = join(dir, "calls.log");
   const ghBin = writeFakeGh(dir, counterFile);

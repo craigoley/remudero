@@ -371,6 +371,15 @@ interface FixModeRule {
  *                        named reason, rather than defaulting again, once it has already spent
  *                        one honest strike and recurs unchanged — see that guard's own doc.
  */
+/**
+ * W1-T10574: a gate failure whose remedy is a PR SPLIT (Standing rule 15) or an unsatisfiable
+ * condition (Standing rule 25 entanglement) cannot be repaired by an in-place edit, so a
+ * `gate-fix` round spent on it only burns CI minutes. Such a reason never selects `gate-fix`.
+ */
+export function isUnfixableInPlaceGateFailure(reason: string): boolean {
+  return /Standing rule 15|entangled: instrument path\(s\)/i.test(reason);
+}
+
 export const FIX_MODE_RULES: readonly FixModeRule[] = [
   {
     mode: "merge-conflict",
@@ -386,7 +395,7 @@ export const FIX_MODE_RULES: readonly FixModeRule[] = [
   },
   {
     mode: "gate-fix",
-    when: (e) => (e.actionableGateFailures?.length ?? 0) > 0,
+    when: (e) => (e.actionableGateFailures ?? []).some((f) => !isUnfixableInPlaceGateFailure(f.reason)),
   },
   {
     mode: "proof-discrimination",

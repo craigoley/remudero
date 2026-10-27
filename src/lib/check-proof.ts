@@ -1,4 +1,4 @@
-import { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, globSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -294,6 +294,39 @@ export function buildBaseProofDir(
   };
 }
 
+/** A leading `<task-id>: ` describe prefix: Vitest's full name joins describe and it, so no file holds it verbatim. */
+const TASK_DESCRIBE_PREFIX = /^(?:W\d+|[A-Z][A-Z0-9_]*)-T\d+:\s+/;
+
+/**
+ * W1-T10742: the test files under a name-filtered Vitest proof's own suite root that contain its LEAF title, found by
+ * fixed string — the label with any leading `<task-id>: ` describe prefix removed (a file holding the whole label also
+ * holds its leaf). Mirrors the executor's own scope (test/spec files, never e2e), so what is printed is what runs.
+ * `undefined` — no suite root to read, no leaf, or no file naming it — keeps the root-wide run: absence is never a
+ * fast-fail for Vitest, because an interpolated or describe-joined title can render to the label.
+ */
+export function resolveVitestLeafCandidates(
+  cwd: string,
+  w: { args: readonly string[]; label: string },
+): { files: string[]; leaf: string } | undefined {
+  const root = w.args.at(-1);
+  const leaf = w.label.replace(TASK_DESCRIBE_PREFIX, "").trim();
+  if (!root || leaf === "") return undefined;
+  let entries: string[];
+  try {
+    entries = readdirSync(join(cwd, root), { recursive: true }) as string[];
+  } catch {
+    return undefined; // an unreadable root is the executor's to report, not a guess at absence here
+  }
+  const files = entries
+    .filter((entry) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(entry) && !/(?:^|\/)e2e\//.test(entry))
+    .map((entry) => `${root.replace(/\/$/, "")}/${entry}`)
+    .filter((file) => {
+      try { return readFileSync(join(cwd, file), "utf8").includes(leaf); }
+      catch { return true; /* an unreadable candidate stays in scope, as the executor keeps it */ }
+    });
+  return files.length > 0 ? { files, leaf } : undefined;
+}
+
 /** `rmd check-proof <proof>`. */
 /** Opt-in for the one `check-proof` path that would otherwise run the ENTIRE suite — see the
  *  `unresolvable` branch in {@link checkProofCommand}. */
@@ -424,7 +457,16 @@ export function checkProofCommand(
     // The registered Vitest target already scopes the run to its own tests/ root. The
     // Node-only grep resolver searches this repo's test/ root and would refuse a valid
     // site/console proof before the shared reviewer executor could run it.
-    console.log("candidates: delegated to the registered Vitest suite root");
+    const narrowed = resolveVitestLeafCandidates(process.cwd(), w);
+    if (narrowed === undefined) {
+      console.log("candidates: delegated to the registered Vitest suite root");
+    } else {
+      console.log(`candidates: ${narrowed.files.length} file(s) — ${narrowed.files.join(", ")}`);
+      args = [...w.args.slice(0, -1), ...narrowed.files];
+      // The executor scopes its run by the files that contain `label`; handing it the leaf makes that the very
+      // set printed above, where the prefixed label (a describe name joined to it) is in no file.
+      w.label = narrowed.leaf;
+    }
   } else if (w.nameFiltered) {
     const r = resolveNameFilteredCandidates(process.cwd(), w.label);
     if (r.status === "resolved") {
