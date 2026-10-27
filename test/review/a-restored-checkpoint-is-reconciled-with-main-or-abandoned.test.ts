@@ -258,6 +258,39 @@ test("W1-T10752: a conflicting checkpoint is merged with main and the worker res
   assert.equal(kept?.head_sha, left.checkpoint.headSha, "the unresolved run keeps the restored checkpoint");
 });
 
+test("W1-T10752: a merge that never starts is surfaced, not mistaken for an open conflict", async () => {
+  const fx = buildFixture();
+  fx.moveMain({ "src/change.ts": "export const value = 7;\n" }, "feat: main moves on");
+  const clone = fx.clone();
+  const calls: string[] = [];
+  await assert.rejects(
+    restoreBoundaryCheckpoint(fx.checkpoint, ID, async (args) => {
+      calls.push(args[0] ?? "");
+      if (args[0] === "merge") throw new Error("merge failed to start");
+      return clone.git(...args); // `rev-parse -q --verify MERGE_HEAD` fails for real: no merge is open
+    }),
+    /merge failed to start/,
+  );
+  assert.equal(calls.includes("merge"), true);
+  assert.equal(calls.at(-1), "rev-parse", "the MERGE_HEAD probe ran last, found nothing, and the merge error surfaced");
+});
+
+test("W1-T10752: a conflicted path the worker resolved by deleting it is not an unresolved conflict", async (t) => {
+  const fx = buildFixture();
+  fx.moveMain({ "src/change.ts": "export const value = 7;\n" }, "feat: main moves on");
+  const run = await drive(t, fx, {
+    gate: true, yieldAfterGate: true,
+    implement: (args) => {
+      inTree(fx, args.cwd, "rm", "-q", "-f", "src/change.ts");
+      inTree(fx, args.cwd, "commit", "-q", "--no-edit");
+    },
+  });
+  const gateRows = stepRows(run.rows, "implement.preopen_gate");
+  assert.deepEqual(gateRows.map((r) => r.result), ["pass"], "a deleted path holds no markers, so the pre-open gate passes");
+  assert.equal(run.gateCalls.length, 1, "the base gate ran over the resolved merge");
+  assert.equal(run.outcome.verdict, "handed_off");
+});
+
 test("W1-T10752: a superseded checkpoint is abandoned with its evidence and the run starts from main", async (t) => {
   const cases: Array<{ evidence: string; files: Record<string, string>; message: string }> = [
     { evidence: "tree-equal", files: { "src/change.ts": "export const value = 42;\n" }, message: "feat: an unrelated commit carries the same change" },
