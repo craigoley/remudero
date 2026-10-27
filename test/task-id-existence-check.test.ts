@@ -680,3 +680,185 @@ test("W1-T4212: the shipped baseline carries a written reason for every id plan 
     assert.ok((byId.get(id) ?? "").trim().length > 20, `${id} has no written baseline reason`);
   }
 });
+
+// W1-T10819: quoted feedback is input, never task identity or a whole-file exemption.
+const QUOTED_FEEDBACK_ID = "fb-1793100000000-abcdef";
+function quotedFeedback(rawScalar: string, optional = ""): string {
+  return `id: ${QUOTED_FEEDBACK_ID}\nts: "2026-10-27T08:05:36.385Z"\nraw: ${rawScalar}\nattachments: []\norigin: issue\nstatus: new\nproposal_pr:\n${optional}`;
+}
+function withQuotedFeedback(fn: (root: string, remote: string) => void) {
+  const root = mkFixtureRoot(), remote = makeEmptyBareRemote();
+  try {
+    mkdirSync(join(root, "plan", "feedback"));
+    writeBaseline(root, []);
+    fn(root, remote);
+  } finally { cleanup(root, remote); }
+}
+function checkQuotedFeedback(root: string, remote: string, text: string, rel = `plan/feedback/${QUOTED_FEEDBACK_ID}.yaml`) {
+  const file = join(root, rel);
+  writeFileSync(file, text);
+  const before = readFileSync(file);
+  const refs = () => execFileSync("git", ["-C", remote, "for-each-ref", "--format=%(refname) %(objectname)"], { encoding: "utf8" });
+  const beforeRefs = refs();
+  const result = runCli(["--cwd", root, "--baseline", join(root, "baseline.json"), "--remote", remote]);
+  assert.deepEqual(readFileSync(file), before, "classification must preserve every feedback byte");
+  assert.equal(refs(), beforeRefs, "classification cannot restore or mint reservation authority");
+  return { ...result, output: result.stdout + result.stderr };
+}
+
+test("task-id-existence: canonical feedback raw text is quoted data", () => {
+  withQuotedFeedback((root, remote) => {
+    for (const raw of [
+      "Historical W1-T88990 was released",
+      "'Historical W1-T88990 was released'",
+      '"Historical W1-T88990 # still quoted"',
+      "|-\n  Historical W1-T88990\n  remains quoted",
+      ">-\n  Historical W1-T88990\n  remains quoted",
+      "|+ # a harmless header comment\n  😀 Historical W1-T88990\n\n",
+      '"😀 historical\\nW1-T88990"',
+      "'Historical\n  W1-T88990'",
+    ]) {
+      const result = checkQuotedFeedback(root, remote, quotedFeedback(raw));
+      assert.equal(result.status, 0, raw + "\n" + result.output);
+      assert.match(result.output, /OK/);
+      assert.doesNotMatch(result.output, /FAILED|UNKNOWN/);
+    }
+    const crlf = "---\n" + quotedFeedback('|-\n  😀 W1-T88990', "reply_to: null\nsummary:\nexpansion:\nsubmission_key: 'issue#1:comment:2'\n");
+    assert.equal(checkQuotedFeedback(root, remote, crlf.replaceAll("\n", "\r\n")).status, 0);
+    for (const [origin, status] of [["cli", "grilling"], ["ui", "proposed"], ["issue#42", "accepted"],
+      ["alert#dependabot-4", "rejected"], ["repair#retry", "answered"], ["incident#" + "a".repeat(64), "new"]]) {
+      const text = quotedFeedback('"W1-T88990"').replace("origin: issue", "origin: " + origin).replace("status: new", "status: " + status);
+      const r = checkQuotedFeedback(root, remote, text);
+      assert.equal(r.status, 0, r.output);
+    }
+  });
+});
+
+test("task-id-existence: authoritative references remain checked beside raw text", () => {
+  withQuotedFeedback((root, remote) => {
+    assert.equal(checkQuotedFeedback(root, remote, quotedFeedback('"W1-T88990"')).status, 0);
+    for (const text of [
+      quotedFeedback('"W1-T88990" # W1-T88990'),
+      quotedFeedback("|- # W1-T88990\n  W1-T88990"),
+      quotedFeedback("W1-T88990 # W1-T88990"),
+      quotedFeedback('"W1-T88990"', 'summary: { headline: "W1-T88990" }\n'),
+      quotedFeedback('"W1-T88990"', 'expansion: { raw: "W1-T88990" }\n'),
+      quotedFeedback('"W1-T88990"', 'submission_key: "W1-T88990"\n'),
+    ]) {
+      const r = checkQuotedFeedback(root, remote, text);
+      assert.equal(r.status, 1, r.output);
+      assert.match(r.output, /W1-T88990/);
+      assert.match(r.output, /plan\/feedback\/fb-1793100000000-abcdef\.yaml:[0-9]+/);
+    }
+    for (const rel of ["src/quoted.ts", "deploy/quoted.sh", "plan/tasks.d/W1-T88991-dependent.yaml"]) {
+      writeFileSync(join(root, rel), rel.includes("tasks.d") ? "- id: W1-T88991\n  depends_on: [W1-T88990]\n" : "# W1-T88990\n");
+      const r = checkQuotedFeedback(root, remote, quotedFeedback('"W1-T88990"'));
+      assert.equal(r.status, 1, rel + "\n" + r.output);
+      assert.ok(r.output.includes(rel + ":"), r.output);
+      rmSync(join(root, rel));
+    }
+  });
+});
+
+test("task-id-existence: ambiguous feedback retains the strict scan", () => {
+  withQuotedFeedback((root, remote) => {
+    const valid = quotedFeedback('"W1-T88990"');
+    assert.equal(checkQuotedFeedback(root, remote, valid).status, 0);
+    const invalid = [
+      valid.replace("id: " + QUOTED_FEEDBACK_ID, "id: fb-1793100000001-abcdef"),
+      valid.replace('ts: "2026-10-27T08:05:36.385Z"\n', ""),
+      valid.replace('"2026-10-27T08:05:36.385Z"', '"not-a-date"'),
+      valid.replace("attachments: []", "attachments: [3]"),
+      valid.replace("attachments: []", "attachments: wrong"),
+      valid.replace("origin: issue\n", ""),
+      valid.replace("origin: issue", "origin: unsupported"),
+      valid.replace("status: new", "status: invented"),
+      valid.replace('raw: "W1-T88990"', "raw: [W1-T88990]"),
+      valid.replace('raw: "W1-T88990"', 'raw: !!str "W1-T88990"'),
+      valid + "status: accepted\n",
+      valid + "summary: { headline: one, headline: two }\n",
+      valid + "summary: &shared { headline: safe }\nexpansion: *shared\n",
+      valid + "summary: !custom safe\n",
+      valid + "---\nraw: W1-T88990\n",
+      valid.replace('raw: "W1-T88990"', 'raw: "W1-T88990'),
+      valid.replace("id: " + QUOTED_FEEDBACK_ID, 'id: ["' + QUOTED_FEEDBACK_ID + '"]'),
+      "- " + valid.replaceAll("\n", "\n  "),
+      valid + "'<<': { summary: safe }\n",
+    ];
+    for (const text of invalid) {
+      const r = checkQuotedFeedback(root, remote, text);
+      assert.equal(r.status, 1, text + "\n" + r.output);
+      assert.match(r.output, /W1-T88990/);
+    }
+    rmSync(join(root, "plan", "feedback", QUOTED_FEEDBACK_ID + ".yaml"));
+    for (const rel of ["plan/feedback/not-a-feedback-record.yaml", "plan/feedback/" + QUOTED_FEEDBACK_ID + ".yml", "src/feedback.yaml"]) {
+      const r = checkQuotedFeedback(root, remote, valid, rel);
+      assert.equal(r.status, 1, r.output);
+      rmSync(join(root, rel));
+    }
+  });
+});
+
+test("task-id-existence: feedback data classification preserves existence guards", () => {
+  const root = mkFixtureRoot(), remote = makeBareRemoteWithReservation("W1-T88992");
+  try {
+    mkdirSync(join(root, "plan", "feedback"));
+    writeBaseline(root, []);
+    writeFileSync(join(root, "src", "reserved.ts"), "// W1-T88992\n");
+    writeFileSync(join(root, "plan", "tasks.d", "W1-T88993-declared.yaml"), "- id: W1-T88993\n  title: a declared control\n");
+    const valid = quotedFeedback('"W1-T88990"');
+    assert.equal(checkQuotedFeedback(root, remote, valid).status, 0);
+    writeFileSync(join(root, "src", "unknown.ts"), "// W1-T88994\n");
+    const unknown = runCli(["--cwd", root, "--baseline", join(root, "baseline.json"), "--remote", join(root, "missing-remote")]);
+    assert.equal(unknown.status, 0, unknown.stderr);
+    assert.match(unknown.stdout + unknown.stderr, /UNKNOWN/);
+    assert.match(unknown.stdout + unknown.stderr, /W1-T88994/);
+    writeBaseline(root, [{ id: "W1-T88994", reason: "" }]);
+    const refused = runCli(["--cwd", root, "--baseline", join(root, "baseline.json"), "--remote", remote]);
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.match(refused.stdout + refused.stderr, /NO WRITTEN REASON/);
+  } finally { cleanup(root, remote); }
+});
+
+test("task-id-existence: a tree without the yaml package still runs, with the strict feedback scan", () => {
+  // The plan-PR preflight runs a detached copy of the tree with no node_modules; a static `yaml` import
+  // crashed the gate there with ERR_MODULE_NOT_FOUND instead of producing a verdict.
+  const copy = mkTmp("no-node-modules"), remote = makeEmptyBareRemote();
+  try {
+    for (const rel of ["scripts/task-id-existence-check.mjs", "scripts/lib/git.mjs", "scripts/lib/argv.mjs", "src/lib/reservation-chain.mjs"]) {
+      mkdirSync(dirname(join(copy, rel)), { recursive: true });
+      writeFileSync(join(copy, rel), readFileSync(join(REPO_ROOT, rel)));
+    }
+    mkdirSync(join(copy, "src"), { recursive: true });
+    mkdirSync(join(copy, "plan", "feedback"), { recursive: true });
+    writeFileSync(join(copy, "plan", "tasks.yaml"), "# empty\n");
+    writeBaseline(copy, []);
+    const run = () => spawnSync(process.execPath, [join(copy, "scripts", "task-id-existence-check.mjs"),
+      "--cwd", copy, "--baseline", join(copy, "baseline.json"), "--remote", remote], { cwd: copy, encoding: "utf8" });
+    const clean = run();
+    assert.equal(clean.status, 0, clean.stdout + clean.stderr);
+    assert.doesNotMatch(clean.stderr, /ERR_MODULE_NOT_FOUND/);
+    assert.match(clean.stdout, /OK/);
+    writeFileSync(join(copy, "plan", "feedback", `${QUOTED_FEEDBACK_ID}.yaml`), quotedFeedback('"Historical W1-T88990"'));
+    const strict = run();
+    assert.equal(strict.status, 1, strict.stdout + strict.stderr);
+    assert.match(strict.stderr, /W1-T88990/);
+    assert.doesNotMatch(strict.stderr, /ERR_MODULE_NOT_FOUND/);
+  } finally { cleanup(copy, remote); }
+});
+
+test("task-id-existence: quoted feedback regression controls are load bearing", () => {
+  withQuotedFeedback((root, remote) => {
+    // Same physical ID on both sides defeats a decoded-value or whole-node/file exclusion.
+    const positive = quotedFeedback("|-\n  😀 W1-T88990\n  still quoted\n");
+    assert.equal(checkQuotedFeedback(root, remote, positive).status, 0);
+    const header = positive.replace("raw: |-", "raw: |- # W1-T88990");
+    const r = checkQuotedFeedback(root, remote, header);
+    assert.equal(r.status, 1, r.output);
+    assert.match(r.output, /fb-1793100000000-abcdef\.yaml:3/);
+    assert.doesNotMatch(r.output, /fb-1793100000000-abcdef\.yaml:4/);
+    const duplicate = positive + "status: accepted\n";
+    assert.equal(checkQuotedFeedback(root, remote, duplicate).status, 1);
+    assert.equal(checkQuotedFeedback(root, remote, positive).status, 0);
+  });
+});

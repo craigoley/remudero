@@ -1,0 +1,71 @@
+- id: W1-T10840
+  title: "THE DEPLOYMENT BAKE-OFF NEVER RAN — wire runSweepBakeoff into the daily measurement cadence so a new or changed cash deployment is trialed once on inbox_draft, bounded by the shared cash allowance, ledgered, and surfaced as a proposal that never re-routes"
+  repo: remudero
+  depends_on: [W1-T10839]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling, Craig 2026-10-27: \"Terra 6.1 joins the inbox-draft bake-off\"; operator direction 2026-09-30 (W1-T4926): bake-offs run when a model is deployed, not on a schedule, across thinking levels"
+  plan_refs: [W1-T100, W1-T4907, W1-T4926, W1-T10839]
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - src/lib/bakeoff-trigger.ts
+    - test/routing/the-deployment-bake-off-runs-from-the-cadence.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED ON origin/main 07dbdcc77 (2026-10-27). W1-T4926 (merged) built `findUntrialedModels`,
+    `deploymentCandidates` and `runDeploymentBakeoff` (src/lib/bakeoff-trigger.ts) and the gate `runSweepBakeoff`
+    (src/lib/sweep.ts), but NOTHING IN PRODUCTION CALLS EITHER: `git grep runSweepBakeoff` finds only its definition,
+    test/a-newly-deployed-model-earns-its-lane-by-a-bake-off.test.ts and a test helper. W1-T4926's fourth proof,
+    `grep: findUntrialedModels( in src/lib/sweep.ts`, passes over that uncalled function — a check that compares
+    nothing. No deployment bake-off has run since 2026-09-30. The one existing replay path,
+    `inboxBakeoffCommand` (src/run-task.ts, `rmd inbox-bakeoff`), is an operator verb.
+    Measured context for the first run: gpt-6-luna fails the inbox_draft fragment contract (0/8 in the replay;
+    38/39 live, #7963), and Haiku 5.5 is refused by the $5 Foundry Claude sublimit, so the lane has no cheap
+    compliant lead today. The lint names W1-T100 (blocked_ci routing to the ci-log fix path) as sharing
+    src/run-task.ts and src/lib/sweep.ts; that task routes CI failures and has nothing to do with bake-offs. The daily measurement cadence in src/run-task.ts already runs `watchSuccessorModels`,
+    which is the fleet's existing "a model was deployed" signal, under its own crash-safe fire marker.
+  design: |
+    (i) WIRE. In the measurement cadence's default `run` (src/run-task.ts), after the successor watch, call
+    `runSweepBakeoff` with: the deployed set (every cash deployment `openWeightDeploymentReady` admits, plus the mounts
+    `claude_candidates`), each cash model's efforts from W1-T10839's declared allowances (low, medium, high where
+    admitted), the inbox_draft incumbent at its configured effort, and a `replay` built from the SAME production draft
+    path `inboxBakeoffCommand` uses (factor it, do not copy it). Expose it through the cadence deps so a test can fake
+    the spend, and cover the real default once.
+    (ii) NEW OR CHANGED. A deployment is untrialed when its billing:model key is absent from
+    state/bakeoff-trialed.json, or when its readiness rows (price, context window, Responses allowance) changed since
+    it was trialed — record a digest of those rows with each trialed key.
+    (iii) FIRST WIRING DOES NOT RE-BUY HISTORY. When the trial file is absent, seed it from the ledger union's existing
+    `inbox.bakeoff` rows (read through the ledger-grep union, never the live file alone) so models already measured on
+    this lane are trialed; everything else trials once. On this host that leaves gpt-6.1-terra (and any other
+    never-measured deployment) as the first run.
+    (iv) BUDGET. Every cash spawn reserves through the existing shared fleet cash allowance; an allowance or Foundry
+    Claude sublimit refusal stops that candidate with a named row and the run reports a PARTIAL table rather than
+    failing or retrying. Nothing here sets its own spend number.
+    (v) NEVER RE-ROUTES. Rows are ledgered as `inbox.bakeoff`; the result is ONE inbox proposal (the existing
+    `runDeploymentBakeoff` publication). A lead change is a proposal for the operator; mounts, routing tables and the
+    selection store are untouched.
+    (vi) W1-T4926's dead proof is the reason this task exists; this task's own grep proof below discriminates a real
+    production call site (zero matches in src/run-task.ts at 07dbdcc77).
+  acceptance:
+    - claim: "The production measurement cadence calls the deployment bake-off"
+      proof: 'grep: runSweepBakeoff in src/run-task.ts'
+    - claim: "A cadence fire with an untrialed ready cash deployment runs the bake-off through the real default wiring, and a second fire does not re-run it"
+      proof: 'grep: test("W1-T10840: the measurement cadence runs the deployment bake-off once for an untrialed deployment" in test/routing/the-deployment-bake-off-runs-from-the-cadence.test.ts'
+    - claim: "A deployment whose readiness rows changed since its trial is trialed again"
+      proof: 'grep: test("W1-T10840: a changed deployment is trialed again" in test/routing/the-deployment-bake-off-runs-from-the-cadence.test.ts'
+    - claim: "With no trial file, models that already have inbox.bakeoff rows in the ledger union are seeded as trialed and only the rest are trialed"
+      proof: 'grep: test("W1-T10840: first wiring seeds measured models and trials only the rest" in test/routing/the-deployment-bake-off-runs-from-the-cadence.test.ts'
+    - claim: "A cash allowance or Foundry sublimit refusal stops that candidate with a named row and the proposal carries a partial table"
+      proof: 'grep: test("W1-T10840: an allowance refusal stops the candidate and reports a partial table" in test/routing/the-deployment-bake-off-runs-from-the-cadence.test.ts'
+    - claim: "The bake-off ledgers its rows and files one proposal, and mounts, routing and the selection store are unchanged"
+      proof: 'grep: test("W1-T10840: the bake-off files a proposal and never changes routing" in test/routing/the-deployment-bake-off-runs-from-the-cadence.test.ts'
+  falsifier: |
+    Delete the cadence call: the first grep proof reads 0 and the cadence test sees no bake-off. CLOSE IF a production
+    caller of runSweepBakeoff or runDeploymentBakeoff already exists on origin/main.

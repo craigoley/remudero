@@ -1,0 +1,76 @@
+- id: W1-T10841
+  title: "REGISTER THE FIRST CONTROLLED FIELD TRIAL — a prospective A/A on the Codex balanced low/medium population, then a pre-registered Terra 6.1 vs Sol 6.1 protocol under the $100 paid pilot: task randomization, verified completion, guardrails and a fixed-horizon stopping rule"
+  repo: remudero
+  depends_on: [W1-T10839, W1-T5433, W1-T5434]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling, Craig 2026-10-27: \"Codex frontier stays Sol 6.1. Codex balanced low/medium becomes a randomized Terra 6.1 vs Sol 6.1 A/B, as the FIRST CONTROLLED field trial: run it after a prospective A/A, use the $100 paid pilot (#7418), and keep Sol as the lead until the trial says otherwise.\""
+  plan_refs: [W1-T4603, W1-T4625, W1-T4647, W1-T5341, W1-T5433, W1-T5434, W1-T10631, W1-T10842, W1-T10843]
+  files:
+    - src/lib/codex-balanced-trial.ts
+    - src/lib/benchmark-aa-prospective.ts
+    - src/lib/benchmark-paid-pilot.ts
+    - src/run-task.ts
+    - test/routing/terra-vs-sol-trial-registration.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED ON origin/main 07dbdcc77 (2026-10-27). The evaluation machinery exists; no trial has been registered on it.
+    - W1-T4647 (merged): a retrospective A/A cannot earn the receipt pilot activation needs, so the A/A runs
+      PROSPECTIVELY — two labels on one pinned stack through the paired-trial seam, subscription only, zero cash
+      (src/lib/benchmark-aa-prospective.ts: `runProspectiveAa`, `prospectiveAaOrder` = sha256 parity per
+      trialId+taskId, `API_BILLING_REFUSAL`).
+    - W1-T5341 (merged): fresh prospective calibration from pinned runtime evidence (src/lib/benchmark-aa-readiness.ts:
+      `runBenchmarkAaReadiness`, `deriveRuntimePins`, `runtimePinRefusals`, frozen populations).
+    - W1-T4625 (merged): the paired dispatch trial runs one eligible task on two randomized models and grades both with
+      the same executable proofs and holdouts (src/lib/paired-trial.ts).
+    - W1-T4603 (merged): the approved $100/7-day paid pilot controller (src/lib/benchmark-paid-pilot.ts:
+      PAID_PILOT_CASH_CEILING_USD, PAID_PILOT_WINDOW_MS, an A/A receipt no older than PAID_PILOT_AA_RECEIPT_MAX_AGE_MS,
+      PAID_PILOT_STOPPING_RULE "fixed horizon: one analysis at expiry plus the maturity window; no interim winner",
+      intention-to-treat verified completion, and arm pins {provider, model, effort} that can express Codex vs Codex).
+    - QUEUED AND IN FLIGHT: W1-T5433 (admit a calibration follow-up once under competing writers) and W1-T5434 (read a
+      competing frozen calibration population instead of throwing) — both edit benchmark-aa-readiness.ts, both have
+      open run- branches, neither has merged; this task waits for them. W1-T10631 (dispatch_hold) moves runtime-pin
+      validation before protocol registration on the same path; this task must not regress it if it lands first.
+    - The ruling's pilot is issue #7418.
+    - Codex analytics price Terra through CODEX_NOTIONAL_PRICES once W1-T10839 adds its OPENWEIGHT_PRICES row.
+  design: |
+    (i) POPULATION. Codex balanced low and medium work as the router actually dispatches it (eligible tasks whose
+    selected provider is codex, tier balanced, effort low or medium), frozen through the existing readiness population
+    path. Frontier, economy, high effort and every cash or Claude row are out of scope.
+    (ii) A/A FIRST. Register a prospective A/A with both labels on gpt-6.1-sol at the task's effort, on one pinned
+    stack, subscription only, through `runProspectiveAa` / the readiness path — no new framework.
+    (iii) PRE-REGISTRATION, written before any A/B assignment and hashed into the protocol: randomization unit = task;
+    arms {codex, gpt-6.1-sol, effort} (control, the lead) and {codex, gpt-6.1-terra, effort} (treatment); primary
+    outcome = verified completion (intention-to-treat); guardrails = the existing named ones the pilot already reads
+    (for example reopened or reverted merges, repair rounds, wall time, Codex usage share) — reuse, do not invent
+    numbers; stopping rule = the pilot's fixed horizon with no interim winner. The pilot request cites #7418 as its
+    approval reference.
+    (iv) GATES. The A/B registration refuses, by name, without a passing A/A receipt for the same population and stack
+    within the pilot's receipt age; and refuses unless the Codex model catalog (`readCodexModelCatalog`) lists
+    gpt-6.1-terra at registration time. Any API-billed attempt reserves inside the pilot's $100 ceiling and 7-day
+    window; subscription attempts spend no cash.
+    (vi) CALL SITE. src/lib/codex-balanced-trial.ts exports registerCodexBalancedTrial, reached from an rmd verb in
+    src/run-task.ts (an operator-run registration, the same shape as the existing prospective A/A verb).
+    (v) This task REGISTERS; it does not assign live work — W1-T10842 consumes the registration. Sol stays the lead.
+  acceptance:
+    - claim: "A prospective A/A registers two identical gpt-6.1-sol labels on the frozen Codex balanced low/medium population, subscription only"
+      proof: 'grep: test("W1-T10841: the A/A registers two Sol 6\.1 labels on the Codex balanced low and medium population" in test/routing/terra-vs-sol-trial-registration.test.ts'
+    - claim: "The Terra-vs-Sol protocol pre-registers the task randomization unit, the verified-completion primary outcome, guardrails and the fixed-horizon stopping rule before any assignment, and its hash covers them"
+      proof: 'grep: test("W1-T10841: the protocol pre-registers outcome, guardrails and stopping rule before any assignment" in test/routing/terra-vs-sol-trial-registration.test.ts'
+    - claim: "The A/B refuses to register without a passing, in-age A/A receipt for the same population and stack"
+      proof: 'grep: test("W1-T10841: the A/B refuses to register without a passing A/A receipt" in test/routing/terra-vs-sol-trial-registration.test.ts'
+    - claim: "Registration refuses when the Codex catalog does not list gpt-6.1-terra"
+      proof: 'grep: test("W1-T10841: registration refuses when the Codex catalog does not list Terra 6\.1" in test/routing/terra-vs-sol-trial-registration.test.ts'
+    - claim: "Any API-billed attempt reserves inside the #7418 pilot ceiling and window, and subscription attempts spend no cash"
+      proof: 'grep: test("W1-T10841: the trial spends only inside the paid pilot ceiling and window" in test/routing/terra-vs-sol-trial-registration.test.ts'
+    - claim: "The registration is reachable from production through an rmd verb in src/run-task.ts"
+      proof: 'grep: registerCodexBalancedTrial( in src/run-task.ts'
+  falsifier: |
+    Skip the A/A receipt check: the A/B registers on an uncalibrated population and the receipt test fails. CLOSE IF a
+    Terra-vs-Sol protocol is already registered on origin/main's evaluation path.

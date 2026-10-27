@@ -1,7 +1,7 @@
 - id: W1-T4081
   title: "RETIRE gpt-5.6-luna AND gpt-5.6-terra FROM THE CASH LADDER ONCE gpt-6-luna IS SERVING — the cleanup the operator asked for when the GPT-6 switch-over lands"
   repo: remudero
-  depends_on: [W1-T4079, W1-T4080]
+  depends_on: [W1-T4079, W1-T4080, W1-T10839]
   # operator-2026-10-14: 90 put every absent-priority task at tier 91 under #11584's tier weighting; 5 keeps it low without exiling them
   priority: 5
   type: implement
@@ -11,7 +11,8 @@
   risk: high
   band_meaning: span
   origin: "operator-ruling#azure-gpt6-2026-09-22"
-  plan_refs: ["W1-T4079", "W1-T4080"]
+  plan_refs: ["W1-T4079", "W1-T4080", "W1-T10839"]
+  note: "amended 2026-10-27 (plan-file-1793108610649): W1-T10839 puts gpt-6.1-terra ahead of a TRAILING gpt-5.6-terra in cash frontier and edits the same rows and tables, so this retirement waits for it; after W1-T10839 the frontier row keeps gpt-6.1-terra when gpt-5.6-terra is removed."
   files:
     - .remudero/mounts.yaml
     - src/lib/worker-provider.ts

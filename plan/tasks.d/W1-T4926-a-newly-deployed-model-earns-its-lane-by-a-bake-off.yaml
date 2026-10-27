@@ -10,9 +10,9 @@
   risk: high
   band_meaning: span
   origin: "operator direction 2026-09-30: bake-offs run when a new model is deployed, not regularly, and must consider thinking levels"
-  note: "reservation hand-off: plan-bakeoff-trigger-1790777606000 -> plan-bakeoff-trigger-1790777606000"
+  note: "reservation hand-off: plan-bakeoff-trigger-1790777606000 -> plan-bakeoff-trigger-1790777606000; amended 2026-10-27 (plan-file-1793108610649): the fourth criterion read the sweep calls the trigger with proof grep findUntrialedModels( in src/lib/sweep.ts, which matched only the definition of runSweepBakeoff, a function with no production caller; the criterion now names the production call site and is carried by follow-up W1-T10840, which wires it"
   plan_refs: [W1-T4907, W1-T3570, W1-T4916]
-  files: [src/lib/bakeoff-trigger.ts, src/lib/sweep.ts, test/a-newly-deployed-model-earns-its-lane-by-a-bake-off.test.ts]
+  files: [src/lib/bakeoff-trigger.ts, src/lib/sweep.ts, src/run-task.ts, test/a-newly-deployed-model-earns-its-lane-by-a-bake-off.test.ts]
   status: merged
   attempts: 0
   rationale: |
@@ -37,7 +37,7 @@
       proof: 'grep: test("W1-T4926: the trial covers every thinking level the model accepts" in test/a-newly-deployed-model-earns-its-lane-by-a-bake-off.test.ts'
     - claim: "the result is one proposal with the ranked table, and routing is unchanged"
       proof: 'grep: test("W1-T4926: the result is one proposal with the ranked table, and routing is unchanged" in test/a-newly-deployed-model-earns-its-lane-by-a-bake-off.test.ts'
-    - claim: "the sweep calls the trigger"
-      proof: 'grep: findUntrialedModels( in src/lib/sweep.ts'
+    - claim: "The production measurement cadence calls the deployment bake-off"
+      proof: 'grep: runSweepBakeoff in src/run-task.ts'
   falsifier: |
     Run the bake-off on every sweep and the first test sees a second trial for the same model.

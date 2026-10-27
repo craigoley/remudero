@@ -36,3 +36,11 @@
     The repair must not add a baseline entry, omit plan/feedback as a directory, normalize or escape the historic ID, restore a released reservation, treat arbitrary string-bearing YAML as valid feedback, or turn a read failure into an empty reference set. The existing active-ref, collision and holder adjudication rules remain authoritative.
     Filing is independent of publication and implementation qualification. Preserve strict TDD, discriminating guard removals, exact-head restoration, maintained author checks, full CI, coverage, security, semantic review and ordinary merge. No first-push exception or new hosted-author attempt is granted by the scanner-boundary approval. Keep serve running and W7740 held at 90 minutes; Foundation, Janitor and resource owners stay independent.
     Attribution is separate from transport repair: this gate task does not use the captured reply feedback ID as its origin and is not implementing credit for that original requested source change. Preserve the original reply for normal downstream filing after the gate is qualified and adopted.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it deletes data, branches, archives or ledgers (\"Removing only the data\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-27T14:38:47.243Z"
+    pin: "6fd436a56fe7d3da02fc1c469c8daa5c6dbc001138b4e70c694d4f2e6626c98c"

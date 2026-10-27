@@ -56,7 +56,9 @@ async function runRecordedStream(): Promise<{ worktree: string; events: WorkerSt
     const sensor = buildWorkerStateSensor({ ledgerPath, runId: "run-w1t10763", taskId: "W1-T10763", root });
     const events: WorkerStreamEvent[] = [];
     const stdout = new PassThrough();
-    const proc = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout, stderr: new PassThrough() });
+    const stdin = new PassThrough();
+    const promptDelivered = new Promise<void>((resolve) => stdin.once("finish", resolve));
+    const proc = Object.assign(new EventEmitter(), { stdin, stdout, stderr: new PassThrough() });
     const run = spawnCodexWorker(
       {
         cwd: worktree,
@@ -71,6 +73,7 @@ async function runRecordedStream(): Promise<{ worktree: string; events: WorkerSt
       },
       { claudeBin: "/unused", root, workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "codex-fixture" } },
     );
+    await Promise.race([promptDelivered, run.then(() => { throw new Error("the fake worker completed before receiving its prompt"); })]);
     for (const line of recordedStream(worktree)) stdout.write(line);
     stdout.end();
     proc.emit("exit", 0);

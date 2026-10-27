@@ -1,0 +1,50 @@
+[
+  {
+    "kind": "healthy-control",
+    "appended": false,
+    "window": "2026-10-27T12:23:14.019Z",
+    "clockAtRead": "2026-10-27T12:23:14.019Z",
+    "postCutoffRowTs": null,
+    "corpusComplete": true,
+    "reason": null,
+    "foldState": "complete",
+    "totalUsd": 2,
+    "pricedSubtotalUsd": 2
+  },
+  {
+    "kind": "concurrent-post-cutoff-append",
+    "appended": true,
+    "window": "2026-10-27T12:23:14.019Z",
+    "clockAtRead": "2026-10-27T12:23:15.019Z",
+    "postCutoffRowTs": "2026-10-27T12:23:14.519Z",
+    "corpusComplete": false,
+    "reason": null,
+    "foldState": "partial",
+    "totalUsd": null,
+    "pricedSubtotalUsd": 2
+  },
+  {
+    "kind": "genuinely-future-row",
+    "appended": false,
+    "window": "2026-10-27T12:23:14.019Z",
+    "clockAtRead": "2026-10-27T12:23:14.019Z",
+    "postCutoffRowTs": "2026-10-27T12:23:14.519Z",
+    "corpusComplete": false,
+    "reason": null,
+    "foldState": "partial",
+    "totalUsd": null,
+    "pricedSubtotalUsd": 2
+  },
+  {
+    "kind": "malformed-row",
+    "appended": false,
+    "window": "2026-10-27T12:23:14.019Z",
+    "clockAtRead": "2026-10-27T12:23:14.019Z",
+    "postCutoffRowTs": null,
+    "corpusComplete": false,
+    "reason": null,
+    "foldState": "partial",
+    "totalUsd": null,
+    "pricedSubtotalUsd": 2
+  }
+]

@@ -19,7 +19,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:net";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 
@@ -385,8 +385,10 @@ function codexChild(onStart: () => void, text: string) {
         { type: "item.completed", item: { type: "agent_message", text } }, { type: "turn.completed", usage: {} }]) {
         stdout.write(`${JSON.stringify(event)}\n`);
       }
+      // `exit` follows the stream's own `end`: the provider attaches its stdout reader after `spawn` returns, so an exit
+      // queued ahead of that read would settle the run before the final message (and its COMMIT_MESSAGE) was parsed.
+      stdout.once("end", () => proc.emit("exit", 0));
       stdout.end();
-      queueMicrotask(() => proc.emit("exit", 0));
     },
   };
 }
@@ -396,10 +398,11 @@ async function runCodex(cwd: string, child: ReturnType<typeof codexChild>, extra
   const pending = provider.spawnCodexWorker({
     workerHome: mkdtempSync(join(root, "codex-home-")), cwd, prompt: "implement the task",
     settingsFile: join(process.cwd(), "settings", "worker.json"), tools: ["Read", "Write", "Edit", "Bash"], ...extra,
-    containment: { spawn: (o) => { args = o.args; return { process: child.proc as never, pid: 61_480 }; }, teardown: () => {} },
+    // The writer's async Git probe runs before this spawn: finish the child only once it exists, or its `exit` has no listener.
+    containment: { spawn: (o) => { args = o.args; child.finish(); return { process: child.proc as never, pid: 61_480 }; }, teardown: () => {} },
   }, { claudeBin: "/unused", root: configRoot, workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome: join(root, "codex-home") } } as never);
-  child.finish();
-  return { args, result: (await pending) as unknown as Record<string, unknown> };
+  const result = (await pending) as unknown as Record<string, unknown>;
+  return { args, result };
 }
 
 describe("W1-T6148: the codex lane has no gitdir grant and the harness commits for it", () => {
@@ -408,7 +411,9 @@ describe("W1-T6148: the codex lane has no gitdir grant and the harness commits f
     // config.root spans the seed and the tree, so the old grant (limited to config.root) would have fired.
     const { args } = await runCodex(wt, codexChild(() => {}, "nothing"), {}, realpathSync(tmpdir()));
     assert.equal(args[args.indexOf("--sandbox") + 1], "workspace-write");
-    assert.deepEqual(args.flatMap((a, i) => (a === "--add-dir" ? [args[i + 1]] : [])), [], "no writable git administrative root");
+    // The one grant a writer keeps is its private addon namespace (never a git administrative root).
+    const nativeCache = join(realpathSync(homedir()), ".cache", "remudero", "swc-native");
+    assert.deepEqual(args.flatMap((a, i) => (a === "--add-dir" ? [args[i + 1]] : [])), [nativeCache], "no writable git administrative root");
   });
 
   it("the edits a codex writer leaves are committed through the leaf under its COMMIT_MESSAGE, end to end", async () => {

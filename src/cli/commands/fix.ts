@@ -3345,7 +3345,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // unchanged, the moment that worker's own attempt cannot go green (rationale (5): a REFUSAL
     // CONDITION, never a retry — a second stuck PR beside the first is worse than the escalation
     // it replaces). Zero strikes spent either way, exactly as before this task.
-    if (review.instrumentEntangled) {
+    // Rule 25 was withdrawn as a refusal. Only positively tagged current verdicts carry that
+    // policy through here; historical/unbound evidence keeps its existing conservative route.
+    if (review.instrumentEntangled && review.instrumentEntanglementPolicy !== "advisory") {
       const paths = review.instrumentEntanglementPaths;
       const instrumentPaths = paths?.instrumentPaths ?? [];
       const srcPaths = paths?.srcPaths ?? [];
@@ -3592,7 +3594,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     const gateFailuresNow: ActionableGateFailure[] | undefined =
       currentMergeConflict === undefined && !noReviewYet && unmet.length === 0
         ? strikes === 0 && opts.actionableGateFailures !== undefined
-          ? opts.actionableGateFailures
+          ? // W1-T10574: re-filter the seed through the single-form producer so an unfixable-in-place
+            // reason (rule 15 / entanglement) never reaches the pre-strike dispatch.
+            actionableGateFailuresFromReasons(opts.actionableGateFailures.map((f) => f.reason))
           : actionableGateFailuresFromReasons(reviewLedgerReasons(review))
         : undefined;
 
