@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
+// @ts-expect-error -- a dependency-free operator script with no declaration file, like its sibling scripts' tests.
 import { openPrBodyVerdict, refusalsAtSha, selectBodySource } from "#scripts/open-pr-body-proof-precheck.mjs";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -105,7 +106,7 @@ test("W1-T9235: a first push or a busy floor makes no GitHub read", () => {
   assert.match(first.lines.join("\n"), /first push of a new branch/);
   const deletion = selectBodySource({ oldSha: "b".repeat(40), newSha: ZERO, ...seams });
   assert.equal(deletion.kind, "skip");
-  assert.deepEqual(calls, [], "neither a first push nor a deletion consults the floor, the cache or GitHub");
+  assert.deepEqual(calls, [] as string[], "neither a first push nor a deletion consults the floor, the cache or GitHub");
 
   const busy = selectBodySource({
     oldSha: "b".repeat(40),
