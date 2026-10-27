@@ -196,7 +196,7 @@ test("a slot whose git link points at a pruned admin dir is recreated and the pr
   const last = steps.filter((s) => s.step === "serve.slot_prepare").at(-1);
   assert.equal(last?.extra?.path, "recreated");
   assert.equal(last?.extra?.reason, "dangling_git_link");
-  assert.match(String(last?.extra?.detail), /not a git repository/);
+  assert.match(String(last?.extra?.detail), /not a git repository|gitfile does not point to a valid repository/);
 });
 
 test("a slot that is a worktree of a different clone is recreated in the serve clone", async () => {

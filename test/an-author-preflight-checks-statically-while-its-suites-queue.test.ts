@@ -2,13 +2,13 @@
 // that ticket waits, and admits its suites in queue order; a cold typecheck never waits on a suite slot or ticket.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import { typecheckStep } from "#src/lib/commit-message.js";
-import { acquireTestSlot } from "#src/lib/test-slot.js";
+import { acquireTestSlot, admitStaticWork } from "#src/lib/test-slot.js";
 import { takeTestSlotTicket, testSlotQueueDir } from "#src/lib/test-slot-queue.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -87,6 +87,40 @@ function queuedTickets(slotDir: string): string[] {
 }
 
 const suites = () => ({ fullRun: false, suites: ["test/leaf.test.ts"], reasons: ["W1-T9951 fixture"] });
+
+test("static admission preserves a pre-existing temporary file or symlink", async (t) => {
+  for (const kind of ["file", "symlink"] as const) {
+    await t.test(kind, (t) => {
+      const root = mkdtempSync(join(tmpdir(), "rmd-static-record-safety-"));
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      const slots = join(root, "slots");
+      mkdirSync(slots);
+      const target = join(root, "target");
+      writeFileSync(target, "preserve this content");
+      let temporary = "";
+      const admission = admitStaticWork("static-file-safety", {
+        dir: slots, memoryBytes: GiB, log: () => {},
+        memoryHeadroom: () => {
+          const records = readdirSync(slots);
+          assert.equal(records.length, 1, "the initial peak was published before checking headroom");
+          temporary = join(slots, `.${records[0]}.tmp`);
+          if (kind === "symlink") symlinkSync(target, temporary);
+          else writeFileSync(temporary, "preserve this content");
+          return undefined;
+        },
+      });
+      t.after(() => admission.release());
+      assert.equal(readFileSync(target, "utf8"), "preserve this content");
+      assert.equal(readFileSync(temporary, "utf8"), "preserve this content");
+      assert.equal(lstatSync(temporary).isSymbolicLink(), kind === "symlink");
+      assert.equal(admission.outcome, "open");
+      assert.match(admission.note, /no memory reading/);
+      assert.match(admission.note, /UNRECORDED.*EEXIST/);
+      admission.release();
+      assert.deepEqual(readdirSync(slots), [temporary.slice(slots.length + 1)], "release preserves the foreign entry");
+    });
+  }
+});
 
 test("W1-T9951: static-preflight runs while the suite ticket waits", async (t) => {
   // Loaded BEFORE the holder starts its bound: a cold import under host load must not spend the holder's window.

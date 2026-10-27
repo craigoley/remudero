@@ -1699,7 +1699,7 @@ export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryB
     const body: TestSlotHolder & { admittedAt?: string } = { pid, host: host(), bootId: bootId(), pidNs: pidNamespace(), startedAt: startedIso,
       heartbeatAt: clock.iso(), label, processStart: testSlotProcessFacts(pid)?.start, memoryBytes: opts.memoryBytes, ...(admittedAt ? { admittedAt } : {}) };
     const temp = join(dir, `.${ownName}.tmp`);
-    writeFileSync(temp, JSON.stringify(body), { mode: 0o644 });
+    writeFileSync(temp, JSON.stringify(body), { mode: 0o644, flag: "wx" });
     renameSync(temp, ownPath);
   };
   const unlinkOwn = (): void => {
