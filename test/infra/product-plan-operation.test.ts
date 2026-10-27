@@ -360,6 +360,23 @@ test("W1-T10823: the shared journal honors the maintained filesystem lock", asyn
   assert.equal(f.calls.length, 1);
 });
 
+test("W1-T10823: completion lock contention never keeps a finished handoff pending", async (t) => {
+  const f = fixture(t), service = f.service();
+  await ok(service.execute(actor, f.command()));
+  const key = createHash("sha256").update(actor).digest("hex");
+  const handle = acquireInflightLock(join(f.journalDirectory, "locks"), key, { run_id: "completion-journal-writer" });
+  try {
+    f.release("queued");
+    // Drain promise callbacks while the real lock stays held. No sleep or fabricated ledger verdict.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  } finally { handle.release(); }
+  const live = await ok(service.execute(actor, f.command()));
+  const restarted = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.equal(live.observation.state, "unknown", "a completed child with no durable outcome or ledger row is unknown");
+  assert.equal(restarted.observation.state, live.observation.state, "live and restarted readers agree");
+  assert.equal(f.calls.length, 1, "failed completion persistence never retries the plan");
+});
+
 test("W1-T10823: an old completed plan never becomes evidence for a newer objective", async (t) => {
   const f = fixture(t);
   const first = await ok(f.service().execute(actor, f.command()));

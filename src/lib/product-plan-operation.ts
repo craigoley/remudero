@@ -430,13 +430,17 @@ export class ProductPlanOperationService {
   private handOff(paths: Paths, record: Record_, brief: string): void {
     const gateway = this.options.gateway!;
     this.flying.add(record.operationId);
-    const finished = (outcome: PlanHandoffOutcome) => this.enqueue(() => this.mutate(paths, async () => {
+    const finished = (outcome: PlanHandoffOutcome) => this.enqueue(async () => {
+      // Completion is known in memory even if another writer prevents persisting its outcome.
+      // With no durable result or ledger row, observe() must report unknown instead of pending.
       this.flying.delete(record.operationId);
-      const journal = this.readJournal(paths);
-      const stored = journal.operations[record.operationId];
-      if (!stored) return;
-      this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...stored, handoff: { outcome, at: this.clock.iso() } } } });
-    })).catch((error: unknown) => { void error; /* the journal keeps its last durable state; the ledger rows still say what ran */ });
+      await this.mutate(paths, async () => {
+        const journal = this.readJournal(paths);
+        const stored = journal.operations[record.operationId];
+        if (!stored) return;
+        this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...stored, handoff: { outcome, at: this.clock.iso() } } } });
+      });
+    }).catch((error: unknown) => { void error; /* the journal keeps its last durable state; the ledger rows still say what ran */ });
     let started: Promise<{ outcome: PlanHandoffOutcome }>;
     try { started = gateway.productPlan!({ operationId: record.operationId, mode: record.mode, brief, repoRoot: record.command.repoRoot }); }
     catch (error) {
