@@ -1,5 +1,5 @@
 - id: W1-T10411
-  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/coverage-session-blanking.test.ts:flaky cost 11.6 PR minute(s) across 4 round(s) on 4 pull request(s)"
+  title: "The author preflight refuses coverage-blanking findings before heavy selection or admission"
   repo: remudero
   depends_on: []
   type: implement
@@ -17,8 +17,26 @@
     - scripts/coverage-session-blanking-check.mjs
     - test/ci/coverage/check-test-test-coverage-session-blanking-test-ts-flaky.test.ts
   acceptance:
-    - claim: "the harness no longer spends a fix round on check:test:test/coverage-session-blanking.test.ts:flaky"
-      proof: "grep: test(\"W1-T10411: check:test:test/coverage-session-blanking.test.ts:flaky is prevented, not retried\" in test/ci/coverage/check-test-test-coverage-session-blanking-test-ts-flaky.test.ts"
+    - claim: "Changed-test coverage-blanking findings refuse the author run before heavy selection or admission, without retry or caller mutation"
+      proof: "unit test: W1-T10411: check:test:test/coverage-session-blanking.test.ts:flaky is prevented, not retried"
+    - claim: "Healthy blanking forms continue to selection while unchanged and deleted tests stay outside the changed-file precheck"
+      proof: "unit test: author blanking precheck admits both blanking forms and ignores deleted and unchanged tests"
+    - claim: "Unreadable changed-test evidence refuses before selection rather than certifying a clean scan"
+      proof: "unit test: author blanking precheck refuses unreadable changed tests before selection"
+  design: |
+    Implement the already-approved changed-test coverage-blanking precheck in scripts/preflight-author.mjs,
+    using the existing scripts/coverage-session-blanking-check.mjs scanner without changing its semantics.
+    Positively resolve changed tracked test paths before heavy suite selection, host admission, dependency
+    preparation or test-slot acquisition. Scan those readable changed tests in process. Findings must
+    refuse with a truthful receipt before those expensive effects, with no retry or caller mutation.
+    Healthy blanking forms continue; unchanged and deleted files are not a new corpus exemption and the
+    existing full-corpus scanner remains in normal CI. Missing or unreadable changed-path evidence
+    refuses; UNKNOWN is never a clean result. Preserve all existing assertions and scanner protections.
+    The existing native test exercises the real author caller and scanner against disposable source
+    fixtures; its three named executable controls must fail without the production wiring.
+    The original observations establish concrete scanner findings, not flakiness. This bounded task
+    prevents that diagnosed defect from reaching heavy author validation; it claims no proof that all
+    historical fix rounds share a cause, nor any remedy credit before the real effect is measured.
   note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/coverage-session-blanking.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
   rationale: |
     MEASURED by the ci-friction gardener: check:test:test/coverage-session-blanking.test.ts:flaky cost 11.6 PR minute(s) (seven-day half-life) across 4 fix round(s) on 4 pull request(s).
@@ -81,11 +99,8 @@
     Missing/unreadable changed-test evidence must refuse, not certify a clean scan.
     Native repair retains source ownership; normal ruling, hosted tests, coverage,
     security and semantic qualification remain required. No remedy credit before effect.
-  risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.93
-    reasons:
-      - "high-risk verdict at confidence 0.93 — on the change's description/files alone, no diff was read — The cited failures report concrete scanner findings in tracked tests; the supplied evidence does not establish that these failures are flaky.; on the change's description/files alone, no diff was read — The filing proposes implementation changes to the scanner and author preflight without describing a preventive mechanism. Its sole acceptance proof checks for test-title text, leaving the claimed prevention unverifiable from what is shown."
-    judged_at: "2026-10-27T01:26:42.829Z"
-    pin: "7b99dd05697c7837c165af0f52a96e0a57b001e3d97dcc81a77b9dad362b8cb1"
+    This proposed clarification replaces the unsupported flaky attribution and title-only proof
+    with the exact three executable caller controls already present on the native branch. Scope,
+    risk high/span, all historical observations and scanner protections remain. Genuine normal
+    risk qualification and an explicit operator release are required; no machine release, retry,
+    source ownership takeover or merge-gate exemption is granted.
