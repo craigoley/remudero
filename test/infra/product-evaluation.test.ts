@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, fstatSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, fstatSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
@@ -154,9 +154,12 @@ test("W1-T10619: evaluation durability faults are explicit, never fabricated suc
   writeFileSync(file, JSON.stringify({ version: "product-evaluation-v1", ownerKey: "0".repeat(64), operations: {} }), { mode: 0o600 });
   assert.deepEqual(f.service.history(actor, f.productId), { ok: false, code: "corrupt" });
   // a wider-than-private journal is refused rather than trusted
-  chmodSync(file, 0o644);
+  // The fixture is created with the mode it needs (a fresh file under a pinned umask), so no OS permission denial is assumed.
+  rmSync(file);
+  const priorUmask = process.umask(0o022);
+  try { writeFileSync(file, "{}", { mode: 0o644 }); } finally { process.umask(priorUmask); }
+  assert.equal(statSync(file).mode & 0o077, 0o044);
   assert.deepEqual(f.service.execute(actor, f.command({ requestId: "eval-request-0000002", expectedRevision: 2 })), { ok: false, code: "unavailable" });
-  chmodSync(file, 0o600);
 
   // a concurrent writer holds the owner lock
   const g = fixture(t);
