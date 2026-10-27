@@ -2887,6 +2887,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
 
 async function withPrivateRegistryCodexProfile<T>(
   args: CodexSpawnArgs, config: Config, selected: string, operation: (profile: PrivateRegistryCodexProfile) => Promise<T>,
+  nativeCacheRoot?: string,
 ): Promise<T> {
   await assertInstanceRegistryRuntimeCurrent();
   // A saved session may carry older permissions. Never silently resume it with unqualified private access.
@@ -2925,7 +2926,10 @@ async function withPrivateRegistryCodexProfile<T>(
     // A positive public read scope must never include the selected source or its invocation artifact.
     // The file-backed profile alone was insufficient in a real exec tool call; the same public-only
     // policy is therefore also supplied through supported CLI overrides. Neither surface names private paths.
-    if ([...roots].some(root => isWithin(root, selected) || isWithin(root, path))) {
+    // --add-dir also expands :workspace_roots. Its verified cache grant must remain disjoint
+    // from both private inputs, even though the public-only profile never names those inputs.
+    const grantRoots = nativeCacheRoot === undefined ? [...roots] : [...roots, directory(nativeCacheRoot)];
+    if (grantRoots.some(root => isWithin(root, selected) || isWithin(root, path))) {
       throw new InstanceRegistryRuntimeError("worker_scope_contains_private_file");
     }
     const filesystem = new Map<string, string>([[":root", "deny"], [":minimal", "read"],
@@ -2993,7 +2997,7 @@ export async function spawnCodexWorker(
       ? prepareWorkerNativeCache() : undefined;
     if (selected === undefined) return spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, undefined, nativeCacheRoot);
     return withPrivateRegistryCodexProfile(args, config, selected, profile =>
-      spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, profile, nativeCacheRoot));
+      spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, profile, nativeCacheRoot), nativeCacheRoot);
   });
 }
 
