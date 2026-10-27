@@ -8,7 +8,8 @@
 // codex-cli 0.163.0 (the version deploy/package-lock.json pins) writes in `exec --json`:
 // `command_execution` {id, command, aggregated_output, exit_code, status}, and `file_change`
 // {id, changes: [{path, kind: "add" | "delete" | "update"}], status}. Codex runs a command through
-// its shell (`/bin/bash -lc`, measured in W1-T2754), so the item's command names the wrapper.
+// its shell (`/bin/bash -lc`, measured in W1-T2754), but the item's `command` is the command
+// submitted to that shell, not the shell invocation.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -17,13 +18,12 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { readLedgerLines } from "#src/lib/status.js";
-import { toolStepSignature } from "#src/lib/tool-step-signature.js";
 import type { WorkerStreamEvent } from "#src/lib/worker.js";
 import { spawnCodexWorker } from "#src/lib/worker-provider.js";
 import { buildWorkerStateSensor, ledgerPathFor, WORKER_ACTIVITY_LEDGER_STEP } from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const COMMAND = "/bin/bash -lc 'git push origin HEAD'";
+const COMMAND = "git push origin HEAD";
 
 function recordedStream(worktree: string): string[] {
   const commandItem = { id: "item_0", type: "command_execution", command: COMMAND };
@@ -94,8 +94,7 @@ test("W1-T10763: a codex command execution is reported as a Bash tool call carry
   const toolRows = rows.filter((row) => row.event_kind === "tool-executing");
   assert.equal(toolRows[0]?.tool_name, "Bash");
   assert.equal(toolRows[0]?.tool_call_index, 0, "the started item is not a second call: one row per completed item");
-  // The row carries toolStepSignature's own reading of the command, whatever it makes of codex's shell wrapper.
-  assert.equal(toolRows[0]?.tool_signature, toolStepSignature("Bash", { command: COMMAND }, worktree));
+  assert.equal(toolRows[0]?.tool_signature, "Bash:git push");
   assert.equal(ledgerText.includes("Everything up-to-date"), false, "the ledger never carries command output");
 });
 
@@ -112,7 +111,7 @@ test("W1-T10763: a codex file change is reported as a file tool call per changed
   const toolRows = rows.filter((row) => row.event_kind === "tool-executing");
   assert.deepEqual(
     toolRows.map((row) => [row.tool_name, row.tool_signature, row.tool_call_index]),
-    [["Bash", toolStepSignature("Bash", { command: COMMAND }, worktree), 0], ["Edit", "Edit:src/lib/worker-provider.ts", 1],
+    [["Bash", "Bash:git push", 0], ["Edit", "Edit:src/lib/worker-provider.ts", 1],
       ["Write", "Write:test/learning/a-new.test.ts", 2]],
     "each changed path is one tool row whose signature is repo-relative, as a claude row's is",
   );
