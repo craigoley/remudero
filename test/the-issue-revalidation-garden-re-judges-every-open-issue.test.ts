@@ -276,7 +276,7 @@ test("W1-T10854: verdict receipt refuses unavailable or superseded identity", as
       if (shape !== "unobserved") receiptSelection(args, shape === "invalid" ? "not-an-immutable-id" : RECEIPT_A);
       if (shape === "conflict") receiptSelection(args, RECEIPT_A, "codex");
       if (shape === "selection-error") args.onSelectionAssignment?.({ id: RECEIPT_A,
-        get selected() { throw new Error("private-selection-metadata"); } } as WorkerSelectionAssignment);
+        get selected() { throw new Error("private-selection-metadata"); } } as unknown as WorkerSelectionAssignment);
       if (shape === "unkeyed-fallback") args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract" });
       if (shape === "fallback-error") args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract",
         selectionAssignmentId: { toString() { throw new Error("private-fallback-metadata"); } } as unknown as string });
