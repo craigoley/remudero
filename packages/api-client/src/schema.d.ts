@@ -521,6 +521,95 @@ export interface components {
       version: "product-deployment-v1";
       error: "invalid_identity" | "invalid_input" | "not_found" | "project_not_found" | "repository_required" | "repository_mismatch" | "team_mismatch" | "project_conflict" | "idempotency_conflict" | "stale_revision" | "capacity" | "creation_denied" | "not_configured" | "busy" | "corrupt" | "unavailable" | "provider_unreadable" | "outcome_unknown" | "recovery_required" | "request_too_large";
     };
+    ProductEvaluationVersions: {
+      objectiveVersion: string;
+      evaluatorVersion: string;
+    };
+    /** One held-out cell. A null score is a missing measurement and stays unknown; it is never read as zero or as a pass. */
+    ProductEvaluationHoldout: {
+      kind: "geography" | "device";
+      id: string;
+      baseline: number | null;
+      candidate: number | null;
+    };
+    ProductEvaluationEvidence: {
+      channel: "replay" | "bot" | "device";
+      reference: string;
+    };
+    ProductEvaluationProposalCommand: {
+      summary: string;
+      pullRequests: number;
+      costUsd: number;
+    };
+    /** At most 16384 raw request bytes. objective names the held-out objective and evaluator version once; baseline and candidate must both have been measured against exactly it, or the comparison is refused as objective_changed. Every holdout cell is judged separately; a candidate below its baseline refuses the comparison as holdout_failed. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. The proposal can request no authority: spend above the product's own resource envelope is refused. */
+    ProductEvaluationCommand: {
+      version: "product-evaluation-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+      objective: ProductEvaluationVersions;
+      baseline: ProductEvaluationVersions;
+      candidate: ProductEvaluationVersions;
+      holdouts: (ProductEvaluationHoldout)[];
+      evidence: (ProductEvaluationEvidence)[];
+      proposal: ProductEvaluationProposalCommand;
+    };
+    ProductEvaluationHoldoutResult: {
+      kind: "geography" | "device";
+      id: string;
+      baseline: number | null;
+      candidate: number | null;
+      outcome: "held" | "regressed" | "unknown";
+    };
+    ProductEvaluationCoverage: {
+      geography: "held" | "regressed" | "unknown";
+      device: "held" | "regressed" | "unknown";
+    };
+    ProductEvaluationProposal: {
+      summary: string;
+      pullRequests: number;
+      costUsd: number;
+      state: "proposed";
+    };
+    /** Bots and replays prove geometry and rule invariants only; each human or physical judgement stays its own unverified field. */
+    ProductEvaluationAcceptance: {
+      humanFun: "unverified";
+      recognizableGeography: "unverified";
+      originality: "unverified";
+      physicalDevice: "unverified";
+    };
+    ProductEvaluationReceipt: {
+      operationId: string;
+      productId: ProductId;
+      objectiveRevision: number;
+      objective: ProductEvaluationVersions;
+      baseline: ProductEvaluationVersions;
+      candidate: ProductEvaluationVersions;
+      holdouts: (ProductEvaluationHoldoutResult)[];
+      coverage: ProductEvaluationCoverage;
+      /** The fraction of held-out cells that were actually measured. */
+      confidence: number;
+      verdict: "reviewable" | "unknown" | "refused";
+      refusal?: "objective_changed" | "holdout_failed";
+      evidence: (ProductEvaluationEvidence)[];
+      proposal: ProductEvaluationProposal;
+      acceptance: ProductEvaluationAcceptance;
+      executionAuthority: "none";
+      autoDeploy: false;
+      deployed: false;
+      recordedAt: string;
+      payloadDigest: string;
+    };
+    ProductEvaluationResponse: {
+      version: "product-evaluation-v1";
+      receipt: ProductEvaluationReceipt;
+      replayed: boolean;
+    };
+    ProductEvaluationError: {
+      version: "product-evaluation-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "objective_changed" | "holdout_failed" | "budget_exceeded" | "request_too_large";
+    };
     ProductCaseImport: {
       version: "product-intent-v1";
       requestId: ProductRequestId;
@@ -6660,6 +6749,20 @@ export interface paths {
           "409": ProductDeploymentError;
           "413": ProductDeploymentError;
           "503": ProductDeploymentError;
+        };
+    };
+  };
+  "/v1/products/evaluation": {
+    post: {
+      responses: {
+          "200": ProductEvaluationResponse;
+          "400": ProductEvaluationError;
+          "401": ProductAccessError;
+          "403": (ProductEvaluationError) | (ProductAccessError);
+          "404": ProductEvaluationError;
+          "409": ProductEvaluationError;
+          "413": ProductEvaluationError;
+          "503": ProductEvaluationError;
         };
     };
   };
