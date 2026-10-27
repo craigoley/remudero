@@ -393,6 +393,48 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
     assert.equal(f.state.escalated, 1, "the scope question is not re-asked");
   });
 
+  test("the light route adopts an answered instrument scope without admitting a fix", async () => {
+    const rows: Record<string, unknown>[] = [{ step: "fix.scope_amendment", task_id: TASK,
+      pr_number: 13039, head_sha: HEAD, outcome: "instrument-escalated",
+      paths: ["scripts/preflight-author.mjs"], issue_url: "https://github.com/o/remudero/issues/13106",
+      contract_revision: "contract-A" }];
+    const f = fixture(rows);
+    f.state.revision = "contract-B";
+    const capability = await lightPassHeadContractRefresh([pr()], f.deps);
+    await runSweepLightPass([pr()], { ...f.deps, updateBranch: undefined, ...capability });
+    assert.equal(f.state.refreshed, 1, "the approved amendment is adopted through the selected capability");
+    assert.equal(f.state.dispatched, 0, "the old head cannot enter another fix round");
+    assert.equal(f.state.admissions, 0, "contract adoption grants no fix admission");
+    assert.equal(rows.filter(row => row.step === "sweep.head_contract_refresh.attempted").length, 1);
+    const next = await lightPassHeadContractRefresh([pr()], f.deps);
+    assert.equal(next.headContractRefreshFor?.(pr()), undefined, "the durable attempt prevents another refresh");
+  });
+
+  test("the selected scope refresh keeps foreign unknown unchanged and unfiled holds closed", async () => {
+    const hold = { step: "fix.scope_amendment", task_id: TASK, pr_number: 13039, head_sha: HEAD,
+      outcome: "instrument-escalated", paths: ["scripts/preflight-author.mjs"],
+      issue_url: "https://github.com/o/remudero/issues/13106", contract_revision: "contract-A" };
+    for (const over of [{ task_id: "foreign" }, { head_sha: "f".repeat(40) },
+      { outcome: "unfiled-escalated" }, { contract_revision: undefined }, { paths: [] }]) {
+      const f = fixture([{ ...hold, ...over }]);
+      f.state.revision = "contract-B";
+      assert.deepEqual(await lightPassHeadContractRefresh([pr()], f.deps), {}, JSON.stringify(over));
+    }
+    for (const revision of ["contract-A", undefined]) {
+      const f = fixture([hold]);
+      f.state.revision = revision;
+      assert.deepEqual(await lightPassHeadContractRefresh([pr()], f.deps), {});
+    }
+    const f = fixture([hold]);
+    f.state.revision = "contract-B";
+    assert.deepEqual(await lightPassHeadContractRefresh([pr()], { ...f.deps,
+      readHeadContractRefreshHistory: async () => ({ complete: false, lines: [] }) }), {});
+    const capability = await lightPassHeadContractRefresh([pr()], f.deps);
+    f.state.revision = "contract-C";
+    assert.equal(capability.headContractRefreshFor?.(pr()), undefined, "a changed contract revokes the selected capability");
+    assert.deepEqual([f.state.refreshed, f.state.dispatched, f.state.admissions], [0, 0, 0]);
+  });
+
   test("a fix round's NEEDS_DESIGN row records the contract it worked on", async (t) => {
     const repo = gitRepo({ scope: t, kind: "design-contract" });
     repo.git("config", "user.name", "fixture");

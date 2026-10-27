@@ -29,7 +29,8 @@ type CensusResult = { status: number | null; signal?: string | null; error?: Err
 
 const MEMBER: Member = { testFile: "test/bounds-census.test.ts", script: "census:bounds", walks: ["lib/"] };
 const OTHER: Member = { testFile: "test/other-census.test.ts", script: "", walks: ["lib/"], structural: true };
-const NO_PRIORITY = { priority: "none", wrap: (file: string, args: string[]) => ({ file, args: [...args] }) };
+const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
+const NO_PRIORITY ={ priority: "none", wrap: (file: string, args: string[]) => ({ file, args: [...args] }) };
 
 /** A spawn that the 60 s backstop stopped, in each shape a child runner reports it. */
 const TIMED_OUT: SpawnResult[] = [
@@ -70,7 +71,10 @@ function censusMain(t: TestContext, members: Member[], runSuites: (input: { root
   const log = t.mock.method(console, "log", () => undefined);
   try {
     const root = censusTree(t);
-    return { status: census.main(["--root", root, "--base", "main"], { admitted: () => members, runSuites }) as number, err };
+    // The always-on skill census joins every nonempty diff; the injected runs below are about the members alone.
+    const memberRuns = (input: { root: string; files: string[] }) =>
+      runSuites({ ...input, files: input.files.filter((f) => f !== SKILL_CENSUS) });
+    return { status: census.main(["--root", root, "--base", "main"], { admitted: () => members, runSuites: memberRuns }) as number, err };
   } finally {
     error.mock.restore();
     log.mock.restore();

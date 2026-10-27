@@ -437,7 +437,7 @@ test("W1-T3379: the report command reads one complete union and refuses malforme
   const readLedger = ((stateDir: string, opts: { step?: string | readonly string[]; refuseIncomplete?: boolean } = {}) => {
     readCalls++;
     assert.equal(stateDir, "/state");
-    assert.deepEqual(opts.step, ["skills.selection", "verdict"]);
+    assert.deepEqual(opts.step, ["skills.selection", "verdict", "verdict.merged", "pr.terminal"]);
     assert.equal(opts.refuseIncomplete, true);
     return {
       stateDir,
