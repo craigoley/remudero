@@ -587,7 +587,7 @@ export async function reconcileManagedImprovementEffects(input: {
           const improvements = parsed.proposals.filter(p => p.improvement !== undefined);
           // The pass follows saved improvements; unrelated native producers do not consume its cap.
           // The entire source still passes the unchanged 2 MiB read bound and row validation above.
-          if (parsed.proposals.length > 512) throw new Error("The saved improvements exceed this evidence pass's bounded population.");
+          if (improvements.length > 512) throw new Error("The saved improvements exceed this evidence pass's bounded population.");
           return { proposals: improvements, tasks: loadPlan(options.planPath!).tasks, prs: [], mergedKeys: [], feedback: [] };
         } };
       const log: GardenerDeps["log"] = (step, fields) => {
