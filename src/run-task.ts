@@ -359,19 +359,22 @@ import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOvers
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { queueJudgeGardenSpec, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
-import { scoutGardenSpec } from "./lib/scout-gardener.js";
+import { SCOUT_WINDOW_MS, scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { ciFailureLedgerEntry, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
+import { CI_FRICTION_HALF_LIFE_MS, ciFrictionCauseKey, ciFrictionRoundMatchesCause, ciFrictionRoundsFromLedger, ciFailureLedgerEntry, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import {
-  gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, operatorRulingTimes, parkedEscalation, readOperatorReleaseRecords,
-  recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts,
+  gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, mechanicalDecisions, operatorRulingTimes, parkedEscalation, readOperatorReleaseRecords,
+  recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts, type MechanicalPort,
 } from "./lib/machine-filing-judge.js";
+import { countRounds, countStepRows, filingEvidenceOf, type SymptomReading } from "./lib/mechanical-rulings.js";
+import { parseCiFrictionOrigin } from "./lib/ci-friction-remedy.js";
+import type { LedgerRecord } from "./lib/retro.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { openIncidentFeedbackOrigins } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, hostResourceInputStamp, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
@@ -21454,8 +21457,19 @@ export async function defaultVerifyHumanCadenceResult(
     const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
     const judgedRows = rowsWithArchivedVerifyHumanVerdicts(ledgerPath, rows);
     const registryPath = join(config.root, "state", "inbox-proposals.json");
+    const credited = readMergeCreditedTaskIds(ledgerPath).credited;
+    const shards = withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, repoRoot, clock, credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), clock.now(), { repository: githubRepoSlugOfCheckout(repoRoot), instance: process.env.RMD_INSTANCE_NAME });
+    const releasedIds = resolveReleasedIds(releaseReadersFor(ledgerPath), plan);
+    // W1-T10371: the operator's four rulings decide what they can; the machine-filing judge's landing owns the write.
+    const ruledByRules = mechanicalDecisions({
+      port: productionMechanicalPort({ repoRoot, stateDir: join(config.root, "state"), clock }), plan,
+      candidates: shards.flatMap((shard) => plan.byId.get(shard.id) ?? []), released: releasedIds, isMerged: (id) => credited.has(id),
+      log: (step, fields) => appendLedger(ledgerPath, { run_id: runId, step, ...fields } as LedgerLine),
+    });
     const result = await verifyHumanCadence({
-      shards: withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, repoRoot, clock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), clock.now(), { repository: githubRepoSlugOfCheckout(repoRoot), instance: process.env.RMD_INSTANCE_NAME }),
+      shards,
+      decidedByRules: (shard) => ruledByRules.get(shard.id),
+      priorMechanicalKeys: new Set(rows.filter((r) => r.step === "verify_human.mechanical_ruling").map((r) => `${String(r.task_id)}:${String(r.rule)}:${String(r.verdict)}`)),
       priorVerdicts: priorVerifyHumanVerdicts(judgedRows),
       priorAgeBandKeys: priorVerifyHumanAgeBandKeys(judgedRows),
       judge: shadowedVerifyHumanJudge({
@@ -21469,7 +21483,7 @@ export async function defaultVerifyHumanCadenceResult(
       appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
       runId,
       release: productionVerifyHumanRelease(plan, repoRoot, ledgerPath, runId),
-      releasedIds: resolveReleasedIds(releaseReadersFor(ledgerPath), plan),
+      releasedIds,
       releaseEscalatedKeys: releaseEscalatedKeys(rows),
     });
     // W1-T4083: measure the release judge over the board's week of rotations, remembering what older
@@ -36852,6 +36866,66 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
  */
 /** The daemon's machine-filing judge (operator ruling 2026-09-29) over this checkout's plan, mounts
  *  and policy. The risk judge is built on first use, as {@link productionVerifyHumanRelease}'s is. */
+/**
+ * W1-T10371: the operator's four mechanical rulings' ports, wired from the ledger union and the gardeners' own windows.
+ * A symptom has a reader only for the families whose history the ledger holds: a scout record's own step (rows across
+ * {@link SCOUT_WINDOW_MS}) and a ci-friction record's cause key (rounds across {@link CI_FRICTION_HALF_LIFE_MS}). Every
+ * other family reads as undefined, which the rules treat as undecided, so it keeps the judge path it had.
+ * A release goes through {@link approveParkedTask}, whose every guard stands.
+ */
+export function productionMechanicalPort(opts: {
+  repoRoot: string;
+  stateDir: string;
+  clock?: Clock;
+  /** Test seams: the union reader and the ci-friction ledger records. */
+  reader?: typeof readLedgerUnionRecordsSync;
+  ciFrictionRecords?: () => LedgerRecord[];
+}): MechanicalPort {
+  const clock = opts.clock ?? systemClock;
+  const ledgerPath = join(opts.stateDir, LEDGER_FILENAME);
+  const reader = opts.reader ?? readLedgerUnionRecordsSync;
+  return {
+    read: (tasks) => {
+      const nowMs = clock.now();
+      const scoutSteps = [...new Set(tasks.flatMap((t) => (t.origin?.startsWith("scout:") ? [t.origin.slice("scout:".length)] : [])))];
+      let scoutRows: readonly Record<string, unknown>[] | undefined;
+      let ciRounds: ReturnType<typeof ciFrictionRoundsFromLedger> | undefined;
+      // ledger-read-intent: live — a decline or restore the receipts store has not retained yet.
+      const declinedOf = declinedWithReceipts(readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[], opts.stateDir);
+      return {
+        symptom: (task): SymptomReading | undefined => {
+          const origin = task.origin ?? "";
+          if (origin.startsWith("scout:")) {
+            if (scoutRows === undefined) {
+              const read = reader(opts.stateDir, { sinceTs: new Date(nowMs - SCOUT_WINDOW_MS).toISOString(), step: scoutSteps, refuseIncomplete: true });
+              if (!read.ok) throw new Error(`incomplete ledger union: ${read.unread.join(", ")}`);
+              scoutRows = read.rows;
+            }
+            const step = origin.slice("scout:".length);
+            const filing = filingEvidenceOf(task, SCOUT_WINDOW_MS);
+            return { ...countStepRows(scoutRows, step, nowMs, SCOUT_WINDOW_MS), ...(filing ? { filing } : {}) };
+          }
+          const cause = parseCiFrictionOrigin(origin);
+          if (cause === undefined) return undefined;
+          ciRounds ??= ciFrictionRoundsFromLedger((opts.ciFrictionRecords ?? (() => readCiFrictionLedgerRecords(opts.stateDir)))());
+          const filing = filingEvidenceOf(task, CI_FRICTION_HALF_LIFE_MS);
+          const matches = (r: { cause: Parameters<typeof ciFrictionCauseKey>[0]; pr: number; evidence?: Parameters<typeof ciFrictionRoundMatchesCause>[0]["evidence"] }): boolean =>
+            ciFrictionRoundMatchesCause({ pr: r.pr, causeKey: ciFrictionCauseKey(r.cause), ...(r.evidence ? { evidence: r.evidence } : {}) }, cause.key);
+          return { ...countRounds(ciRounds, matches, nowMs, CI_FRICTION_HALF_LIFE_MS), ...(filing ? { filing } : {}) };
+        },
+        declined: (task) => declinedOf(`machine-judge:${task.id}`) !== undefined || declinedOf(`verify-human:${task.id}`) !== undefined,
+      };
+    },
+    release: (task, provenance) => approveParkedTask(task.id, {
+      plan: { tasks: [task], byId: new Map([[task.id, task]]) },
+      ledgerPath,
+      runId: `machine-judge-mechanical-${nextLaneEpochMs()}`,
+      riskPolicy: readRiskPolicy(policyPath(opts.repoRoot)),
+      provenance: { ...provenance },
+    }),
+  };
+}
+
 export function productionMachineFilingJudgePorts(opts: {
   repoRoot: string;
   stateDir: string;
@@ -36868,6 +36942,7 @@ export function productionMachineFilingJudgePorts(opts: {
   let mount: Mount | undefined;
   const fetcher = opts.fetcher ?? ghJson;
   return {
+    mechanical: productionMechanicalPort({ repoRoot: opts.repoRoot, stateDir: opts.stateDir, clock: opts.clock }),
     flakeEvidence: flakeJudgeEvidencePort({
       stateDir: opts.stateDir, log: opts.log, clock: opts.clock ?? systemClock,
       mainFailures: opts.mainFailures ?? selectorShadowMainFailures(opts.owner, opts.repo),

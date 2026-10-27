@@ -605,6 +605,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T8264: sre-lane.ts routeOperatorInterventions dedupes a hand action by this row; rotated away, the same
   // intervention reads as new and is routed to the SRE lane a second time.
   "operator.intervention",
+  "verify_human.mechanical_ruling", // W1-T10371: verifyHumanCadence reads these rows (priorMechanicalKeys) so a ruled shard is not re-written.
   // W1-T3646: the advisory repair lease. `priorRepairLease` reads this row to decide whether a
   // second fix lane may claim a PR already under repair, so it is decision-relevant by the same
   // test that derives this set from its consumers -- not a log line nobody reads.
