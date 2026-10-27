@@ -8,6 +8,7 @@ import { createReadModelTicker, readModelBodyKey, readModelLaneViews, readModelS
 import { createDemandBook, VIEW_DEMAND_EVICT_MS } from "#src/lib/view-demand.js";
 import { CODE_HEALTH_SCOPE_KEY, CODE_HEALTH_VIEW_NAME, createCodeHealthView, validateCodeHealthRequest } from "#src/lib/code-health-view.js";
 import { judgeSource } from "#src/lib/view-freshness.js";
+import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
 
 function inventory(stateDir: string) {
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
@@ -15,7 +16,7 @@ function inventory(stateDir: string) {
 }
 
 test("code health remains readable after the second production view lane starts", async () => {
-  await withTempDir("code-health-demand-lanes", stateDir => {
+  await withTempDir("code-health-demand-lanes", async stateDir => {
     inventory(stateDir);
     writeFileSync(join(stateDir, "ledger.ndjson"), "");
     writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ projector: "on", views: { [CODE_HEALTH_VIEW_NAME]: "serve" } }));
@@ -44,7 +45,12 @@ test("code health remains readable after the second production view lane starts"
       assert.equal(validateCodeHealthRequest(new URLSearchParams("repository=all"), source, clock.now()), undefined, "positive control: the selected all-repository read was ready before the peer started");
       start("heavy"); fast.tick();
       assert.equal(validateCodeHealthRequest(new URLSearchParams("repository=all"), source, clock.now()), undefined, `starting the peer must preserve the ready scope and selected body; dropped keys: ${JSON.stringify(drops)}`);
-    } finally { for (const lane of lanes) lane.release(); projector.release(); }
+    } finally {
+      for (const lane of lanes) lane.release();
+      projector.release();
+      // The store's background transaction publisher writes under stateDir; drain it before the directory is removed.
+      await flushReadModelTransactions();
+    }
   });
 });
 
@@ -60,7 +66,7 @@ test("code health production factory reads configured durable state before the p
 });
 
 test("demand lane ownership preserves expiry and key limits", async () => {
-  for (const perInstance of [false, true]) await withTempDir("demand-key-ownership", stateDir => {
+  for (const perInstance of [false, true]) await withTempDir("demand-key-ownership", async stateDir => {
     let now = Date.now();
     const clock = clockFromMillisFn(() => now), holder = "demand-key-ownership";
     writeFileSync(join(stateDir, "ledger.ndjson"), "");
@@ -125,6 +131,11 @@ test("demand lane ownership preserves expiry and key limits", async () => {
       assert.equal(has("task", next), false, "regaining the unit invalidates the old key absent from this owner's demand book");
       core.want("task", next); core.buildNow("task");
       assert.ok(has("task", next), "a new read is served after the genuine invalidation");
-    } finally { for (const ticker of tickers) ticker.release(); projector.release(); }
+    } finally {
+      for (const ticker of tickers) ticker.release();
+      projector.release();
+      // The store's background transaction publisher writes under stateDir; drain it before the directory is removed.
+      await flushReadModelTransactions();
+    }
   });
 });
