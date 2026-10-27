@@ -1,0 +1,250 @@
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { test, type TestContext } from "node:test";
+import { fixedClock } from "#src/lib/clock.js";
+import { ProductIntentStore } from "#src/lib/product-intent-store.js";
+import { bootstrapConfirmed } from "#src/lib/product-build.js";
+import {
+  productCasePlanText, productPlanLedgerTaskId, productPlanOrigin, ProductPlanOperationService,
+  type PlanHandoffOutcome, type PlanRepository, type PlanTargetPort,
+} from "#src/lib/product-plan-operation.js";
+import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
+import { writeLedger, type LedgerFixture } from "#test/helpers/ledger-fixture.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+
+const actor = "clerk:alice";
+const HEAD = "a".repeat(40);
+const MOVED = "b".repeat(40);
+const ID = 1432832754;
+const identity = { provider: "github", id: ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public", verifiedAt: "2026-10-26T00:00:00.000Z" } as const;
+const envelope = { budgetUsd: 30, maxConcurrentBuilds: 1, existingSetupOnly: true };
+const brief = { idea: "private original mobile combat idea", name: "Wreckterra", constraints: ["mobile first"], resourceEnvelope: envelope };
+const REQUESTED = "2026-10-26T01:00:00.000Z";
+const PR_URL = "https://github.com/craigoley/wreckterra/pull/42";
+
+class Target implements PlanTargetPort {
+  inspection = { enrolled: true as boolean | undefined, head: HEAD as string | undefined, readmeOnly: false as boolean | undefined };
+  runner = true;
+  async inspect() { return this.inspection; }
+  runnerRegistered() { return this.runner; }
+}
+
+function fixture(t: TestContext, over: { planned?: "clarify" | "create" | "unreadable"; gateway?: boolean; bound?: boolean; envelope?: boolean } = {}) {
+  const root = ownedFixtureDir(t, "product-plan-operation").dir;
+  const store = new ProductIntentStore({ root });
+  const saved = store.write(actor, { version: "product-intent-v1", requestId: "seed-product-00001", expectedRevision: 0,
+    brief: over.envelope === false ? { idea: brief.idea } : brief });
+  assert.ok(saved.ok);
+  const productId = saved.value.receipt.productId;
+  if (over.bound !== false) {
+    assert.ok(store.transition(actor, { version: "product-intent-v1", requestId: "seed-bound-0000001", id: productId,
+      expectedRevision: 1, expectedObjectiveRevision: 1, repository: identity }).ok);
+  }
+  const target = new Target();
+  const provider: Pick<ProductRepositoryProvider, "read"> & { next: ProviderRead } = {
+    next: { state: "found", repository: { id: ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" } },
+    async read() { return this.next; },
+  };
+  const calls: { operationId: string; mode: string; brief: string; repoRoot: string; journaled: boolean }[] = [];
+  const ledgerDir = join(root, "state");
+  mkdirSync(ledgerDir, { recursive: true });
+  const ledgerPath = join(ledgerDir, "ledger.ndjson");
+  const journalDirectory = join(root, "state", "products", "v1", "plan-operations");
+  let release: (outcome: PlanHandoffOutcome) => void = () => {};
+  const gateway = {
+    async productPlan(call: { operationId: string; mode: "create" | "clarify"; brief: string; repoRoot: string }) {
+      // The durable record must already be on disk when the hand-off starts.
+      const journaled = existsSync(journalDirectory) && readdirSync(journalDirectory).some((name) => readFileSync(join(journalDirectory, name), "utf8").includes(call.operationId));
+      calls.push({ ...call, journaled });
+      return new Promise<{ outcome: PlanHandoffOutcome }>((resolve) => { release = (outcome) => resolve({ outcome }); });
+    },
+  };
+  const text = async (args: string[]) => {
+    if (over.planned === "unreadable") throw new Error("gh: server error (HTTP 502)");
+    if (over.planned === "create") throw new Error("gh: Not Found (HTTP 404)");
+    assert.match(args.join(" "), /contents\/plan\/tasks\.d\?ref=/);
+    return JSON.stringify([{ name: "WRECK-T1-first.yaml" }]);
+  };
+  const checkout = join(root, "repos", "wreckterra");
+  const service = (options: { alive?: boolean; head?: string; gateway?: boolean } = {}) => new ProductPlanOperationService({
+    root, store, provider, target, bootstrapConfirmed, ledgerPath, text, checkout: (repo: PlanRepository) => repo.name === "wreckterra" ? checkout : undefined,
+    clock: fixedClock(Date.parse(REQUESTED)), isAlive: () => options.alive ?? true,
+    ...(options.gateway === false || over.gateway === false ? {} : { gateway }),
+  });
+  let ledger: LedgerFixture | undefined;
+  const row = (atMs: number, line: Record<string, unknown>) => {
+    ledger ??= writeLedger([], { dir: ledgerDir });
+    ledger.append([{ ts: new Date(atMs).toISOString(), ...line }]);
+  };
+  const command = (extra: Record<string, unknown> = {}) => ({ requestId: "plan-request-00001", productId, expectedRevision: 2, expectedObjectiveRevision: 1, ...extra });
+  return { root, store, productId, target, provider, calls, service, row, command, ledgerPath, checkout, journalDirectory, release: (outcome: PlanHandoffOutcome) => release(outcome) };
+}
+type Fixture = ReturnType<typeof fixture>;
+const ok = async (promise: ReturnType<ProductPlanOperationService["execute"]>) => {
+  const result = await promise;
+  assert.ok(result.ok, JSON.stringify(result));
+  return result.value;
+};
+const refused = async (promise: ReturnType<ProductPlanOperationService["execute"]>) => { const result = await promise; assert.equal(result.ok, false); return result.code; };
+const at = (offsetMs: number) => Date.parse(REQUESTED) + offsetMs;
+/** The ledger rows the maintained gateway and the native plan run write for one hand-off, shaped as their own writers shape them. */
+const nativeRun = (f: Fixture, operationId: string, extra: { exit?: boolean; pr?: string; pid?: number } = {}) => {
+  const pid = extra.pid ?? 4242;
+  f.row(at(1_000), { run_id: "PANEL-1", task_id: productPlanLedgerTaskId(operationId), step: "ratify.cli_started", origin: "ratify-gateway", verb: "plan", pid });
+  f.row(at(2_000), { run_id: "PLAN-clarify-1", task_id: "PLAN-clarify", step: "plan.start", lane: "plan", actor_pid: pid, mode: "clarify" });
+  if (extra.pr) f.row(at(3_000), { run_id: "PLAN-clarify-1", task_id: "PLAN-clarify", step: "pr.opened", lane: "plan", actor_pid: pid, pr_url: extra.pr });
+  if (extra.exit) f.row(at(4_000), { run_id: "PANEL-2", task_id: productPlanLedgerTaskId(operationId), step: "ratify.cli_exited", origin: "ratify-gateway", verb: "plan", code: 0, signal: null });
+};
+const revisionOf = (f: Fixture) => { const read = f.store.read(actor, f.productId); assert.ok(read.ok); return read.value.revision; };
+const evidenceIds = (f: Fixture) => { const read = f.store.read(actor, f.productId); assert.ok(read.ok); return read.value.stageEvidence.map((item) => item.id); };
+
+test("W1-T10823: a saved product reaches one native plan operation across replay and restart", async (t) => {
+  // Refusals come first and never journal or hand anything off.
+  const unbound = fixture(t, { bound: false });
+  assert.equal(await refused(unbound.service().execute(actor, unbound.command({ expectedRevision: 1 }))), "repository_missing");
+  const bare = fixture(t, { envelope: false });
+  assert.equal(await refused(bare.service().execute(actor, bare.command())), "envelope_missing", "no resource envelope is ever invented");
+  const noRunner = fixture(t, { gateway: false });
+  assert.equal(await refused(noRunner.service().execute(actor, noRunner.command())), "handoff_unavailable");
+  assert.ok(!existsSync(noRunner.journalDirectory) || readdirSync(noRunner.journalDirectory).length === 0, "a refused request journals nothing");
+  const f = fixture(t);
+  assert.equal(await refused(f.service().execute(actor, f.command({ expectedRevision: 1 }))), "stale_revision");
+  assert.equal(await refused(f.service().execute(actor, { ...f.command(), pullRequest: 7 })), "invalid_input", "a caller-supplied pull request is never accepted");
+  assert.equal(await refused(f.service().execute(actor, { ...f.command(), brief: "x" })), "invalid_input", "caller brief text is never accepted");
+  assert.equal(await refused(f.service().execute(actor, { ...f.command(), budgetUsd: 1 })), "invalid_input", "a caller budget is never accepted");
+  f.target.inspection = { enrolled: false, head: HEAD, readmeOnly: false };
+  assert.equal(await refused(f.service().execute(actor, f.command())), "target_not_enrolled");
+  f.target.inspection = { enrolled: true, head: HEAD, readmeOnly: true };
+  assert.equal(await refused(f.service().execute(actor, f.command())), "bootstrap_unverified");
+  f.target.inspection = { enrolled: true, head: undefined, readmeOnly: undefined };
+  assert.equal(await refused(f.service().execute(actor, f.command())), "target_unreadable");
+  f.target.inspection = { enrolled: true, head: HEAD, readmeOnly: false };
+  f.target.runner = false;
+  assert.equal(await refused(f.service().execute(actor, f.command())), "runner_missing");
+  f.target.runner = true;
+  f.provider.next = { state: "unreadable" };
+  assert.equal(await refused(f.service().execute(actor, f.command())), "provider_unreadable");
+  f.provider.next = { state: "found", repository: { id: 7, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" } };
+  assert.equal(await refused(f.service().execute(actor, f.command())), "repository_conflict");
+  f.provider.next = { state: "found", repository: { id: ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" } };
+  assert.deepEqual(f.calls, [], "no refusal reached the gateway");
+
+  // ONE request: a truthful pending observation at once, the record durable BEFORE the hand-off.
+  const process = f.service();
+  const first = await ok(process.execute(actor, f.command()));
+  assert.equal(first.replayed, false);
+  assert.equal(first.observation.state, "pending", "a hand-off that has not reported is pending, never queued or proposed");
+  assert.equal(first.observation.mode, "clarify", "a head that already holds a plan is reconciled, not recreated");
+  assert.equal(first.observation.targetHead, HEAD);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0]!.journaled, true, "the journal record existed before the gateway was called");
+  assert.equal(f.calls[0]!.repoRoot, f.checkout, "the child runs against the managed target checkout");
+  assert.equal(f.calls[0]!.operationId, first.observation.operationId);
+  const read = f.store.read(actor, f.productId);
+  assert.ok(read.ok);
+  assert.ok(f.calls[0]!.brief.startsWith(productCasePlanText(read.value.brief)), "the hand-off carries the complete approved brief");
+  assert.match(f.calls[0]!.brief, /Constraints:\n- mobile first/);
+  assert.match(f.calls[0]!.brief, /Resource envelope: budgetUsd=30 maxConcurrentBuilds=1 existingSetupOnly=true/);
+  assert.ok(f.calls[0]!.brief.includes(productPlanOrigin(f.productId, first.observation.planEvidenceId)), "the design must carry the product plan origin token");
+  assert.ok(f.calls[0]!.brief.includes(`Operation: ${first.observation.operationId}`));
+  const journalFile = join(f.journalDirectory, readdirSync(f.journalDirectory).find((name) => name.endsWith(".json"))!);
+  assert.equal(statSync(journalFile).mode & 0o777, 0o600, "the plan-operation journal is private");
+  assert.ok(evidenceIds(f).includes(`pplan-op:${first.observation.operationId.slice(0, 32)}`), "stageEvidence is the supported projection");
+  const operation = first.observation.operationId;
+
+  // Repeats, lost responses and a fresh request id for the SAME saved product all read the one record.
+  const again = await ok(process.execute(actor, f.command()));
+  assert.deepEqual([again.replayed, again.observation.operationId, again.observation.state], [true, operation, "pending"]);
+  const current = f.store.read(actor, f.productId);
+  assert.ok(current.ok);
+  const freshId = await ok(process.execute(actor, f.command({ requestId: "plan-request-00002", expectedRevision: current.value.revision })));
+  assert.deepEqual([freshId.replayed, freshId.observation.operationId], [true, operation]);
+  assert.equal(await refused(process.execute(actor, f.command({ expectedRevision: 9 }))), "idempotency_conflict", "one request id is one payload");
+  assert.equal(f.calls.length, 1, "no replay spent a second plan");
+
+  // Restart while the child still runs: a brand-new service over the same files and ledger.
+  f.release("queued");
+  nativeRun(f, operation);
+  const restarted = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.deepEqual([restarted.replayed, restarted.observation.operationId, restarted.observation.state], [true, operation, "pending"], "a live child is pending after a restart");
+  const dead = await ok(f.service({ alive: false, gateway: false }).execute(actor, f.command()));
+  assert.equal(dead.observation.state, "unknown", "a child that vanished without an exit row is unknown, never retried");
+  assert.equal(f.calls.length, 1);
+
+  // The native run opens a pull request: only now is it proposed, and that stays distinct from approved or merged.
+  f.row(at(3_000), { run_id: "PLAN-clarify-1", task_id: "PLAN-clarify", step: "pr.opened", lane: "plan", actor_pid: 4242, pr_url: PR_URL });
+  const proposed = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.equal(proposed.observation.state, "proposed");
+  assert.equal(proposed.observation.proposal, PR_URL);
+  assert.ok(evidenceIds(f).includes(`pplan-op:${operation.slice(0, 32)}:proposed`));
+  assert.equal(f.calls.length, 1, "restart plus a proposal still spent exactly one plan");
+  await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.equal(evidenceIds(f).filter((id) => id.endsWith(":proposed")).length, 1, "the terminal evidence is recorded once");
+});
+
+test("W1-T10823: pending refused unknown changed-brief and stale-target stay distinct", async (t) => {
+  // refused: the child exited and no correlated pull request was opened.
+  const a = fixture(t);
+  const first = await ok(a.service().execute(actor, a.command()));
+  a.release("queued");
+  nativeRun(a, first.observation.operationId, { exit: true });
+  const refusedRun = await ok(a.service({ gateway: false }).execute(actor, a.command()));
+  assert.equal(refusedRun.observation.state, "refused");
+  assert.ok(evidenceIds(a).includes(`pplan-op:${first.observation.operationId.slice(0, 32)}:refused`));
+  assert.equal((await ok(a.service().execute(actor, a.command({ requestId: "plan-request-00002", expectedRevision: revisionOf(a) })))).observation.state, "refused",
+    "a refused plan is never retried silently, even by a fresh request");
+  assert.equal(a.calls.length, 1);
+
+  // a pull request outside the target repository, or one no plan run of that child opened, is never this proposal.
+  const b = fixture(t);
+  const second = await ok(b.service().execute(actor, b.command()));
+  b.release("queued");
+  nativeRun(b, second.observation.operationId, { exit: true, pr: "https://github.com/someone/else/pull/9" });
+  assert.equal((await ok(b.service({ gateway: false }).execute(actor, b.command()))).observation.state, "refused");
+
+  // unknown: a restart lost the in-memory hand-off and no ledger row says what happened.
+  const c = fixture(t);
+  const live = c.service();
+  const third = await ok(live.execute(actor, c.command()));
+  assert.equal(third.observation.state, "pending");
+  assert.equal((await ok(c.service({ gateway: false }).execute(actor, c.command()))).observation.state, "unknown");
+  // ...and an unreadable ledger is unknown too, not a guess.
+  assert.equal(c.calls.length, 1);
+
+  // stale-target: the live head moved. The same brief never gets a second plan while the first is unresolved.
+  c.target.inspection = { enrolled: true, head: MOVED, readmeOnly: false };
+  const stale = await ok(c.service({ gateway: false }).execute(actor, c.command()));
+  assert.equal(stale.observation.state, "stale-target");
+  assert.equal(stale.observation.targetHead, HEAD, "the frozen head is reported, never replaced");
+  const stillOne = await ok(c.service().execute(actor, c.command({ requestId: "plan-request-00003", expectedRevision: revisionOf(c) })));
+  assert.deepEqual([stillOne.replayed, stillOne.observation.operationId, stillOne.observation.state], [true, third.observation.operationId, "stale-target"]);
+  assert.equal(c.calls.length, 1);
+
+  // changed-brief: the saved brief moved on. The old plan is reported as such and never reused for the new brief.
+  const moved = c.store.write(actor, { version: "product-intent-v1", requestId: "brief-changed-000001", id: c.productId,
+    expectedRevision: revisionOf(c),
+    brief: { ...brief, idea: "a different original idea" } });
+  assert.ok(moved.ok);
+  c.target.inspection = { enrolled: true, head: HEAD, readmeOnly: false };
+  const changed = await ok(c.service({ gateway: false }).execute(actor, c.command()));
+  assert.equal(changed.observation.state, "changed-brief");
+  assert.equal(c.calls.length, 1, "a changed brief spends nothing on a replay");
+  const latest = c.store.read(actor, c.productId);
+  assert.ok(latest.ok);
+  const replanned = await ok(c.service().execute(actor, c.command({ requestId: "plan-request-00004", expectedRevision: latest.value.revision, expectedObjectiveRevision: latest.value.objectiveRevision })));
+  assert.notEqual(replanned.observation.operationId, third.observation.operationId, "the new brief is its own operation");
+  assert.equal(replanned.observation.state, "pending");
+  assert.equal(c.calls.length, 2);
+  assert.ok(c.calls[1]!.brief.includes("a different original idea"));
+});
+
+test("W1-T10823: a plan hand-off refuses an unreadable target plan and plans fresh when the target holds none", async (t) => {
+  const none = fixture(t, { planned: "create" });
+  const created = await ok(none.service().execute(actor, none.command()));
+  assert.equal(created.observation.mode, "create", "only an absent plan directory is `create`");
+  assert.equal(none.calls[0]!.mode, "create");
+  const unreadable = fixture(t, { planned: "unreadable" });
+  assert.equal(await refused(unreadable.service().execute(actor, unreadable.command())), "target_unreadable");
+  assert.deepEqual(unreadable.calls, [], "an unreadable plan is never guessed into a second plan");
+});
