@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { readFile, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // ── W1-T123: ci-gate dedupes check-runs BY NAME, evaluates only the LATEST attempt ──────────
 //
@@ -138,4 +139,44 @@ test("ci-gate-dedupe: a required check absent from the deduped list is still wai
   assert.match(out, /- missing-check/);
   assert.doesNotMatch(out, /merge may proceed\./);
   assert.doesNotMatch(out, /required check\(s\) FAILED/);
+});
+
+
+test("the real CI inventory query and jq retain posted results across attempts", async () => {
+  const script = await loadAggregateScript();
+  const query = /gh api "([^"\n]*\/check-runs\?[^"\n]*)" --paginate --slurp/.exec(script);
+  const filter = /jq -c '([\s\S]*?)' <<< "\$\{raw\}"/.exec(script);
+  assert.ok(query, "the shipped query and pagination invocation must be identifiable");
+  assert.ok(filter, "the actual producer-aware jq filter must be identifiable");
+  const clonedJob = { id: 30, name: "light-gates", status: "completed", conclusion: "success",
+    started_at: "2026-10-27T01:44:04Z", external_id: "copied-job-attempt-three" };
+  for (const conclusion of ["success", "failure", "absent", "pending"] as const) {
+    const oldPost = { id: 10, name: "rule-checks", status: "completed", conclusion: conclusion === "pending" ? "success" : "failure",
+      started_at: "2026-10-27T01:55:32Z", external_id: "run:40434301641:1:job:121959187138" };
+    const latestPost = { ...oldPost, id: 20, conclusion: conclusion === "pending" ? null : conclusion,
+      status: conclusion === "pending" ? "queued" : "completed",
+      started_at: conclusion === "pending" ? null : "2026-10-27T03:22:57Z" };
+    const sameNameJob = { ...clonedJob, name: "rule-checks", started_at: "2026-10-27T04:00:00Z" };
+    const pages = conclusion === "absent" ? [{ check_runs: [clonedJob] }]
+      : [{ check_runs: [clonedJob, oldPost, sameNameJob] }, { check_runs: [latestPost] }];
+    const shim = ghShim([
+      { when: "filter=all", stdout: JSON.stringify(pages) },
+      { when: "/check-runs?", stdout: JSON.stringify([{ check_runs: [clonedJob] }]) },
+    ], { kind: "retained-posted-attempts" });
+    try {
+      const endpoint: string = query[1].replace("${REPO}", "example/example").replace("${SHA}", "deadbeef");
+      const read: SpawnSyncReturns<string> = spawnSync(join(shim.dir, "gh"), ["api", endpoint, "--paginate", "--slurp"], { encoding: "utf8" });
+      assert.equal(read.status, 0, read.stderr);
+      const projected: SpawnSyncReturns<string> = spawnSync("jq", ["-c", filter[1]], { input: read.stdout, encoding: "utf8" });
+      assert.equal(projected.status, 0, projected.stderr);
+      const runs = JSON.parse(projected.stdout) as Array<{ name: string; producer: string; conclusion: string | null; status: string }>;
+      const posted = runs.filter(run => run.name === "rule-checks" && run.producer === "posted");
+      assert.deepEqual(posted.map(run => run.conclusion), conclusion === "absent" ? [] : [conclusion === "pending" ? null : conclusion]);
+      if (conclusion === "pending") assert.deepEqual(posted.map(run => run.status), ["queued"],
+        "an old timestamped success cannot hide a newer attempt that has not started");
+      if (conclusion === "failure") assert.ok(runs.some(run => run.name === "rule-checks" && run.conclusion === "failure"),
+        "a later same-name job success cannot erase the posted failure");
+      assert.ok(shim.calls().every(call => call.includes("filter=all") && call.includes("--paginate") && call.includes("--slurp")));
+    } finally { await rm(shim.dir, { recursive: true, force: true }); }
+  }
 });

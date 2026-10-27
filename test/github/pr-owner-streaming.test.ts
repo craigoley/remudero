@@ -30,6 +30,28 @@ async function command(dir: string, oldReader = false): Promise<string> {
   return output;
 }
 
+for (const oldReader of [false, true]) {
+  test(`the native fix target URL prevents a false FREE owner result (${oldReader ? "compatibility" : "streaming"})`, async () => {
+    // The actual producer writes repair_pr_url and PR-<n>; the sweep retains task_id=unfiled.
+    const dir = corpus([fix({ task_id: "PR-44", repair_pr_url: "https://github.com/a/b/pull/44",
+      run_id: "native-repair-owner" })], [sweep({ task_id: "unfiled", disposition: "blocked-fixable", acted: false,
+      reason: "duplicate fix-dispatch key is held by its own detached fix dispatch" })]);
+    try {
+      const output = await command(dir, oldReader);
+      assert.match(output, /— OWNED/, "the producer's explicit PR target must survive the synthetic task-name difference");
+      assert.match(output, /task=PR-44/);
+      assert.match(output, /native-repair-owner/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test(`a different native repair target cannot own this PR (${oldReader ? "compatibility" : "streaming"})`, async () => {
+    const dir = corpus([fix({ task_id: "PR-44", repair_pr_url: "https://github.com/a/b/pull/99" })],
+      [sweep({ task_id: "unfiled", disposition: "blocked-fixable", acted: false })]);
+    try { assert.match(await command(dir, oldReader), /— FREE/); }
+    finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+}
+
 for (const [name, rows, live] of [
   ["legacy fix before later task association", [fix()], [sweep()]],
   ["all historical heads and historical fixes remain evidence", [fix({ ts: "2026-10-20", head_sha: "old" }), sweep({ head_sha: "old" })], [sweep({ disposition: "merged", head_sha: "new" })]],

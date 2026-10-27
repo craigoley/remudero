@@ -13,12 +13,13 @@
 //   a FIRST LINE `// test/<own-name>.test.ts` self-path comment is removed (it is false after a move).
 // WHAT IT LISTS AND NEVER GUESSES: a relative specifier that leaves src/scripts/test (package.json, bin,
 // packages), a runtime read of ./fixtures, `import.meta.url`/`__dirname` path math, and a read of another
-// test by its `test/<name>` path. The repoRoot()/resolveTestPath rewrite of those reads waits for the
-// resolveTestPath helper (W1-T9860), which is not on main; until it is, they are reported for the batch task.
+// test by its `test/<name>` path. The repoRoot()/resolveTestPath helper (W1-T9860) is on main, but the codemod
+// does not yet rewrite those reads: most `test/<name>` hits are string literals in test data, not file reads, so
+// they stay reported for the batch task to judge.
 //
 // USAGE: node scripts/test-location-codemod.mjs [--folder <name> ...] [--files <list-file>] [--write] [file ...]
 //   --folder <name>  every test the placement table (scripts/test-placement/test-folders.tsv, W1-T9874) maps to
-//                    <name>; when that file does not exist yet the folder selects nothing and says so.
+//                    <name>; when that file is absent the folder selects nothing and says so.
 //   --files <path>   a newline-separated list of test files.
 //   --write          write the rewrite in place; without it the codemod only reports (a dry run).
 import { existsSync, readFileSync, writeFileSync } from "node:fs";

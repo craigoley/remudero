@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.71
   status: queued
@@ -21,10 +21,10 @@
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
   risk_ruling:
-    verdict: "low"
-    action: escalate
-    confidence: 0.6
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
     reasons:
-      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared scope is a single test file (test/gardeners/scout-console-pr-action-refused.test.ts), which does not exist yet. Nothing in the description or files list touches secrets, auth, permissions, merge/deploy policy, or data deletion.; on the change's description/files alone, no diff was read — The task is a fix for a recurring ledger symptom. Its acceptance is a grep for a named test in a test file, so it is verifiable and does not ask for an operator-only decision.; on the change's description/files alone, no diff was read — The rationale says the rows name no file, so the actual cause lies in code not yet located. The real fix may touch files beyond the declared one, and the PR will still pass CI and review. The step name \"pr_action_refused\" hints at merge-related behavior, but the description gives no sign that it changes merge policy.; on the change's description/files alone, no diff was read — The scout family has a weak record (0 merged, 1 declined; Beta mean 0.33), and the evidence shows 0 cited PRs. This adds some caution, but it does not meet the escalation criteria."
-    judged_at: "2026-10-20T05:33:31.122Z"
-    pin: "337f266068896514e23bcb6c3e2662efb243806684f8562ed54b63fd611db151"
+      - "rule 3 (live and low-privilege): the symptom is live, 11 occurrence(s) across 7 day(s), last seen 2026-10-26T22:34:31.500Z, and the record declares no privileged path"
+    judged_at: "2026-10-27T06:32:22.566Z"
+    pin: "b6b50fe454bf47082234246bab6dda68a1a2d13cb1e112f9e02ac27912a4b4fa"

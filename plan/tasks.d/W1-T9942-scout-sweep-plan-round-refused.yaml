@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -21,10 +21,10 @@
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.96
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
     reasons:
-      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The filing reports eight refusal rows but supplies no row contents or diagnosed cause; it explicitly leaves locating the writer to the builder. Whether these refusals represent a defect cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The task requires a cause fix but declares only a new test file, and its grep proof checks for test-title text rather than demonstrating that the cause was fixed or recurrence stopped."
-    judged_at: "2026-10-16T23:12:23.045Z"
-    pin: "7c1115a368c2f7bedcbe7f72752ed1c49a8290eeb5e3d9f9385b692cb81a893a"
+      - "rule 3 (live and low-privilege): the symptom is live, 11 occurrence(s) across 7 day(s), last seen 2026-10-26T23:48:35.887Z, and the record declares no privileged path"
+    judged_at: "2026-10-27T06:32:22.566Z"
+    pin: "835f495fde0c0fd097a52bf565d1936555310230e45b9c5349dbc8a6c16f937c"

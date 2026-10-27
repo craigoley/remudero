@@ -4,6 +4,7 @@ import { dirname, join, relative, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
 /**
@@ -413,7 +414,7 @@ export function vetPinnedConfig(pin: PinnedWorktreeGit, log: WorktreeGitLog = st
 }
 
 async function vetPinnedConfigAsync(pin: PinnedWorktreeGit, log: WorktreeGitLog, timeout = CONFIG_READ_TIMEOUT_MS): Promise<Array<[string, string]>> {
-  const { stdout } = await execFileLoopBounded("git", CONFIG_LIST_ARGS, { cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), timeout });
+  const { stdout } = await execFileRouted("git", CONFIG_LIST_ARGS, { cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), timeout });
   return vetted(pin, stdout, log);
 }
 

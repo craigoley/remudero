@@ -21,8 +21,9 @@ export interface PrOwnerLedgerProjection {
 
 function prNumber(row: Row): number | undefined {
   if (typeof row.pr_number === "number" && Number.isInteger(row.pr_number) && row.pr_number > 0) return row.pr_number;
-  if (typeof row.pr_url !== "string") return undefined;
-  const match = /\/pull\/(\d+)(?:[/?#].*)?$/.exec(row.pr_url);
+  const url = typeof row.pr_url === "string" ? row.pr_url : row.repair_pr_url;
+  if (typeof url !== "string") return undefined;
+  const match = /\/pull\/(\d+)(?:[/?#].*)?$/.exec(url);
   return match ? Number(match[1]) : undefined;
 }
 

@@ -60,7 +60,8 @@ import { contributionOriginFromRest, feedbackContentDigest, observeFeedbackSourc
   type AdmissionRead, type AdmissionSettings, type FeedbackAdmissionSubject } from "./contributor-admission.js";
 import { openLedgerUnion } from "./ledger-union.js";
 import { captureFeedbackReply, replyRefusalFor, type PanelGraphDeps } from "./panel-graph.js";
-import { feedbackEntryRepoPath, findFeedbackBySubmissionKey } from "./feedback.js";
+import { feedbackEntryRepoPath, findFeedbackBySubmissionKey, qualifyCanonicalGrillContinuation } from "./feedback.js";
+import { parse as parseYaml } from "yaml";
 import { readQueuedFeedbackRecords } from "./feedback-landing.js";
 import {
   ASK_TYPE_LABEL,
@@ -383,7 +384,8 @@ export function pickFeedbackAnswer<T extends { namesOption: boolean }>(answers: 
 
 /**
  * W1-T8511: apply the picked operator answer to the grilled feedback record through the console's own reply writer
- * ({@link captureFeedbackReply}). Only a record still `grilling` is touched (design step 7): a queued record is read
+ * ({@link captureFeedbackReply}). Only a record still `grilling` is touched (design step 7); W1-T10789 also qualifies
+ * an unchanged older queued `new` capture against canonical `grilling` evidence. A queued record is read
  * first, then the route's own {@link replyRefusalFor} status read over an async origin/main read, both BEFORE any write — so an answered, rejected or
  * otherwise moved record gets no write at all. The answer's origin is the reply's `submission_key`, so a second pass
  * finds it and writes nothing (design step 3). Returns the ledger row to write: `feedback_applied` on a write,
@@ -402,10 +404,19 @@ async function applyGrilledFeedbackAnswer(
   try {
     const queued = readQueuedFeedbackRecords(feedback.inboxRoot);
     const queuedRecord = queued.get(feedbackEntryRepoPath(feedbackId));
-    if (queuedRecord !== undefined && queuedRecord.status !== "grilling") return undefined;
+    if (queuedRecord !== undefined && queuedRecord.status !== "grilling" && queuedRecord.status !== "new") return undefined;
     // The route's own status read, fed origin/main's blob read off the loop (a rejection reads as unreadable).
     const mainBlob = await hostWorktreeGitAsync(feedback.root, ["show", `origin/main:${feedbackEntryRepoPath(feedbackId)}`])
       .catch((error: unknown) => ({ unreadable: error }));
+    // An unchanged older capture may precede canonical grilling. It is never sufficient
+    // evidence on its own: missing/invalid main must refuse this new path, not fall back.
+    const continuation = queuedRecord?.status === "new" && typeof mainBlob === "string"
+      ? qualifyCanonicalGrillContinuation(feedback.root, feedback.inboxRoot, feedbackId, queuedRecord, parseYaml(mainBlob))
+      : undefined;
+    if (queuedRecord?.status === "new" && continuation === undefined) {
+      return { ...base, step: "escalation_answer.feedback_unreadable",
+        reason: "canonical grill continuation refused: older capture does not match a verified canonical grilling target" };
+    }
     if (replyRefusalFor(feedback.root, feedbackId, queued, () => {
       if (typeof mainBlob !== "string") throw mainBlob.unreadable;
       return mainBlob;
@@ -413,7 +424,7 @@ async function applyGrilledFeedbackAnswer(
     if (findFeedbackBySubmissionKey(feedback.root, picked.origin, feedback.inboxRoot)) return undefined;
     const { entry, landingError } = captureFeedbackReply(feedback, {
       text: picked.text, replyTo: feedbackId, submissionKey: picked.origin, origin: "issue",
-    });
+    }, continuation);
     return { ...base, step: "escalation_answer.feedback_applied", reply_id: entry.id, answer: picked.text,
       ...(landingError === undefined ? { landing: "queued" } : { landing_error: landingError }) };
   } catch (error) {

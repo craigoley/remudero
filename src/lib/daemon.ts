@@ -27,6 +27,7 @@ import { startGarden, type GardenerDeps, type PrState } from "./gardener.js";
 import { knowledgeGardenSpec, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
 import { startLivenessPulse } from "./liveness-pulse.js";
+import { installSpawnHelper, startSpawnHelper } from "./spawn-helper.js";
 
 
 import type {
@@ -1298,6 +1299,15 @@ export type ReviewAdmissionGate = (() => boolean) & {
   workerAdmissionHold?: (kind?: "review") => string | undefined;
 };
 
+/** One pending "run this task now" kick. `repo` is set for a repo-scoped marker (W1-T429) and absent for a
+ *  legacy/unscoped one; the binding hands this daemon only the kicks addressed to its own target (W1-T10615). */
+export interface DaemonKick { taskId: string; origin: string; repo?: string }
+
+/** A repo-scoped kick's ledger rows name its repo; an unscoped kick's rows stay byte-identical to before W1-T10615. */
+function kickRepoField(kick: DaemonKick): { repo?: string } {
+  return kick.repo === undefined ? {} : { repo: kick.repo };
+}
+
 export interface DaemonDeps {
   repositoryMaintenance?: (context: { activeLanes: number; disk: "healthy" | "low" | "unknown"; queueBusy: boolean }) => Promise<void>;
   /** Only a supervised dedicated daemon may exit into the shell's 30-minute zero-token probe. */
@@ -1324,7 +1334,8 @@ export interface DaemonDeps {
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
     sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number;
-      by_caller?: unknown[]; unnamed_ms?: number }; // W1-T9577: the interval's callers by total, and the rest
+      by_caller?: unknown[]; unnamed_ms?: number; // W1-T9577: the interval's callers by total, and the rest
+      async_spawn_sync_ms?: number; async_by_caller?: unknown[] }; // W1-T9754: the async spawns' fork time
     /** W1-T7746: each tick's lag, the history the loop-stall profiler's bound is a quantile of. */
     observeLoopLag?: (reading: { lagMs: number; intervalMs: number }, log: (step: string, extra?: Record<string, unknown>) => void) => void };
   /** W1-T6782: flat, payload-free memory fields (`sampleDaemonMemory`, daemon-memory-telemetry.ts)
@@ -1591,9 +1602,10 @@ export interface DaemonDeps {
   /** Peek the pending "run this queued task now" kick markers, oldest first — a pure injection, no filesystem here.
    * The daemon gates each through {@link assertRunnable} and the merged projection and clears it as it dispatches or
    * refuses it, so a runnable kick it cannot service this cycle survives to the next (fb-1784988460437-9daa9b). */
-  pendingKicks?: () => Array<{ taskId: string; origin: string }>;
-  /** Delete one kick marker (consumed-once) after the daemon dispatches or refuses it. */
-  clearKick?: (taskId: string) => void;
+  pendingKicks?: () => Array<DaemonKick>;
+  /** Delete one kick marker (consumed-once) after the daemon dispatches or refuses it. W1-T10615: `repo` is the
+   *  SAME repo the pending kick carried, so the clear names that exact marker, never a sibling repo's. */
+  clearKick?: (taskId: string, repo?: string) => void;
   /** Read and delete the "drain now" marker, consumed once; a defined return means the operator
    *  asked for one immediate dispatch cycle. */
   consumeDrainNow?: () => { origin: string } | null;
@@ -1601,6 +1613,8 @@ export interface DaemonDeps {
    * consumes at most one per poll and keeps final fix/review authority in its established command
    * path; the HTTP writer never starts a process. */
   pendingPrActions?: () => Array<{ action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string; operator?: string }>;
+  pendingImprovementActions?: () => AsyncIterable<{ operationId: string; stateDir: string; repoRoot: string }>;
+  handOffImprovementAction?: (target: { operationId: string; stateDir: string; repoRoot: string }) => Promise<unknown>;
   /** Clear the request only after its established command reaches a named terminal outcome. */
   clearPrAction?: (action: "fix" | "review", prNumber: number) => void;
   /** W1-T4087: writes plain-language messages for operator-owned inbox items that have none yet,
@@ -2207,12 +2221,14 @@ function startMemoryReadAfterRow(deps: Pick<DaemonDeps, "readMemoryTelemetry">, 
 
 /** W1-T7745: what the spawns of THIS consumer's own interval were, read and closed so the next row starts clean.
  *  Spread into a `reportLoopLag` sample; a daemon without the sampler contributes neither field. */
-function takeSyncSpawn(deps: Pick<DaemonDeps, "readLoopTelemetry">, consumer: string):
-  { syncSpawnTop?: unknown; syncSpawnMs?: number; syncSpawnByCaller?: unknown[]; syncSpawnUnnamedMs?: number } {
+export function takeSyncSpawn(deps: Pick<DaemonDeps, "readLoopTelemetry">, consumer: string):
+  { syncSpawnTop?: unknown; syncSpawnMs?: number; syncSpawnByCaller?: unknown[]; syncSpawnUnnamedMs?: number;
+    asyncSpawnSyncMs?: number; asyncSpawnByCaller?: unknown[] } {
   try {
     const taken = deps.readLoopTelemetry?.takeLagInterval?.(consumer);
     return taken === undefined ? {} : { syncSpawnTop: taken.top, syncSpawnMs: taken.sync_spawn_ms,
-      syncSpawnByCaller: taken.by_caller, syncSpawnUnnamedMs: taken.unnamed_ms };
+      syncSpawnByCaller: taken.by_caller, syncSpawnUnnamedMs: taken.unnamed_ms,
+      asyncSpawnSyncMs: taken.async_spawn_sync_ms, asyncSpawnByCaller: taken.async_by_caller };
   } catch { return {}; /* Reason: observability only. */ }
 }
 
@@ -2253,7 +2269,9 @@ export function reportLoopLag(
     /** W1-T5718: the longest synchronous spawn of the interval this lag closes (W1-T7745: its own interval's). */
     syncSpawnTop?: unknown;
     /** W1-T7745: the synchronous spawn time of that same interval, so a row says how much of its lag was spawn. */
-    syncSpawnMs?: number; syncSpawnByCaller?: unknown[]; syncSpawnUnnamedMs?: number }, // W1-T9577
+    syncSpawnMs?: number; syncSpawnByCaller?: unknown[]; syncSpawnUnnamedMs?: number; // W1-T9577
+    /** W1-T9754: the same interval's async spawns: the time each held the loop inside its own spawn call. */
+    asyncSpawnSyncMs?: number; asyncSpawnByCaller?: unknown[] },
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   try {
@@ -2269,6 +2287,8 @@ export function reportLoopLag(
       ...(sample.syncSpawnMs === undefined ? {} : { sync_spawn_ms: sample.syncSpawnMs }),
       ...(sample.syncSpawnByCaller === undefined ? {} : { sync_spawn_by_caller: sample.syncSpawnByCaller }),
       ...(sample.syncSpawnUnnamedMs === undefined ? {} : { sync_spawn_unnamed_ms: sample.syncSpawnUnnamedMs }),
+      ...(sample.asyncSpawnSyncMs === undefined ? {} : { async_spawn_sync_ms: sample.asyncSpawnSyncMs }),
+      ...(sample.asyncSpawnByCaller === undefined ? {} : { async_spawn_sync_by_caller: sample.asyncSpawnByCaller }),
     });
   } catch {
     // Reason: a throwing logger must cost the reading, never the tick.
@@ -3163,6 +3183,9 @@ export function detectDaemonCrashLoop(
   };
 }
 
+/** W1-T9754: the environment switch that starts the spawn helper at boot. Its default, off, is an operator decision. */
+export const SPAWN_HELPER_SWITCH = "RMD_SPAWN_HELPER";
+
 /** The daemon's startup routine (W1-T12b): the clean-env boot assertion, run once before the scheduler loop starts.
  * Takes the log sink and the env as injectable inputs, so it is provable in-process with a fake env and no real
  * launchd load. Every optional dependency below follows one shape: injected rather than imported, because this module
@@ -3226,6 +3249,13 @@ export async function daemonBoot(
     ...(bootHeadSha ? { head_sha: bootHeadSha } : {}),
     ...(checkoutDepth ? { checkout_shallow: checkoutDepth.shallow, checkout_commit_count: checkoutDepth.commitCount } : {}),
   });
+  // W1-T9754: the spawn helper starts here, while this process is still small, so a later routed spawn forks from
+  // it and not from a 1.5-2 GB daemon. Whether it starts is the operator's switch, off unless set to "on".
+  if (env[SPAWN_HELPER_SWITCH] === "on") {
+    const helper = startSpawnHelper({ log });
+    installSpawnHelper(helper);
+    log("daemon.spawn_helper", { started: true, pid: helper.pid, switch: SPAWN_HELPER_SWITCH });
+  }
   // The boot-rate invariant: the shape-not-cause check. Logged either way, so the invariant's own
   // pass or fail is part of the boot record, not only its breaches (W1-T215).
   if (crashLoopCheck) {
@@ -3337,6 +3367,73 @@ export { checkDispatchGovernors, type DispatchGovernorVerdict } from "./dispatch
  * flagged and skipped, a fixable blocker gets a bounded fix attempt (W1-T174), and a genuine blocker escalates once
  * and parks until its PR ownership materially changes. Idling is an in-process state, never a process exit.
  * Forensics: docs/forensics/daemon.md. */
+/** The saved-planning pump's handle. `stop()` refuses every further handoff but never interrupts the active one;
+ *  `settled()` resolves when that one has finished, and `activeOperation()` names it while it runs. */
+export interface ImprovementActionPump {
+  stop(): void;
+  settled(): Promise<void>;
+  isBusy(): boolean;
+  activeOperation(): string | undefined;
+}
+
+/** Runs saved planning requests serially without blocking dispatch or interrupting an active child. */
+export function startImprovementActionPump(
+  deps: Pick<DaemonDeps, "pendingImprovementActions" | "handOffImprovementAction" | "checkStop" | "checkPause">,
+  intervalMs: number,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): ImprovementActionPump {
+  const pending = deps.pendingImprovementActions, run = deps.handOffImprovementAction;
+  if (!pending || !run) return { stop() {}, settled: async () => {}, isBusy: () => false, activeOperation: () => undefined };
+  let stopped = false, pass: Promise<void> | undefined, active: string | undefined;
+  const tick = (): void => {
+    if (stopped || pass) return;
+    pass = (async () => {
+      if (resolveFleetControlHold(deps)) return;
+      for await (const target of pending()) {
+        if (stopped || resolveFleetControlHold(deps)) break;
+        log("improvement.action_started", { operation_id: target.operationId });
+        active = target.operationId;
+        try {
+          const result = await run(target);
+          log("improvement.action_handoff_settled", { operation_id: target.operationId, result });
+        } catch (error) {
+          log("improvement.action_handoff_failed", { operation_id: target.operationId, error: String(error) });
+        } finally {
+          active = undefined;
+        }
+      }
+    })().catch(error => { log("improvement.action_read_failed", { error: String(error) }); }).finally(() => { pass = undefined; });
+  };
+  const timer = setInterval(tick, Math.max(1, intervalMs)); timer.unref?.(); tick();
+  return {
+    stop: () => { stopped = true; clearInterval(timer); },
+    settled: async () => { await pass; },
+    isBusy: () => pass !== undefined,
+    activeOperation: () => active,
+  };
+}
+
+/** What a clean STOP's bounded wait left running: the active handoff's operation, or the queue read that precedes one. */
+interface AbandonedImprovementPass { operation_id: string | null; phase: "handoff" | "discovery" }
+
+/** A clean STOP waits for the stopped pump's pass, bounded like the in-flight review drain. Returns what was still
+ *  running at the bound, or `undefined` when nothing was running or it settled within the bound. */
+async function drainImprovementActionHandoff(pump: ImprovementActionPump, boundMs: number): Promise<AbandonedImprovementPass | undefined> {
+  if (!pump.isBusy()) return undefined;
+  let settled = false;
+  const work = pump.settled().then(() => { settled = true; });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<void>((resolve) => { timer = setTimeout(resolve, Math.max(0, boundMs)); });
+  try {
+    await Promise.race([work, bound]);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (settled) return undefined;
+  const operation = pump.activeOperation();
+  return { operation_id: operation ?? null, phase: operation === undefined ? "discovery" : "handoff" };
+}
+
 /**
  * W1-T4077 — THE CONSOLE'S "REVIEW NOW" / "FIX NOW", RUN ON THEIR OWN TIMER.
  *
@@ -4132,6 +4229,9 @@ export async function runDaemon(
 
   // W1-T4077: stopped by `summary`, which every exit path of this function returns through.
   const prActionPumpRef: { stop: () => void; isBusy: () => boolean } = { stop: () => {}, isBusy: () => false };
+  const improvementActionPumpRef: ImprovementActionPump = {
+    stop: () => {}, settled: async () => {}, isBusy: () => false, activeOperation: () => undefined,
+  };
   // W1-T4087: its own timer, so a main loop busy for many minutes never delays a plain message.
   const plainBackfill = deps.plainBackfill ? startPlainBackfill(deps.plainBackfill, pollIntervalMs, log) : undefined;
   const recommendationBackfill = deps.recommendationBackfill ? startRecommendationBackfill(deps.recommendationBackfill, pollIntervalMs, log) : undefined;
@@ -4174,7 +4274,7 @@ export async function runDaemon(
     try { if (pauseReview.clock) await stopPauseReviewClock(report); }
     catch (reason) { /* Retained in the cleanup AggregateError, after every other stop is attempted. */ failures.push(reason); }
     for (const stop of [
-      () => prActionPumpRef.stop(), () => plainBackfill?.stop(), () => recommendationBackfill?.stop(), () => fleetLane?.stop(),
+      () => prActionPumpRef.stop(), () => improvementActionPumpRef.stop(), () => plainBackfill?.stop(), () => recommendationBackfill?.stop(), () => fleetLane?.stop(),
       () => inboxResponder?.stop(), () => gardenerRef.stop(), () => livenessPulse?.stop(),
     ]) {
       try { stop(); }
@@ -4189,9 +4289,20 @@ export async function runDaemon(
     await closeOwnedServices(report);
     if (stopReason === "stopped") {
       if (backgroundSweep) await backgroundSweep;
-      const abandonedReviews = await drainInFlightReviews({ boundMs: sweepWallClockBoundMs });
-      if (abandonedReviews > 0) report("daemon.stop_drain.completed", {
+      // The pump is stopped above, so no new handoff starts; the active one finishes within the review bound.
+      const [abandonedPass, abandonedReviews] = await Promise.all([
+        drainImprovementActionHandoff(improvementActionPumpRef, sweepWallClockBoundMs),
+        drainInFlightReviews({ boundMs: sweepWallClockBoundMs }),
+      ]);
+      if (abandonedPass) {
+        // Never a clean settle: the exit row and the summary both name what the bound left running.
+        report("improvement.action_handoff_abandoned", { ...abandonedPass, bound_ms: sweepWallClockBoundMs });
+        const what = abandonedPass.operation_id === null ? "saved-action queue read" : `handoff ${abandonedPass.operation_id}`;
+        stopDetail = [stopDetail, `improvement ${what} still running at the ${sweepWallClockBoundMs} ms stop bound`].filter(Boolean).join("; ");
+      }
+      if (abandonedReviews > 0 || abandonedPass) report("daemon.stop_drain.completed", {
         abandoned_in_flight_reviews: abandonedReviews, bound_ms: sweepWallClockBoundMs,
+        ...(abandonedPass ? { abandoned_improvement_pass: abandonedPass } : {}),
       });
     }
     flushIdleLaneWindow(report);
@@ -4217,6 +4328,7 @@ export async function runDaemon(
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;
+  Object.assign(improvementActionPumpRef, startImprovementActionPump(deps, pollIntervalMs, log));
   // W1-T5720 — THE BOOT GATE. Tick 1 runs a light pass at once, then holds its cadences until the first full
   // pass returns or the BACKSTOP passes (10-05: first `sweep.pass` 6.7-15.8 min after `daemon.boot`). It holds
   // only what is wired: with nothing to defer, tick 1's admission keeps W1-T4998's no-wait contract.
@@ -6518,16 +6630,22 @@ export async function runDaemon(
       });
     }
     let forcedNext: Task | undefined;
-    let forcedKick: { taskId: string; origin: string } | undefined;
+    let forcedKick: DaemonKick | undefined;
     if (deps.pendingKicks) {
       for (const kick of deps.pendingKicks()) {
         const refuse = (reason: string) => {
-          deps.clearKick?.(kick.taskId);
-          log("console.kick_refused", { task: kick.taskId, origin: kick.origin, reason });
+          deps.clearKick?.(kick.taskId, kick.repo);
+          log("console.kick_refused", { task: kick.taskId, origin: kick.origin, reason, ...kickRepoField(kick) });
         };
         const task = planForBatch.byId.get(kick.taskId);
         if (!task) { refuse("unknown task id"); continue; }
         if (isMerged(kick.taskId) || pendingMergedCredit.has(kick.taskId)) { refuse("already merged — stale kick"); continue; }
+        if (deps.isCreditIndeterminate?.(kick.taskId)) {
+          log("console.kick_held", { task: kick.taskId, origin: kick.origin, reason: "open PR ownership unreadable", ...kickRepoField(kick) });
+          continue;
+        }
+        const openPr = deps.isOpenPr?.(kick.taskId);
+        if (openPr !== undefined) { refuse(`already has open PR #${openPr} — existing repair owner retains the task`); continue; }
         try {
           // W1-T3216: a console kick for an operator-RELEASED verify:human task must be admitted
           // here too, or the release works from the drain and is refused from the console.
@@ -6886,7 +7004,7 @@ export async function runDaemon(
               }
             });
             if (!hasUnblockedTask && !(await stopInterphaseReviewClock()) &&
-              !prActionPumpRef.isBusy() && (!plainBackfill || !plainBackfill.isBusy()) && (!recommendationBackfill || !recommendationBackfill.isBusy()) &&
+              !prActionPumpRef.isBusy() && !improvementActionPumpRef.isBusy() && (!plainBackfill || !plainBackfill.isBusy()) && (!recommendationBackfill || !recommendationBackfill.isBusy()) &&
               (!inboxResponder || !inboxResponder.isBusy()) &&
               !deps.pendingKicks?.().length && !deps.pendingPrActions?.().length) {
               log("daemon.idle_starved.enter", { repo: deps.targetRepo, open_prs: 0, plan_tasks: planForBatch.tasks.length });
@@ -7421,9 +7539,9 @@ export async function runDaemon(
       noteBootFirstDispatch({ startedAtMs: daemonClock.now(), admitted: admitted.length });
       if (forcedKick?.taskId === task.id) {
         const kick = forcedKick;
-        deps.clearKick?.(task.id);
+        deps.clearKick?.(task.id, kick.repo);
         forcedKick = undefined;
-        log("console.kick_dispatched", { task: task.id, origin: kick.origin });
+        log("console.kick_dispatched", { task: task.id, origin: kick.origin, ...kickRepoField(kick) });
       }
       if (isRefill) log("dispatch.lane_refilled", { lane, finished_task: refill!.finishedTaskId, next_task: task.id,
         ...(restartDecided ? { restart_decided: true } : {}) });

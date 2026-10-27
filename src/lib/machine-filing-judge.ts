@@ -57,6 +57,10 @@ import { backstopConcern, deterministicEscalation, UNPRICED_PRIORITY, withoutRul
 import {
   FLAKE_INCIDENT_MAIN_INHERITED_STEP, flakeIncidentMainInherited, type FlakeIncidentRecordEvidence, type FlakeJudgeEvidencePort, type MainRedAtBase,
 } from "./flake-incident-gardener.js";
+import {
+  isMechanicalDecision, mechanicalReleaseProvenance, mechanicalRetirementReason, mechanicalRuleName, mechanicalRuling, mechanicalRulingRow,
+  RULE_3_LOW_PRIVILEGE, type MechanicalDecision, type MechanicalReleaseProvenance, type SymptomReading,
+} from "./mechanical-rulings.js";
 import { lintTask, promoteIntroducedPlanOnlyDiagnostics, rulingVerifyViolation, taskRulingPin, type LintViolation } from "./task-linter.js";
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
@@ -378,7 +382,9 @@ export function machineJudgeInput(task: Task, record: FamilyTrackRecord, pathExi
 }
 
 export type MachineJudgement =
-  | { kind: "ruled"; task: Task; ruling: FilingRiskRuling; bar: number; record: FamilyTrackRecord; byOperator?: true }
+  | { kind: "ruled"; task: Task; ruling: FilingRiskRuling; bar: number; record: FamilyTrackRecord; byOperator?: true;
+      /** W1-T10371: a rule-3 release, decided with no model call; its landing also writes `ratify.approved`. */
+      byRule?: MechanicalDecision }
   | { kind: "unavailable"; task: Task; reason: string };
 
 /** Ask the judge about ONE record. Never throws: an error or a verdict-less answer is `unavailable`. */
@@ -635,7 +641,7 @@ function staleRulingPins(records: RulingPins[], main: Map<string, string>): { id
     // The source pin covers the unruled record; the rendered pin covers verify/priority after release,
     // and a retirement (W1-T9694) is current while the tree reads the record as it was written.
     const current = (task?.status === "queued" && task.retirement === undefined && (pin === record.sourcePin || pin === record.pin)) ||
-      ((record.action === "retire" || record.action === "withdraw") && pin === record.pin);
+      ((record.action === "retire" || record.action === "withdraw" || record.action === "rule-retire") && pin === record.pin);
     const operatorCurrent = record.operatorReleasePin === undefined || (task !== undefined && operatorReleasePin(task) === record.operatorReleasePin);
     return current && operatorCurrent ? [] : [{ id: record.id, pin: record.pin, main_pin: pin }];
   });
@@ -672,6 +678,8 @@ interface MachineJudgeState {
   reaskRecord?: Record<string, ReaskRecord>;
   /** W1-T9694: for each released flake-incident record, the pin and evidence it was last reconsidered on. */
   flakeReleased?: Record<string, string>;
+  /** W1-T10371: the symptom count a rule-4 hold was last ledgered at, so a hold is re-recorded only when the count moves. */
+  mechanicalHeld?: Record<string, number>;
 }
 
 interface ReaskEntry {
@@ -689,8 +697,19 @@ function readState(path: string): MachineJudgeState {
   return parsed;
 }
 
+/** W1-T10371: what the operator's four mechanical rulings read and write. Absent: the judges run as they did. */
+export interface MechanicalPort {
+  /** Read once per pass: a record's symptom reading (undefined when its family has no reader) and whether the
+   *  operator declined its ask. A reader that throws leaves the whole pass with no rule applied. */
+  read: (tasks: readonly Task[]) => { symptom: (task: Task) => SymptomReading | undefined; declined: (task: Task) => boolean };
+  /** Writes rule 3's `ratify.approved` row through `approveParkedTask`, whose every guard stands: a non-zero code means no row. */
+  release: (task: Task, provenance: MechanicalReleaseProvenance) => { code: number; message: string; released?: boolean };
+}
+
 export interface MachineJudgePorts {
   stateDir: string;
+  /** W1-T10371: the operator's four mechanical rulings, applied before any model is asked. */
+  mechanical?: MechanicalPort;
   plan: () => Plan | Promise<Plan>;
   riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>;
   riskPolicy?: () => RiskPolicy;
@@ -774,6 +793,8 @@ export interface MachineJudgeReport {
   retired?: string[];
   /** W1-T9043: machine escalations withdrawn after {@link MACHINE_JUDGE_UNANSWERED_WITHDRAW_DAYS} days with no ruling. */
   withdrawn?: string[];
+  /** W1-T10371: records rule 4 holds queued, with no model call, no re-ask and no inbox ask. */
+  held?: string[];
 }
 
 const FAMILY_GARDENER_STATE: Readonly<Record<string, string>> = {
@@ -880,6 +901,8 @@ async function reaskParkedEscalations(c: {
   room: number;
   /** W1-T9043: records this pass withdraws as unanswered, which are not asked again. */
   withdrawing: ReadonlySet<string>;
+  /** W1-T10371: records a mechanical rule decided this pass, which are neither asked nor re-asked. */
+  decided: ReadonlySet<string>;
 }): Promise<Map<string, PendingReask>> {
   const { ports, plan, state } = c;
   // A schedule is kept while its record is open. A pin that no longer matches is re-seeded below.
@@ -893,7 +916,7 @@ async function reaskParkedEscalations(c: {
   let room = c.room;
   for (const task of plan.tasks) {
     if (room <= 0) break;
-    if (!parkedEscalation(task, c.released) || c.reapproval.has(task.id) || c.withdrawing.has(task.id)) continue;
+    if (!parkedEscalation(task, c.released) || c.reapproval.has(task.id) || c.withdrawing.has(task.id) || c.decided.has(task.id)) continue;
     const family = judgementFamily(task);
     const pin = task.risk_ruling!.pin; // parkedEscalation proved it is the record's own pin
     if (c.excluded.has(family) || state.declined?.[task.id] === pin) continue;
@@ -1100,6 +1123,93 @@ async function reconsiderReleasedFlakes(c: {
   return out;
 }
 
+/**
+ * W1-T10371: the decision each of `candidates` gets from the operator's four mechanical rulings, read through the
+ * port. Only a record a rule DECIDES (retire, release or hold) is returned: an escalation, an undecidable record
+ * and a record whose family has no symptom reader keep today's judge path. A release applies only to a parked
+ * (`verify: human`) record, which is what `approveParkedTask` releases. Nothing is written; the caller records.
+ * A port that cannot be read decides nothing, since a rule applied on unread evidence would answer for the operator.
+ */
+export function mechanicalDecisions(c: {
+  port: MechanicalPort;
+  plan: Plan;
+  candidates: readonly Task[];
+  released: ReadonlySet<string>;
+  isMerged: (id: string) => boolean;
+  log: MachineJudgePorts["log"];
+}): Map<string, MechanicalDecision> {
+  const decisions = new Map<string, MechanicalDecision>();
+  const live = c.plan.tasks.filter((t) => t.status === "queued" && t.verify === "human" && t.retirement === undefined);
+  let read: ReturnType<MechanicalPort["read"]>;
+  try {
+    read = c.port.read([...new Set([...live, ...c.candidates])]);
+  } catch (e) {
+    c.log("machine_judge.mechanical_unavailable", { reason: `the rules' evidence is unreadable: ${String((e as Error)?.message ?? e)}` });
+    return decisions;
+  }
+  const readings = new Map<string, SymptomReading | undefined>();
+  const reading = (t: Task): SymptomReading | undefined => {
+    if (!readings.has(t.id)) {
+      try {
+        readings.set(t.id, read.symptom(t));
+      } catch (e) {
+        c.log("machine_judge.mechanical_unavailable", { task_id: t.id, reason: `its symptom is unreadable: ${String((e as Error)?.message ?? e)}` });
+        readings.set(t.id, undefined);
+      }
+    }
+    return readings.get(t.id);
+  };
+  const familyCounts = new Map<string, number[]>();
+  const countsOf = (family: string): number[] => {
+    if (!familyCounts.has(family)) familyCounts.set(family, live.filter((t) => machineFamily(t) === family).flatMap((t) => reading(t)?.count ?? []));
+    return familyCounts.get(family)!;
+  };
+  for (const task of c.candidates) {
+    const ruling = mechanicalRuling(task, {
+      operatorReleased: c.released.has(task.id), shipped: c.isMerged(task.id), declined: read.declined(task), symptom: reading(task),
+      familyCounts: countsOf(machineFamily(task)),
+    });
+    if (!isMechanicalDecision(ruling)) continue;
+    if (ruling.verdict === "release" && task.verify !== "human") continue;
+    decisions.set(task.id, ruling);
+  }
+  return decisions;
+}
+
+/**
+ * W1-T10371: apply the rules to every record this pass would judge or re-ask (a due record or a parked
+ * escalation), BEFORE any model is asked. Each decision is ledgered as `machine_judge.mechanical_ruling`; a
+ * hold only when its symptom count moved, so a quiet record is not re-recorded every pass.
+ */
+function decideMechanically(c: {
+  ports: MachineJudgePorts;
+  plan: Plan;
+  state: MachineJudgeState;
+  released: ReadonlySet<string>;
+  reapproval: ReadonlySet<string>;
+  excluded: ReadonlySet<string>;
+  due: readonly Task[];
+  isMerged: (id: string) => boolean;
+}): Map<string, MechanicalDecision> {
+  if (c.ports.mechanical === undefined) return new Map();
+  const dueIds = new Set(c.due.map((t) => t.id));
+  const candidates = c.plan.tasks.filter((t) =>
+    !c.reapproval.has(t.id) && (dueIds.has(t.id) || parkedEscalation(t, c.released)) &&
+    !c.excluded.has(judgementFamily(t)) && shardRelPath(t) !== undefined &&
+    !(t.risk_ruling !== undefined && c.state.declined?.[t.id] === t.risk_ruling.pin));
+  const decisions = mechanicalDecisions({ port: c.ports.mechanical, plan: c.plan, candidates, released: c.released, isMerged: c.isMerged, log: c.ports.log });
+  const held: Record<string, number> = {};
+  for (const [id, decision] of decisions) {
+    if (decision.verdict === "hold") {
+      held[id] = decision.count ?? 0;
+      if (c.state.mechanicalHeld?.[id] === held[id]) continue;
+    }
+    c.ports.log("machine_judge.mechanical_ruling", { task_id: id, ...mechanicalRulingRow(decision) });
+  }
+  c.state.mechanicalHeld = held;
+  return decisions;
+}
+
 /** One pass: rule on every unjudged or stale machine record, then land or write the rewrites. */
 export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<MachineJudgeReport> {
   const statePath = join(ports.stateDir, MACHINE_JUDGE_STATE_FILE);
@@ -1192,11 +1302,28 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   );
   const records = new Map<string, FamilyTrackRecord>();
   const ruled: Extract<MachineJudgement, { kind: "ruled" }>[] = [];
+  // W1-T10371: the operator's four rulings come first; a record a rule decides is never judged or re-asked.
+  const decisions = decideMechanically({ ports, plan, state, released, reapproval: releaseEvidence.reapproval, excluded, due, isMerged });
+  const mechRetire: { task: Task; decision: MechanicalDecision }[] = [];
+  for (const [id, decision] of decisions) {
+    const task = plan.byId.get(id)!;
+    if (decision.verdict === "retire") mechRetire.push({ task, decision });
+    else if (decision.verdict === "hold") (report.held ??= []).push(id);
+    else {
+      const family = judgementFamily(task);
+      if (!records.has(family)) records.set(family, familyRecordForPass(plan, family, isMerged, ports, state, released));
+      ruled.push({
+        kind: "ruled", task, bar: 0, record: records.get(family)!, byRule: decision,
+        ruling: { verdict: RULE_3_LOW_PRIVILEGE, action: "proceed", confidence: 1, reasons: [`${mechanicalRuleName(decision.rule)}: ${decision.evidence}`], judgedAt: ports.clock.iso() },
+      });
+    }
+  }
   // W1-T9694: a flake-incident record is judged with the harness's retry and main-health facts, and one the
   // gardener's own classifier reads as main-inherited is retired rather than asked about.
   const flakePort = ports.flakeEvidence;
   const releasedFlakes = flakePort === undefined ? [] : plan.tasks.filter((t) => releasedFlake(t, released));
-  const judgedNow = due.slice(0, ports.limit ?? due.length);
+  const undecided = due.filter((t) => !decisions.has(t.id));
+  const judgedNow = undecided.slice(0, ports.limit ?? undecided.length);
   const flakeTasks = [...judgedNow.filter((t) => isFlakeIncident(t) && !released.has(t.id)), ...releasedFlakes];
   const retries = flakePort !== undefined && flakeTasks.length > 0 ? flakePort.retries(flakeTasks) : new Map<string, FlakeIncidentRecordEvidence>();
   const retire: Retirement[] = [];
@@ -1243,10 +1370,11 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       reasons: judged.ruling.reasons,
     });
   }
-  const withdraw = unansweredEscalations({ ports, plan, state, released, excluded });
+  const withdraw = unansweredEscalations({ ports, plan, state, released, excluded }).filter((w) => !decisions.has(w.task.id));
   const reasks = await reaskParkedEscalations({
     ports, plan, state, report, records, released, reapproval: releaseEvidence.reapproval, excluded, isMerged, policy,
-    room: ports.limit === undefined ? Infinity : ports.limit - due.length, withdrawing: new Set(withdraw.map((w) => w.task.id)),
+    room: ports.limit === undefined ? Infinity : ports.limit - undecided.length, withdrawing: new Set(withdraw.map((w) => w.task.id)),
+    decided: new Set(decisions.keys()),
   });
   ruled.push(...[...reasks.values()].map((r) => r.judged));
   if (flakePort !== undefined) {
@@ -1254,7 +1382,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   }
   // Persisted before landing, so a landing that throws never costs these rulings again.
   writeAtomic(statePath, JSON.stringify(state) + "\n");
-  if (ruled.length === 0 && retire.length === 0 && withdraw.length === 0) return report;
+  if (ruled.length === 0 && retire.length === 0 && withdraw.length === 0 && mechRetire.length === 0) return report;
 
   const ws = ports.writeRoot === undefined ? await ports.openWorkspace?.() : undefined;
   const root = ports.writeRoot ?? ws?.root;
@@ -1284,6 +1412,29 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
           route: "main-health", task_id: task.id, source: "machine-judge",
         });
         ports.log("machine_judge.main_inherited", { task_id: task.id, origin: task.origin, recovered: r.recovered, also_failed: r.alsoFailed, main_red: facts.mainRed });
+      } catch (e) {
+        report.failed.push(task.id);
+        ports.log("machine_judge.record_failed", { task_id: task.id, error: String((e as Error)?.message ?? e) });
+      }
+    }
+    for (const { task, decision } of mechRetire) {
+      try {
+        const relPath = shardRelPath(task)!;
+        const text = readFileIfExists(join(root, relPath));
+        const out = text === undefined
+          ? { refused: `${relPath} is absent from the landing tree` }
+          : taskRulingPin(shardRecord(text, relPath)) !== taskRulingPin(task)
+          ? { refused: `${task.id} changed since the rules read it` }
+          : renderRetiredShard(text, relPath, mechanicalRetirementReason(decision, ports.clock.iso()));
+        if ("refused" in out) {
+          (state.declined ??= {})[task.id] = taskRulingPin(task);
+          report.refused.push(task.id);
+          ports.log("machine_judge.refused", { task_id: task.id, reason: out.refused, mechanical_rule: decision.rule });
+          continue;
+        }
+        writeAtomic(join(root, relPath), out.contents);
+        landed.push({ id: task.id, relPath, pin: taskRulingPin(shardRecord(out.contents, relPath)), sourcePin: taskRulingPin(shardRecord(text!, relPath)), action: "rule-retire" });
+        (report.retired ??= []).push(task.id);
       } catch (e) {
         report.failed.push(task.id);
         ports.log("machine_judge.record_failed", { task_id: task.id, error: String((e as Error)?.message ?? e) });
@@ -1329,7 +1480,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
           : r.byOperator && operatorReleasePin(shardRecord(text, relPath)) !== operatorReleasePin(r.task)
           ? { refused: `${r.task.id} operator-approved contract changed before landing` }
           : renderRuledShard(text, relPath, judgedPin, r.ruling, plan.byId, admission);
-        if (text !== undefined && "refused" in out && out.lint && !r.byOperator) {
+        if (text !== undefined && "refused" in out && out.lint && !r.byOperator && r.byRule === undefined) {
           // A proceed the record cannot honour is BROKEN, which is the operator's to see: park it,
           // pinned, with the reason, rather than re-asking the judge every pass.
           r.ruling = { ...r.ruling, action: "escalate", reasons: [...r.ruling.reasons, `the judge said proceed, but ${out.refused}`] };
@@ -1367,6 +1518,17 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
           report.settled.push(r.task.id);
           ports.log("machine_judge.already_landed", { task_id: r.task.id, pin });
           continue;
+        }
+        if (r.byRule !== undefined) {
+          // Rule 3's release row goes through approveParkedTask, every guard standing (a risk: high record is refused).
+          // It is written only once the shard renders, so a refused rewrite leaves no release behind.
+          const wrote = ports.mechanical!.release(r.task, mechanicalReleaseProvenance(r.byRule));
+          if (wrote.code !== 0 || wrote.released !== true) {
+            (state.declined ??= {})[r.task.id] = taskRulingPin(r.task);
+            report.refused.push(r.task.id);
+            ports.log("machine_judge.refused", { task_id: r.task.id, reason: wrote.message, mechanical_rule: r.byRule.rule });
+            continue;
+          }
         }
         writeAtomic(join(root, relPath), out.contents);
         landed.push({ id: r.task.id, relPath, pin, sourcePin: taskRulingPin(shardRecord(text!, relPath)), action: r.ruling.action,
@@ -1408,7 +1570,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       });
       if (report.prUrl) state.pending = {
         prUrl: report.prUrl, ids: landed.map((l) => l.id), records: landed,
-        repoRoot: dirname(dirname(dirname((ruled[0]?.task ?? retire[0]?.task ?? withdraw[0]!.task).sourcePath!))),
+        repoRoot: dirname(dirname(dirname((ruled[0]?.task ?? retire[0]?.task ?? mechRetire[0]?.task ?? withdraw[0]!.task).sourcePath!))),
       };
       else report.unlanded = landed.map((l) => l.id);
       ports.log("machine_judge.landed", { pr_url: report.prUrl ?? null, ids: landed.map((l) => l.id) });
@@ -1423,6 +1585,10 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
 /** How each landed action reads in the judge PR, and the proof its acceptance block carries. */
 const LANDED_NOTE: Record<string, { note: string; claim: (id: string) => string; grep: string }> = {
   retire: { note: " (a red inherited from main, routed to main-health; W1-T9694)", claim: (id) => `${id} is retired as a red inherited from main`, grep: "^  retirement: retired" },
+  "rule-retire": {
+    note: " (retired by the operator's mechanical rulings, rule 1 or 2; W1-T10371)",
+    claim: (id) => `${id} is retired by a mechanical ruling`, grep: "^  retirement: retired",
+  },
   withdraw: {
     note: " (escalated to a person and unanswered for 30 days, so withdrawn, never released; operator ruling 2026-10-13, W1-T9043)",
     claim: (id) => `${id} is withdrawn as an unanswered escalation`, grep: "^  retirement: withdrawn",
