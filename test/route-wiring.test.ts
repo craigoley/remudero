@@ -309,7 +309,7 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/products",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts invokes the
   // production research adapter through a disposable child process after actor verification,
-  // including unavailable toolchain refusal and recovery for the same objective.
+  // including disabled-provider/toolchain refusals and recovery for the same objective.
   "POST /v1/products/research",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts and the production-assembly test below (W1-T10613).
   "POST /v1/products/repository",

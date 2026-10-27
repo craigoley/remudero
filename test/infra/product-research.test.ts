@@ -129,6 +129,52 @@ test("W1-T10617: product research retains sources answers and the objective revi
     .find((item) => item.runId === receipt.runId);
   assert.deepEqual(historicalReceipt?.request, receipt.request, "replacing the brief preserves the original objective, sources and command");
   assert.deepEqual(history.products[id].runs.find((run: { id: string }) => run.id === receipt.runId), record.runs[0]);
+
+  await t.test("in-flight objective changes retain the original research without applying it", async (t) => {
+    const { root, store, id } = seed(t, { objective });
+    let finish!: (value: unknown) => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<unknown>((resolve) => { finish = resolve; });
+    let calls = 0;
+    const service = new ProductResearchService({ root, store, clock, provider: { id: "held-provider", research: async () => {
+      calls++; entered(); return held;
+    } } });
+    const body = command(id, 1, { answers });
+    const pending = service.run(ACTOR, body);
+    await started;
+    try {
+      const current = store.read(ACTOR, id); assert.ok(current.ok);
+      assert.ok(store.write(ACTOR, { version: "product-intent-v1", requestId: rid("inflight-rebrief"), id,
+        expectedRevision: current.value.revision, brief: { ...brief, objective: "Explore another city", research: [] } }).ok);
+    } finally { finish({ summary: "Original objective findings", questions: [{ text: "Which park zones are in scope?" }] }); }
+    assert.equal((await pending).code, "stale_revision", "old research cannot acknowledge the new objective");
+    const stored = JSON.parse(readFileSync(researchFile(root), "utf8"));
+    const [run] = stored.products[id].runs;
+    assert.ok(run, "the completed research must survive the revision refusal");
+    assert.deepEqual([run.objectiveRevision, run.productRevision, run.outcome, run.summary],
+      [1, 1, "completed", "Original objective findings"]);
+    assert.deepEqual(run.sources, [{ ...SOURCES[0], disposition: "data" }]);
+    assert.deepEqual(stored.products[id].questions.map((item: { text: string; objectiveRevision: number }) => [item.text, item.objectiveRevision]),
+      [["Which park zones are in scope?", 1]], "unresolved questions stay under their original objective");
+    const [receipt] = Object.values<{ runId: string; request: Record<string, unknown> }>(stored.receipts);
+    assert.equal(receipt.runId, run.id);
+    assert.deepEqual(receipt.request, { command: body, objective, objectiveRevision: 1, productRevision: 1,
+      sources: SOURCES, provider: "held-provider", budgetUsd: 0,
+      acceptedAnswers: [{ questionId: "q_constraints", text: "Which platform and quality constraints are fixed?", answer: answers[0].answer }] });
+    const changed = store.read(ACTOR, id); assert.ok(changed.ok);
+    assert.deepEqual(changed.value.stageEvidence, [], "the superseded run is not applied to the current objective");
+    const resumed = new ProductResearchService({ root, clock });
+    assert.equal((await resumed.run(ACTOR, body)).code, "stale_revision");
+    assert.equal(calls, 1, "retrying the old revision cannot repeat provider work");
+    const next = await ok(resumed, command(id, 2));
+    assert.deepEqual(next.accepted.map((item) => [item.questionId, item.answer]), [["q_constraints", answers[0].answer]],
+      "the unaffected accepted answer survives the in-flight scope change");
+    assert.ok(!next.open.some((item) => item.origin === "provider"), "old questions do not leak into the new objective");
+    const history = JSON.parse(readFileSync(researchFile(root), "utf8"));
+    assert.deepEqual(history.products[id].runs[0], run);
+    assert.deepEqual(Object.values(history.receipts)[0], receipt, "a fresh service retains the original receipt unchanged");
+  });
 });
 
 test("product research refuses provider work until submitted answers are durable and retries safely", async (t) => {

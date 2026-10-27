@@ -213,9 +213,10 @@ writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmi
   let calls = 0;
   let toolchainReady = false;
   let queries = 0;
+  const config = { root: fixture, workerProviders: { enabled: [] } } as unknown as Config;
   const provider = realProductResearchProvider({
     mount: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1000, provider: "claude" },
-    config: { root: fixture } as Config, cwd: fixture, settingsFile,
+    config, cwd: fixture, settingsFile,
     spawn: (async (args) => {
       calls++;
       assert.equal(args.mountProvider, "claude");
@@ -267,18 +268,29 @@ writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmi
     assert.equal(blocked.status, 200);
     assert.deepEqual(violations(blockedReply, declaredBody("/v1/products/research", "POST", 200)), []);
     assert.deepEqual([blockedReply.run.outcome, blockedReply.run.failure, blockedReply.run.summary, blockedReply.run.spendUsd],
-      ["unavailable", undefined, undefined, 0], "a pre-invocation toolchain refusal remains recoverable");
+      ["unavailable", undefined, undefined, 0], "a disabled configured provider remains recoverable");
     assert.equal(calls, 1);
-    assert.equal(queries, 0, "the real toolchain preflight refuses before invoking the SDK");
-    assert.equal(existsSync(output), false, "a blocked toolchain starts no research child");
+    assert.equal(queries, 0, "the real provider admission refuses before invoking the SDK");
+    assert.equal(existsSync(output), false, "a disabled provider starts no research child");
     assert.deepEqual(blockedReply.accepted.map((item) => [item.questionId, item.answer]), [["q_audience", "commuters"]]);
-    toolchainReady = true;
+    config.workerProviders!.enabled = ["claude"];
     const blockedReplay = await post("alice");
     const replayedBlock = await blockedReplay.json() as typeof blockedReply;
     assert.equal(blockedReplay.status, 200);
     assert.equal(replayedBlock.replayed, true);
     assert.deepEqual(replayedBlock.run, blockedReply.run, "restoring capability preserves the original unavailable receipt");
     assert.equal(calls, 1, "replaying a refused request never starts a worker");
+    const toolchainBody = { ...body, requestId: "research-process-toolchain", answers: [] };
+    const toolchainBlocked = await post("alice", toolchainBody);
+    const toolchainReply = await toolchainBlocked.json() as typeof blockedReply;
+    assert.equal(toolchainBlocked.status, 200);
+    assert.deepEqual(violations(toolchainReply, declaredBody("/v1/products/research", "POST", 200)), []);
+    assert.deepEqual([toolchainReply.run.outcome, toolchainReply.run.failure, toolchainReply.run.summary],
+      ["unavailable", undefined, undefined], "an enabled provider with an absent toolchain is also unavailable");
+    assert.equal(calls, 2);
+    assert.equal(queries, 0);
+    assert.equal(existsSync(output), false);
+    toolchainReady = true;
     const resumedBody = { ...body, requestId: "research-process-0002", answers: [] };
     const response = await post("alice", resumedBody);
     const reply = await response.json() as { run: { id: string; outcome: string; provider: string; spendUsd: number }; replayed: boolean; accepted: { questionId: string; answer: string }[] };
@@ -287,7 +299,7 @@ writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmi
     assert.deepEqual([reply.run.outcome, reply.run.provider, reply.run.spendUsd], ["completed", "claude:haiku", 0.02]);
     assert.deepEqual(reply.accepted.map((item) => [item.questionId, item.answer]), [["q_audience", "commuters"]]);
     assert.notEqual(reply.run.id, blockedReply.run.id);
-    assert.equal(calls, 2, "a new request resumes the same objective after capability restoration");
+    assert.equal(calls, 3, "a new request resumes the same objective after capability restoration");
     assert.equal(queries, 1);
     const receipts = () => readFileSync(join(fixture, "state", "ledger.ndjson"), "utf8").trim().split("\n")
       .map((line) => JSON.parse(line) as { step: string; lane?: string; run_id: string; task_id: string;
@@ -300,6 +312,8 @@ writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmi
     assert.deepEqual(blockedRows.map((row) => row.step), ["worker.attempt"],
       "the pre-invocation refusal retains a terminal receipt without an execution assignment");
     assert.equal(blockedRows[0].success, false);
+    assert.deepEqual(allRows.filter((row) => row.run_id === toolchainReply.run.id).map((row) => [row.step, row.success]),
+      [["worker.attempt", false]], "the toolchain refusal is ledgered without an execution assignment");
     const rows = allRows.filter((row) => row.run_id === reply.run.id);
     assert.deepEqual(rows.map((row) => row.step), ["worker.assignment", "worker.attempt"],
       "the real worker writes exactly one assignment and one terminal receipt");
@@ -313,7 +327,7 @@ writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmi
     assert.ok(rows.every((row) => row.run_id === reply.run.id && row.task_id === "PRODUCT-RESEARCH"));
     const retry = await post("alice", resumedBody);
     assert.equal((await retry.json() as { replayed: boolean }).replayed, true);
-    assert.equal(calls, 2, "a durable receipt does not start another worker");
+    assert.equal(calls, 3, "a durable receipt does not start another worker");
     assert.deepEqual(receipts(), allRows, "replaying research never duplicates worker receipts");
   } finally { await app.close(); }
 });

@@ -10,7 +10,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
 import { productRequestIdSchema, productIdSchema, productTransitionSchema, type ProductBrief, type ProductProjection, type ProductStoreCode } from "./product-intent.js";
 import { ProductIntentStore, productStatePaths } from "./product-intent-store.js";
-import type { Config } from "./config.js";
+import { enabledWorkerProviders, type Config } from "./config.js";
 import type { Mount } from "./mounts.js";
 import { ClaudeToolchainBlockedError, spawnWorker, SubscriptionOnlyRefusedError } from "./worker.js";
 import { ProviderCapacityBlockedError } from "./worker-provider.js";
@@ -71,7 +71,9 @@ export function realProductResearchProvider(options: {
         tools: ["WebSearch"], signal: input.signal, runId: input.requestId, taskId: "PRODUCT-RESEARCH",
       }); }
       catch (error) {
-        if (error instanceof ProviderCapacityBlockedError || error instanceof SubscriptionOnlyRefusedError ||
+        // The worker's disabled-mount refusal is an untyped error; classify it from trusted config.
+        if ((options.mount.provider && !enabledWorkerProviders(options.config).includes(options.mount.provider)) ||
+          error instanceof ProviderCapacityBlockedError || error instanceof SubscriptionOnlyRefusedError ||
           error instanceof ClaudeToolchainBlockedError) throw new ResearchProviderUnavailable();
         throw error;
       }
@@ -364,7 +366,8 @@ export class ProductResearchService {
       const draft = needsRun ? await this.runResearch(request, requestKey, paths.ownerKey, provider) : undefined;
 
       const outcome = (() => {
-        const product = loaded();
+        // Preserve actual execution evidence under the objective that admitted it, even if it changed in flight.
+        const product = first;
         const state = this.read(paths);
         const existing = state.receipts[requestKey];
         if (existing) {
@@ -400,6 +403,8 @@ export class ProductResearchService {
         return { run: currentRun, view: project(product.id, product.brief, product.objectiveRevision, next, false) };
       })();
 
+      // Refuse application to a changed objective only after retaining the original request and result.
+      loaded();
       // Canonical record: the run is stage evidence in the product's own durable record. A retry heals a failure here.
       if (outcome.run) this.recordEvidence(actor, input.productId, outcome.run, paths, requestKey);
       return outcome.view;
