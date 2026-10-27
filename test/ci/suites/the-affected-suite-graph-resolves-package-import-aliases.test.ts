@@ -110,12 +110,16 @@ test("W1-T10820: an imports target the resolver does not model is a named full r
 test("W1-T10820: coverage-narrow lists a #src importer as a direct importer", async (t) => {
   const repo = gitRepo({ scope: t, kind: "w10820-coverage-narrow" });
   mkdirSync(join(repo.dir, "test"), { recursive: true });
+  // The worktree's own imports map, which carries a key the harness checkout's does not: the narrow pass must
+  // resolve against the tree it measures, never the module's own checkout.
+  writeFileSync(join(repo.dir, "package.json"), JSON.stringify({ imports: { "#src/*": "./src/*", "#lib/*": "./src/lib/*" } }));
   writeFileSync(join(repo.dir, "test", "by-alias.test.ts"), 'import { small } from "#src/lib/small.js";\nsmall();\n');
+  writeFileSync(join(repo.dir, "test", "by-own-alias.test.ts"), 'import { small } from "#lib/small.js";\nsmall();\n');
   writeFileSync(join(repo.dir, "test", "by-path.test.ts"), `${imp("small", "../src/lib/small.js")}\nsmall();\n`);
   writeFileSync(join(repo.dir, "test", "unrelated.test.ts"), 'import { other } from "#src/lib/other.js";\nother();\n');
   repo.git("add", "-A");
   repo.git("commit", "-q", "-m", "tree");
-  assert.deepEqual(await coverageNarrowSuites(repo.dir, ["src/lib/small.ts"]), ["test/by-alias.test.ts", "test/by-path.test.ts"]);
+  assert.deepEqual(await coverageNarrowSuites(repo.dir, ["src/lib/small.ts"]), ["test/by-alias.test.ts", "test/by-own-alias.test.ts", "test/by-path.test.ts"]);
 });
 
 test("W1-T10820: on the real tree every suite importing #src/run-task.js is an importer of src/run-task.ts", () => {
