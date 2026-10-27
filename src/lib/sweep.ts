@@ -295,7 +295,9 @@ import {
   runsForHeadRestArgs,
   fetchWorkflowRunObservations,
   GhPaceFloorStandDownError,
+  isHumanHoldCandidate,
   isScannerBlockerCandidate,
+  mergesDirectlyAsPlanPr,
   paceGhEntry,
   type GhApiFetcher,
   type GhCallPacer,
@@ -7086,8 +7088,9 @@ export interface OpenPrView {
    *  escalation names THIS reported value, never only the {@link MergeState} bucket. */
   mergeableState?: string;
   /** W1-T3980 — the bounded scanner read taken ONLY for {@link isScannerBlockerCandidate}'s
-   *  population (armed, green, review success, `mergeable`, raw `blocked`). `undefined` means not
-   *  a candidate or over the per-pass cap, and every row behaves exactly as before. */
+   *  population (armed, green, review success, `mergeable`, raw `blocked`), plus the review-hold read
+   *  alone for an unarmed plan PR in that state ({@link isHumanHoldCandidate}). `undefined` means not
+   *  a candidate, over the per-pass cap, or no hold on such a plan PR, and every row behaves as before. */
   scannerBlocker?: ScannerBlockerObservation;
   /** W1-T5633 — the open high CodeQL alerts analysed at THIS head, read ONLY when the head's latest
    *  `CodeQL` results check concluded failure. `undefined` (no such check, a green one, an unread
@@ -11508,7 +11511,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // A HUMAN HOLD IS THE BLOCKER. An armed, green, reviewed PR that GitHub reports `blocked` because a
     // reviewer's standing verdict is CHANGES_REQUESTED read as `mergeable`: re-arming changed nothing, a
     // positive distance pressed update-branch after every main move, and it waited forever with nothing
-    // said. No automation may clear a person's hold, so it is named once per head instead.
+    // said. No automation may clear a person's hold, so it is named once per head instead. An unarmed
+    // plan PR (#14599) is held here too, ordered before `mergeable`, so its direct merge is not retried.
     disposition: "blocked-ambiguous",
     when: (pr) => changesRequestedHold(pr) !== undefined,
     blocker: "escalated",
@@ -11552,7 +11556,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     when: checksGreenReviewSuccess,
     blocker: "awaiting-arm",
     // W1-T6595: a plan PR is never armed (W1-T5615), so its row says what the sweep does instead.
-    reason: (pr) => (pr.changedFiles ?? []).some((f) => f.startsWith("plan/"))
+    reason: (pr) => mergesDirectlyAsPlanPr(pr)
       ? MERGEABLE_PLAN_PR_REASON
       : "review success, required checks green — arming auto-merge",
   },
@@ -12134,11 +12138,13 @@ export function scannerBlockerAmbiguity(pr: OpenPrView, policy: Pick<SweepPolicy
   return undefined;
 }
 
-/** The human CHANGES_REQUESTED holds standing on an armed, green, `blocked` PR, read at this head. */
+/** The human CHANGES_REQUESTED holds standing on a green, `blocked` PR that is armed or is a plan PR the fleet
+ *  merges directly ({@link isHumanHoldCandidate}), read at this head. An unarmed plan PR is never armed, so
+ *  an armed-only test left its hold unread and the direct merge refused every pass with nothing said. */
 export function changesRequestedHold(pr: OpenPrView): ChangesRequestedHold[] | undefined {
   const blocker = pr.scannerBlocker;
   if (blocker === undefined || blocker.kind !== "changes-requested") return undefined;
-  if (blocker.headSha !== pr.headSha || !isScannerBlockerCandidate(pr)) return undefined;
+  if (blocker.headSha !== pr.headSha || !isHumanHoldCandidate(pr)) return undefined;
   return blocker.holds;
 }
 
@@ -12149,9 +12155,10 @@ export function changesRequestedReason(pr: OpenPrView): string {
     const at = hold.commitId === pr.headSha ? "this head" : `${hold.commitId.slice(0, 9)}, before head ${pr.headSha.slice(0, 9)}`;
     return `${hold.login} (review ${hold.reviewId}, at ${at})`;
   });
-  return `armed, checks green and review success, but mergeable_state is blocked by a CHANGES_REQUESTED review from ` +
-    `${holds.join(", ")} — no re-arm, branch refresh or repair can clear a person's hold; it needs that reviewer's ` +
-    `re-review (or the review dismissed), so escalating instead of waiting silently`;
+  const path = pr.autoMergeArmed === true ? "armed" : "an unarmed plan PR the fleet merges directly";
+  return `${path}, checks green and review success, but mergeable_state is blocked by a CHANGES_REQUESTED review from ` +
+    `${holds.join(", ")} — no re-arm, direct merge, branch refresh or repair can clear a person's hold; it needs that ` +
+    `reviewer's re-review (or the review dismissed), so escalating instead of waiting silently`;
 }
 
 /** W1-T3980 — the repair worker's only input, rendered through the ci-log fix mode's fenced,
