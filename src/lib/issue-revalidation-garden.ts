@@ -230,7 +230,10 @@ function judgeReceipt(verdict: RevalidationVerdict, source: JudgeReceipt["source
         (receipt.evidence_state === "absence-only" && !["resolved", "still-true"].includes(receipt.parsed_verdict!))) return empty("receipt-build-failed");
     return { version: 1, source: receipt.source, ...(receipt.source === "legacy" ? unavailableIdentity("legacy-text-only") : closedJudgeIdentity(receipt)), parser_state: receipt.parser_state,
       ...(receipt.parser_state === "parsed" ? { parsed_verdict: receipt.parsed_verdict } : {}), evidence_state: receipt.evidence_state };
-  } catch { return empty("receipt-build-failed"); }
+  } catch {
+    // Damaged optional evidence is explicitly unavailable; the issue decision remains the caller's.
+    return empty("receipt-build-failed");
+  }
 }
 
 export interface RevalidationVerdict {
@@ -847,7 +850,10 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
       let identity = unavailableIdentity("legacy-text-only"), observed = false;
       const text = await opts.judgeText(buildIssueRevalidationPrompt(issue, issueClass, evidence), issue.number, value => {
         observed = true;
-        try { identity = closedJudgeIdentity(value); } catch { identity = unavailableIdentity("receipt-build-failed"); }
+        try { identity = closedJudgeIdentity(value); } catch {
+          // A malformed observer payload loses attribution, never the already-returned judge text.
+          identity = unavailableIdentity("receipt-build-failed");
+        }
       });
       const parsed = parseIssueRevalidationJudgment(text);
       return { ...parsed.verdict, judgeEvidence: { version: 1, source: observed ? "model" : "legacy", ...identity,
@@ -926,7 +932,10 @@ export function issueRevalidationJudgeText(opts: { mount: Mount; cwd: string; se
             if (!["claude", "codex", "cash"].includes(provider)) { identityInvalid = true;return; }
             if (selections.has(assignment.id) && selections.get(assignment.id)!.signature !== signature) identityConflict = true;
             selections.set(assignment.id, { provider, signature });
-          } catch { identityInvalid = true; }
+          } catch {
+            // Unreadable selection metadata refuses attribution without altering worker execution.
+            identityInvalid = true;
+          }
         },
         onModelFallbackAttempt: attempt => {
           const id = attempt.selectionAssignmentId ?? attempt.result?.selectionAssignmentId;
@@ -934,7 +943,10 @@ export function issueRevalidationJudgeText(opts: { mount: Mount; cwd: string; se
           try {
             if (id && ASSIGNMENT_ID.test(id) && departed.size < 32) departed.add(id);
             else unknownFallback = true;
-          } catch { unknownFallback = true; }
+          } catch {
+            // Unreadable fallback provenance cannot identify the consumed attempt; money is retained above.
+            unknownFallback = true;
+          }
         },
       }, identity));
     } catch (error) { record(undefined, assignmentId); throw error; }
@@ -949,7 +961,10 @@ export function issueRevalidationJudgeText(opts: { mount: Mount; cwd: string; se
           finalId !== assignmentId || departed.has(finalId) ? unavailableIdentity("superseded-assignment") :
           selections.get(finalId)!.provider !== result.provider ? unavailableIdentity("provider-mismatch") :
           { identity_state: "observed", selection_assignment_id: finalId };
-      } catch { identity = unavailableIdentity("receipt-build-failed"); }
+      } catch {
+        // Optional final-result metadata failure is unavailable evidence, not a new worker failure.
+        identity = unavailableIdentity("receipt-build-failed");
+      }
       try { observe(identity); } catch { /* optional receipt observers cannot change the worker result */ }
     }
     return result.text;
