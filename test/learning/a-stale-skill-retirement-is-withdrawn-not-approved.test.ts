@@ -14,7 +14,7 @@ import {
   stageSkillLifecycleProposal,
 } from "#src/lib/skill-workshop.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { approveCommand } from "#src/run-task.js";
+import { approveCommand, skillLifecycleCommand } from "#src/run-task.js";
 
 // A retirement proposal carries the evidence as it stood when it was staged. Approval deleted the skill on that
 // proposal alone, and staging never removed one the ledger had since turned against. Approval now re-judges the
@@ -188,6 +188,29 @@ test("the gardener withdraws a stale staged retirement only from a complete ledg
     stageSkillLifecycleForAction(stateDir, root, action);
     assert.deepEqual(loadProposalRegistry(registryPath), [], "the same pass over a complete read withdraws it");
     assert.equal(existsSync(join(root, ".claude", "skills", SKILL, "SKILL.md")), true, "withdrawal deletes nothing");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rmd skill lifecycle reports the stale staged retirement it withdrew", () => {
+  const root = tmp("stale-retirement-cli-");
+  try {
+    const stateDir = join(root, "state");
+    const registryPath = join(stateDir, "inbox-proposals.json");
+    const skillsDir = join(root, "skills");
+    approveSkill(skillsDir);
+    writeLedger(stateDir, FAVORABLE);
+    stageRetirement(registryPath);
+    const errors: string[] = [];
+
+    const code = skillLifecycleCommand([SKILL], {
+      stateDir, registryPath, approvedSkillsDir: skillsDir, write: () => {}, error: (text) => errors.push(text),
+    });
+
+    assert.equal(code, 0, "a review candidate is not a failure");
+    assert.match(errors.join("\n"), /REFUSED REVIEW-CANDIDATE is read-only.*; withdrew the stale staged retirement from the inbox/);
+    assert.deepEqual(loadProposalRegistry(registryPath), []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
