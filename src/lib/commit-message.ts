@@ -7,7 +7,7 @@ import {
   hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES, typecheckEnv,
 } from "./typecheck-buildinfo.js";
 import { dirIsWritable, prepareTypecheckRun } from "./typecheck-run.js";
-import { acquireTestSlot, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
+import { admitStaticWork, readMemoryHeadroom, type StaticAdmission, type TestSlotOptions } from "./test-slot.js";
 import { observeSynchronousPreflightPhase, type PreflightPhaseReporter } from "./preflight-phase-progress.js";
 
 /**
@@ -577,13 +577,14 @@ export function typecheckStep(
   testSlot: TestSlotOptions = {},
   canWrite: (dir: string) => boolean = dirIsWritable,
 ): PreflightStepResult {
-  let slot: TestSlotLease | undefined;
+  let slot: StaticAdmission | undefined;
   try {
     const tsc = join(repoRoot, "node_modules", ".bin", "tsc");
     const prepared = prepareTypecheckRun(repoRoot, canWrite);
     if (!hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(repoRoot))) {
-      slot = acquireTestSlot("typecheck:preflight", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES, ...testSlot });
-      if (!testSlotExecutionAllowed(slot)) return { name: "typecheck", ok: false, detail: `typecheck: NOT_RUN (${slot.note})` };
+      // W1-T9951: a cold tsc is a memory cost, admitted by headroom alone — never behind a suite ticket or slot.
+      slot = admitStaticWork("typecheck:preflight", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES, ...testSlot });
+      if (!slot.executionAllowed) return { name: "typecheck", ok: false, detail: `typecheck: NOT_RUN (${slot.note})` };
     }
     const tight = lowMemoryTypecheckArgs((testSlot.memoryHeadroom ?? readMemoryHeadroom)(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES);
     const res = spawn(tsc, [...prepared.args, ...tight], { cwd: repoRoot, env: typecheckEnv(process.env) });

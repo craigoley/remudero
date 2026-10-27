@@ -17,6 +17,7 @@
     - test/a-capped-pr-with-repairable-proofs-is-repaired-not-escalated.test.ts
     - test/a-board-projection-shares-equal-string-values-within-its-rows.test.ts
     - test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts
+    - "src/lib/affected-suites.ts"
   status: queued
   priority: 2
   attempts: 0

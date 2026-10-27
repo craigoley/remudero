@@ -1,0 +1,176 @@
+- id: W1-T10865
+  title: "A product case records the local and hosted outcome of its own correlated native run, failures included, at the exact source head"
+  repo: remudero
+  depends_on:
+    - W1-T10618
+    - W1-T10799
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs:
+    - W1-T10615
+    - W1-T10618
+    - W1-T10799
+    - W1-T10866
+    - W1-T10867
+  files:
+    - src/lib/product-case.ts
+    - src/lib/product-build.ts
+    - src/lib/local-qualification-receipt.ts
+    - src/lib/ci-project-preflight.ts
+    - src/lib/ci-parity.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/lib/product-intent.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/plan/product-case-run-receipts.test.ts
+  status: queued
+  attempts: 0
+  rationale: >-
+    Filed for issue #14864 by plan-only run PLAN-clarify-1793116565507. This is step 1 of 3 of the product-case
+    receipt producer sequence. W1-T10866 covers deployment and W1-T10867 covers the physical phone. The run edits no
+    source, releases no hold, and alters neither the reviewed W1-T10823 claims (PR14824) nor any owner, cap or
+    failed receipt. OBSERVED at main 13037885: ProductCaseService.recordEvidence (src/lib/product-case.ts) writes
+    only outcome "succeeded". Its only callers are test/plan/wreckterra-product-case.test.ts. buildProductCaseRoutes
+    (src/lib/product-routes.ts) constructs the service and calls execute only. ProductResearchService.recordEvidence
+    (src/lib/product-research.ts) is a separate private method. It is a positive control and does not close this gap.
+    The existing durable product-job association is ProductBuildService's operationId (pbuild_<digest>) plus the kick
+    origin productBuildKickOrigin(productId, operationId). readTargetExecution (src/lib/product-build.ts) correlates
+    that origin to the console.kick_dispatched row and that run's run.start/verdict/run.error rows over the complete
+    rotated-plus-live union (readLedgerUnionRecordsSync, refuseIncomplete). The run writer (src/cli/commands/run-task-verb.ts)
+    logs pr.opened with pr_url and head_sha, pr.checks red with head_sha, pr.opened_with_failing_proof and one
+    terminal verdict. Settled by lookup: is this already filed or already decided? -> no. No shard, DECISIONS.md,
+    LEARNINGS.md or MASTER-PLAN.md entry names a production caller of case evidence. W1-T10618's rationale keeps the
+    collectors in its scope, but its source is credited (test/plan/wreckterra-product-case.test.ts,
+    test/console-api/serve/product-routes.test.ts), and this observation cannot re-admit it. W1-T10823 (PR14824)
+    expressly excludes production collectors. W1-T10799 excludes "evidence collectors (W1-T10618)". Settled by
+    lookup: does a durable product-to-run identity already exist, or must one be invented? -> it exists. It is the
+    operationId plus kick origin, which the daemon's own kick row carries (src/lib/product-build.ts
+    productBuildKickOrigin, readTargetExecution). Settled by lookup: can stored evidence express non-success? -> yes.
+    stageEvidence.outcome already admits queued/admitted/running/succeeded/failed/unknown/blocked
+    (src/lib/product-intent.ts). Only recordEvidence and the case projection narrow it to succeeded. Settled by
+    lookup: is there an existing required-check read? -> yes. Branch-protection required_status_checks is read
+    through the bounded gh transport in src/lib/head-rehome.ts and src/lib/sweep.ts. Settled by lookup: why depend
+    on W1-T10799? -> it changes which daemon root (and therefore which ledger) a daemonless Wreckterra kick lands in,
+    and it edits src/lib/product-build.ts. Settled by lookup: is the case reply contract fixed? -> yes.
+    ProductCaseResponse local/hosted items are {id, reference} with additionalProperties false (openapi/daemon.yaml),
+    so showing an outcome needs a contract change.
+  design: >-
+    Wire the FIRST live producer bridge: the existing case "build" action, replayed with the same command, is the
+    reconciler boundary. It adds no new route, no evidence-writing command, no UI toggle and no client-supplied
+    outcome. (1) Identity. ProductBuildService hands back, internally, the ExecutionRead its own replay already
+    computes (runId, the daemon state root it read, and the operationId/origin). Do not re-derive a daemon root in
+    product-case.ts. Never infer a run from matching task text or branch names. (2) Local qualification is separate from execution completion. Preserve the correlated native run's actual
+    execution state, but never map a final merged/ended/normal run verdict to local test success. Two actual existing producer contracts must remain distinct. Core's scripts/preflight-author.mjs writes
+    coverage/preflight-author.json and per-capture receipts. Wreckterra's AGENTS instead names its registered
+    frontend commands. The existing resolveProjectPreflight/runProjectPreflight in src/lib/ci-project-preflight.ts
+    already selects craigoley/wreckterra's pinned typecheck, Vitest, Vite build and existing quality commands.
+    preflightCommand in src/run-task.ts serializes their steps, qualityProfile, headSha and runContext through
+    buildPreflightSummary into coverage/preflight-summary.json. This is the existing consumer producer, not a
+    Core-author receipt. Keep execution, profile pins, empty-selection behavior, verdicts and resource gates
+    unchanged; preserve actual observations rather than changing a measurement to make it pass. Add a bounded typed
+    local-qualification receipt reader/capture helper in src/lib/local-qualification-receipt.ts. Wire its real default
+    producer call into the maintained runTaskBody path in src/cli/commands/run-task-verb.ts after the worker's final
+    source commit is known and before its owned worktree is retired. Select only the real fixed receipt paths above from the verified repository/profile beneath the owned
+    worktree, never an HTTP-supplied path or transcript assertion. Validate each producer's real schema and exact
+    source head, actual measured suite/test summary, complete/partial verdict and captured result provenance.
+    boundedSuiteLeaf currently discards successful default-subprocess output. In src/lib/ci-parity.ts retain bounded
+    actual command/output/completion metadata on that existing result; in src/lib/ci-project-preflight.ts preserve
+    the consumer profile, exact command and clean source-head observations before/after execution. The existing
+    result spread and buildPreflightSummary must carry the optional typed observations into the durable summary.
+    Reuse existing output bounds, and preserve the existing exit and admission behavior on every arm. Do not add a
+    second quality launcher, a new audit or scan, a changed command, test skip, timing/quality limit or new service.
+    Parse positive executed Vitest/Node counts from actual complete output, not from the number of successful
+    steps or a zero exit alone. Missing, truncated, ambiguous, all-skipped, dirty/changed-tree or legacy data without
+    these observations stays unknown/partial for local qualification even if the old summary says ok. No fabricated
+    frontend count or Core-author substitute is permitted.
+    Preserve the original author verdict, errors and earlier attempts: failed, NOT_RUN, over-capacity, zero-test or
+    incomplete results cannot become full local PASS. Persist a bounded immutable run/task/head-correlated snapshot
+    and digest under the existing state root before cleanup, and log its genuine artifact reference on that same run.
+    Missing, unreadable, wrong-head or uncorrelated evidence stays unknown; the capture cannot fail a healthy source
+    run solely because a receipt is unavailable and cannot rerun tests or launch a worker. The bridge reads the real
+    snapshot through the same helper and verifies its digest and matching native run/head row over the complete
+    union. Local succeeded requires an actual complete passing local qualification receipt at that head, with
+    positive nonzero measured tests; execution completion remains a different field. A later native repair head
+    with no corresponding local snapshot stays unknown instead of inheriting the earlier head's result. Record
+    actor, productId, objectiveRevision, repository, taskId, operationId, runId and actual qualified source head as
+    typed receipt metadata. (3) Hosted channel. This channel is separate from local. Use the run's own pr_url and head_sha
+    and the existing bounded gh transport. Read the PR (base repository id must equal the product repository id; the
+    live head must equal the logged head, otherwise the receipt is stale/unknown), the base branch's actual required
+    status checks through a supported existing bounded metadata/policy reader, the check runs and statuses at that exact head, and the
+    latest review per reviewer at that head. succeeded requires EVERY current required context to conclude success at that exact head and the actual
+    maintained native review protocol, resolved through the existing trusted review provenance reader, with no
+    standing decisive human changes-requested hold. A native COMMENTED/PASS review can satisfy that protocol without
+    an APPROVED submission; arbitrary green contexts or comment prose cannot. Do not apply the plan-only task/brief
+    verifier to a source PR. Reuse the actual trusted native-review and standing-hold contracts instead. One arbitrary green context is not enough.
+    Pending is running. A failed, cancelled or timed-out required context is failed, with the context and
+    conclusion in the reference label. An unreadable or truncated page (100 or more items), or an empty or
+    unreadable required set, is unknown. (4) Contract. Extend recordEvidence minimally to take a typed outcome from
+    the stored enum and bounded typed local/hosted receipt metadata. Declare the optional discriminated receipt
+    metadata in the strict stored stageEvidence schema in src/lib/product-intent.ts, with known bounded fields for
+    channel, operation/run/task, repository/head and actual qualification reference/summary. Preserve old records
+    without that metadata as legacy/unknown rather than synthesizing a result. It is trusted-mechanism data and must
+    remain excluded from browser brief writes and generic HTTP evidence writing. Do not pack commands or opaque
+    JSON in labels/URLs. Project typed outcome and correlation fields for the new local/hosted items and declare
+    their exact OpenAPI schema, then regenerate
+    packages/api-client/src/schema.d.ts with the maintained generator. Earlier failed attempts and
+    other-head/other-objective receipts stay stored, and never project as current success. (5) Idempotency and
+    concurrency. Derive the evidence id and the store requestId deterministically from (productId,
+    objectiveRevision, channel, operationId, runId, head, outcome). Then replay after response loss, duplicated
+    completion, two service instances and a process restart all converge on one receipt. Write with the read
+    revision. On stale_revision, re-read and retry once. Record nothing as current success when the objective
+    changed in between. A full product evidence store (128) is an explicit capacity refusal and never evicts a
+    receipt. Bound the ledger read to the run's requestedAt window and the gh reads to the existing limits. Plan
+    review, plan merge, job admission and queued/admitted/running are never local or hosted test completion. Out of
+    scope: deployment (W1-T10866), the physical phone (W1-T10867), native review, author qualification, source
+    merge, runtime adoption, OleyArcade catalog edits, live Wreckterra receipts, and first gameplay. First gameplay
+    stays signed-in Console C4. Holds, caps, budgets, claims and Console148/149/150 and W1-T10823 ownership are
+    unchanged. TEST. One whole file at test/plan/product-case-run-receipts.test.ts, placed beside
+    test/plan/wreckterra-product-case.test.ts, whose import set it shares. Confirm the placement with rmd test-place
+    from the actual imports before writing it, and use the #src/#test aliases. Drive buildProductCaseRoutes'
+    handler with the default ProductCaseService and ProductBuildService over a real ProductIntentStore directory,
+    real rotated-plus-live ledger files, and a controlled gh subprocess shim at the transport boundary. A fake
+    injected recordEvidence is not a proof. Qualify the actual default runTaskBody capture boundary with a controlled
+    worker fixture and known final commit. Qualify both the real Core author artifact and the registered consumer's
+    actual public preflight/default-subprocess result path, using real bounded fixture commands, pinned test tooling
+    and durable files. Prove nonzero measured test output survives the default consumer producer and capture; a
+    fake injected preflight result or hand-written success JSON cannot prove that path. Prove the durable native
+    artifact, ledger correlation and served reply after worktree retirement. A unit fake calling the helper is not
+    that default producer proof. Add explicit failed/missing/partial/over-capacity local qualification, native
+    COMMENTED/PASS without APPROVED, standing human hold, wrong-head snapshot and corrupt artifact controls. Remove
+    each new qualification/provenance guard independently and require the corresponding test to fail then pass when
+    restored. Run actual test-place from the written imports and obtain a normal scope correction if it disagrees.
+    No access expansion is required: if the configured existing required-context read is unavailable, record unknown.
+    No collector may mint a missing qualification artifact or substitute a final run verdict. W1-T10674's verified
+    target selection and all existing consumer script/profile/capacity assertions remain intact. Source lookup
+    establishes that Wreckterra does not use the Core author script; refresh a complete all-open-head subject census
+    for this consumer-result retention surface as well as case receipts before publishing this correction.
+    The new helper has two named production entries: captureLocalQualificationReceipt is called by the existing
+    src/cli/commands/run-task-verb.ts final-source capture boundary, and readLocalQualificationReceipt is called by
+    src/lib/product-case.ts while reconciling the trusted durable snapshot. Neither entry launches qualification.
+  acceptance:
+    - claim: "replaying the product build through the served case route records a local and a hosted receipt bound to the actor, product, objective, repository, task, operation, native run and exact head, reading only that run's ledger rows and that head's required checks and reviews"
+      proof: "unit test: W1-T10865: served reconciliation binds real local and hosted receipts"
+    - claim: "failed, cancelled, pending, stale-head, foreign-repository, foreign-run, rotated-but-incomplete and unreadable inputs record an explicit failed, running or unknown outcome, never succeeded, and an earlier failed receipt stays stored beside a later success"
+      proof: "unit test: W1-T10865: failed incomplete foreign and stale evidence cannot pass"
+    - claim: "replay after response loss, a second service instance, a process restart and a concurrent product revision change converge on one receipt per run and head without overwriting the concurrent edit"
+      proof: "unit test: W1-T10865: replay restart and concurrent edits retain one receipt"
+    - claim: "the served case reply and its regenerated contract show the outcome of each local and hosted item, while the HTTP command union still accepts no evidence writer"
+      proof: "unit test: W1-T10865: served receipts keep typed outcomes without an HTTP writer"
+    - claim: "the maintained final-source run path calls the real local qualification capture helper before retiring its owned worktree"
+      proof: "grep: captureLocalQualificationReceipt( in src/cli/commands/run-task-verb.ts"
+    - claim: "the product case producer calls the real local qualification receipt reader when reconciling its correlated run"
+      proof: "grep: readLocalQualificationReceipt( in src/lib/product-case.ts"
+  falsifier: >-
+    Remove each new mechanism on its own: the runId-scoped row filter, the exhaustive verdict table's unknown
+    default, the exact-head equality, the every-required-context rule, the deterministic evidence id, and the
+    stale-revision re-read. Each removal must make a named test in test/plan/product-case-run-receipts.test.ts fail
+    against the same real-file fixture, and the test must pass once that piece is restored. A whole pre-existing
+    passing file, a zero-test wrapper or a fake-only recordEvidence call never counts. Fixture receipts never stand
+    in for live Wreckterra evidence.

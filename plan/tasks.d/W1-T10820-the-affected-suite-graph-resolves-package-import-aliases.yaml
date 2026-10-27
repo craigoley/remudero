@@ -11,6 +11,7 @@
   plan_refs: [W1-T5702, W1-T10043, W1-T10354, W1-T9864, W1-T4404, W1-T5940, W1-T5705, W1-T9483]
   files:
     - src/lib/affected-suites.ts
+    - src/lib/rule-suites.ts
     - scripts/affected-reach-baseline.json
     - test/the-affected-suite-reach-ratchet.test.ts
     - test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts
@@ -110,6 +111,11 @@
        assertion first proves its population is non-empty: at least one tracked suite imports
        "#src/run-task.js". Then every such suite must be in the graph's importers of
        src/run-task.ts. The ratchet suite gains the alias-importer and one-transition tests.
+    7. Register the new real-tree test in src/lib/rule-suites.ts under the existing predicate:
+       it has no grandfather baseline or exemption table, so clause (c) refuses fast-lane
+       admission. This is a reasoned population record, not a testing exclusion: the suite
+       remains mandatory in normal full CI. Do not change scripts, thresholds or any existing
+       member, and preserve every real-tree assertion and the one-time reach remeasurement.
     Out of scope: src/lib/test-placement.ts's own prefix scan; scripts/mutation-ratchet.mjs
     (W1-T10354, which may reuse the resolver if exported, with no dependency either way); the
     queued selector-shadow-miss tasks; flipping RMD_AFFECTED_SUITE_LIVE.

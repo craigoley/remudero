@@ -74,7 +74,7 @@ test("W1-T3116: full gc is authorized only with a failed-gc marker, no active la
   const decide = (s: ReturnType<typeof survey>) => maintenance.decideRepositoryMaintenance(s, fresh(), policy, 10);
   assert.equal(decide(survey("failure")).verdict, "full-gc-due");
   assert.equal(decide(survey()).verdict, "incremental-due");
-  assert.equal(decide({ ...survey("failure"), activeLanes: 1 }).verdict, "deferred");
+  assert.equal(decide({ ...survey("failure"), activeLanes: policy.maxActiveLanes + 1 }).verdict, "deferred");
   assert.equal(decide({ ...survey("failure"), readable: false }).verdict, "deferred");
   assert.equal(decide({ ...survey(), disk: "unknown" }).verdict, "deferred");
   assert.equal(fresh().nextEligibleAt, 0);
@@ -264,7 +264,7 @@ test("a lane admitted during the object survey vetoes full GC", async () => {
   const statePath = join(store.dir, "state.json");
   await maintenance.runRepositoryMaintenance(store.dir, statePath, policy, () => {}, {
     context: () => ({ activeLanes: lanes, disk: "healthy" }),
-    survey: async () => { lanes = 1; return survey("failed"); },
+    survey: async () => { lanes = policy.maxActiveLanes + 1; return survey("failed"); },
     run: async () => { assert.fail("new lane vetoes full GC"); },
   });
   assert.equal(maintenance.readMaintenanceState(statePath).lastOutcome, "defer");

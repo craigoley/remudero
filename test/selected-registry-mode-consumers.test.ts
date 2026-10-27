@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +28,9 @@ const pr = { prUrl: "https://github.com/owner/repo/pull/1", prNumber: 1,
 function fixture(mode: string | null = "shadow", legacy: "shadow" | "live" = "live", optedIn = true,
   physical?: "armAuto" | "mergeDirect" | "enqueue") {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-mode-consumer-`));
+  mkdirSync(join(root, "state"));
+  writeFileSync(join(root, "state", "ledger.ndjson"), "");
+  writeFileSync(join(root, "ledger.ndjson"), "");
   const selected = join(root, "selected.yaml"), other = join(root, "other.yaml");
   writeFileSync(selected, registry(mode === null ? undefined : mode, root)); writeFileSync(other, registry("live", root));
   const prior = { path: process.env.RMD_INSTANCE_REGISTRY, name: process.env.RMD_INSTANCE_NAME };
@@ -409,7 +412,7 @@ test("selected mode rechecks after actual asynchronous security admission before
         output: { title: "No new alerts in code changed by this pull request",
           summary: "[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A11468+tool%3ACodeQL+is%3Aopen)." } }] };
       return { state: "open", head: { sha: head }, base: { sha: base, ref: "main", repo: { full_name: "craigoley/remudero" } }, changed_files: 1 };
-    }, head, q);
+    }, head, q, () => {});
     assert.ok(reads > 0); assert.equal(writes, 1, "SHADOW observes, it does not deny the security-approved independent effect");
     assert.equal(rows.at(-1)?.selected_outcome, "would-refuse"); assert.equal(rows.at(-1)?.reason, "revision_changed");
     assert.equal(rows.at(-1)?.binding_digest, original); assert.equal(rows.at(-1)?.publication_permission, "not-granted");

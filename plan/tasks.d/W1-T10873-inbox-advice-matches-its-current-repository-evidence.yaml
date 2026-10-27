@@ -1,0 +1,97 @@
+- id: W1-T10873
+  title: "INBOX ADVICE MATCHES ITS CURRENT REPOSITORY EVIDENCE — generate against the selected target checkout and independently qualify cached advice before serving it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  author_class: machine
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high
+  band_meaning: span
+  origin: "console-followup: signed-in Console Inbox foreign-evidence observation console-inbox-foreign-evidence-20261027, captured once and still queued, not yet a landed feedback record"
+  plan_refs: [W1-T8950, W1-T10431, W1-T5897, W1-T6012]
+  files: [src/cli/commands/daemon.ts, src/lib/inbox-recommendation.ts, src/lib/panel-graph.ts, src/lib/inbox-view.ts, test/an-inbox-item-carries-a-recommended-decision.test.ts, test/daemon-command-retro-wiring.test.ts, test/every-inbox-page-shares-its-classification-snapshot.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    A signed-in Core-to-Console header switch retained the Inbox route and selected Console correctly.
+    Its stale read-only Console snapshot nevertheless showed verify-human:W1-T1015 with obsolete=true
+    advice citing PR6377 and e8ee75935bb9fb16e3f05088de4d610ae7710543. GraphQL verified that PR and
+    commit in Core, while Console returned NOT_FOUND. Both the179-task mounted Console plan and the
+    actual216-task daemon plan contain only remudero-console tasks and do not declare W1-T1015.
+    Distinct stable Console proposal and recommendation files actually contain that foreign task;
+    this is not merely a renderer URL or inode-alias theory. Real Git resolved all three evidence
+    forms in Core and none in Console, with positive shard inventories on both sides.
+    At audited main aa90fdc4405e9e537ef04c80f58eebe566e3a0d9, daemon.ts wires the recommendation
+    evidence and seed through code repoRoot instead of its already selected targetCheckoutRoot.
+    The live non-self daemon process separately has the Core code checkout as its cwd. The reader
+    recommendationFor compares sourceFingerprint against stored.shardBlob, not independently read
+    current repository/task evidence, and served the observed cached advice in the default helper.
+    This establishes two concrete source boundaries; it does not prove all timeouts, stale plans,
+    foreign proposals or readiness deficits share that cause. The mounted-checkout repair remains
+    with ops, and CI infrastructure plus Azure memory remain with their owners.
+    Before reserving, every one of17 API-open immutable heads was compared against its merge base
+    with main; all had positive subject controls and none changed this subject or four source paths.
+    W1-T8950 already promises current task-blob advice, but its implemented reader self-checks the cache.
+  design: |
+    Generation uses the selected target repository for Git evidence, plan layout and seed reads.
+    Use the already resolved target checkout and repository identity, retaining correct self-target
+    behavior, the existing paced writer and configured provider. Do not repoint a registry or mount,
+    rewrite a global seed, change cadence or induce a new live model/gardener pass as test evidence.
+    Capture a fixed verified main commit before reading its tree, task text, history and cited evidence;
+    do not mix multiple mutable origin/main reads into one recommendation. Recheck the selected source
+    before storing or publishing, and explicitly refuse incomplete, changed or foreign source evidence.
+    Cached advice requires independent current repository and task evidence from one captured pass.
+    A stored fingerprint and its own stored blob cannot certify one another. Qualify task references
+    using the selected repository's actual current task record, including monolith tasks; absent,
+    changed, malformed, foreign or unavailable source evidence omits advice and its route. A legacy
+    unproven entry must not acquire a repository just because that is what the user currently selected.
+    Correct current advice, self-target behavior and non-task recommendations retain their meaning
+    when their actual selected-repository source is qualified. Preserve raw historical records,
+    proposals, threads, operator decisions, genuine asks and existing action/server permission checks.
+    All cached Inbox projections use the same independently qualified captured evidence.
+    Carry qualification through existing InboxStores and the persisted classification, then use it
+    in legacy, materialized and continuation pages, including set-aside views. HTTP reads perform no
+    Git, whole-ledger scan, model call or recommendation-store mutation. On failure preserve prior
+    historical evidence explicitly rather than present it as current advice or fabricate a safe zero.
+    Extend only the three existing physical suites. Drive the real daemon constructor far enough to
+    exercise the actual non-self recommendation reader/seed ports; use two real temporary Git repos
+    with distinct task blobs and citations and a positive self-target control. Isolate fixture config
+    without assigning HOME or another common system option. New imports use package aliases and root
+    helpers. Exercise the actual cached producer-to-legacy/materialized/page path, not only pure helpers
+    or source-text greps. Include same task IDs in two repos, a moved task blob with unchanged summary,
+    a missing/unknown source, legacy unqualified entries, monolith and non-task controls, valid matching
+    advice, source drift during generation and unreadable evidence. Preserve existing assertion coverage.
+    Both source-boundary regressions must fail with their own correction removed and pass restored.
+    Qualify source-positive coverage, canonical stored acceptance, census, native author, governed
+    semantic review, every hosted security/test check and protected merge. Filing records no risk
+    verdict; only an actual native judge or operator ruling may release the machine-authored task.
+    No automatic Inbox decisions, archive/readmark cleanup, captured-reply replay, provider or budget
+    setting, permission, service/restart/deployment, guard, CI or Azure-memory policy change is included.
+  acceptance:
+    - claim: "The actual non-self daemon recommendation ports use the selected target Git repository, plan and seed; real two-repository evidence plus a self-target positive prevents Core evidence leaking into Console advice"
+      proof: "unit test: inbox recommendation wiring reads the selected target repository"
+    - claim: "Changed, missing, foreign or unqualified current source evidence omits cached advice and its route, while valid selected-repository task, monolith and non-task advice remains and historical records are preserved"
+      proof: "unit test: inbox advice requires independently captured current repository evidence"
+    - claim: "One captured qualification is shared by actual legacy, materialized and continuation Inbox reads without hot-route Git, model calls, raw-store writes or false current evidence on source failure"
+      proof: "unit test: every inbox page shares independently qualified recommendation evidence"
+    - claim: "The default real Git reader fixes its source commit and refuses cross-repository or mid-pass source drift; separate source-removal controls prove both producer wiring and cached-reader corrections matter"
+      proof: "unit test: a fixed recommendation source refuses repository and revision drift"
+  falsifier: |
+    Restore only daemon.ts evidence/seed wiring to code repoRoot: the two-repository constructor
+    control must fail. Separately restore the reader's cached fingerprint/cached-blob self-check:
+    unchanged-summary/current-source and foreign cached advice controls must fail. Restore both fixes
+    and pass all controls, including positive actual same-repository advice and preserved raw history.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.86
+    reasons:
+      - "The declared files are 4 existing source modules and 3 test suites, all existing at base. The description states it adds no permission, deploy, CI, merge or review policy change, and no budget or provider setting change."
+      - "The description says raw history, proposals and operator decisions are preserved. It omits cached advice rather than deleting data, so it is not irreversible."
+      - "All four acceptance criteria are checkable by unit tests (verify: auto), and the defect is described with concrete, verifiable evidence (foreign task and PR in Console advice, daemon wiring through repoRoot instead of targetCheckoutRoot)."
+      - "The family track record is 8 merged, 5 operator-approved and 0 declined, and the gates state is clean. No bounded change view was supplied, so this verdict rests on the description alone."
+    judged_at: "2026-10-27T18:00:34.610Z"
+    pin: "d3037355641d0722e01dada0ee6702722d5a6b7d0591fad717e1821b7a363f36"

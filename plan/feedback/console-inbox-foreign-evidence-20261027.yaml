@@ -1,0 +1,64 @@
+id: console-inbox-foreign-evidence-20261027
+ts: 2026-10-27T16:35:48.839Z
+raw: >-
+  OBSERVED signed-in repository-boundary evidence defect, 2026-10-27
+  around16:24–16:29 UTC. Switching the header from craigoley/remudero to
+  craigoley/remudero-console preserved /inbox and selected-repository links. Its
+  first classification read timed out after5000ms; one normal UI refresh
+  retained a stale Console-classification clock16:17:35.352Z and correctly
+  withheld all write decisions. That stale Console Inbox displayed
+  verify-human:W1-T1015 with a possibly-resolved recommendation citing #6377 and
+  commit e8ee75935bb9fb16e3f05088de4d610ae7710543. The rendered links pointed to
+  craigoley/remudero-console/pull/6377 and the same Console commit path. A
+  current native broker GraphQL comparison at16:29:34 positively identifies Core
+  PR6377 as MERGED on2026-09-21, exact merge
+  e8ee75935bb9fb16e3f05088de4d610ae7710543, title fix(sweep): attribute
+  self-updated review heads (W1-T1015). The Console PR and commit fields are
+  null; GraphQL returned the explicit NOT_FOUND error for Console PR6377, so CLI
+  status1 is an expected partial GraphQL result, not a successful whole-response
+  assertion. Do not treat those links as valid Console evidence.
+
+
+  Source inspection of an immutable Console head0dfef730 finds ThreadMailbox.tsx
+  recommendationEvidence mapping bare #numbers and SHAs into the selected
+  repository; its existing inbox-evidence-repository-scope tests deliberately
+  verify selected-source scoping. This does NOT justify forcing Core links
+  globally, treating every shared-looking task ID as Core, or weakening those
+  tests. The actual producer/retained-source identity of this stale W1-T1015
+  recommendation has not been traced. Distinguish an unqualified producer
+  recommendation, retained historical migration, malformed metadata, and a
+  renderer context bug before choosing a repair. The same bounded localhost
+  interval timed out even /v1/version and Core Inbox before recovering b063, so
+  general latency is separate evidence and is not proven to be caused by the
+  stale non-core plan. Existing W1-T6012 and registry/mount work remain with
+  their owners; CI infrastructure and Azure memory are separate chats.
+
+
+  Follow up here under the existing Console/Inbox scope: reconcile current main,
+  all open PR heads and owners before any filing; trace selected-instance roots,
+  cached proposal/recommendation origin, task and source identities through the
+  real instance gateway and Console reader into rendered links. Add a physical
+  multi-repository regression with identical task IDs and a Core-only PR/commit,
+  plus positive legitimate Console evidence. Preserve all old history, real
+  human holds, source freshness and server action fences; ambiguous/foreign
+  evidence must never authorize a selected-repository decision or be silently
+  relabeled. Use explicit verified source identity or retain ambiguous evidence
+  as readable non-actionable information. Repair the earliest proven boundary,
+  not just the symptom, and keep all native judgment, task scope,
+  source-positive coverage, review, hosted CI and protected merge gates. No
+  source repair, new action authority, deployment, provider calls or settings
+  changes are granted by recording this observation. Original117/9 identities
+  and the once-captured reply are unchanged; no reply, readmark, approval,
+  reframe, archive or replay was sent.
+attachments:
+  - https://github.com/craigoley/remudero/pull/6377
+  - https://github.com/craigoley/remudero-console/blob/0dfef7307612b2b5bd417ac4a43b4aaef341baf1/app/inbox/_components/ThreadMailbox.tsx
+  - https://github.com/craigoley/remudero-console/blob/0dfef7307612b2b5bd417ac4a43b4aaef341baf1/tests/unit/inbox-evidence-repository-scope.test.tsx
+origin: repair#console-inbox-foreign-evidence
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: console-followup:inbox-foreign-evidence:20261027-v1
+thread_id: null

@@ -186,3 +186,21 @@ test("W1-T8167: an open stall issue does not stand a fix round down", async () =
   await effects.escalate(stalled, reason, { ...renderClarificationQuestion(stalled, reason), cause: "stage-stall" });
   assert.equal(issues.created.length, 1);
 });
+
+test("#14898: a stalled stage whose PR a fresh read finds merged or closed is never escalated", async () => {
+  resetIdleReviewMemo();
+  for (const state of ["MERGED", "CLOSED"]) {
+    const f = fixture(33);
+    await runSweep([pr], { ...f.deps, actionable: () => false, readLiveState: () => ({ ok: true, state }) });
+    assert.equal(f.escalations.length, 0, state);
+    assert.equal(f.rows("pr.stuck").length, 0, state);
+    assert.equal(f.rows("pr.stuck.not_open")[0]?.reason, `state is ${state} (only an OPEN PR carries a live block)`);
+  }
+  // An open PR, a failed read and a throwing read all escalate exactly as before.
+  for (const readLiveState of [() => ({ ok: true, state: "OPEN" }), () => ({ ok: false }), () => { throw new Error("gh down"); }]) {
+    const f = fixture(33);
+    await runSweep([pr], { ...f.deps, actionable: () => false, readLiveState });
+    assert.equal(f.escalations.length, 1);
+    assert.equal(f.rows("pr.stuck.not_open").length, 0);
+  }
+});

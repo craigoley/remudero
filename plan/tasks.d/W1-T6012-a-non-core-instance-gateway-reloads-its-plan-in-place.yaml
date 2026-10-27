@@ -12,7 +12,7 @@
   plan_refs: [W1-T4228, W1-T4481, W1-T4906, W1-T5060]
   files: [src/lib/instance-gateway.ts, src/lib/board.ts, test/one-gateway-serves-every-instance.test.ts]
   status: queued
-  dispatch_hold: true  # filing only: existing source owner and fresh native judgment must be resolved before implementation
+  dispatch_hold: false # operator-approved 2026-10-27 after preserved-WIP source handoff
   priority: 3
   attempts: 0
   author_class: machine
@@ -61,3 +61,4 @@
       - "The family has no track record (0 merged/declined), which is neutral, and the filed rationale states there is no conflicting open PR or branch touching the file."
     judged_at: "2026-10-27T16:48:24.648Z"
     pin: "62319651ee9e8fb28944e90a7c415cdc1a7bebda22b225c7a281d72faa2d56b3"
+  note: "2026-10-27 operator-approved bounded source handoff: remote575da92a3d2a3885df2f35730bc233c91e10485e is retained, with exact14890-byte local patch SHA256507bc1aefb1e9cdac4f3a884c7e63286f0483304cf12a51792ae9280818b8065. The October11 worker exited and handed off; its old2748ccbb4e44 container is absent from this Docker host. Current namespace boot is2026-10-27T18:06:34.750Z. Reachable remote refs, complete current process/cwd and active-lock controls show no active source holder. No claim was forcibly released. Native current live-input handoff classification separately returned no pendingW6012 checkpoint; this is not a claim that old archive evidence never existed, and must be rechecked before source dispatch. Reconcile preserved WIP as reference on current main; do not import its undeclared standalone test or force the old branch. Current three-file scope,3USD budget, pinned native low/proceed judgment and all gates remain unchanged. PR14817 only changes import aliases in the shared approved gateway suite: coordinate its owner or wait for normal merge before source edits. Mount/source-origin readiness remains ops-owned. No service or deployment authority is granted."
