@@ -145,8 +145,14 @@ test("W1-T9952: darwin memory headroom gates admission", async (t) => {
   assert.equal(waits.outcome, "wait_bound_exceeded", "CPU has room; memory read from vm_stat closes the slot");
   assert.match(waits.note, /memory headroom 1016 MiB < 1280 MiB for this run and the live holders' peaks/);
   assert.equal(reports, 1, "one report served every slot of that poll");
-  const waitsAsync = await acquireTestSlotAsync("suite-async", { ...opts, memoryBytes: 0.5 * GiB, waitBoundMs: 0 });
+  // Each report moves a fake clock 10 ms and the wait starts after the first: a 25 ms bound is four polls on any host.
+  let now = Date.now();
+  const clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
+  const before = reports;
+  const waitsAsync = await acquireTestSlotAsync("suite-async", { ...opts, clock, vmStat: () => { now += 10; return vmStat(); },
+    memoryBytes: 0.5 * GiB, waitBoundMs: 25, pollMs: 1 });
   assert.equal(waitsAsync.outcome, "wait_bound_exceeded", "the async driver reads the same darwin headroom");
+  assert.equal(reports - before, 4, "the async driver re-reads vm_stat before every poll");
   const fits = acquireTestSlot("small", { ...opts, memoryBytes: 0.2 * GiB, waitBoundMs: 0 });
   assert.equal(fits.outcome, "acquired", "a peak the headroom holds beside the holder's is admitted");
   assert.match(fits.note, /memory headroom 1016 MiB, named peaks 768 MiB$/);
