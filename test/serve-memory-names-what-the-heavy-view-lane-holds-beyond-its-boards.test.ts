@@ -1,7 +1,7 @@
 // test/serve-memory-names-what-the-heavy-view-lane-holds-beyond-its-boards.test.ts — W1-T9983.
 // Retained-view accounting is named, cached at fill, and never substitutes for a heap reading.
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
@@ -15,7 +15,7 @@ import {
 } from "#src/lib/read-model-worker.js";
 import { createRepositoriesReadModelView, createRepositoriesSourcePublisher } from "#src/lib/repositories-view.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { closeReadModelFixture, readModelFixtureDir } from "#test/helpers/read-model-fixture.js";
 import { answerThreadHeaps, THREAD_HEAPS_REQUEST, type WorkerThread } from "#src/lib/worker-heaps.js";
 import * as heapMemory from "#src/lib/worker-heaps.js";
 import { createWorkstreamsView } from "#src/lib/workstreams-view.js";
@@ -33,9 +33,7 @@ const GITHUB = {
 } as unknown as GitHub;
 
 function scratch(t: TestContext): string {
-  const root = makeTempDir("heavy-view-holders");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  return root;
+  return readModelFixtureDir(t, "heavy-view-holders");
 }
 
 function sizes(view: unknown): Holds {
@@ -99,7 +97,7 @@ test("W1-T9983: a lane that never builds now still reports its holds", (t) => {
   const projector = createReadModelTicker({ stateDir, instances, views: [], oracle: "off", holder: "holders-fixture", clock: CLOCK,
     post: (message) => void projectorPosts.push(message) });
   projector.start();
-  t.after(() => projector.release());
+  closeReadModelFixture(t, () => projector.release());
   const posts: ReadModelWorkerMessage[] = [];
   let built = 0;
   const view = { name: "workstreams", version: 1, perInstance: true,
@@ -110,7 +108,7 @@ test("W1-T9983: a lane that never builds now still reports its holds", (t) => {
   const lane = createReadModelTicker({ stateDir, instances, views: [view], viewsOnly: true, lane: "fast", oracle: "off", holder: "holders-fixture", clock: CLOCK,
     passBudgetMs: 1_000_000, post: (message) => void posts.push(message) });
   lane.start();
-  t.after(() => lane.release());
+  closeReadModelFixture(t, () => lane.release());
   projector.tick();
   const state = projectorPosts.findLast((message) => message.type === "state");
   assert.ok(state?.type === "state");
@@ -201,7 +199,7 @@ test("W1-T9983: the real now view names its state beside its boards", (t) => {
   const ledgerPath = join(ledgerDir, "ledger.ndjson");
   writeFileSync(ledgerPath, "");
   const db = openProjectorReadModel(join(root, "home"), "core", CLOCK);
-  t.after(() => db.close());
+  closeReadModelFixture(t, () => db.close());
   const lease = acquireLease(db, { clock: CLOCK, ttlMs: 1e12 });
   assert.ok(lease.ok);
   const projector = createLedgerProjector({ ledgerDir, db, lease: lease.lease, clock: CLOCK });

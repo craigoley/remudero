@@ -1285,10 +1285,31 @@ function dialectGrepMatchedLineIsComment(line: string): boolean {
 interface MatchedLineCommentContext {
   pattern: string;
   fileText: string;
+  /** The matched file's repo-relative path. Its extension picks the comment grammar
+   *  (W1-T10372); omitted, the legacy JavaScript reading applies. */
+  path?: string;
 }
 
-function commentMaskByLine(fileText: string): boolean[][] {
+/** Which characters count as a comment in a file (W1-T10372): `js` reads `//` and `/* *\/`,
+ *  `yaml` reads an unquoted `#` to end of line, and `none` (Markdown, or any extension with no
+ *  known grammar) masks nothing. */
+type CommentGrammar = "js" | "yaml" | "none";
+
+const JS_COMMENT_EXTENSIONS = new Set(["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]);
+const YAML_COMMENT_EXTENSIONS = new Set(["yaml", "yml"]);
+
+function commentGrammarForPath(path: string | undefined): CommentGrammar {
+  if (path === undefined) return "js";
+  const ext = /\.([^./\\]+)$/.exec(path)?.[1]?.toLowerCase();
+  if (ext !== undefined && JS_COMMENT_EXTENSIONS.has(ext)) return "js";
+  if (ext !== undefined && YAML_COMMENT_EXTENSIONS.has(ext)) return "yaml";
+  return "none";
+}
+
+function commentMaskByLine(fileText: string, grammar: CommentGrammar = "js"): boolean[][] {
   const lines = fileText.split("\n").map((line) => line.replace(/\r$/, ""));
+  if (grammar === "yaml") return yamlCommentMaskByLine(lines);
+  if (grammar === "none") return lines.map((line) => Array.from({ length: line.length }, () => false));
   const masks: boolean[][] = [];
   let block = false;
   let quote: '"' | "'" | "`" | undefined;
@@ -1335,6 +1356,74 @@ function commentMaskByLine(fileText: string): boolean[][] {
   return masks;
 }
 
+/** A block-scalar header (`key: |`, `- >-`, `|2+`) at the end of a line's non-comment text. */
+export const YAML_BLOCK_SCALAR_HEADER_RE = /(?:^|\s)[|>][-+1-9]{0,2}$/;
+
+/** YAML's comment grammar: a `#` at line start or after whitespace runs to end of line, unless it
+ *  sits inside a quoted scalar (which may span lines) or a block scalar's content. A quote opens a
+ *  scalar only where a scalar may start, so `it's` in a plain scalar opens nothing. */
+function yamlCommentMaskByLine(lines: readonly string[]): boolean[][] {
+  const masks: boolean[][] = [];
+  let quote: '"' | "'" | undefined;
+  let escaped = false;
+  let blockIndent: number | undefined;
+  for (const line of lines) {
+    const mask = Array.from({ length: line.length }, () => false);
+    const indent = line.length - line.trimStart().length;
+    if (blockIndent !== undefined) {
+      if (line.trim() === "" || indent > blockIndent) {
+        masks.push(mask);
+        continue;
+      }
+      blockIndent = undefined;
+    }
+    let prevNonSpace: string | undefined;
+    let contentEnd = line.length;
+    for (let i = 0; i < line.length; i += 1) {
+      const ch = line[i]!;
+      if (quote === '"') {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') quote = undefined;
+        prevNonSpace = ch;
+        continue;
+      }
+      if (quote === "'") {
+        if (ch === "'" && line[i + 1] === "'") i += 1;
+        else if (ch === "'") quote = undefined;
+        prevNonSpace = ch;
+        continue;
+      }
+      if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]!))) {
+        for (let j = i; j < line.length; j += 1) mask[j] = true;
+        contentEnd = i;
+        break;
+      }
+      if ((ch === '"' || ch === "'") && (prevNonSpace === undefined || ":-?[{,".includes(prevNonSpace))) quote = ch;
+      if (!/\s/.test(ch)) prevNonSpace = ch;
+    }
+    if (quote === undefined && YAML_BLOCK_SCALAR_HEADER_RE.test(line.slice(0, contentEnd).trimEnd())) blockIndent = indent;
+    masks.push(mask);
+  }
+  return masks;
+}
+
+/** The no-literal-occurrence fallback, read in the file's own grammar: JavaScript keeps its
+ *  displayed-shape test; YAML asks whether the line's first non-blank character is masked;
+ *  a grammar with no comments never reads a line as one. */
+function matchedLineIsCommentInGrammar(
+  line: string,
+  grammar: CommentGrammar,
+  sourceLine?: string,
+  mask?: readonly boolean[],
+): boolean {
+  if (grammar === "js") return dialectGrepMatchedLineIsComment(line);
+  if (grammar === "none") return false;
+  if (sourceLine === undefined || mask === undefined) return dialectGrepMatchedSourceText(line).startsWith("#");
+  const first = sourceLine.length - sourceLine.trimStart().length;
+  return first < sourceLine.length && mask[first] === true;
+}
+
 function allLiteralOccurrencesAreComments(line: string, mask: readonly boolean[], pattern: string): boolean | undefined {
   if (!pattern) return undefined;
   let found = false;
@@ -1354,14 +1443,15 @@ export function matchedLinesAreAllComments(
   if (matchedLines.length === 0) return false;
   if (context !== undefined) {
     const sourceLines = context.fileText.split("\n").map((line) => line.replace(/\r$/, ""));
-    const masks = commentMaskByLine(context.fileText);
+    const grammar = commentGrammarForPath(context.path);
+    const masks = commentMaskByLine(context.fileText, grammar);
     return matchedLines.every((line) => {
       const lineNumber = dialectGrepMatchedLineNumber(line);
-      if (lineNumber === undefined) return dialectGrepMatchedLineIsComment(line);
+      if (lineNumber === undefined) return matchedLineIsCommentInGrammar(line, grammar);
       const sourceLine = sourceLines[lineNumber - 1];
       const mask = masks[lineNumber - 1];
-      if (sourceLine === undefined || mask === undefined) return dialectGrepMatchedLineIsComment(line);
-      return allLiteralOccurrencesAreComments(sourceLine, mask, context.pattern) ?? dialectGrepMatchedLineIsComment(line);
+      if (sourceLine === undefined || mask === undefined) return matchedLineIsCommentInGrammar(line, grammar);
+      return allLiteralOccurrencesAreComments(sourceLine, mask, context.pattern) ?? matchedLineIsCommentInGrammar(line, grammar, sourceLine, mask);
     });
   }
   return matchedLines.every(dialectGrepMatchedLineIsComment);
@@ -1371,7 +1461,7 @@ function matchedLineCommentContext(w: WhitelistedProof, cwd: string): MatchedLin
   const path = dialectGrepTargetPath(w);
   if (path === undefined) return undefined;
   const fullPath = join(cwd, path);
-  return existsSync(fullPath) ? { pattern: w.args[2]!, fileText: readFileSync(fullPath, "utf8") } : undefined;
+  return existsSync(fullPath) ? { pattern: w.args[2]!, fileText: readFileSync(fullPath, "utf8"), path } : undefined;
 }
 
 /** Compile a `unit test:` dialect body — either a literal test-file path (reusing the exact-file

@@ -1,0 +1,66 @@
+- id: W1-T10844
+  title: The console tunnel runs a pinned cloudflared image, and a tunnel off its pin is rolled replica-first with no gap
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 14
+  risk: high  # the tunnel is the console's only ingress; a wrong roll darkens console.remudero.com
+  band_meaning: blast-radius
+  origin: operator-request#cloudflared-emudhra-2026-10-27
+  plan_refs:
+    - W1-T9669
+  files:
+    - deploy/edge-heal.sh
+    - deploy/cloudflared/Dockerfile
+    - deploy/install-host-units.sh
+    - src/lib/launcher-host-alerts.ts
+    - test/edge-containers-self-heal.test.ts
+    - test/deploy/the-tunnel-image-is-pinned-at-or-above-the-security-floor.test.ts
+    - test/deploy/a-tunnel-off-its-pinned-image-is-rolled-with-no-gap.test.ts
+    - test/deploy/a-failed-tunnel-roll-never-darkens-the-console.test.ts
+    - test/deploy/a-failed-tunnel-roll-raises-a-host-alert.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-27. Cloudflare's eMudhra notice (2026-10-26) requires every cloudflared to be 2026.10.2 or later: older builds trust eight eMudhra intermediates with weak keys. The only cloudflared on the Azure host is the `cloudflared` container, which carries console.remudero.com to http://remudero-serve:4317. It was running 2026.8.3, created 2026-09-05 from `cloudflare/cloudflared:latest` with `--no-autoupdate`.
+    deploy/edge-heal.sh recreates the tunnel only when it is ABSENT, and nothing else ever replaces a present one. So `:latest` names whatever image the host happened to pull once, and `--no-autoupdate` keeps it there forever. The fleet had no path from "Cloudflare published a floor" to "the host runs it".
+    The operator fixed it by hand at 13:25Z: a 2026.10.3 replica on the same tunnel token registered 4 connections in about 5 s, then `edge-heal.sh --migrate-cloudflared` recreated the main container on 2026.10.4 (4 connections), then the replica was removed. The console's Cloudflare Access 302 held throughout.
+    That replica-first sequence is the thing to automate. It is also the one W1-T10845 needs, so that a Dependabot pin bump reaches the host with no human step.
+  design: |
+    (1) PIN. A new deploy/cloudflared/Dockerfile holds the image ref. It is never built; Dockerfile shape is only so Dependabot's docker ecosystem can bump it (W1-T10845). It has exactly one `FROM cloudflare/cloudflared:<YYYY.M.P>@sha256:<64 hex>` line, at or above the 2026.10.2 floor.
+       edge-heal reads TUNNEL_IMAGE from that FROM line. RMD_CLOUDFLARED_IMAGE still overrides it. A missing or malformed pin refuses with a named reason and creates or replaces nothing. `cloudflare/cloudflared:latest` no longer appears as a default.
+       acr-build.yml's path filter and DEPLOY_BAKED_PATHS name deploy/Dockerfile exactly, so this file triggers no image build. Keep it that way.
+    (2) DRIFT. heal_tunnel keeps its absent-tunnel behaviour, now on the pinned ref. A PRESENT tunnel costs one `docker container inspect` per tick for `.Config.Image`. Equal to the pin means nothing more happens.
+       Different from the pin means roll:
+       - `docker pull <pin>`; a failed pull touches nothing.
+       - Run `cloudflared-next` on the pin. Use the same network, the same read-only token-file mount, `--restart=unless-stopped`, and `tunnel --no-autoupdate run --token-file`. The token never reaches argv or env.
+       - Wait until `docker logs cloudflared-next` shows 4 `Registered tunnel connection` lines. That is the observed 2026.10.x readiness signal; the image is distroless, so an exec probe is impossible. The wait has a bounded deadline (default 120 s, env-overridable for tests).
+       - `docker rm -f` the main container, run_tunnel on the pin, and wait the same way.
+       - Remove the replica.
+       The first tick after this merges WILL roll the live container: its `.Config.Image` is `cloudflare/cloudflared:latest`, not the pin. That roll is the live proof.
+    (3) FAIL-SAFE.
+       - If the replica never registers within the bound: remove the replica, leave the main untouched (no rm of it), and exit non-zero with a named reason.
+       - If the new main fails to register: leave `cloudflared-next` serving and exit non-zero.
+       - A later tick that finds the main on the pin with 4 registrations, beside a leftover `cloudflared-next`, removes the leftover.
+       - After a failed roll, no new roll is attempted for 1 h. Keep a failure stamp under $RMD_STATE_DIR/state, so a broken pin cannot churn replicas every 5-min tick.
+    (4) ALERT. Add a `tunnel-roll-failed` LauncherAlertCondition (W1-T9669 registry).
+       - The core launcher's edge_heal_on_exit raises it when edge-heal reports a failed roll. Use a distinct exit status or marker, so that other heal failures do not raise it.
+       - It clears when a later tick finds the tunnel on its pin.
+       - A silent failed roll is exactly how 2026.8.3 survived seven weeks.
+    The existing "present is left alone" self-heal test changes: present-and-on-pin is the new no-op. Keep its assertions that the token never reaches argv and that rmd-net is never created beside a live tunnel.
+  acceptance:
+    - claim: deploy/cloudflared/Dockerfile pins one digest-qualified cloudflared release at or above 2026.10.2, edge-heal creates an absent tunnel from that ref, and a missing or malformed pin creates nothing
+      proof: "unit test: test/deploy/the-tunnel-image-is-pinned-at-or-above-the-security-floor.test.ts"
+    - claim: a present tunnel whose image is not the pin is rolled replica-first (pull, replica registered, main replaced and registered, replica removed) with the token only in a read-only mount, and a tunnel already on its pin costs one inspect and nothing else
+      proof: "unit test: test/deploy/a-tunnel-off-its-pinned-image-is-rolled-with-no-gap.test.ts"
+    - claim: a replica that never registers is removed with the main untouched, a main that fails leaves the replica serving, a leftover replica beside a registered pinned main is removed, and a failed roll is not retried within the hour
+      proof: "unit test: test/deploy/a-failed-tunnel-roll-never-darkens-the-console.test.ts"
+    - claim: a failed roll raises the tunnel-roll-failed host alert, another heal failure does not, and the alert clears once the tunnel is on its pin
+      proof: "unit test: test/deploy/a-failed-tunnel-roll-raises-a-host-alert.test.ts"
+  falsifier: |
+    Revert edge-heal.sh's drift branch. The rolled-with-no-gap test then sees zero `run -d --name cloudflared-next` calls against a present off-pin tunnel, and fails.
+    Make the replica-timeout path `rm -f cloudflared`. The never-darkens test then sees the main removed while no registered connector exists, and fails.

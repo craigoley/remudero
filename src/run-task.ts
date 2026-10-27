@@ -27179,7 +27179,7 @@ export function issueRevalidationRunTaskPorts(
     reconcile?: Pick<NonNullable<Parameters<typeof buildEscalationReconcileCandidates>[5]>, "github" | "evidenceRootFor" | "creditIo">;
     spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"];
   } = {},
-): Pick<IssueRevalidationPorts, "hasReferent" | "referentVerdicts"> & { judgeText: (prompt: string, issueNumber: number) => Promise<string> } {
+): Pick<IssueRevalidationPorts, "hasReferent" | "referentVerdicts"> & { judgeText: ReturnType<typeof issueRevalidationJudgeText> } {
   const { owner, repo, repoRoot, stateDir, log } = ctx;
   let plan: Plan | undefined;
   const planNow = (): Plan => (plan ??= (seams.loadPlan ?? (() => loadPlan(resolveRepoLayout(repoRoot).planMonolith)))());
@@ -27203,10 +27203,10 @@ export function issueRevalidationRunTaskPorts(
         return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open` }];
       }));
     },
-    judgeText: (prompt, issueNumber) => {
+    judgeText: (prompt, issueNumber, observe) => {
       const mounts = loadMounts(mountsPath(repoRoot));
       return issueRevalidationJudgeText({ mount: mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), cwd: repoRoot,
-        settingsFile: join(repoRoot, "settings", "worker.json"), spawn: seams.spawn })(prompt, issueNumber);
+        settingsFile: join(repoRoot, "settings", "worker.json"), spawn: seams.spawn })(prompt, issueNumber, observe);
     },
   };
 }
@@ -30957,7 +30957,7 @@ export async function resumeForMissingCommitLine(
 export function requiredCompanions(
   sha: string,
   leftOut: readonly string[],
-  git: (args: string[]) => string,
+  git: (args: string[], options?: Pick<HostWorktreeGitOptions, "maxBuffer">) => string,
 ): RequiredCompanion[] {
   return runTaskCommandHelpers(runTaskCommandHost()).requiredCompanions(sha, leftOut, git);
 }
@@ -30978,7 +30978,7 @@ export async function askScopeForLeftOutImports(input: {
   taskId: string;
   branch: string;
   commit: { sha: string; undeclared: readonly string[] } | undefined;
-  git: (args: string[]) => string;
+  git: (args: string[], options?: Pick<HostWorktreeGitOptions, "maxBuffer">) => string;
   amend: (request: ScopeAmendmentRequest) => ScopeAmendmentOutcome | Promise<ScopeAmendmentOutcome>;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }): Promise<{ companions: RequiredCompanion[]; amendment: ScopeAmendmentOutcome } | undefined> {

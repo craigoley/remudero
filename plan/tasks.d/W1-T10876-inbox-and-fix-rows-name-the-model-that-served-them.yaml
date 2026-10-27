@@ -1,0 +1,49 @@
+- id: W1-T10876
+  title: "INBOX DRAFTS AND FIX ROUNDS NAME NO MODEL — inbox.drafted carries lint_clean but no model, and the fix lane's dispatch and terminal rows carry no worker model, so 565 clean / 1,076 dirty drafts and every repair round cannot be attributed per model; each row records the requested and the served model"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high  # two writers (inbox and fix lane) and a wrong field misattributes a public cell downstream
+  band_meaning: span
+  origin: "operator ruling, Craig 2026-10-27: per-model guidance at disclosure level B (contract ~/Remudero-notes/field-trials/model-guidance-contract-v1.md); gap found by a read-only ledger census the same day"
+  plan_refs: [W1-T10875, W1-T10877, W1-T10878, W1-T10843]
+  files:
+    - src/lib/inbox.ts
+    - src/cli/commands/fix.ts
+    - test/routing/inbox-and-fix-rows-name-the-model-that-served-them.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-27, read-only, host ledger union 2026-09-27..2026-10-27 at origin/main aa90fdc44:
+    inbox.drafted rows read 565 lint-clean, 1,076 dirty and 880 draft errors, and none carries a model, so the
+    only per-model inbox evidence is an n=8 bake-off (below the site's cell minimum of 10). Both writers in
+    src/lib/inbox.ts (the scoped completion flush and the unscoped draft path) log proposal_id and lint_clean
+    only. The fix lane (src/cli/commands/fix.ts) logs fix.dispatch and its terminal rows (fix.done,
+    fix.exhausted, fix.commit_refused, fix.stood_down) with no worker model, so repair rounds and first-pass
+    success cannot be split by the model that did the repair.
+  design: |
+    1. inbox.drafted and inbox.draft_error carry `requested_model` (what the draft route asked for) and
+       `served_model` (what the worker result reported, or null with the existing served_model_reason when
+       unreported). Same field names and null semantics as worker.attempt's served_model.
+    2. fix.dispatch carries the round's `requested_model`; the round's terminal row (fix.done, fix.exhausted,
+       fix.commit_refused, fix.stood_down when a worker ran) carries `served_model` from that round's worker
+       result, with the same null-plus-reason rule. A row where no worker ran carries neither.
+    3. Additive only: no reader changes here; W1-T10877 and W1-T10843 consume the fields.
+  acceptance:
+    - claim: "an inbox.drafted row records the requested and served model, and an unreported served model is null with a reason"
+      proof: 'grep: test("W1-T10876: an inbox draft row names the requested and served model" in test/routing/inbox-and-fix-rows-name-the-model-that-served-them.test.ts'
+    - claim: "a fix round's dispatch names the requested model and its terminal row names the served model"
+      proof: 'grep: test("W1-T10876: a fix round names the model that repaired it" in test/routing/inbox-and-fix-rows-name-the-model-that-served-them.test.ts'
+    - claim: "a fix terminal row where no worker ran carries no model field"
+      proof: 'grep: test("W1-T10876: a fix row with no worker names no model" in test/routing/inbox-and-fix-rows-name-the-model-that-served-them.test.ts'
+  falsifier: |
+    At base neither writer carries a model, so the first two cases fail.
+    - Copy requested_model into served_model: the unreported-served case expects null and fails.
+    - Stamp a model on a fix row where no worker ran: the no-worker case fails.
+    GUARDS that held at base and must still hold: every existing test that asserts an inbox.drafted row
+    (grep -rlF inbox.drafted test/) and the fix lane's ledger cases under test/fix-lane/ and test/fix-*.test.ts;
+    each still passes with the new fields.
