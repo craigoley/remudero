@@ -23,7 +23,9 @@ test("a census child stopped by its own time bound says so, where an outside SIG
 test("a census precheck stopped by its bound refuses as NOT MEASURED and names the budget", async () => {
   const events: Array<{ step: string; data?: Record<string, unknown> }> = [];
   const outcome = await checkFixCensusSnapshotAsync("/unused-injected-root", "/unused-snapshot", (step, data) => events.push({ step, data }),
-    (_file, _args, options) => spawnCensusChild(process.execPath, ["-e", noisySleeper], { ...options, timeout: 300 }));
+    // The controller's own budget inspector runs for real; only the precheck child is the over-budget sleeper.
+    (file, args, options) => args.includes("--snapshot-budget") ? spawnCensusChild(file, args, options)
+      : spawnCensusChild(process.execPath, ["-e", noisySleeper], { ...options, timeout: 300 }));
   assert.ok(outcome?.refusal, "an unmeasured census still refuses the commit/push guard");
   assert.match(outcome.refusal.text, /^census-precheck: NOT MEASURED — census precheck child: LoopBoundedChildTimeout: Command failed: /);
   assert.match(outcome.refusal.text, /stopped by SIGTERM at its 300ms loop-available budget$/);
