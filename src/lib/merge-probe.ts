@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -38,7 +38,8 @@ export function defaultMergeProbeGit(cwd: string): MergeProbeGit {
   // its review clock can still admit and post reviews while this observation is in flight.
   return (args) => new Promise((resolve) => {
     try {
-      execFileLoopBounded("git", [...args], { cwd, encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }).then(
+      // W1-T9754: an awaited child routes through the spawn helper when one is installed and healthy.
+      execFileRouted("git", [...args], { cwd, encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }).then(
         ({ stdout }) => resolve({ status: 0, stdout: stdout ?? "" }),
         (error: { code?: unknown; stdout?: unknown }) =>
           resolve({ status: typeof error.code === "number" ? error.code : null, stdout: typeof error.stdout === "string" ? error.stdout : "" }),

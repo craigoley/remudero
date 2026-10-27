@@ -754,6 +754,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // alert-feedback entry was already closed; the local entry stays `new`, so the line IS the dedup.
   "ops.feedback_reconciled",
   "ratify.approved",
+  "approve.id_materialized", // The saved improvement filing receipt recovers the actual task identities from this row.
   "ratify.reframed",
   // W1-T2604: inbox.ts's `declinedReasonInLedger` reads this row — the decline's one receipt.
   // Rotating it away un-declines a proposal and re-offers ratify on something already refused.

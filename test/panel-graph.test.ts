@@ -1,3 +1,9 @@
+import { rmSync } from "node:fs";
+import { proposeHandRouteFeedback, projectReconciledFeedback } from "#src/lib/panel-graph.js";
+import { feedbackEntryRepoPath } from "#src/lib/feedback.js";
+import { readQueuedFeedbackRecords, queuedFeedbackDir } from "#src/lib/feedback-landing.js";
+import type { ChangedFileEvidence } from "#src/lib/changed-files-cache.js";
+import type { PrRef } from "#src/lib/status.js";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -1828,4 +1834,126 @@ test("individual route builders each return their own exact-match route (W1-T364
   assert.equal(buildClearDailyCostCeilingRoute(deps).path, "/v1/policy/daily-cost-ceiling/clear");
   assert.equal(buildClearDailyCostCeilingRoute(deps).method, "POST");
   assert.equal(buildClearDailyCostCeilingRoute(deps).scope, "write");
+});
+
+// W1-T10625: merged source evidence proposes a lifecycle change; the landing review decides it.
+function handRouteWorld(t: { after: (fn: () => void) => void }) {
+  const root = tmpRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const entry = captureFeedback(root, { raw: "A source defect that this hand-route repair addresses", origin: "cli" });
+  const stateRoot = join(root, "state");
+  const pr: PrRef = { number: 41, url: "https://github.com/o/r/pull/41", state: "MERGED", headRefOid: "a".repeat(40), body: "Resolves feedback `" + entry.id + "`" };
+  let merged: PrRef[] | null = [pr];
+  let evidence: ChangedFileEvidence = { status: "complete", repository: "o/r", prNumber: 41, headRefOid: "a".repeat(40), prState: "MERGED", source: "github_rest_pull_files_paginated", complete: true, observedAt: 1, freshness: "immutable_merged_head", files: ["src/lib/panel-graph.ts"] };
+  const github: GitHub = { ...fakeBatchedStatusGithub({}), prByRef: () => pr, listMergedHeadBranches: () => merged, changedFileEvidence: () => evidence };
+  const run = () => proposeHandRouteFeedback(root, github, "o/r", { stateRoot });
+  return { root, entry, pr, github, stateRoot, run, setMerged: (value: PrRef[] | null) => { merged = value; }, setEvidence: (value: ChangedFileEvidence) => { evidence = value; } };
+}
+
+test("a verified hand-route closure reaches the existing gardener and reviewed feedback landing", (t) => {
+  const w = handRouteWorld(t);
+  assert.equal(projectReconciledFeedback([w.entry], w.github)[0]?.status, "new", "a read never turns the source marker into a live decision");
+  const result = w.run();
+  assert.equal(result[0]?.outcome, "proposed");
+  assert.equal(readFeedbackEntry(w.root, w.entry.id).status, "new", "the candidate never edits the checkout or implies operator acceptance");
+  const proposed = readQueuedFeedbackRecords(w.stateRoot).get(feedbackEntryRepoPath(w.entry.id)) as unknown as FeedbackEntry;
+  assert.equal(proposed.status, "accepted", "accepted is proposed only through the existing reviewed landing queue");
+  assert.equal(proposed.proposal_pr, w.pr.url);
+  assert.ok(proposed.summary?.what_happened.includes(w.pr.headRefOid!));
+  assert.ok(proposed.summary?.what_happened.includes("src/lib/panel-graph.ts"));
+  assert.deepEqual(result[0]?.evidence?.files, ["src/lib/panel-graph.ts"]);
+  assert.deepEqual(landQueuedFeedback(w.stateRoot, w.root), [feedbackEntryRepoPath(w.entry.id)], "the existing landing fixture models its reviewed merge");
+  assert.equal(readFeedbackEntry(w.root, w.entry.id).status, "accepted");
+  assert.deepEqual(w.run(), []);
+});
+
+test("unqualified hand-route evidence never accepts a feedback entry", (t) => {
+  const cases: Array<{ name: string; change: (w: ReturnType<typeof handRouteWorld>) => void }> = [
+    { name: "open", change: (w) => { w.pr.state = "OPEN"; } },
+    { name: "closed without merge", change: (w) => { w.pr.state = "CLOSED"; } },
+    { name: "foreign repository", change: (w) => { w.pr.url = "https://github.com/other/r/pull/41"; } },
+    { name: "foreign marker", change: (w) => { w.pr.body = "Resolves feedback `other/r#" + w.entry.id + "`"; } },
+    { name: "ambiguous marker", change: (w) => { w.pr.body += "\n" + w.pr.body; } },
+    { name: "malformed marker", change: (w) => { w.pr.body = "Resolves feedback " + w.entry.id; } },
+    { name: "no explicit marker", change: (w) => { w.pr.body = "This mentions " + w.entry.id + " in prose"; } },
+    { name: "unreadable merged snapshot", change: (w) => { w.setMerged(null); } },
+    { name: "throwing merged snapshot", change: (w) => { w.github.listMergedHeadBranches = () => { throw new Error("listing failed"); }; } },
+    { name: "throwing failure state", change: (w) => { w.github.readFailed = () => { throw new Error("read state failed"); }; } },
+    { name: "throwing current PR", change: (w) => { w.github.prByRef = () => { throw new Error("PR read failed"); }; } },
+    { name: "throwing source evidence", change: (w) => { w.github.changedFileEvidence = () => { throw new Error("evidence read failed"); }; } },
+    { name: "missing source qualification", change: (w) => { w.github.changedFileEvidence = undefined; } },
+    { name: "missing merged head", change: (w) => { w.pr.headRefOid = undefined; } },
+    { name: "unreadable evidence", change: (w) => { w.setEvidence({ status: "unknown", reason: "unbound_legacy_entry" }); } },
+    { name: "different merged head", change: (w) => { w.pr.headRefOid = "b".repeat(40); } },
+    { name: "different evidence repository", change: (w) => { w.setEvidence({ ...w.github.changedFileEvidence!(w.pr.url), repository: "other/r" } as ChangedFileEvidence); } },
+    { name: "different evidence PR", change: (w) => { w.setEvidence({ ...w.github.changedFileEvidence!(w.pr.url), prNumber: 42 } as ChangedFileEvidence); } },
+    { name: "not a complete read", change: (w) => { w.setEvidence({ ...w.github.changedFileEvidence!(w.pr.url), complete: false } as unknown as ChangedFileEvidence); } },
+    { name: "plan-only filing", change: (w) => { w.setEvidence({ ...w.github.changedFileEvidence!(w.pr.url), files: ["plan/tasks.d/W1-T1.yaml"] } as ChangedFileEvidence); } },
+    { name: "truncated population", change: (w) => { w.setEvidence({ ...w.github.changedFileEvidence!(w.pr.url), files: Array.from({ length: 3000 }, (_, i) => "src/p" + i + ".ts") } as ChangedFileEvidence); } },
+    { name: "same feedback claimed by two PRs", change: (w) => { w.setMerged([w.pr, { ...w.pr, number: 42, url: "https://github.com/o/r/pull/42" }]); } },
+  ];
+  for (const c of cases) {
+    const w = handRouteWorld(t);
+    c.change(w);
+    const result = w.run();
+    assert.equal(result.length, 1, c.name + " retains one named decision rather than inventing absence");
+    assert.ok(["refused", "unknown"].includes(result[0]!.outcome), c.name);
+    assert.ok(result[0]!.reason.length > 0, c.name);
+    assert.equal(readFeedbackEntry(w.root, w.entry.id).status, "new", c.name);
+    assert.equal(readQueuedFeedbackRecords(w.stateRoot).size, 0, c.name);
+  }
+});
+
+test("hand-route reconciliation preserves operator decisions and is idempotent", (t) => {
+  for (const status of ["accepted", "rejected", "answered", "grilling", "proposed"] as const) {
+    const w = handRouteWorld(t);
+    const before = setFeedbackStatus(w.root, w.entry.id, status);
+    assert.deepEqual(w.run(), [], status + " is outside this candidate path");
+    assert.deepEqual(readFeedbackEntry(w.root, w.entry.id), before);
+  }
+  const w = handRouteWorld(t);
+  assert.equal(w.run()[0]?.outcome, "proposed");
+  const before = readQueuedFeedbackRecords(w.stateRoot);
+  assert.equal(w.run()[0]?.outcome, "already_queued");
+  assert.deepEqual(readQueuedFeedbackRecords(w.stateRoot), before, "repeated reconciliation does not rewrite or create another landing record");
+  assert.equal(readFeedbackEntry(w.root, w.entry.id).status, "new");
+  const unrelated = captureFeedback(w.root, { raw: "An unrelated unresolved entry", origin: "cli" });
+  assert.equal(w.run().find(v => v.id === unrelated.id)?.outcome, "refused");
+  assert.equal(readFeedbackEntry(w.root, unrelated.id).status, "new");
+});
+
+test("hand-route queue failure remains unknown and does not claim a proposal", (t) => {
+  const w = handRouteWorld(t);
+  const blocked = join(w.root, "queue-file");
+  writeFileSync(blocked, "a file is not a queue directory");
+  const result = proposeHandRouteFeedback(w.root, w.github, "o/r", { stateRoot: blocked });
+  assert.equal(result[0]?.outcome, "unknown");
+  assert.match(result[0]!.reason, /landing|queue/);
+  assert.equal(readFeedbackEntry(w.root, w.entry.id).status, "new");
+});
+
+test("hand-route unreadable pending feedback is unknown and never replaced", (t) => {
+  const w = handRouteWorld(t);
+  const dir = queuedFeedbackDir(w.stateRoot);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, w.entry.id + ".yaml");
+  writeFileSync(file, "status: [\n");
+  const before = readFileSync(file, "utf8");
+  assert.equal(w.run()[0]?.outcome, "unknown");
+  assert.equal(w.run()[0]?.reason, "landing_queue_unreadable");
+  assert.equal(readFileSync(file, "utf8"), before);
+});
+
+test("hand-route pending operator decisions and summary bounds are preserved", (t) => {
+  const w = handRouteWorld(t);
+  setFeedbackStatus(w.root, w.entry.id, "answered", { land: { stateRoot: w.stateRoot }, answeredBy: "fb-1792859760649-99e381" });
+  const before = readQueuedFeedbackRecords(w.stateRoot);
+  assert.equal(w.run()[0]?.outcome, "already_queued");
+  assert.deepEqual(readQueuedFeedbackRecords(w.stateRoot), before);
+  const other = handRouteWorld(t);
+  setFeedbackStatus(other.root, other.entry.id, "new", { summary: { headline: "Keep the original question", what_happened: "x".repeat(600), decision: "Keep this context.", options: [{ label: "Keep", consequence: "Keep it." }, { label: "Review", consequence: "Review it." }] } });
+  const original = readFeedbackEntry(other.root, other.entry.id);
+  assert.equal(other.run()[0]?.outcome, "refused");
+  assert.deepEqual(readFeedbackEntry(other.root, other.entry.id), original);
+  assert.equal(readQueuedFeedbackRecords(other.stateRoot).size, 0);
 });

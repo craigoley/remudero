@@ -36,12 +36,22 @@ type Member = { testFile: string; script: string; walks: string[] };
 type Found = { violations: string[]; unmeasured: string | null };
 type RunResult = { status?: number | null; signal?: string | null; error?: Error; stdout?: string; stderr?: string };
 
+const SKILL = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
+
 const BOUNDS: Member = { testFile: "test/bounds-census.test.ts", script: "census:bounds", walks: ["src/"] };
 const WORKFLOWS: Member = { testFile: "test/workflow-census.test.ts", script: "census:workflow", walks: ["src/", ".github/"] };
 const TESTS: Member = { testFile: "test/test-census.test.ts", script: "census:test", walks: ["test/"] };
 
 function evaluate(changed: string[], members: Member[], runSuites: (files: string[]) => string[]): Found {
-  return precheck.evaluateAdmittedCensusSuites({ changed, loadMembers: () => members, runSuites }) as Found;
+  let skillRuns = 0;
+  const found = precheck.evaluateAdmittedCensusSuites({ changed, loadMembers: () => members,
+    runSuites: (files: string[]) => {
+      skillRuns += files.filter((file) => file === SKILL).length;
+      const selected = files.filter((file) => file !== SKILL);
+      return selected.length > 0 ? runSuites(selected) : [];
+    } }) as Found;
+  assert.equal(skillRuns, changed.length > 0 ? 1 : 0, "the mandatory skill census is selected independently of admitted populations");
+  return found;
 }
 
 const TAP_HEAD = "TAP version 13\n";
@@ -81,7 +91,7 @@ test("W1-T5617: a diff that grows a census-admitted suite's population is refuse
   assert.deepEqual(evaluate(["src/lib/a.ts"], [BOUNDS, WORKFLOWS, TESTS], () => []), { violations: [], unmeasured: null });
 });
 
-test("W1-T5617: an untouched population starts no child", () => {
+test("W1-T5617: an untouched admitted population starts no admitted child", () => {
   let runs = 0;
   let loads = 0;
   const runSuites = (files: string[]) => {
@@ -197,7 +207,8 @@ function fixtureRepo(change: Record<string, string>): string {
       writeFileSync(join(repo.dir, path), text);
     }
   };
-  write({ [FIXTURE_MEMBER.testFile]: FIXTURE_CENSUS, "lib/bounds.ts": DECLARED });
+  write({ [FIXTURE_MEMBER.testFile]: FIXTURE_CENSUS, "lib/bounds.ts": DECLARED,
+    [SKILL]: 'import { test } from "node:test"; test("healthy mandatory fixture census", () => {});\n' });
   repo.git("add", "-A");
   repo.git("commit", "--quiet", "-m", "the base");
   repo.git("switch", "--quiet", "-c", "work");

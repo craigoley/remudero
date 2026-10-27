@@ -13,6 +13,7 @@ import * as precheck from "../scripts/census-precheck.mjs";
 // @source-text-subject: the read-call strings are inputs to census discovery in private fixtures.
 // @census-reads: none — all source-text reads below belong to private fixture repositories.
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const SKILL = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 const SUITE = "test/source-census.test.ts";
 const SUBJECT = "src/subject.ts";
 const ADMITTED = { testFile: "test/admitted.test.ts", script: "census:fixture", walks: ["other/"] };
@@ -42,6 +43,7 @@ function fixture(t: TestContext, readers = true, baseRed = false) {
       ` FAST_GATE_CENSUS_REMEASURE_MARGIN } from ${JSON.stringify(join(ROOT, "src/lib/ci-parity.ts"))};`,
   ].join("\n"));
   if (readers) symlinkSync(join(ROOT, "src/lib/source-text-readers.ts"), join(repo.dir, "src/lib/source-text-readers.ts"));
+  put(SKILL, 'import { test } from "node:test"; test("healthy mandatory fixture census", () => {});\n');
   put(SUITE, CENSUS);
   put("test/other-census.test.ts", CENSUS);
   put("test/behaviour.test.ts", 'readFileSync("src/unrelated.ts", "utf8");');
@@ -61,7 +63,10 @@ function capture(t: { mock: { method: (o: object, k: string, f: (...a: unknown[]
 }
 
 function realChildren(options: { root: string; files: string[]; readerRuntimePolicy?: object }) {
-  assert.deepEqual(options.readerRuntimePolicy, READER_POLICY);
+  if (options.files.includes(SKILL)) {
+    assert.deepEqual(options.files, [SKILL]);
+    assert.equal(options.readerRuntimePolicy, undefined, "the mandatory census is not a structural reader");
+  } else assert.deepEqual(options.readerRuntimePolicy, READER_POLICY);
   return precheck.runCensusSuitesViaChild(options);
 }
 
@@ -96,19 +101,29 @@ test("W1-T9757: joined readers run separately with a measured bound and name an 
   const result = precheck.evaluateAdmittedCensusSuites({
     changed: [SUBJECT],
     loadMembers: () => members,
-    runSuites: (files: string[], options: { readerRuntimePolicy: object }) => {
+    runSuites: (files: string[], options?: { readerRuntimePolicy: object }) => {
       runs.push(files);
-      assert.deepEqual(options.readerRuntimePolicy, READER_POLICY);
+      if (files.includes(SKILL)) {
+        assert.deepEqual(files, [SKILL]);
+        assert.equal(options, undefined);
+        return [];
+      }
+      assert.deepEqual(options?.readerRuntimePolicy, READER_POLICY);
       if (files.includes(SUITE)) throw new Error("ETIMEDOUT");
       return files;
     },
   });
-  assert.deepEqual(runs, [["test/other-census.test.ts"], [SUITE]]);
+  assert.deepEqual(runs, [[SKILL], ["test/other-census.test.ts"], [SUITE]]);
   assert.match(result.unmeasured, /test\/source-census.test.ts.*ETIMEDOUT/);
   assert.match(result.violations[0], /test\/other-census.test.ts fails/);
   const io = capture(t);
   assert.equal(precheck.main(["--root", repo.dir, "--base", "main"], {
     runSuites: ({ files, readerRuntimePolicy }: { files: string[]; readerRuntimePolicy: object }) => {
+      if (files.includes(SKILL)) {
+        assert.deepEqual(files, [SKILL]);
+        assert.equal(readerRuntimePolicy, undefined);
+        return [];
+      }
       assert.deepEqual(readerRuntimePolicy, READER_POLICY);
       assert.equal(files.length, 1);
       throw new Error("ETIMEDOUT");
@@ -133,7 +148,7 @@ test("W1-T9757: an explicit trigger cannot group a discovered reader with other 
       return files.includes(suite) ? [suite] : [];
     },
   });
-  assert.deepEqual(runs, [{ files: [ADMITTED.testFile] }, { files: [suite], timeoutMs }]);
+  assert.deepEqual(runs, [{ files: [ADMITTED.testFile, SKILL] }, { files: [suite], timeoutMs }]);
   assert.deepEqual(result, { violations: [
     `census-suite: ${suite} fails — run npm run census:env-var-registry; register ENV_REGISTRY in src/lib/config-schema.ts`,
   ], unmeasured: null });

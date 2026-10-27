@@ -29,6 +29,8 @@ type Tree = Record<string, string>;
 type Side = { candidates: string[]; gaps: string[] };
 
 const WORKFLOW = ".github/workflows/ci.yml";
+const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
+const SKILL_CENSUS_STUB = 'import { test } from "node:test"; test("healthy mandatory fixture census", () => {});\n';
 const BASE_TREE: Tree = {
   [WORKFLOW]: "jobs:\n  a:\n    steps:\n      - run: node scripts/old-ratchet.mjs\n",
   "scripts/old-ratchet.mjs": "export {};\n",
@@ -116,7 +118,8 @@ function fixtureRepo(seed: Tree, change: Tree): string {
       writeFileSync(join(repo.dir, path), text);
     }
   };
-  write(seed);
+  // The mandatory skill census runs on every nonempty diff, so the base carries a healthy stand-in.
+  write({ ...seed, [SKILL_CENSUS]: SKILL_CENSUS_STUB });
   repo.git("add", "-A");
   repo.git("commit", "--quiet", "-m", "the base");
   repo.git("switch", "--quiet", "-c", "work");

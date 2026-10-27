@@ -8,8 +8,9 @@
 // codex-cli 0.163.0 (the version deploy/package-lock.json pins) writes in `exec --json`:
 // `command_execution` {id, command, aggregated_output, exit_code, status}, and `file_change`
 // {id, changes: [{path, kind: "add" | "delete" | "update"}], status}. Codex runs a command through
-// its shell (`/bin/bash -lc`, measured in W1-T2754), so the item's command names the wrapper; the tool call
-// is the script the wrapper ran, so its signature reads `Bash:git push` exactly as a claude row's does.
+// its shell (`/bin/bash -lc`, measured in W1-T2754), and the fixture's command names that wrapper. A
+// bare command reads the same: either way the tool call is the script, so its signature reads
+// `Bash:git push` exactly as a claude row's does.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";

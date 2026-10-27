@@ -43,7 +43,7 @@ import {
   ghArgvIsWrite, ghBrokerClassForActor, parseGhApiArgv, parseGhRateLimitHeaders, refuseSentinelGhToken, splitGhHeaderBlock,
 } from "./github-transport.js";
 import { deriveLedgerActor } from "./ledger.js";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { hostWorktreeGitEnv, pinWorktreeGit } from "./worktree-git.js";
 
 // ── WHAT A READ IS ──────────────────────────────────────────────────────────────────────────────
@@ -470,7 +470,7 @@ export const defaultGhUpstreamExec: GhUpstreamExec = async (args, opts) => {
   if (!opts.env) return ghRunForBroker(args, { cwd: opts.cwd, maxBuffer: 1 << 26 });
   try {
     refuseSentinelGhToken("gh", args, opts.env);
-    const result = await execFileLoopBounded("gh", args, { cwd: opts.cwd, env: opts.env, encoding: "utf8", maxBuffer: 1 << 26, timeout: DEFAULT_GH_CALL_TIMEOUT_MS });
+    const result = await execFileRouted("gh", args, { cwd: opts.cwd, env: opts.env, encoding: "utf8", maxBuffer: 1 << 26, timeout: DEFAULT_GH_CALL_TIMEOUT_MS });
     return { ...result, exitCode: 0 };
   } catch (cause) {
     const error = cause as { stdout?: string; stderr?: string; code?: unknown; message?: string };

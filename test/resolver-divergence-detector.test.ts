@@ -225,12 +225,14 @@ test("resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — t
   // W1-T9232: the review command reads the SAME plan at `origin/main` once, only when the head has no record of
   // the task's own, to tell "built before its shard merged" from "no such task". Pinned below.
   // W1-T9805 adds the sixth: the unpublished local scope merge validates its widened task contract.
-  // Both additions keep their location/input assertions; a seventh or a moved call is refused.
+  // W1-T10787 adds the seventh: after a refused remote update and a captured local conflict, the amended contract is
+  // proved at origin/main's tip before the bounded conflict repair is admitted.
+  // Every addition keeps its location/input assertions; an eighth or a moved call is refused.
   const atHeadCallSites = runTaskSrc.split(/resolvePlanCriteriaAtHead(?:Async)?\(/).length - 1;
   assert.equal(
     atHeadCallSites,
-    6,
-    "only review-command (head and origin/main), fix-rung-head-contract (sync and awaited), preflight-proofs and local scope-merge resolver calls are permitted",
+    7,
+    "only review-command (head and origin/main), fix-rung-head-contract (sync and awaited), preflight-proofs, local scope-merge and conflict-repair contract proofs are permitted",
   );
   assert.match(
     runTaskSrc,
@@ -249,13 +251,16 @@ test("resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — t
     "the third resolver call is confined to W1-T3738's local proof tier",
   );
   const scopeStart = runTaskSrc.indexOf("if (pendingScope && Array.isArray(pendingScope.paths))");
-  const scopeEnd = runTaskSrc.indexOf('deps.log("fix.scope_amendment", { outcome: "amendment_merged"', scopeStart);
+  const scopeEnd = runTaskSrc.indexOf('deps.log("fix.scope_amendment", conflictRepairMainSha === undefined', scopeStart);
   assert.ok(scopeStart >= 0 && scopeEnd > scopeStart, "locate the pending scope merge before recording its success");
   const scopeMerge = runTaskSrc.slice(scopeStart, scopeEnd);
-  assert.equal(scopeMerge.split(/resolvePlanCriteriaAtHead(?:Async)?\(/).length - 1, 1);
+  assert.equal(scopeMerge.split(/resolvePlanCriteriaAtHead(?:Async)?\(/).length - 1, 2);
   assert.match(scopeMerge,
     /await resolvePlanCriteriaAtHeadAsync\(`Remudero-Task: \$\{opts.taskId\}`,\s*opts.worktreePath, "plan\/tasks.yaml", mergeSha, git\)/,
     "the additional resolver validates this task at the unpublished local merge, through awaited git");
+  assert.match(scopeMerge,
+    /await resolvePlanCriteriaAtHeadAsync\(`Remudero-Task: \$\{opts.taskId\}`,\s*opts.worktreePath, "plan\/tasks.yaml", mainSha, git\)/,
+    "the conflict-repair resolver proves the amended contract at origin/main's tip, through awaited git");
   // Neither retroCommand nor a merged-PR sweep (which DO touch merged-adjacent state) gained a
   // reference to either resolver.
   for (const fn of ["async function retroCommand", "export function fixRungTaskFor("]) {
