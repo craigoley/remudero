@@ -100,7 +100,6 @@ export function reconcileImprovementEffects(source: ImprovementEffectSource, evi
     const descends = (base: string, head: string) => base === head || (evidence.ancestry ?? []).some(row => row.base === base && row.head === head && row.isAncestor === true);
     if (relevant.some(pr => !descends(before.input.analyzedSha, pr.mergeSha) || !descends(pr.mergeSha, after.input.analyzedSha))) return refuse("The analyzed commit has not been confirmed to include every merged change after the saved baseline.");
     const comparison: CodeHealthProjectionInput = { ...after.input, baseline: { analyzedSha: before.input.analyzedSha, policyVersion: before.input.registry.version, scans: before.input.scans } };
-    if (compareCodeHealthEvidence(comparison).state !== "comparable") return refuse("Scope, tool, rules, exclusions, or independently measured finding states are not comparable.");
     const original = prior.findings.filter(row => row.ruleId === source.ruleId && row.category === "maintainability" && row.status === "open");
     if (!original.length) return refuse("The saved baseline does not identify any linked open findings.");
     for (const finding of original) {
