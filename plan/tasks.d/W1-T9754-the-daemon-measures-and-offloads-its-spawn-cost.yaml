@@ -16,6 +16,9 @@
     - src/lib/daemon.ts
     - test/the-daemon-measures-and-offloads-its-spawn-cost.test.ts
     - "src/lib/config-schema.ts"
+    - "src/lib/gh-read-broker.ts"
+    - "src/lib/merge-probe.ts"
+    - "src/lib/worktree-git.ts"
   status: queued
   priority: 2
   attempts: 0
