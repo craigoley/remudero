@@ -462,3 +462,113 @@ test("a merged identity without its widened contract falls back without running 
   assert.match(String(row?.reason), /locally merged task contract does not admit/);
   assert.equal(f.repo.git("status", "--porcelain"), "");
 });
+
+const refusedUpdate = (f: ReturnType<typeof fixture>) => {
+  let refused = 0;
+  f.opts.deps.scopeAmendmentWritePorts = { ...f.ports, updateBranch: () => { refused++; return { ok: false, error: "HTTP 422" }; } };
+  const spawn = f.opts.deps.spawn;
+  f.opts.deps.spawn = async (args) => {
+    if (existsSync(join(f.repo.dir, ".git/MERGE_HEAD"))) writeFileSync(join(f.repo.dir, "src/existing.ts"), "export const existing = 4;\n");
+    return spawn(args);
+  };
+  return () => refused;
+};
+
+test("W1-T10787: an actual conflicted scope merge with a refused branch update reaches the bounded repair", async (t) => {
+  const f = fixture(t); f.mergeAmendment(true);
+  const refused = refusedUpdate(f);
+  const result = await runFixRung(f.opts);
+  assert.equal(result.outcome, "fixed", JSON.stringify({ result, rows: f.rows }));
+  assert.equal(refused(), 1);
+  assert.deepEqual(f.counts(), { updates: 0, spawns: 1, pushes: 1 });
+  const resumed = f.rows.findLast((r) => r.step === "fix.scope_amendment" && r.outcome === "conflict_repair_resumed");
+  assert.deepEqual(resumed?.conflicted_files, ["src/existing.ts"]);
+  assert.equal(resumed?.merged_locally, false);
+  assert.equal(resumed?.main_sha, f.repo.git("rev-parse", "origin/main"));
+  assert.ok(f.rows.some((r) => r.step === "fix.merge_started"), "the harness started the merge of main for the worker");
+  assert.match(f.prompt(), /src\/existing\.ts/);
+  assert.equal(f.repo.git("show", "HEAD:src/existing.ts"), "export const existing = 4;");
+  assert.equal(f.repo.git("show", "HEAD:src/lib/rule-suites.ts") + "\n", content);
+  assert.equal(f.repo.git("rev-parse", "HEAD^1"), f.headSha, "the repair merge sits on the original published head");
+});
+
+test("W1-T10787: a successful branch update retains its existing zero-worker fallback", async (t) => {
+  const f = fixture(t); f.mergeAmendment(true);
+  const result = await runFixRung(f.opts);
+  assert.equal(result.outcome, "stood_down");
+  assert.deepEqual(f.counts(), { updates: 1, spawns: 0, pushes: 0 });
+  assert.equal(f.rows.some((r) => r.outcome === "conflict_repair_resumed"), false);
+  assert.equal(f.rows.some((r) => r.step === "fix.merge_started"), false);
+  assert.equal(f.repo.git("rev-parse", "HEAD"), f.headSha);
+  assert.equal(f.repo.git("status", "--porcelain"), "");
+});
+
+test("W1-T10787: missing conflict evidence or an unproved amended contract never dispatches repair", async (t) => {
+  // (a) a local failure that is not a conflict: no unmerged paths exist, so there is no evidence to repair.
+  const a = fixture(t);
+  a.repo.git("remote", "set-url", "origin", join(a.repo.dir, "absent-origin"));
+  const aRefused = refusedUpdate(a);
+  assert.equal((await runFixRung(a.opts)).outcome, "stood_down");
+  assert.equal(aRefused(), 1);
+  assert.equal(a.counts().spawns, 0);
+  assert.equal(a.rows.some((r) => r.outcome === "conflict_repair_resumed"), false);
+
+  // (b) a real conflict whose evidence cannot be read stays a stand-down.
+  const b = fixture(t); b.mergeAmendment(true);
+  const bRefused = refusedUpdate(b);
+  b.opts.deps.scopeAmendmentGit = async (cwd, args, options) => {
+    if (args[0] === "diff" && args.includes("--diff-filter=U")) throw new Error("index unreadable");
+    return hostWorktreeGitAsync(cwd, args, options);
+  };
+  assert.equal((await runFixRung(b.opts)).outcome, "stood_down");
+  assert.equal(bRefused(), 1);
+  assert.equal(b.counts().spawns, 0);
+  assert.match(String(b.rows.findLast((r) => r.outcome === "branch_update_requested")?.reason), /conflict evidence: .*index unreadable/);
+  assert.equal(b.repo.git("status", "--porcelain"), "");
+
+  // (c) a real conflict on a main that does not admit the amendment paths is never repaired.
+  const c = fixture(t);
+  c.repo.git("checkout", "-q", "main");
+  writeFileSync(join(c.repo.dir, "src/existing.ts"), "export const existing = 3;\n");
+  c.repo.git("commit", "-qam", "unrelated conflicting change"); c.repo.git("push", "-q", "origin", "main");
+  c.repo.git("checkout", "-q", branch);
+  const cRefused = refusedUpdate(c);
+  assert.equal((await runFixRung(c.opts)).outcome, "stood_down");
+  assert.equal(cRefused(), 1);
+  assert.equal(c.counts().spawns, 0);
+  assert.equal(c.rows.some((r) => r.outcome === "conflict_repair_resumed"), false);
+  assert.equal(c.repo.git("rev-parse", "HEAD"), c.headSha);
+
+  // (d) a dirty worktree after the aborted merge is never read as conflict evidence.
+  const d = fixture(t); d.mergeAmendment(true);
+  const dRefused = refusedUpdate(d);
+  d.opts.deps.scopeAmendmentGit = async (cwd, args, options) => {
+    const out = await hostWorktreeGitAsync(cwd, args, options);
+    if (args[0] === "merge" && args[1] === "--abort") writeFileSync(join(d.repo.dir, "stray.txt"), "dirty");
+    return out;
+  };
+  assert.equal((await runFixRung(d.opts)).outcome, "stood_down");
+  assert.equal(dRefused(), 1);
+  assert.equal(d.counts().spawns, 0);
+  assert.match(String(d.rows.findLast((r) => r.outcome === "conflict_repair_refused")?.reason), /not clean/);
+});
+
+test("W1-T10787: the resumed scope repair preserves its original publish base and requires fresh evidence", async (t) => {
+  const f = fixture(t); f.mergeAmendment(true);
+  refusedUpdate(f);
+  const reads: string[][] = [];
+  f.opts.deps.scopeAmendmentGit = async (cwd, args, options) => {
+    reads.push([...args]);
+    return hostWorktreeGitAsync(cwd, args, options);
+  };
+  const result = await runFixRung(f.opts);
+  assert.equal(result.outcome, "fixed", JSON.stringify({ result, rows: f.rows }));
+  const mergeAt = reads.findIndex((a) => a[0] === "merge" && a[1] !== "--abort");
+  const captureAt = reads.findIndex((a) => a[0] === "diff" && a.includes("--diff-filter=U"));
+  const abortAt = reads.findIndex((a) => a[0] === "merge" && a[1] === "--abort");
+  assert.ok(mergeAt >= 0 && captureAt > mergeAt && abortAt > captureAt, "evidence is read from this round's pending merge, before the abort");
+  // The fixture's push asserts `prior === headSha`: the lease stays on the original published tip.
+  assert.equal(f.counts().pushes, 1);
+  assert.equal(f.repo.git("rev-parse", "HEAD^1"), f.headSha);
+  assert.equal(f.repo.git("status", "--porcelain"), "");
+});

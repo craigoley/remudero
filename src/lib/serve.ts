@@ -156,7 +156,8 @@ import { buildRecordJudgeLabelRoute, fileJudgeLabelStore } from "./judge-calibra
 import { createOperatorAgentRowsSource } from "./operator-agent-read-model.js";
 import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, prewarmOperatorAgentReads, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
-import { buildProductBuildRoutes, buildProductDeploymentRoutes, buildProductRepositoryRoutes, buildProductRoutes } from "./product-routes.js";
+import type { ProductResearchProvider } from "./product-research.js";
+import { buildProductBuildRoutes, buildProductDeploymentRoutes, buildProductRepositoryRoutes, buildProductResearchRoutes, buildProductRoutes } from "./product-routes.js";
 import { automationTriggerLedgerJournal, buildAutomationTriggerRoutes, createAutomationTriggerRegistry, submitAutomationTrigger, type AutomationTriggerRegistry } from "./automation-trigger.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import {
@@ -385,6 +386,10 @@ export interface ServeDeps {
   issues: IssueCloser;
   /** Fleet-control flag-file root — MUST equal the `config.root` `rmd daemon`/`rmd drain` check (see module header). */
   fleetControlRoot: string;
+  /** Approved research transport for /v1/products/research; absent means research is reported unavailable. */
+  productResearchProvider?: ProductResearchProvider;
+  /** Operator-configured per-run research spending ceiling in USD; never raised by request or provider text. Default 0. */
+  productResearchBudgetUsd?: number;
   /** Core repository resolved from the serving checkout, for assistant-action target binding. */
   assistantRepository?: string;
   /** `plan/questions.ndjson` root — MUST equal the `repoRoot` `appendQuestion` writes into (see module header). */
@@ -2962,6 +2967,7 @@ function assembleServeRoutes(
   const rawRoutes = [
     ...buildImprovementThreadRoutes({ stateDir: dirname(deps.ledgerPath) }),
     ...buildProductRoutes({ root: deps.fleetControlRoot }),
+    ...buildProductResearchRoutes({ root: deps.fleetControlRoot, provider: deps.productResearchProvider, budgetUsd: deps.productResearchBudgetUsd }),
     ...buildProductRepositoryRoutes({ root: deps.fleetControlRoot }),
     ...buildProductDeploymentRoutes({ root: deps.fleetControlRoot }),
     // W1-T10615: the kick marker lands under the target's OWN daemon root, resolved through the same
