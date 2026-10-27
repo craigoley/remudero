@@ -50,6 +50,7 @@ import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
 import { dropDerivativeAggregateCiFailure } from "../../lib/derivative-ci-failure.js";
 import { ghJson, parseReport, foreignTreeStandDownReason, workerTranscript, worktreeAdd, worktreeRemove, type SpawnWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, workerContinuation } from "../../lib/worker.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "../../lib/worktree-git.js";
+import type { MergeConflictEvidence } from "../../lib/merge-state.js";
 import { runStepsAsync, runStepsSync, step } from "../../lib/git-push.js";
 import { FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "../../lib/fix-fence.js";
 import { assertLiveWriteAllowed } from "../../lib/live-write-guard.js";
@@ -2066,6 +2067,37 @@ async function routeFix(
   };
 }
 
+/**
+ * W1-T10787: the conflict the LOCAL scope merge actually produced, read from the unmerged index while the merge is
+ * still pending (before `merge --abort`). Nothing is inferred from a dirty tree: a merge that stopped without unmerged
+ * paths, or whose sides cannot be read, yields `undefined` and the caller keeps its stand-down.
+ */
+async function capturedScopeMergeConflict(
+  git: (args: string[]) => Promise<string>,
+): Promise<MergeConflictEvidence | undefined> {
+  const paths = (await git(["diff", "--name-only", "--diff-filter=U", "-z"])).split("\0").filter(Boolean);
+  if (paths.length === 0) return undefined;
+  const headSha = (await git(["rev-parse", "HEAD"])).trim();
+  const mainSha = (await git(["rev-parse", "refs/remotes/origin/main"])).trim();
+  const base = (await git(["merge-base", headSha, mainSha])).trim();
+  const removed = async (tip: string): Promise<Map<string, number>> => {
+    const out = new Map<string, number>();
+    for (const entry of (await git(["diff", "--numstat", "-z", "--no-renames", base, tip, "--"])).split("\0").filter(Boolean)) {
+      const match = /^([^\t]+)\t([^\t]+)\t([\s\S]+)$/.exec(entry);
+      if (match) out.set(match[3]!, /^\d+$/.test(match[2]!) ? Number(match[2]) : 0);
+    }
+    return out;
+  };
+  const ours = await removed(headSha);
+  const theirs = await removed(mainSha);
+  const evidence: MergeConflictEvidence = {
+    files: paths.map((path) => ({ path, oursDeleted: ours.get(path) ?? 0, theirsDeleted: theirs.get(path) ?? 0 })),
+    oursLog: (await git(["log", "--reverse", "--format=%h %s", `${base}..${headSha}`, "--"])).trim(),
+    theirsLog: (await git(["log", "--reverse", "--format=%h %s", `${base}..${mainSha}`, "--"])).trim(),
+  };
+  return hasCapturedMergeConflictEvidence(evidence) ? evidence : undefined;
+}
+
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   pendingAnswer?: OpenPrView["pendingAnswer"];
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
@@ -3631,6 +3663,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       ["created", "resumed", "branch_update_requested"].includes(String(row.outcome)));
     let scopeMergeStartSha: string | undefined;
     let scopeRecoveryEvidence: string | undefined;
+    let conflictRepairMainSha: string | undefined;
     if (pendingScope && Array.isArray(pendingScope.paths)) {
       const paths = pendingScope.paths as string[];
       const resumed = await amendScope(paths, paths, priorHeadSha);
@@ -3661,11 +3694,23 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         opts.task = { ...opts.task, files: contract.taskDeclaredFiles, acceptance: contract.criteria };
       } catch (error) {
         let reason = `${String(error)}\n${String((error as { stdout?: unknown }).stdout ?? "")}\n${String((error as { stderr?: unknown }).stderr ?? "")}`;
-        if (mergeAttempted && mergeSha === undefined) try {
-          await git(["merge", "--abort"]);
-        } catch (abortError) {
-          const error = String(abortError);
-          reason += `; merge abort: ${error}`;
+        // W1-T10787: the conflict is read while the merge is still pending; an unreadable one is a named gap, never evidence.
+        let conflict: MergeConflictEvidence | undefined;
+        let abortFailed = false;
+        if (mergeAttempted && mergeSha === undefined) {
+          try {
+            conflict = await capturedScopeMergeConflict(git);
+          } catch (captureError) {
+            const error = String(captureError);
+            reason += `; conflict evidence: ${error}`;
+          }
+          try {
+            await git(["merge", "--abort"]);
+          } catch (abortError) {
+            const error = String(abortError);
+            reason += `; merge abort: ${error}`;
+            abortFailed = true;
+          }
         }
         let update: { ok: boolean; error?: string };
         try {
@@ -3680,7 +3725,32 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         }
         deps.log("fix.scope_amendment", { outcome: "branch_update_requested", ...update, reason,
           paths, head_sha: priorHeadSha, pr_number: prNumber, amendment_number: resumed.amendmentNumber, merged_locally: false });
-        return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+        // W1-T10787: only a refused remote update, a real captured local conflict, a clean aborted worktree and the
+        // amended contract proved on main re-enter the bounded conflict repair; a successful update keeps its stand-down.
+        let admitted: string | undefined;
+        if (!update.ok && conflict !== undefined && !abortFailed) try {
+          if ((await git(["status", "--porcelain", "-z", host.GIT_UNTRACKED_FILES_ALL])).trim()) {
+            throw new Error("the worktree is not clean after the aborted scope merge");
+          }
+          if ((await git(["rev-parse", "HEAD"])).trim() !== priorHeadSha) throw new Error("the worktree head moved off the reviewed head");
+          const mainSha = (await git(["rev-parse", "refs/remotes/origin/main"])).trim();
+          const contract = await resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${opts.taskId}`,
+            opts.worktreePath, "plan/tasks.yaml", mainSha, git);
+          const declaredFiles = contract.taskDeclaredFiles;
+          if (contract.divergence || declaredFiles === undefined || !paths.every((path) => declaredFiles.includes(path))) {
+            throw new Error(`the amended task contract on main does not admit the amendment paths: ${contract.divergence?.reason ?? JSON.stringify(declaredFiles)}`);
+          }
+          opts.task = { ...opts.task, files: declaredFiles, acceptance: contract.criteria };
+          admitted = mainSha;
+        } catch (proofError) {
+          deps.log("fix.scope_amendment", { outcome: "conflict_repair_refused", reason: String(proofError), paths,
+            head_sha: priorHeadSha, pr_number: prNumber, amendment_number: resumed.amendmentNumber });
+        }
+        if (admitted === undefined || conflict === undefined) {
+          return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+        }
+        currentMergeConflict ??= conflict;
+        conflictRepairMainSha = admitted;
       }
       let recovery: Record<string, unknown>;
       try {
@@ -3692,8 +3762,12 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         recovery = { recovery_status: "unavailable", recovery_reason: reason };
         scopeRecoveryEvidence = `Scope amendment #${resumed.amendmentNumber} admitted ${paths.join(", ")}. Saved work unavailable: ${reason}. Repair these admitted paths against the red below.`;
       }
-      deps.log("fix.scope_amendment", { outcome: "amendment_merged", merged_locally: true, merge_sha: mergeSha,
-        amendment_number: resumed.amendmentNumber, paths, head_sha: priorHeadSha, pr_number: prNumber, ...recovery });
+      deps.log("fix.scope_amendment", conflictRepairMainSha === undefined
+        ? { outcome: "amendment_merged", merged_locally: true, merge_sha: mergeSha,
+          amendment_number: resumed.amendmentNumber, paths, head_sha: priorHeadSha, pr_number: prNumber, ...recovery }
+        : { outcome: "conflict_repair_resumed", merged_locally: false, main_sha: conflictRepairMainSha,
+          conflicted_files: conflictedFilePaths(currentMergeConflict), amendment_number: resumed.amendmentNumber,
+          paths, head_sha: priorHeadSha, pr_number: prNumber, ...recovery });
     }
     // W1-T9807: a main-owned refusal is retried, without a worker, at the first head holding the main it compared.
     const lastScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" && row.task_id === opts.taskId && row.pr_number === prNumber);
