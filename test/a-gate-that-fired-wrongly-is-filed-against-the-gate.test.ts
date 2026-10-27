@@ -541,7 +541,7 @@ function gateRepairIdentityFixture(first: { name: string; details_url?: string; 
     if (path.includes("/pulls/1/commits")) return [{ sha: red }, { sha: green }];
     if (path.includes("/pulls/2/commits")) return [{ sha: "red2" }, { sha: "green2" }];
     if (path.includes("/check-runs")) return { check_runs: [{ id: 121865015049,
-      name: path.includes("red2") || path.includes("green2") ? "census" : first.name,
+      name: path.includes("red2") || path.includes("green2") ? "test/example.test.ts" : first.name,
       details_url: first.details_url, app: first.app, status: "completed",
       conclusion: path.includes(`/commits/${red}/`) || path.includes("/commits/red2/") ? "failure" : "success" }] };
     if (path.endsWith("/status")) return { statuses: [] };
@@ -551,10 +551,10 @@ function gateRepairIdentityFixture(first: { name: string; details_url?: string; 
     throw new Error(`unexpected gate identity read: ${args.join(" ")}`);
   };
   return { red, green, compare, events, logs,
-    run: () => loadGateRepairObservations([{ ...rule, trigger: () => true }], { ghJson, ghText: async args => {
+    run: () => loadGateRepairObservations([{ ...rule, gate: "test/example.test.ts", trigger: () => true }], { ghJson, ghText: async args => {
       logs.push(args);
       assert.deepEqual(args, ["run", "view", "--job", "91", "--log-failed"]);
-      return "rule-checks: failed suites: census";
+      return "rule-checks: failed suites: test/example.test.ts";
     } }, (step, extra) => events.push({ step, extra })) };
 }
 
