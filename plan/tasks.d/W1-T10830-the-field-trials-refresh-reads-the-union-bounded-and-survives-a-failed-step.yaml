@@ -1,0 +1,112 @@
+- id: W1-T10830
+  title: "THE FIELD-TRIALS REFRESH HAS DIED ON EVERY RUN SINCE 2026-10-19 — its first step, private-routing-daily-review.mjs, holds every core ledger line since 2026-09-24 in openLedgerUnion's exact-line dedupe Set and hits the ~4 GB heap; set -e then skips the case-file and snapshot steps, so the last snapshot is 2026-10-18 and nothing records that it is stale"
+  repo: remudero
+  depends_on: []  # W1-T8885 (queued, P3) also edits scripts/private-routing-daily-review.mjs (its as-of instant); coordinate, do not wait
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 35.00
+  risk: high  # Rule 19: one concern, the daily collector pass (bounded read, independent steps, its own outcome row); no routing, gate or publication change
+  band_meaning: span
+  priority: 1  # Craig 2026-10-27: field trials on the site; every downstream release task (W1-T10831, W1-T10832) reads this snapshot, and it has been frozen for 9 days
+  status: queued
+  attempts: 0
+  origin: "filing agent F20, 2026-10-27, on Craig's 2026-10-27 ask ('When are we going to have those field trials live on our site? ... lean into automation and self improvement'); re-verified read-only on the Azure host 13:20-13:45Z at origin/main 07dbdcc77"
+  plan_refs: [W1-T4574, W1-T100001, W1-T8885, W1-T10756, W1-T4710]
+  files:
+    - scripts/private-routing-daily-review.mjs
+    - deploy/field-trials-refresh.sh
+    - src/lib/field-trials-refresh.ts
+    - src/lib/field-trials-flow.ts
+    - src/run-task.ts
+    - test/routing/the-daily-routing-review-reads-the-union-bounded.test.ts
+    - test/deploy/a-field-trials-refresh-step-failure-keeps-the-other-steps.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-27, read-only, on the Azure host and on origin/main 07dbdcc77.
+
+    THE CRASH. The service user's crontab runs `17 4 * * * ~/.local/bin/rmd-field-trials-refresh`, a copy
+    whose blob (ab84b6cd) equals main's deploy/field-trials-refresh.sh. Its log
+    (~/.local/state/remudero/field-trials-refresh.log, 910 lines) shows a `Daily routing review` line every
+    day 2026-10-03..2026-10-18, then NINE `FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap
+    out of memory` blocks (one per day, 10-19..10-27), each after Mark-Compact at ~3990-4030 MB. The script
+    runs `set -euo pipefail`, and the routing review is its first docker step, so the case-file and
+    `rmd field-trials` steps never run. Newest outputs in rmd-state2/state/field-trials:
+    field-trials-flow-v1.json 2026-10-18 04:28, field-trials-github-v1.json 04:25, case-files-latest.json
+    04:24, routing-daily/2026-10-18.json 04:18. Nothing since; nothing in the ledger says so (the
+    field-trials command's own help says it "writes no ledger line").
+
+    THE MECHANISM (read at 07dbdcc77, by symbol). readSource in scripts/private-routing-daily-review.mjs
+    calls openLedgerUnion(stateDir, { since: <earliest ROUTING_EXPERIMENTS startedOn> = 2026-09-24 }) with no
+    step, pattern or keep filter. openLedgerUnion (src/lib/ledger-union.ts) parses every line and, with the
+    default exact-line dedupe, adds every line that passes the since filter to `seen`, a Set of full line
+    strings. MEASURED on the host: rotations cut since 2026-09-24 plus the live file hold 5,413,201 lines and
+    3,256,524,328 bytes (593 gz files, niced zcat | wc). On 10-18 the review read 3,055,664 core rows and
+    still finished; the corpus has grown every day since. Raising the heap is not a remedy: the memory budget
+    is one shared host budget.
+    A SECOND DEFECT rides on the same read. The review retains every row carrying selection_assignment_id, up
+    to 100,000 rows, but evaluateRoutingExperiment (src/lib/routing-experiments.ts) reads only
+    worker.assignment, verdict.merged, fix.dispatch and the worker.attempt / verdict / *.done receipts. Since
+    late September selection_assignment_id also rides worker.activity and inbox.draft_synthesized rows.
+    MEASURED: in ledger.2026-10-01T23-59-54-541Z, 4,340 rows (4.79 MB) match the retain predicate (2,308 of
+    them worker.activity), against 227 rows (0.17 MB) in ledger.2026-09-20T23-59-59-117Z. The 10-18 core
+    source already reported `ledger-retention-row-bound`, so every core experiment report read
+    `source-incomplete; next action: repair-source-evidence` from a truncated retained set.
+
+    NOTHING ELSE COVERS THIS. Swept plan/ and the 15 open PR heads (positive control: the same sweep finds 4
+    hits on the commit that last touched the review script): no task or PR names routing-daily-review's
+    memory, the refresh's set -e, or a refresh outcome row. W1-T10756 converges the cron LINE only.
+  design: |
+    1. BOUNDED READ. The routing review never holds the corpus. Give its union read a line filter (the
+       openLedgerUnion `step` option, or a raw-line keep/pattern pre-check on the windowed reader) so only
+       rows it retains enter the dedupe Set and get parsed; or reuse an existing bounded projection (the
+       benchmark-cohort source records) if it already carries these rows. Narrow the retain predicate to what
+       evaluateRoutingExperiment, observeReviewFlow and the self-improvement block actually read, so
+       worker.activity and other assignment-stamped rows stop filling the retained set. The source-quality
+       counters (rowsRead, malformed, future-dated, invalid timestamp, newestTs, quarantine findings) keep
+       their meaning: count them while streaming, never by retaining lines. Do not raise
+       --max-old-space-size or NODE_OPTIONS anywhere.
+    2. INDEPENDENT STEPS. deploy/field-trials-refresh.sh runs each step (routing review, case files, field
+       trials snapshot) to completion or failure without aborting the others, records each step's exit
+       state, and still runs the snapshot step after a failed routing review. A failed case-file step falls
+       back to the previous case-files-latest.json and says so. Argument validation and the lock stay fail
+       closed.
+    3. A PARTIAL SNAPSHOT NAMES ITS FAILED STEPS. The field-trials snapshot carries a refresh section listing
+       each step with state ok / failed / skipped and its exit code, so a snapshot built after a failed step
+       reads partial, never healthy.
+    4. THE COLLECTOR LEDGERS ITS OWN OUTCOME. Every pass, including one where every step failed, appends one
+       `field-trials.refresh` row to the core ledger through the existing ledger writer (no hand-rolled
+       append). recordFieldTrialsRefresh in the new src/lib/field-trials-refresh.ts builds the row; the
+       `rmd field-trials` command (fieldTrialsCommand) calls it, with a record-only mode the shell runs
+       when the snapshot step itself failed (the help syntax in src/run-task.ts names the new flag).
+       The row carries each step's state, the snapshot asOf it produced or null, the asOf of the last good
+       snapshot, and the running script's own blob so a stale installed copy is visible. A step that failed
+       on the previous pass and fails again raises one deduplicated alert through the existing escalation
+       path (src/lib/escalate.ts); the next pass where that step succeeds resolves it.
+    After merge the installed host copy differs from main until deploy/install-field-trials-refresh.sh
+    --install runs; W1-T10756's convergence reports that drift. Report the exact install command for the
+    operator; never run it from a session.
+  acceptance:
+    - claim: "the daily routing review over a corpus of unrelated rows retains and dedupes only the rows its reports read, and its source-quality counts still cover every row it streamed"
+      proof: 'grep: test("W1-T10830: the routing review dedupes only the rows its reports read" in test/routing/the-daily-routing-review-reads-the-union-bounded.test.ts'
+    - claim: "worker.activity and inbox.draft_synthesized rows that carry selection_assignment_id no longer count toward the retained-row bound, while the experiment receipts still join"
+      proof: 'grep: test("W1-T10830: assignment-stamped activity rows do not fill the retained set" in test/routing/the-daily-routing-review-reads-the-union-bounded.test.ts'
+    - claim: "a routing review that exits non-zero leaves the case-file and snapshot steps running, and the snapshot names the failed step"
+      proof: 'grep: test("W1-T10830: a failed routing review still produces a partial snapshot naming it" in test/deploy/a-field-trials-refresh-step-failure-keeps-the-other-steps.test.ts'
+    - claim: "every refresh pass, including one where every step failed, appends one field-trials.refresh row with each step state and the last good snapshot asOf"
+      proof: 'grep: test("W1-T10830: every refresh pass ledgers its step states" in test/deploy/a-field-trials-refresh-step-failure-keeps-the-other-steps.test.ts'
+    - claim: "the field-trials command builds the refresh outcome row through the new module"
+      proof: 'grep: recordFieldTrialsRefresh( in src/lib/field-trials-flow.ts'
+  falsifier: |
+    At base the first case fails: the review's union read carries no line filter, so every unrelated row is
+    parsed and held in the dedupe Set.
+    - Filter rows after openLedgerUnion yields them instead of before dedupe: the dedupe-population assertion
+      fails.
+    - Keep `|| row.selection_assignment_id` in the retain predicate: the activity-rows case fails.
+    - Restore `set -e` around the routing review step: the partial-snapshot case fails.
+    - Write the outcome row only on success: the all-failed half of the ledger case fails.
+    GUARDS that held at base and must still hold:
+    - test/daily-routing-review.test.ts (report shape, prior-day deltas, quarantine resolutions);
+    - test/routing-quarantine-resolution.test.ts and test/ci-refresh-prevention.test.ts;
+    - test/field-trials-flow.test.ts (snapshot families, release withholding).
+    Each guard's existing case must fail when its production branch is removed, and pass again with zero
+    failures once it is restored.

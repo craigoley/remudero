@@ -44,6 +44,7 @@
     - test/**/daily-progress-projection.test.ts
     - test/**/daily-progress-worker.test.ts
     - test/**/daily-progress-view.test.ts
+    - test/the-defuse-lane-sees-a-wire-name-stamp.test.ts
   rationale: A complete Today/Yesterday report must survive Recent feed truncation, read-model scratch deletion,
     browser closure and restart. Existing Analytics collection is view-switch dependent, existing windows are
     UTC, and current open PRs do not reconstruct yesterday midnight. Operators need each repository and the

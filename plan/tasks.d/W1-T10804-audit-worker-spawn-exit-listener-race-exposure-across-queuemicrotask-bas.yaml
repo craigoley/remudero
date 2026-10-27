@@ -6,7 +6,10 @@
   verify: human
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=586453582af41511
+  # backlog gardener: placed=2026-10-27T15:03:16.070Z
   attempts: 0
   files:
     - src/lib/worker-provider.ts
@@ -35,9 +38,10 @@
     action: escalate
     confidence: 0.9
     reasons:
-      - "The plan record is a recon/audit task whose deliverable is a report. Nothing in the description touches secrets, auth, deletion, merge/deploy/review policy, or irreversible actions."
-      - "The acceptance criteria are verifiable from what is shown, since each requires naming files, functions, lines, and a safe/needs-follow-up disposition per named test."
-      - "Gates state is clean: author_class is operator, filingTime is true, the family track record is 21 merged with a Beta mean of 0.86, and all 4 declared files exist at the base."
+      - "The description states a recon/audit task whose output is a report, with fixes deferred to follow-up tasks; it names no secrets, auth, deletion, policy, or irreversible action."
+      - "Acceptance criteria 1-3 each carry a demonstration the operator can verify by reading the report, so the finding is verifiable from what is shown."
+      - "The gates state is clean: filingTime is true, author_class is operator, the family track record is strong (21 merged, Beta mean 0.86), and all 4 declared files exist at the base."
+      - "The declared files include production source (worker-provider.ts, worker.ts), but the description frames the work as read-only analysis. No bounded change view was supplied, so the actual touched-file shape is unverified."
       - "the judge said proceed, but W1-T10804: at verify: auto it fails lint (proof-dialect)"
-    judged_at: "2026-10-27T11:15:00.928Z"
-    pin: "9988fad34aca8d3b94d0bff09d73e989351e347e6b5408b654e4c7455382458f"
+    judged_at: "2026-10-27T16:48:09.246Z"
+    pin: "3f7e541225b0e88c2c5ae0b9e1b3ef2154a08dd1e2172cec116866473b0e47ff"

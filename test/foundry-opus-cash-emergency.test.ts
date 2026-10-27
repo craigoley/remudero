@@ -71,9 +71,9 @@ test("Opus has a separate $5 ordinary limit, $10 squeeze limit, and shares the $
       reserveOpenWeightBudget(f.config, { requestId: id, deployment, requestBodyBytes: bytes, atIso: ISO, squeezed });
     reserve("cheap", "gpt-6-luna", true);
     for (let i = 0; i < 31; i++) reserve(`opus-${i}`, "claude-opus-5-5", false);
-    assert.throws(() => reserve("normal-over", "claude-opus-5-5", false), /\$5\.00 dailyCapUsd/);
+    assert.throws(() => reserve("normal-over", "claude-opus-5-5", false), /\$5\.00 foundry-claude cap/);
     for (let i = 31; i < 62; i++) reserve(`opus-${i}`, "claude-opus-5-5", true);
-    assert.throws(() => reserve("squeeze-over", "claude-opus-5-5", true), /\$10\.00 dailyCapUsd/);
+    assert.throws(() => reserve("squeeze-over", "claude-opus-5-5", true), /\$10\.00 foundry-claude cap/);
     const rows = Object.values(allowance(f.root).reservations);
     assert.equal(rows.filter((row) => row.deployment === "claude-opus-5-5").length, 62);
     assert.ok(rows.some((row) => row.deployment === "gpt-6-luna"), "cheap calls occupy the same ledger");

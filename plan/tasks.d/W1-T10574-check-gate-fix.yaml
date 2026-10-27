@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high  # Rule 19 span: widened to fix, prompt-render, sweep by a scope amendment for #14806
   band_meaning: span
   priority: 1.09
@@ -40,3 +40,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The description and declared files (prompt-render.ts, fix.ts, sweep.ts, and a new test) show a code-path remedy to the harness's own fix-round dispatch, with no secrets, auth, permission, deletion, merge/deploy/review policy, or irreversible action named."
+      - "Acceptance is mechanically checkable by a grep for a named test, so the finding can be verified from what is shown, and the change is structurally different from the prior docs-only rung as the plan requires."
+      - "The family track record is mixed (81 declined vs 65 merged), and no bounded view of the actual change was supplied, so confidence is moderate rather than high. Normal CI and review still gate the PR."
+    judged_at: "2026-10-27T14:38:47.241Z"
+    pin: "967242f5ac38420d5ccf6ddd07e04f1b3a23b96426019f6f3914aeb51d79a66b"
