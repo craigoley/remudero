@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { resolveVitestLeafCandidates } from "../src/lib/check-proof.js";
 import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/run-task.js";
 
 function vitestCheckout(): string {
@@ -54,6 +55,28 @@ test("registered Vitest still reports an unmatched title as no-match", () => {
     assert.equal(result.code, CHECK_PROOF_EXIT.noMatch, result.out);
     assert.match(result.out, /candidates: delegated to the registered Vitest suite root/);
     assert.match(result.out, /verdict:\s+no-match/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an unreadable Vitest suite root keeps the root-wide run rather than guessing absence", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-vitest-noroot-"));
+  try {
+    assert.equal(existsSync(join(dir, "tests", "unit")), false, "positive control: the root is absent");
+    assert.equal(
+      resolveVitestLeafCandidates(dir, { args: ["--reporter=tap", "tests/unit"], label: "site proof title" }),
+      undefined,
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an unreadable candidate file stays in scope, as the executor keeps it", () => {
+  const dir = vitestCheckout();
+  try {
+    // A directory named like a test file lists as a candidate entry but cannot be read as text.
+    mkdirSync(join(dir, "tests", "unit", "unreadable.test.ts"), { recursive: true });
+    const found = resolveVitestLeafCandidates(dir, { args: ["--reporter=tap", "tests/unit"], label: "CONSOLE-T127: site proof title" });
+    assert.equal(found?.leaf, "site proof title");
+    assert.deepEqual([...(found?.files ?? [])].sort(), ["tests/unit/sample.test.ts", "tests/unit/unreadable.test.ts"]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
