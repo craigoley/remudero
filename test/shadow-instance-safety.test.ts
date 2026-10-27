@@ -589,6 +589,30 @@ function privateClaudeArgs(fixture: ReturnType<typeof runtimeRegistryFixture>, s
     }) as SpawnWorkerArgs["queryFn"] };
 }
 
+for (const permissionMode of ["bypassPermissions", "plan", "dontAsk"] as const) {
+  test(`unselected Claude preserves caller SDK permission and settings for ${permissionMode}`, async () => {
+    const fixture = runtimeRegistryFixture(), sink = { calls: 0 } as { calls: number; options?: Record<string, unknown> };
+    const priorHome = process.env.HOME;
+    try {
+      process.env.HOME = fixture.root;
+      assert.equal(runtimeRegistry.runtimeInstanceRegistryPrivateFile(), undefined);
+      const args = privateClaudeArgs(fixture, sink), settingsFile = args.settingsFile;
+      args.permissionMode = permissionMode;
+      const query = args.queryFn!;
+      let settingsInput: unknown;
+      args.queryFn = params => { settingsInput = params.options?.settings; return query(params); };
+      await spawnWorker(args);
+      assert.equal(sink.calls, 1, "the real worker boundary reaches its intercepted SDK query");
+      assert.equal(sink.options!.permissionMode, permissionMode);
+      assert.equal(settingsInput, settingsFile, "legacy selection preserves the original settings-file argument");
+      assert.deepEqual(sink.options!.settings, JSON.parse(readFileSync(settingsFile, "utf8")));
+    } finally {
+      if (priorHome === undefined) delete process.env.HOME; else process.env.HOME = priorHome;
+      fixture.cleanup();
+    }
+  });
+}
+
 test("selected Claude public policy never names private inputs while preserving workspace edits", async () => {
   const fixture = runtimeRegistryFixture(), sink = { calls: 0 } as { calls: number; options?: Record<string, unknown> };
   try {
