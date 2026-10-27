@@ -145,3 +145,68 @@ test("W1-T9484: every suite declared gitFree runs with git absent from PATH", ()
     rmSync(controlDir, { recursive: true, force: true });
   }
 });
+
+function reachFixture(headValue = 2, baseValue = 1, baseExpected = 1) {
+  const f = fixture();
+  const snapshot = JSON.parse(readFileSync(f.snapshot, "utf8"));
+  const suite = "test/the-affected-suite-reach-ratchet.test.ts";
+  const module = "src/lib/affected-suites.ts";
+  const baseline = "scripts/affected-reach-baseline.json";
+  const suiteText = [
+    'import assert from "node:assert/strict";',
+    'import { readFileSync, writeFileSync } from "node:fs";',
+    'import { test } from "node:test";',
+    'import { value } from "../src/lib/affected-suites.js";',
+    'const snapshot = JSON.parse(readFileSync(process.env.RMD_CENSUS_SNAPSHOT, "utf8"));',
+    'test("snapshot reach uses its own selector and baseline", () => {',
+    '  writeFileSync(`${snapshot.root}/reach-child-observed`, String(value));',
+    '  assert.equal(value, JSON.parse(readFileSync(`${snapshot.root}/scripts/affected-reach-baseline.json`, "utf8")).expected);',
+    '});', "",
+  ].join("\n");
+  const baseTexts = { [suite]: suiteText, [module]: `export const value = ${baseValue};\n`,
+    [baseline]: JSON.stringify({ expected: baseExpected }) };
+  const headTexts = { ...baseTexts, [module]: `export const value = ${headValue};\n`,
+    [baseline]: JSON.stringify({ expected: 2 }) };
+  for (const [path, text] of Object.entries(headTexts)) {
+    mkdirSync(dirname(join(f.root, path)), { recursive: true });
+    writeFileSync(join(f.root, path), text);
+    snapshot.headPaths.push(path);
+    snapshot.basePaths.push(path);
+    snapshot.baseBlobs[path] = baseTexts[path as keyof typeof baseTexts];
+  }
+  writeFileSync(f.snapshot, JSON.stringify(snapshot));
+  return f;
+}
+
+function removeReachFixture(f: ReturnType<typeof reachFixture>) {
+  rmSync(f.root, { recursive: true, force: true });
+  rmSync(f.snapshotDir, { recursive: true, force: true });
+}
+
+test("snapshot reach executes the candidate selector with that candidate's baseline", () => {
+  const f = reachFixture();
+  try {
+    const result = precheck(f);
+    assert.equal(result.status, 0, result.text);
+    assert.equal(readFileSync(join(f.root, "reach-child-observed"), "utf8"), "2");
+  } finally { removeReachFixture(f); }
+});
+
+test("snapshot reach refuses a candidate regression against a healthy base using each tree's selector", () => {
+  const f = reachFixture(3);
+  try {
+    const result = precheck(f);
+    assert.equal(readFileSync(join(f.root, "reach-child-observed"), "utf8"), "3");
+    assert.equal(result.status, 1, result.text);
+    assert.match(result.text, /census-suite: test\/the-affected-suite-reach-ratchet\.test\.ts fails/);
+  } finally { removeReachFixture(f); }
+});
+
+test("snapshot reach retains its existing subtraction of a failure already present on the base", () => {
+  const f = reachFixture(3, 4, 1);
+  try {
+    const result = precheck(f);
+    assert.equal(readFileSync(join(f.root, "reach-child-observed"), "utf8"), "3");
+    assert.equal(result.status, 0, result.text);
+  } finally { removeReachFixture(f); }
+});
