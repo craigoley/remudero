@@ -1,14 +1,15 @@
 // W1-T9951: an author preflight takes its suite ticket first, runs its static stage on a memory admission while
 // that ticket waits, and admits its suites in queue order; a cold typecheck never waits on a suite slot or ticket.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import { typecheckStep } from "#src/lib/commit-message.js";
-import { acquireTestSlot, admitStaticWork } from "#src/lib/test-slot.js";
+import { acquireTestSlot, admitStaticWork, enqueueTestSlot } from "#src/lib/test-slot.js";
 import { takeTestSlotTicket, testSlotQueueDir } from "#src/lib/test-slot-queue.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -248,4 +249,125 @@ test("W1-T9951: a cold typecheck is admitted by memory, not by the suite queue",
   assert.equal(unread.step.ok, true, unread.step.detail);
   assert.equal(holder.outcome, "acquired");
   assert.equal(readdirSync(testSlotQueueDir(slots)).length, 1, "the ticket ahead is untouched");
+});
+
+function scratch(t: TestContext, prefix: string): { root: string; slots: string } {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const slots = join(root, "slots");
+  mkdirSync(slots);
+  return { root, slots };
+}
+
+test("an unusable ticket queue leaves the suite stage to unqueued admission", (t) => {
+  const slots = slotEnvironment(t);
+  // A plain file where the ticket line's directory belongs: the ticket cannot be taken.
+  writeFileSync(`${slots}.queue`, "not a directory");
+  const logs: string[] = [];
+  const hold = enqueueTestSlot("unqueueable", { dir: slots, queue: true, log: line => logs.push(line) });
+  assert.equal(hold.ticketed, false);
+  assert.equal(hold.position, undefined);
+  assert.match(hold.note, /^queue unavailable \(.+\); admission polls unqueued$/);
+  hold.cancel("never admitted");
+  assert.deepEqual(logs, [], "no ticket was taken, so none was cancelled or reported");
+});
+
+test("static admission opens, and says so, when no slot directory can be resolved", () => {
+  const absentTmp = join(tmpdir(), `rmd-w1-t9951-absent-${randomUUID()}`, "tmp");
+  // A test process with no configured slot dir mints one under TMPDIR at module load; an absent TMPDIR makes that fail.
+  const script = `
+    process.env.TMPDIR = ${JSON.stringify(absentTmp)};
+    process.env.NODE_TEST_CONTEXT = 'child-v8';
+    delete process.env.RMD_TEST_SLOT_DIR; delete process.env.RMD_TEST_SLOT_PARENT;
+    const { admitStaticWork } = await import(${JSON.stringify(SLOT_MODULE)});
+    const a = admitStaticWork('no-slot-dir', { memoryBytes: 1, log: () => {} });
+    console.log(JSON.stringify({ outcome: a.outcome, executionAllowed: a.executionAllowed, waitedMs: a.waitedMs, note: a.note }));
+  `;
+  const run = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script],
+    { cwd: REPO_ROOT, encoding: "utf8", timeout: 120_000, env: { ...process.env, NODE_TEST_CONTEXT: undefined } });
+  assert.equal(run.status, 0, run.stderr);
+  const admission = JSON.parse(run.stdout.trim().split("\n").pop() ?? "{}") as { outcome: string; executionAllowed: boolean; waitedMs: number; note: string };
+  assert.equal(admission.outcome, "open");
+  assert.equal(admission.executionAllowed, true);
+  assert.equal(admission.waitedMs, 0);
+  assert.match(admission.note, /static admission OPEN: slot directory unresolved \(.*ENOENT.*\); no peak could be counted/);
+});
+
+test("a nested static stage is covered by its ancestor's static record", (t) => {
+  const { slots } = scratch(t, "rmd-w1-t9951-nested-");
+  const common = { dir: slots, log: () => {}, isPidAlive: () => true, memoryHeadroom: () => undefined };
+  // The author's own static admission, recorded under its parent's pid: this process is that pid's descendant.
+  const ancestor = admitStaticWork("author-static", { ...common, memoryBytes: GiB, pid: process.ppid });
+  t.after(() => ancestor.release());
+  assert.equal(ancestor.outcome, "open");
+  const nested = admitStaticWork("nested-static", { ...common, memoryBytes: GiB });
+  assert.equal(nested.outcome, "inherited");
+  assert.equal(nested.executionAllowed, true);
+  assert.ok(nested.note.includes(`inherited from ancestor static-`) && nested.note.includes(`(author-static, pid ${process.ppid})`), nested.note);
+  assert.equal(readdirSync(slots).filter(name => name.startsWith("static-")).length, 1, "only the ancestor's record remains");
+});
+
+test("a static stage past its wait bound runs anyway and names the holders it ran beside", (t) => {
+  const { slots } = scratch(t, "rmd-w1-t9951-bound-");
+  const holder = acquireTestSlot("suite", { dir: slots, slots: 1, memoryBytes: 8 * GiB, memoryHeadroom: () => 64 * GiB, log: () => {} });
+  t.after(() => holder.release());
+  assert.equal(holder.outcome, "acquired");
+  const logs: string[] = [];
+  const starved = admitStaticWork("starved-static", { dir: slots, memoryBytes: GiB, memoryHeadroom: () => GiB, waitBoundMs: 0,
+    sleep: () => { throw new Error("a zero wait bound must not sleep"); }, log: line => logs.push(line) });
+  t.after(() => starved.release());
+  assert.equal(starved.outcome, "wait_bound_exceeded");
+  assert.equal(starved.executionAllowed, true);
+  assert.match(starved.note, /WAIT BOUND EXCEEDED.*headroom 1024 MiB < 9216 MiB beside suite \(pid \d+, 8192 MiB\); ran anyway/);
+  const row = logs.map(line => JSON.parse(line)).find(entry => entry.step === "test_slot.static_wait_bound_exceeded");
+  assert.ok(row, logs.join("\n"));
+  assert.equal(row.holders.length, 1);
+});
+
+test("an unreadable static record names no peak, and an unreadable slot record hands the judgment to the slot", async (t) => {
+  if (process.getuid?.() === 0) { t.skip("root reads any file"); return; }
+  await t.test("static record", (t) => {
+    const { slots } = scratch(t, "rmd-w1-t9951-unreadable-static-");
+    const record = join(slots, `static-${randomUUID()}.json`);
+    writeFileSync(record, "{}");
+    chmodSync(record, 0o000);
+    const admitted = admitStaticWork("beside-unreadable-static", { dir: slots, memoryBytes: GiB, memoryHeadroom: () => 8 * GiB, log: () => {} });
+    t.after(() => admitted.release());
+    assert.equal(admitted.outcome, "admitted");
+    assert.match(admitted.note, /and 0 live holder\(s\)/);
+  });
+  await t.test("slot record", (t) => {
+    const { slots } = scratch(t, "rmd-w1-t9951-unreadable-slot-");
+    const record = join(slots, "slot-1.json");
+    writeFileSync(record, "{}");
+    chmodSync(record, 0o044); // group/other bits keep it a public record, yet its owner cannot open it
+    const handed = admitStaticWork("beside-unreadable-slot", { dir: slots, slots: 1, memoryBytes: GiB, memoryHeadroom: () => 64 * GiB, waitBoundMs: 0, sleep: () => {}, log: () => {} });
+    t.after(() => handed.release());
+    assert.equal(handed.outcome, "slot");
+    assert.match(handed.note, /^slot-1\.json unreadable: .*EACCES/);
+  });
+});
+
+test("a static record that vanishes while the directory is scanned is skipped", (t) => {
+  const { slots } = scratch(t, "rmd-w1-t9951-vanish-");
+  const holder = acquireTestSlot("suite", { dir: slots, slots: 1, memoryBytes: GiB, memoryHeadroom: () => 64 * GiB, log: () => {} });
+  t.after(() => holder.release());
+  assert.equal(holder.outcome, "acquired");
+  const planted = join(slots, `static-${randomUUID()}.json`);
+  writeFileSync(planted, JSON.stringify({ pid: process.pid, host: "w1-t9951", startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), label: "vanishing" }));
+  // The scan lists the planted record, then reads the suite holder's record first (it sorts earlier) and asks the
+  // clock about it: that is where the planted record disappears, before the scan reaches it.
+  const clock = {
+    now: () => {
+      const own = readdirSync(slots).filter(name => name.startsWith("static-") && name !== basename(planted));
+      if (own.length > 0 && existsSync(planted)) unlinkSync(planted);
+      return Date.now();
+    },
+    date: () => new Date(), iso: () => new Date().toISOString(),
+  };
+  const admitted = admitStaticWork("racing-static", { dir: slots, memoryBytes: GiB, memoryHeadroom: () => 8 * GiB, clock, log: () => {} });
+  t.after(() => admitted.release());
+  assert.equal(existsSync(planted), false, "the record vanished during the scan");
+  assert.equal(admitted.outcome, "admitted");
+  assert.match(admitted.note, /and 1 live holder\(s\)/, "only the suite holder was counted");
 });

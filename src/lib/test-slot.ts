@@ -21,7 +21,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync, type Stats } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeSync, type Stats } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleepAsync } from "node:timers/promises";
@@ -1699,7 +1699,9 @@ export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryB
     const body: TestSlotHolder & { admittedAt?: string } = { pid, host: host(), bootId: bootId(), pidNs: pidNamespace(), startedAt: startedIso,
       heartbeatAt: clock.iso(), label, processStart: testSlotProcessFacts(pid)?.start, memoryBytes: opts.memoryBytes, ...(admittedAt ? { admittedAt } : {}) };
     const temp = join(dir, `.${ownName}.tmp`);
-    writeFileSync(temp, JSON.stringify(body), { mode: 0o644, flag: "wx" });
+    // Exclusive, link-refusing creation: a foreign file or symlink already at this name is never written through.
+    const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    try { writeSync(fd, JSON.stringify(body)); fchmodSync(fd, 0o644); } finally { closeSync(fd); }
     renameSync(temp, ownPath);
   };
   const unlinkOwn = (): void => {
