@@ -305,6 +305,73 @@ test("W1-T10750: boot evidence takes the earliest FRESH receipt of another insta
   assert.throws(() => maintenance.bootEvidenceFor(gitDir, opts), /boot receipt broken-host unreadable/);
 });
 
+test("W1-T10750: a leftover scan that cannot read the pack directory is carried as a failure, never thrown", async () => {
+  const store = gitRepo({ kind: "maintenance-scan-failed" });
+  const pack = join(store.dir, ".git", "objects", "pack");
+  rmSync(pack, { recursive: true, force: true });
+  writeFileSync(pack, "a file where the pack directory belongs\n");
+  const result = await maintenance.reclaimOwnerGoneLeftovers(store.dir, { listProcesses: () => [], hostname: () => HOST, bootMs: () => NOW });
+  assert.deepEqual(result.reclaimed, []);
+  assert.deepEqual(result.kept, []);
+  assert.equal(result.failed.length, 1);
+  assert.equal(result.failed[0].path, ".");
+  assert.match(result.failed[0].error, /^leftover scan failed: .*ENOTDIR/, "the scan failure is named with its cause");
+});
+
+test("W1-T10750: a leftover that cannot be removed is reported failed and does not stop the others", async () => {
+  const store = gitRepo({ kind: "maintenance-rm-failed" });
+  const gitDir = join(store.dir, ".git");
+  // A directory named like a crashed repack's temp file: it is a candidate, but `rm` without recursion refuses it.
+  const stuck = join(gitDir, "objects", "pack", "tmp_pack_dir");
+  plant(join(stuck, "inner"));
+  utimesSync(stuck, LONG_AGO, LONG_AGO);
+  plant(join(gitDir, "objects", "pack", "tmp_idx_ok"));
+  const result = await maintenance.reclaimOwnerGoneLeftovers(store.dir, { listProcesses: () => [], hostname: () => HOST, bootMs: () => NOW });
+  assert.deepEqual(result.reclaimed, ["objects/pack/tmp_idx_ok"], "the removable leftover is still reclaimed");
+  assert.equal(result.failed.length, 1);
+  assert.equal(result.failed[0].path, "objects/pack/tmp_pack_dir");
+  assert.ok(result.failed[0].error.length > 0, "the failure carries the filesystem's reason");
+  assert.equal(existsSync(join(stuck, "inner")), true, "the unremovable leftover is left in place");
+});
+
+test("W1-T10750: an unreachable operator channel never blocks maintenance and the row carries why", async () => {
+  const store = gitRepo({ kind: "maintenance-operator-down" });
+  const statePath = join(store.dir, "maintenance.json");
+  const rows: Array<Record<string, unknown>> = [];
+  const calls: string[][] = [];
+  const operator = {
+    open: async (): Promise<string> => { throw new Error("issue tracker down"); },
+    close: async (): Promise<void> => { throw new Error("issue tracker down"); },
+  };
+  writeState(statePath, { failures: 2, lastOutcome: "fail" });
+  await maintenance.runRepositoryMaintenance(store.dir, statePath, policy, (_s, f) => rows.push(f), {
+    clock: fixedClock(NOW), random: () => 0, context: quiet, hostname: () => HOST, operator,
+    listProcesses: () => [], bootMs: () => NOW, survey: async () => survey("marker"),
+    run: async (_repo, args) => { calls.push([...args]); return { ok: false, timedOut: false, error: "lock held" }; },
+  });
+  const state = maintenance.readMaintenanceState(statePath);
+  assert.equal(calls.length, 1, "maintenance still ran");
+  assert.equal(state.escalated, true);
+  assert.equal(state.operatorIssue, undefined, "no issue was recorded, so the next pass retries");
+  assert.ok(rows.some((r) => r.operator_error === "issue tracker down"), "a row names the operator channel failure");
+});
+
+test("W1-T10750: a boot receipt that cannot be written is carried on the row and maintenance still runs", async () => {
+  const store = gitRepo({ kind: "maintenance-receipt-unwritable" });
+  const gitDir = join(store.dir, ".git");
+  writeFileSync(join(gitDir, maintenance.BOOT_RECEIPT_DIR), "a file where the receipt directory belongs\n");
+  const rows: Array<Record<string, unknown>> = [];
+  const calls: string[][] = [];
+  await maintenance.runRepositoryMaintenance(store.dir, join(store.dir, "maintenance.json"), policy, (_s, f) => rows.push(f), {
+    clock: fixedClock(NOW), random: () => 0, context: quiet, hostname: () => HOST, listProcesses: () => [],
+    survey: markerUntilRun(calls, "marker"), run: okRun(calls),
+  });
+  assert.equal(calls.length, 1, "an unwritable receipt does not stop maintenance");
+  const receiptError = rows.at(-1)?.boot_receipt_error;
+  assert.equal(typeof receiptError, "string", "the row carries the receipt write failure");
+  assert.ok(String(receiptError).length > 0);
+});
+
 test("W1-T10750: prune inputs name a worktree with no gitdir file or an unreadable one rather than skip it", async () => {
   const store = gitRepo({ kind: "maintenance-worktree-unreadable" });
   const worktrees = join(store.dir, ".git", "worktrees");
