@@ -7245,7 +7245,7 @@ export const REQUIRED_CHECK_FAIL = new Set([
   "STALE",
 ]);
 
-function rollupProducerKey(c: RollupCheckEntry): { key: string; known: boolean } {
+export function rollupProducerKey(c: RollupCheckEntry): { key: string; known: boolean } {
   const posted = /^(?:run:\d+:\d+:)?job:\d+$/.test(c.externalId ?? "");
   const kind = c.context !== undefined && c.name === undefined ? "status" : "check";
   const identifiedWorkflow = c.workflowId !== undefined ? `workflow:${c.workflowId}`
