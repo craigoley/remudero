@@ -359,19 +359,22 @@ import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOvers
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { queueJudgeGardenSpec, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
-import { scoutGardenSpec } from "./lib/scout-gardener.js";
+import { SCOUT_WINDOW_MS, scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { ciFailureLedgerEntry, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
+import { CI_FRICTION_HALF_LIFE_MS, ciFrictionCauseKey, ciFrictionRoundMatchesCause, ciFrictionRoundsFromLedger, ciFailureLedgerEntry, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import {
-  gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, operatorRulingTimes, parkedEscalation, readOperatorReleaseRecords,
-  recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts,
+  gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, mechanicalDecisions, operatorRulingTimes, parkedEscalation, readOperatorReleaseRecords,
+  recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts, type MechanicalPort,
 } from "./lib/machine-filing-judge.js";
+import { countRounds, countStepRows, filingEvidenceOf, type SymptomReading } from "./lib/mechanical-rulings.js";
+import { parseCiFrictionOrigin } from "./lib/ci-friction-remedy.js";
+import type { LedgerRecord } from "./lib/retro.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { openIncidentFeedbackOrigins } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, hostResourceInputStamp, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
@@ -4006,8 +4009,9 @@ interface PrOwnerLedgerRead {
 
 function prNumberFromLedgerRow(row: Record<string, unknown>): number | undefined {
   if (typeof row.pr_number === "number" && Number.isInteger(row.pr_number) && row.pr_number > 0) return row.pr_number;
-  if (typeof row.pr_url !== "string") return undefined;
-  const m = /\/pull\/(\d+)(?:[/?#].*)?$/.exec(row.pr_url);
+  const url = typeof row.pr_url === "string" ? row.pr_url : row.repair_pr_url;
+  if (typeof url !== "string") return undefined;
+  const m = /\/pull\/(\d+)(?:[/?#].*)?$/.exec(url);
   return m ? Number(m[1]) : undefined;
 }
 
@@ -6458,6 +6462,13 @@ export function ensureTaskTrailer(
     const body = view.body ?? "";
     if (body.includes(trailer)) return;
     const newBody = body.trim().length > 0 ? `${body.trimEnd()}\n\n${trailer}\n` : `${trailer}\n`;
+    // GitHub's PR PATCH has no compare-and-swap, so re-read right before writing: a body edited after the read
+    // above (2026-10-13, #11216: a human edit overwritten by this stamp) is left alone, and the next pass stamps it.
+    const live = (read(["pr", "view", prUrl, "--json", "body"]) as { body?: string }).body ?? "";
+    if (live !== body) {
+      log("trailer_stamp.raced", { task_id: taskId, pr_url: prUrl });
+      return;
+    }
     phase = "write";
     // W1-T2948: the SHARED builder, so this stamp cannot retain its own copy of the failing
     // transport. An unresolvable URL throws here and lands in the catch below with phase "write" —
@@ -10952,19 +10963,18 @@ export function spawnCensusChild(file: string, args: string[], options: SpawnSyn
     const child = execFile(file, args, { cwd: options.cwd, env: options.env, encoding: "utf8", maxBuffer: options.maxBuffer },
       (error, stdout, stderr) => {
         bound?.cancel();
-        const failed = (bound?.timedOut ? bound.timeoutError(file, { stdout, stderr }) : error) as (Error & { code?: unknown; signal?: NodeJS.Signals | null }) | null;
+        // The bound's kill keeps its named error beside the signal, as spawnSync's ETIMEDOUT does: a refusal then says the
+        // budget stopped the child instead of reading as an outside SIGTERM. The output stays on stdout/stderr, so the
+        // error's text cannot be cut away by the refusal's 4,000-character tail.
+        const failed = (bound?.timedOut ? bound.timeoutError(file) : error) as (Error & { code?: unknown; signal?: NodeJS.Signals | null }) | null;
         const status = failed === null ? 0 : typeof failed.code === "number" ? failed.code : null;
         const signal = failed?.signal ?? null;
         resolveChild({ status, signal, stdout: String(stdout), stderr: String(stderr),
-          ...(failed !== null && status === null && signal === null ? { error: failed } : {}) } as CensusChildResult);
+          ...(failed !== null && status === null && (signal === null || bound?.timedOut) ? { error: failed } : {}) } as CensusChildResult);
       });
     const bound = options.timeout ? boundChildByLoopTime(child, options.timeout) : undefined;
   });
 }
-
-// The precheck runs bounded suite children serially, including base retries; allow their own
-// backstops to report before the outer process bound fires. The reach child stays at 60 s.
-const CENSUS_PRECHECK_TIME_BOUND_MS = 8 * 60_000;
 
 function* fixCensusSnapshotSteps(
   root: string,
@@ -10977,8 +10987,33 @@ function* fixCensusSnapshotSteps(
     .filter(([key]) => !/^(?:GIT_|NODE_TEST_CONTEXT$|RMD_SELF_SYNC_DONE$)/.test(key)));
   env[CENSUS_SNAPSHOT_ENV] = path;
   const scriptsRoot = repoRoot;
+  const childTimeBoundMs = 60_000;
+  // The trusted controller reports its own fixed stage inventory; no worker code/table is loaded here.
+  const budgetRead = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--snapshot-budget"],
+    { cwd: scriptsRoot, env, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
+  let controllerTimeBoundMs: number;
+  try {
+    if (budgetRead.status !== 0 || budgetRead.signal || budgetRead.error) throw new Error("budget inspector did not complete");
+    const budget = JSON.parse(String(budgetRead.stdout)) as { version?: number; childTimeBoundMs?: number;
+      stages?: Record<string, number>; timeoutMs?: number };
+    const stages = budget.stages;
+    const keys = ["setup", "admission", "reach", "joinedGitFree", "structuralGitFree"];
+    if (budget.version !== 1 || budget.childTimeBoundMs !== childTimeBoundMs || !stages || Array.isArray(stages) ||
+        Object.keys(stages).length !== keys.length || keys.some(key => !Number.isSafeInteger(stages[key]) || stages[key]! < 0) ||
+        stages.setup !== 1 || stages.admission !== 1 || stages.reach !== 2 || stages.joinedGitFree !== 2 || stages.structuralGitFree! % 2 !== 0) {
+      throw new Error("unsupported controller stage inventory");
+    }
+    const derived = keys.reduce((sum, key) => sum + stages[key]!, 0) * childTimeBoundMs;
+    if (!Number.isSafeInteger(derived) || budget.timeoutMs !== derived || derived <= childTimeBoundMs) throw new Error("invalid derived controller deadline");
+    controllerTimeBoundMs = derived;
+  } catch (error) {
+    const reason = `controller budget UNKNOWN (${error instanceof Error ? error.message : String(error)})`;
+    const refusal = { text: `census-precheck: NOT MEASURED — ${reason}`, censuses: [], offeredBaselines: [] };
+    log("fix.census_check", { outcome: "refused", refusal: refusal.text, reason });
+    return { refusal, unmeasured: reason };
+  }
   const precheck = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--root", root],
-    { cwd: scriptsRoot, env, encoding: "utf8", timeout: CENSUS_PRECHECK_TIME_BOUND_MS, maxBuffer: 64 * 1024 * 1024 }));
+    { cwd: scriptsRoot, env, encoding: "utf8", timeout: controllerTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
   const text = `${precheck.stdout ?? ""}${precheck.stderr ?? ""}`;
   let refusal = censusPushRefusal(text);
   let unmeasured = precheck.status === 2 ? text.trim() : undefined;
@@ -10993,7 +11028,7 @@ function* fixCensusSnapshotSteps(
     const reach = "test/the-affected-suite-reach-ratchet.test.ts";
     const result = yield* step(() => run(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import",
       "./test/setup/tmp-hygiene.ts", reach],
-      { cwd: scriptsRoot, env, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 }));
+      { cwd: scriptsRoot, env, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
     const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
     if (result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
       refusal = unavailable(`census suite ${reach}`, result, output);
@@ -11686,7 +11721,7 @@ export function normalizeRunPrAcceptanceFromPlan(
   // The SAME two leaves (and the same defaults) repairRetroAcceptanceBlock injects — reused from its
   // own signature rather than a second inline copy; its retro-only `diff` input is omitted here.
   deps: Omit<NonNullable<Parameters<typeof repairRetroAcceptanceBlock>[2]>, "diff"> = {},
-): "rewritten" | "healthy" | "no-block" | "error" {
+): "rewritten" | "healthy" | "no-block" | "raced" | "error" {
   return runTaskCommandHelpers(runTaskCommandHost()).normalizeRunPrAcceptanceFromPlan(prUrl, taskId, planCriteria, log, deps);
 }
 
@@ -21426,8 +21461,19 @@ export async function defaultVerifyHumanCadenceResult(
     const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
     const judgedRows = rowsWithArchivedVerifyHumanVerdicts(ledgerPath, rows);
     const registryPath = join(config.root, "state", "inbox-proposals.json");
+    const credited = readMergeCreditedTaskIds(ledgerPath).credited;
+    const shards = withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, repoRoot, clock, credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), clock.now(), { repository: githubRepoSlugOfCheckout(repoRoot), instance: process.env.RMD_INSTANCE_NAME });
+    const releasedIds = resolveReleasedIds(releaseReadersFor(ledgerPath), plan);
+    // W1-T10371: the operator's four rulings decide what they can; the machine-filing judge's landing owns the write.
+    const ruledByRules = mechanicalDecisions({
+      port: productionMechanicalPort({ repoRoot, stateDir: join(config.root, "state"), clock }), plan,
+      candidates: shards.flatMap((shard) => plan.byId.get(shard.id) ?? []), released: releasedIds, isMerged: (id) => credited.has(id),
+      log: (step, fields) => appendLedger(ledgerPath, { run_id: runId, step, ...fields } as LedgerLine),
+    });
     const result = await verifyHumanCadence({
-      shards: withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, repoRoot, clock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), clock.now(), { repository: githubRepoSlugOfCheckout(repoRoot), instance: process.env.RMD_INSTANCE_NAME }),
+      shards,
+      decidedByRules: (shard) => ruledByRules.get(shard.id),
+      priorMechanicalKeys: new Set(rows.filter((r) => r.step === "verify_human.mechanical_ruling").map((r) => `${String(r.task_id)}:${String(r.rule)}:${String(r.verdict)}`)),
       priorVerdicts: priorVerifyHumanVerdicts(judgedRows),
       priorAgeBandKeys: priorVerifyHumanAgeBandKeys(judgedRows),
       judge: shadowedVerifyHumanJudge({
@@ -21441,7 +21487,7 @@ export async function defaultVerifyHumanCadenceResult(
       appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
       runId,
       release: productionVerifyHumanRelease(plan, repoRoot, ledgerPath, runId),
-      releasedIds: resolveReleasedIds(releaseReadersFor(ledgerPath), plan),
+      releasedIds,
       releaseEscalatedKeys: releaseEscalatedKeys(rows),
     });
     // W1-T4083: measure the release judge over the board's week of rotations, remembering what older
@@ -36824,6 +36870,66 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
  */
 /** The daemon's machine-filing judge (operator ruling 2026-09-29) over this checkout's plan, mounts
  *  and policy. The risk judge is built on first use, as {@link productionVerifyHumanRelease}'s is. */
+/**
+ * W1-T10371: the operator's four mechanical rulings' ports, wired from the ledger union and the gardeners' own windows.
+ * A symptom has a reader only for the families whose history the ledger holds: a scout record's own step (rows across
+ * {@link SCOUT_WINDOW_MS}) and a ci-friction record's cause key (rounds across {@link CI_FRICTION_HALF_LIFE_MS}). Every
+ * other family reads as undefined, which the rules treat as undecided, so it keeps the judge path it had.
+ * A release goes through {@link approveParkedTask}, whose every guard stands.
+ */
+export function productionMechanicalPort(opts: {
+  repoRoot: string;
+  stateDir: string;
+  clock?: Clock;
+  /** Test seams: the union reader and the ci-friction ledger records. */
+  reader?: typeof readLedgerUnionRecordsSync;
+  ciFrictionRecords?: () => LedgerRecord[];
+}): MechanicalPort {
+  const clock = opts.clock ?? systemClock;
+  const ledgerPath = join(opts.stateDir, LEDGER_FILENAME);
+  const reader = opts.reader ?? readLedgerUnionRecordsSync;
+  return {
+    read: (tasks) => {
+      const nowMs = clock.now();
+      const scoutSteps = [...new Set(tasks.flatMap((t) => (t.origin?.startsWith("scout:") ? [t.origin.slice("scout:".length)] : [])))];
+      let scoutRows: readonly Record<string, unknown>[] | undefined;
+      let ciRounds: ReturnType<typeof ciFrictionRoundsFromLedger> | undefined;
+      // ledger-read-intent: live — a decline or restore the receipts store has not retained yet.
+      const declinedOf = declinedWithReceipts(readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[], opts.stateDir);
+      return {
+        symptom: (task): SymptomReading | undefined => {
+          const origin = task.origin ?? "";
+          if (origin.startsWith("scout:")) {
+            if (scoutRows === undefined) {
+              const read = reader(opts.stateDir, { sinceTs: new Date(nowMs - SCOUT_WINDOW_MS).toISOString(), step: scoutSteps, refuseIncomplete: true });
+              if (!read.ok) throw new Error(`incomplete ledger union: ${read.unread.join(", ")}`);
+              scoutRows = read.rows;
+            }
+            const step = origin.slice("scout:".length);
+            const filing = filingEvidenceOf(task, SCOUT_WINDOW_MS);
+            return { ...countStepRows(scoutRows, step, nowMs, SCOUT_WINDOW_MS), ...(filing ? { filing } : {}) };
+          }
+          const cause = parseCiFrictionOrigin(origin);
+          if (cause === undefined) return undefined;
+          ciRounds ??= ciFrictionRoundsFromLedger((opts.ciFrictionRecords ?? (() => readCiFrictionLedgerRecords(opts.stateDir)))());
+          const filing = filingEvidenceOf(task, CI_FRICTION_HALF_LIFE_MS);
+          const matches = (r: { cause: Parameters<typeof ciFrictionCauseKey>[0]; pr: number; evidence?: Parameters<typeof ciFrictionRoundMatchesCause>[0]["evidence"] }): boolean =>
+            ciFrictionRoundMatchesCause({ pr: r.pr, causeKey: ciFrictionCauseKey(r.cause), ...(r.evidence ? { evidence: r.evidence } : {}) }, cause.key);
+          return { ...countRounds(ciRounds, matches, nowMs, CI_FRICTION_HALF_LIFE_MS), ...(filing ? { filing } : {}) };
+        },
+        declined: (task) => declinedOf(`machine-judge:${task.id}`) !== undefined || declinedOf(`verify-human:${task.id}`) !== undefined,
+      };
+    },
+    release: (task, provenance) => approveParkedTask(task.id, {
+      plan: { tasks: [task], byId: new Map([[task.id, task]]) },
+      ledgerPath,
+      runId: `machine-judge-mechanical-${nextLaneEpochMs()}`,
+      riskPolicy: readRiskPolicy(policyPath(opts.repoRoot)),
+      provenance: { ...provenance },
+    }),
+  };
+}
+
 export function productionMachineFilingJudgePorts(opts: {
   repoRoot: string;
   stateDir: string;
@@ -36840,6 +36946,7 @@ export function productionMachineFilingJudgePorts(opts: {
   let mount: Mount | undefined;
   const fetcher = opts.fetcher ?? ghJson;
   return {
+    mechanical: productionMechanicalPort({ repoRoot: opts.repoRoot, stateDir: opts.stateDir, clock: opts.clock }),
     flakeEvidence: flakeJudgeEvidencePort({
       stateDir: opts.stateDir, log: opts.log, clock: opts.clock ?? systemClock,
       mainFailures: opts.mainFailures ?? selectorShadowMainFailures(opts.owner, opts.repo),
