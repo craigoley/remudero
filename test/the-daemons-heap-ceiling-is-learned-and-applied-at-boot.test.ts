@@ -21,6 +21,7 @@ import {
   nextLearnedHeapCeiling, parseLearnedHeapCeiling, priorBootAtLimit, proposeHeapCeiling, runChildrenAdoptedGate,
   type HeapCeilingGate, type HeapSampleIo, type LearnedHeapCeiling, type SlackSnapshot,
 } from "#src/lib/daemon-memory-policy.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -218,7 +219,7 @@ test("W1-T9106: a heap-limit exit raises the next ceiling", () => {
 
   // An absent file keeps the inherited value, and the daemon.memory_policy row says why.
   assert.deepEqual(launchHeapCeiling(undefined, INHERITED, stateDir, t0), { ceiling_source: "inherited", reason: "absent" });
-  assert.deepEqual(heapCeilingSource(INHERITED, { stateDir, read: io.readFile, now: () => t0 + 1 }), { ceiling_source: "inherited", ceiling_unapplied: "the launcher did not apply it", learned_ceiling_mib: held.ceiling_mib });
+  assert.deepEqual(heapCeilingSource(INHERITED, { stateDir, read: io.readFile, clock: fixedClock(t0 + 1) }), { ceiling_source: "inherited", ceiling_unapplied: "the launcher did not apply it", learned_ceiling_mib: held.ceiling_mib });
   assert.deepEqual(heapCeilingSource(INHERITED, { stateDir: "/nowhere", read: io.readFile }), { ceiling_source: "inherited", ceiling_unapplied: "absent" });
   const denied = () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); };
   assert.deepEqual(heapCeilingSource(INHERITED, { stateDir, read: denied }), { ceiling_source: "inherited", ceiling_unapplied: "unreadable: EACCES" });

@@ -862,7 +862,8 @@ export interface LearnedHeapCeiling {
 export interface HeapCeilingLocation {
   stateDir: string;
   read?: (path: string) => string;
-  now?: () => number;
+  /** The clock the file's currency is judged against. Default: the system clock. */
+  clock?: Clock;
 }
 
 export function heapCeilingPath(stateDir: string): string {
@@ -1032,7 +1033,7 @@ export function heapCeilingSource(nodeOptions: string | undefined, location: Hea
     const code = errnoOrReason(error);
     if (code !== "ENOENT") return { ceiling_source: "inherited", ceiling_unapplied: `unreadable: ${code}` };
   }
-  const launch = launchHeapCeiling(text, nodeOptions, location.stateDir, (location.now ?? Date.now)());
+  const launch = launchHeapCeiling(text, nodeOptions, location.stateDir, (location.clock ?? systemClock).now());
   if (launch.ceiling_source === "inherited") return { ceiling_source: "inherited", ceiling_unapplied: launch.reason };
   if (heapCeilingMibOf(nodeOptions) !== launch.ceiling_mib) {
     return { ceiling_source: "inherited", ceiling_unapplied: "the launcher did not apply it", learned_ceiling_mib: launch.ceiling_mib };
