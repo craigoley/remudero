@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { classifyGateRepair, gateGardenSpec, gateRepairCandidates, loadGateProbes, loadGateRepairObservations, renderFalsePositiveShard, type GateRepairRule } from "#src/lib/gate-gardener.js";
+import { classifyGateRepair, failedSuitesInLog, gateGardenSpec, gateRepairCandidates, loadGateProbes, loadGateRepairObservations, renderFalsePositiveShard, type GateRepairRule } from "#src/lib/gate-gardener.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations } from "#src/lib/plan.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -642,4 +642,48 @@ test("repair log attribution selects the failing producer that the later commit 
     assert.deepEqual(observed.map(row => row.pair.pr), [1, 2]);
     assert.deepEqual(jobs, [["run", "view", "--job", "91", "--log-failed"]]);
   }
+});
+
+
+const singleJudgedFailure = "test-judge: NODE --TEST RUN FAILED (status 1): # fail 2. 1/1 file(s) reported, # tests 11, # fail 2. Last test started: test/sweep/a-started-fix-seed-is-reconciled-after-a-clean-boot.test.ts > the metadata-only fix seed";
+
+test("gate repair attribution reads a counted single-file judged failure without borrowing a last-started file", () => {
+  const file = "test/sweep/a-started-fix-seed-is-reconciled-after-a-clean-boot.test.ts";
+  assert.deepEqual([...failedSuitesInLog(singleJudgedFailure)], [file]);
+  for (const bad of [singleJudgedFailure.replace("1/1 file", "2/2 file"),
+    singleJudgedFailure.replaceAll("# fail 2", "# fail 0"), singleJudgedFailure.replace("# tests 11", "# tests 1"),
+    singleJudgedFailure.replace("# fail 2. 1/1", "# fail 3. 1/1"),
+    singleJudgedFailure.replace("status 1", "status 0"), singleJudgedFailure.replace("1/1 file", "1/2 file")]) {
+    assert.deepEqual([...failedSuitesInLog(bad)], [], "a successful, multi-file or contradictory report does not identify the failing file");
+  }
+});
+
+test("an unattributed repair cannot read a partial diff and block independent enrolled observations", async () => {
+  const outside = "test/sweep/a-started-fix-seed-is-reconciled-after-a-clean-boot.test.ts";
+  assert.ok(GATE_REPAIR_RULES.length > 0, "the real enrolled census rule population was read");
+  assert.equal(GATE_REPAIR_RULES.some((r: GateRepairRule) => r.gate === outside), false);
+  const f = gateRepairIdentityFixture({ name: "coverage-shard (8/8)", app: { slug: "github-actions" },
+    details_url: "https://github.com/o/r/actions/runs/90/job/91", compare: { files: [{
+      filename: "src/lib/fix-progress-judge.ts", additions: 0, deletions: 0,
+    }] } });
+  let mediaReads = 0, logReads = 0;
+  const observed = await loadGateRepairObservations([{ ...rule, gate: "test/example.test.ts", trigger: () => true }], {
+    ghJson: f.ghJson, ghText: async args => {
+      if (args[0] === "api") { mediaReads++; throw new Error("an inapplicable comparison must not request full diff media"); }
+      assert.deepEqual(args, ["run", "view", "--job", "91", "--log-failed"]);
+      logReads++; return singleJudgedFailure;
+    },
+  }, (step, extra) => f.events.push({ step, extra }));
+  assert.deepEqual(observed.map(row => row.pair.pr), [2], "only the independent enrolled observation is emitted");
+  assert.equal(logReads, 1, "the actual failed job must be read before deciding relevance");
+  assert.equal(mediaReads, 0);
+  assert.equal(f.events[0]!.extra?.reason, "no-enrolled-failed-suite");
+  assert.equal(f.events[0]!.extra?.evidence_state, "unknown", "no healthy or remedy credit is invented");
+});
+
+test("an enrolled repair still refuses incomplete changed-line evidence", async () => {
+  const f = gateRepairIdentityFixture({ name: "census", compare: { files: [{ filename: baseline, additions: 0, deletions: 0 }] } });
+  await assert.rejects(loadGateRepairObservations([{ ...rule, gate: "census", trigger: () => true }], {
+    ghJson: f.ghJson, ghText: async () => `diff --git a/${baseline} b/${baseline}\n--- a/${baseline}\n+++ b/${baseline}\n@@ -1 +1 @@\n-old\n+new\n`,
+  }), /textual hunk or changed-line totals incomplete/);
 });
