@@ -14,7 +14,7 @@ import {
 import { verifyHumanCadence } from "#src/lib/measurement-cadence.js";
 import { loadPlan, type Task } from "#src/lib/plan.js";
 import type { RiskJudgeVerdict } from "#src/lib/risk-judge.js";
-import { approveParkedTask } from "#src/run-task.js";
+import { approveParkedTask, productionMechanicalPort } from "#src/run-task.js";
 import { taskRulingPin } from "#src/lib/task-linter.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { ShardUnderJudgement } from "#src/lib/verify-human-judge.js";
@@ -283,7 +283,7 @@ test("W1-T10371: the verify-human cadence defers to the rules and escalates priv
     priorVerdicts: new Map(),
     judge: async (s) => { judged.push(s.id); return { decision: "automate", reason: "looks mechanical" }; },
     // The release judge disagrees on the privileged record: it escalates, and a person is asked, as today.
-    release: async (s) => (s.id === privileged.id ? { kind: "escalated", reason: "it touches a gate" } : { kind: "released" }),
+    release: async (s) => (s.id === privileged.id ? { kind: "escalated", reason: "it touches a gate" } : { kind: "released", reason: "ok" }),
     stageProposal: (p) => { staged.push(p.id); },
     appendRow: (row) => { rows.push(row); },
     runId: "VERIFY-HUMAN-CADENCE-rules",
@@ -322,4 +322,64 @@ test("W1-T10371: a rule-3 release approveParkedTask refuses leaves the record pa
   assert.deepEqual(report.refused, ["W1-T9272"]);
   assert.equal(f.task("W1-T9272").verify, "human");
   assert.equal(f.task("W1-T9272").risk_ruling, undefined);
+});
+
+test("W1-T10371: the production port reads a scout's step rows, a ci-friction cause, and the operator's declines", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}mechanical-port-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "plan"), { recursive: true });
+  writeFileSync(join(root, "plan", "policy.yaml"), "risk: {}\n");
+  const at = (ms: number) => new Date(NOW - ms).toISOString();
+  writeFileSync(join(root, "ledger.ndjson"), [
+    { step: "panel.proposal_declined", task_id: "machine-judge:W1-T9301", ts: at(5000) },
+    { step: "panel.proposal_declined", task_id: "verify-human:W1-T9302", ts: at(5000) },
+    { step: "panel.proposal_declined", task_id: "machine-judge:W1-T9303", ts: at(5000) },
+    { step: "panel.proposal_restored", task_id: "machine-judge:W1-T9303", ts: at(4000) },
+  ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const asked: unknown[] = [];
+  const port = productionMechanicalPort({
+    repoRoot: root, stateDir: root, clock: { now: () => NOW, date: () => new Date(NOW), iso: () => new Date(NOW).toISOString() },
+    reader: ((_dir: string, options: unknown) => {
+      asked.push(options);
+      return { ok: true, rows: [{ step: "x.failed", ts: at(1000) }, { step: "x.failed", ts: at(2000) }], unread: [] };
+    }) as never,
+    ciFrictionRecords: () => [],
+  });
+  const task = (id: string, origin?: string, rationale?: string) => ({ id, origin, rationale, title: id, depends_on: [] }) as unknown as Task;
+  const scout = task("W1-T9301", "scout:x.failed", "landed rows in both halves of the trailing 7 days: 1 in the older half, 1 in the newer.");
+  const read = port.read([scout, task("W1-T9302"), task("W1-T9303"), task("W1-T9304", "ci-friction:check:ci-log:some-cause"), task("W1-T9305", "architect")]);
+  assert.deepEqual(read.symptom(scout), { count: 2, windowMs: WEEK, lastSeen: at(1000), filing: { count: 2, windowMs: WEEK } });
+  assert.deepEqual((asked[0] as { step: string[] }).step, ["x.failed"], "one union read, for the steps the records name");
+  assert.equal(read.symptom(task("W1-T9304", "ci-friction:check:ci-log:some-cause"))?.count, 0, "a cause with no round in the window had none");
+  assert.equal(read.symptom(task("W1-T9305", "architect")), undefined, "a family with no reader is undecided");
+  assert.deepEqual([read.declined(scout), read.declined(task("W1-T9302")), read.declined(task("W1-T9303")), read.declined(task("W1-T9304"))], [true, true, false, false]);
+  const refused = port.release(scout, { released_by: "mechanical-rule", rule: "rule-3-low-privilege", author_class: "machine", evidence: "e" });
+  assert.equal(refused.code, 2, "approveParkedTask's guards apply: a task that is not a queued verify: human record is refused");
+  const failing = productionMechanicalPort({
+    repoRoot: root, stateDir: root, reader: (() => ({ ok: false, rows: [], unread: ["ledger.2026.ndjson.gz"] })) as never,
+  });
+  assert.throws(() => failing.read([scout]).symptom(scout), /incomplete ledger union: ledger.2026.ndjson.gz/);
+});
+
+test("W1-T10371: unreadable evidence applies no rule and leaves the record on the judge path", async (t) => {
+  const f = bed(t, [{ id: "W1-T9311", step: "h.unread" }, { id: "W1-T9312", step: "h.one-bad" }]);
+  const run = (mechanical: MechanicalPort) => runMachineFilingJudge({
+    stateDir: f.root, writeRoot: f.root, plan: () => loadPlan(join(f.root, "plan", "tasks.yaml")),
+    riskJudge: async () => { throw new Error("no model in this test"); }, gardenRecord: () => ({ alpha: 3, beta: 1 }), isMerged: (id) => id === "W1-T9311",
+    stageProposal: () => {}, log: (step, extra) => { f.logs.push({ step, extra }); }, clock: { now: () => NOW, date: () => new Date(NOW), iso: () => new Date(NOW).toISOString() },
+    mechanical,
+  });
+  // A port that cannot be read: even a SHIPPED record is not retired on evidence nobody read.
+  await run({ read: () => { throw new Error("ledger union unreadable"); }, release: () => assert.fail("released") });
+  assert.match(String(f.logs.find((l) => l.step === "machine_judge.mechanical_unavailable")?.extra?.reason), /ledger union unreadable/);
+  assert.equal(f.task("W1-T9311").status, "queued");
+  // One record whose symptom cannot be read decides nothing for itself; the other is still ruled on.
+  f.logs.length = 0;
+  const report = await run({
+    read: () => ({ symptom: (task) => { if (task.id === "W1-T9312") throw new Error("step rows unreadable"); return reading(0); }, declined: () => false }),
+    release: () => assert.fail("released"),
+  });
+  assert.deepEqual(report.retired, ["W1-T9311"]);
+  assert.match(String(f.logs.find((l) => l.step === "machine_judge.mechanical_unavailable")?.extra?.reason), /step rows unreadable/);
+  assert.equal(f.task("W1-T9312").status, "queued");
 });
