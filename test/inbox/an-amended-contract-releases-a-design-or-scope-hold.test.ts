@@ -747,3 +747,27 @@ test("an unread strict archive stays unknown instead of falling back to a permis
   assert.equal(recovered.torn, 1, "a successful strict reread retains the unattributed evidence");
   assert.equal(reads, 2, "failed strict loads are retried through the same asynchronous reader");
 });
+
+
+test("the real strict history retains rotated scope holds and the once-per-head intent", async t => {
+  for (const form of ["plain", "gzip"] as const) await t.test(form, async t => {
+    const { dir } = ownedFixtureDir(t, "contract-rotated-hold");
+    const ledger = join(dir, "ledger.ndjson");
+    writeFileSync(ledger, "");
+    const archived = { step: "fix.scope_amendment", task_id: TASK, pr_number: 13039, head_sha: HEAD,
+      outcome: "instrument-escalated", paths: ["scripts/preflight-author.mjs"],
+      issue_url: "https://github.com/o/remudero/issues/13106", contract_revision: "contract-A" };
+    const raw = JSON.stringify(archived) + "\n";
+    writeFileSync(join(dir, `ledger.2026-10-23.ndjson${form === "gzip" ? ".gz" : ""}`), form === "gzip" ? gzipSync(raw) : raw);
+    const rows: Record<string, unknown>[] = [];
+    const f = fixture(rows); f.state.revision = "contract-B";
+    const deps = { ...f.deps, ledgerPath: ledger, readLedger: () => [], readHeadContractRefreshHistory: undefined,
+      appendLine: (_path: string, row: Record<string, unknown>) => { rows.push(row); writeFileSync(ledger, JSON.stringify(row) + "\n", { flag: "a" }); } };
+    const capability = await lightPassHeadContractRefresh([pr()], deps);
+    assert.equal(capability.headContractRefreshFor?.(pr()), f.deps.updateBranch);
+    await runSweepLightPass([pr()], { ...deps, updateBranch: undefined, ...capability });
+    assert.deepEqual([f.state.refreshed, f.state.dispatched, f.state.admissions], [1, 0, 0]);
+    const next = await lightPassHeadContractRefresh([pr()], deps);
+    assert.equal(next.headContractRefreshFor?.(pr()), undefined, "the real durable intent survives the next strict history read");
+  });
+});

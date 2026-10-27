@@ -9623,6 +9623,7 @@ export async function lightPassHeadContractRefresh(
   if (!deps.updateBranch || headContractRefreshInFlight) return {};
   try {
     if (!prs.some(pr => pr.taskId !== undefined)) return {};
+    (deps.readLedger ?? readLedgerLines)(deps.ledgerPath); // Validate the live caller boundary; strict history supplies the rows.
     const history = await headContractRefreshHistory(deps);
     if (!history.complete) return {};
     const lines = history.lines; // Holds and attempts must both survive rotation in the same strict union.
