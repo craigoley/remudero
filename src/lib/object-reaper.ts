@@ -2,12 +2,14 @@
 import { execFileSync, spawn } from "node:child_process";
 import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { hostname } from "node:os";
+import { readFile, readdir, rm, stat } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { OpenFileProbe } from "./clone-reaper.js";
 import { type Clock, systemClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, readFileIfExists } from "./fs-race-safe.js";
+import { RMD_TMP_PREFIX } from "./tmp.js";
 
 /** How old an unreachable object must be before it is eligible. The SECOND of the two barriers:
  *  it is what makes a wrong quiet verdict survivable, so it is never omitted and never zero. */
@@ -100,6 +102,12 @@ export interface ObjectReapDeps {
   context?: () => MaintenanceContext;
   survey?: typeof surveyRepositoryMaintenance;
   run?: typeof runMaintenanceGit;
+  /** W1-T10750: the earliest start of any instance that could own a leftover in the store; THROWS when unreadable. */
+  bootMs?: (gitDir: string) => number;
+  /** W1-T10750: the instants of every live consumer of the store, for the gc prune window. THROWS when unreadable. */
+  pruneInputs?: PruneInputsFn;
+  /** W1-T10750: where an escalated store tells the operator, and where recovery closes it. */
+  operator?: MaintenanceOperatorChannel;
 }
 
 /** What an awaited prune reports. `timedOutAfterMs` is set iff it was killed at its bound. */
@@ -339,6 +347,234 @@ export function reclaimStaleMaintenanceLocks(gitDir: string, deps: ObjectReapDep
     }
   }
   return result;
+}
+
+/** W1-T10750: a git process that could own ANY leftover below — the maintenance verbs, plus the verbs
+ *  that write a pack (`fetch`, `index-pack`) or a ref (`update-ref`, `commit`, `reflog`). */
+const LEFTOVER_OWNER_PROCESS = /(^|[\s/])git\s(.*\s)?(gc|maintenance|repack|prune|pack-refs|fetch|update-ref|commit|reflog|index-pack|pack-objects)(\s|$)/;
+
+/** Where each mounting instance advertises its start beside a shared store (git ignores the directory). */
+export const BOOT_RECEIPT_DIR = "rmd-boot-receipts";
+
+/** One leftover the owner-gone reclaim left in place. `owner: "live"` is PROVEN (a live gc.pid, or a live git
+ *  process naming this store), so the lock is a deferral; `"unproven"` is only "could not prove it gone". */
+export interface KeptLeftover {
+  path: string;
+  reason: string;
+  owner: "live" | "unproven";
+}
+
+export interface LeftoverReclaim {
+  reclaimed: string[];
+  kept: KeptLeftover[];
+  failed: Array<{ path: string; error: string }>;
+}
+
+/** The directory git keeps this repo's database in, or undefined when it cannot be named. */
+function maintenanceGitDir(repo: string): string | undefined {
+  try {
+    if (statSync(join(repo, ".git")).isDirectory()) return join(repo, ".git");
+  } catch (err) {
+    // no `.git` directory: a bare store is its own git dir; anything else unstattable cannot be named, so no leftover is touched
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
+    if (existsSync(join(repo, "objects"))) return repo;
+  }
+  return undefined;
+}
+
+async function listLockFiles(gitDir: string, rel: string, out: string[]): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(join(gitDir, rel), { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) await listLockFiles(gitDir, `${rel}/${entry.name}`, out);
+    else if (entry.name.endsWith(".lock")) out.push(`${rel}/${entry.name}`);
+  }
+}
+
+/** Every leftover that exists: the maintenance set, a crashed repack's `tmp_pack_*`/`tmp_idx_*`, and stale ref and reflog locks. */
+async function leftoverCandidates(gitDir: string): Promise<string[]> {
+  const found: string[] = [];
+  for (const rel of MAINTENANCE_LEFTOVERS) if (existsSync(join(gitDir, rel))) found.push(rel);
+  try {
+    for (const name of await readdir(join(gitDir, "objects", "pack"))) {
+      if (/^tmp_(pack|idx)_/.test(name)) found.push(`objects/pack/${name}`);
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  await listLockFiles(gitDir, "refs", found);
+  await listLockFiles(gitDir, "logs/refs", found);
+  return found;
+}
+
+/**
+ * W1-T10750: remove the store's leftovers when their owner is PROVABLY gone — never by age. A leftover is
+ * removed only when no git process that could own it is alive in this PID namespace, `gc.pid` (when present)
+ * names a dead pid here or another host, and its mtime predates {@link ObjectReapDeps.bootMs} (the earliest
+ * start of any instance that mounts the store). Anything unreadable KEEPS the leftover and says what.
+ * `gc.log` is never touched (W1-T3116 (iv)). Never throws: a failure is carried in the result.
+ */
+export async function reclaimOwnerGoneLeftovers(repo: string, deps: ObjectReapDeps = {}): Promise<LeftoverReclaim> {
+  const result: LeftoverReclaim = { reclaimed: [], kept: [], failed: [] };
+  const gitDir = maintenanceGitDir(repo);
+  if (gitDir === undefined) return result;
+  let candidates: string[];
+  try {
+    candidates = await leftoverCandidates(gitDir);
+  } catch (err) {
+    result.failed.push({ path: ".", error: `leftover scan failed: ${String((err as Error)?.message ?? err)}` });
+    return result;
+  }
+  if (candidates.length === 0) return result;
+  const keepAll = (reason: string, owner: KeptLeftover["owner"]): LeftoverReclaim => {
+    result.kept = candidates.map((path) => ({ path, reason, owner }));
+    return result;
+  };
+  let processes: readonly ProcessEntry[];
+  try {
+    processes = (deps.listProcesses ?? defaultListProcesses)();
+  } catch (err) {
+    // could not look is not "nobody is there": every leftover is kept and the kept reason names the failure
+    return keepAll(`process list unavailable, so a live owner cannot be ruled out: ${String((err as Error)?.message ?? err)}`, "unproven");
+  }
+  const [pidText = "", owner = ""] = (readFileIfExists(join(gitDir, "gc.pid")) ?? "").trim().split(/\s+/);
+  if (candidates.includes("gc.pid") && !/^\d+$/.test(pidText)) return keepAll("gc.pid is unreadable, so its owner cannot be named", "unproven");
+  if (owner === (deps.hostname ?? hostname)() && processes.some((p) => p.pid === Number(pidText))) {
+    return keepAll(`gc.pid names live process ${pidText} on this host`, "live");
+  }
+  const live = processes.find((p) => LEFTOVER_OWNER_PROCESS.test(p.args));
+  if (live !== undefined) {
+    return keepAll(`live git process ${live.pid}: ${live.args}`, live.args.includes(repo) ? "live" : "unproven");
+  }
+  let boot: number;
+  try {
+    if (deps.bootMs === undefined) throw new Error("no boot evidence source supplied");
+    boot = deps.bootMs(gitDir);
+  } catch (err) {
+    // an unprovable start keeps every leftover; the kept reason names what could not be read
+    return keepAll(`boot evidence unreadable, so a leftover cannot be shown to predate every instance: ${String((err as Error)?.message ?? err)}`, "unproven");
+  }
+  for (const rel of candidates) {
+    try {
+      const { mtimeMs } = await stat(join(gitDir, rel));
+      if (!(mtimeMs < boot)) {
+        result.kept.push({ path: rel, owner: "unproven",
+          reason: `mtime ${new Date(mtimeMs).toISOString()} does not predate boot ${new Date(boot).toISOString()}` });
+        continue;
+      }
+      await rm(join(gitDir, rel), { force: true });
+      result.reclaimed.push(rel);
+    } catch (err) {
+      result.failed.push({ path: rel, error: String((err as Error)?.message ?? err) });
+    }
+  }
+  return result;
+}
+
+let ownBootCache: number | undefined;
+
+/** This PID namespace's start: now minus PID 1's elapsed time. THROWS when `ps` cannot say. */
+function ownBootMs(now: number): number {
+  if (ownBootCache === undefined) {
+    const out = execFileSync("ps", ["-o", "etimes=", "-p", "1"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 }).trim();
+    const seconds = Number(out);
+    if (!/^\d+$/.test(out) || !Number.isFinite(seconds)) throw new Error(`PID 1 elapsed time unreadable: ${JSON.stringify(out)}`);
+    ownBootCache = now - seconds * 1000;
+  }
+  return ownBootCache;
+}
+
+/** Advertise this instance's start beside the store, so every other instance that mounts it can read it. */
+export function writeBootReceipt(gitDir: string, host: string, now: number): void {
+  const dir = join(gitDir, BOOT_RECEIPT_DIR);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, host), JSON.stringify({ boot: ownBootMs(now) }) + "\n");
+}
+
+/** The earliest start among this instance and every OTHER instance whose receipt was refreshed within `freshMs`. THROWS when unreadable. */
+export function bootEvidenceFor(gitDir: string, opts: { now: number; host: string; freshMs: number }): number {
+  let earliest = ownBootMs(opts.now);
+  const dir = join(gitDir, BOOT_RECEIPT_DIR);
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  for (const name of names) {
+    if (name === opts.host) continue;
+    const path = join(dir, name);
+    if (opts.now - statSync(path).mtimeMs > opts.freshMs) continue;
+    const boot = Number((JSON.parse(readFileSync(path, "utf8")) as { boot?: unknown }).boot);
+    if (!Number.isFinite(boot)) throw new Error(`boot receipt ${name} unreadable`);
+    earliest = Math.min(earliest, boot);
+  }
+  return earliest;
+}
+
+/** One live consumer of a store and when it started. */
+export interface PruneInput {
+  source: string;
+  at: number;
+}
+export type PruneInputsFn = (repo: string) => Promise<readonly PruneInput[]>;
+
+/** The registered worktrees, inflight locks and live `--shared` borrower clones of `repo`, each with its start. THROWS when any is unreadable. */
+export function fleetPruneInputs(inflightDir: string, scratchDir: string = tmpdir()): PruneInputsFn {
+  const startOf = async (path: string): Promise<number | undefined> => {
+    try {
+      return (await stat(path)).mtimeMs;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw err;
+    }
+  };
+  const names = async (dir: string): Promise<string[]> => {
+    try {
+      return await readdir(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw err;
+    }
+  };
+  return async (repo) => {
+    const gitDir = maintenanceGitDir(repo);
+    if (gitDir === undefined) throw new Error(`git dir of ${repo} unreadable`);
+    const inputs: PruneInput[] = [];
+    for (const name of await names(join(gitDir, "worktrees"))) {
+      const at = await startOf(join(gitDir, "worktrees", name, "gitdir"));
+      if (at === undefined) throw new Error(`worktree ${name} has no gitdir file`);
+      inputs.push({ source: `worktree:${name}`, at });
+    }
+    for (const name of (await names(inflightDir)).filter((n) => n.endsWith(".lock"))) {
+      const at = await startOf(join(inflightDir, name));
+      if (at !== undefined) inputs.push({ source: `inflight:${name}`, at });
+    }
+    for (const name of (await names(scratchDir)).filter((n) => n.startsWith(RMD_TMP_PREFIX))) {
+      for (const alternates of [join(scratchDir, name, ".git", "objects", "info", "alternates"), join(scratchDir, name, "objects", "info", "alternates")]) {
+        let text: string;
+        try {
+          text = await readFile(alternates, "utf8");
+        } catch (err) {
+          if (["ENOENT", "ENOTDIR"].includes((err as NodeJS.ErrnoException).code ?? "")) continue;
+          throw err;
+        }
+        if (!text.split("\n").includes(join(gitDir, "objects"))) continue;
+        inputs.push({ source: `borrower:${name}`, at: (await stat(alternates)).mtimeMs });
+      }
+    }
+    return inputs;
+  };
+}
+
+/** The `gc.pruneExpire` value for an instant: second resolution, rounded EARLIER so it is never narrower than the evidence. */
+export function pruneExpireFor(ms: number): string {
+  return new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(/\.000Z$/, "Z");
 }
 
 /**
@@ -639,7 +875,25 @@ export interface MaintenanceSurvey extends MaintenanceContext {
   error?: string;
 }
 
+/** W1-T10750: what the operator is told when a store escalates. */
+export interface MaintenanceEscalationNote {
+  repo: string;
+  leftovers: Array<{ path: string; reason: string }>;
+  lastReason: string;
+  nextSurveyAt: number;
+}
+
+/** W1-T10750: the operator channel an escalated store opens one issue on (keyed by repo) and recovery closes. */
+export interface MaintenanceOperatorChannel {
+  open(note: MaintenanceEscalationNote): Promise<string>;
+  close(repo: string, issueUrl: string | undefined, comment: string): Promise<void>;
+}
+
 export interface MaintenanceState {
+  /** W1-T10750: when a gc marker was first seen without a gc since; bounds how long quiet admission may starve the full gc. */
+  gcLogSince?: number;
+  /** W1-T10750: the open operator issue for this store, until the first verified success closes it. */
+  operatorIssue?: string;
   nextEligibleAt: number;
   nextSurveyAt: number;
   failures: number;
@@ -652,9 +906,10 @@ export interface MaintenanceState {
   lastReason?: string;
 }
 
-export function maintenanceArgs(kind: "incremental" | "gc"): string[] {
-  return ["maintenance", "run", ...(kind === "gc" ? ["--task=gc"] :
-    ["--task=commit-graph", "--task=loose-objects", "--task=incremental-repack"])];
+export function maintenanceArgs(kind: "incremental" | "gc", pruneExpire?: string): string[] {
+  // `-c` rides git's own maintenance run, never a raw gc or prune: the expiry is the only thing it changes.
+  return [...(kind === "gc" && pruneExpire !== undefined ? ["-c", `gc.pruneExpire=${pruneExpire}`] : []), "maintenance", "run",
+    ...(kind === "gc" ? ["--task=gc"] : ["--task=commit-graph", "--task=loose-objects", "--task=incremental-repack"])];
 }
 
 function completeMaintenanceSurvey(survey: MaintenanceSurvey): boolean {
@@ -666,19 +921,23 @@ function completeMaintenanceSurvey(survey: MaintenanceSurvey): boolean {
 
 export function decideRepositoryMaintenance(
   survey: MaintenanceSurvey, state: MaintenanceState, policy: MaintenancePolicy, now: number,
-): { verdict: "healthy" | "incremental-due" | "full-gc-due" | "deferred" | "escalate";
+): { verdict: "healthy" | "incremental-due" | "full-gc-due" | "deferred";
   reason: string; nextEligibleAt: number } {
   const decision = (verdict: ReturnType<typeof decideRepositoryMaintenance>["verdict"], reason: string) =>
     ({ verdict, reason, nextEligibleAt: state.nextEligibleAt });
   if (!completeMaintenanceSurvey(survey)) {
     return decision("deferred", survey.error ?? "incomplete repository survey");
   }
-  if (state.escalated) return decision("escalate", "automatic retries exhausted");
   if (now < state.nextEligibleAt) return decision("healthy", "cadence or failure backoff pending");
   if (survey.disk !== "healthy") return decision("deferred", `disk verdict ${survey.disk}`);
   if (survey.gcLog !== null) {
-    if (survey.activeLanes !== 0 || survey.queueBusy) return decision("deferred", "full GC requires quiet admission");
-    return decision("full-gc-due", "persistent Git failure marker");
+    if (survey.activeLanes === 0 && !survey.queueBusy) return decision("full-gc-due", "persistent Git failure marker");
+    if (survey.activeLanes > policy.maxActiveLanes) return decision("deferred", "full GC requires quiet admission");
+    // W1-T10750: a store that is never fully quiet is not starved. The incremental pass runs under its normal
+    // load limit, and once the marker has outlived one maintenance interval the full gc is admitted beside the lanes —
+    // its prune window never reaches past the oldest live consumer, so it deletes nothing a lane can still name.
+    if (now - (state.gcLogSince ?? now) >= policy.intervalMs) return decision("full-gc-due", "quiet admission starved past the maintenance interval");
+    return decision("incremental-due", "incremental maintenance beside a persistent Git failure marker");
   }
   if (survey.activeLanes > policy.maxActiveLanes) return decision("deferred", "incremental load limit");
   return decision("incremental-due", "daily incremental maintenance due");
@@ -715,7 +974,8 @@ export function runMaintenanceGit(repo: string, args: readonly string[], timeout
     const grouped = process.platform !== "win32";
     // Git can return zero when another maintainer owns its database lock. Its default
     // pipe mode also hides the warning; retain that diagnostic instead of claiming work.
-    const maintenanceRun = args[0] === "maintenance" && args[1] === "run";
+    const verb = args[0] === "-c" ? 2 : 0;
+    const maintenanceRun = args[verb] === "maintenance" && args[verb + 1] === "run";
     const childArgs = maintenanceRun ? [...args, "--no-quiet"] : args;
     const child = spawn("git", ["-C", repo, ...childArgs], { detached: grouped,
       env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "pipe"] });
@@ -774,7 +1034,8 @@ const maintenanceInFlight = new Set<string>();
 export async function runRepositoryMaintenance(
   repo: string, statePath: string, policy: MaintenancePolicy,
   log: (step: string, fields: Record<string, unknown>) => void,
-  deps: Pick<ObjectReapDeps, "clock" | "random" | "survey" | "run"> & Required<Pick<ObjectReapDeps, "context">>,
+  deps: Pick<ObjectReapDeps, "clock" | "random" | "survey" | "run" | "listProcesses" | "hostname" | "bootMs" | "pruneInputs" | "operator"> &
+    Required<Pick<ObjectReapDeps, "context">>,
 ): Promise<void> {
   if (maintenanceInFlight.has(repo)) return;
   maintenanceInFlight.add(repo);
@@ -783,6 +1044,11 @@ export async function runRepositoryMaintenance(
   let before: MaintenanceSurvey | undefined;
   let after: MaintenanceSurvey | undefined;
   let kind: "incremental" | "gc" | undefined;
+  let leftovers: LeftoverReclaim = { reclaimed: [], kept: [], failed: [] };
+  let prune: { expire?: string; inputs: string[] } | undefined;
+  let closedIssue: string | undefined;
+  let operatorError: string | undefined;
+  let receiptError: string | undefined;
   const started = clock.now();
   const emit = (outcome: string, reason: string) => log(`repository_maintenance.${outcome}`, {
     repo, kind: kind ?? "survey", outcome, reason, duration_ms: Math.max(0, clock.now() - started),
@@ -792,71 +1058,150 @@ export async function runRepositoryMaintenance(
     gc_log_after: after?.gcLog === undefined ? "unknown" : after.gcLog === null ? "absent" : "present",
     active_lanes: before?.activeLanes, next_retry: state && Math.max(state.nextEligibleAt, state.nextSurveyAt),
     last_success: state?.lastSuccess, last_failure: state?.lastFailure,
-    retry_pending: state !== undefined && !state.escalated && Math.max(state.nextEligibleAt, state.nextSurveyAt) > clock.now(),
+    retry_pending: state !== undefined && Math.max(state.nextEligibleAt, state.nextSurveyAt) > clock.now(),
+    leftovers_reclaimed: leftovers.reclaimed, leftovers_failed: leftovers.failed,
+    leftovers_kept: leftovers.kept.map((k) => `${k.path}: ${k.reason}`),
+    prune_expire: prune?.expire ?? (prune === undefined ? undefined : "git-default"), prune_inputs: prune?.inputs,
+    operator_issue: state?.operatorIssue, operator_issue_closed: closedIssue, operator_error: operatorError, boot_receipt_error: receiptError,
   });
+  const jittered = (backoff: number) =>
+    Math.min(policy.maxBackoffMs, Math.round(backoff * (1 + (deps.random ?? Math.random)() * 0.2)));
+  // W1-T10750: an escalated store tells the operator once and tells them again only when it recovers.
+  const settleOperator = async (): Promise<void> => {
+    if (!deps.operator || !state) return;
+    try {
+      if (state.escalated && state.operatorIssue === undefined) {
+        state.operatorIssue = await deps.operator.open({ repo, lastReason: state.lastReason ?? "unknown",
+          leftovers: leftovers.kept.map((k) => ({ path: k.path, reason: k.reason })),
+          nextSurveyAt: Math.max(state.nextEligibleAt, state.nextSurveyAt) });
+        saveMaintenanceState(statePath, state);
+      } else if (!state.escalated && state.operatorIssue !== undefined) {
+        const url = state.operatorIssue;
+        await deps.operator.close(repo, url, `Repository maintenance verified for ${repo}. Loose objects ` +
+          `${before?.looseCount ?? "unknown"} -> ${after?.looseCount ?? "unknown"}, ` +
+          `${before?.looseBytes ?? "unknown"} -> ${after?.looseBytes ?? "unknown"} bytes.`);
+        closedIssue = url;
+        state.operatorIssue = undefined;
+        saveMaintenanceState(statePath, state);
+      }
+    } catch (error) {
+      // an unreachable operator channel never blocks maintenance; the row carries operator_error and the next pass retries
+      operatorError = String((error as Error)?.message ?? error);
+    }
+  };
+  const settle = async (outcome: string, reason: string): Promise<void> => {
+    await settleOperator();
+    emit(outcome, reason);
+  };
   try {
     state = readMaintenanceState(statePath);
-    if (state.escalated || started < Math.max(state.nextEligibleAt, state.nextSurveyAt)) return;
+    // W1-T10750: escalation is the "operator has been told" tier, never a stop; the retry window alone gates a pass.
+    if (started < Math.max(state.nextEligibleAt, state.nextSurveyAt)) return;
     if (state.lastOutcome === "running") {
+      const wasEscalated = state.escalated;
       state.lastOutcome = "fail";
       state.lastFailure = state.lastAttempt;
       state.lastReason = "daemon stopped during maintenance; retry window preserved";
-      state.escalated = state.failures >= policy.maxFailures;
-      saveMaintenanceState(statePath, state);
-      emit("fail", state.lastReason);
-      if (state.escalated) {
-        emit("escalate", "automatic retry limit reached after interrupted attempt");
+      state.escalated = state.escalated || state.failures >= policy.maxFailures;
+      if (state.escalated && !wasEscalated) {
+        // The interrupted attempt was the last allowed one: tell the operator, then wait one backoff step before the re-survey.
+        state.nextSurveyAt = started + jittered(policy.backoffMs * 2 ** Math.min(state.failures - 1, 30));
+        saveMaintenanceState(statePath, state);
+        emit("fail", state.lastReason);
+        await settle("escalate", "automatic retry limit reached after interrupted attempt");
         return;
       }
+      saveMaintenanceState(statePath, state);
+      emit("fail", state.lastReason);
     }
     const context = deps.context();
+    const gitDir = maintenanceGitDir(repo);
+    const host = (deps.hostname ?? hostname)();
+    if (deps.bootMs === undefined && gitDir !== undefined) {
+      try { writeBootReceipt(gitDir, host, started); }
+      catch (error) { receiptError = String((error as Error)?.message ?? error); /* carried on every row as boot_receipt_error */ }
+    }
+    leftovers = await reclaimOwnerGoneLeftovers(repo, { clock, listProcesses: deps.listProcesses, hostname: () => host,
+      bootMs: deps.bootMs ?? ((dir) => bootEvidenceFor(dir, { now: started, host, freshMs: 2 * policy.intervalMs })) });
     const survey = deps.survey ?? surveyRepositoryMaintenance;
     before = { ...await survey(repo, context.activeLanes, context.disk, Math.min(policy.timeoutMs, 30000)),
       queueBusy: context.queueBusy };
     // Re-read occupancy after asynchronous probes; a newly admitted lane must veto heavy work.
     Object.assign(before, deps.context());
-    const decision = decideRepositoryMaintenance(before, state, policy, started);
+    if (completeMaintenanceSurvey(before)) state.gcLogSince = before.gcLog === null ? undefined : (state.gcLogSince ?? started);
+    let decision = decideRepositoryMaintenance(before, state, policy, started);
+    // A lock a PROVEN live owner holds is a deferral, never a failure: the run would only be refused by it.
+    const held = leftovers.kept.find((k) => k.owner === "live" && !/\/tmp_(pack|idx)_/.test(k.path));
+    if (held && (decision.verdict === "incremental-due" || decision.verdict === "full-gc-due")) {
+      decision = { ...decision, verdict: "deferred", reason: `${held.path} is held by a live owner: ${held.reason}` };
+    }
     if (decision.verdict === "deferred" || decision.verdict === "healthy") {
       state.nextSurveyAt = clock.now() + policy.probeIntervalMs;
       state.lastOutcome = "defer";
       state.lastReason = decision.reason;
       saveMaintenanceState(statePath, state);
-      emit("defer", decision.reason);
+      await settle("defer", decision.reason);
       return;
     }
     kind = decision.verdict === "full-gc-due" ? "gc" : "incremental";
+    if (kind === "gc" && deps.pruneInputs) {
+      // The window never reaches past the oldest live consumer; any unreadable input leaves git's own default.
+      try {
+        const inputs = await deps.pruneInputs(repo);
+        const oldest = inputs.reduce((min, i) => Math.min(min, i.at), Number.POSITIVE_INFINITY);
+        prune = { expire: inputs.length === 0 ? undefined : pruneExpireFor(oldest),
+          inputs: inputs.map((i) => `${i.source}@${new Date(i.at).toISOString()}`) };
+      } catch (error) {
+        prune = { inputs: [`unreadable: ${String((error as Error)?.message ?? error)}`] };
+      }
+    }
     state.failedGcLog = before.gcLog ?? undefined;
     // Persist an interrupted attempt's failure and retry window BEFORE spawning the child.
+    const priorFailures = state.failures;
     state.failures++;
     state.lastAttempt = clock.now();
     state.lastOutcome = "running";
     const backoff = Math.min(policy.maxBackoffMs, policy.backoffMs * 2 ** Math.min(state.failures - 1, 30));
-    state.nextEligibleAt = clock.now() + policy.timeoutMs +
-      Math.min(policy.maxBackoffMs, Math.round(backoff * (1 + (deps.random ?? Math.random)() * 0.2)));
+    state.nextEligibleAt = clock.now() + policy.timeoutMs + jittered(backoff);
     saveMaintenanceState(statePath, state);
     emit("start", decision.reason);
-    const result = await (deps.run ?? runMaintenanceGit)(repo, maintenanceArgs(kind), policy.timeoutMs);
+    const result = await (deps.run ?? runMaintenanceGit)(repo, maintenanceArgs(kind, prune?.expire), policy.timeoutMs);
     const postContext = deps.context();
     after = await survey(repo, postContext.activeLanes, postContext.disk, Math.min(policy.timeoutMs, 30000));
-    const verified = result.ok && completeMaintenanceSurvey(after) && after.gcLog === null;
-    if (verified) {
+    const beside = kind === "incremental" && before.gcLog !== null;
+    const verified = result.ok && completeMaintenanceSurvey(after) && (beside || after.gcLog === null);
+    if (verified && beside) {
+      // An incremental pass beside a gc marker bounds the store but verifies nothing: the full gc is still owed.
+      state.failures = priorFailures;
+      state.lastOutcome = "complete";
+      state.lastSuccess = clock.now();
+      state.lastReason = "incremental maintenance verified; full gc still pending behind the Git failure marker";
+      state.nextEligibleAt = Math.max(clock.now() + policy.probeIntervalMs,
+        Math.min((state.gcLogSince ?? started) + policy.intervalMs, clock.now() + policy.intervalMs));
+      saveMaintenanceState(statePath, state);
+      await settle("complete", state.lastReason);
+    } else if (verified) {
       state = { ...state, failures: 0, escalated: false, lastOutcome: "complete", lastSuccess: clock.now(),
-        nextEligibleAt: clock.now() + Math.max(86400000, policy.intervalMs), nextSurveyAt: 0, failedGcLog: undefined };
+        nextEligibleAt: clock.now() + Math.max(86400000, policy.intervalMs), nextSurveyAt: 0, failedGcLog: undefined,
+        gcLogSince: undefined };
       state.lastReason = "Git maintenance verified";
       saveMaintenanceState(statePath, state);
-      emit("complete", state.lastReason);
+      await settle("complete", state.lastReason);
     } else {
+      const wasEscalated = state.escalated;
       state.lastOutcome = "fail";
       state.lastReason = !result.ok ? `${result.timedOut ? "timeout: " : ""}${result.error}` :
         !completeMaintenanceSurvey(after) ? `post-survey unreadable: ${after.error ?? "incomplete state"}` :
           "Git failure marker survives";
       state.lastFailure = clock.now();
-      state.nextEligibleAt = clock.now() +
-        Math.min(policy.maxBackoffMs, Math.round(backoff * (1 + (deps.random ?? Math.random)() * 0.2)));
-      state.escalated = state.failures >= policy.maxFailures;
+      state.nextEligibleAt = clock.now() + jittered(backoff);
+      state.escalated = state.escalated || state.failures >= policy.maxFailures;
+      // An escalated store is re-surveyed one further backoff step past the failure window, and the step keeps growing.
+      if (state.escalated) state.nextSurveyAt = state.nextEligibleAt + jittered(backoff);
       saveMaintenanceState(statePath, state);
       emit("fail", state.lastReason);
-      if (state.escalated) emit("escalate", "automatic retry limit reached");
+      if (state.escalated && !wasEscalated) await settle("escalate", "automatic retry limit reached");
+      else await settleOperator();
     }
   } catch (error) {
     // State and adapter failures remain visible, with the interrupted attempt's saved retry window.
