@@ -14,6 +14,7 @@
  * port gathered, and returns a decision. It holds no fixed threshold: every bound is the gardener's own
  * measured history (its window, its family's live counts, the record's own filing rate).
  */
+import { fixedClock } from "./clock.js";
 import { pathClass } from "./machine-filing.js";
 import type { Task } from "./plan.js";
 
@@ -190,7 +191,7 @@ export function countStepRows(rows: readonly Record<string, unknown>[], step: st
     count += 1;
     if (t > last) last = t;
   }
-  return { count, windowMs, ...(count > 0 ? { lastSeen: new Date(last).toISOString() } : {}) };
+  return { count, windowMs, ...(count > 0 ? { lastSeen: fixedClock(last).iso() } : {}) };
 }
 
 /** Rounds `matches` accepts that ended in `[nowMs - windowMs, nowMs]`. A round with no end time counts, as the gardener counts it. */
@@ -204,7 +205,7 @@ export function countRounds<R extends { at?: string }>(rounds: readonly R[], mat
     count += 1;
     if (Number.isFinite(t) && t > last) last = t;
   }
-  return { count, windowMs, ...(last > -Infinity ? { lastSeen: new Date(last).toISOString() } : {}) };
+  return { count, windowMs, ...(last > -Infinity ? { lastSeen: fixedClock(last).iso() } : {}) };
 }
 
 /** What the record's own filing evidence counted, read from its rationale: the scout's "N in the older half, M in the
