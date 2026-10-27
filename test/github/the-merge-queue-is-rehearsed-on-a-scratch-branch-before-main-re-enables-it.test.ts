@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
-  REPLAY_PREFIX, RehearsalRefusal, SOURCE_RULESET_ID, assertRulesetTargetsOnlyScratch, buildRehearsalRuleset,
+  DEFAULT_RUNNER_SLOTS, REPLAY_PREFIX, RehearsalRefusal, SOURCE_RULESET_ID, assertRulesetTargetsOnlyScratch, buildRehearsalRuleset,
   classifyRemoval, createGhSeam, main, parseGroupSelection, pickSample, renderReport, runRehearsal, scratchBranchName,
   sizeSample, tearDown, verdictOf,
   // @ts-ignore the executable harness module has no declaration file.
@@ -32,7 +32,7 @@ type Group = { merged?: boolean; removal?: { reason: string; at: string }; log?:
 
 /** An in-memory GitHub: it holds rulesets, branches and PRs, and records every call the harness makes. */
 function fakeSeam(opts: { groups?: Record<number, Group>; checks?: (pr: number) => string; source?: unknown;
-  openBase?: string; enqueueThrows?: number; failDelete?: string; budget?: { busyJobs: number; jobsPerRun: number };
+  openBase?: string; enqueueThrows?: number; failDelete?: string; budget?: { busyJobs: number; jobMinutesPerRun?: number };
   onChecks?: () => void; candidates?: typeof CANDIDATES } = {}) {
   let clock = NOW;
   const calls: string[] = [];
@@ -48,7 +48,7 @@ function fakeSeam(opts: { groups?: Record<number, Group>; checks?: (pr: number) 
     readRuleset: async (id: number) => { calls.push(`readRuleset ${id}`); return rulesets.get(id); },
     readBranchHead: async (b: string) => branches.get(b)!,
     listGreenMergedPrs: async () => opts.candidates ?? CANDIDATES,
-    readRunnerBudget: async () => opts.budget ?? { busyJobs: 0, jobsPerRun: 5 },
+    readRunnerBudget: async () => opts.budget ?? { busyJobs: 0, jobMinutesPerRun: 80 },
     createBranch: async (name: string, sha: string) => { calls.push(`createBranch ${name} ${sha.slice(0, 1)}`); branches.set(name, sha); },
     deleteBranch: async (name: string) => {
       calls.push(`deleteBranch ${name}`);
@@ -202,18 +202,22 @@ test("W1-T7736: the report records completion time, outcome and suite selection 
   assert.match(renderReport({ ...plan, sample: [], conflictPair: null, requiredChecks: undefined, identity: { login: "x", kind: "y", note: "z" } }),
     /- ran as `x` \(y\)\n- z\n[\s\S]*required checks: none\n[\s\S]*sample: none\n- conflicting pair: none in the sample/);
 
-  // The sample is sized from the runner budget and the observed CI duration, never a fixed count.
-  assert.deepEqual(sizeSample({ candidates: 9, groupCiMinutes: 30, budget: { freeJobSlots: 10, jobsPerRun: 5 }, maxEntriesToBuild: 4, windowMinutes: 120 }),
+  // The sample is sized from the runner budget and a CI run's measured job-minutes, never a fixed count.
+  assert.deepEqual(sizeSample({ candidates: 9, budget: { freeJobSlots: 10, jobMinutesPerRun: 150 }, maxEntriesToBuild: 4, windowMinutes: 120 }),
     { size: 8, concurrent: 4, slotMinutes: 1200, groupCost: 150 });
-  assert.deepEqual(sizeSample({ candidates: 9, groupCiMinutes: 30, budget: { freeJobSlots: 0, jobsPerRun: 5 }, maxEntriesToBuild: 4, windowMinutes: 120 }),
+  assert.deepEqual(sizeSample({ candidates: 9, budget: { freeJobSlots: 0, jobMinutesPerRun: 150 }, maxEntriesToBuild: 4, windowMinutes: 120 }),
     { size: 0, concurrent: 0, slotMinutes: 0, groupCost: 150 });
+  // jobs x wall-clock is no price: with no measured job-minutes the window fits no group.
+  assert.deepEqual(sizeSample({ candidates: 9, groupCiMinutes: 30, budget: { freeJobSlots: 10, jobsPerRun: 5 }, maxEntriesToBuild: 4, windowMinutes: 120 }),
+    { size: 0, concurrent: 0, slotMinutes: 1200, groupCost: undefined });
+  assert.equal(DEFAULT_RUNNER_SLOTS, 114, "the default is the 2026-10-27 observed concurrency floor, not Free's 20");
   assert.equal(pickSample(CANDIDATES, 1).conflictPair, null);
-  const full = fakeSeam({ budget: { busyJobs: 20, jobsPerRun: 5 } });
+  const full = fakeSeam({ budget: { busyJobs: DEFAULT_RUNNER_SLOTS, jobMinutesPerRun: 80 } });
   const noRoom = await runRehearsal(full.seam, { live: true });
   assert.match(verdictOf(noRoom).reason, /leaves room for no group/);
   assert.deepEqual(full.writes(), []);
   assert.equal(verdictOf({ live: true, teardown: [], groups: [] }).reason, "no group ran");
-  const none = await runRehearsal(fakeSeam({ candidates: [] }).seam);
+  const none = await runRehearsal(fakeSeam({ candidates: [], budget: { busyJobs: 0 } }).seam);
   assert.equal(none.groupCiMinutes, undefined, "no green PR means no observed duration, and no sample");
   assert.equal(none.sizing.size, 0);
   assert.match(renderReport(none), /\/ — job-min per group = 0 group\(s\)/);
@@ -318,8 +322,20 @@ test("W1-T7736: the real seam builds its GitHub calls on the paced transport", a
     [/pullRequest\(number: 8\)/, { data: { repository: { pullRequest: { merged: true, mergedAt: "t2", mergeQueueEntry: null, timelineItems: { nodes: [] } } } } }],
     [/rulesets\/24525891/, { id: SOURCE_RULESET_ID }],
     [/git\/ref\/heads\/main/, { object: { sha: "m" } }],
-    [/status=in_progress/, { total_count: 2 }], [/status=queued/, { total_count: 1 }],
-    [/workflows\/ci\.yml\/runs/, { workflow_runs: [{ id: 5 }] }], [/runs\/5\/jobs/, { total_count: 9 }],
+    // Busy capacity is counted in JOBS: two running runs and one queued run hold four busy jobs.
+    [/status=in_progress/, { workflow_runs: [{ id: 11 }, { id: 12 }] }], [/status=queued/, { workflow_runs: [{ id: 13 }] }],
+    [/runs\/11\/jobs/, { jobs: [{ status: "in_progress" }, { status: "completed" }, { status: "queued" }] }],
+    [/runs\/12\/jobs/, { jobs: [{ status: "in_progress" }] }], [/runs\/13\/jobs/, { jobs: [{ status: "queued" }] }],
+    // A run's price is its jobs' runner minutes: skipped and never-started jobs hold no runner.
+    [/workflows\/ci\.yml\/runs/, { workflow_runs: [{ id: 5 }, { id: 15 }, { id: 25 }] }],
+    [/runs\/5\/jobs/, { jobs: [
+      { conclusion: "success", started_at: "2026-10-27T00:00:00Z", completed_at: "2026-10-27T00:30:00Z" },
+      { conclusion: "skipped", started_at: "2026-10-27T00:00:00Z", completed_at: "2026-10-27T00:30:00Z" },
+      { conclusion: "cancelled", started_at: null, completed_at: "2026-10-27T00:30:00Z" },
+      { conclusion: "success", started_at: "2026-10-27T00:00:00Z", completed_at: "2026-10-27T00:10:00Z" }] }],
+    [/runs\/15\/jobs/, { jobs: [{ conclusion: "failure", started_at: "2026-10-27T00:00:00Z", completed_at: "2026-10-27T01:00:00Z" }] }],
+    [/runs\/25\/jobs/, { jobs: [{ conclusion: "success", started_at: "2026-10-27T00:00:00Z", completed_at: "2026-10-27T00:10:00Z" }] }],
+    // Priced 40, 60 and 10: the median would say 40; the costliest, 60, is the price.
     [/pulls\/7$/, { head: { sha: "h7" } }], [/pulls\/8$/, { head: { sha: "h8" } }], [/pulls\/9$/, { head: { sha: "h9" } }],
     [/commits\/h7\/check-runs/, { check_runs: [{ name: "ci", status: "completed", conclusion: "failure" }] }],
     [/commits\/h8\/check-runs/, { check_runs: [{ name: "ci", status: "completed", conclusion: "success" }] }],
@@ -346,7 +362,7 @@ test("W1-T7736: the real seam builds its GitHub calls on the paced transport", a
   assert.deepEqual(await seam.readRuleset(SOURCE_RULESET_ID), { id: SOURCE_RULESET_ID });
   assert.equal(await seam.readBranchHead("main"), "m");
   assert.deepEqual(await seam.listGreenMergedPrs(), [{ number: 1, headSha: "s1", files: ["a"], green: true, ciMinutes: 16 }]);
-  assert.deepEqual(await seam.readRunnerBudget(), { busyJobs: 3, jobsPerRun: 9 });
+  assert.deepEqual(await seam.readRunnerBudget(), { busyJobs: 4, jobMinutesPerRun: 60 });
   assert.deepEqual(await seam.createRuleset({ name: "n" }), { id: 42 });
   assert.deepEqual(await seam.deleteRuleset(42), {});
   await seam.createBranch("mq-canary/x", "s");
@@ -373,7 +389,7 @@ test("W1-T7736: the real seam builds its GitHub calls on the paced transport", a
   assert.equal(waits, reads.length + writes.length, "every call waits on the pacer first");
   const quiet = createGhSeam({ pacer: { waitAsync: async () => {}, wait: () => {}, recordResult: () => {} },
     readExec: () => JSON.stringify({ total_count: 0, workflow_runs: [] }), exec: () => "" });
-  assert.deepEqual(await quiet.readRunnerBudget(), { busyJobs: 0, jobsPerRun: 1 }, "no CI run read leaves one job per run");
+  assert.deepEqual(await quiet.readRunnerBudget(), { busyJobs: 0, jobMinutesPerRun: undefined }, "no CI run read leaves no price, so no group");
   await seam.sleep(1);
   assert.equal(typeof seam.now(), "number");
 });
@@ -386,7 +402,7 @@ test("W1-T7736: the harness CLI writes the report and really runs as a script", 
     write: (p: string, s: string) => written.push([p, s]), log: (l: string) => logged.push(l), onSignal: () => {} });
   assert.equal(code, 1, "a dry run is never a go");
   assert.equal(written[0][0], "out.md");
-  assert.match(written[0][1], /runner budget: 10 slots, at least 0 busy/);
+  assert.match(written[0][1], /runner budget: 10 slots, 0 jobs busy \(running or queued\), 80 job-min per CI run/);
   assert.match(written[0][1], /sizing: 1200 free slot-min in the window \/ 80 job-min per group = 3 group\(s\), up to 3 building at once/);
   assert.match(written[0][1], /## Notes\n\n- first\n- second\n/);
   assert.deepEqual(f.writes(), []);
