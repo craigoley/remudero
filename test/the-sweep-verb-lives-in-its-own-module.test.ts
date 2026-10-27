@@ -14,7 +14,6 @@ import type { Plan } from "#src/lib/plan.js";
 import type { GitHub } from "#src/lib/status.js";
 import type { OpenPrView, SweepDeps, BuildSweepEffectsDeps } from "#src/lib/sweep.js";
 import type { SweepCommandHost } from "#src/cli/commands/sweep.js";
-import { systemClock } from "#src/lib/clock.js";
 
 // Avoid the argv module's checkout discovery: these fixtures do not need a git executable.
 const savedArgv = [...process.argv];
@@ -327,7 +326,7 @@ test("W1-T9338: command composes a dry-run summary and contains enumeration fail
   writeFileSync(path, JSON.stringify(f.config));
   const output: string[] = [];
   const errors: string[] = [];
-  t.mock.method(systemClock, "now", () => 9338000);
+  t.mock.method(Date, "now", () => 9338000);
   t.mock.method(console, "log", (s: string) => output.push(s));
   t.mock.method(console, "error", (s: string) => errors.push(s));
   const host = { ...f.host, commandViews: () => [],

@@ -603,7 +603,7 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
   const self = resolveOwnerRepo();
   const repo = flagValue(rest, "--repo") ?? self.repo;
   const owner = self.owner;
-  const runId = `SWEEP-${systemClock.now()}`;
+  const runId = `SWEEP-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "SWEEP", step, lane: "sweep", ...extra });
   const triageRuntime = buildEscalationTriageRuntime({ root: repoRoot, config, owner, repo });
