@@ -10,12 +10,14 @@ import type { ContainedSpawnOptions } from "../src/lib/worker-containment.js";
 
 function deferredCodexProcess() {
   const stdin = new PassThrough();
+  const promptDelivered = new Promise<void>(resolve => stdin.once("finish", resolve));
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   const process = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
   let exited = false;
   return {
     process,
+    promptDelivered,
     finish(exitCode = 0, error?: string) {
       if (exited) return;
       exited = true;
@@ -36,6 +38,13 @@ function deferredCodexProcess() {
       process.emit("exit", null);
     },
   };
+}
+
+async function waitForPrompt(controlled: ReturnType<typeof deferredCodexProcess>, run: Promise<unknown>): Promise<void> {
+  await Promise.race([
+    controlled.promptDelivered,
+    run.then(() => { throw new Error("the fake worker completed before receiving its prompt"); }),
+  ]);
 }
 
 function config(root: string, codexHome = join(root, "durable-codex-home")) {
@@ -88,12 +97,13 @@ test("W1-T2750: overlapping fresh and resumed Codex workers get distinct private
       },
       config(root, durableHome),
     );
-    return { promise, controlled };
+    return { promise, controlled, ready: waitForPrompt(controlled, promise) };
   };
 
   const first = launch(27_501);
   const second = launch(27_502, "resume-thread");
   try {
+    await Promise.all([first.ready, second.ready]);
     assert.equal(captures.length, 2);
     assert.notEqual(captures[0]!.privateTmp, captures[1]!.privateTmp, "concurrent workers never share temp state");
     assert.notEqual(captures[0]!.privateTmp, sharedTmp, "caller TMPDIR cannot collapse isolation");
@@ -108,6 +118,7 @@ test("W1-T2750: overlapping fresh and resumed Codex workers get distinct private
     assert.ok(!captures[0]!.options.args.includes("resume"));
     assert.ok(captures[1]!.options.args.includes("resume"));
   } finally {
+    await Promise.allSettled([first.ready, second.ready]);
     first.controlled.finish();
     second.controlled.finish();
     await Promise.allSettled([first.promise, second.promise]);
@@ -145,6 +156,7 @@ test("W1-T2750: provider-error and synchronous-spawn paths both reap only their 
     },
     config(root),
   );
+  await waitForPrompt(providerProcess, providerPromise);
   providerProcess.finish(1, "provider refused the turn");
   const providerResult = await providerPromise;
   assert.equal(providerResult.isError, true);

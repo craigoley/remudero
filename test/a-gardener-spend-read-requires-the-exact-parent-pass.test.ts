@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -989,5 +989,91 @@ test("W1-T9658: cached gardener usage survives the real materialization boundary
       const actual = measured.instances.find(i => i.instanceId === instance.instanceId)?.gardenerSpend;
       assert.equal(actual?.pricedSubtotalUsd, 2, `optional usage must not hide ${instance.instanceId}'s valid money`);
     }
+  });
+});
+
+// W1-T10860: the fixed-window controls use real files and the default union capture. The injected
+// clock appends rows to the live file right after it declares the cutoff, then reads a later clock.
+const laterPass = "32345678-1234-4123-8123-123456789abc";
+const laterOrigin = { state: "linked", version: 1, name: "config", passId: laterPass };
+const cutoffMs = Date.parse(at) + 1000;
+function appendingClock(dir: string, appended: unknown[], readMs = cutoffMs + 500) {
+  return { now: () => readMs, date: () => new Date(readMs), iso: () => {
+    appendFileSync(join(dir, "ledger.ndjson"), appended.map(row => JSON.stringify(row)).join("\n") + "\n");
+    return new Date(cutoffMs).toISOString();
+  } };
+}
+function laterRows(ts: string) {
+  const later = assignedCall("later", {}, laterOrigin);
+  return [{ ...parent, ts, passId: laterPass }, { ...child, ts, run_id: "later-child", total_cost_usd: 5, gardener_origin: laterOrigin },
+    { ...later.assignment, ts }, { ...later.attempt, ts }];
+}
+
+test("W1-T10860: a gardener capture keeps its fixed window when ordinary later rows arrive", async t => {
+  const early = assignedCall("early");
+  const rows = [parent, child, early.assignment, early.attempt];
+  const control = await captured(t, rows);
+  assert.equal(control.spend.totalUsd, 2);
+  const { dir } = await captured(t, rows);
+  const appended = laterRows(new Date(cutoffMs + 100).toISOString());
+  const source = await captureGardenerSpendSource(dir, appendingClock(dir, appended));
+  assert.equal(source.corpusComplete, true, "valid later appends must not make the earlier window incomplete");
+  const spend = foldGardenerSpend(source, repository, callMaterializedAt);
+  assert.equal(spend.state, "complete");
+  assert.equal(spend.totalUsd, 2, "later parent and price contribute no money");
+  assert.deepEqual(spend.counts, { priced: 1, unpriced: 0, unlinked: 0 });
+  assert.equal(spend.window!.through, new Date(cutoffMs).toISOString());
+  assert.equal(spend.workerCalls!.state, "complete");
+  assert.deepEqual(spend.workerCalls!.counts, { ...emptyCallCounts, assignments: 1, matched: 1 }, "later calls add no coverage");
+  assert.equal(spend.workerCalls!.window!.through, new Date(cutoffMs).toISOString());
+});
+
+test("W1-T10860: a gardener fixed window preserves evidence refusals during concurrent capture", async t => {
+  const early = assignedCall("early");
+  const rows = [parent, child, early.assignment, early.attempt];
+  const futureTs = new Date(cutoffMs + 60_000).toISOString();
+  const laterTs = new Date(cutoffMs + 100).toISOString();
+  const futureCall = assignedCall("future", {}, origin);
+  for (const kind of ["future-money", "future-parent", "future-call", "malformed-live", "unreadable-archive", "foreign", "generation", "unknown-price"]) {
+    await t.test(kind, async t => {
+      const { dir } = await captured(t, rows);
+      let appended: unknown[] = laterRows(laterTs);
+      if (kind === "future-money") appended = [{ ...child, ts: futureTs, run_id: "future-child" }];
+      if (kind === "future-parent") appended = [{ ...parent, ts: futureTs }];
+      if (kind === "future-call") appended = [{ ...futureCall.assignment, ts: futureTs }, { ...futureCall.attempt, ts: futureTs }];
+      if (kind === "unknown-price") appended = [{ ...child, run_id: "unpriced", total_cost_usd: undefined, ts: new Date(at).toISOString() }];
+      const clock = appendingClock(dir, appended);
+      if (kind === "malformed-live") appendFileSync(join(dir, "ledger.ndjson"), "{bad\n");
+      if (kind === "unreadable-archive") writeFileSync(join(dir, archive() + ".gz"), "not-gzip");
+      if (kind === "foreign") writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify({ ...runtime(), repository: "foreign/repo" }));
+      if (kind === "generation") {
+        const iso = clock.iso;
+        clock.iso = () => {
+          const next = runtime(); next.daemonRunId = "new-generation";
+          writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify(next));
+          return iso();
+        };
+      }
+      const source = await captureGardenerSpendSource(dir, clock, { repository });
+      const spend = foldGardenerSpend(source, repository, callMaterializedAt);
+      if (kind === "future-call") {
+        // Worker rows are optional usage evidence: money stays known, the usage window is withheld.
+        assert.equal(spend.totalUsd, 2);
+        assert.equal(spend.workerCalls!.state, "partial");
+        assert.ok(spend.workerCalls!.counts.invalid! > 0);
+        return;
+      }
+      assert.notEqual(spend.state, "complete");
+      assert.equal(spend.totalUsd, null);
+      if (kind === "unknown-price") assert.deepEqual(spend.counts, { priced: 1, unpriced: 1, unlinked: 0 });
+    });
+  }
+  await t.test("cancellation during a concurrent append still rejects", async t => {
+    const { dir } = await captured(t, rows);
+    const controller = new AbortController();
+    const clock = appendingClock(dir, laterRows(laterTs));
+    const iso = clock.iso;
+    clock.iso = () => { controller.abort(Error("fixture cancellation")); return iso(); };
+    await assert.rejects(captureGardenerSpendSource(dir, clock, { repository, signal: controller.signal }), /fixture cancellation/);
   });
 });

@@ -7,7 +7,7 @@ import { appendLedger, type LedgerLine } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized } from "./ledger-union.js";
 import { ownHistoryBound } from "./fleet-flow-detectors.js";
-import { infrastructureRefusal, streakRefusal } from "./non-worker-verdict.js";
+import { infrastructureRefusal, PROOF_INCONCLUSIVE, streakRefusal } from "./non-worker-verdict.js";
 import type {
   FleetFlowDetector,
   FleetFlowFinding,
@@ -76,6 +76,7 @@ export function nonWorkerVerdictClass(row: Record<string, unknown>): string | un
   if (row.verdict === "failed" && row.stage === "worktree.node_modules") return "node_modules";
   const refusal = infrastructureRefusal(row) ?? streakRefusal(row);
   if (refusal === undefined || refusal === "task_already_merged") return undefined;
+  if (refusal === PROOF_INCONCLUSIVE) return PROOF_INCONCLUSIVE; // W1-T10742: the harness's, not a toolchain fault
   return refusal === "blocked_git_fetch" ? "git_fetch" : "toolchain";
 }
 

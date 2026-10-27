@@ -192,7 +192,7 @@ test("W1-T8503: a gone checkpoint branch with a fetchable head is recreated", as
   } finally { f.cleanup(); }
 });
 
-test("W1-T8503: a recreated checkpoint keeps its own base when main conflicts", async () => {
+test("W1-T8503: a recreated checkpoint is merged with main when main conflicts", async () => {
   const f = fixture();
   try {
     writeFileSync(join(f.repo.dir, "paid-work.txt"), "main's conflicting work\n");
@@ -201,15 +201,17 @@ test("W1-T8503: a recreated checkpoint keeps its own base when main conflicts", 
     f.repo.git("push", "--quiet", "origin", "main");
     const main = f.repo.git("rev-parse", "HEAD");
     const restored = await restoreBoundaryCheckpoint({ branch, headSha: f.headSha }, taskId, async (args) => f.repo.git(...args), f.log);
-    assert.equal(restored.base, "checkpoint");
-    if (restored.base !== "checkpoint") assert.fail("the conflicting main cannot be the restored base");
+    assert.equal(restored.base, "main", "W1-T10752: the run is never left on the checkpoint's own stale base");
+    assert.equal(restored.reconciled, "merge");
     assert.equal(restored.sourceBranchAbsent, true);
-    assert.equal(restored.headSha, f.headSha);
+    assert.equal(restored.headSha, f.headSha, "the checkpoint stays the first parent");
+    assert.equal(restored.mainSha, main);
     assert.deepEqual(restored.mainConflicts, ["paid-work.txt"]);
     assert.equal(f.repo.git("rev-parse", "HEAD"), f.headSha);
+    assert.equal(f.repo.git("rev-parse", "MERGE_HEAD"), main, "main's merge is open in the worktree");
+    assert.match(readFileSync(join(f.repo.dir, "paid-work.txt"), "utf8"), /^<{7} /m, "the conflict markers stay for the worker");
     assert.equal(f.origin.git("rev-parse", "main"), main);
     assert.equal(f.origin.git("rev-parse", branch), f.headSha);
-    assert.equal(readFileSync(join(f.repo.dir, "paid-work.txt"), "utf8"), "checkpoint work\n");
     assert.deepEqual(f.rows.map((row) => row.step), ["implement.checkpoint_branch_recreated"]);
     assert.equal(pendingWorkerBoundaryHandoffs(lines([receipt(f.headSha), ...f.rows])).size, 1);
   } finally { f.cleanup(); }
