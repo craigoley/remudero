@@ -371,7 +371,7 @@ test("W1-T9114: a review the sweep starts as a child is held by the registry and
       buildReviewerCodeFreshnessGate: () => ({ call: (...args: unknown[]) => { gateCalls.push(args); return 17; }, staleThisPass: () => undefined }),
       buildBaseReproductionProbe: () => () => ({ reproduced: false }), buildImportClosureRead: () => () => [],
       buildRequiredFixReviewRunner: () => () => 0, readyDraftViaGh: () => () => {},
-    } as unknown as SweepCommandHost;
+    } as unknown as SweepCommandHost & Required<Pick<SweepCommandHost, "freshTreeGit">>;
     const deps: BuildSweepEffectsDeps = {
       owner: "acme", repo: "fixture", localRepoName: "fixture", config, ledgerPath: join(f.root, "state", "ledger.ndjson"),
       runId: "SWEEP-CHILD", plan, log: f.log,
