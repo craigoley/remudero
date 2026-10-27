@@ -3416,9 +3416,12 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       let prerequisitePr = priorPrerequisitePrFor(ledgerLines, opts.prUrl);
 
       if (prerequisitePr === undefined) {
+        const constraint = opts.constraint?.trim();
+        const constraintSha256 = constraint ? createHash("sha256").update(constraint).digest("hex") : undefined;
         const priorNoPr = ledgerLines.findLast(row => row.step === "fix.prerequisite_dispatch_failed" &&
           row.task_id === opts.taskId && row.repair_pr_url === opts.prUrl && row.prerequisite_outcome === "completed-no-pr" &&
           typeof row.read_contract_revision === "string" &&
+          (constraintSha256 === undefined || row.read_constraint_sha256 === constraintSha256) &&
           fixRungInputsUnchanged(row, { headSha: review.headSha, contractRevision: currentContractRevision, bodySha256: opts.prBodySha256 }) &&
           !(typeof row.read_task_semantic_revision === "string" && currentSemanticRevision !== undefined &&
             row.read_task_semantic_revision !== currentSemanticRevision));
@@ -3475,6 +3478,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
             strike: strikes, repair_pr_url: opts.prUrl,
             ...fixRungInputFields({ headSha: review.headSha, contractRevision: currentContractRevision, bodySha256: opts.prBodySha256 }),
             ...(currentSemanticRevision === undefined ? {} : { read_task_semantic_revision: currentSemanticRevision }),
+            ...(constraintSha256 === undefined ? {} : { read_constraint_sha256: constraintSha256 }),
             ...(spawnOutcome.kind === "spawned" ? { prerequisite_outcome: "completed-no-pr" } : {}),
             reason: spawnOutcome.kind === "abandoned" ? "spawn wall-clock bound exceeded" : "worker opened no pull request",
           });
