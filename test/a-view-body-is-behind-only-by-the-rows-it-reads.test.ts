@@ -1,5 +1,6 @@
+import { closeReadModelFixture, readModelFixtureDir } from "#test/helpers/read-model-fixture.js";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -8,15 +9,13 @@ import {
   builtLedgerSource, createReadModelTicker, createReadModelWorker, ledgerSource, readModelSwitchesPath,
   type ReadModelInstanceState, type ReadModelView, type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import type { ViewSource } from "#src/lib/views.js";
 
 const START = Date.parse("2026-10-18T12:00:00.000Z");
 const iso = (ms: number): string => new Date(ms).toISOString();
 
 function fixture(t: TestContext, declared = true, heartbeat = true) {
-  const dir = makeTempDir("view-ledger-reads");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "view-ledger-reads");
   mkdirSync(join(dir, "read-model"), { recursive: true });
   const repoPath = join(dir, "instances.yaml");
   writeFileSync(repoPath, "instances:\n  core:\n    github_repo: craigoley/remudero\n    project: remudero\n");
@@ -36,7 +35,7 @@ function fixture(t: TestContext, declared = true, heartbeat = true) {
     clock: { now: () => now, date: () => new Date(now), iso: () => iso(now) },
     post: (message) => messages.push(message),
   });
-  t.after(() => ticker.release());
+  closeReadModelFixture(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   const body = messages.flatMap((m) => m.type === "body" ? [m.entry.body] : [])[0];
@@ -119,7 +118,7 @@ test("a first daemon heartbeat invalidates a body built without one", (t) => {
 });
 
 test("serve judges the real instances worker's heartbeat readings without changing the source shape", async (t) => {
-  const dir = makeTempDir("served-ledger-reads");
+  const dir = readModelFixtureDir(t, "served-ledger-reads");
   mkdirSync(join(dir, "read-model"), { recursive: true });
   const repoPath = join(dir, "instances.yaml");
   writeFileSync(repoPath, "instances:\n  core:\n    github_repo: craigoley/remudero\n    project: remudero\n");
@@ -137,7 +136,7 @@ test("serve judges the real instances worker's heartbeat readings without changi
       if (m.type === "sources" && m.ledgerReads?.instances?.["ledger:core"] === iso(now - 60_000)) readReceived = true;
     },
   });
-  t.after(() => { handle.stop(); rmSync(dir, { recursive: true, force: true }); });
+  closeReadModelFixture(t, async () => { await handle.pause?.(); handle.stop(); });
   handle.start();
   const deadline = Date.now() + 20_000;
   while ((!readReceived || !handle.body("instances") || !handle.state().instances.get("core")?.tickedAt) && Date.now() < deadline) await sleep(10);
