@@ -58,7 +58,6 @@ import {
   disarmAutoMerge,
   logArmAttribution,
   mergeDirectViaRestAsync,
-  assertOperatorMergeUnheld,
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
   readMergeQueueMembership,
@@ -2969,8 +2968,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
         mergeDirect: async (prUrl) => {
           assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
-          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha, selectedModeQualification,
-            () => assertOperatorMergeUnheld(prUrl, { ledgerLines: () => readLedgerLines(ledgerPath), say: (message) => console.log(message) })); // ledger-read-intent: live
+          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha, selectedModeQualification);
         },
       } : undefined;
       let attemptError: string | undefined;

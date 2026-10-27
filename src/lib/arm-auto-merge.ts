@@ -24,7 +24,6 @@
  * have both run-task.ts and this file import the ONE copy; noted as a follow-up, not done here.
  */
 import { systemClock, type Clock } from "./clock.js";
-import { RmdError } from "./errors.js";
 import { securityMergeHead, securityMergeHeadAsync, securityMetadataGhArgs } from "./security-merge-admission.js";
 import { observeSelectedMode, type SelectedModeQualification } from "./instance-mode.js";
 import { createHash } from "node:crypto";
@@ -435,7 +434,6 @@ export function mergeDirectViaRest(
   securityRead?: (path: string) => unknown,
   expectedHead?: string,
   qualification?: SelectedModeQualification,
-  beforeWrite: () => void = () => { throw new Error("direct merge requires an operator-hold write guard"); },
 ): void {
   const target = mergeTargetFromPrUrl(prUrl);
   if (!target) {
@@ -443,10 +441,7 @@ export function mergeDirectViaRest(
   }
   const head = securityMergeHead(prUrl, securityRead ?? (path => JSON.parse(String(exec("gh", securityMetadataGhArgs(path),
     { encoding: "utf8", stdio: "pipe", timeout: 15_000, maxBuffer: 2 << 20, killSignal: "SIGKILL" })))), expectedHead);
-  const write = () => {
-    beforeWrite();
-    return exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8", stdio: "pipe" });
-  };
+  const write = () => exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8", stdio: "pipe" });
   if (qualification) qualification.observeSync("direct-merge", write, prUrl);
   else write();
 }
@@ -460,17 +455,14 @@ export async function mergeDirectViaRestAsync(
   securityRead?: (path: string) => Promise<unknown>,
   expectedHead?: string,
   qualification?: SelectedModeQualification,
-  beforeWrite: () => void = () => { throw new Error("direct merge requires an operator-hold write guard"); },
 ): Promise<void> {
   const target = mergeTargetFromPrUrl(prUrl);
   if (!target) {
     throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
   }
   const head = await securityMergeHeadAsync(prUrl, securityRead, expectedHead);
-  await observeSelectedMode(qualification, "direct-merge", () => {
-    beforeWrite();
-    return exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8" });
-  }, prUrl);
+  await observeSelectedMode(qualification, "direct-merge", () =>
+    exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8" }), prUrl);
 }
 
 /**
@@ -655,19 +647,16 @@ export function realArmDeps(
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
       const head = securityMergeHead(prUrl, readSecurity);
-      const write = () => {
-        assertConfiguredMergeUnheld(prUrl, loadConfigImpl);
-        return runGh(["pr", "merge", prUrl, "--auto", "--squash", ...(head ? ["--match-head-commit", head] : [])], {
-          encoding: "utf8",
-          stdio: "pipe",
-        });
-      };
+      const write = () => runGh(["pr", "merge", prUrl, "--auto", "--squash", ...(head ? ["--match-head-commit", head] : [])], {
+        encoding: "utf8",
+        stdio: "pipe",
+      });
       if (qualification) qualification.observeSync("arm", write, prUrl);
       else write();
     },
     mergeDirect: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl} directly`);
-      mergeDirectViaRest(prUrl, undefined, undefined, undefined, qualification, () => assertConfiguredMergeUnheld(prUrl, loadConfigImpl));
+      mergeDirectViaRest(prUrl, undefined, undefined, undefined, qualification);
     },
     disableAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `disabling auto-merge on ${prUrl}`);
@@ -699,10 +688,7 @@ export function realArmDeps(
     enqueue: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
       const head = securityMergeHead(prUrl, readSecurity);
-      const write = () => {
-        assertConfiguredMergeUnheld(prUrl, loadConfigImpl);
-        return runGh(["pr", "merge", prUrl, ...(head ? ["--match-head-commit", head] : [])], { encoding: "utf8", stdio: "pipe" });
-      };
+      const write = () => runGh(["pr", "merge", prUrl, ...(head ? ["--match-head-commit", head] : [])], { encoding: "utf8", stdio: "pipe" });
       if (qualification) qualification.observeSync("queue", write, prUrl);
       else write();
     },
@@ -746,14 +732,12 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig,
     armAuto: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
       const head = await securityMergeHeadAsync(prUrl);
-      await observeSelectedMode(qualification, "arm", () => {
-        assertConfiguredMergeUnheld(prUrl, loadConfigImpl);
-        return ghTextAsync(["pr", "merge", prUrl, "--auto", "--squash", ...(head ? ["--match-head-commit", head] : [])]);
-      }, prUrl);
+      await observeSelectedMode(qualification, "arm", () =>
+        ghTextAsync(["pr", "merge", prUrl, "--auto", "--squash", ...(head ? ["--match-head-commit", head] : [])]), prUrl);
     },
     mergeDirect: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl} directly`);
-      await mergeDirectViaRestAsync(prUrl, undefined, undefined, undefined, qualification, () => assertConfiguredMergeUnheld(prUrl, loadConfigImpl));
+      await mergeDirectViaRestAsync(prUrl, undefined, undefined, undefined, qualification);
     },
     disableAuto: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `disabling auto-merge on ${prUrl}`);
@@ -766,10 +750,8 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig,
     enqueue: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
       const head = await securityMergeHeadAsync(prUrl);
-      await observeSelectedMode(qualification, "queue", () => {
-        assertConfiguredMergeUnheld(prUrl, loadConfigImpl);
-        return ghTextAsync(["pr", "merge", prUrl, ...(head ? ["--match-head-commit", head] : [])]);
-      }, prUrl);
+      await observeSelectedMode(qualification, "queue", () =>
+        ghTextAsync(["pr", "merge", prUrl, ...(head ? ["--match-head-commit", head] : [])]), prUrl);
     },
   };
 }
@@ -1480,49 +1462,6 @@ export const REST_MERGE_UNSETTLED_MAX_READS = 3;
 /** W1-T1280 — the short interval between one `UNKNOWN` re-read and the next. */
 export const REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS = 2_000;
 
-class OperatorMergeHoldWriteRefused extends RmdError {
-  constructor(message: string) {
-    super("github", 1, message, { reason: "operator-merge-hold" });
-  }
-}
-
-/** A final write fence, including callers that spent time reading security metadata. */
-export function assertOperatorMergeUnheld(
-  prUrl: string,
-  deps: Pick<ArmDeps<true>, "say" | "ledgerLines">,
-): void {
-  const lines = deps.ledgerLines();
-  const evidence = lines as { present?: boolean; torn?: number };
-  if (evidence.present !== true || evidence.torn !== 0) {
-    throw new Error("operator hold evidence is unavailable or torn — merge withheld");
-  }
-  if (operatorHoldRefusal(prUrl, { ...deps, ledgerLines: () => lines })) {
-    throw new OperatorMergeHoldWriteRefused("operator merge hold stands — write withheld");
-  }
-}
-
-function assertConfiguredMergeUnheld(prUrl: string, getConfig: typeof loadConfig): void {
-  assertOperatorMergeUnheld(prUrl, {
-    ledgerLines: () => readLedgerLines(ledgerPathFor(getConfig())), // ledger-read-intent: live
-    say: (message) => console.log(message),
-  });
-}
-
-function operatorHoldRefusal(
-  prUrl: string,
-  deps: Pick<ArmDeps<true>, "say"> & Partial<Pick<ArmDeps<true>, "ledgerLines">>,
-): ArmAttemptResult | undefined {
-  const holdLedgerLines = deps.ledgerLines?.();
-  const prNumber = prNumberFromRef(prUrl);
-  const hold = holdLedgerLines && prNumber !== undefined ? automergeHoldFromLedger(holdLedgerLines, prNumber) : undefined;
-  if (!hold) return undefined;
-  deps.say(
-    `automerge.hold_refused (W1-T1000002): operator hold engaged by ${hold.by} (${hold.reason}) — ` +
-      `arm withheld: ${prUrl}`,
-  );
-  return { outcome: "hold-refused" };
-}
-
 export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps<false>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
@@ -1567,8 +1506,19 @@ function* attemptArmSteps(
     );
     return { outcome: "draft-refused" };
   }
-  const heldAtEntry = operatorHoldRefusal(prUrl, deps);
-  if (heldAtEntry) return heldAtEntry;
+  // MERGE (W1-T1000002 x W1-T1079): every caller reads one type.
+  const holdLedgerLines = deps.ledgerLines?.();
+  if (holdLedgerLines) {
+    const prNumber = prNumberFromRef(prUrl);
+    const hold = prNumber !== undefined ? automergeHoldFromLedger(holdLedgerLines, prNumber) : undefined;
+    if (hold) {
+      deps.say(
+        `automerge.hold_refused (W1-T1000002): operator hold engaged by ${hold.by} (${hold.reason}) — ` +
+          `arm withheld: ${prUrl}`,
+      );
+      return { outcome: "hold-refused" };
+    }
+  }
   if (deps.stackPrerequisite) {
     let stack: StackPrerequisiteCheck;
     try {
@@ -1627,12 +1577,9 @@ function* attemptArmSteps(
   if ("hold" in judged) return judged.hold;
   try {
     yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
-    const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
-    if (heldBeforeWrite) return heldBeforeWrite;
     yield* step(() => deps.armAuto(prUrl));
     return { outcome: "armed", ...(judged.judge ? { ratchetJudge: judged.judge } : {}) };
   } catch (e) {
-    if (e instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
     // GitHub REFUSES to enable auto-merge on an ALREADY-mergeable PR ("Pull request is in clean
     // status"): every SWEEP-armed PR can land in exactly that state, so the fallback below
@@ -1656,13 +1603,10 @@ function* attemptArmSteps(
       if (!preflight.proceed) return preflight.result;
       try {
         yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
-        const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
-        if (heldBeforeWrite) return heldBeforeWrite;
         yield* step(() => deps.mergeDirect(prUrl));
         deps.say(`automerge.rate_limited_rest_merge (W1-T1255; arm refused on quota, PR already green): ${prUrl}`);
         return { outcome: "direct-merged", error: msg, rateLimit: quota, directMergePreflight: preflight.evidence };
       } catch (e3) {
-        if (e3 instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
         let msg3 = String((e3 as { stderr?: unknown })?.stderr ?? (e3 as Error)?.message ?? e3);
         if (yield* step(() => deps.isMerged?.(prUrl))) {
           deps.say(`automerge.rate_limited_rest_merge (merge landed; a post-merge step failed: ${msg3}): ${prUrl}`);
@@ -1692,8 +1636,6 @@ function* attemptArmSteps(
               if (!retryPreflight.proceed) return retryPreflight.result;
               try {
                 yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
-                const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
-                if (heldBeforeWrite) return heldBeforeWrite;
                 yield* step(() => deps.mergeDirect(prUrl));
                 deps.say(
                   `automerge.rate_limited_rest_merge (W1-T1255; settled mergeable on retry ${read}): ${prUrl}`,
@@ -1705,7 +1647,6 @@ function* attemptArmSteps(
                   directMergePreflight: retryPreflight.evidence,
                 };
               } catch (e4) {
-                if (e4 instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
                 msg3 = String((e4 as { stderr?: unknown })?.stderr ?? (e4 as Error)?.message ?? e4);
                 if (yield* step(() => deps.isMerged?.(prUrl))) {
                   deps.say(
@@ -1738,19 +1679,15 @@ function* attemptArmSteps(
 /** The REST merge once {@link directMergePreflight} has let it through. */
 function* mergeDirectAfterPreflightSteps(
   prUrl: string,
-  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say" | "contributorAdmission"> &
-    Partial<Pick<ArmDeps<true>, "ledgerLines">>,
+  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say" | "contributorAdmission">,
   evidence: DirectMergePreflightEvidence | undefined,
 ): Steps<ArmAttemptResult> {
   try {
     yield* step(() => deps.contributorAdmission?.(prUrl));
-    const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
-    if (heldBeforeWrite) return heldBeforeWrite;
     yield* step(() => deps.mergeDirect(prUrl));
     deps.say(`automerge.clean_status_direct_merge (already green — merged now): ${prUrl}`);
     return { outcome: "direct-merged", directMergePreflight: evidence };
   } catch (e2) {
-    if (e2 instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
     const msg2 = String((e2 as { stderr?: unknown })?.stderr ?? (e2 as Error)?.message ?? e2);
     // W1-T1050: a merge that landed must never be reported as a failed one.
     if (yield* step(() => deps.isMerged?.(prUrl))) {
@@ -1938,17 +1875,14 @@ function* attemptPlanPrMergeSteps(
  */
 function* attemptQueueArmSteps(
   prUrl: string,
-  deps: Pick<ArmDeps<true>, "armAuto" | "isMerged" | "say"> & Partial<Pick<ArmDeps<true>, "enqueue" | "contributorAdmission" | "ledgerLines">>,
+  deps: Pick<ArmDeps<true>, "armAuto" | "isMerged" | "say"> & Partial<Pick<ArmDeps<true>, "enqueue" | "contributorAdmission">>,
 ): Steps<ArmAttemptResult> {
   try {
     yield* step(() => deps.contributorAdmission?.(prUrl));
-    const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
-    if (heldBeforeWrite) return heldBeforeWrite;
     yield* step(() => deps.armAuto(prUrl));
     deps.say(`automerge.queued (W1-T4405): auto-merge armed on a merge-queue branch — the queue merges it: ${prUrl}`);
     return { outcome: "armed" };
   } catch (e) {
-    if (e instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
     if (armFailureIsAlreadyQueued(msg)) {
       deps.say(`automerge.queued (W1-T4405): already in the merge queue — armed, not stuck: ${prUrl}`);
@@ -1958,13 +1892,10 @@ function* attemptQueueArmSteps(
     if (armFailureAction(msg) === "direct-merge" && enqueue) {
       try {
         yield* step(() => deps.contributorAdmission?.(prUrl));
-        const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
-        if (heldBeforeWrite) return heldBeforeWrite;
         yield* step(() => enqueue(prUrl));
         deps.say(`automerge.enqueued (W1-T4405): already green — added to the merge queue, never merged around it: ${prUrl}`);
         return { outcome: "armed" };
       } catch (e2) {
-        if (e2 instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
         const msg2 = String((e2 as { stderr?: unknown })?.stderr ?? (e2 as Error)?.message ?? e2);
         if (armFailureIsAlreadyQueued(msg2) || (yield* step(() => deps.isMerged?.(prUrl)))) {
           deps.say(`automerge.enqueued (W1-T4405): the queue already holds or merged it: ${prUrl}`);
