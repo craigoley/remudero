@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fixedClock } from "../src/lib/clock.js";
-import { ciFrictionGardenSpec, ciFrictionHandFixRounds, readCiFrictionHandFixes, priceCiFrictionCauses, landedCiFrictionOrigins } from "../src/lib/ci-friction-gardener.js";
+import { ciFrictionLadder, ciFrictionGardenSpec, ciFrictionHandFixRounds, readCiFrictionHandFixes, priceCiFrictionCauses, landedCiFrictionOrigins } from "../src/lib/ci-friction-gardener.js";
 import { ciFrictionEvidence, ciFrictionRemedyRationale, locateCiFrictionOwner } from "../src/lib/ci-friction-remedy.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghShim } from "./helpers/gh-shim.js";
@@ -17,17 +17,17 @@ const rounds = [
 const search = { filesContaining: (term: string) => term === "worker changed nothing" ? [{ file: "src/worker.ts", hits: 1 }] : [], fileExists: () => true };
 const fix = { pr: 9, at: "2026-10-02T10:00:00Z", files: ["src/worker.ts"] };
 
-test("W1-T5300: a hand fix touching a cause's owning code is attached to that cause as evidence", () => {
-  const added = ciFrictionHandFixRounds([fix, fix], rounds, priceCiFrictionCauses(rounds), search);
-  assert.equal(added.length, 1);
-  assert.equal(added[0]!.cause.name, "changed-nothing");
+test("W1-T5300: manual changes retain their own file observations instead of claiming another cause", () => {
+  const added = ciFrictionHandFixRounds([fix, fix, { ...fix, pr: 10 }], rounds, priceCiFrictionCauses(rounds), search);
+  assert.equal(added.length, 2);
+  assert.equal(added[0]!.cause.name, "src/worker.ts");
   assert.equal(added[0]!.minutes, 5);
-  const evidence = ciFrictionEvidence(added.map((r) => ({ ...r, causeKey: `${r.cause.kind}:${r.cause.name}` })), "fix_refusal:changed-nothing");
+  const evidence = ciFrictionEvidence(added.map((r) => ({ ...r, causeKey: `${r.cause.kind}:${r.cause.name}` })), "hand_fix:src/worker.ts");
   assert.equal(evidence[0]!.pr, 9);
   assert.match(evidence[0]!.detail, /median proxy/);
-  assert.match(ciFrictionRemedyRationale({ key: "fix_refusal:changed-nothing", minutes: 5, rounds: 1, prs: 1,
+  assert.match(ciFrictionRemedyRationale({ key: "hand_fix:src/worker.ts", minutes: 5, rounds: 1, prs: 1,
     owner: { files: ["src/worker.ts"], why: [] }, evidence,
-    prior: { task: { id: "W1-T1", origin: "ci-friction:fix_refusal:changed-nothing", status: "merged", retired: false, files: ["src/worker.ts"] } },
+    prior: { task: { id: "W1-T1", origin: "ci-friction:hand_fix:src/worker.ts", status: "merged", retired: false, files: ["src/worker.ts"] } },
   }).join("\n"), /PR #9.*hand fix/);
 });
 
@@ -148,8 +148,72 @@ test("a hand fix merged before a cause's first observed round is not that cause'
   // The same file repaired twice before the cause was ever seen is a repeated hand fix of that file instead.
   const repeated = ciFrictionHandFixRounds([early, { ...early, pr: 8 }], rounds, priced, search);
   assert.deepEqual(repeated.map((r) => [r.pr, r.cause]), [[7, { kind: "hand_fix", name: "src/worker.ts" }], [8, { kind: "hand_fix", name: "src/worker.ts" }]]);
-  // At or after the first observed round the owner match still holds, and an undated round dates its cause from always.
-  assert.deepEqual(ciFrictionHandFixRounds([{ ...early, at: rounds[0]!.at }], rounds, priced, search).map((r) => r.cause.name), ["changed-nothing"]);
+  // Later or undated observations still cannot prove that a manual change repaired this cause.
+  assert.deepEqual(ciFrictionHandFixRounds([{ ...early, at: rounds[0]!.at }], rounds, priced, search).map((r) => r.cause.name), []);
   const undated = [{ ...rounds[0]!, at: undefined }, rounds[1]!];
-  assert.deepEqual(ciFrictionHandFixRounds([early], undated, priceCiFrictionCauses(undated), search).map((r) => r.cause.name), ["changed-nothing"]);
+  assert.deepEqual(ciFrictionHandFixRounds([early], undated, priceCiFrictionCauses(undated), search).map((r) => r.cause.name), []);
+});
+
+test("manual file overlap never fabricates a named failing-check observation", () => {
+  const fixes = [fix, { ...fix, pr: 10 }];
+  const before = structuredClone({ fixes, rounds });
+  const added = ciFrictionHandFixRounds(fixes, rounds, priceCiFrictionCauses(rounds), search);
+  assert.equal(added.length, 2, "the two actual manual changes remain observations");
+  assert.ok(added.every(row => row.cause.kind === "hand_fix" && row.cause.name === "src/worker.ts"));
+  assert.ok(added.every(row => row.pricing === "median-proxy" && row.minutes === 5));
+  assert.deepEqual({ fixes, rounds }, before, "historical inputs and measured costs remain untouched");
+  // The production inventory also prices checks from the gate report: PRs 9 and 10 red on a measured gate already
+  // carry its 8 measured check-minutes, so their manual changes must earn no second, proxy cost.
+  const root = mkdtempSync(join(tmpdir(), "rmd-hand-gate-"));
+  const logs: string[] = [];
+  try {
+    const gate = { gate: "coverage-ratchet", prs: 2, runs: 3, redRuns: 2, refusals: 1, repaired: 1, overridden: 0, minutes: 12, redMinutes: 8, redPrs: 2 };
+    const report = (redPrNumbers?: number[]) => ({ status: "measured" as const, prsScanned: 2, neverFired: [], alwaysFired: [],
+      gates: [{ ...gate, ...(redPrNumbers ? { redPrNumbers } : {}) }] });
+    const inventory = (redPrNumbers?: number[]) => ciFrictionGardenSpec({ stateDir: root, repoRoot: root, clock, log: (step) => logs.push(step),
+      openWorkspace: () => { throw new Error("not needed"); } }, {
+      ledgerRecords: () => [
+        { step: "pr.opened", run_id: "run-2", pr_url: "https://github.com/owner/repo/pull/2", ts: "2026-10-01T10:00:00.000Z" },
+        { step: "fix.base_refreshed", run_id: "run-2", matching_base_files: ["src/other.ts"], ts: "2026-10-01T10:05:00.000Z" },
+      ],
+      handFixes: () => ({ state: "observed", fixes }), gateFireRates: () => report(redPrNumbers),
+      planState: () => ({ tasks: [] }), ownerSearch: search, mintTaskId: () => "W1-T1",
+    }).inventory();
+    const proxies = (inv: ReturnType<typeof inventory>) => inv.rounds.filter(r => r.pricing === "median-proxy").map(r => [r.pr, r.cause.kind, r.minutes]);
+    assert.deepEqual(proxies(inventory([3, 4])), [[9, "hand_fix", 5], [10, "hand_fix", 5]], "control: manual changes on unpriced PRs keep their proxy");
+    const gatePriced = inventory([9, 10]);
+    assert.deepEqual(proxies(gatePriced), [], "PRs 9 and 10 already carry measured check minutes: no proxy cost is added");
+    assert.equal(gatePriced.priced.some(p => p.cause.kind === "hand_fix"), false);
+    assert.equal(gatePriced.priced.find(p => p.cause.kind === "check")?.minutes, 8, "the measured gate cost is charged exactly once");
+    assert.deepEqual(ciFrictionHandFixRounds(fixes, rounds, priceCiFrictionCauses(rounds), search, report([9, 10])), []);
+    assert.equal(logs.includes("ci-friction.hand_fixes_unpriced"), false);
+    // A report persisted before `redPrNumbers` counts red PRs without naming them: keep each observation, charge none.
+    const legacy = inventory();
+    assert.deepEqual(proxies(legacy), [[9, "hand_fix", 0], [10, "hand_fix", 0]], "unnamed red PRs are never guessed priced or unpriced");
+    assert.match(legacy.rounds.find(r => r.pr === 9)?.detail ?? "", /no proxy minutes.*coverage-ratchet without naming them/);
+    assert.ok(logs.includes("ci-friction.hand_fixes_unpriced"));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a manual change with an actual priced failure does not receive a second proxy cost", () => {
+  const added = ciFrictionHandFixRounds([{ ...fix, pr: 2 }, fix, { ...fix, pr: 10 }],
+    rounds, priceCiFrictionCauses(rounds), search);
+  assert.equal(added.some(row => row.pr === 2), false, "PR2's actual coverage failure already carries its measured cost");
+  assert.deepEqual(added.map(row => row.pr), [9, 10]);
+  assert.ok(added.every(row => row.cause.kind === "hand_fix"));
+});
+
+
+test("manual file-change signals require a mechanism before implementation is drafted", () => {
+  const observations = ciFrictionHandFixRounds([fix, { ...fix, pr: 10 }], rounds, priceCiFrictionCauses(rounds), search);
+  const input = { tasks: [], receipts: new Set<string>(), escalated: new Set<string>(), ownerSearch: search, nowMs: clock.now() };
+  const manual = ciFrictionLadder({ ...input, priced: priceCiFrictionCauses(observations), rounds: observations });
+  assert.equal(manual.next?.decision.kind, "escalate");
+  assert.match(manual.next?.decision.kind === "escalate" ? manual.next.decision.why : "", /manual.*mechanism/i);
+  assert.equal(manual.ladder[0]?.state, "escalate");
+  const known = ciFrictionLadder({ ...input, priced: priceCiFrictionCauses(rounds), rounds });
+  assert.equal(known.next?.decision.kind, "draft", "a separately evidenced ordinary cause still follows its existing remedy route");
+  const held = ciFrictionLadder({ ...input, priced: priceCiFrictionCauses(observations), rounds: observations,
+    escalated: new Set(["ci-friction:hand_fix:src/worker.ts"]) });
+  assert.equal(held.next, undefined, "the same unqualified signal cannot repeatedly request a design");
 });

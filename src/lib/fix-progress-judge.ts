@@ -55,7 +55,7 @@ export interface FixProgressCheckEvidence {
   unavailable?: string;
 }
 
-/** W1-T9297: `supplied` when at least one failing check carried a readable log; else why none did. Absent
+/** W1-T9297: `supplied` when at least one failing check carried readable log or commit-status evidence; else why none did. Absent
  *  evidence is never an empty `checks` list. */
 export type FixProgressFailureEvidence =
   | { supplied: true; checks: FixProgressCheckEvidence[] }
@@ -74,7 +74,7 @@ export interface FixProgressReviewEvidence {
 }
 
 export interface FixProgressCiFailure {
-  name: string; logTail: string; tailSource?: string; logUnavailable?: { kind: string; detail?: string };
+  name: string; logTail: string; statusDescription?: string; tailSource?: string; logUnavailable?: { kind: string; detail?: string };
 }
 
 /** BACKSTOP (W1-T9297): the failing titles and log characters the judge's input keeps per failing check. */
@@ -88,7 +88,9 @@ function checkEvidenceOf(f: FixProgressCiFailure): FixProgressCheckEvidence {
   const lines = f.logTail.split("\n").map(l => stripLogTimestamp(l).trimEnd());
   if (lines.every(l => l.trim() === "")) {
     const cause = f.logUnavailable ? [f.logUnavailable.kind, f.logUnavailable.detail].filter(Boolean).join(": ") : "empty log tail";
-    return { check: f.name, signature: null, tests: [], excerpt: null, tail_source: f.tailSource ?? null, unavailable: cause };
+    return { check: f.name, signature: null, tests: [],
+      excerpt: f.statusDescription?.slice(0, FIX_PROGRESS_EVIDENCE_EXCERPT_CAP) ?? null,
+      tail_source: f.statusDescription ? "status-description" : f.tailSource ?? null, unavailable: cause };
   }
   const titles = lines.flatMap(l => /^\s*not ok \d+ - (.+?)(?:\s+# .*)?$/.exec(l)?.[1] ?? /^\s*✖ (.+?)(?: \([\d.]+m?s\))?$/.exec(l)?.[1] ?? []);
   const tests = [...new Set(titles)].slice(0, FIX_PROGRESS_EVIDENCE_TESTS_CAP);

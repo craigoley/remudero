@@ -310,6 +310,7 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   "retro.preflight_repair", "fix.done", "fix.contract_hold", "fix.commit_line_answered", "census_push.strike", "plan.synthesized", "diagnose.worker_done",
   // W1-T5668: the rest that can be a worker run's first pr_url row (0 live rows on 2026-10-04, listed so a first one is read).
   "acceptance.repair.unrepresentable", "changeset_claim.repaired", "retro.pr.recovered", "pr.body_normalize.error",
+  "pr.body_normalize.raced",
 ];
 
 /** W1-T5474: the 60-day union read bounded to {@link CONFIG_GARDEN_LEDGER_STEPS}. An incomplete union fails

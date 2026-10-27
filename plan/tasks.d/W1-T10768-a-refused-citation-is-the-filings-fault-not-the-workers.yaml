@@ -1,0 +1,147 @@
+- id: W1-T10768
+  title: "A CITATION THE PROVENANCE GATE WOULD REFUSE IS CAUGHT BEFORE DISPATCH, AND A PROVENANCE REFUSAL IS NEVER A WORKER STRIKE — CONSOLE-T152's five breaker strikes on 2026-10-26 were all `provenance gate blocked dispatch — unrecognized source kind` from one bad `context[].src` in its shard; each run paid a recon first, the breaker tripped, and nothing at filing or pre-dispatch checks a context citation's kind"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, a shard's context citation the provenance gate refuses (caught at the linter, and classed as the filing's when it still reaches the gate); no breaker bound, other class or gate pattern changes
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: CONSOLE-T152 tripped its breaker at 14:04Z (console escalation #2288) on five provenance refusals; the operator released it at 15:19Z after citation-only console #2285"
+  plan_refs: [W1-T7742, W1-T8241, W1-T3657, W1-T164, W1-T10742, W1-T10749, W1-T120, CONSOLE-T152]
+  files:
+    - src/lib/provenance.ts
+    - src/lib/task-linter.ts
+    - src/lib/non-worker-verdict.ts
+    - src/lib/stranded-task-detector.ts
+    - src/run-task.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/review/a-refused-citation-is-the-filings-fault-not-the-workers.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main 7b75a38f7. The ledger read was read-only, niced and bounded on
+    the host: the console instance's /mnt/rmd/remudero-console-state/state/ledger.ndjson.
+
+    THE INCIDENT. CONSOLE-T152 has five `verdict` rows, all `verdict: failed`, `stage: run.error`, `cause:
+    run-error`. Their runs are -1793018634158 (13:24:12Z), -1793021236051 (13:28:44Z), -1793021490404
+    (13:36:45Z), -1793022095512 (13:46:42Z) and -1793022619429 (13:59:05Z). Each reason reads
+    `provenance gate blocked dispatch — 1 uncited CONTEXT claim(s): • unrecognized source kind
+    'repository-source-health-followup-20261026.json; https://github.com/…/app/live-view-actions.ts'`.
+    - The first run wrote `report.followups` from its RECON at 13:24:12.680Z, 0.3 s before the verdict,
+      and the verdict carries `cost_usd` 0.288. So a worker DID run before the refusal: the recon. The
+      refused prompt was the IMPLEMENT prompt.
+    - The breaker tripped at 14:04Z (console escalation #2288). The operator released it at 15:19Z.
+    - Console #2285 (merged 13:50:55Z) replaced that `context[].src` with the bare https URL. The diff
+      touches only plan/tasks.d/CONSOLE-T152-repository-health-recheck.yaml.
+
+    WHERE THE GATE IS, AND WHY NOTHING EARLIER CATCHES IT.
+    - src/lib/prompt-render.ts:1201-1203 `implementPromptParts` renders each shard `context` entry as
+      `- <claim> [src: <src>]` inside `# CONTEXT`.
+    - src/cli/commands/run-task-verb.ts:6307 `assertProvenance(prompt)` runs on the rendered implement
+      prompt, AFTER recon.
+    - src/lib/provenance.ts:27-29 `ACCEPTED_KIND` admits only recon#, plan#, PR#, learnings#, operator#,
+      commit#, an http(s) URL or a bare sha. :114-115 refuses anything else as `unrecognized source kind`.
+    - plan.ts:209 and :781 load `context` with a bare cast: no shape or kind check.
+    - task-linter.ts's only `provenance` check (:2514 `provenanceViolation`) checks for a missing
+      `origin:`. No lint check reads `context[].src`.
+    - The pre-dispatch linter runs before the inflight lock and before recon
+      (run-task-verb.ts:4766 `assertLintClean`). A refusal there is `blocked_illformed`, a zero-cost
+      admission refusal (status.ts:3695 reads it as `admission_refused`), and W1-T3657's repair lane
+      takes it. A context-citation check there would have cost CONSOLE-T152 nothing.
+    - The console's own CI (.github/workflows/ci.yml) runs only scripts/check-plan-dependencies.mjs. It
+      does not run core's lint-plan, so a consumer filing reaches dispatch unlinted for this.
+
+    WHY IT STRIKES.
+    - run-task.ts:10720-10730 `runErrorCause` has no arm for a ProvenanceError, so it returns
+      `run-error`.
+    - non-worker-verdict.ts:24-29 INFRASTRUCTURE_THROWN_STAGES has no `run.error`, and :50-53
+      `streakRefusal` returns undefined. So the W1-T7742 breaker counts it.
+    - stranded-task-detector.ts:66-80 `nonWorkerVerdictClass` returns undefined, so the W1-T8241 runbook
+      reads it as the worker's.
+
+    THE SAME DEFECT IS QUEUED IN CORE TODAY (measured). Loading origin/main's plan and testing every
+    `context[].src` against `ACCEPTED_KIND` gives: 4,740 tasks, 2 with context, 4 claims, and 1
+    refused. That one is W1-T10573 (queued, verify auto), whose second claim cites `src:
+    src/lib/instance-mode.ts`. `refs/rmd-dispatch/W1-T10573` exists on origin, so it is claimed. Whether
+    it has already struck was not read. Repairing that citation is a separate item, not this task.
+
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d on origin/main for `provenance gate`, `unrecognized
+    source kind`, `ACCEPTED_KIND` and `context-citation`: no task checks a context citation's kind.
+    - W1-T10742 (queued, `proof_inconclusive`) and W1-T10749 (queued, `push_auth_refused`) each add a
+      class to the same `streakRefusal` and `nonWorkerVerdictClass`. There is no depends_on: whichever
+      lands second merges the arms side by side.
+    - W1-T3657 (merged) owns the repair lane this reuses.
+    - lint-plan's duplicate-surface advisory names W1-T120 (tasks.yaml, no status) for sharing
+      src/lib/task-linter.ts and src/run-task.ts. That task makes a gate prove which plan file it read.
+      It shares two hot files and no concern: this task adds one lint check and one error cause.
+    - Read the 14 open core PRs' titles at 22:15Z: none touches provenance or these classifiers. No run-
+      branch for this id exists.
+  design: |
+    1. ONE PREDICATE. provenance.ts exports `citationKindRefusal(src)`: undefined for an accepted kind,
+       else the same `unrecognized source kind '<src>'` text `lintPrompt` writes. `lintPrompt` calls it,
+       so the gate and the linter cannot drift. Never write a second copy of `ACCEPTED_KIND`.
+    2. A LINT CHECK, BLOCKING, AT FILING AND PRE-DISPATCH. task-linter.ts adds check `context-citation`,
+       severity block.
+       - Each `context[]` entry whose `src` the predicate refuses is one violation, naming the task, the
+         entry's index and the predicate's text.
+       - It runs everywhere `lintTask` runs. That is lint-plan on a plan PR (filing), and `assertLintClean`
+         before recon in run-task.
+       - So a consumer repo's shard, which its own CI never lints with core's rules, is still refused as
+         `blocked_illformed` before recon spends anything. W1-T3657's repair lane carries the verdict.
+       - Before enabling it, run the predicate over every repo plan the fleet dispatches, at least core
+         and the console, and list each refused task in the PR body. Today that is W1-T10573 in core.
+         Report each one, and never edit another task's shard in this PR.
+    3. A PROVENANCE REFUSAL THAT STILL REACHES THE GATE IS THE FILING'S, NOT THE WORKER'S.
+       - That covers a recon, learning or operator-note part, or a shard the linter missed.
+       - `runErrorCause` returns a new cause, `provenance-refused`, for a ProvenanceError (checked by
+         class first). Add it to `RunErrorCause` in run-task-verb.ts.
+       - non-worker-verdict.ts `streakRefusal` returns `provenance_refused` for a `failed` verdict at
+         stage `run.error` with that cause. For rows written before the cause existed, it also matches
+         cause `run-error` whose `reason` starts `provenance gate blocked dispatch`. So CONSOLE-T152's
+         five rows stop counting.
+       - It goes in the streak arm only, never in `lifetimeInfrastructureRefusal`, the way the harness
+         checkpoint reasons are. A run that spent a recon still counts for lifetime judgment, which keeps
+         a refusal that recurs every dispatch bounded.
+       - stranded-task-detector.ts `nonWorkerVerdictClass` maps it to `provenance_refused`, never
+         `toolchain`.
+    4. Nothing else. No breaker bound, `ACCEPTED_KIND` member, repair-lane or other class changes.
+  prompt: |
+    Write test/review/a-refused-citation-is-the-filings-fault-not-the-workers.test.ts. `rmd test-place`
+    computed that folder on 2026-10-26 for these imports. Keep this exact path, because the proofs grep it.
+    Import through `#src/*`. Every new test title starts with `W1-T10768: `, exactly as in the acceptance
+    proofs.
+    - Linter case: load a task from YAML whose `context` holds CONSOLE-T152's exact pre-#2285 src, and one
+      citing `src/lib/instance-mode.ts`. Assert one `context-citation` block violation each, and that
+      `assertLintClean` throws TaskLintError. A task with recon#, PR#, a sha and an https URL is clean.
+      Assert the linter's text equals what `lintPrompt` writes for the same src.
+    - Classifier case: feed CONSOLE-T152's real 13:24:12.986Z verdict row in its exact old shape (cause
+      `run-error`, the provenance reason), plus the new-cause shape. Assert `runErrorCause` returns
+      `provenance-refused` for a thrown ProvenanceError, and that `streakRefusal` and
+      `nonWorkerVerdictClass` agree on `provenance_refused` for both rows. Assert
+      `lifetimeInfrastructureRefusal` still returns undefined for them.
+    - A `run-error` row with any other reason is still worker-attributable.
+    Restore base code with `git show origin/main:<path>`, never stash, and watch every new case fail. Run
+    the suite, `npm run -s lint-plan:fast` and `rmd preflight --fast` on the committed tree before the
+    first push.
+  acceptance:
+    - claim: "the task linter refuses, at filing and pre-dispatch, a context claim whose src the provenance gate would refuse, with the gate's own text from one shared predicate"
+      proof: 'grep: test("W1-T10768: a context citation the gate would refuse fails the linter" in test/review/a-refused-citation-is-the-filings-fault-not-the-workers.test.ts'
+    - claim: "a provenance refusal at run.error is the non-worker class provenance_refused in streakRefusal and nonWorkerVerdictClass, for the new cause and for CONSOLE-T152's old run-error rows, and still counts for lifetime"
+      proof: 'grep: test("W1-T10768: a provenance refusal is not a worker strike" in test/review/a-refused-citation-is-the-filings-fault-not-the-workers.test.ts'
+  falsifier: |
+    At base no lint check reads `context[].src`, and `streakRefusal` returns undefined for the CONSOLE-T152
+    row, so both cases fail.
+    - Drop the lint check: the linter case sees no violation.
+    - Copy `ACCEPTED_KIND` into the linter instead of sharing the predicate, and change one copy: the
+      equal-text assertion fails.
+    - Match only the new cause: the old-row half of the classifier case fails.
+    - Put the class in `lifetimeInfrastructureRefusal`: the lifetime assertion fails.
+    GUARDS that held at base and must still hold:
+    - an uncited CONTEXT claim still throws ProvenanceError at the gate (test/provenance.test.ts);
+    - the pre-dispatch refusal still spawns nothing (test/task-linter-wiring.test.ts);
+    - a worker's own run.error (`run-error`, any other reason) still counts as a strike.
+    Remove each guard's production branch in turn, and its existing case must fail. Then restore it and
+    require zero failures.

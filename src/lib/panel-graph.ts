@@ -26,7 +26,7 @@ import { inboxBoardReferents } from "./inbox-board-referents.js";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { isAbsolute, basename, dirname, join, relative } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   loadPlan,
@@ -69,6 +69,7 @@ import {
   recentFeedbackFewShot,
   setFeedbackStatus,
   validateFeedbackExpansion,
+  validateDecisionSummary,
   type FeedbackEntry,
   type FeedbackExpanderDeps,
   type FeedbackExpansion,
@@ -77,6 +78,7 @@ import {
 } from "./feedback.js";
 import {
   queueFeedbackRecord,
+  landFeedbackStatusContent,
   overlayQueuedFeedback,
   overlayQueuedFeedbackEntries,
   queuedFeedbackLandings,
@@ -273,6 +275,100 @@ export function reconcileFeedbackEntries(
 export function acceptMergedFeedback(root: string, statusGithub: GitHub, land: LandFeedbackOpts): string[] {
   const proposed = listFeedback(root, { status: "proposed" });
   return reconcileFeedbackEntries(root, proposed, statusGithub, land).filter((entry) => entry.status === "accepted").map((entry) => entry.id);
+}
+
+
+/** A hand-route marker proposes a reviewed lifecycle change; it never decides a live entry. */
+export interface HandRouteFeedbackOutcome {
+  id: string;
+  outcome: "proposed" | "already_queued" | "refused" | "unknown";
+  reason: string;
+  evidence?: { pr: string; head: string; files: string[] };
+}
+
+/**
+ * W1-T10625: canonical marker: a single physical line `Resolves feedback \`fb-…\``.
+ * One repository-local new entry, one merged PR and its complete exact-head source evidence may
+ * propose `accepted` through the existing landing queue. The checkout and GET projection stay
+ * untouched until the ordinary review/merge path lands that proposal. Nothing here fetches.
+ */
+export function proposeHandRouteFeedback(
+  root: string,
+  github: GitHub,
+  repository: string,
+  land: LandFeedbackOpts & { stateRoot: string },
+): HandRouteFeedbackOutcome[] {
+  const entries = listFeedback(root, { status: "new" });
+  if (entries.length === 0) return [];
+  const unknown = (reason: string): HandRouteFeedbackOutcome[] => entries.map(entry => ({ id: entry.id, outcome: "unknown", reason }));
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) return unknown("invalid_repository_identity");
+  let merged: PrRef[] | null | undefined;
+  try {
+    merged = github.listMergedHeadBranches?.();
+    if (github.readFailed?.()) return unknown("merged_snapshot_unavailable");
+  } catch {
+    const reason = "merged_snapshot_read_failed";
+    return unknown(reason);
+  }
+  if (!merged) return unknown("merged_snapshot_unavailable");
+  let queued: ReturnType<typeof readQueuedFeedbackRecords>;
+  try {
+    queued = readQueuedFeedbackRecords(land.stateRoot);
+  } catch {
+    const reason = "landing_queue_unreadable";
+    return unknown(reason);
+  }
+  const marker = /^Resolves feedback `(?<id>fb-[0-9]{13}-[0-9a-f]{6})`[ \t]*\r?$/;
+  const candidates = new Map<string, PrRef[]>();
+  for (const pr of merged) {
+    const lines = (pr.body ?? "").split("\n").filter(line => /^Resolves feedback\b/.test(line));
+    const match = lines.length === 1 ? marker.exec(lines[0]!) : null;
+    if (match?.groups?.id) candidates.set(match.groups.id, [...(candidates.get(match.groups.id) ?? []), pr]);
+  }
+  return entries.map((entry): HandRouteFeedbackOutcome => {
+    const refuse = (reason: string): HandRouteFeedbackOutcome => ({ id: entry.id, outcome: "refused", reason });
+    const uncertain = (reason: string): HandRouteFeedbackOutcome => ({ id: entry.id, outcome: "unknown", reason });
+    const relPath = feedbackEntryRepoPath(entry.id);
+    if (queued.has(relPath)) return { id: entry.id, outcome: "already_queued", reason: "pending_feedback_record_preserved" };
+    const matches = candidates.get(entry.id) ?? [];
+    if (matches.length !== 1) return refuse(matches.length ? "ambiguous_merged_pr_identity" : "explicit_marker_absent_or_malformed");
+    const pr = matches[0]!;
+    const identity = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/([1-9][0-9]*)$/.exec(pr.url);
+    if (!identity || identity[1] !== repository || !Number.isSafeInteger(Number(identity[2])) || Number(identity[2]) !== pr.number) return refuse("foreign_or_invalid_pr_identity");
+    if (pr.state !== "MERGED") return refuse("pr_not_merged");
+    if (!pr.headRefOid || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(pr.headRefOid)) return uncertain("merged_head_unavailable");
+    let evidence: ReturnType<NonNullable<GitHub["changedFileEvidence"]>>;
+    try {
+      const current = github.prByRef(pr.url);
+      if (!current || current.url !== pr.url || current.number !== pr.number || current.state !== "MERGED" || current.headRefOid !== pr.headRefOid || current.body !== pr.body) return uncertain("merged_snapshot_identity_changed");
+      evidence = github.changedFileEvidence?.(pr.url) ?? { status: "unknown", reason: "qualified_cache_unavailable" };
+    } catch {
+      const reason = "source_evidence_read_failed";
+      return uncertain(reason);
+    }
+    if (evidence.status !== "complete") return uncertain(evidence.reason);
+    if (evidence.repository !== repository || evidence.prNumber !== pr.number || evidence.headRefOid !== pr.headRefOid || evidence.prState !== "MERGED" || evidence.complete !== true || evidence.source !== "github_rest_pull_files_paginated" || evidence.freshness !== "immutable_merged_head" || !Number.isFinite(evidence.observedAt)) return uncertain("source_evidence_binding_mismatch");
+    // Limit kind: protocol — the pull-files endpoint cannot attest completeness at its 3,000-file ceiling.
+    if (evidence.files.length === 0 || evidence.files.length >= 3_000 || new Set(evidence.files).size !== evidence.files.length || evidence.files.some(file => !file || file.includes("\0") || file.split("/").some(part => part === "" || part === "." || part === ".."))) return uncertain("source_evidence_incomplete");
+    if (!evidence.files.some(file => /^(?:src|scripts|packages|deploy)\//.test(file) || file.startsWith(".github/workflows/"))) return refuse("no_product_source_change");
+    const receipt = { pr: pr.url, head: pr.headRefOid, files: [...evidence.files] };
+    const description = "Verified merged source receipt: " + JSON.stringify(receipt);
+    const summary = validateDecisionSummary(entry.summary ? { ...entry.summary, what_happened: entry.summary.what_happened + "\n" + description } : {
+      headline: "Review the hand-route feedback closure",
+      what_happened: description,
+      decision: "Review this lifecycle proposal before accepting the feedback as resolved.",
+      options: [
+        { label: "Accept", consequence: "Accept the lifecycle change through the normal reviewed landing." },
+        { label: "Keep", consequence: "Keep the feedback open if this source repair does not resolve it." },
+      ],
+    });
+    if (!summary) return refuse("source_receipt_exceeds_existing_summary_contract");
+    const result = landFeedbackStatusContent(root, relPath, stringifyYaml({ ...entry, status: "accepted", proposal_pr: pr.url, summary }), land);
+    if (result.error) return uncertain("landing_queue_not_confirmed: " + result.error);
+    if (result.queued === undefined) return uncertain("landing_queue_acknowledgement_missing");
+    if (!result.queued.includes(relPath)) return uncertain("landing_queue_expected_path_absent");
+    return { id: entry.id, outcome: "proposed", reason: "verified_source_queued_for_review", evidence: receipt };
+  });
 }
 
 /**

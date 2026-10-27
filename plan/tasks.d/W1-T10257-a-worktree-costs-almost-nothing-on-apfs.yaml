@@ -23,6 +23,7 @@
     - scripts/console-parity-baseline.json
     - test/worktree-creation-census.test.ts
     - test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
+    - "docs/operator-guide.md"
   status: queued
   priority: 1 # operator-2026-10-20: the Mac sits under 4 GB free; every agent worktree is a full checkout
   attempts: 0

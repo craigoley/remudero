@@ -1,0 +1,32 @@
+id: incident-f2b066a5370489b8
+ts: 2026-10-26T22:06:04.952Z
+raw: >-
+  Incident f2b066a53704: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix stood down at rung.instrument_scope and nothing it read has changed
+  (head <sha>, task contract) — no worker is dispatched until one does:
+  instrument scope need escalated
+
+  First seen: 2026-10-26T22:03:33.527Z
+
+  Last seen: 2026-10-26T22:03:33.527Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=14567 escalated: already escalated (reason unreadable: no escalation of this PR at head 27886fc is in the ledger); this pass: fix stood down at rung.instrument_scope and nothing it read has changed (head 27886fc, task contract) — no worker is dispatched until one does: instrument scope need escalated
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#f2b066a5370489b84a85df9a2c26b43e5de28386d765ec76411f72ee51113457
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

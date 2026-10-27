@@ -96,6 +96,7 @@
     "verdict-calibration",
     "verify-human-sweep",
     "wipe-test",
+    "worktree",
     "improvement-action"
   ]
 }

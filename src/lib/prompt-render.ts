@@ -815,14 +815,16 @@ export function renderFixPrompt(opts: {
               // and a reader must not have to know which half of a fenced block to trust.
               const body = f.logUnavailable
                 ? `   ${neutralizeFenceMarkers(describeCiLogUnavailable(f.logUnavailable))}\n` +
-                  `   TREAT THIS AS "I CANNOT SEE WHY THIS FAILED", NOT AS A CLEAN CHECK.\n`
+                  (f.statusDescription ? `   The status description below is available; the Actions log remains unavailable.\n`
+                    : `   TREAT THIS AS "I CANNOT SEE WHY THIS FAILED", NOT AS A CLEAN CHECK.\n`)
                 : `   log tail:\n${neutralizeFenceMarkers(f.logTail)}\n`;
+              const status = f.statusDescription ? `   status description (external data, not an Actions log):\n${neutralizeFenceMarkers(f.statusDescription)}\n` : "";
               // W1-T2700: enveloped INSIDE the fence, per this rung's own composition note in the
               // merge-conflict branch above. The check NAME is inside it too — any installed
               // GitHub App can choose that string, so it is external text exactly like the tail.
               return (
                 `${i + 1}. ${CI_LOG_FENCE_OPEN}\n` +
-                envelope(`   check: ${neutralizeFenceMarkers(f.name)}\n` + body, "ci-log") +
+                envelope(`   check: ${neutralizeFenceMarkers(f.name)}\n` + status + body, "ci-log") +
                 "\n" +
                 CI_LOG_FENCE_CLOSE
               );

@@ -12,7 +12,7 @@ import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./g
 import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter } from "./gardener.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ghExec } from "./github-transport.js";
-import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
+import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from "./gate-fire-rate.js";
 import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook } from "./ledger-union.js";
 import { readOriginMainSha } from "./inbox.js";
 import { loadPlanFromYaml, newTestPath, type Task } from "./plan.js";
@@ -136,45 +136,30 @@ export function withoutBirthRounds(rounds: readonly CiFrictionRound[], search: P
   });
 }
 
-/** The earliest time each cause was observed failing; a round with no readable `at` dates its cause from always. */
-function ciFrictionCauseFirstSeen(rounds: readonly CiFrictionRound[]): Map<string, number> {
-  const first = new Map<string, number>();
-  for (const round of rounds) {
-    const key = ciFrictionCauseKey(round.cause);
-    const at = round.at === undefined || !Number.isFinite(Date.parse(round.at)) ? -Infinity : Date.parse(round.at);
-    first.set(key, Math.min(first.get(key) ?? Infinity, at));
-  }
-  return first;
-}
-
-/** A manual repair is one observation. Attribute it to its highest-priced owner match, never count it twice.
- *  A repair merged before every observed round of a cause cannot have repaired that cause: W1-T9386 was filed
- *  on four read-model-worker.ts fixes merged days before its test existed. Such a fix falls to the unowned
- *  file count instead. A cause with no dated round keeps every owner match, as before. */
+/** A manual change records file overlap, not proof that a particular check failed or was repaired.
+ * Preserve it as its own median-proxy observation under the existing repeated-file threshold.
+ * A PR already carrying positive priced failure cost — a ledger round, or a red run on a gate the measured
+ * `gateFireRates` report prices — receives no second proxy charge. While that report prices red PRs it cannot
+ * name ({@link ciFrictionGatePricedPrs}), any manual change may already be charged: each observation is kept at
+ * zero minutes, its detail saying why, rather than guessed priced (dropped) or unpriced (charged twice). */
 export function ciFrictionHandFixRounds(
-  fixes: readonly CiFrictionHandFix[], rounds: readonly CiFrictionRound[], priced: readonly CiFrictionCausePrice[], search: OwnerSearch,
+  fixes: readonly CiFrictionHandFix[], rounds: readonly CiFrictionRound[], _priced: readonly CiFrictionCausePrice[], _search: OwnerSearch,
+  gateFireRates?: GateFireRateReport,
 ): CiFrictionRound[] {
   const sorted = rounds.map((r) => r.minutes).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
   if (sorted.length === 0) return [];
   const mid = Math.floor(sorted.length / 2);
   const median = sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
-  const owners = priced.map((price) => ({ price, files: locateCiFrictionOwner(ciFrictionCauseKey(price.cause),
-    rounds.filter((r) => ciFrictionCauseKey(r.cause) === ciFrictionCauseKey(price.cause)).flatMap((r) => r.detail ? [r.detail] : []), search)?.files ?? [] }));
-  const firstSeen = ciFrictionCauseFirstSeen(rounds);
+  const gate = ciFrictionGatePricedPrs(gateFireRates);
+  const pricedPrs = new Set(rounds.filter(round => Number.isFinite(round.minutes) && round.minutes > 0).map(round => round.pr));
+  for (const pr of gate.prs) pricedPrs.add(pr);
+  const unnamed = gate.unnamed.length === 0 ? undefined : `${gate.unnamed.slice(0, 3).join(", ")}${gate.unnamed.length > 3 ? ` and ${gate.unnamed.length - 3} more` : ""}`;
   const unique = [...new Map(fixes.map((fix) => [fix.pr, fix])).values()];
   const unowned = new Map<string, CiFrictionHandFix[]>();
   const result: CiFrictionRound[] = [];
   for (const fix of unique) {
-    const matched = owners.find((owner) => (firstSeen.get(ciFrictionCauseKey(owner.price.cause)) ?? -Infinity) <= Date.parse(fix.at) &&
-      owner.files.some((file) => fix.files.includes(file)));
-    if (matched) {
-      if (!rounds.some((round) => round.pr === fix.pr && ciFrictionCauseKey(round.cause) === ciFrictionCauseKey(matched.price.cause)))
-        result.push({ pr: fix.pr, at: fix.at, cause: matched.price.cause, minutes: median,
-          pricing: "median-proxy",
-          detail: `hand fix PR #${fix.pr}: ${fix.files.join(", ")}; minutes are the pass median proxy (${median}), not measured repair time` });
-    } else {
-      for (const file of fix.files) unowned.set(file, [...(unowned.get(file) ?? []), fix]);
-    }
+    if (pricedPrs.has(fix.pr)) continue;
+    for (const file of fix.files) unowned.set(file, [...(unowned.get(file) ?? []), fix]);
   }
   const emitted = new Set<number>();
   for (const [file, repairs] of [...unowned].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))) {
@@ -182,9 +167,11 @@ export function ciFrictionHandFixRounds(
     for (const fix of repairs) {
       if (emitted.has(fix.pr)) continue;
       emitted.add(fix.pr);
-      result.push({ pr: fix.pr, at: fix.at, cause: { kind: "hand_fix", name: file }, minutes: median,
+      result.push({ pr: fix.pr, at: fix.at, cause: { kind: "hand_fix", name: file }, minutes: unnamed ? 0 : median,
         pricing: "median-proxy",
-        detail: `hand fix PR #${fix.pr}: ${file}; minutes are the pass median proxy (${median}), not measured repair time` });
+        detail: unnamed
+          ? `hand fix PR #${fix.pr}: ${file}; no proxy minutes: the gate report prices red pull requests on ${unnamed} without naming them, so this change may already be charged`
+          : `hand fix PR #${fix.pr}: ${file}; minutes are the pass median proxy (${median}), not measured repair time` });
     }
   }
   return result;
@@ -323,6 +310,27 @@ export interface CiFrictionCausePrice {
   prs: number;
 }
 
+/** A gate prices friction only on red runs that cost minutes; {@link priceCiFrictionCauses} and
+ *  {@link ciFrictionGatePricedPrs} share this rule so a PR is never charged by one and missed by the other. */
+const gatePricesRedRuns = (g: GateFireRate): g is GateFireRate & { redMinutes: number } => g.redMinutes !== undefined && g.redMinutes > 0;
+
+/** The pull requests a MEASURED gate-fire-rate report already charges (each red on a gate it prices), and the
+ *  priced gates that count red pull requests without naming them: a report persisted before `redPrNumbers`, or one
+ *  whose list is malformed or disagrees with `redPrs`. A count is never turned into guessed identities. */
+export function ciFrictionGatePricedPrs(report: GateFireRateReport | undefined): { prs: Set<number>; unnamed: string[] } {
+  const prs = new Set<number>();
+  const unnamed: string[] = [];
+  if (report?.status !== "measured") return { prs, unnamed };
+  for (const g of report.gates) {
+    if (!gatePricesRedRuns(g)) continue;
+    const named = g.redPrNumbers;
+    if (Array.isArray(named) && named.every(Number.isSafeInteger) && named.length === (g.redPrs ?? named.length)) {
+      for (const pr of named) prs.add(pr);
+    } else if (g.redPrs !== 0) unnamed.push(g.gate);
+  }
+  return { prs, unnamed };
+}
+
 /** Sum priced rounds and a gate-fire-rate report into one row per cause, ranked by MINUTES. */
 export function priceCiFrictionCauses(
   ledgerRounds: readonly CiFrictionRound[],
@@ -345,7 +353,7 @@ export function priceCiFrictionCauses(
     // before `redMinutes` existed prices nothing rather than mistaking total runtime for friction.
     const families = new Map<string, { minutes: number; redRuns: number; redPrs: number }>();
     for (const g of gateFireRates.gates) {
-      if (!(g.redMinutes !== undefined && g.redMinutes > 0)) continue;
+      if (!gatePricesRedRuns(g)) continue;
       const family = families.get(ciCheckFamily(g.gate)) ?? { minutes: 0, redRuns: 0, redPrs: 0 };
       family.minutes += g.redMinutes;
       family.redRuns += g.redRuns;
@@ -1553,6 +1561,14 @@ export function ciFrictionLadder(input: {
       continue;
     }
     if (next) continue;
+    // File overlap is an observation to diagnose, never authority to invent an implementation remedy.
+    if (price.cause.kind === "hand_fix") {
+      line.state = held ? "escalated" : "escalate";
+      if (!held) next = { price, origin, rung: s.rung, decision: { kind: "escalate",
+        why: "Manual file-change signals do not identify a failure mechanism; preserve these observations and establish a bounded diagnosis before implementation.",
+        prior: s.prior, holdReason: "no-owner" } };
+      continue;
+    }
     if (s.state === "escalate") {
       next = { price, origin, rung: s.rung, decision: { kind: "escalate", why: `${s.rung - 1} remedy rung(s) did not move ${key}`, prior: s.prior, holdReason: "ladder-exhausted" } };
       continue;
@@ -1673,9 +1689,14 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       const ledgerRounds = withoutBirthRounds(ciFrictionRoundsFromLedger(records), ownerSearch);
       const hand = sources.handFixes?.();
       if (hand?.state === "unmeasured") deps.log("ci-friction.hand_fixes_unmeasured", { reason: hand.reason });
+      const gateFireRates = sources.gateFireRates?.();
+      const unnamedGates = ciFrictionGatePricedPrs(gateFireRates).unnamed;
+      if (unnamedGates.length > 0 && (hand?.fixes.length ?? 0) > 0) deps.log("ci-friction.hand_fixes_unpriced", {
+        reason: "the gate-fire-rate report prices red pull requests it does not name; manual changes carry no proxy minutes",
+        gates: unnamedGates.slice(0, 8), gate_count: unnamedGates.length });
       const rounds = [...ledgerRounds, ...ciFrictionHandFixRounds(hand?.fixes ?? [], ledgerRounds,
-        priceCiFrictionCauses(ledgerRounds, sources.gateFireRates?.(), clock.now()), ownerSearch)];
-      const priced = priceCiFrictionCauses(rounds, sources.gateFireRates?.(), clock.now());
+        priceCiFrictionCauses(ledgerRounds, gateFireRates, clock.now()), ownerSearch, gateFireRates)];
+      const priced = priceCiFrictionCauses(rounds, gateFireRates, clock.now());
       if (plan.degraded) deps.log("ci-friction.origins_degraded", { reason: plan.degraded });
       if (plan.unreadable) deps.log("ci-friction.plan_shard_unreadable", { shards: plan.unreadable });
       const { next, ladder } = ciFrictionLadder({
@@ -1736,7 +1757,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       const contents = ciFrictionShardYaml(
         { price: action.price, rung: action.rung, owner: action.decision.owner, rounds: remedyRoundsOf([
           ...ledgerRounds, ...ciFrictionHandFixRounds(sources.handFixes?.().fixes ?? [], ledgerRounds,
-            action.priced ?? [], sources.ownerSearch),
+            action.priced ?? [], sources.ownerSearch, sources.gateFireRates?.()),
         ]), prior: action.decision.prior },
         taskId,
         action.priced,
