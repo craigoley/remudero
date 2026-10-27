@@ -1,5 +1,6 @@
+import { closeReadModelFixture, readModelFixtureDir, type ReadModelFixtureScope } from "#test/helpers/read-model-fixture.js";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -8,16 +9,14 @@ import type { Clock } from "../src/lib/clock.js";
 import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "../src/lib/ledger-projector.js";
 import { openReadModel, type ReadModelDb } from "../src/lib/read-model-db.js";
 import { createReadModelTicker, threadViews, type ReadModelInstanceState, type ReadModelViewFactory, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
 import { switchViewsOn } from "./helpers/read-model-switches.js";
 
 const proof = "test/a-view-unit-s-measured-cost-survives-a-restart.test.ts";
 const key = (instance: string | null) => `view_cost:${JSON.stringify(["sample", instance])}`;
-type Context = { after(fn: () => void): void };
+type Context = ReadModelFixtureScope;
 
 function fixture(t: Context) {
-  const stateDir = makeTempDir("view-cost-restart");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stateDir = readModelFixtureDir(t, "view-cost-restart");
   const instances = ["core", "site"].map((name) => {
     const ledgerDir = join(stateDir, name);
     mkdirSync(ledgerDir);
@@ -30,7 +29,7 @@ function fixture(t: Context) {
   const advance = (ms: number) => void (now += ms);
   const db = (): ReadModelDb => {
     const opened = openReadModel({ stateDir, instance: "core", schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION });
-    t.after(() => opened.close());
+    closeReadModelFixture(t, () => opened.close());
     return opened;
   };
   function start(costs: Record<string, number>, onBuild?: (instance: string) => void, restoreCosts?: boolean) {
@@ -60,7 +59,7 @@ function fixture(t: Context) {
     };
     const fast = lane("fast"), heavy = lane("heavy");
     const stop = () => { fast.ticker.release(); heavy.ticker.release(); projector.release(); };
-    t.after(stop);
+    closeReadModelFixture(t, stop);
     return { fast, heavy, stop };
   }
   return { start, db, advance };
@@ -263,8 +262,7 @@ test(`${proof}: a replaced writer lease fences cost updates just as it fences vi
 });
 
 test(`${proof}: the real lane spawner restores on generation boot but not after a peer has reclaimed a dead lane`, async (t) => {
-  const dir = makeTempDir("view-cost-spawn");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "view-cost-spawn");
   const workerPath = join(dir, "worker.mjs");
   writeFileSync(workerPath, `import { parentPort, workerData } from "node:worker_threads";
 parentPort.postMessage({ type: "log", step: "fixture.boot", extra: { lane: workerData.lane, restoreCosts: workerData.restoreCosts } });
@@ -277,7 +275,7 @@ parentPort.on("message", (msg) => {
   const messages: ReadModelWorkerMessage[] = [];
   const lanes = threadViews({ data: { stateDir: dir, instances: [], tickMs: 20, holder: "fixture" }, workerUrl: pathToFileURL(workerPath),
     relay: (m) => void messages.push(m), log: () => {} });
-  t.after(() => lanes.close());
+  closeReadModelFixture(t, () => lanes.close());
   const boots = () => messages.flatMap((m) => m.type === "log" && m.step === "fixture.boot" ? [m.extra] : []);
   const until = async (count: number) => {
     // BACKSTOP: only this disposable worker's startup; the assertion never accepts missing rows.
