@@ -101,7 +101,7 @@ import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflight
 import { reclaimStaleLock } from "./fs-race-safe.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger, isRealStrike, type LedgerLine } from "./ledger.js";
-import { appendOperatorNote, loadOperatorNotesForTask, type OperatorNoteEntry } from "./operator-notes.js";
+import { appendOperatorNote, loadOperatorNotes, operatorNoteStore, type OperatorNoteEntry } from "./operator-notes.js";
 import {
   capStrikeLadderNote, decideStrikeLadderRung, firstFailingTestTitle, hasUnspentLadderRefresh,
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
@@ -2573,6 +2573,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     });
   const repoRoot = entrypointRepoRoot;
+  const noteStore = operatorNoteStore({ stateDir: join(config.root, "state"), repository: `${owner}/${repo}`, legacyRoot: repoDir });
   // W1-T7096: ONE judge serves both the sweep's own next-round decision and the rung it dispatches.
   // Never the fix-worker spawn seam: a judge must not run through a writer's spawn (a fixture's fake commits).
   const effectsProgressJudge = deps.productionProgressJudge ? productionFixProgressJudge({ cwd: repoRoot,
@@ -3548,24 +3549,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // `escalate()` purely as the notification TRANSPORT, carrying the SAME two
     // candidate resolutions as its options — never a generic needs-human.
     strikeLadder: {
-      readNotes: (taskId) => {
-        let raw: string;
-        try {
-          raw = readFileSync(join(repoRoot, "plan", "operator-notes.ndjson"), "utf8");
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-          throw error;
-        }
-        for (const line of raw.split("\n").filter(line => line.trim())) {
-          const entry = JSON.parse(line) as Partial<OperatorNoteEntry> | null;
-          if (typeof entry?.author !== "string" || !entry.author.trim() || typeof entry.taskId !== "string" || !entry.taskId.trim() ||
-              typeof entry.note !== "string" || !entry.note.trim() || typeof entry.ts !== "string" || !Number.isFinite(Date.parse(entry.ts))) {
-            throw new Error("operator note is unstamped or unreadable");
-          }
-        }
-        return loadOperatorNotesForTask(repoRoot, taskId);
-      },
-      appendNote: (entry) => appendOperatorNote(repoRoot, entry),
+      readNotes: (taskId) => loadOperatorNotes(noteStore, true).filter(entry => entry.taskId === taskId),
+      appendNote: (entry) => appendOperatorNote(noteStore, entry),
       readAuthor: async (pr) => {
         const row = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { user?: { login?: string } } | undefined;
         return row?.user?.login;

@@ -30,6 +30,8 @@ import { GARDENER_RUNTIME_FILE, parseGardenerRuntime } from "./gardener-runtime.
  * Silence is judged against the gardener's OWN median gap between rows.
  * EFFECT and CHURN never touch another gardener's state file — that races its pass. They are written
  * to `state/<name>-gardener-effects.json`, which `runGarden` folds into its Beta record.
+ * W1-T10728: the retro is watched on the same ladder through its own outcome rows, failures only
+ * ({@link FAILURE_ONLY_LOOPS}).
  * OFF SWITCH: `state/GARDENER_OVERSEER_OFF`.
  */
 
@@ -51,8 +53,20 @@ const KEEP_MS = 30 * DAY_MS;
 export const OVERSEER_LEDGER_WINDOW_MS = 14 * DAY_MS;
 export const OVERSEER_MIN_INTERVAL_MS = HOUR_MS;
 
-/** The ledger lines the overseer reads — a raw-line prefilter, so the union is not parsed whole. */
-export const OVERSEER_STEP_PATTERN = /"step":"[^"]*(\.(scorecard|gardener_failed|garden_filing_failed|garden_filing_escalated|gardener_judged)|garden\.(pass|due_failed)|evidence_coverage\.pass|selector-shadow\.report|flow\.report|fixlane\.report|machine_judge\.failed|host_resource\.failed)"/;
+/** The ledger lines the overseer reads — a raw-line prefilter, so the union is not parsed whole.
+ *  W1-T10728: the retro's four outcome steps match whole, never as a suffix. */
+export const OVERSEER_STEP_PATTERN = /"step":"([^"]*(\.(scorecard|gardener_failed|garden_filing_failed|garden_filing_escalated|gardener_judged)|garden\.(pass|due_failed)|evidence_coverage\.pass|selector-shadow\.report|flow\.report|fixlane\.report|machine_judge\.failed|host_resource\.failed)|retro\.(synthesized|no_op|error)|retro_aborted_integrity)"/;
+
+/**
+ * W1-T10728: loops the overseer judges by their failures alone, each with the ledger rows that are its evidence.
+ * The retro is quiet whenever the spend gates close or merges stop — a healthy condition — and W1-T9119's
+ * `noteRetroDeferral` already names a persisting deferral, so its silence never opens an episode. Such a loop
+ * keeps no `state/<name>-gardener.json`, so HEAL clears nothing, and reads no `state/<NAME>_OFF-<class>`
+ * switch, so ESCALATE offers none.
+ */
+const FAILURE_ONLY_LOOPS: ReadonlyMap<string, { failed: string; passed: string }> = new Map([
+  ["retro", { failed: "`retro.error` and `retro_aborted_integrity`", passed: "`retro.synthesized` and `retro.no_op`" }],
+]);
 
 type EventKind = "pass" | "failed" | "filing_failed" | "filing_escalated" | "judged";
 const KIND_BY_SUFFIX: Record<string, EventKind> = {
@@ -84,6 +98,10 @@ export function classifyGardenerStep(step: unknown): { name: string; kind: Event
   if (step === "flow.report") return { name: "flow", kind: "pass" };
   if (step === "machine_judge.failed") return { name: "machine_judge", kind: "failed" };
   if (step === "host_resource.failed") return { name: "host_resource", kind: "failed" };
+  // W1-T10728: the retro's outcome rows. A skip (`retro.skipped_open_pr`, `retro.skipped_in_flight`) is neither,
+  // and `retro.preflight_failed` keeps its own strike cap (`retro.publication.escalated`), so neither is read.
+  if (step === "retro.synthesized" || step === "retro.no_op") return { name: "retro", kind: "pass" };
+  if (step === "retro.error" || step === "retro_aborted_integrity") return { name: "retro", kind: "failed" };
   const dot = step.lastIndexOf(".");
   const name = step.slice(0, dot);
   const suffix = step.slice(dot + 1);
@@ -336,7 +354,7 @@ function groupEvents(rows: readonly Row[], registered: readonly string[] | undef
   return byName;
 }
 
-function judgeHealth(events: readonly GardenerEvent[], nowMs: number, mtimeMs: number | undefined): { health?: Health; cadence?: number } {
+function judgeHealth(events: readonly GardenerEvent[], nowMs: number, mtimeMs: number | undefined, failureOnly: boolean): { health?: Health; cadence?: number } {
   const cadence = gardenerCadenceMs(events.map((e) => e.at));
   const registryPasses = events.filter(e => e.row.step === "garden.pass");
   const passEvents = registryPasses.length > 0 ? registryPasses : events;
@@ -351,7 +369,7 @@ function judgeHealth(events: readonly GardenerEvent[], nowMs: number, mtimeMs: n
     const owned = failed.length === 0 && since.some((e) => e.kind === "filing_escalated");
     return { cadence, health: { kind: "failure", failures: failed.length + filing.length, lastError, owned } };
   }
-  if (cadence !== undefined) {
+  if (cadence !== undefined && !failureOnly) {
     const lastActivity = Math.max(events.at(-1)?.at ?? Number.NEGATIVE_INFINITY, mtimeMs ?? Number.NEGATIVE_INFINITY);
     const silenceMs = nowMs - lastActivity;
     if (silenceMs > SILENCE_CADENCES * cadence) return { cadence, health: { kind: "silence", failures: 0, owned: false, silenceMs } };
@@ -387,14 +405,19 @@ function livenessEscalation(name: string, health: Health): Escalation {
   const what = health.kind === "failure"
     ? `its passes have failed ${health.failures} times in a row`
     : `it has been silent for ${Math.round((health.silenceMs ?? 0) / HOUR_MS)} hours, well past its own cadence`;
+  // W1-T10728: a failure-only loop names its own rows, and is offered no `_OFF-<class>` switch that nothing reads.
+  const loop = FAILURE_ONLY_LOOPS.get(legacyName(name));
+  const healed = loop ? `the ${name} keeps no gardener state, so nothing was cleared` : "cleared the gardener's `lastCheap` and any `lastPass` that landed nothing";
+  const history = loop ? `The ledger's ${loop.failed} rows carry the failures, and its ${loop.passed} rows the passes.`
+    : `The ledger's \`${name}.gardener_failed\` and \`${name}.scorecard\` rows carry the history.`;
   return {
     class: "BLOCKED",
     taskId: `${name}-gardener-liveness`,
-    summary: `the ${name} gardener is unhealthy: ${what}`,
-    detail: `The gardener overseer noticed, then healed (cleared the gardener's \`lastCheap\` and any \`lastPass\` that landed nothing), and the condition persisted.${health.lastError ? ` Latest error:\n\n${health.lastError}\n\n` : " "}The ledger's \`${name}.gardener_failed\` and \`${name}.scorecard\` rows carry the history.`,
+    summary: `the ${name}${loop ? "" : " gardener"} is unhealthy: ${what}`,
+    detail: `The gardener overseer noticed, then healed (${healed}), and the condition persisted.${health.lastError ? ` Latest error:\n\n${health.lastError}\n\n` : " "}${history}`,
     options: [
       { label: "fix-gardener", detail: "repair what the latest error names; the next pass then recovers on its own" },
-      { label: "switch-off", detail: `touch state/${name.toUpperCase()}_OFF-<class> to stop the class` },
+      ...(loop ? [] : [{ label: "switch-off", detail: `touch state/${name.toUpperCase()}_OFF-<class> to stop the class` }]),
     ],
     recommendation: "fix-gardener",
     headDedup: "independent",
@@ -659,7 +682,7 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
   let closedThisPass = false;
   for (const name of names) {
     const list = events.get(legacyName(name)) ?? [];
-    const { health, cadence } = judgeHealth(list, nowMs, mtimeOf(legacyName(name)));
+    const { health, cadence } = judgeHealth(list, nowMs, mtimeOf(legacyName(name)), FAILURE_ONLY_LOOPS.has(legacyName(name)));
     cadences.set(name, cadence);
     if (!health) {
       const recovered = state.episodes[name];
@@ -678,9 +701,11 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
           const healedMs = Date.parse(recovered.healedAt ?? recovered.since);
           const passAt = list.find((e) => e.kind === "pass" && e.at >= healedMs) ?? [...list].reverse().find((e) => e.kind === "pass");
           const recoveredAt = passAt ? fixedClock(passAt.at).iso() : clock.iso();
+          // W1-T10728: a failure-only loop passes by its own outcome row, not a scorecard.
+          const passing = passAt && FAILURE_ONLY_LOOPS.has(legacyName(name)) ? `\`${String(passAt.row.step)}\` row` : "scorecard";
           closedThisPass = true;
           try {
-            deps.closeIssue(url, `Recovered: first passing scorecard at ${recoveredAt}. Closing automatically; a relapse opens its own issue.`);
+            deps.closeIssue(url, `Recovered: first passing ${passing} at ${recoveredAt}. Closing automatically; a relapse opens its own issue.`);
           } catch (error) {
             deps.log(`${OVERSEER_NAME}.clear_failed`, { gardener: name, issue_url: url, error: String((error as Error)?.message ?? error) });
             continue;

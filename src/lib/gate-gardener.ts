@@ -226,6 +226,10 @@ async function evaluateTriggerAsync(rule: GateRepairRule, changed: string[], sha
 export function failedSuitesInLog(log: string): Set<string> {
   const failed = new Set(failingRuleSuitesFromCiFailures([{ name: RULE_CHECKS_CHECK, logTail: log }]));
   const named = [...log.matchAll(/rule-checks: (\S+): failed \(/g), ...log.matchAll(/\bnot ok \d+ - (\S+)/g)].map(([, path]) => path!);
+  for (const m of log.matchAll(/test-judge: NODE --TEST RUN FAILED \(status [1-9]\d*\): # fail ([1-9]\d*)\. 1\/1 file\(s\) reported, # tests ([1-9]\d*), # fail ([1-9]\d*)\. Last test started: (test\/\S+\.test\.ts) > /g)) {
+    const tests = Number(m[2]), failedCount = Number(m[3]);
+    if (m[1] === m[3] && Number.isSafeInteger(tests) && Number.isSafeInteger(failedCount) && failedCount <= tests) named.push(m[4]!);
+  }
   for (const path of named) {
     // A runner may print the suite's absolute checkout path: keep it from its repo-relative `test/`.
     const suite = path.startsWith("test/") ? path : path.includes("/test/") ? path.slice(path.indexOf("/test/") + 1) : "";
@@ -331,10 +335,6 @@ export async function loadGateRepairObservations(rules: readonly GateRepairRule[
         unavailable("same-tree-no-code-remedy");
         continue;
       }
-      const raw = files.some(file => typeof file.patch !== "string")
-        ? await readTextAsync(["api", comparePath, "-H", "Accept: application/vnd.github.diff"]) : "";
-      const repairDiff = files.map(file => `diff --git a/${file.filename} b/${file.filename}\n${
-        typeof file.patch === "string" ? file.patch : recoveredGateRepairPatch(file, raw, pair)}`).join("\n");
       const direct = rules.filter((rule) => rule.gate === pair.gate);
       const failed = runs.get(pair.redSha)?.check_runs.find((check) => check.name === pair.gate && check.conclusion === "failure" &&
         (pair.producerKey === undefined || rollupProducerKey(rollupFromRest([check], [])[0] ?? {}).key === pair.producerKey));
@@ -346,6 +346,11 @@ export async function loadGateRepairObservations(rules: readonly GateRepairRule[
       }
       const failedSuites = failedSuitesInLog(failedLog);
       const implicated = direct.length ? direct : rules.filter((rule) => failedSuites.has(rule.gate));
+      if (!implicated.length) { unavailable("no-enrolled-failed-suite"); continue; }
+      const raw = files.some(file => typeof file.patch !== "string")
+        ? await readTextAsync(["api", comparePath, "-H", "Accept: application/vnd.github.diff"]) : "";
+      const repairDiff = files.map(file => `diff --git a/${file.filename} b/${file.filename}\n${
+        typeof file.patch === "string" ? file.patch : recoveredGateRepairPatch(file, raw, pair)}`).join("\n");
       for (const rule of implicated) {
         const before = await readJsonAsync(["api", `${api}/compare/${pr.base.sha}...${pair.redSha}`]) as { merge_base_commit: { sha: string }; files: Array<{ filename: string }> };
         const readAt = async (sha: string, path: string): Promise<string | null> => {
