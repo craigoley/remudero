@@ -12,7 +12,7 @@ import { observeSelectedMode } from "#src/lib/instance-mode.js";
 import { daemonCommand } from "#src/cli/commands/daemon.js";
 import { runTask as directRunTask } from "#src/cli/commands/run-task-verb.js";
 import { spawnCodexWorker, spawnFoundryClaudeWorker, spawnOpenWeightWorker, type OpenWeightSpawnArgs } from "#src/lib/worker-provider.js";
-import { deployLedgerPath, realDeployDeps } from "#src/lib/deployer.js";
+import { deployLedgerPath, realDeployDeps, realDeploySensorsAsync } from "#src/lib/deployer.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { writeMutantModule } from "#test/helpers/mutant-module.js";
 import * as modeRuntime from "#src/lib/instance-mode.js";
@@ -254,6 +254,40 @@ test("selected supervisor hands immutable private identity only to its trusted r
         assert.equal(error.message.includes(fixture.root), false, "exec failures must not quote private argv");
         return true;
       });
+    }, { envPath: fixture.selected, instanceName: "worker" });
+  } finally { fixture.cleanup(); }
+});
+
+test("private registry selection reaches real host and daemon readers: async deploy sensors retain the selected target", async () => {
+  const fixture = runtimeRegistryFixture(), stateRoot = join(fixture.root, "selected-state"), calls: string[][] = [];
+  writeFileSync(fixture.selected, registry("shadow") + `    state_dir: ${stateRoot}\n    container_name: selected-container\n`);
+  try {
+    await runtimeRegistryRunner()(async () => {
+      const options: Parameters<typeof realDeployDeps>[0] = { installPath: fixture.root, stateRoot,
+        daemonLabel: "fixture", serveLabel: "fixture-serve", servePort: 1, uid: 1,
+        ledgerPath: join(stateRoot, "unused"), log: () => {},
+        execFile: (command, args) => { calls.push([command, ...args]); return ""; } };
+      const forbiddenGh = async (): Promise<string> => { throw new Error("unexpected external transport"); };
+      const sensors = realDeploySensorsAsync(options, forbiddenGh);
+      const pending = sensors.newestBakedSha();
+      assert.equal(typeof pending.then, "function", "the actual async sensor adapter remains asynchronous");
+      await pending;
+      assert.ok(calls.some(args => args[0] === "git"), "the healthy control reaches the sensor transport");
+      calls.length = 0;
+      assert.throws(() => realDeploySensorsAsync({ ...options, instance: "different" }, forbiddenGh),
+        /selected instance registry unavailable \(target_missing_or_mismatched\)/);
+      assert.deepEqual(calls, [], "an invalid selected target refuses before any transport");
+      const recycler = sensors.restartBackends!().find(backend => backend.name === "recycle-container")!;
+      options.instance = "retargeted";
+      recycler.restart();
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0]![0], "bash");
+      assert.ok(calls[0]!.includes("worker") && calls[0]!.includes(fixture.selected));
+      assert.equal(calls[0]!.includes("retargeted"), false, "the new async factory retains the original selection");
+      calls.length = 0;
+      writeFileSync(fixture.selected, registry("live") + `    state_dir: ${stateRoot}\n    container_name: selected-container\n`);
+      assert.throws(() => recycler.restart(), /selected instance registry unavailable \(revision_changed\)/);
+      assert.deepEqual(calls, [], "a revised selected file cannot trigger a restart");
     }, { envPath: fixture.selected, instanceName: "worker" });
   } finally { fixture.cleanup(); }
 });
