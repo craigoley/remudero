@@ -81,10 +81,11 @@
        boot-cycle evidence W1-T9087 uses, and demotes on a lost or misidentified child.
     6. FIX DISPATCH USES THE GOVERNED PRODUCER. The two CLI companions permit the existing fix producer and
        child callee to share a typed, serializable decision envelope. Do not serialize a claim keeper, dependency
-       function or phase callback. Spawn before taking the fix-branch claim; the child takes its own claim through
-       the existing native helper and identity checks, reconstructs live dependencies, and rechecks the current PR
-       head, canonical task/risk, merged/retired state, holds, admission and all existing gates before the normal
-       rung. Preserve phase evidence through the existing owned run/status/ledger protocol and adoption identity.
+       function or phase callback. Spawn before taking the fix-branch claim. The child reconstructs live dependencies
+       and rechecks the current PR head, canonical task/risk, merged/retired state, holds and admission before taking
+       its own claim through the existing native helper and identity checks. Preserve every existing write-time
+       fence before the normal rung. Preserve phase evidence through the existing owned run/status/ledger protocol
+       and adoption identity.
        Do not invoke the operator/bootstrap `rmd fix` route or `--requested` as automatic authority: that route
        intentionally lacks board-wide merged/retired projections. An unread identity, grant or reconstruction
        refuses; it is not a successful child. No manual claim transfer, retry reset or new admission exception.
