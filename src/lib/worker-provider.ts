@@ -114,7 +114,10 @@ interface CodexSpawnArgs {
     teardown?: (pgid: number) => void;
   };
   onSpawnError?: (error: NodeJS.ErrnoException) => void;
-  streamObserver?: (event: { kind: "working" | "tool-executing" | "message"; tsMs: number; text?: string }) => void;
+  /** W1-T10763: a codex tool call also carries `toolName`/`toolInput`/`cwd`, the fields the run-task observer signs. */
+  streamObserver?: (event: {
+    kind: "working" | "tool-executing" | "message"; tsMs: number; text?: string; toolName?: string; toolInput?: unknown; cwd?: string;
+  }) => void;
   clockBound?: { boundMs: number; now?: () => number; pollMs?: number };
   /** W1-T9245 — the caller's cancel, as `SpawnWorkerArgs.signal` is for Claude: aborting it (or passing it aborted) tears the
    * process group down through `teardownOnce`, so an `end_round` abort stops the worker instead of letting it run on. */
@@ -2089,7 +2092,11 @@ interface CodexJsonEvent {
   thread_id?: string;
   usage?: { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number };
   error?: { message?: string };
-  item?: { type?: string; text?: string; command?: string; aggregated_output?: string };
+  item?: {
+    type?: string; text?: string; command?: string; aggregated_output?: string;
+    /** A `file_change` item's changed paths; `kind` is "add", "update" or "delete". */
+    changes?: ReadonlyArray<{ path?: unknown; kind?: unknown } | null>;
+  };
 }
 
 export interface ParsedCodexEvents {
@@ -2279,7 +2286,8 @@ class CodexJsonlAccumulator {
   ) as Record<CodexEventByteKind, number>;
 
   constructor(private nowMs: number, private readonly pendingFile?: string, private readonly observeToolLineage?: (raw: unknown) => void,
-    private readonly observeMessage?: (text: string, tsMs: number) => void) {}
+    private readonly observeMessage?: (text: string, tsMs: number) => void,
+    private readonly observeToolCall?: (toolName: "Bash" | "Edit" | "Write", toolInput: Record<string, string>, tsMs: number) => void) {}
 
   push(chunk: string, nowMs = this.nowMs): void {
     this.nowMs = nowMs;
@@ -2419,6 +2427,7 @@ class CodexJsonlAccumulator {
       this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
       this.observeMessage?.(event.item.text, this.nowMs);
     }
+    if (event.type === "item.completed") this.observeToolCalls(event.item);
     if (event.type === "turn.completed") {
       this.turnInProgress = false;
       this.completedTurns += 1;
@@ -2448,6 +2457,23 @@ class CodexJsonlAccumulator {
       // adapter boundary while the text is known to be provider error evidence; never scan agent
       // output, which may discuss usage limits as part of the task.
       this.usageRefusal ??= detectUsageLimitRefusal(message, this.nowMs);
+    }
+  }
+
+  /** W1-T10763: a completed command or file change is a tool call, named as a claude tool call is so its
+   *  `worker.activity` row carries the same `toolStepSignature`. Only the item's own fields are read: a
+   *  command is `Bash` with its `command`, and a file change is one call per changed path, `Write` for an
+   *  added file and `Edit` otherwise. */
+  private observeToolCalls(item: CodexJsonEvent["item"]): void {
+    if (!this.observeToolCall) return;
+    if (item?.type === "command_execution" && typeof item.command === "string") {
+      this.observeToolCall("Bash", { command: item.command }, this.nowMs);
+    }
+    if (item?.type === "file_change" && Array.isArray(item.changes)) {
+      for (const change of item.changes) {
+        if (typeof change?.path !== "string" || change.path.length === 0) continue;
+        this.observeToolCall(change.kind === "add" ? "Write" : "Edit", { file_path: change.path }, this.nowMs);
+      }
     }
   }
 }
@@ -5385,7 +5411,9 @@ async function spawnCodexWorkerInPrivateTemp(
   const toolLineage = createWorkerToolLineage({ provider: "codex", root: config.root, runId: args.runId, taskId: args.taskId });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"), raw => observeWorkerToolLineage(toolLineage, raw),
-    (text, tsMs) => args.streamObserver?.({ kind: "message", tsMs, text }));
+    (text, tsMs) => args.streamObserver?.({ kind: "message", tsMs, text }),
+    (toolName, toolInput, tsMs) =>
+      args.streamObserver?.({ kind: "tool-executing", tsMs, text: `[tool_use: ${toolName}]`, toolName, toolInput, cwd: args.cwd }));
   const stdoutDecoder = new StringDecoder("utf8");
   let stdoutBytes = 0;
   const stderrRetainer = new CodexStderrRetainer();
