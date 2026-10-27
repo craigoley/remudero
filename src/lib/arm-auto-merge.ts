@@ -1728,12 +1728,7 @@ export function heldPlanPrFromLedger(
   let latestAt = -Infinity;
   let latest: Record<string, unknown> | undefined;
   for (const row of rows) {
-    // The review caller also records this outcome on its primary arm row. Require the full
-    // current-head plan identity before replaying that shape into the existing serial lane.
-    const reviewHold = row.step === "automerge.arm_skipped" && row.outcome === "plan-pr-held" &&
-      row.plan_touch === "touched" && row.head_sha === pr.headSha &&
-      row.pr_number === pr.prNumber && row.pr_url === pr.prUrl;
-    if ((row.step !== "automerge.plan_pr_held" && !reviewHold) || typeof row.ts !== "string") continue;
+    if (row.step !== "automerge.plan_pr_held" || typeof row.ts !== "string") continue;
     if (row.pr_url !== pr.prUrl && row.pr_number !== pr.prNumber) continue;
     const head = row.head_sha ?? row.prior_head_sha;
     if (typeof head === "string" && head !== pr.headSha) continue;
