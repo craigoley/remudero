@@ -5,17 +5,31 @@ import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
 import { test } from "node:test";
 
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import type { Config } from "#src/lib/config.js";
 import { runDaemon, type DaemonFreshness } from "#src/lib/daemon.js";
 import { defaultInstance } from "#src/lib/host-memory-ledger.js";
-import { loadPlan } from "#src/lib/plan.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
 import {
-  adoptRunChildren, DETACHED_WORK_INVENTORY, DETACHED_WORK_KINDS, detachedWorkPlacement, measureDrainCosts, readWorkSpec,
-  type DetachedWorkEvidence, type DetachedWorkKind, type DetachedWorkSpec,
+  adoptRunChildren, createDetachedWorkHost, DETACHED_WORK_INVENTORY, DETACHED_WORK_KINDS, detachedWorkModeNow, detachedWorkPlacement,
+  HOSTED_DETACHED_WORK_KINDS, measureDrainCosts, readWorkSpec,
+  type DetachedWorkEvidence, type DetachedWorkKind, type DetachedWorkSpec, type spawnRunChild, type startRunChildProbe,
 } from "#src/lib/run-child.js";
 import { childIdentity, readStatus, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
 import { runChildMain } from "#src/run-child-main.js";
 import type { RunResult } from "#src/lib/run-result.js";
-import { adoptChildWork, childWorkCount, childWorkLeftRunning, resetChildWork, reviewAdmissionBound, type DetachedActionKind } from "#src/lib/sweep.js";
+import {
+  adoptChildWork, childWorkCount, childWorkHoldsReviewKey, childWorkLeftRunning, installDetachedWorkHost, resetChildWork, reviewAdmissionBound,
+  type BuildSweepEffectsDeps, type DetachedActionKind, type OpenPrView,
+} from "#src/lib/sweep.js";
+import type { SweepCommandHost } from "#src/cli/commands/sweep.js";
+
+// Avoid the argv module's checkout discovery: these fixtures do not need a git executable.
+const savedArgv = [...process.argv];
+process.argv.push("--repo-root", REPO_ROOT);
+const { buildSweepEffects } = await import("#src/cli/commands/sweep.js");
+const { runDetachedWork } = await import("#src/run-task.js");
+process.argv.splice(0, process.argv.length, ...savedArgv);
 
 const result = (id: string): RunResult => ({ taskId: id, runId: id, merged: false, verdict: "no_pr", costUsd: 0 });
 
@@ -217,7 +231,12 @@ test("W1-T9114: a restart does not drain child reviews or fix dispatches", async
     const ledger = [JSON.stringify({ step: "daemon.freshness_drain.completed", duration_ms: 186_000, in_flight_reviews: 1, waited_on: [
       { what: "review", kind: "review", settled_after_ms: 120_000 }, { what: "detached", kind: "fix-dispatch", abandoned: true },
     ] })];
+    // No `detachedWorkMode` and no `detachedWorkHosts` reach runDaemon: the placement is read from the host the daemon's sweep builder
+    // installs, built here by the same factory production uses, so the drain's evidence has a producer.
     const drive = (mode: "on" | "off", bound?: number) => {
+      installDetachedWorkHost(createDetachedWorkHost({
+        stateRoot: f.stateRoot, repoDir: f.root, root: f.root, repo: "fixture", log: f.log, readLedger: () => [], readMode: () => mode,
+      }));
       const rows: Array<Record<string, unknown>> = [];
       const daemon = runDaemon(loadPlan(planPath), {
         adoptRunChildren: f.adopt, refreshMerged: () => () => true, openPrCount: () => 0,
@@ -226,7 +245,6 @@ test("W1-T9114: a restart does not drain child reviews or fix dispatches", async
         checkFreshness: (): DaemonFreshness => ({ stale: true, oldSha: "a".repeat(40), newSha: "b".repeat(40) }),
         sweep: async () => {}, sleepUntilSweepWake: async () => { await flush(); return "timeout"; }, sweepLight: async () => {},
         readLedgerLines: () => ledger,
-        detachedWorkMode: () => mode, detachedWorkHosts: () => new Set<DetachedWorkKind>(["review", "fix-dispatch"]),
       }, { laneCount: 1, wipLimit: 1, pollIntervalMs: 5, ...(bound === undefined ? {} : { sweepWallClockBoundMs: bound }) });
       return { daemon, rows };
     };
@@ -240,7 +258,9 @@ test("W1-T9114: a restart does not drain child reviews or fix dispatches", async
     assert.equal(completed.abandoned_in_flight_reviews, 0);
     assert.equal(completed.abandoned_detached_sweep_actions, 0);
     assert.equal((completed.detached_work_placement as Record<string, string>).review, "child");
-    assert.equal((completed.detached_work_placement as Record<string, string>)["fix-dispatch"], "child");
+    // A fix dispatch's inputs are in-process claims no spec can carry, so no entry hosts it: a NEW one stays in process (and is
+    // waited for), while one an earlier boot adopted as a child is left running above.
+    assert.equal((completed.detached_work_placement as Record<string, string>)["fix-dispatch"], "process");
     assert.equal((completed.detached_work_placement as Record<string, string>).retro, "process");
     assert.equal(childWorkCount(), 2, "neither child was settled, aborted or waited for by the exit");
     assert.equal(JSON.parse(readFileSync(join(reviewDir.dir, "status.json"), "utf8")).state, "running");
@@ -251,5 +271,165 @@ test("W1-T9114: a restart does not drain child reviews or fix dispatches", async
     const offRow = off.rows.find((r) => r.step === "daemon.freshness_drain.completed");
     assert.equal((offRow?.detached_work_placement as Record<string, string>).review, "process");
     assert.deepEqual(offRow?.detached_children_left_running, { review: 1, "fix-dispatch": 1 });
+
+    // Control: with no host installed at all (a daemon whose sweep builder was injected) every kind reads as in process.
+    installDetachedWorkHost(undefined);
+    const bare: Array<Record<string, unknown>> = [];
+    const noHost = await runDaemon(loadPlan(planPath), {
+      adoptRunChildren: f.adopt, refreshMerged: () => () => true, openPrCount: () => 0,
+      runOne: async (id) => result(id), sleep: async () => { await flush(); },
+      log: (step, fields) => { bare.push({ step, ...fields }); f.log(step, fields); },
+      checkFreshness: (): DaemonFreshness => ({ stale: true, oldSha: "a".repeat(40), newSha: "b".repeat(40) }),
+      sweep: async () => {}, sleepUntilSweepWake: async () => { await flush(); return "timeout"; }, sweepLight: async () => {},
+      readLedgerLines: () => ledger,
+    }, { laneCount: 1, wipLimit: 1, pollIntervalMs: 5 });
+    assert.equal(noHost.stopReason, "stale");
+    const bareRow = bare.find((r) => r.step === "daemon.freshness_drain.completed");
+    assert.equal((bareRow?.detached_work_placement as Record<string, string>).review, "process");
+  } finally { installDetachedWorkHost(undefined); f.cleanup(); }
+});
+
+test("W1-T9114: the production host starts a review as a child only where the ledger measured a drain wait", async () => {
+  const f = fixture();
+  try {
+    const spawned: Array<{ taskId: string; lane?: string; work?: DetachedWorkSpec }> = [];
+    const settled = Promise.resolve(result("A"));
+    let spawnOutcome: "started" | "unavailable" = "started";
+    const spawn = (async (input: { taskId: string; lane?: string; work?: DetachedWorkSpec }) => {
+      spawned.push(input);
+      return spawnOutcome === "started"
+        ? { started: true, runId: "work-review-A-9", dir: f.root, pid: 1, settled, abort: async () => ({}) }
+        : { started: false, reason: "no engine tree has been built yet" };
+    }) as unknown as typeof spawnRunChild;
+    let probes = 0;
+    let endProbe: () => void = () => {};
+    const probe = (() => { probes++; return new Promise((resolve) => { endProbe = () => resolve({ started: false, reason: "fixture" }); }); }) as unknown as typeof startRunChildProbe;
+    const waited = [{ step: "daemon.freshness_drain.completed", duration_ms: 9_000, in_flight_reviews: 1, waited_on: [{ what: "review", kind: "review", settled_after_ms: 4_000 }] }];
+    const host = (mode: "off" | "shadow" | "on", ledger: Array<Record<string, unknown>> = waited) => createDetachedWorkHost({
+      stateRoot: f.stateRoot, repoDir: f.root, root: f.root, repo: "fixture", log: f.log, readLedger: () => ledger, readMode: () => mode, spawn, probe,
+    });
+    const ask = (h: ReturnType<typeof host>) => h.spawnReview({ pr: { prNumber: 7, headSha: "h".repeat(40), taskId: "A", isPlanFiling: true },
+      reviewKey: "review-key-7", reviewAttemptId: "review-PR7-attempt" });
+
+    assert.deepEqual([...HOSTED_DETACHED_WORK_KINDS], ["review"], "only the review has an entry: a fix dispatch's inputs are in-process claims");
+    assert.deepEqual([...host("on").hosts], ["review"]);
+
+    const launched = await ask(host("on"));
+    assert.equal(launched?.runId, "work-review-A-9");
+    assert.equal(spawned.length, 1);
+    assert.equal(spawned[0]!.lane, "review", "the child reserves on the review class");
+    assert.deepEqual(spawned[0]!.work, { kind: "review", prNumber: 7, headSha: "h".repeat(40), reviewKey: "review-key-7",
+      inputs: { repo: "fixture", reviewAttemptId: "review-PR7-attempt", planOnlyFiling: true } });
+
+    assert.equal(await ask(host("on", [])), undefined, "a review that never held a drain stays in process");
+    assert.equal(await ask(host("off")), undefined);
+    assert.equal(spawned.length, 1, "neither started a child");
+    spawnOutcome = "unavailable";
+    assert.equal(await ask(host("on")), undefined, "a child that cannot start leaves the review in process");
+    assert.equal(spawned.length, 2);
+
+    // Shadow: one probe at a time round-trips the contract; the review itself stays in process.
+    const shadow = host("shadow");
+    assert.equal(await ask(shadow), undefined);
+    assert.equal(await ask(shadow), undefined);
+    assert.equal(probes, 1, "a second review does not stack a second probe");
+    endProbe();
+    await flush();
+    assert.equal(await ask(shadow), undefined);
+    assert.equal(probes, 2);
+    assert.equal(spawned.length, 2, "shadow never starts a work child");
+    endProbe();
+
+    // The mode is the policy's, and `auto` is decided on ledger evidence: with none it never reads as on.
+    assert.equal(detachedWorkModeNow(f.stateRoot, () => "on"), "on");
+    assert.equal(detachedWorkModeNow(f.stateRoot, () => "shadow"), "shadow");
+    assert.equal(detachedWorkModeNow(f.stateRoot, () => "off"), "off");
+    assert.notEqual(detachedWorkModeNow(f.stateRoot, () => "auto"), "on");
+    assert.equal(detachedWorkModeNow(f.stateRoot, () => { throw new Error("policy unreadable"); }), "off");
+  } finally { f.cleanup(); }
+});
+
+test("W1-T9114: a review the sweep starts as a child is held by the registry and never run in process", async () => {
+  const f = fixture();
+  try {
+    const config = { root: f.root, claudeBin: "/bin/true" } as Config;
+    const plan: Plan = { tasks: [], byId: new Map() };
+    const gateCalls: unknown[][] = [];
+    const noop = (value?: unknown) => () => value;
+    const host = {
+      USAGE: "fixture usage", buildSweepEffects: noop(), buildInboxDraftHook: noop(), createPlanFilingClassificationTelemetry: noop(),
+      buildEscalationTriageRuntime: noop(), refreshEscalationTriageEvidence: noop(), sweepPostFixReverification: noop({ results: [], total: 0, redriven: 0 }),
+      tickReadReverificationDeps: noop({}), gitCredentialFixSpawn: noop(() => assert.fail("no fix spawn expected")),
+      updatedForWorkflowFromLedger: noop(() => false), buildRereadPrAtAct: noop(), handedOffHeadRiskJudge: noop(), codeScanningJudgeDeps: noop({}),
+      sweepEscalationReconcile: noop({}), sweepEscalationTriage: noop(), sweepPrTerminalRung: noop(), runAutomaticBranchReapRung: noop(),
+      runTmpSweepRung: noop(), runWorkerTailSweepRung: noop(), runInflightLockSweepRung: noop(), runWorkerStallDetectorRung: noop(),
+      runMountRecommenderRung: noop(), fixRungAllowedBesideInFlight: noop(true), inFlightTaskIdsFrom: () => [],
+      blockedFixableIsRequeueOnly: () => false, lightPassActionable: () => false, reviewOnlyLightPassDeps: () => ({}),
+      freshTreeGit: () => assert.fail("no fresh worktree requested"),
+      realDeps: () => ({ reviewWorktree: { addWorktree: () => assert.fail("no review worktree requested") } }),
+      buildFreshTreeReviewRunner: () => () => assert.fail("no fresh review requested"),
+      buildReviewerCodeFreshnessGate: () => ({ call: (...args: unknown[]) => { gateCalls.push(args); return 17; }, staleThisPass: () => undefined }),
+      buildBaseReproductionProbe: () => () => ({ reproduced: false }), buildImportClosureRead: () => () => [],
+      buildRequiredFixReviewRunner: () => () => 0, readyDraftViaGh: () => () => {},
+    } as unknown as SweepCommandHost;
+    const deps: BuildSweepEffectsDeps = {
+      owner: "acme", repo: "fixture", localRepoName: "fixture", config, ledgerPath: join(f.root, "state", "ledger.ndjson"),
+      runId: "SWEEP-CHILD", plan, log: f.log,
+    };
+    const effects = buildSweepEffects(host, { ...deps, reviewerCodeFreshnessImpl: () => ({ status: "unreadable", reason: "fixture" }) as never,
+      instanceRegistryTextImpl: () => undefined });
+    const pr: OpenPrView = {
+      prNumber: 9114, prUrl: "https://github.com/acme/fixture/pull/9114", headSha: "a".repeat(40), headRefName: "run-W1-T9114-1",
+      taskId: "W1-T9114", reviewState: "success", checksState: "green", unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false,
+      lastActivityAt: new Date().toISOString(),
+    };
+    let finish!: () => void;
+    const settled = new Promise<RunResult>((resolve) => { finish = () => resolve(result("W1-T9114")); });
+    const asked: Array<{ reviewKey: string; reviewAttemptId: string | undefined; prNumber: number }> = [];
+    installDetachedWorkHost({
+      hosts: new Set(["review"]), mode: () => "on",
+      spawnReview: async ({ pr: asking, reviewKey, reviewAttemptId }) => {
+        asked.push({ reviewKey, reviewAttemptId, prNumber: asking.prNumber });
+        return { runId: "work-review-W1-T9114-1", settled };
+      },
+    });
+
+    await effects.postReview!(pr, { kind: "full-review" }, "review-PR9114-attempt");
+    assert.equal(gateCalls.length, 0, "the review did not run in this process");
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0]!.prNumber, 9114);
+    assert.equal(asked[0]!.reviewAttemptId, "review-PR9114-attempt");
+    assert.equal(childWorkCount("review"), 1, "the registry holds the child's slot");
+    assert.equal(childWorkHoldsReviewKey(asked[0]!.reviewKey), true, "and its mutex key, so the PR is not re-admitted under it");
+    assert.equal(reviewAdmissionBound(1).bound, 0);
+    assert.equal(f.rows.some((r) => r.step === "sweep.post_review.child" && r.child_run_id === "work-review-W1-T9114-1"), true);
+
+    // A reuse review is not a full review: it stays in process and never asks the host.
+    await effects.postReview!(pr, { kind: "discriminate-only", judgedHeadSha: "b".repeat(40) });
+    assert.equal(asked.length, 1);
+    assert.equal(gateCalls.length, 1);
+
+    // The child ends: slot and key are released, and the next pass re-admits the PR.
+    finish();
+    for (let i = 0; i < 400 && childWorkCount("review") > 0; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(childWorkCount("review"), 0);
+    assert.equal(childWorkHoldsReviewKey(asked[0]!.reviewKey), false);
+    assert.equal(reviewAdmissionBound(1).bound, 1);
+  } finally { installDetachedWorkHost(undefined); f.cleanup(); }
+});
+
+test("W1-T9114: the run path exports runDetachedWork, which refuses work no entry hosts", async () => {
+  const f = fixture();
+  try {
+    assert.equal(typeof runDetachedWork, "function");
+    await assert.rejects(() => runDetachedWork(fix, { runId: "r", taskId: "A" }), /hosts no detached work of kind fix-dispatch/);
+    await assert.rejects(() => runDetachedWork({ kind: "review" }, { runId: "r", taskId: "A" }), /without a PR number/);
+    // Through the child's entry, with the real run path's export: a kind nothing hosts is a failed status, never a success.
+    const unhosted = f.add("work-fix-1", fix);
+    assert.equal(await runChildMain(["--run-dir", unhosted.dir], { env: {}, stderr: () => {}, heartbeatMs: 60_000, signals: { on() {}, off() {} },
+      loadRunPath: async () => ({ runDetachedWork }) }), 1);
+    const status = readStatus(unhosted.dir);
+    assert.ok(status.ok);
+    assert.equal(status.value.state, "failed");
   } finally { f.cleanup(); }
 });

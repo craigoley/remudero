@@ -21,7 +21,10 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { loadRunChildMode, runChildEffectiveMode, type RunChildMode } from "./policy.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { pauseDetail, stopDetail } from "./fleet-control.js";
-import { classifyRunChildLoss, decideRunChildMode, RUN_CHILD_ADOPTION_PASS_STEP, type RunChildModeEvidence } from "./run-child-mode.js";
+import {
+  classifyRunChildLoss, createRunChildModeTracker, decideRunChildMode, emptyRunChildModeEvidence, readRunChildModeUnion, readRunChildPolicy,
+  runChildModeFor, runChildModeWindow, RUN_CHILD_ADOPTION_PASS_STEP, type RunChildModeEvidence,
+} from "./run-child-mode.js";
 import {
   RUN_CHILD_SCHEMA, classifyRunDir, fromRunChildFailure, isTerminalState, readSpec, readStatus, runDir, writeSpec,
   type RunChildEntryKind, type RunChildFailureClass, type RunChildProbe, type RunChildSpec, type RunChildSpecOptions, type RunChildStatus,
@@ -29,7 +32,7 @@ import {
 import { waitingStarts } from "./host-memory-admission.js";
 import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservation.js";
 import type { RunResult } from "./run-result.js";
-import type { DetachedActionKind } from "./sweep.js";
+import type { DetachedActionKind, DetachedWorkHost } from "./sweep.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { killProcessGroup } from "./worker-containment.js";
 
@@ -1142,4 +1145,83 @@ export function detachedWorkPlacement(
   const waitedMs = evidence.measured[known]?.waitedMs ?? 0;
   if (waitedMs <= 0) return stay("it never held a drain over the measured window");
   return { kind, placement: "child", reason: `it held drains for ${waitedMs} ms over the measured window` };
+}
+
+/**
+ * The kinds this process has a run-child entry for. A review is hosted: `runDetachedWork` (src/run-task.ts) takes the PR number and
+ * the review's flags from the spec. A fix dispatch is NOT: its inputs are the sweep's in-process claim, its judged evidence and its
+ * phase observer, which a spec cannot carry, so it stays in process and the placement says "no run-child entry hosts it yet".
+ */
+export const HOSTED_DETACHED_WORK_KINDS: ReadonlySet<DetachedWorkKind> = new Set<DetachedWorkKind>(["review"]);
+
+/** `sweep.runChild.mode` as detached work reads it: `auto` is decided from the ledger evidence the build runs use (W1-T9087). */
+export function detachedWorkModeNow(stateRoot: string, read: () => RunChildMode = () => loadRunChildMode()): DetachedWorkMode {
+  const policy = readRunChildPolicy(read);
+  if (policy.mode === undefined) return "off";
+  if (policy.mode !== "auto") return runChildModeFor(policy.mode, emptyRunChildModeEvidence()).mode;
+  try {
+    const union = readRunChildModeUnion(stateRoot);
+    return runChildModeFor("auto", createRunChildModeTracker(runChildModeWindow(union.rows), undefined, union.unread).evidence()).mode;
+  } catch (error) {
+    void error; // An evidence read that throws decides nothing: the work stays in process, as under mode off.
+    return "off";
+  }
+}
+
+export interface DetachedWorkHostInput {
+  stateRoot: string;
+  /** The managed checkout the engine trees are cut from. */
+  repoDir: string;
+  root: string;
+  /** The repository name a review is run against (`--repo`). */
+  repo: string;
+  log: Log;
+  /** The ledger rows the measured drain cost is read from. */
+  readLedger: () => ReadonlyArray<Record<string, unknown>>;
+  readMode?: () => RunChildMode;
+  spawn?: typeof spawnRunChild;
+  probe?: typeof startRunChildProbe;
+}
+
+/**
+ * The production host the sweep's review path asks (src/lib/sweep.ts `installDetachedWorkHost`), and the drain reads through
+ * `detachedWorkPlacement`. Under `shadow` it starts one probe at a time that round-trips the contract and records its cost, and the
+ * review stays in process. Under `on` it starts the review as a run child on its own reservation, only where the inventory and the
+ * measured drain cost say so; a child that cannot start is `undefined`, and the review runs in process as before.
+ */
+export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWorkHost {
+  const mode = (): DetachedWorkMode => detachedWorkModeNow(input.stateRoot, input.readMode);
+  let probing = false;
+  return {
+    hosts: HOSTED_DETACHED_WORK_KINDS,
+    mode,
+    async spawnReview({ pr, reviewKey, reviewAttemptId }) {
+      const current = mode();
+      if (current === "shadow") {
+        if (!probing) {
+          probing = true;
+          void (input.probe ?? startRunChildProbe)({
+            taskId: `review-PR${pr.prNumber}`, stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
+            plan: Promise.resolve({ plan: { tasks: [] } }), options: {}, log: input.log,
+          }, { readMode: () => "shadow" }).finally(() => { probing = false; });
+        }
+        return undefined;
+      }
+      if (current !== "on") return undefined;
+      const placement = detachedWorkPlacement("review", {
+        mode: current, hosted: HOSTED_DETACHED_WORK_KINDS, measured: measureDrainCosts(input.readLedger()),
+      });
+      if (placement.placement !== "child") return undefined;
+      const work: DetachedWorkSpec = {
+        kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey,
+        inputs: { repo: input.repo, reviewAttemptId, ...(typeof pr.isPlanFiling === "boolean" ? { planOnlyFiling: pr.isPlanFiling } : {}) },
+      };
+      const launch = await (input.spawn ?? spawnRunChild)({
+        taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "review", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
+        plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+      });
+      if (!launch.started) return undefined;
+      return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
+    },
+  };
 }

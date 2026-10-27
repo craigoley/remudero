@@ -3166,6 +3166,20 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         ...(mode.kind === "full-review" ? {} : { judged_head_sha: mode.judgedHeadSha }),
       });
       try {
+        // W1-T9114: a full review the installed host starts as a run child is not run (or waited for) here. The registry holds its
+        // slot and mutex key until the child settles, so the PR is not re-admitted while it runs, and a restart adopts it.
+        const reviewKey = reviewOutcomeKeyForPr(pr);
+        const hosted = mode.kind === "full-review"
+          ? await installedWorkHost?.spawnReview({ pr, reviewKey, reviewAttemptId }) : undefined;
+        if (hosted !== undefined) {
+          void adoptChildWork({
+            runId: hosted.runId, taskId: pr.taskId ?? `PR-${pr.prNumber}`,
+            work: { kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey },
+            settled: hosted.settled, ...(hosted.acknowledge === undefined ? {} : { acknowledge: hosted.acknowledge }),
+          }, log);
+          log("sweep.post_review.child", { pr_number: pr.prNumber, head_sha: pr.headSha, review_key: reviewKey, child_run_id: hosted.runId });
+          return;
+        }
         const exit =
           mode.kind === "full-review" || !deps.reviewReuseRunner
             ? await reviewRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId)
@@ -16534,6 +16548,46 @@ export function resetChildWork(): void {
   settledChildWork.clear();
 }
 
+/** Does a registered child hold this review's mutex key? The review that spawned it must not release the key behind it. */
+export function childWorkHoldsReviewKey(reviewKey: string): boolean {
+  for (const work of childWork.values()) if (work.reviewKey === reviewKey) return true;
+  return false;
+}
+
+/** A review started as a run child: the handle the sweep registers, the same one a boot adopts from its spec and status. */
+export interface ReviewChildLaunch {
+  runId: string;
+  settled: Promise<unknown>;
+  acknowledge?: (outcome: PromiseSettledResult<never>) => void;
+}
+
+/**
+ * W1-T9114: what starts detached work as a run child in this process, installed by the daemon's composition root. Unset, every kind
+ * runs in process. `hosts` is what is wired (never what the design intends), and the drain reads it as the evidence that an entry
+ * hosts a kind; `mode` is `sweep.runChild.mode` resolved on the ledger evidence W1-T9087 uses.
+ */
+export interface DetachedWorkHost {
+  hosts: ReadonlySet<string>;
+  mode: () => "off" | "shadow" | "on";
+  /** Starts one review as a child, or `undefined` when it stays in process (the mode, the placement, no engine, no admission). */
+  spawnReview: (input: {
+    pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean };
+    reviewKey: string;
+    reviewAttemptId: string | undefined;
+  }) => Promise<ReviewChildLaunch | undefined>;
+}
+let installedWorkHost: DetachedWorkHost | undefined;
+
+/** Installs (or, with `undefined`, removes) the process's detached-work host. */
+export function installDetachedWorkHost(host: DetachedWorkHost | undefined): void {
+  installedWorkHost = host;
+}
+
+/** The installed host, or `undefined` when every kind runs in process. */
+export function installedDetachedWorkHost(): DetachedWorkHost | undefined {
+  return installedWorkHost;
+}
+
 /** The child a boot adopted, as the registry takes it: structural, so this module imports nothing from run-child. */
 export interface AdoptedWorkChild {
   runId: string; taskId: string;
@@ -22512,7 +22566,8 @@ export async function runSweep(
         // and BEFORE `finalizeDisposition`, which only ledgers and never gates a future pass. On
         // success `postReview` has already durably written the reviewed state a later pass sees; on
         // failure the row just above establishes a bounded retry clock.
-        claim.release();
+        // W1-T9114: a review child holds this key until it settles; releasing it here would re-admit the PR under a running review.
+        if (!childWorkHoldsReviewKey(job.reviewKey)) claim.release();
       }
       if (!deps.detachReviewWait) await finalizeDisposition(
         job.index,

@@ -114,6 +114,7 @@ import {
 // module, so this edge closes no cycle (W1-T2744).
 import {
   adoptChildWork,
+  installedDetachedWorkHost,
   childWorkLeftRunning,
   detachSweepAction,
   detachedActionInFlight,
@@ -1458,9 +1459,11 @@ export interface DaemonDeps {
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
   adoptRunChildren?: () => AdoptedRunChild[];
-  /** W1-T9114: how detached work (reviews, fix dispatches) is placed. Unwired, it reads `off`: everything stays in process. */
+  /** W1-T9114: how detached work (reviews, fix dispatches) is placed. Unwired, it is the installed detached-work host's mode
+   *  (src/lib/sweep.ts `installDetachedWorkHost`, installed by the daemon's sweep builder), and `off` when none is installed. */
   detachedWorkMode?: () => DetachedWorkMode;
-  /** W1-T9114: the kinds a run-child entry hosts in this process. Unwired, none: a kind is never moved to an entry that is not there. */
+  /** W1-T9114: the kinds a run-child entry hosts in this process. Unwired, the installed host's kinds, and none without one:
+   *  a kind is never moved to an entry that is not there. */
   detachedWorkHosts?: () => ReadonlySet<DetachedWorkKind>;
   /** W1-T9924: will the run-child policy run this refill as an adoptable child? Unwired, it reads false. */
   refillRunsAsChild?: (task: Task) => boolean;
@@ -4563,11 +4566,15 @@ export async function runDaemon(
     return action;
   };
 
-  // W1-T9114: where each kind of detached work runs, from the inventory. The ledger is read only when the mode is wired and not `off`.
+  // W1-T9114: where each kind of detached work runs, from the inventory. Mode and hosts come from the host the composition root
+  // installed (the same one the sweep's review path spawns through), unless a caller supplies its own. The ledger is read only
+  // when the mode is not `off` and not `shadow`.
   const detachedWorkPlacements = (): Record<string, ReturnType<typeof detachedWorkPlacement>> => {
-    const mode = deps.detachedWorkMode?.() ?? "off";
+    const installed = installedDetachedWorkHost();
+    const mode = deps.detachedWorkMode?.() ?? installed?.mode() ?? "off";
     const evidence: DetachedWorkEvidence = {
-      mode, hosted: deps.detachedWorkHosts?.() ?? new Set<DetachedWorkKind>(),
+      mode,
+      hosted: deps.detachedWorkHosts?.() ?? new Set<DetachedWorkKind>(DETACHED_WORK_KINDS.filter((kind) => installed?.hosts.has(kind) === true)),
       measured: mode === "on" ? measureDrainCosts(deps.readLedgerLines?.() ?? []) : {},
     };
     return Object.fromEntries(DETACHED_WORK_KINDS.map((kind) => [kind, detachedWorkPlacement(kind, evidence)]));

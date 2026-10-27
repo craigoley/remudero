@@ -26527,7 +26527,17 @@ export function reviewerCodeRecoveryFromLoadedModule(
 // builders while `daemonCommand` may shadow their names with a test injection below. Keeping the
 // live calls as `buildSweepHook(...)`/`buildSweepLightHook(...)` preserves the composition-root
 // contract that existing daemon wiring tests inspect.
-const daemonDefaultBuildSweepHook = buildSweepHook;
+// W1-T9114: the daemon's own sweep builder also installs the detached-work host its review path and its restart drain read
+// (src/lib/sweep.ts `installDetachedWorkHost`): mode from `sweep.runChild.mode` on the ledger evidence, the review kind as the one
+// an entry hosts (`runDetachedWork`, below). An injected builder (a test) installs nothing, so every kind stays in process there.
+const daemonDefaultBuildSweepHook: typeof buildSweepHook = (...args) => {
+  const [, repo, config, ledgerPath] = args;
+  installDetachedWorkHost(createDetachedWorkHost({
+    stateRoot: join(config.root, "state"), repoDir: args[16] ?? repoRoot, root: config.root, repo, log: args[6],
+    readLedger: () => readLedgerLines(ledgerPath),
+  }));
+  return buildSweepHook(...args);
+};
 const daemonDefaultBuildSweepLightHook = buildSweepLightHook;
 
 
@@ -41535,7 +41545,8 @@ import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js"
 // W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
-import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, runChildModeIsOn, spawnRunChild, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, runChildModeIsOn, spawnRunChild, type DetachedWorkSpec, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+import { installDetachedWorkHost } from "./lib/sweep.js";
 import { type RunChildMode } from "./lib/policy.js";
 import {
   escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
@@ -42547,6 +42558,25 @@ if (!readWorkerOptions && process.argv[1] && fileURLToPath(import.meta.url) === 
 }
 
 export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, retroCommand, initCommand, projectCommand };
+
+/**
+ * W1-T9114: the detached work a run child hosts (src/run-child-main.ts calls it for a spec that carries `work`). A review is the
+ * same `reviewCommand` call the sweep's in-process review makes, from the serializable inputs the spec holds: the PR number, the
+ * repository, the plan-filing flag and the review attempt id. A kind this entry does not host throws, which the child writes as a
+ * failed status through the closed failure union; an unknown kind is never read as success.
+ */
+export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: string; taskId: string }): Promise<RunResult> {
+  if (work.kind !== "review" || work.prNumber === undefined) {
+    throw new Error(`the run child hosts no detached work of kind ${work.kind}${work.kind === "review" ? " without a PR number" : ""}`);
+  }
+  const inputs = work.inputs ?? {};
+  await reviewCommand(String(work.prNumber), typeof inputs.repo === "string" ? ["--repo", inputs.repo] : [], {
+    executionMode: "semantic",
+    ...(typeof inputs.planOnlyFiling === "boolean" ? { planOnlyFiling: inputs.planOnlyFiling } : {}),
+    ...(typeof inputs.reviewAttemptId === "string" ? { reviewAttemptId: inputs.reviewAttemptId } : {}),
+  });
+  return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
+}
 // Exported for a behavioral test of the drain gateway-targeting fix (W1-T53): drainCommand's
 // injectable deps (config/planPath/skipGitSync/githubFactory) let a test prove `--repo` scopes
 // the merged-status gateway to the NAMED repo, not a hardcoded literal — logic unchanged, export
