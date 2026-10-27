@@ -85,7 +85,10 @@ test("W1-T9114: the inventory moves a kind only on a measured drain cost", () =>
   const hosted = new Set<DetachedWorkKind>(DETACHED_WORK_KINDS);
   const on = (over: Partial<DetachedWorkEvidence> = {}): DetachedWorkEvidence => ({ mode: "on", hosted, measured, ...over });
   const moved = (evidence: DetachedWorkEvidence) => DETACHED_WORK_KINDS.filter((k) => detachedWorkPlacement(k, evidence).placement === "child");
-  assert.deepEqual(moved(on()).sort(), ["fix-dispatch", "review"]);
+  assert.deepEqual(moved(on()), ["review"], "only the review moves: a fix dispatch is deferred out of this task");
+  const fixPlacement = detachedWorkPlacement("fix-dispatch", on());
+  assert.equal(fixPlacement.placement, "process");
+  assert.match(fixPlacement.reason, /deferred out of W1-T9114/, "the table says why the fix dispatch stays in process");
   assert.deepEqual(moved(on({ measured: {} })), [], "no measured drain cost, nothing moves");
   assert.deepEqual(moved(on({ measured: { review: { drains: 3, waitedMs: 0, abandoned: 0 } } })), [], "a zero wait is no cost");
   assert.deepEqual(moved(on({ mode: "off" })), []);
@@ -159,7 +162,6 @@ test("W1-T9114: a boot adopts a live review child", async () => {
   const f = fixture();
   try {
     const child = f.add("work-review-A-1", review);
-    f.add("run-B-1", { kind: "fix-dispatch", fixKey: "fix-key-B" }, {}, "B");
     assert.deepEqual(readWorkSpec(child.dir), review);
     const planPath = join(f.root, "tasks.yaml");
     writeFileSync(planPath, `- id: A\n  title: A\n  repo: remudero\n  type: implement\n  verify: auto\n  depends_on: []\n  status: queued\n  files: [src/A.ts]\n`);
@@ -174,9 +176,8 @@ test("W1-T9114: a boot adopts a live review child", async () => {
       sleep: async () => { await flush(); },
     }, { laneCount: 2, wipLimit: 1, pollIntervalMs: 5 });
     await flush();
-    assert.equal(f.rows.filter((r) => r.step === "run_child.adopted").length, 2);
+    assert.equal(f.rows.filter((r) => r.step === "run_child.adopted").length, 1);
     assert.equal(childWorkCount("review"), 1, "the live review child is registered with the sweep");
-    assert.equal(childWorkCount("fix-dispatch"), 1);
     assert.deepEqual(reviewAdmissionBound(3), { bound: 2, inFlight: 1 }, "it keeps its review slot, and counts in the width");
     assert.equal(reviewAdmissionBound(1).bound, 0, "the PR is not re-admitted while the child runs");
     await run;
@@ -220,14 +221,15 @@ test("W1-T9114: a terminal review child settles once", async () => {
   } finally { f.cleanup(); }
 });
 
-test("W1-T9114: a restart does not drain child reviews or fix dispatches", async () => {
+// Narrowed per the operator (W1-T78): the drain half is proved for REVIEW children only, through the production host factory.
+// Fix-dispatch drain is out of scope for this PR (no production producer spawns a fix child); the test asserts it stays in process.
+test("W1-T9114: a restart does not drain child reviews or fix dispatches — only reviews move, fix dispatch is deferred", async () => {
   const f = fixture();
   try {
     const reviewDir = f.add("work-review-A-3", review);
-    f.add("work-fix-A-3", fix);
     const planPath = join(f.root, "tasks.yaml");
     writeFileSync(planPath, `- id: A\n  title: A\n  repo: remudero\n  type: implement\n  verify: auto\n  depends_on: []\n  status: queued\n  files: [src/A.ts]\n`);
-    // The ledger the placement reads: a review drain that waited, and a fix dispatch the drain had to abandon.
+    // The ledger the placement reads: a review drain that waited, and a fix dispatch the drain had to abandon (which still does not move).
     const ledger = [JSON.stringify({ step: "daemon.freshness_drain.completed", duration_ms: 186_000, in_flight_reviews: 1, waited_on: [
       { what: "review", kind: "review", settled_after_ms: 120_000 }, { what: "detached", kind: "fix-dispatch", abandoned: true },
     ] })];
@@ -250,19 +252,19 @@ test("W1-T9114: a restart does not drain child reviews or fix dispatches", async
     };
     const moved = drive("on");
     const summary = await moved.daemon;
-    assert.equal(summary.stopReason, "stale", "the restart returned while both children still ran");
+    assert.equal(summary.stopReason, "stale", "the restart returned while the review child still ran");
     const completed = moved.rows.find((r) => r.step === "daemon.freshness_drain.completed");
     assert.ok(completed, "the drain row is written for children alone");
-    assert.deepEqual(completed.detached_children_left_running, { review: 1, "fix-dispatch": 1 });
+    assert.deepEqual(completed.detached_children_left_running, { review: 1 });
     assert.equal(completed.in_flight_reviews, 0);
     assert.equal(completed.abandoned_in_flight_reviews, 0);
     assert.equal(completed.abandoned_detached_sweep_actions, 0);
     assert.equal((completed.detached_work_placement as Record<string, string>).review, "child");
-    // A fix dispatch's inputs are in-process claims no spec can carry, so no entry hosts it: a NEW one stays in process (and is
-    // waited for), while one an earlier boot adopted as a child is left running above.
+    // A fix dispatch's inputs are in-process claims no spec can carry, so nothing spawns one as a child: it stays in process
+    // (and the drain waits for it) under the moved mode. That drain is out of this task's scope; a follow-up moves it.
     assert.equal((completed.detached_work_placement as Record<string, string>)["fix-dispatch"], "process");
     assert.equal((completed.detached_work_placement as Record<string, string>).retro, "process");
-    assert.equal(childWorkCount(), 2, "neither child was settled, aborted or waited for by the exit");
+    assert.equal(childWorkCount(), 1, "the review child was not settled, aborted or waited for by the exit");
     assert.equal(JSON.parse(readFileSync(join(reviewDir.dir, "status.json"), "utf8")).state, "running");
 
     // Control: the same boot with the mode off reads every kind as in process, and a child adopted earlier is still left running and named.
@@ -270,7 +272,7 @@ test("W1-T9114: a restart does not drain child reviews or fix dispatches", async
     assert.equal((await off.daemon).stopReason, "stale");
     const offRow = off.rows.find((r) => r.step === "daemon.freshness_drain.completed");
     assert.equal((offRow?.detached_work_placement as Record<string, string>).review, "process");
-    assert.deepEqual(offRow?.detached_children_left_running, { review: 1, "fix-dispatch": 1 });
+    assert.deepEqual(offRow?.detached_children_left_running, { review: 1 });
 
     // Control: with no host installed at all (a daemon whose sweep builder was injected) every kind reads as in process.
     installDetachedWorkHost(undefined);

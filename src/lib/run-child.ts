@@ -1008,7 +1008,8 @@ const REDONE_AFTER_RESTART = "a best-effort rung the restart releases and the ne
 /** The inventory, as data. The drain cost of a kind is NOT stored here: it is measured from the ledger ({@link measureDrainCosts}). */
 export const DETACHED_WORK_INVENTORY: Readonly<Record<DetachedWorkKind, DetachedWorkRow>> = {
   review: { kind: "review", holds: "the judgement's model call and the PR's diff, in the daemon heap", resumableFromFiles: true, eligible: true },
-  "fix-dispatch": { kind: "fix-dispatch", holds: "the fix worker's handle and its admission or CI wait", resumableFromFiles: true, eligible: true },
+  "fix-dispatch": { kind: "fix-dispatch", holds: "the fix worker's handle and its admission or CI wait", resumableFromFiles: true, eligible: false,
+    stays: "deferred out of W1-T9114: a fix dispatch's inputs are the sweep's in-process claim, judged evidence and phase observer, which a spec cannot carry yet (follow-up: a serializable fix-evidence contract)" },
   retro: { kind: "retro", holds: "a settle await on the retro subprocess", resumableFromFiles: false, eligible: false,
     stays: "the retro already runs in its own subprocess (runAutomatedRetroSubprocess, W1-T2870); only its settle is in process" },
   "auto-triage": { kind: "auto-triage", holds: "one triage run's await", resumableFromFiles: false, eligible: false, stays: REDONE_AFTER_RESTART },
@@ -1149,8 +1150,8 @@ export function detachedWorkPlacement(
 
 /**
  * The kinds this process has a run-child entry for. A review is hosted: `runDetachedWork` (src/run-task.ts) takes the PR number and
- * the review's flags from the spec. A fix dispatch is NOT: its inputs are the sweep's in-process claim, its judged evidence and its
- * phase observer, which a spec cannot carry, so it stays in process and the placement says "no run-child entry hosts it yet".
+ * the review's flags from the spec. A fix dispatch is NOT, and is out of this task's scope: its inputs are the sweep's in-process
+ * claim, its judged evidence and its phase observer, which a spec cannot carry, so the inventory keeps it in process and says why.
  */
 export const HOSTED_DETACHED_WORK_KINDS: ReadonlySet<DetachedWorkKind> = new Set<DetachedWorkKind>(["review"]);
 
