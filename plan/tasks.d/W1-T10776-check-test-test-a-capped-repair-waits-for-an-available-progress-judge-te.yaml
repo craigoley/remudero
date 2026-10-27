@@ -35,3 +35,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The filing documents recurring failures and proxy costs, but supplies no failure output or root-cause finding connecting those rounds to a specific preventable defect in src/lib/sweep.ts; the finding cannot be verified from what is shown.; on the change's description/files alone, no diff was read — Acceptance requires preventing dispatch or self-healing without a fix round, but the proposed mechanism is unspecified, leaving its alignment with existing repair and review policy unresolved."
+    judged_at: "2026-10-27T00:50:00.370Z"
+    pin: "f56615e927eea7c009b275afc07b1d7fa089b528f33294a15cd71442bbc34010"
