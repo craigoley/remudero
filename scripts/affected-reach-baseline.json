@@ -1,8 +1,8 @@
 {
-  "_comment": "W1-T10820 MEASUREMENT CORRECTION, not a loosening: the graph now resolves the package.json imports aliases (#src/*, #scripts/*, #test/*), so the record is re-measured from the alias-aware graph and equals the live measurement exactly. Measured on origin/main c950e4d88 plus this task (first measured on 7d558c29d at importerCount 1006 and median 48.99100413323608; main then added three alias importers, named in the importers list). The previous relative-only record (W1-T5702) held importerCount 933, largestScc 250, medianReachPercent 81.47138964577657; this one holds importerCount 1009, largestScc 85, medianReachPercent 48.958837772397096. The old ceiling counted a shrinking subset of importers: every new alias test read lower while the real count rose. The resolution field may change once, from none to package-imports; all three metrics may only shrink from here. Importer paths identify additions. Tightening passes and prints the new measurement.",
-  "importerCount": 1009,
+  "_comment": "W1-T10820 MEASUREMENT CORRECTION, not a loosening: the graph now resolves the package.json imports aliases (#src/*, #scripts/*, #test/*), so the record is re-measured from the alias-aware graph and equals the live measurement exactly. Measured on origin/main be013e432 plus this task (first measured on 7d558c29d at importerCount 1006 and median 48.99100413323608; main then added four alias importers, named in the importers list). The previous relative-only record (W1-T5702) held importerCount 933, largestScc 250, medianReachPercent 81.47138964577657; this one holds importerCount 1010, largestScc 85, medianReachPercent 48.983050847457626. The old ceiling counted a shrinking subset of importers: every new alias test read lower while the real count rose. The resolution field may change once, from none to package-imports; all three metrics may only shrink from here. Importer paths identify additions. Tightening passes and prints the new measurement.",
+  "importerCount": 1010,
   "largestScc": 85,
-  "medianReachPercent": 48.958837772397096,
+  "medianReachPercent": 48.983050847457626,
   "resolution": "package-imports",
   "importers": [
     "test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts",
@@ -220,6 +220,7 @@
     "test/a-review-worktree-stranded-by-a-kill-is-swept-later.test.ts",
     "test/a-reviewer-that-cannot-see-the-repo-posts-no-verdict.test.ts",
     "test/a-reviews-plan-lint-runs-in-a-child-not-on-the-loop.test.ts",
+    "test/a-reviews-status-post-and-pass-arm-await-their-transport.test.ts",
     "test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts",
     "test/a-run-child-runs-from-an-engine-tree-pinned-to-its-revision.test.ts",
     "test/a-run-that-throws-writes-no-verdict.test.ts",
