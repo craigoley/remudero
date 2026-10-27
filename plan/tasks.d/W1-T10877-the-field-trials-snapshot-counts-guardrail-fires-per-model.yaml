@@ -1,0 +1,67 @@
+- id: W1-T10877
+  title: "NOTHING COUNTS HOW OFTEN EACH GUARDRAIL FIRES PER MODEL — truncations, refused formats, fit refusals, dirty drafts, relints and unnamed served models are scattered across rows with no per-model rate; the field-trials snapshot gains a guardrails family keyed by model x public category x public guardrail class, through ONE committed public vocabulary that maps internal lanes and mechanisms to the contract's closed lists"
+  repo: remudero
+  depends_on: [W1-T10875, W1-T10876]  # fires are counted only on attributable attempts, and draft and fix fires need the model on their rows
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # the vocabulary module is the disclosure boundary: an internal name leaking through it is published
+  band_meaning: blast-radius
+  origin: "operator ruling, Craig 2026-10-27: per-model guidance at disclosure level B; the closed public vocabularies (category, guardrailClass) are fixed by the contract ~/Remudero-notes/field-trials/model-guidance-contract-v1.md"
+  plan_refs: [W1-T10875, W1-T10876, W1-T10878, W1-T10856]
+  files:
+    - src/lib/public-model-vocabulary.ts
+    - src/lib/field-trials-flow.ts
+    - test/routing/the-field-trials-snapshot-counts-guardrail-fires-per-model.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The guardrails exist and fire, but no reader tallies them per model. READ 2026-10-27 at origin/main aa90fdc44:
+    OPENWEIGHT_RESPONSE_FORMATS / OpenWeightUnsupportedResponseFormatError (format refused),
+    OPENWEIGHT_CONTEXT_WINDOWS / openWeightDeploymentHolds / OpenWeightRequestTooLargeError (fit refused; the
+    per-minute ceiling joins it under W1-T10856), OPENWEIGHT_MAX_COMPLETION_TOKENS / OpenWeightTruncatedReplyError
+    and CODEX_WORKER_STDOUT_MAX_BYTES (output cap), OPENWEIGHT_OUTPUT_CONTRACT and MAX_RELINT_ATTEMPTS (draft
+    contract and relint), CODEX_SERVED_MODEL_REASON and CASH_SERVED_MODEL_REASONS (served model unverified),
+    SubscriptionOnlyRefusedError (frontier kept for high-risk work), FOUNDRY_CLAUDE_DAILY_CAP_USD and the fleet
+    cap (budget). The census counted 40 output-limit hits on 7,638 Sol calls and 146 unnamed served models, but
+    only by hand. The public page (disclosure level B) shows these as rate buckets, never as the mechanisms.
+  design: |
+    1. ONE VOCABULARY MODULE, src/lib/public-model-vocabulary.ts, the only place an internal name meets a public
+       one. It exports:
+       - PUBLIC_CATEGORIES and PUBLIC_GUARDRAIL_CLASSES, exactly the contract's closed lists, in contract order;
+       - publicCategoryOfLane(lane): one table mapping internal lanes to a public category (run-task and daemon
+         implement -> repository-change; review and reviewer -> code-review; the risk, ci, refresh,
+         verify-human and escalation judges -> short-judgment; feedback and escalation summaries ->
+         summarization; inbox-draft -> long-context-drafting; triage -> diagnosis-triage). Containment,
+         isolation and worker-smoke lanes map to null and are never published;
+       - publicGuardrailClassOf(signal): one table mapping each guardrail signal to a public class
+         (format refused and draft-contract dirty -> schema-validated-output; temperature pin ->
+         deterministic-sampling; fit refused and per-minute shortfall -> context-and-rate-fit; truncated reply
+         and output retention -> output-cap-truncation-check; relint used and judge retry ->
+         bounded-retry-then-escalate; served model unnamed -> served-model-verification; subscription-only
+         refusal -> strongest-model-for-high-risk; budget refusal -> per-lane-budget-cap). Independent review
+         and acceptance checks are properties of every implementer route and never fire per call.
+       A test pins that every lane in .remudero/mounts.yaml routes maps to a category or to null explicitly, so a
+       new lane cannot publish by default.
+    2. SNAPSHOT FAMILY. buildFieldTrialsFlowSnapshot gains a `guardrails` family: per (modelId, public
+       category, guardrailClass) the count of fires and the count of opportunities (attributable attempts or
+       drafts in that cell), from worker.attempt via attributeAttemptOutcome (W1-T10875) and from inbox.drafted
+       and fix rows via their model fields (W1-T10876). Rows whose lane maps to null are excluded. The family
+       follows the existing rebuildFamily pattern (digests, partitions, SMALL_CELL_MIN).
+    3. No public output here: W1-T10878 turns the family into rate buckets.
+  acceptance:
+    - claim: "the public vocabulary module exposes exactly the contract's closed category and guardrail-class lists"
+      proof: 'grep: test("W1-T10877: the public vocabulary is exactly the contract lists" in test/routing/the-field-trials-snapshot-counts-guardrail-fires-per-model.test.ts'
+    - claim: "every lane the routing config names maps explicitly to a public category or to null, so a new lane never publishes by default"
+      proof: 'grep: test("W1-T10877: every routed lane maps to a public category or explicitly to none" in test/routing/the-field-trials-snapshot-counts-guardrail-fires-per-model.test.ts'
+    - claim: "the snapshot counts guardrail fires and opportunities per model, public category and guardrail class, from attributable attempts only"
+      proof: 'grep: test("W1-T10877: guardrail fires are counted per model, category and class" in test/routing/the-field-trials-snapshot-counts-guardrail-fires-per-model.test.ts'
+    - claim: "the snapshot builder produces the guardrails family"
+      proof: 'grep: guardrailUnits( in src/lib/field-trials-flow.ts'
+  falsifier: |
+    At base no guardrails family and no vocabulary module exist, so every case fails.
+    - Default an unmapped lane to a category: the explicit-mapping case fails on a fixture lane.
+    - Count fires over all attempts, including pre-request refusals: the attributable-only case fails.
+    - Add a class outside the contract list: the closed-list case fails.

@@ -285,3 +285,35 @@ test("gardener spend refuses complete totals on an enumeration fault while readi
   assert.equal(restored.corpusComplete, true);
   assert.equal(foldGardenerSpend(restored, repository, materializedAt).totalUsd, 14);
 });
+
+test("W1-T10860: a bounded gardener capture keeps money and usage aligned at its cutoff", async t => {
+  const cutoff = Date.parse(observedAt);
+  const callShared = { ts: at, run_id: "call-run", task_id: "call-task", gardener_origin: origin };
+  const rows = [...Array.from({ length: 200 }, (_, i) => ({ ...child, run_id: `child-${i}` })), parent,
+    { ...callShared, step: "worker.assignment", worker_assignment: { id: "a1", selected: { provider: "codex", model: "fixture" } } },
+    { ...callShared, step: "worker.attempt", selection_assignment_id: "a1", billing_mode: "subscription" }];
+  const inventory = { ...runtime(), gardens: [{ ...runtime().gardens[0]!, attempts: 1, completions: 1 }] };
+  const control = await capture(t, rows, inventory);
+  assert.equal(control.spend.totalUsd, 400);
+  assert.equal(control.spend.workerCalls!.counts.matched, 1);
+  // More valid later rows than the 16384-identity ceiling must neither overflow it nor add anything.
+  const laterTs = new Date(cutoff + 100).toISOString();
+  const later = Array.from({ length: 17000 }, (_, i) => ({ ...child, ts: laterTs, run_id: `later-${i}` }));
+  const lateCall = { ...callShared, ts: laterTs, run_id: "late-run" };
+  later.push({ ...lateCall, step: "worker.assignment", worker_assignment: { id: "a2", selected: { provider: "codex", model: "fixture" } } } as never,
+    { ...lateCall, step: "worker.attempt", selection_assignment_id: "a2", billing_mode: "api" } as never);
+  const { dir } = await capture(t, rows, inventory);
+  const clock = { now: () => cutoff + 500, date: () => new Date(cutoff + 500), iso: () => {
+    fs.appendFileSync(join(dir, "ledger.ndjson"), later.map(row => JSON.stringify(row)).join("\n") + "\n");
+    return observedAt;
+  } };
+  const source = await captureGardenerSpendSource(dir, clock);
+  assert.equal(source.reason, undefined);
+  assert.equal(source.corpusComplete, true);
+  assert.deepEqual(source.compact, control.source.compact, "later money shares the fixed cutoff");
+  assert.deepEqual(source.workerCalls, control.source.workerCalls, "later usage shares the fixed cutoff");
+  assert.ok(Buffer.byteLength(JSON.stringify(source)) <= GARDENER_SPEND_MAX_BYTES);
+  const spend = foldGardenerSpend(source, repository, materializedAt);
+  assert.equal(spend.totalUsd, 400);
+  assert.equal(spend.workerCalls!.counts.assignments, 1);
+});

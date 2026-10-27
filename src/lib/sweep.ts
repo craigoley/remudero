@@ -16688,6 +16688,8 @@ export interface FixAdmissionCharge {
   admissionRung: FixAdmissionRung;
 }
 
+/** W1-T10596: how long a repair may wait before a live fix tree stops blocking its typical-peak admission. */
+export const FIX_STARVATION_MS = 2 * 60 * 60 * 1000;
 export type FixAdmissionRung = "fits" | "typical" | "nothing-live" | "none";
 
 /**
@@ -16794,6 +16796,7 @@ export function createSweepFixAdmissionController(input: {
   let pressure: FixHostPressure | undefined;
   let charge: FixAdmissionCharge | undefined;
   let available = 0;
+  let starved = false; // W1-T10596: the claim being judged has waited past FIX_STARVATION_MS.
   const estimate = (workerClass: FixAdmissionClass): LearnedEstimate =>
     input.readEstimate?.(workerClass) ?? { estimateMib: DEFAULT_ESTIMATE_MIB[workerClass], samples: 0 };
   const readResidents = (): FixAdmissionResidents => {
@@ -16850,7 +16853,8 @@ export function createSweepFixAdmissionController(input: {
       return;
     }
     const live = reservations === 0 ? liveTrees() : undefined;
-    if (live && live.fix.length === 0 && left >= charge.fixTypicalMib) charge.admissionRung = "typical";
+    // W1-T10596: a repair starved past FIX_STARVATION_MS no longer yields to a live fix tree; the typical peak must still fit.
+    if (live && (live.fix.length === 0 || starved) && left >= charge.fixTypicalMib) charge.admissionRung = "typical";
     else if (live && live.fix.length + live.review.length === 0 && activeWorkers === 0 &&
       charge.headroomMib > 0 && charge.fixTypicalMib > charge.headroomMib) charge.admissionRung = "nothing-live";
     if (charge.admissionRung !== "none") available = 1;
@@ -16933,6 +16937,7 @@ export function createSweepFixAdmissionController(input: {
     claim: (pr) => {
       const since = input.reviewQueue && input.waitSinceMs ? input.waitSinceMs(pr) : undefined;
       ahead = since === undefined ? undefined : kept().filter((review) => review.sinceMs <= since);
+      starved = since !== undefined && systemClock.now() - since >= FIX_STARVATION_MS;
       const order = (): Record<string, unknown> | undefined => since === undefined ? undefined : {
         pr_number: pr.prNumber, blocker_since: clockFromMillisFn(() => since).iso(),
         ordered_ahead: ahead!.map((review) => review.prNumber), overtaken_reviews: [...overtaken],

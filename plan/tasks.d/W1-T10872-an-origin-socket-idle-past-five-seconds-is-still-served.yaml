@@ -1,0 +1,40 @@
+- id: W1-T10872
+  title: The console server keeps an idle keep-alive socket longer than cloudflared reuses one, so a GitHub webhook POST is never reset
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 6
+  risk: high  # every console and webhook request crosses this server; one concern, its idle socket lifetime
+  band_meaning: blast-radius
+  origin: operator-session#cloudflared-emudhra-2026-10-27
+  plan_refs:
+    - W1-T2568
+    - W1-T10844
+  files:
+    - src/lib/service.ts
+    - test/console-api/serve/an-origin-socket-idle-past-five-seconds-is-still-served.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-27 on the Azure host, after the console tunnel moved to cloudflared 2026.10.4 at 13:25Z.
+    - Between 13:25Z and 17:25Z the `cloudflared` container logged 361 failed origin requests. Every one was `POST https://console.remudero.com/v1/hooks/github`, logged as "Unable to reach the origin service".
+    - The errors split as: 632 "read tcp ...: connection reset by peer", 82 "EOF", 6 "use of closed network connection" and 2 "broken pipe". These are line counts; each failure logs two lines.
+    - The old 2026.8.3 container showed the same errors (1542 lines in the prior 30 h), so the connector version is not the cause.
+    - The ledger shows NO `github.wake.refused` rows for 13Z-17Z, only accepted, check_settled and summary rows. So the route's handler never saw these requests.
+    - Bursts follow GitHub's delivery bursts (44 at 14:38Z, 40 at 16:09Z). They are not tied to the serve generation swaps, which were at 13:24, 14:00, 14:45, 15:27 and 16:10Z. The drain v2 in serve-drain.ts covers the swaps.
+    CAUSE, proven live: nothing in src sets `keepAliveTimeout`, so createService's http.Server (src/lib/service.ts) uses Node 24's 5 s default. cloudflared reuses an idle origin connection for up to its originRequest keepAliveTimeout, 90 s by default.
+    A raw socket inside the remudero-serve container sent a request, waited, and sent a second on the same socket. After 3 s idle it was answered (404). After 6 s idle it got ECONNRESET. That is exactly cloudflared's "connection reset by peer", and cloudflared does not retry a POST.
+    Each reset is a GitHub webhook delivery recorded as failed. The fleet's event wake (W1-T2568) then falls back to polling latency for that event.
+  design: |
+    In createService (src/lib/service.ts), set the server's `keepAliveTimeout` above cloudflared's 90 s origin idle reuse (for example 120 s). Set `headersTimeout` just above `keepAliveTimeout`, so a reused socket's next request is not cut by the headers clock. Keep both within Node's `requestTimeout` (300 s).
+    Name the constants, with the cloudflared default they must exceed in the doc comment.
+    The drain (serve-drain.ts) answers with `Connection: close` and then sweeps idle sockets itself, so a longer idle lifetime does not lengthen a swap. Assert that in the test, through a real drain of a real server.
+  acceptance:
+    - claim: a real createService server answers a second request on one socket after more than 5 s idle (where today it resets), its keep-alive exceeds cloudflared's 90 s origin reuse with headersTimeout above it, and a drain still closes an idle kept-alive socket within its grace
+      proof: "unit test: test/console-api/serve/an-origin-socket-idle-past-five-seconds-is-still-served.test.ts"
+  falsifier: |
+    Remove the keepAliveTimeout setting. The test's second request, sent after 6 s idle on the same real socket, then gets ECONNRESET or EOF instead of a response, and the test fails.

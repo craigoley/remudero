@@ -1976,6 +1976,55 @@ task blocked or returns a named error; it does not claim completion. After provi
 the running daemon's boot/image SHA, an actual Luna and Foundry response, and the allowance
 receipt before calling either lane live.
 
+### Per-deployment cash endpoints and keys (a second Azure account)
+
+The cash lane normally sends every deployment to the one configured `workerProviders.cashEndpoint`
+(falling back to the deprecated `openweightEndpoint`, W1-T3607) with the one daemon key
+`RMD_OPENWEIGHT_API_KEY`. `workerProviders.cashDeploymentEndpoints` is an optional map, keyed by
+deployment id, from a deployment to its OWN `{endpoint, keyEnv}` — for a deployment that lives on a
+**second** Azure account rather than the default one. A deployment this map does not name is
+byte-identical to a host with no map at all: every cash endpoint reader (the chat and Responses
+transport, both web_search readers, the replay-harness pin, and the cash model catalog) resolves
+through the one per-deployment resolver, so adding a mapped entry changes nothing for every other
+deployment.
+
+```json
+"workerProviders": {
+  "cashEndpoint": "https://<default-account>.openai.azure.com/",
+  "cashDeploymentEndpoints": {
+    "gpt-6.1-terra": {
+      "endpoint": "https://synthwatch-foundry-eus.cognitiveservices.azure.com/",
+      "keyEnv": "RMD_CASH_EASTUS_API_KEY"
+    }
+  }
+}
+```
+
+**Refusal rules, checked at config load (named, not silent):**
+
+- `keyEnv` must be `RMD_OPENWEIGHT_API_KEY` (the default) or match the cash-key shape
+  `RMD_CASH_<NAME>_API_KEY` — a config-named env var is a way to send ANY daemon secret to a URL, so
+  an arbitrary name (e.g. `HOME`, `GH_TOKEN`) is refused rather than trusted.
+- `endpoint` must be `https` on an Azure Cognitive Services or Azure OpenAI host (the same host
+  shape `unbilledAzureOpenAi429Policy` already checks) — a non-Azure or non-TLS endpoint is refused.
+- A mapped deployment whose own `keyEnv` is **unset** in the daemon environment is NOT READY: it
+  never falls back to the default key, which bills a different account. The spawn refuses by name
+  (`CashDeploymentNotReadyError`) before any request is made.
+- The key VALUE never enters a ledger row, a log line, an error message, or a worker environment —
+  only the `keyEnv` NAME ever appears in any of those.
+
+**Edit this host's config only AFTER this change is deployed on the daemon** — an unknown config
+field before then is not a supported state. Through the container's mounted config directory,
+keeping the file's mode and inode:
+
+```bash
+ssh remudero 'set -e; umask 077; f="$HOME/.config/remudero-container/config.json"; t="$f.tmp-eastus"; jq --arg e "https://synthwatch-foundry-eus.cognitiveservices.azure.com/" --arg k RMD_CASH_EASTUS_API_KEY ".workerProviders.cashDeploymentEndpoints[\"gpt-6.1-terra\"] = {endpoint: \$e, keyEnv: \$k}" "$f" > "$t"; cat "$t" > "$f"; rm -f "$t"; jq -c ".workerProviders.cashDeploymentEndpoints" "$f"'
+```
+
+Then carry the named key itself (`RMD_CASH_EASTUS_API_KEY`) into the daemon environment the same
+way the existing `RMD_OPENWEIGHT_API_KEY`/`RMD_FOUNDRY_CLAUDE_API_KEY` secrets are carried (see
+"Foundry Opus cash emergency" above) — never as a config field.
+
 ### One fleet cash cap across core, site, and console
 
 The shared cash allowance is opt-in and requires a stopped-writer migration. Until it is

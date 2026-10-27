@@ -46,6 +46,7 @@ import { makeTempDir, withTempDir } from "./tmp.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
+import { cashDeploymentEndpoint, cashDeploymentTarget } from "./config-schema.js";
 import {
   hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, seedFromCanonical, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES,
   TYPECHECK_WARM_PEAK_BYTES, typecheckEnv,
@@ -3277,6 +3278,21 @@ export class OpenWeightDeploymentNotFoundError extends RmdError {
   }
 }
 
+/** W1-T10837 design (iii): `deployment` is named in `workerProviders.cashDeploymentEndpoints` but
+ *  its own `keyEnv` is unset in the daemon environment. Distinct from the plain "requires
+ *  RMD_OPENWEIGHT_API_KEY" refusal an UNMAPPED deployment gets: this deployment is NOT READY and
+ *  must never fall back to the default key, which bills a different Azure account. */
+export class CashDeploymentNotReadyError extends RmdError {
+  readonly deployment: string;
+  readonly keyEnv: string;
+  constructor(deployment: string, keyEnv: string) {
+    super("usage", 1, `cash deployment ${JSON.stringify(deployment)} maps to ${keyEnv}, which is unset in the daemon environment`, { deployment, keyEnv });
+    this.name = "CashDeploymentNotReadyError";
+    this.deployment = deployment;
+    this.keyEnv = keyEnv;
+  }
+}
+
 class CashHttpFailure extends RmdError {
   constructor(message: string, readonly status: number, readonly retryAfterMs?: number) {
     super("usage", 1, message, { status, retryAfterMs });
@@ -3637,7 +3653,16 @@ export class OpenWeightAllowanceExhaustedError extends RmdError {
   readonly capUsd: number;
   readonly wantUsd: number;
   readonly resetAt: string;
-  constructor(detail: { committedUsd: number; capUsd: number; wantUsd: number; utcDay: string }) {
+  /** W1-T10384: which limit refused. `fleet` is the shared dailyCapUsd; `foundry-claude` is the
+   *  Foundry Claude sub-cap, which binds below the fleet cap and is the one a Luna rung can outlive. */
+  readonly limit: CashAllowanceLimitName;
+  readonly squeezed: boolean;
+  constructor(detail: { committedUsd: number; capUsd: number; wantUsd: number; utcDay: string; limit?: CashAllowanceLimitName; squeezed?: boolean }) {
+    const limit = detail.limit ?? "fleet";
+    const posture = detail.squeezed === true ? "squeezed" : "normal";
+    const bound = limit === "foundry-claude"
+      ? `foundry-claude cap (FOUNDRY_CLAUDE_DAILY_CAP_USD.${posture}, ${posture} posture)`
+      : `dailyCapUsd (fleet limit, ${posture} posture)`;
     // Kind "usage", the same discriminant `GhReadCadenceRefusal` carries: both are a LIMIT refusing
     // a call that was otherwise well-formed, not a malformed request. Adopting the shared envelope
     // rather than extending `Error` directly is what `test/error-subclass-census.test.ts` asks a new
@@ -3646,16 +3671,21 @@ export class OpenWeightAllowanceExhaustedError extends RmdError {
       "usage",
       1,
       `openweight daily allowance exhausted for ${detail.utcDay}: committed $${detail.committedUsd.toFixed(6)} + ` +
-        `$${detail.wantUsd.toFixed(6)} would exceed the $${detail.capUsd.toFixed(2)} dailyCapUsd`,
-      { committedUsd: detail.committedUsd, capUsd: detail.capUsd, wantUsd: detail.wantUsd, utcDay: detail.utcDay },
+        `$${detail.wantUsd.toFixed(6)} would exceed the $${detail.capUsd.toFixed(2)} ${bound}`,
+      { committedUsd: detail.committedUsd, capUsd: detail.capUsd, wantUsd: detail.wantUsd, utcDay: detail.utcDay, limit, posture },
     );
     this.name = "OpenWeightAllowanceExhaustedError";
     this.committedUsd = detail.committedUsd;
     this.capUsd = detail.capUsd;
     this.wantUsd = detail.wantUsd;
     this.resetAt = openWeightAllowanceReset(detail.utcDay);
+    this.limit = limit;
+    this.squeezed = detail.squeezed === true;
   }
 }
+
+/** The two limits a cash reservation is checked against. */
+export type CashAllowanceLimitName = "fleet" | "foundry-claude";
 
 function openWeightAllowanceReset(day: string): string {
   return fixedClock(Date.parse(`${day}T00:00:00.000Z`) + 24 * 60 * 60 * 1000).iso();
@@ -3696,12 +3726,13 @@ function configuredCashCap(config: Config, squeezed?: boolean): number {
 }
 
 function cashAllowanceLimits(state: OpenWeightAllowanceState, cap: number, deployment: string, squeezed?: boolean) {
-  const limits = [{ committedUsd: openWeightCommittedUsd(state), capUsd: Math.min(cap, state.fleetCapUsd ?? Infinity) }];
+  const limits: { committedUsd: number; capUsd: number; limit: CashAllowanceLimitName }[] =
+    [{ committedUsd: openWeightCommittedUsd(state), capUsd: Math.min(cap, state.fleetCapUsd ?? Infinity), limit: "fleet" }];
   if (isFoundryClaudeDeployment(deployment)) {
     const reservations = Object.fromEntries(Object.entries(state.reservations)
       .filter(([, row]) => row.deployment !== undefined && isFoundryClaudeDeployment(row.deployment)));
     limits.push({ committedUsd: openWeightCommittedUsd({ utcDay: state.utcDay, reservations }),
-      capUsd: squeezed ? FOUNDRY_CLAUDE_DAILY_CAP_USD.squeezed : FOUNDRY_CLAUDE_DAILY_CAP_USD.normal });
+      capUsd: squeezed ? FOUNDRY_CLAUDE_DAILY_CAP_USD.squeezed : FOUNDRY_CLAUDE_DAILY_CAP_USD.normal, limit: "foundry-claude" });
   }
   return limits;
 }
@@ -3841,7 +3872,7 @@ export function reserveOpenWeightBudget(
     }
     for (const limit of limits) {
       if (limit.committedUsd + wantUsd > limit.capUsd)
-        throw new OpenWeightAllowanceExhaustedError({ ...limit, wantUsd, utcDay });
+        throw new OpenWeightAllowanceExhaustedError({ ...limit, wantUsd, utcDay, squeezed: input.squeezed === true });
     }
     return {
       next: { ...state, reservations: { ...state.reservations, [input.requestId]: { reservedUsd: wantUsd, settledUsd: null, deployment: input.deployment } } },
@@ -4009,6 +4040,8 @@ export interface OpenWeightWorkerResult {
   budgetSettledUsd: number;
   budgetRefused: boolean;
   cashAllowanceResetAt?: string;
+  /** W1-T10384: the limit that refused, when `budgetRefused`. */
+  cashAllowanceLimit?: CashAllowanceLimitName;
   externalEffect?: ExternalEffectResult;
 }
 
@@ -4083,7 +4116,11 @@ export interface OpenWeightCheckInput {
 export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = process.env,
   extra: Record<string, string> = {}): Record<string, string> {
   for (const key of Object.keys(extra)) {
-    if (/^(ANTHROPIC_|RMD_(OPENWEIGHT|FOUNDRY_CLAUDE)_API_KEY$|CLAUDE_CODE_OAUTH_TOKEN$|GH_TOKEN$)/i.test(key)) {
+    // W1-T10837: widened to `RMD_CASH_.*_API_KEY$` so a MAPPED deployment's own key (and the
+    // existing shared `CASH_WEB_SEARCH_KEY_ENV`, the same shape) trips this boundary exactly like
+    // the default `RMD_OPENWEIGHT_API_KEY` always has -- design (iv) names the worker environment
+    // as one of the four places a cash key value must never reach.
+    if (/^(ANTHROPIC_|RMD_OPENWEIGHT_API_KEY$|RMD_FOUNDRY_CLAUDE_API_KEY$|RMD_CASH_[A-Z0-9_]*API_KEY$|CLAUDE_CODE_OAUTH_TOKEN$|GH_TOKEN$)/i.test(key)) {
       throw new Error(`openWeightCheckEnv: credential/billing-boundary violation: ${key}`);
     }
   }
@@ -4755,9 +4792,11 @@ export function assertOpenWeightToolBoundary(
  * gap (W1-T3695).
  */
 function openWeightEndpoint(config: Config, model: string): string {
-  // W1-T3607: canonical `cashEndpoint` first, falling back to the deprecated `openweightEndpoint`
-  // spelling so an already-deployed host's config.json need not be hand-edited the moment this ships.
-  const raw = config.workerProviders?.cashEndpoint ?? config.workerProviders?.openweightEndpoint;
+  // W1-T10837: resolves THIS deployment's own endpoint when `workerProviders.cashDeploymentEndpoints`
+  // names it, else W1-T3607's canonical `cashEndpoint` falling back to the deprecated
+  // `openweightEndpoint` spelling -- so an already-deployed host's config.json with no map need not
+  // be hand-edited the moment this ships.
+  const raw = cashDeploymentEndpoint(config, model);
   if (typeof raw !== "string" || raw.trim() === "") throw new Error("cash provider requires workerProviders.cashEndpoint");
   const endpoint = new URL(raw.endsWith("/") ? raw : `${raw}/`);
   if (endpoint.protocol !== "https:") throw new Error("cash endpoint must use https");
@@ -4869,7 +4908,7 @@ function openWeightResult(input: {
     budgetReservedUsd: input.budgetReservedUsd ?? 0,
     budgetSettledUsd: input.budgetSettledUsd ?? 0,
     budgetRefused: input.budgetRefused ?? false,
-    ...(input.error instanceof OpenWeightAllowanceExhaustedError ? { cashAllowanceResetAt: input.error.resetAt } : {}),
+    ...(input.error instanceof OpenWeightAllowanceExhaustedError ? { cashAllowanceResetAt: input.error.resetAt, cashAllowanceLimit: input.error.limit } : {}),
     ...(input.deploymentAbsent ? { openWeightDeploymentAbsent: input.deploymentAbsent } : {}),
     webSearchAttempted: input.webSearchAttempted ?? 0,
     webSearchAccepted: input.webSearchAccepted ?? 0,
@@ -5161,8 +5200,18 @@ export async function spawnOpenWeightWorker(
     const checkEnv = openWeightCheckEnv(args.workerHome, env, args.workerEnv);
     const webSearchConsented = cashWebSearchEnabled(config);
     const tools = openWeightTools(args.tools, webSearchConsented);
-    const key = env[OPENWEIGHT_API_KEY_ENV];
-    if (!key) throw new Error(`openweight provider requires ${OPENWEIGHT_API_KEY_ENV} in the daemon environment`);
+    // W1-T10837: THE ONE RESOLVER, read here for the key (and again below, beside price, for the
+    // endpoint -- see `openWeightEndpoint`). A deployment named in `cashDeploymentEndpoints` is
+    // NOT READY when its own `keyEnv` is unset: it must never borrow the default key, which bills a
+    // different account (design iii), so that case is a DISTINCT, named refusal rather than the
+    // plain "requires RMD_OPENWEIGHT_API_KEY" message an unmapped deployment gets.
+    const cashTarget = cashDeploymentTarget(config, selection.model, env);
+    if (!cashTarget.ok) {
+      if (cashTarget.reason === "no-endpoint") throw new Error("cash provider requires workerProviders.cashEndpoint");
+      if (cashTarget.mapped) throw new CashDeploymentNotReadyError(selection.model, cashTarget.keyEnv);
+      throw new Error(`openweight provider requires ${cashTarget.keyEnv} in the daemon environment`);
+    }
+    const key = cashTarget.key;
     const declaredNames = new Set(tools.map((tool) => String((tool.function as { name?: unknown }).name)));
     const messages: OpenWeightMessage[] = [
       { role: "system", content: OPENWEIGHT_OUTPUT_CONTRACT },
@@ -5426,7 +5475,9 @@ async function brokerCashWebSearch(input: {
   // A declared-but-unusable tool must refuse loudly rather than return an empty result the model
   // would read as "the web knows nothing about this".
   if (!searchKey) throw new Error(`web_search requires ${CASH_WEB_SEARCH_KEY_ENV} in the daemon environment`);
-  const rawEndpoint = input.config.workerProviders?.cashEndpoint ?? input.config.workerProviders?.openweightEndpoint;
+  // W1-T10837: THIS deployment's own endpoint (the search credential itself stays the daemon's
+  // single shared `CASH_WEB_SEARCH_KEY_ENV`, deliberately not per-deployment -- see that const's doc).
+  const rawEndpoint = cashDeploymentEndpoint(input.config, input.model);
   const endpoint = cashWebSearchEndpoint(typeof rawEndpoint === "string" ? rawEndpoint : "", input.model);
   const body = JSON.stringify({ model: input.model, input: query, tools: [{ type: "web_search" }] });
   let reservation: { reservedUsd: number; committedUsd: number; capUsd: number };
