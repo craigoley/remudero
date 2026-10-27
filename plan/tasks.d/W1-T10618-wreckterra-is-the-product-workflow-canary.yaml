@@ -7,7 +7,6 @@
     - W1-T10614
     - W1-T10615
     - W1-T10799
-    - W1-T10823
   priority: 1.1
   type: implement
   verify: auto
@@ -44,9 +43,7 @@
     Precondition added by run PLAN-clarify-1793095322512 for the needs-operator-input refusal on criterion 1. This changes only depends_on; the acceptance is unchanged.
     Settled by lookup: is a real production build path for a target without its own daemon already filed? -> no. It is now W1-T10799, and this task depends on it (plan/tasks.d/W1-T10799-a-daemonless-managed-target-runs-one-bounded-native-job.yaml).
     Settled by lookup: does registryDaemonRoot reach any executor for Wreckterra today? -> no. A repository with no live registry instance yields target_daemon_missing (src/lib/product-build.ts).
-    PR14763's ProductCaseService delegation remains natively owned. The evidence collectors stay in this task. Fixture receipts never count as live Wreckterra success, and first gameplay is still admitted only through signed-in Console C4.
-    Run PLAN-clarify-1793103032747 moved the C3 plan producer and the native-review protocol out to W1-T10823, and this task now depends on it. That run changed only depends_on and this rationale. Acceptance, files, budget and the refusal hold above are unchanged.
-    Settled by lookup: does any existing task already produce or reconcile a native target plan from a saved product brief? -> no. Only this rationale named it, and W1-T10823 now owns it (plan/tasks.d/W1-T10823-a-saved-product-brief-reaches-one-natively-reviewed-target-plan.yaml).
+    PR14763's ProductCaseService delegation remains natively owned. The C3 plan producer, the native-review protocol and the evidence collectors stay in this task. Fixture receipts never count as live Wreckterra success, and first gameplay is still admitted only through signed-in Console C4.
   design: Add a reusable import/adoption case mechanism and executable integration proof using Wreckterra as the first input. Import the user-approved original-IP/mobile-first/solo-network-ready/OSM-fidelity/existing-resource decisions with provenance and existing repository identity. Do not create a duplicate repo or pretend the record already existed. Carry one persisted product ID across adopt, verified onboarding, versioned task plan and actual guarded build request. Rehydrate after each stage and lost response. Store source/local/hosted/review/merge/deploy/mobile evidence separately. The real signed-in Console case is executed after deployment, with its durable receipts, and remains distinct from fixture tests. Mount buildProductCaseRoutes from the existing serve composition; the route builder delegates to the named product operation rather than a test-only seam. For every newly served product operation, declare the authenticated route plus bounded request, response and explicit failure schemas in openapi/daemon.yaml, then regenerate packages/api-client/src/schema.d.ts through the maintained generator. Exercise the assembled HTTP operation with the real default transport and verified-actor guard in the existing test/console-api/serve/product-routes.test.ts, and register that actual proof in test/route-wiring.test.ts. No contract baseline, wiring-debt entry, host-capability waiver, or client-granted verification substitutes for those proofs.
   acceptance:
     - claim: Wreckterra resumes the same product and repository across every stage
