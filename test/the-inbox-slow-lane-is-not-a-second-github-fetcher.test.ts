@@ -132,7 +132,7 @@ function laneWorld(t: TestCtx, time: ReturnType<typeof manualTime>, root = coreR
     pending.shift()?.();
     await settle(before + 1);
   };
-  return { root, stateDir, hold, pass, laneSource };
+  return { root, stateDir, hold, pass, laneSource, logRecords: () => posted.filter((message): message is Extract<SlowLaneMessage, { type: "log" }> => message.type === "log") };
 }
 
 test("the inbox notices an atomic snapshot replacement even when its mtime is unchanged", (t) => {
@@ -299,6 +299,9 @@ test("hand-route feedback reconciliation reuses the existing slow-lane snapshot 
   assert.ok(proposed, "the production default slow-lane unit must reach the real landing queue");
   assert.equal(proposed.status, "accepted");
   assert.equal(proposed.proposal_pr, row.url);
+  const decision = world.logRecords().find(message => message.step === "feedback.hand_route_reconciled")?.extra;
+  assert.equal(decision?.refused, 1, "the unmarked sibling retains a named refusal in the actual slow-lane decision receipt");
+  assert.ok(Array.isArray(decision?.reasons) && decision.reasons.includes("explicit_marker_absent_or_malformed"));
   assert.equal(readFeedbackEntry(root, entry.id).status, "new", "no direct lifecycle mutation before reviewed landing");
   assert.equal(readFeedbackEntry(root, other.id).status, "new");
   await world.pass();
