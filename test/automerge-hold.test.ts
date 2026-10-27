@@ -11,6 +11,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { captureFeedback } from "../src/lib/feedback.js";
 import { LANDING_BRANCH } from "../src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { attemptArmAsync } from "#src/lib/arm-auto-merge.js";
 
 // ── W1-T1000002 ───────────────────────────────────────────────────────────────────────────
 //
@@ -88,6 +89,35 @@ function holdReleasedLine(over: Record<string, unknown> = {}): Record<string, un
     pr_number: PR_NUMBER,
     ...over,
   };
+}
+
+for (const route of ["auto", "direct", "queue", "plan"] as const) {
+  test(`a hold engaged during awaited ${route} admission withholds the final merge effect`, async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const effects: string[] = [];
+    let admissions = 0;
+    const result = await attemptArmAsync(greenPr().prUrl, {
+      ledgerLines: () => lines,
+      say: () => {},
+      contributorAdmission: async () => {
+        await Promise.resolve();
+        if (++admissions === (route === "direct" ? 2 : 1)) lines.push(holdEngagedLine());
+      },
+      armAuto: async () => {
+        if (route === "direct") throw new Error("Pull request is in clean status");
+        effects.push("arm");
+      },
+      mergeDirect: async () => { effects.push("merge"); },
+      enqueue: async () => { effects.push("enqueue"); },
+      mergeQueue: async () => route === "queue",
+      readPlanTouch: async () => route === "plan" ? "touched" : "untouched",
+      readMergeFacts: async () => ({ mergeable: "MERGEABLE", mergeableState: "clean", behindBy: 0 }),
+      updateBranch: async () => ({ ok: true }),
+      isMerged: async () => false,
+    });
+    assert.deepEqual(effects, [], "a completed admission cannot release a newer operator hold");
+    assert.equal(result.outcome, "hold-refused");
+  });
 }
 
 /** A recording fake for every injected sweep effect. */
