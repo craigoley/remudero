@@ -11,11 +11,14 @@
 // any number, and never a real 20-minute wall clock.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { retainFixture } from "#test/setup/retained-fixtures.js";
 import {
   RETRO_PREFLIGHT_STALL_MS,
   RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS,
@@ -23,9 +26,7 @@ import {
   runRetroPrepublishPreflight,
   type RetroPrepublishCommandResult,
   type RetroPrepublishRunner,
-} from "../src/lib/retro-preflight.js";
-
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+} from "#src/lib/retro-preflight.js";
 
 function options(timeout: number, totalBackstopMs?: number, env: NodeJS.ProcessEnv = process.env): Parameters<RetroPrepublishRunner>[2] {
   // Only these synthetic -e scripts are excluded. The importing test process still covers the
@@ -268,4 +269,133 @@ test("W1-T2803: the backstop fires on a chatty run that outruns it, naming the e
   assert.equal((result.error as NodeJS.ErrnoException).code, "ETIMEDOUT");
   assert.match(result.error?.message ?? "", /total backstop/);
   assert.match(result.error?.message ?? "", /elapsed \d+ms/, "the measured elapsed rides beside the bound here too");
+});
+
+async function untilFixture(predicate: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 6_000;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, message);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+
+/** An exact fixture PID probe: a failed ps is UNKNOWN, never permission to remove live scratch. */
+function fixturePidEnded(pid: number): boolean {
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "stat="], {
+    encoding: "utf8", timeout: 1_000, maxBuffer: 4096,
+  });
+  if (!result.error && result.status === 1 && result.stdout.trim() === "") return true;
+  assert.equal(result.error, undefined, "fixture liveness must be readable");
+  assert.equal(result.status, 0, "unknown fixture liveness is not absence");
+  const state = result.stdout.trim();
+  assert.ok(state.length > 0, "the exact PID probe must name its state");
+  return state.startsWith("Z"); // A reparented zombie cannot write or execute further fixture code.
+}
+
+async function nestedWatchdogFixture(mode: "silence" | "total" | "output"): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-retro-owned-group-")), nonce = randomUUID();
+  const actor = join(dir, "actor.cjs"), wrapper = join(dir, "wrapper.cjs");
+  // Private stdio is essential: killing the wrapper must not merely wait for an inherited pipe.
+  // Both actors also have a nonce-bound stop request and finite fallback lifetime under deletion.
+  writeFileSync(actor, `const fs=require('node:fs'),p=require('node:path');
+const [dir,role,nonce]=process.argv.slice(2),file=n=>p.join(dir,role+'.'+n);
+fs.writeFileSync(file('ready.tmp'),JSON.stringify({pid:process.pid,nonce}));
+fs.renameSync(file('ready.tmp'),file('ready'));
+const tick=setInterval(()=>{fs.appendFileSync(file('heart'),'tick\\n');
+ if(fs.existsSync(file('stop'))&&fs.readFileSync(file('stop'),'utf8')===nonce){clearInterval(tick);process.exit(0);}},25);
+setTimeout(()=>{clearInterval(tick);process.exit(0)},6000);`);
+  writeFileSync(wrapper, `const fs=require('node:fs'),p=require('node:path'),{spawn}=require('node:child_process');
+const [dir,actor,nonce,mode]=process.argv.slice(2);
+const child=spawn(process.execPath,[actor,dir,'owned',nonce],{stdio:'ignore',env:process.env});
+child.once('error',()=>process.exit(2));
+const ready=setInterval(()=>{if(!fs.existsSync(p.join(dir,'owned.heart')))return;
+ clearInterval(ready);process.stdout.write('fixture-ready\\n');
+ if(mode==='output')process.stdout.write('x'.repeat(8192));
+ if(mode==='total')setInterval(()=>process.stdout.write('tick\\n'),40);},10);
+setTimeout(()=>process.exit(0),6500);`);
+  const env = { ...process.env, NODE_V8_COVERAGE: "" };
+  const sibling = spawn(process.execPath, [actor, dir, "sibling", nonce], { env, stdio: "ignore", detached: true });
+  let siblingError: Error | undefined;
+  sibling.once("error", error => { siblingError = error; });
+  const siblingClosed = new Promise<void>(resolve => sibling.once("close", () => resolve()));
+  let ownedPid: number | undefined;
+  const readPid = (role: string): number => {
+    const ready = JSON.parse(readFileSync(join(dir, role + ".ready"), "utf8")) as { nonce?: string; pid?: number };
+    assert.equal(ready.nonce, nonce);
+    assert.ok(typeof ready.pid === "number" && Number.isSafeInteger(ready.pid) && ready.pid > 1);
+    return ready.pid;
+  };
+  const heart = (role: string) => readFileSync(join(dir, role + ".heart")).byteLength;
+  try {
+    await untilFixture(() => existsSync(join(dir, "sibling.heart")), "the independent sibling must really start");
+    assert.equal(siblingError, undefined);
+    const result = await runRetroPrepublishCommand(process.execPath, [wrapper, dir, actor, nonce, mode], {
+      ...options(1_500, mode === "total" ? 2_000 : 5_000, env),
+      maxBuffer: mode === "output" ? 1024 : 16 * 1024,
+    });
+    assert.match(result.stdout, /fixture-ready/, "a missing descendant start is not discrimination");
+    ownedPid = readPid("owned");
+    assert.ok(heart("owned") > 0, "the owned descendant must have executed");
+    assert.equal((result.error as NodeJS.ErrnoException | undefined)?.code, mode === "output" ? "ENOBUFS" : "ETIMEDOUT");
+    const ownedAtResult = heart("owned"), siblingAtResult = heart("sibling");
+    await new Promise(resolve => setTimeout(resolve, 250));
+    assert.equal(heart("owned"), ownedAtResult, "the known owned descendant must not keep writing after the result");
+    assert.ok(heart("sibling") > siblingAtResult, "an unrelated sibling must remain live and writing");
+    assert.ok(fixturePidEnded(ownedPid), "a stopped heartbeat alone is not teardown evidence");
+  } finally {
+    // The original/deleted runner leaves its descendant live. Ask only these fixture actors to exit,
+    // then verify exact PIDs before deleting scratch. No foreign PID or inherited group is signalled.
+    try {
+      for (const role of ["owned", "sibling"]) writeFileSync(join(dir, role + ".stop"), nonce);
+      if (ownedPid === undefined) {
+        await untilFixture(() => existsSync(join(dir, "owned.ready")), "unknown owned fixture identity must retain scratch");
+        ownedPid = readPid("owned");
+      }
+      if (ownedPid !== undefined) await untilFixture(() => fixturePidEnded(ownedPid!), "owned fixture did not retire");
+      await siblingClosed;
+      assert.ok(sibling.pid !== undefined && fixturePidEnded(sibling.pid), "sibling fixture must retire before scratch");
+      rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      retainFixture(dir, "retro process replay cleanup is unknown");
+      throw error;
+    }
+  }
+}
+
+test("W1-T10885: the retro watchdog stops its owned descendants without signaling a sibling", async t => {
+  for (const mode of ["silence", "total", "output"] as const) {
+    await t.test(mode, () => nestedWatchdogFixture(mode));
+  }
+});
+
+test("W1-T10885: retro process-group cleanup preserves ordinary results and spawn failures", async () => {
+  const ordinary = await runRetroPrepublishCommand(process.execPath, ["-e", 'process.stdout.write("ordinary");process.stderr.write("warning")'], options(5_000));
+  assert.equal(ordinary.status, 0); assert.equal(ordinary.signal, null); assert.equal(ordinary.error, undefined);
+  assert.equal(ordinary.stdout, "ordinary"); assert.equal(ordinary.stderr, "warning");
+  const failed = await runRetroPrepublishCommand(process.execPath, ["-e", "process.exit(7)"], options(5_000));
+  assert.equal(failed.status, 7); assert.equal(failed.error, undefined);
+  const absent = await runRetroPrepublishCommand(join(tmpdir(), "rmd-absent-" + randomUUID()), [], options(5_000));
+  assert.equal((absent.error as NodeJS.ErrnoException | undefined)?.code, "ENOENT");
+  assert.notEqual(absent.status, 0);
+
+  // The real child catches TERM and exits zero. Its watchdog error must still reach the consumer,
+  // so a nominal exit cannot publish an interrupted run or start a repair against the same bound.
+  let calls = 0, repairs = 0, regenerations = 0;
+  const events: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const outcome = await runRetroPrepublishPreflight({
+    worktreePath: REPO_ROOT, provenance: { model: "fixture", effort: "default", sessionId: "trapped-term" },
+    remotePrExisted: false, repair: async () => { repairs++; }, regenerateHarnessArtifacts: () => { regenerations++; },
+    log: (step, fields) => { events.push({ step, fields }); },
+    deps: { changedFiles: async () => ({ unreadable: "fixture has no PR diff" }), run: async () => {
+      if (++calls === 1) return { status: 0, signal: null, stdout: "test/retro-preflight-bound-fires-on-a-healthy-run.test.ts\n", stderr: "" };
+      const result = await runRetroPrepublishCommand(process.execPath, ["-e", 'process.on("SIGTERM",()=>process.exit(0));process.stdout.write("ready\\n");setTimeout(()=>process.exit(0),4000)'], options(1_000, 5_000));
+      assert.match(result.stdout, /ready/); assert.equal(result.status, 0);
+      assert.equal((result.error as NodeJS.ErrnoException | undefined)?.code, "ETIMEDOUT");
+      return result;
+    } },
+  });
+  assert.equal(outcome.ok, false, "a trapped zero exit cannot turn a watchdog error into publication success");
+  assert.deepEqual({ calls, repairs, regenerations }, { calls: 2, repairs: 0, regenerations: 0 });
+  assert.equal(events.find(x => x.step === "retro.preflight_failed")?.fields.exit_class, "process_timeout");
+  assert.ok(events.some(x => x.step === "retro.preflight_repair_stood_down"));
 });
