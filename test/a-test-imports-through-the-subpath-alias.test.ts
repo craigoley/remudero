@@ -16,8 +16,9 @@ import { test } from "node:test";
 import { LOCATION_RELATIVE_ERE, aliasFor, hasLocationRelativeSpecifier, isTransientTestPath, main as codemodMain, rewriteSource } from "#scripts/test-location-codemod.mjs";
 import { repoRoot } from "#test/helpers/repo-root.js";
 
-// The checkout this file lives in, not the process's working directory (which another test may have moved).
-const ROOT = repoRoot();
+// The git repository the run is in: the W1-T10595 flake screen plants violations in a scratch copy and runs
+// this file there, so the census below must read that repository, not this file's own checkout.
+const ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
 
 function git(args: string[]): string {
   return execFileSync("git", args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
@@ -118,7 +119,8 @@ test("W1-T9864: location-relative test files never rise above the merge base", (
     "a-base-probe-that-contradicts-mains-green-ci-parks-no-pr",
     "a-blocked-task-with-no-disposition-is-reported",
   ].map((name) => `test/${name}.test.ts`);
-  const stillRelative = rewrittenAtBatch1.filter((f) => hasLocationRelativeSpecifier(readFileSync(join(ROOT, f), "utf8")));
+  // The representative files live in this file's checkout; the screen's scratch repository holds only its plants.
+  const stillRelative = rewrittenAtBatch1.filter((f) => hasLocationRelativeSpecifier(readFileSync(join(repoRoot(), f), "utf8")));
   assert.deepEqual(stillRelative, [], "the batch-1 representative tests import through the aliases");
   assert.ok(
     atHead <= atBase,
