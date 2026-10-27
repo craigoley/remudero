@@ -82,6 +82,7 @@ import {
   overlayQueuedFeedback,
   overlayQueuedFeedbackEntries,
   queuedFeedbackLandings,
+  queuedFeedbackDir,
   readQueuedFeedbackRecords,
   type LandFeedbackOpts,
   type QueuedFeedbackRecord,
@@ -573,6 +574,12 @@ export interface FeedbackReplyInput {
   origin: FeedbackOrigin;
 }
 
+/** Byte identity for the pending evidence read before the asynchronous canonical lookup. */
+export function feedbackReplyQueueFingerprint(stateRoot: string): string {
+  return createHash("sha256").update(JSON.stringify(queuedFeedbackLandings(stateRoot)
+    .map(rel => [rel, readFileSync(join(queuedFeedbackDir(stateRoot), basename(rel)))]))).digest("hex");
+}
+
 /**
  * W1-T8511: the reply half of POST /v1/feedback, factored out so an operator's GitHub reply on a
  * feedback GRILL issue (lib/escalation-answers.ts) answers the record through the SAME writes the
@@ -584,7 +591,16 @@ export interface FeedbackReplyInput {
 export function captureFeedbackReply(
   deps: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
   input: FeedbackReplyInput,
+  qualified?: { target?: FeedbackEntry; queueFingerprint: string },
 ): { entry: FeedbackEntry; landingError?: string } {
+  if (qualified !== undefined) {
+    if (feedbackReplyQueueFingerprint(deps.inboxRoot) !== qualified.queueFingerprint) {
+      throw new Error("feedback reply queue changed before capture");
+    }
+    if (qualified.target !== undefined && (qualified.target.id !== input.replyTo || qualified.target.status !== "grilling")) {
+      throw new Error("feedback reply canonical target changed before capture");
+    }
+  }
   const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
   const land = { stateRoot: deps.inboxRoot };
   const entry = captureFeedback(deps.root, {
@@ -601,7 +617,9 @@ export function captureFeedbackReply(
     const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
     const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
     if (input.replyTo !== undefined) {
-      setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id, ...(deps.feedbackLand ? { land } : {}) });
+      setFeedbackStatus(deps.root, input.replyTo, "answered", {
+        answeredBy: entry.id, baseEntry: qualified?.target, ...(deps.feedbackLand ? { land } : {}),
+      });
     }
     const inQueue = new Set(queuedFeedbackLandings(deps.inboxRoot));
     const unqueued = [entry.id, ...flipped].map(feedbackEntryRepoPath).filter((rel) => !inQueue.has(rel));

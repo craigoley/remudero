@@ -51,6 +51,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { parse as parseYaml } from "yaml";
 import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghTextAsync } from "./github-transport.js";
 import { appendLedger, type LedgerWriterDeps } from "./ledger.js";
@@ -59,9 +61,9 @@ import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { contributionOriginFromRest, feedbackContentDigest, observeFeedbackSource, readAdmissionRestAsync,
   type AdmissionRead, type AdmissionSettings, type FeedbackAdmissionSubject } from "./contributor-admission.js";
 import { openLedgerUnion } from "./ledger-union.js";
-import { captureFeedbackReply, replyRefusalFor, type PanelGraphDeps } from "./panel-graph.js";
-import { feedbackEntryRepoPath, findFeedbackBySubmissionKey } from "./feedback.js";
-import { readQueuedFeedbackRecords } from "./feedback-landing.js";
+import { captureFeedbackReply, feedbackReplyQueueFingerprint, replyRefusalFor, type PanelGraphDeps } from "./panel-graph.js";
+import { feedbackEntryRepoPath, findFeedbackBySubmissionKey, isValidFeedbackOrigin, type FeedbackEntry } from "./feedback.js";
+import { readQueuedFeedbackRecords, type QueuedFeedbackRecord } from "./feedback-landing.js";
 import {
   ASK_TYPE_LABEL,
   escalationTaskId,
@@ -381,6 +383,17 @@ export function pickFeedbackAnswer<T extends { namesOption: boolean }>(answers: 
   return answers.find((a) => a.namesOption) ?? answers[0];
 }
 
+function unchangedQueuedCapture(id: string, queued: QueuedFeedbackRecord, canonical: FeedbackEntry | undefined): boolean {
+  if (queued.status !== "new" || queued.proposal_pr != null || queued.summary != null || queued.answered_by != null
+    || canonical?.id !== id || canonical.status !== "grilling" || canonical.answered_by != null
+    || typeof canonical.ts !== "string" || typeof canonical.raw !== "string"
+    || !Array.isArray(canonical.attachments) || !canonical.attachments.every(item => typeof item === "string")
+    || typeof canonical.origin !== "string" || !isValidFeedbackOrigin(canonical.origin)) return false;
+  const capture = (record: object) => Object.fromEntries(Object.entries(record)
+    .filter(([key]) => !["status", "proposal_pr", "summary", "answered_by"].includes(key)));
+  return isDeepStrictEqual(capture(queued), capture(canonical));
+}
+
 /**
  * W1-T8511: apply the picked operator answer to the grilled feedback record through the console's own reply writer
  * ({@link captureFeedbackReply}). Only a record still `grilling` is touched (design step 7): a queued record is read
@@ -388,6 +401,8 @@ export function pickFeedbackAnswer<T extends { namesOption: boolean }>(answers: 
  * otherwise moved record gets no write at all. The answer's origin is the reply's `submission_key`, so a second pass
  * finds it and writes nothing (design step 3). Returns the ledger row to write: `feedback_applied` on a write,
  * `feedback_unreadable` when a store could not be read, and undefined when there is nothing to apply.
+ * W1-T10789: an unchanged queued capture at `new` may follow canonical `grilling`; queued decisions
+ * remain authoritative, and the writer rechecks the queue's byte identity before capturing a reply.
  */
 async function applyGrilledFeedbackAnswer(
   feedback: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
@@ -400,12 +415,17 @@ async function applyGrilledFeedbackAnswer(
   if (feedbackId === undefined || picked === undefined) return undefined;
   const base = { task_id: taskId, feedback_id: feedbackId, origin: picked.origin, issue_url: issue.url };
   try {
+    const queueFingerprint = feedbackReplyQueueFingerprint(feedback.inboxRoot);
     const queued = readQueuedFeedbackRecords(feedback.inboxRoot);
     const queuedRecord = queued.get(feedbackEntryRepoPath(feedbackId));
-    if (queuedRecord !== undefined && queuedRecord.status !== "grilling") return undefined;
+    if (queuedRecord !== undefined && !["new", "grilling"].includes(queuedRecord.status)) return undefined;
     // The route's own status read, fed origin/main's blob read off the loop (a rejection reads as unreadable).
     const mainBlob = await hostWorktreeGitAsync(feedback.root, ["show", `origin/main:${feedbackEntryRepoPath(feedbackId)}`])
       .catch((error: unknown) => ({ unreadable: error }));
+    const canonical = typeof mainBlob === "string" ? parseYaml(mainBlob) as FeedbackEntry | undefined : undefined;
+    if (queuedRecord?.status === "new" && !unchangedQueuedCapture(feedbackId, queuedRecord, canonical)) {
+      throw new Error("queued capture lacks unchanged canonical grilling evidence");
+    }
     if (replyRefusalFor(feedback.root, feedbackId, queued, () => {
       if (typeof mainBlob !== "string") throw mainBlob.unreadable;
       return mainBlob;
@@ -413,7 +433,7 @@ async function applyGrilledFeedbackAnswer(
     if (findFeedbackBySubmissionKey(feedback.root, picked.origin, feedback.inboxRoot)) return undefined;
     const { entry, landingError } = captureFeedbackReply(feedback, {
       text: picked.text, replyTo: feedbackId, submissionKey: picked.origin, origin: "issue",
-    });
+    }, { target: queuedRecord?.status === "grilling" ? queuedRecord as unknown as FeedbackEntry : canonical, queueFingerprint });
     return { ...base, step: "escalation_answer.feedback_applied", reply_id: entry.id, answer: picked.text,
       ...(landingError === undefined ? { landing: "queued" } : { landing_error: landingError }) };
   } catch (error) {

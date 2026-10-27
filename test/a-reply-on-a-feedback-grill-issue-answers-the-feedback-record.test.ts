@@ -8,12 +8,13 @@
 // (`captureFeedbackReply`), once, only while it is still grilling, picking the option-naming reply, for any id shape.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { stringify as stringifyYaml, parse as parseYaml } from "yaml";
-import { renderIssueBody, type Escalation, type OpenIssue } from "../src/lib/escalate.js";
+import { renderIssueBody, type Escalation, type OpenIssue } from "#src/lib/escalate.js";
 import {
   ghEscalationAnswerGateway,
   grilledFeedbackId,
@@ -21,13 +22,13 @@ import {
   readEscalationAnswers,
   type EscalationAnswerGateway,
   type EscalationIssueComment,
-} from "../src/lib/escalation-answers.js";
-import { listFeedback, type FeedbackEntry } from "../src/lib/feedback.js";
-import { overlayQueuedFeedbackEntries } from "../src/lib/feedback-landing.js";
-import { feedbackHasAnswer } from "../src/lib/human-gate.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/escalation-answers.js";
+import { listFeedback, type FeedbackEntry } from "#src/lib/feedback.js";
+import { overlayQueuedFeedbackEntries, queuedFeedbackDir, readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
+import { feedbackHasAnswer } from "#src/lib/human-gate.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const FB_ID = "fb-1789382125003-abdb87";
 
@@ -338,4 +339,167 @@ test("W1-T8511: a stored question answer reaches the record's answered status en
   assert.equal(answered.status, "answered");
   assert.equal(repliesTo(f)[0].raw, `[answer to feedback#${FB_ID}] site-intake`, "the option answer, not the earlier prose");
   assert.ok(feedbackHasAnswer(answered, records(f)));
+});
+
+
+function gitFixture(t: { after(fn: () => void): void }, queuedStatus = "new") {
+  const f = fixture(FB_ID, "new");
+  t.after(() => {
+    for (const dir of [f.root, f.stateRoot, dirname(f.ledgerPath)]) rmSync(dir, { recursive: true, force: true });
+  });
+  const git = (...args: string[]) => execFileSync("git", ["-C", f.root, ...args], {
+    encoding: "utf8", stdio: "pipe",
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+  }).trim();
+  git("init", "-b", "main");
+  git("config", "user.name", "Feedback Fixture");
+  git("config", "user.email", "feedback@example.test");
+  const path = join(f.root, "plan", "feedback", `${FB_ID}.yaml`);
+  const capture = { ...parseYaml(readFileSync(path, "utf8")), submission_key: "capture-10789",
+    contribution: { kind: "issue", source_ref: "fixture/repo#42", admission: { outcome: "admitted", reason: "operator" } },
+    expansion: { claim: "original expansion" }, thread_id: "original-thread", future_metadata: "preserve this too" };
+  writeFileSync(path, stringifyYaml(capture));
+  git("add", ".");
+  git("commit", "-m", "test: capture feedback");
+  const original = git("rev-parse", "HEAD");
+  const canonical = { ...capture, status: "grilling", proposal_pr: "https://github.com/fixture/repo/pull/43",
+    summary: { title: "canonical decision", options: [] } };
+  writeFileSync(path, stringifyYaml(canonical));
+  git("add", ".");
+  git("commit", "-m", "test: grill feedback");
+  git("update-ref", "refs/remotes/origin/main", "HEAD");
+  git("checkout", "--detach", original);
+  mkdirSync(queuedFeedbackDir(f.stateRoot), { recursive: true });
+  const pending = join(queuedFeedbackDir(f.stateRoot), `${FB_ID}.yaml`);
+  writeFileSync(pending, stringifyYaml(queuedStatus === "grilling" ? canonical : { ...capture, status: queuedStatus }));
+  const gateway = { ...gatewayFor(issueFor(14638), [ownerComment(10789, "site-intake")]), operatorLogins: ["craigoley"] };
+  const questions = `${JSON.stringify({ ts: "2026-10-27T01:10:46Z", task: `TRIAGE-${FB_ID}`,
+    answer: "site-intake", origin: "issue#14638:comment:10789" })}\n`;
+  writeFileSync(join(f.root, "plan", "questions.ndjson"), questions);
+  const run = () => readEscalationAnswers(f.root, "RUN-10789", gateway, { ledgerPath: f.ledgerPath, feedback: f.feedback });
+  const target = () => readQueuedFeedbackRecords(f.stateRoot).get(`plan/feedback/${FB_ID}.yaml`)!;
+  return { ...f, git, path, pending, capture, canonical, gateway, questions, run, target };
+}
+
+test("W1-T10789: canonical grilling advances an unchanged older capture exactly once", async (t) => {
+  for (const status of ["new", "grilling"]) {
+    const f = gitFixture(t, status);
+    const source = readFileSync(f.path, "utf8");
+    const history = f.git("log", "--all", "--format=%H");
+    assert.deepEqual(await f.run(), { accepted: 0, ignored: 0, unreadable: 0 });
+    assert.equal(f.target().status, "answered");
+    assert.equal(repliesTo(f).length, 1);
+    assert.equal(f.target().answered_by, repliesTo(f)[0].id);
+    assert.equal(repliesTo(f)[0].submission_key, "issue#14638:comment:10789");
+    const before = snapshot(f);
+    await f.run();
+    assert.deepEqual(snapshot(f), before);
+    assert.equal(appliedRows(f.ledgerPath).length, 1);
+    assert.equal(readFileSync(f.path, "utf8"), source);
+    assert.equal(f.git("log", "--all", "--format=%H"), history);
+    assert.equal(readFileSync(join(f.root, "plan", "questions.ndjson"), "utf8"), f.questions);
+  }
+});
+
+test("W1-T10789: stale or contradictory reply evidence preserves the pending record", async (t) => {
+  const changes: Record<string, unknown>[] = [
+    { raw: "changed" }, { attachments: ["other.png"] }, { contribution: null }, { ts: "other" },
+    { id: "foreign-id" }, { origin: "ui" }, { submission_key: "different-capture" },
+    { thread_id: "different-thread" }, { expansion: null }, { unknown_capture_field: "changed" },
+    { proposal_pr: "newer decision" }, { summary: { title: "newer summary" } }, { answered_by: "other-reply" },
+  ];
+  for (const changed of changes) {
+    const f = gitFixture(t);
+    writeFileSync(f.pending, stringifyYaml({ ...f.capture, ...changed }));
+    const before = snapshot(f);
+    await f.run();
+    assert.deepEqual(snapshot(f), before, JSON.stringify(changed));
+    assert.equal(appliedRows(f.ledgerPath).length, 0);
+  }
+  for (const main of ["missing", "unreadable", "foreign", "changed", "new", "proposed", "accepted", "answered", "rejected"]) {
+    const f = gitFixture(t);
+    if (main === "missing") f.git("update-ref", "-d", "refs/remotes/origin/main");
+    else {
+      const next = main === "foreign" ? { ...f.canonical, id: "foreign" }
+        : main === "changed" ? { ...f.canonical, raw: "changed canonical content" }
+        : { ...f.canonical, status: main };
+      writeFileSync(f.path, main === "unreadable" ? "[invalid YAML" : stringifyYaml(next));
+      f.git("add", ".");
+      f.git("commit", "-m", "test: change canonical evidence");
+      f.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    }
+    const before = snapshot(f);
+    const history = f.git("log", "--all", "--format=%H");
+    await f.run();
+    assert.deepEqual(snapshot(f), before, main);
+    assert.equal(f.git("log", "--all", "--format=%H"), history);
+    assert.equal(appliedRows(f.ledgerPath).length, 0);
+  }
+  for (const location of ["checkout", "queue"]) {
+    const f = gitFixture(t);
+    const dir = location === "checkout" ? dirname(f.path) : dirname(f.pending);
+    writeFileSync(join(dir, "competing.yaml"), stringifyYaml({ ...f.capture, id: "competing", reply_to: FB_ID }));
+    const before = snapshot(f);
+    await f.run();
+    assert.deepEqual(snapshot(f), before);
+    assert.equal(appliedRows(f.ledgerPath).length, 0);
+  }
+  for (const change of ["bytes", "decision", "reply"]) {
+    const drift = gitFixture(t);
+    let reads = 0;
+    let atDrift: Record<string, string> | undefined;
+    const history = drift.git("log", "--all", "--format=%H");
+    Object.defineProperty(drift.feedback, "root", { get() {
+      if (++reads === 2) {
+        if (change === "bytes") writeFileSync(drift.pending, readFileSync(drift.pending, "utf8") + "\n");
+        if (change === "decision") writeFileSync(drift.pending, stringifyYaml({ ...drift.capture, status: "rejected" }));
+        if (change === "reply") writeFileSync(join(dirname(drift.pending), "racing-reply.yaml"),
+          stringifyYaml({ ...drift.capture, id: "racing-reply", reply_to: FB_ID }));
+        atDrift = snapshot(drift);
+      }
+      return drift.root;
+    } });
+    await drift.run();
+    assert.ok(atDrift, "the queue changes after the async canonical read, before capture");
+    assert.deepEqual(snapshot(drift), atDrift, `${change} drift refuses before a reply is created`);
+    assert.equal(drift.git("log", "--all", "--format=%H"), history);
+    assert.equal(appliedRows(drift.ledgerPath).length, 0);
+    assert.ok(readLedgerLines(drift.ledgerPath).some(row => row.step === "escalation_answer.feedback_unreadable"));
+  }
+  const control = gitFixture(t);
+  await control.run();
+  assert.equal(control.target().status, "answered", "unchanged evidence is the positive control");
+});
+
+test("W1-T10789: continuation retains the canonical proposal and source metadata", async (t) => {
+  for (const queuedStatus of ["new", "grilling"]) {
+    const f = gitFixture(t, queuedStatus);
+    await f.run();
+    const reply = repliesTo(f)[0];
+    assert.ok(reply, "the ordinary reply writer captured the continuation");
+    assert.deepEqual(f.target(), { ...f.canonical, status: "answered", answered_by: reply.id });
+    assert.equal(reply.reply_to, FB_ID);
+    assert.equal(reply.origin, "issue");
+    assert.equal(reply.raw, `[answer to feedback#${FB_ID}] site-intake`);
+    assert.equal(reply.submission_key, "issue#14638:comment:10789");
+    assert.equal(readFileSync(f.path, "utf8"), stringifyYaml(f.capture), "source capture and history stay intact");
+  }
+});
+
+test("W1-T10789: current queued decisions and legacy reply callers keep their guards", async (t) => {
+  for (const status of ["answered", "rejected", "proposed", "accepted", "unknown"]) {
+    const f = gitFixture(t, status);
+    const before = snapshot(f);
+    await f.run();
+    assert.deepEqual(snapshot(f), before, `a queued ${status} decision stays authoritative`);
+  }
+  const f = gitFixture(t);
+  const before = snapshot(f);
+  const outsiders = { ...f.gateway, operatorLogins: ["other-operator"] };
+  await readEscalationAnswers(f.root, "RUN-FOREIGN", outsiders, { ledgerPath: f.ledgerPath, feedback: f.feedback });
+  assert.deepEqual(snapshot(f), before, "the new path still refuses unconfigured humans");
+  await readEscalationAnswers(f.root, "RUN-LEGACY", f.gateway, { ledgerPath: f.ledgerPath });
+  assert.deepEqual(snapshot(f), before, "legacy callers without feedback deps still only record answers");
+  await f.run();
+  assert.equal(f.target().status, "answered", "only the configured operator with feedback deps may continue");
 });

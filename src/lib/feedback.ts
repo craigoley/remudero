@@ -1038,6 +1038,8 @@ export function setFeedbackStatus(
     proposalPr?: string;
     land?: LandFeedbackOpts;
     summary?: DecisionSummary | null;
+    /** Canonical entry already qualified by the reply caller; absent retains queue-first behavior. */
+    baseEntry?: FeedbackEntry;
     /** W1-T2278: the id of the entry that just answered THIS one — set ONLY by
      * `buildSubmitFeedbackRoute` in the same call that moves a `grilling` target to
      * `status: "answered"`. `undefined` leaves whatever this entry already had. */
@@ -1049,7 +1051,7 @@ export function setFeedbackStatus(
   }
   // W1-T5628: a queued record is newer than the checkout, and a console capture exists only there.
   const queued = opts.land?.stateRoot === undefined ? undefined : readQueuedFeedbackRecords(opts.land.stateRoot).get(feedbackEntryRepoPath(id));
-  const entry = (queued as unknown as FeedbackEntry | undefined) ?? readFeedbackEntry(root, id);
+  const entry = opts.baseEntry ?? (queued as unknown as FeedbackEntry | undefined) ?? readFeedbackEntry(root, id);
   const updated: FeedbackEntry = {
     ...entry,
     status,

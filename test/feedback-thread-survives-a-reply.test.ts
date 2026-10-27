@@ -1,17 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { fileURLToPath } from "node:url";
-import { dirname } from "node:path";
-import { createService } from "../src/lib/service.js";
-import { buildPanelGraphRoutes, buildSubmitFeedbackRoute, type PanelGraphDeps, type RatifyCliGateway } from "../src/lib/panel-graph.js";
-import { captureFeedback, listFeedback, readFeedbackEntry, setFeedbackStatus, type FeedbackEntry } from "../src/lib/feedback.js";
-import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
-import type { GitHub } from "../src/lib/status.js";
-import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
+import { createService } from "#src/lib/service.js";
+import { buildPanelGraphRoutes, buildSubmitFeedbackRoute, captureFeedbackReply, feedbackReplyQueueFingerprint, replyRefusalFor, type PanelGraphDeps, type RatifyCliGateway } from "#src/lib/panel-graph.js";
+import { captureFeedback, listFeedback, readFeedbackEntry, setFeedbackStatus, type FeedbackEntry } from "#src/lib/feedback.js";
+import type { TraceGithub, TracePrView } from "#src/lib/trace.js";
+import type { GitHub } from "#src/lib/status.js";
+import { landQueuedFeedback } from "#test/helpers/land-queued-feedback.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // ── W1-T2278: a reply is a new item, and the link back to what it answers must be a durable ────
 // field, not only prose inside the reply's own text ─────────────────────────────────────────
@@ -234,9 +233,6 @@ test("POST /v1/feedback stays write-scoped, tier low -- no new tier introduced f
 // operator's behalf" are properties of the WHOLE tree, not just of one request/response pair --
 // proven here by scanning the real source rather than trusting a single exercised path.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
-
 function readSrc(relPath: string): string {
   return readFileSync(join(REPO_ROOT, "src", relPath), "utf8");
 }
@@ -275,4 +271,34 @@ test("the reply-handling branch of buildSubmitFeedbackRoute names no merge, no P
   // The only status this route ever writes explicitly is the reply-close state itself.
   const statusWrites = [...body.matchAll(/setFeedbackStatus\([^,]+,\s*[^,]+,\s*"([a-z]+)"/g)].map((m) => m[1]);
   assert.deepEqual(new Set(statusWrites), new Set(["answered"]));
+});
+
+
+test("legacy reply writers and refusal checks retain their checkout-only behavior", (t) => {
+  const root = tmpRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const target = grillingEntry(root, "legacy caller question");
+  const noMain = () => { throw new Error("no origin/main in this legacy checkout"); };
+  assert.equal(replyRefusalFor(root, target.id, new Map(), noMain), undefined);
+  const { entry } = captureFeedbackReply({ root, inboxRoot: root }, {
+    text: "legacy answer", replyTo: target.id, submissionKey: "legacy-10789", origin: "ui",
+  });
+  assert.equal(entry.reply_to, target.id);
+  assert.equal(readFeedbackEntry(root, target.id).answered_by, entry.id);
+  assert.match(replyRefusalFor(root, target.id, new Map(), noMain)!.refused, /status: answered/);
+});
+
+
+test("a qualified reply refuses a foreign or advanced target before creating its entry", (t) => {
+  const root = tmpRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const target = grillingEntry(root, "canonical caller question");
+  const before = listFeedback(root);
+  const queueFingerprint = feedbackReplyQueueFingerprint(root);
+  for (const changed of [{ id: "foreign-target" }, { status: "answered" as const }]) {
+    assert.throws(() => captureFeedbackReply({ root, inboxRoot: root }, {
+      text: "operator answer", replyTo: target.id, submissionKey: "qualified-10789", origin: "issue",
+    }, { target: { ...target, ...changed }, queueFingerprint }), /canonical target changed/);
+    assert.deepEqual(listFeedback(root), before);
+  }
 });
