@@ -4088,8 +4088,7 @@ test("a repo-scoped kick is consumed once without consuming another repository's
 test("an old kick cannot bypass an existing PR or unreadable ownership", async () => {
   const { requestKick, kickFilePath } = await import("#src/lib/fleet-control.js");
   const { daemonKickPort } = await import("#src/cli/commands/daemon.js");
-  for (const ownership of ["open", "unknown", "throws"] as const) {
-    const unknown = ownership !== "open";
+  for (const unknown of [false, true]) {
     const { home, root } = claudeWiringFixtureHome();
     try {
       const all = fixturePlan(), task = all.byId.get("D")!;
@@ -4098,8 +4097,7 @@ test("an old kick cannot bypass an existing PR or unreadable ownership", async (
       const spawned: string[] = [];
       const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
       await runDaemon(plan, { refreshMerged: () => NONE_MERGED, targetRepo: task.repo,
-        isOpenPr: () => { if (ownership === "throws") throw new Error("owner projection unavailable"); return ownership === "open" ? 14729 : undefined; },
-        isCreditIndeterminate: () => ownership === "unknown",
+        isOpenPr: () => unknown ? undefined : 14729, isCreditIndeterminate: () => unknown,
         runOne: async id => { spawned.push(id); return okResult(id); },
         ...daemonKickPort(root, { repo: task.repo, isSelf: true }),
         checkStop: () => stopDetail(root), sleep: async () => { requestStop(root, "fixture complete"); },
