@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
@@ -276,4 +276,42 @@ test("W1-T10750: an escalation opens one operator issue and recovery closes it",
   assert.match(closed[0].comment, /Loose objects 6000 -> 120/);
   assert.deepEqual(open, [], "no issue stays open after recovery");
   assert.equal(calls.length, 3);
+});
+
+test("W1-T10750: boot evidence takes the earliest FRESH receipt of another instance and refuses a malformed one", () => {
+  const store = gitRepo({ kind: "maintenance-boot-receipts" });
+  const gitDir = join(store.dir, ".git");
+  const receipts = join(gitDir, maintenance.BOOT_RECEIPT_DIR);
+  const wall = Date.now();
+  const opts = { now: wall, host: HOST, freshMs: 60000 };
+  const own = maintenance.bootEvidenceFor(gitDir, opts);
+  assert.ok(Number.isFinite(own), "with no receipt directory the evidence is this namespace's own boot");
+
+  // This instance's own receipt is skipped; another instance's fresh receipt is honoured; a stale one is not.
+  plant(join(receipts, HOST), JSON.stringify({ boot: 1000 }), new Date(wall));
+  plant(join(receipts, "stale-host"), JSON.stringify({ boot: 2000 }), new Date(wall - 3600000));
+  assert.equal(maintenance.bootEvidenceFor(gitDir, opts), own, "own and stale receipts do not move the evidence");
+  plant(join(receipts, "fresh-host"), JSON.stringify({ boot: 5000 }), new Date(wall));
+  assert.equal(maintenance.bootEvidenceFor(gitDir, opts), 5000, "a fresh receipt earlier than this boot is the earliest start");
+  plant(join(receipts, "later-host"), JSON.stringify({ boot: own + 1e9 }), new Date(wall));
+  assert.equal(maintenance.bootEvidenceFor(gitDir, opts), 5000, "a later start never raises the evidence");
+
+  // A written receipt round-trips through the reader as another instance's boot.
+  rmSync(receipts, { recursive: true });
+  maintenance.writeBootReceipt(gitDir, "written-host", wall);
+  assert.equal(maintenance.bootEvidenceFor(gitDir, { ...opts, host: "elsewhere" }), own, "the written receipt is read back");
+
+  plant(join(receipts, "broken-host"), JSON.stringify({ boot: "not a number" }), new Date(wall));
+  assert.throws(() => maintenance.bootEvidenceFor(gitDir, opts), /boot receipt broken-host unreadable/);
+});
+
+test("W1-T10750: prune inputs name a worktree with no gitdir file or an unreadable one rather than skip it", async () => {
+  const store = gitRepo({ kind: "maintenance-worktree-unreadable" });
+  const worktrees = join(store.dir, ".git", "worktrees");
+  const inputs = maintenance.fleetPruneInputs(join(store.dir, "no-inflight"), join(store.dir, "no-scratch"));
+  mkdirSync(join(worktrees, "ghost"), { recursive: true });
+  await assert.rejects(inputs(store.dir), /worktree ghost has no gitdir file/, "a missing gitdir file is named, not read as no consumer");
+  rmSync(join(worktrees, "ghost"), { recursive: true });
+  writeFileSync(join(worktrees, "blocked"), "a file where a worktree directory belongs\n");
+  await assert.rejects(inputs(store.dir), /ENOTDIR/, "an error other than a missing file propagates");
 });
