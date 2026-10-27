@@ -162,6 +162,13 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
       ...options,
       spawn: async (args) => {
         if (++resumedCalls === 1) return worker("RECON REPORT\nOBSERVED: restored checkpoint\n");
+        if (mainMoves === "conflict") {
+          assert.match(readFileSync(join(args.cwd, "src/change.ts"), "utf8"), /^<{7} /m, "the resumed worker meets main's merge conflict");
+          assert.match(args.prompt, /src\/change\.ts/, "the prompt names the conflicted path");
+          writeFileSync(join(args.cwd, "src/change.ts"), "export const value = 42;\n");
+          seed.git("-C", args.cwd, "add", "src/change.ts");
+          seed.git("-C", args.cwd, "commit", "--no-edit");
+        }
         const restored = await import(pathToFileURL(join(args.cwd, "src/change.ts")).href);
         assert.equal(restored.value, 42, "the resumed worker sees the checkpoint's exported value");
         if (mainMoves === "clean") assert.equal(existsSync(join(args.cwd, "src/sibling.ts")), true, "the resumed worker builds on current main");
@@ -186,9 +193,12 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
     assert.equal(restored?.source_branch, branch);
     assert.equal(restored?.source_head_sha, handoff?.head_sha);
     if (mainMoves === "conflict") {
-      assert.equal(restored?.base, "checkpoint", "a checkpoint main conflicts with resumes on its own base");
+      assert.equal(restored?.base, "main", "W1-T10752: a conflicting main is merged, never left behind");
+      assert.equal(restored?.reconciled, "merge");
       assert.deepEqual(restored?.main_conflicts, ["src/change.ts"]);
       assert.equal(restored?.restored_head_sha, handoff?.head_sha);
+      const resolved = origin.git("rev-list", "--parents", "-1", branchOfResume).trim().split(" ").slice(1);
+      assert.deepEqual(resolved, [String(handoff?.head_sha), seed.git("rev-parse", "HEAD").trim()], "the worker's commit completes the merge with both parents");
     }
     if (mainMoves === "clean") {
       assert.equal(restored?.base, "main");
@@ -231,7 +241,7 @@ test("a restart arriving during checkpoint judgment still prevents a resumed wor
   await boundaryRun(t, "checkpoint", false, false, undefined, true);
 });
 
-test("a restored checkpoint main conflicts with resumes on its own base instead of ending the run", async (t) => {
+test("a restored checkpoint main conflicts with is merged with main and its worker resolves it instead of ending the run", async (t) => {
   await boundaryRun(t, "checkpoint", false, true, undefined, false, { mainMoves: "conflict" });
 });
 

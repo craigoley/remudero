@@ -5175,6 +5175,55 @@ function satelliteNodeModulesSource(repoDir: string, worktreePath: string, opts:
   }
 }
 
+/** W1-T10752: what {@link reprovisionWorktreeDependencies} did. `unchanged` means the linked tree already carries this checkout's
+ *  own install inputs; `failed` names the stage and the link that was left in place (always ledgered, never silent). */
+export type ReprovisionOutcome =
+  | { kind: "unchanged"; hash: string }
+  | { kind: "reprovisioned"; fromHash: string; toHash: string; nodeModules: string }
+  | { kind: "failed"; fromHash: string; toHash: string; stage: string; reason: string };
+
+/** W1-T10752: make a worktree's `node_modules` the tree keyed by THIS checkout's own `package.json` + `package-lock.json`.
+ *  A worktree is provisioned for the lockfile it was cut with; a restored checkpoint (or a worker edit) moves HEAD onto another,
+ *  and a tree pinned to the old one fails every proof as "installed Vitest does not match the checkout lockfile pin". Reads
+ *  {@link hashInstallInputs} of the worktree now, and when the link's own hash differs, provisions that hash through the same
+ *  {@link provisionDependencyTree} path and lock as worktree-add, then replaces the symlink. Never installs into the worktree,
+ *  never removes a real `node_modules` directory, and ledgers `deps.reprovisioned` or, on a provisioning failure, the same
+ *  `deps.install_failed` row the add path writes (the old link stays and the row says so). */
+export function reprovisionWorktreeDependencies(
+  repoDir: string,
+  worktreePath: string,
+  reason: string,
+  opts: WorktreeAddDepsArg = {},
+): ReprovisionOutcome {
+  const dest = join(worktreePath, "node_modules");
+  const toHash = hashInstallInputs(worktreePath);
+  const linked = lstatSync(dest, { throwIfNoEntry: false });
+  const fromHash = linked ? linkedInstallInputsHash(dest) : "";
+  if (fromHash === toHash) return { kind: "unchanged", hash: toHash };
+  const name = readPackageName(worktreePath);
+  const failed = (stage: string, why: string): ReprovisionOutcome => {
+    opts.log?.("deps.install_failed", { package: name.kind === "named" ? name.name : undefined, worktreePath, stage, reason: why,
+      fallback: linked ? dest : null, reprovision: reason, from_hash: fromHash, to_hash: toHash });
+    return { kind: "failed", fromHash, toHash, stage, reason: why };
+  };
+  if (name.kind !== "named") return failed("package_name", name.kind === "unreadable" ? name.error : "package.json names no package");
+  if (linked && !linked.isSymbolicLink()) return failed("not_a_link", `${dest} is a real directory; refusing to replace it`);
+  let tree: string;
+  try {
+    tree = realpathSync(provisionDependencyTree(repoDir, worktreePath, name.name, opts));
+  } catch (e) {
+    return failed((e as { depsStage?: string } | null)?.depsStage ?? "unexpected", String((e as Error)?.message ?? e));
+  }
+  try {
+    if (linked) unlinkSync(dest);
+    symlinkSync(tree, dest, "dir");
+  } catch (e) {
+    return failed("relink", String((e as Error)?.message ?? e));
+  }
+  opts.log?.("deps.reprovisioned", { package: name.name, worktreePath, from_hash: fromHash, to_hash: toHash, reason, node_modules: tree });
+  return { kind: "reprovisioned", fromHash, toHash, nodeModules: tree };
+}
+
 /** Is `glob` a workspace pattern this repo's workspace-linking is willing to read? Only a normalized relative path
  * (`apps/dashboard`) or that SAME shape with exactly one trailing wildcard segment (`apps/*`) qualifies — never an absolute
  * path, a `..` segment anywhere, a bare/embedded `*` mid-segment, or a recursive glob (`apps/**`). This is the boundary the
