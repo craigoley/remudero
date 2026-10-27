@@ -330,3 +330,11 @@ test("sweep comment recovery refuses extra bytes owners missing evidence and an 
     assert.deepEqual(qualifiedRunTaskLayoutSplit(f.base, f.current), {});
   }
 });
+
+
+test("the committed sweep module restores the exact operator-approved mounts comment", () => {
+  const actual = spawnSync("git", ["cat-file", "blob", "HEAD:src/cli/commands/sweep.ts"], { cwd: REPO_ROOT, encoding: "utf8" });
+  assert.equal(actual.status, 0, `the committed sweep module must be readable: ${actual.stderr}`);
+  assert.ok(actual.stdout.split("\n").some(line => line.trim() ===
+    "// try/catch inside the rung; never mutates `.remudero/mounts.yaml` itself."));
+});

@@ -3594,7 +3594,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     const gateFailuresNow: ActionableGateFailure[] | undefined =
       currentMergeConflict === undefined && !noReviewYet && unmet.length === 0
         ? strikes === 0 && opts.actionableGateFailures !== undefined
-          ? opts.actionableGateFailures
+          ? // W1-T10574: re-filter the seed through the single-form producer so an unfixable-in-place
+            // reason (rule 15 / entanglement) never reaches the pre-strike dispatch.
+            actionableGateFailuresFromReasons(opts.actionableGateFailures.map((f) => f.reason))
           : actionableGateFailuresFromReasons(reviewLedgerReasons(review))
         : undefined;
 

@@ -4803,15 +4803,17 @@ export function branchPrTitle(worktreePath: string, task?: { id: string; title?:
   return runTaskCommandHelpers(runTaskCommandHost()).branchPrTitle(worktreePath, task);
 }
 
-/** Where {@link restoreBoundaryCheckpoint} left a fresh run's branch: on current main, or on the checkpoint's
- *  own base when main conflicts with it (naming those paths, or why the merge could not be read). */
+/** Where {@link restoreBoundaryCheckpoint} left a fresh run's branch: on current main, or on the checkpoint with main's
+ *  conflicting merge open (`reconciled: "merge"`, naming those paths, or why the merge could not be read). */
 
 /**
  * A restart checkpoint is RESTORED BY MERGE, never replayed: the fresh branch becomes the checkpoint's
  * head with current main merged in (the checkpoint is the first parent, so its commits keep their shas).
- * When main conflicts, the branch stays on the checkpoint's own base and the run goes on; the conflict
- * reaches the PR, whose merge-conflict repair rounds resolve it. Why: a cherry-pick onto a moved main
- * conflicted and ended W1-T7806 and W1-T7766 `restart_checkpoint_restore_failed`, stranding paid work.
+ * When main conflicts, main is merged for real (`--no-commit`) and the conflict stays in the worktree for the worker
+ * to resolve (W1-T10752); the run never resumes on the checkpoint's own stale base. A checkpoint whose changes main
+ * already carries (tree-equal, blobs-equal, or this task credited on a later main commit) is dropped as superseded and
+ * the run starts from main. Why: a cherry-pick onto a moved main conflicted and ended W1-T7806 and W1-T7766
+ * `restart_checkpoint_restore_failed`, stranding paid work, and a stale base later failed CONSOLE-T127's PR open.
  * An absent head is recovered or dropped; a moved head still refuses replay of someone else's work.
  */
 export async function restoreBoundaryCheckpoint(
@@ -27168,7 +27170,7 @@ export function issueRevalidationRunTaskPorts(
     reconcile?: Pick<NonNullable<Parameters<typeof buildEscalationReconcileCandidates>[5]>, "github" | "evidenceRootFor" | "creditIo">;
     spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"];
   } = {},
-): Pick<IssueRevalidationPorts, "hasReferent" | "referentVerdicts"> & { judgeText: (prompt: string, issueNumber: number) => Promise<string> } {
+): Pick<IssueRevalidationPorts, "hasReferent" | "referentVerdicts"> & { judgeText: ReturnType<typeof issueRevalidationJudgeText> } {
   const { owner, repo, repoRoot, stateDir, log } = ctx;
   let plan: Plan | undefined;
   const planNow = (): Plan => (plan ??= (seams.loadPlan ?? (() => loadPlan(resolveRepoLayout(repoRoot).planMonolith)))());
@@ -27192,10 +27194,10 @@ export function issueRevalidationRunTaskPorts(
         return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open` }];
       }));
     },
-    judgeText: (prompt, issueNumber) => {
+    judgeText: (prompt, issueNumber, observe) => {
       const mounts = loadMounts(mountsPath(repoRoot));
       return issueRevalidationJudgeText({ mount: mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), cwd: repoRoot,
-        settingsFile: join(repoRoot, "settings", "worker.json"), spawn: seams.spawn })(prompt, issueNumber);
+        settingsFile: join(repoRoot, "settings", "worker.json"), spawn: seams.spawn })(prompt, issueNumber, observe);
     },
   };
 }
@@ -30946,7 +30948,7 @@ export async function resumeForMissingCommitLine(
 export function requiredCompanions(
   sha: string,
   leftOut: readonly string[],
-  git: (args: string[]) => string,
+  git: (args: string[], options?: Pick<HostWorktreeGitOptions, "maxBuffer">) => string,
 ): RequiredCompanion[] {
   return runTaskCommandHelpers(runTaskCommandHost()).requiredCompanions(sha, leftOut, git);
 }
@@ -30967,7 +30969,7 @@ export async function askScopeForLeftOutImports(input: {
   taskId: string;
   branch: string;
   commit: { sha: string; undeclared: readonly string[] } | undefined;
-  git: (args: string[]) => string;
+  git: (args: string[], options?: Pick<HostWorktreeGitOptions, "maxBuffer">) => string;
   amend: (request: ScopeAmendmentRequest) => ScopeAmendmentOutcome | Promise<ScopeAmendmentOutcome>;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }): Promise<{ companions: RequiredCompanion[]; amendment: ScopeAmendmentOutcome } | undefined> {

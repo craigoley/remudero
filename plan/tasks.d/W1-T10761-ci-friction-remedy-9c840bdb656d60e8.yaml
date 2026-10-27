@@ -3,10 +3,11 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   risk: low
-  priority: 1.13
-  status: queued
+  status: blocked
+  retirement: closed
+  # backlog gardener: retirement evidence=9c778199fdb56f5c
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/census-discovery-is-blind-to-a-second-idiom.test.ts"
@@ -60,13 +61,3 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
-  risk_ruling:
-    verdict: "low"
-    action: proceed
-    confidence: 0.8
-    reasons:
-      - "The declared files are src/lib/ci-parity.ts and a new test under test/ci/parity/. Both are ordinary source and test files, and nothing in the description or files list touches secrets, auth, permissions, merge/deploy policy, or data deletion."
-      - "The task targets a CI test flake (a census-discovery test failing repeatedly). The acceptance criterion is a unit test, so it can be verified. The change is reversible and will still go through CI and review."
-      - "The new test file is absent at base, which is expected for an implement task that has not been built yet. The family track record (Beta mean 0.73) is moderate and not alarming. No operator-only decision is requested."
-    judged_at: "2026-10-26T22:10:12.691Z"
-    pin: "05c0ccc032c3821a7f78ff688d9d1005643a8152dc6d265ac8b287d9ee388476"
