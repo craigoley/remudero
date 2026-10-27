@@ -229,7 +229,7 @@ test("the DEFAULT leaves really shell out to gh — argv, JSON parse and the edi
   }
 });
 
-test("a body edited between the read and the write is never written over", () => {
+test("the acceptance normalize writes nothing when its pre-write re-read finds the body changed", () => {
   // The interleaving: the harness reads the body at T, a person edits it at T+1, the harness would PATCH at T+2.
   const r = recorder();
   const reads = [DIVERGING_BODY, `${DIVERGING_BODY}\nA note the operator added after the read.\n`];

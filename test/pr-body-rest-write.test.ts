@@ -202,7 +202,7 @@ test("W1-T2948: the change adds no worker dispatch, commit, merge, provider-sele
 
 // ── a read-modify-write never lands over an edit made after its read (2026-10-13, #11216) ────
 
-test("the trailer stamp leaves a body edited after its read untouched", () => {
+test("the trailer stamp writes nothing when its pre-write re-read finds the body changed", () => {
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const written: string[][] = [];
   const reads = ["an existing body", "an existing body\n\nA line the operator added after the stamp read it."];
@@ -220,7 +220,7 @@ test("the trailer stamp leaves a body edited after its read untouched", () => {
   assert.equal(logs.find((l) => l.step === "trailer_stamp.raced")?.extra?.task_id, "W1-T2948");
 });
 
-test("the baked-closure catalog leaves a body edited after its read untouched", () => {
+test("the baked-closure catalog writes nothing when its pre-write re-read finds the body changed", () => {
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const edits: string[] = [];
   const reads = ["prose\n\nRemudero-Task: W1-T2948\n", "prose, edited by a person\n\nRemudero-Task: W1-T2948\n"];
