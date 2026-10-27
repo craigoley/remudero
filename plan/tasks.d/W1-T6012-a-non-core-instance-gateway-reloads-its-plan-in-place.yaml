@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "2026-10-06 core-console architecture plan backlog E8 (P0-LOOP: non-core instance gateways loadPlan once at boot)"
   plan_refs: [W1-T4228, W1-T4481, W1-T4906, W1-T5060]
-  files: [src/lib/instance-gateway.ts, test/a-non-core-instance-gateway-reloads-its-plan-in-place.test.ts]
+  files: [src/lib/instance-gateway.ts, src/lib/board.ts, test/console-api/serve/a-non-core-instance-gateway-reloads-its-plan-in-place.test.ts]
   status: queued
   priority: 3
   attempts: 0
@@ -31,9 +31,20 @@
     core. A failed re-parse keeps the last good plan and logs `serve.instance_plan_reload_failed` naming the
     instance; a successful one logs `serve.instance_plan_reloaded`. An instance whose BOOT parse failed still
     answers 503 until a later parse succeeds.
+    Qualification boundary: loaded plan identity is not remote freshness. The October27 read-only comparison found Serve on Console checkout 2b91e906 with179tasks while the actual Console daemon was on249c7f40 with216tasks. Reloading the same old mounted checkout cannot repair that separate mount/source-origin mismatch. Keep it an explicit operational readiness dependency; this task cannot fetch, pull, remap, restart, select another registry, or silently borrow a daemon code tree.
+    Publication barrier: recheck the same plan-source identity before publishing a replacement. Resolve this instance repository and configured plan path once, capture its monolith and complete shard identity, parse only that source, and reject identity changes or unreadable source at the final check. A last good plan may remain available as retained evidence; do not describe failed refreshes or missing source as a successful current load. Preserve startup503 until a successful verified load, and source/repository isolation throughout.
+    Recent cache repair: replay only retained recent rows when the plan identity changes. Status already invalidates its plan-keyed memo, but recent activity otherwise permanently skips rows for unknown taskIDs. Keep its bounded retained history and normal unchanged-request incremental behavior; a plan update must not trigger a full rotated-ledger scan, a new measurement store or duplicate GitHub decoration on every render.
+    Legacy work preservation: retain remote WIP 575da92a3d2a3885df2f35730bc233c91e10485e on run-W1-T6012-1791711657759. It is not a merged or qualified implementation. Resolve source ownership and process-tree quiescence through the normal native workflow before implementation; do not overwrite or clear another owner. The prior future root-test declaration moves to its computed console-api/serve folder, with package aliases and shared root helper in new test code; no existing committed test is removed.
+    Default-path controls must use physical temporary sources and the real loader, not only injected fakes. Cover healthy current identity, stale or changing identity, missing and unreadable sources, malformed edits, boot recovery, same-count shard changes, unchanged memo reuse and cross-instance isolation. Remove the reload wiring and independently remove the recent-cache invalidation to demonstrate both regressions. Keep all limits, permissions, routes, write-action checks, read-model switches, provider/budget settings and hosted gates unchanged.
   acceptance:
     - claim: "a task filed in a non-core instance's plan after the gateway was built appears in that instance's /v1/i/<instance>/status board without a serve restart, and an unparseable edit keeps the last good plan and ledgers the failure"
-      proof: "unit test: test/a-non-core-instance-gateway-reloads-its-plan-in-place.test.ts"
+      proof: "unit test: W1-T6012: a current instance plan reloads while malformed changes retain the last good board"
+    - claim: "The real mounted-source default loader detects monolith and shard additions, edits, removals and recovery; an unreadable, missing or concurrently changed source cannot publish a fresh replacement or borrow another repository plan"
+      proof: "unit test: W1-T6012: a changed or unavailable instance plan source never publishes a fresh replacement"
+    - claim: "After a verified plan replacement the same recent route can classify already-retained rows for newly known tasks and updated titles, with unchanged requests remaining incremental and other instances isolated"
+      proof: "unit test: W1-T6012: retained recent activity follows its instance plan identity"
+    - claim: "Concurrent reads share one bounded refresh, repeated failed identities do not create duplicate readers or unbounded diagnostics, and a broken boot recovers only after a verified successful load"
+      proof: "unit test: W1-T6012: instance plan refresh coalesces and recovers without a restart"
   falsifier: |
     Keep the single boot loadPlan: the fixture files a task in the instance plan after building the routes, the
     status board does not list it, and the test fails.
