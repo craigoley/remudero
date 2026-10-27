@@ -716,3 +716,35 @@ test("same-clone async registrations wait without blocking another repository an
     if (refuse) assert.match(String((results[0] as PromiseRejectedResult).reason), /origin\/missing|invalid reference/);
   }
 });
+
+
+test("a fix worktree retries only transient ref-lock fetches within the existing three-attempt bound", async () => {
+  for (const [kind, failures, message, expectedAttempts] of [
+    ["transient", 1, "error: cannot lock ref 'refs/remotes/origin/main': is at abc but expected def", 2],
+    ["persistent", 9, "error: cannot lock ref 'refs/remotes/origin/main': is at abc but expected def", 3],
+    ["permission", 9, "fatal: authentication failed for origin", 1],
+  ] as const) {
+    const branch = `run-fetch-ref-lock-${kind}`;
+    const fx = slowOriginFixture(`fetch-ref-lock-${kind}`, [branch]);
+    try {
+      const attemptsPath = join(fx.root, "fetch-attempts.log");
+      const script = execFileSync("git", ["config", "--file", join(fx.root, "global.gitconfig"), "--get", "remote.origin.uploadpack"], { encoding: "utf8" }).trim();
+      writeFileSync(script, `#!/bin/sh\necho attempt >> '${attemptsPath}'\nn=$(wc -l < '${attemptsPath}')\nif [ "$n" -le ${failures} ]; then\n  echo "${message}" >&2\n  exit 1\nfi\nexec git upload-pack "$@"\n`, { mode: 0o755 });
+      const path = join(fx.worktreesRoot, kind);
+      mkdirSync(fx.worktreesRoot, { recursive: true });
+      if (kind === "transient") {
+        let ticks = 0;
+        const timer = setInterval(() => ticks++, 5);
+        try { await createFixRungWorktree(fx.clone, path, branch); }
+        finally { clearInterval(timer); }
+        assert.ok(ticks > 0, "fetch retry backoff must leave the daemon loop runnable");
+        assert.equal(git(path, "rev-parse", "HEAD"), git(fx.origin, "rev-parse", branch));
+        assert.equal(git(path, "branch", "--show-current"), branch);
+      } else {
+        await assert.rejects(createFixRungWorktree(fx.clone, path, branch), /cannot lock ref|authentication failed/);
+        assert.equal(existsSync(path), false, "failed fetch cannot create a repair worktree");
+      }
+      assert.equal(readFileSync(attemptsPath, "utf8").trim().split("\n").length, expectedAttempts, kind);
+    } finally { fx.cleanup(); }
+  }
+});

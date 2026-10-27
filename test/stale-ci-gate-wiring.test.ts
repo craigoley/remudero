@@ -440,3 +440,35 @@ test("runSweep END TO END with the REAL buildSweepEffects wiring: a genuinely st
   assert.equal(armed.length, 0, "a red required check must never be armed/merged — the gate still holds");
   assert.equal(readLedgerLines(ledger).find((l) => l.step === CI_GATE_REAGGREGATE_STEP), undefined, "nothing was re-driven — nothing to ledger");
 });
+
+
+test("the default async CI rollup preserves independent workflow failures", async () => {
+  const { stillRedRequiredNames } = await import("#src/lib/sweep.js");
+  const workflowPath = `repos/${OWNER}/${REPO}/actions/runs?head_sha=${SHA}&per_page=100`;
+  const read = fakeReadJson({
+    [CHECK_RUNS_PATH]: { check_runs: [
+      { id: 122001248518, name: "ci-gate", status: "completed", conclusion: "failure", started_at: "2026-10-27T03:59:28Z",
+        details_url: "https://github.com/craigoley/remudero/actions/runs/40434301641/job/122001248518" },
+      { id: 122008094124, name: "ci-gate", status: "completed", conclusion: "success", started_at: "2026-10-27T04:22:00Z",
+        details_url: "https://github.com/craigoley/remudero/actions/runs/40449328849/job/122008094124" },
+    ] },
+    [COMBINED_STATUS_PATH]: { statuses: [] },
+    [workflowPath]: { workflow_runs: [{ id: 40434301641, workflow_id: 312964904 }, { id: 40449328849, workflow_id: 313901555 }] },
+  });
+  const rollup = await buildEffects(() => {}, read).readCiGateRollup!(pr());
+  assert.deepEqual(stillRedRequiredNames(["ci-gate"], rollup), ["ci-gate"]);
+  assert.equal(read.calls.filter(args => args[1] === workflowPath).length, 1, "the third shared-reader request must reach the async transport");
+});
+
+test("the async CI reader refuses unavailable and partial workflow identity", async () => {
+  const workflowPath = `repos/${OWNER}/${REPO}/actions/runs?head_sha=${SHA}&per_page=100`;
+  for (const identity of [undefined, {}, { workflow_runs: [] }, { workflow_runs: [{ id: 90, workflow_id: 10 }] }]) {
+    const read = fakeReadJson({
+      [CHECK_RUNS_PATH]: { check_runs: [
+        { name: "ci-gate", status: "completed", conclusion: "failure", started_at: "2026-10-27T03:00:00Z", details_url: "https://github.com/o/r/actions/runs/90/job/91" },
+        { name: "ci-gate", status: "completed", conclusion: "success", started_at: "2026-10-27T04:00:00Z", details_url: "https://github.com/o/r/actions/runs/92/job/93" },
+      ] }, [COMBINED_STATUS_PATH]: { statuses: [] }, [workflowPath]: identity,
+    });
+    assert.equal(await buildEffects(() => {}, read).readCiGateRollup!(pr()), undefined, "unproved identities cannot clear an independent failure");
+  }
+});

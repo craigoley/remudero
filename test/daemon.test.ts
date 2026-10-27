@@ -4038,3 +4038,73 @@ test("W1-T513: the review-key mutex is now cross-call — two concurrent runSwee
       "callers, closing the race this test used to demonstrate was open",
   );
 });
+
+
+test("the real daemon command clears the exact repository-scoped kick marker", async () => {
+  const { requestKick, kickFilePath } = await import("#src/lib/fleet-control.js");
+  const { home, root, planPath } = claudeWiringFixtureHome();
+  const oldHome = process.env.HOME, oldOverride = process.env[CLAUDE_BIN_ENV_OVERRIDE];
+  const priorResolved = claudeExecutableCache.resolved;
+  process.env.HOME = home; process.env[CLAUDE_BIN_ENV_OVERRIDE] = process.execPath; claudeExecutableCache.resolved = undefined;
+  try {
+    const request = requestKick(root, "W1-T10789", "one-scoped-intent", "remudero");
+    requestKick(root, "W1-T10790", "foreign-intent", "console");
+    const loopStub: typeof runDaemon = async (_plan, deps) => {
+      const observed = deps.pendingKicks?.().find(k => k.taskId === request.taskId);
+      assert.equal(observed?.origin, request.origin);
+      deps.clearKick?.(request.taskId, request.repo);
+      assert.equal(existsSync(kickFilePath(root, request.taskId, request.repo)), false, "the native command must forward the captured repository to its real filesystem helper");
+      assert.equal(existsSync(kickFilePath(root, "W1-T10790", "console")), true);
+      return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+    };
+    assert.equal(await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], { runDaemon: loopStub }), 0);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    if (oldOverride === undefined) delete process.env[CLAUDE_BIN_ENV_OVERRIDE]; else process.env[CLAUDE_BIN_ENV_OVERRIDE] = oldOverride;
+    claudeExecutableCache.resolved = priorResolved;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a repo-scoped kick is consumed once without consuming another repository's intent", async () => {
+  const { requestKick, kickFilePath } = await import("#src/lib/fleet-control.js");
+  const { daemonKickPort } = await import("#src/cli/commands/daemon.js");
+  const { home, root } = claudeWiringFixtureHome();
+  try {
+    const plan = fixturePlan(), task = plan.byId.get("D")!;
+    requestKick(root, task.id, "foreign-intent", "console");
+    requestKick(root, task.id, "owned-intent", task.repo);
+    const spawned: string[] = [];
+    await runDaemon(plan, { refreshMerged: () => NONE_MERGED, targetRepo: task.repo,
+      runOne: async id => { spawned.push(id); return okResult(id); },
+      ...daemonKickPort(root, { repo: task.repo, isSelf: true }),
+      sleep: async () => {} }, { headroomEnabled: false, max: 1 });
+    assert.deepEqual(spawned, [task.id]);
+    assert.equal(existsSync(kickFilePath(root, task.id, task.repo)), false);
+    assert.equal(existsSync(kickFilePath(root, task.id, "console")), true);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("an old kick cannot bypass an existing PR or unreadable ownership", async () => {
+  const { requestKick, kickFilePath } = await import("#src/lib/fleet-control.js");
+  const { daemonKickPort } = await import("#src/cli/commands/daemon.js");
+  for (const unknown of [false, true]) {
+    const { home, root } = claudeWiringFixtureHome();
+    try {
+      const all = fixturePlan(), task = all.byId.get("D")!;
+      const plan = { ...all, tasks: [task], byId: new Map([[task.id, task]]) };
+      requestKick(root, task.id, "stale-kick", task.repo);
+      const spawned: string[] = [];
+      const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+      await runDaemon(plan, { refreshMerged: () => NONE_MERGED, targetRepo: task.repo,
+        isOpenPr: () => unknown ? undefined : 14729, isCreditIndeterminate: () => unknown,
+        runOne: async id => { spawned.push(id); return okResult(id); },
+        ...daemonKickPort(root, { repo: task.repo, isSelf: true }),
+        checkStop: () => stopDetail(root), sleep: async () => { requestStop(root, "fixture complete"); },
+        log: (step, extra = {}) => lines.push({ step, extra }) }, { headroomEnabled: false, max: 1 });
+      assert.deepEqual(spawned, []);
+      assert.equal(existsSync(kickFilePath(root, task.id, task.repo)), unknown, "unknown ownership retains the intent; a known existing PR disposes the stale request");
+      assert.ok(lines.some(row => row.step === (unknown ? "console.kick_held" : "console.kick_refused")));
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  }
+});

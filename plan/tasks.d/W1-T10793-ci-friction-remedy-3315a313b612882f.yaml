@@ -1,0 +1,81 @@
+- id: W1-T10793
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/the-affected-suite-reach-ratchet.test.ts cost 35.4 PR minute(s) across 27 round(s) on 26 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.12
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/the-affected-suite-reach-ratchet.test.ts"
+  files:
+    - scripts/census-precheck.mjs
+    - test/ci/gates/ci-friction-remedy-3315a313b612882f.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/the-affected-suite-reach-ratchet.test.ts"
+      proof: "unit test: W1-T10793: check:test:test/the-affected-suite-reach-ratchet.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/the-affected-suite-reach-ratchet.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/the-affected-suite-reach-ratchet.test.ts cost 35.4 PR minute(s) (seven-day half-life) across 27 fix round(s) on 26 pull request(s).
+
+    WHERE IT COMES FROM:
+    - scripts/census-precheck.mjs: test/the-affected-suite-reach-ratchet.test.ts imports it
+    - test/the-affected-suite-reach-ratchet.test.ts: named by the failing check
+    - the rounds name a failing test: test/the-affected-suite-reach-ratchet.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12861 (https://github.com/craigoley/remudero/pull/12861) at 2026-10-19T00:51:11.569Z: ci-log round — ci-shard (1/8): test/the-affected-suite-reach-ratchet.test.ts; ci-shard (3/8): test/the-affected-suite-reach-ratchet.test.ts
+        failing tests: W1-T9413: check:test:test/the-affected-suite-reach-ratchet.test.ts:flaky is prevented, not retried; ["W1-T9413: check:test:test/the-affected-suite-reach-ratchet.test.ts:flaky is prevented, not retried"]
+        log excerpt:
+          | grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-1.log" || : > "$FLAKE_RETRY_DIR/shard-1.log"
+          | not ok 1 - W1-T9413: check:test:test/the-affected-suite-reach-ratchet.test.ts:flaky is prevented, not retried
+          |   ---
+          |   duration_ms: 41.00919
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/ci-friction-remedy-77b0666683c4948a.test.ts:1:383'
+          |   failureType: 'testCodeFailure'
+          |   error: 'the suite edge must be present'
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+          |   expected: true
+          |   actual: false
+          |   operator: '=='
+          |   stack: |-
+    - PR #12793 (https://github.com/craigoley/remudero/pull/12793) at 2026-10-18T16:39:05.793Z: ci-log round — rule-checks: test/the-affected-suite-reach-ratchet.test.ts
+        failing tests: unit test: test/the-affected-suite-reach-ratchet.test.ts
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/the-affected-suite-reach-ratchet.test.ts:1:3747
+          | ✖ unit test: test/the-affected-suite-reach-ratchet.test.ts (3972.459047ms)
+          |   AssertionError [ERR_ASSERTION]: importerCount: 934 > 933; new importers: test/a-booting-daemon-adopts-its-live-run-children.test.ts, test/a-build-run-executes-in-a-detached-child.test.ts, test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts, test/a-codex-routed-repair-worker-commit-is-pushed-and-opened.test.ts, test/a-commit-status-is-not-a-check-run.test.ts, test/a-conflicted-head-gets-its-conflict-round-on-the-light-pass.test
+    - PR #12700 (https://github.com/craigoley/remudero/pull/12700) at 2026-10-18T02:43:22.065Z: ci-log round — rule-checks: test/the-affected-suite-reach-ratchet.test.ts; coverage-shard (4/8): test/the-affected-suite-reach-ratchet.test.ts; coverage-shard (2/8): test/a-test-imports-through-the-su
+        failing tests: unit test: test/the-affected-suite-reach-ratchet.test.ts; W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/the-affected-suite-reach-ratchet.test.ts:1:3747
+          | ✖ unit test: test/the-affected-suite-reach-ratchet.test.ts (1866.039422ms)
+          |   AssertionError [ERR_ASSERTION]: importerCount: 934 > 933; new importers: test/a-booting-daemon-adopts-its-live-run-children.test.ts, test/a-build-run-executes-in-a-detached-child.test.ts, test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts, test/a-codex-routed-repair-worker-commit-is-pushed-and-opened.test.ts, test/a-commit-status-is-not-a-check-run.test.ts, test/a-conflicted-head-gets-its-conflict-round-on-the-light-pass.test
+    - PR #12049 (https://github.com/craigoley/remudero/pull/12049) at 2026-10-16T03:19:22.679Z: ci-log round — rule-checks: test/the-affected-suite-reach-ratchet.test.ts
+        failing tests: unit test: test/the-affected-suite-reach-ratchet.test.ts
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/the-affected-suite-reach-ratchet.test.ts:1:3747
+          | ✖ unit test: test/the-affected-suite-reach-ratchet.test.ts (3027.367328ms)
+          |   AssertionError [ERR_ASSERTION]: importerCount: 934 > 933; new importers: test/a-booting-daemon-adopts-its-live-run-children.test.ts, test/a-build-run-executes-in-a-detached-child.test.ts, test/a-codex-routed-repair-worker-commit-is-pushed-and-opened.test.ts, test/a-commit-status-is-not-a-check-run.test.ts, test/a-conflicted-head-gets-its-conflict-round-on-the-light-pass.test.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts,
+    - PR #12007 (https://github.com/craigoley/remudero/pull/12007) at 2026-10-16T00:23:03.764Z: ci-log round — rule-checks: test/the-affected-suite-reach-ratchet.test.ts
+        failing tests: unit test: test/the-affected-suite-reach-ratchet.test.ts
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/the-affected-suite-reach-ratchet.test.ts:1:3747
+          | ✖ unit test: test/the-affected-suite-reach-ratchet.test.ts (2332.754054ms)
+          |   AssertionError [ERR_ASSERTION]: importerCount: 934 > 933; new importers: test/a-booting-daemon-adopts-its-live-run-children.test.ts, test/a-build-run-executes-in-a-detached-child.test.ts, test/a-codex-routed-repair-worker-commit-is-pushed-and-opened.test.ts, test/a-commit-status-is-not-a-check-run.test.ts, test/a-conflicted-head-gets-its-conflict-round-on-the-light-pass.test.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts,
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

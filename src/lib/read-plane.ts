@@ -43,6 +43,10 @@ export interface LagIntervalReading {
   /** W1-T9577: present once the interval spawned — its callers by total, and the time none of them holds. */
   by_caller?: SyncSpawnCallerTotal[];
   unnamed_ms?: number;
+  /** W1-T9754: present once the interval made an ASYNC spawn — the time those held the loop inside the spawn
+   *  call itself (the fork), and their callers by that total. An idle interval reads as before. */
+  async_spawn_sync_ms?: number;
+  async_by_caller?: SyncSpawnCallerTotal[];
 }
 
 export interface ReadPlaneSample {
@@ -52,6 +56,9 @@ export interface ReadPlaneSample {
   sync_spawn_top: SyncSpawnEntry[];
   sync_spawn_by_caller: SyncSpawnCallerTotal[];
   sync_spawn_unnamed_ms: number;
+  /** W1-T9754: the synchronous share of the window's async spawns, and its callers by total. */
+  async_spawn_sync_ms: number;
+  async_spawn_sync_by_caller: SyncSpawnCallerTotal[];
 }
 
 /** The sampler is handed to the daemon unbound. Calling it closes the `daemon.alive` window. `takeLagInterval`
@@ -180,10 +187,29 @@ export function startReadPlaneTelemetry(options: { clock?: Clock; stallProfiler?
   let callers: CallerTotals = new Map();
   // One window per lag consumer: what was spawned since its last reading, or since the sampler started for
   // a consumer's first. `sinceStart` is that first reading's window; it is in the set until a consumer claims it.
-  const lagWindows = new Map<string, { ms: number; top: SyncSpawnEntry[]; callers: CallerTotals }>();
-  const sinceStart = { ms: 0, top: [] as SyncSpawnEntry[], callers: new Map() as CallerTotals };
+  type LagWindow = { ms: number; top: SyncSpawnEntry[]; callers: CallerTotals; asyncMs: number; asyncCallers: CallerTotals };
+  const freshWindow = (): LagWindow => ({ ms: 0, top: [], callers: new Map(), asyncMs: 0, asyncCallers: new Map() });
+  const lagWindows = new Map<string, LagWindow>();
+  const sinceStart = freshWindow();
+  let asyncMs = 0;
+  let asyncCallers: CallerTotals = new Map();
   const names = ["execFileSync", "execSync", "spawnSync"] as const;
   const originals = names.map((name) => childProcess[name]);
+  const tally = (totals: CallerTotals, who: Omit<SyncSpawnCallerTotal, "total_ms" | "calls">, key: string,
+    durationMs: number): void => {
+    const total = totals.get(key) ?? { ...who, total_ms: 0, calls: 0 };
+    total.total_ms += durationMs;
+    total.calls++;
+    totals.set(key, total);
+  };
+  const whoCalled = (): { who: Omit<SyncSpawnCallerTotal, "total_ms" | "calls">; key: string } => {
+    const { caller, leaf, callerIsLeaf, chain } = callerFrame();
+    const who: Omit<SyncSpawnCallerTotal, "total_ms" | "calls"> = { caller };
+    if (chain !== undefined) who.caller_chain = chain;
+    if (leaf !== undefined) who.leaf = leaf;
+    if (callerIsLeaf) who.caller_is_leaf = true;
+    return { who, key: JSON.stringify([caller, chain, leaf]) };
+  };
   const record = (via: string, args: unknown[], durationMs: number): void => {
     try {
       const head = String(args[0] ?? "");
@@ -192,18 +218,10 @@ export function startReadPlaneTelemetry(options: { clock?: Clock; stallProfiler?
       const rest = args[1];
       const first = via === "execSync" || !Array.isArray(rest) || rest.length === 0 ? undefined
         : String(rest[0]).slice(0, ARG_MAX_CHARS);
-      const { caller, leaf, callerIsLeaf, chain } = callerFrame();
-      const who: Omit<SyncSpawnCallerTotal, "total_ms" | "calls"> = { caller };
-      if (chain !== undefined) who.caller_chain = chain;
-      if (leaf !== undefined) who.leaf = leaf;
-      if (callerIsLeaf) who.caller_is_leaf = true;
-      if (caller !== undefined) {
-        const key = JSON.stringify([caller, chain, leaf]);
+      const { who, key } = whoCalled();
+      if (who.caller !== undefined) {
         for (const totals of [callers, sinceStart.callers, ...[...lagWindows.values()].map((w) => w.callers)]) {
-          const total = totals.get(key) ?? { ...who, total_ms: 0, calls: 0 };
-          total.total_ms += durationMs;
-          total.calls++;
-          totals.set(key, total);
+          tally(totals, who, key, durationMs);
         }
       }
       if (durationMs < SYNC_SPAWN_RECORD_MIN_MS) return;
@@ -235,22 +253,50 @@ export function startReadPlaneTelemetry(options: { clock?: Clock; stallProfiler?
     Object.assign(childProcess, { [name]: wrapper });
   });
   syncBuiltinESMExports();
+  // W1-T9754: every async spawn (spawn, execFile, exec, fork, and a `promisify(execFile)` captured before this
+  // ran) reaches ChildProcess.prototype.spawn, whose call is the fork on this thread. The sync calls never do.
+  const prototype = childProcess.ChildProcess.prototype as unknown as { spawn: (...args: unknown[]) => unknown };
+  const originalAsyncSpawn = prototype.spawn;
+  prototype.spawn = function meteredSpawn(this: unknown, ...args: unknown[]): unknown {
+    const began = now();
+    try { return originalAsyncSpawn.apply(this, args); }
+    finally {
+      const took = now() - began;
+      asyncMs += took;
+      for (const window of [sinceStart, ...lagWindows.values()]) window.asyncMs += took;
+      try {
+        const { who, key } = whoCalled();
+        if (who.caller !== undefined) {
+          for (const totals of [asyncCallers, sinceStart.asyncCallers, ...[...lagWindows.values()].map((w) => w.asyncCallers)]) {
+            tally(totals, who, key, took);
+          }
+        }
+      } catch (error) {
+        void error; // Reason: attribution is best effort and must never take down the spawn it observes.
+      }
+    }
+  };
   let stopped = false;
   const sample = Object.assign((): ReadPlaneSample => {
     const share = namedShare(callers, syncMs);
     const out: ReadPlaneSample = { loop_delay_max_ms: histogram.max / 1e6,
       loop_delay_p99_ms: histogram.count ? histogram.percentile(99) / 1e6 : 0, sync_spawn_ms: syncMs,
-      sync_spawn_top: top, sync_spawn_by_caller: share.by_caller, sync_spawn_unnamed_ms: share.unnamed_ms };
+      sync_spawn_top: top, sync_spawn_by_caller: share.by_caller, sync_spawn_unnamed_ms: share.unnamed_ms,
+      async_spawn_sync_ms: Math.round(asyncMs), async_spawn_sync_by_caller: namedShare(asyncCallers, asyncMs).by_caller };
     histogram.reset();
     syncMs = 0;
     top = [];
     callers = new Map();
+    asyncMs = 0;
+    asyncCallers = new Map();
     return out;
   }, {
     takeLagInterval: (consumer = ""): LagIntervalReading => {
       const window = lagWindows.get(consumer) ?? sinceStart;
-      lagWindows.set(consumer, { ms: 0, top: [], callers: new Map() });
-      const reading: LagIntervalReading = { top: window.top[0], sync_spawn_ms: Math.round(window.ms) };
+      lagWindows.set(consumer, freshWindow());
+      const reading: LagIntervalReading = { top: window.top[0], sync_spawn_ms: Math.round(window.ms),
+        ...(window.asyncMs > 0 ? { async_spawn_sync_ms: Math.round(window.asyncMs),
+          async_by_caller: namedShare(window.asyncCallers, window.asyncMs).by_caller } : {}) };
       return window.ms > 0 ? { ...reading, ...namedShare(window.callers, window.ms) } : reading;
     },
     observeLoopLag: (reading: LoopLagReading, log: StallLog): void => stallProfiler.observe(reading, log),
@@ -267,6 +313,7 @@ export function startReadPlaneTelemetry(options: { clock?: Clock; stallProfiler?
       stallProfiler.stop();
       histogram.disable();
       names.forEach((name, index) => Object.assign(childProcess, { [name]: originals[index] }));
+      prototype.spawn = originalAsyncSpawn;
       syncBuiltinESMExports();
     },
   };

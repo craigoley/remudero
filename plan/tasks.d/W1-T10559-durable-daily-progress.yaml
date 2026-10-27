@@ -16,6 +16,11 @@
   priority: 1
   budget_usd: 60
   files:
+    - test/a-fix-dispatch-whose-daemon-run-ended-is-settled.test.ts
+    - test/a-fix-round-with-a-codeql-red-carries-its-alerts.test.ts
+    - test/ci/coverage/code-health-opportunities.test.ts
+    - test/console-api/views/code-health-projection.test.ts
+    - test/console-api/views/daily-progress-contract.test.ts
     - src/lib/daily-progress-calendar.ts
     - scripts/expiring-fixture-census.mjs
     - test/view-etags-are-deterministic.test.ts
@@ -110,3 +115,28 @@
     merged-task credit and dispatch/run claims before implementation. Reservations belong to
     codex/file-console-improvement-20261024; preserve contested claims. Reserved W1-T10559 through rmd
     next-task-id; this filing does not claim implementation or deployment.
+  amendment: |
+    Bounded clock-relative fixture refresh: propose the five additional test paths above
+    for the existing native Daily repair, plus the two Daily fixture files already covered
+    by its projection/view wildcards. Native round DAEMON-1793063024615:1:1793064615135
+    explicitly required this separate operator-checkout proposal before editing those inputs.
+    Its snapshot reported 321 stamps, 20 crossings and two introduced crossings; mandatory
+    census-precheck remained NOT MEASURED because native binding loading failed.
+
+    Limit these companion changes to clock inputs and their necessary fixture wiring.
+    Share an injected clock with the actual reader for intentionally fixed historical dates,
+    or derive age-sensitive stamps from that reader's controlled clock. Preserve before,
+    at and after threshold cases, stale/future and ordering controls, calendar/DST cases,
+    every existing behavioral assertion and the production behavior each fixture protects.
+    Do not merely move literal dates forward, delete a case, add an exemption or scanner
+    exclusion, change census registration/counts/thresholds, or relax any gate or assertion.
+    Existing scripts/expiring-fixture-census.mjs scope grants no new policy change here.
+
+    Qualify each affected physical file and the mandatory census on the exact repaired head;
+    preserve failed and NOT_RUN receipts and verify falsifiers. The separate hosted Daily
+    projector publication-failure regression remains a real failure for its native owner
+    to repair under existing source scope; this fixture proposal does not waive it.
+    Keep the current native repair owner, existing jobs, immutable preservation, admission,
+    spending, review and console holds. No source build, re-dispatch, owner-answer replay,
+    strike reset, service restart or runtime adoption is performed by this plan amendment.
+    The five original acceptance criteria and all other task fields remain unchanged.

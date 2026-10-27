@@ -3365,7 +3365,7 @@ function normalizeRunPrAcceptanceFromPlan(
   // The SAME two leaves (and the same defaults) repairRetroAcceptanceBlock injects — reused from its
   // own signature rather than a second inline copy; its retro-only `diff` input is omitted here.
   deps: Omit<NonNullable<Parameters<RunTaskCommandHost["repairRetroAcceptanceBlock"]>[2]>, "diff"> = {},
-): "rewritten" | "healthy" | "no-block" | "error" {
+): "rewritten" | "healthy" | "no-block" | "raced" | "error" {
   const { rewriteAcceptanceBlockFromPlan, defaultRetroFetchBody, defaultRetroEditBody } = helperHost;
   if (planCriteria.length === 0) return "no-block";
   const { fetchBody, editBody } = { fetchBody: defaultRetroFetchBody, editBody: defaultRetroEditBody, ...deps };
@@ -3374,6 +3374,11 @@ function normalizeRunPrAcceptanceFromPlan(
     // W1-T5544: the comparison and splice live in {@link rewriteAcceptanceBlockFromPlan}, shared with the sweep cure.
     const rewrite = rewriteAcceptanceBlockFromPlan(body, taskId, planCriteria);
     if (rewrite.kind !== "rewritten") return rewrite.kind;
+    // No compare-and-swap on a PR PATCH: a body edited since the read above is never written over.
+    if (fetchBody(prUrl) !== body) {
+      log("pr.body_normalize.raced", { pr_url: prUrl });
+      return "raced";
+    }
     editBody(prUrl, rewrite.repairedBody);
     log("pr.body_normalized", { pr: prUrl, removed_proofs: rewrite.removedProofs, rendered_proofs: rewrite.planProofs });
     return "rewritten";
@@ -3397,6 +3402,10 @@ function recordBakedClosureCatalog(
     if (body.split("\n").includes(catalog)) return;
     const trailer = body.match(/^Remudero-Task: .+$/m)?.[0];
     const prose = body.replace(/^Remudero-Task: .+\n?/gm, "").trimEnd();
+    if ((deps.fetchBody ?? defaultRetroFetchBody)(prUrl) !== body) {
+      log("pr.body_normalize.raced", { pr_url: prUrl, site: "baked-closure-catalog" });
+      return;
+    }
     (deps.editBody ?? defaultRetroEditBody)(prUrl, `${prose}\n\n${catalog}${trailer ? `\n\n${trailer}` : ""}`);
     log("pr.body_normalized", { pr: prUrl, site: "baked-closure-catalog", catalog_files: [...files] });
   } catch (error) {

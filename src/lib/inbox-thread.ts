@@ -1,6 +1,11 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
-import { dirname } from "node:path";
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { acquireInflightLock, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
+import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
+import { defaultIsPidAlive } from "./drain-lock.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
 /**
  * W1-T2494: join an escalation to the answer it provoked.
@@ -76,6 +81,10 @@ export function hasThreadEvent(extra: ThreadMessageExtra | undefined): boolean {
 const OPERATOR_EVENT_KINDS: ReadonlySet<ThreadEventKind> = new Set(["reframed", "declined", "restored", "approved", "released"]);
 
 export interface ThreadMessageExtra {
+  /** Durable write identity, independent of the caller's retry or process. */
+  messageId?: string;
+  /** Saved source context; a planning comment is never an executable Inbox input. */
+  improvement?: { repository: string; instance: string; opportunityId: string; snapshotId: string; policyVersion: string; analyzedSha: string };
   event?: ThreadEvent;
   did?: { action: InboxThreadAction; undo?: string };
   suggestedAction?: InboxThreadAction;
@@ -287,21 +296,32 @@ export function appendThreadMessage(
   deps: ThreadStoreDeps,
   extra?: ThreadMessageExtra,
 ): string {
+  return withThreadStoreMutation(deps, (owns) => appendThreadMessageHeld(identity, role, body, deps, extra, owns).threadId);
+}
+
+function appendThreadMessageHeld(identity: ThreadIdentity, role: ThreadMessageRole, body: string, deps: ThreadStoreDeps, extra: ThreadMessageExtra | undefined, owns: () => boolean): ThreadMessage {
   const threadId = deriveThreadId(identity);
   const existing = readThread(threadId, deps);
   if (existing.status === "unresolved") {
     throw new Error(`inbox-thread: cannot append to ${threadId} — ${existing.reason}`);
   }
   const now = deps.now ?? Date.now;
-  const message: ThreadMessage = { threadId, role, body, seq: existing.messages.length + 1, ts: now(), ...(extra ? { extra } : {}) };
+  if (existing.messages.some(message => !Number.isSafeInteger(message.seq) || message.seq < 1)) throw new Error("inbox-thread: invalid saved message sequence");
+  const seq = existing.messages.reduce((max, message) => Math.max(max, message.seq), 0) + 1;
+  const message: ThreadMessage = { threadId, role, body, seq, ts: now(), ...(extra ? { extra } : {}) };
+  if (!owns()) throw new InboxThreadMutationError();
   mkdirSync(dirname(deps.threadStorePath), { recursive: true });
-  const fd = openSync(deps.threadStorePath, "a");
+  const fd = openSync(deps.threadStorePath, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
   try {
-    writeSync(fd, Buffer.from(JSON.stringify(message) + "\n", "utf8"));
+    if (!fstatSync(fd).isFile()) throw new Error("inbox-thread: the message store is not a regular file");
+    const bytes = Buffer.from(JSON.stringify(message) + "\n", "utf8");
+    for (let at = 0; at < bytes.length;) { const count = writeSync(fd, bytes, at, bytes.length - at); if (count <= 0) throw new Error("inbox-thread: incomplete message write"); at += count; }
+    fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
-  return threadId;
+  syncThreadDirectory(dirname(deps.threadStorePath));
+  return message;
 }
 
 export function appendThreadReplyOnce(
@@ -311,12 +331,14 @@ export function appendThreadReplyOnce(
   deps: ThreadStoreDeps,
   extra: ThreadMessageExtra = {},
 ): { kind: "appended" | "existing" | "conflict"; seq: number; ts?: number } {
+  return withThreadStoreMutation(deps, (owns) => {
   const current = readThread(deriveThreadId(identity), deps);
   if (current.status === "unresolved") throw new Error(`inbox-thread: ${current.reason}`);
   const prior = current.messages.find((message) => message.role === "reply" && message.extra?.replyId === replyId);
   if (prior) return { kind: prior.body === body ? "existing" : "conflict", seq: prior.seq, ts: prior.ts };
-  appendThreadMessage(identity, "reply", body, deps, { ...extra, replyId });
-  return { kind: "appended", seq: current.messages.length + 1 };
+  const saved = appendThreadMessageHeld(identity, "reply", body, deps, { ...extra, replyId }, owns);
+  return { kind: "appended", seq: saved.seq };
+  });
 }
 
 /**
@@ -335,6 +357,7 @@ export function appendThreadEvent(
   ts?: number,
   extra: Pick<ThreadMessageExtra, "input" | "response"> = {},
 ): "appended" | "existing" {
+  return withThreadStoreMutation(deps, (owns) => {
   const current = readThread(inboxThreadId(proposalId), deps);
   if (current.status === "unresolved") throw new Error(`inbox-thread: ${current.reason}`);
   if (current.messages.some((message) => message.extra?.event?.key === event.key)) return "existing";
@@ -358,8 +381,9 @@ export function appendThreadEvent(
   if (operator && current.messages.some(message => message.role === "reply" && !hasThreadEvent(message.extra) &&
     (extra.input ? verifiedInboxInput(message.extra?.input, { repository: extra.input.repository }, proposalId, message.body) && message.extra?.input?.id === extra.input.id
       : message.body.trim() === text.trim()))) return "existing";
-  appendThreadMessage(inboxThreadIdentity(proposalId), operator ? "reply" : "escalation", text, { ...deps, now: ts === undefined ? deps.now : () => ts }, { event, ...extra });
+  appendThreadMessageHeld(inboxThreadIdentity(proposalId), operator ? "reply" : "escalation", text, { ...deps, now: ts === undefined ? deps.now : () => ts }, { event, ...extra }, owns);
   return "appended";
+  });
 }
 
 export const INBOX_THREAD_CLASS = "inbox";
@@ -412,4 +436,75 @@ export function parseAllThreads(raw: string, sourcePath: string): ReturnType<typ
   }
   for (const list of threads.values()) list.sort((a, b) => a.seq - b.seq);
   return { status: "ok", threads };
+}
+
+
+export type ThreadAppendOnceResult = { kind: "appended" | "existing"; threadId: string; seq: number; ts: number }
+  | { kind: "conflict" | "busy" | "unresolved"; reason: string };
+/** Durably append one source-bound message, or report that its delivery is not confirmed. */
+export function appendThreadMessageOnce(identity: ThreadIdentity, role: ThreadMessageRole, body: string, messageId: string,
+  deps: ThreadStoreDeps, extra: ThreadMessageExtra = {}): ThreadAppendOnceResult {
+  if (typeof messageId !== "string" || !messageId || messageId.length > 256 || messageId.includes("\0")) return { kind: "conflict", reason: "A valid message write identity is required." };
+  try { return withThreadStoreMutation(deps, (owns) => {
+    const threadId = deriveThreadId(identity), current = readThread(threadId, deps);
+    if (current.status !== "ok") return { kind: "unresolved", reason: "Saved chat messages could not be verified. Earlier messages were retained." };
+    const expected = JSON.parse(JSON.stringify({ ...extra, messageId })) as ThreadMessageExtra;
+    const prior = current.messages.filter(message => message.extra?.messageId === messageId);
+    if (prior.length > 1 || prior.some(message => message.role !== role || message.body !== body || !isDeepStrictEqual(message.extra, expected)))
+      return { kind: "conflict", reason: "This message identity was already used for different content or source information." };
+    if (prior.length === 1) {
+      syncThreadFile(deps.threadStorePath);
+      return { kind: "existing", threadId, seq: prior[0]!.seq, ts: prior[0]!.ts };
+    }
+    const saved = appendThreadMessageHeld(identity, role, body, deps, expected, owns);
+    return { kind: "appended", threadId, seq: saved.seq, ts: saved.ts };
+  }); } catch (error) { return error instanceof InboxThreadMutationError ? { kind: "busy", reason: error.message }
+    : { kind: "unresolved", reason: "The chat message could not be confirmed saved. Retry with the same write identity." }; }
+}
+
+class InboxThreadMutationError extends RmdError {
+  constructor() { super("read-model", GENERIC_EXIT_CODE, "Another chat writer is active, or its ownership is not yet known. Retry with the same write identity."); }
+}
+function syncThreadDirectory(path: string): void {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+function syncThreadFile(path: string): void {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try { if (!fstatSync(fd).isFile()) throw new Error("Invalid chat store file."); fsyncSync(fd); } finally { closeSync(fd); }
+  syncThreadDirectory(dirname(path));
+}
+function withThreadStoreMutation<T>(deps: ThreadStoreDeps, action: (owns: () => boolean) => T): T {
+  const dir = join(dirname(deps.threadStorePath), "inbox-thread-locks"), path = join(dir, "write.lock");
+  const acquire = (): InflightLockHandle => acquireInflightLock(dir, "write", { run_id: `inbox-thread:${randomUUID()}`, reclaim: false });
+  let lock: InflightLockHandle;
+  try { lock = acquire(); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const reclaimed = reclaimStaleLock(path, {
+      parseHolder: raw => ({ info: parseInflightLockInfo(raw) }),
+      isStale: holder => holder.info !== null && Number.isSafeInteger(holder.info.pid) && holder.info.pid > 0 && typeof holder.info.host === "string" &&
+        Number.isFinite(Date.parse(holder.info.startedAt)) && isHolderStale(holder.info, { isPidAlive: defaultIsPidAlive }),
+    });
+    if (reclaimed.outcome !== "missing" && reclaimed.outcome !== "reclaimed") throw new InboxThreadMutationError();
+    try { lock = acquire(); } catch (retry) { if ((retry as NodeJS.ErrnoException).code === "EEXIST") throw new InboxThreadMutationError(); throw retry; }
+  }
+  const held = lstatSync(lock.path);
+  const owns = (): boolean => {
+    let fd: number | undefined;
+    try {
+      fd = openSync(lock.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const current = fstatSync(fd);
+      return current.isFile() && current.size <= 4096 && current.dev === held.dev && current.ino === held.ino && isDeepStrictEqual(JSON.parse(readFileSync(fd, "utf8")), lock.info);
+    } catch { // An unreadable or replaced lock never proves that this writer owns it.
+      return false;
+    } finally { if (fd !== undefined) closeSync(fd); }
+  };
+  try {
+    if (!owns()) throw new InboxThreadMutationError();
+    const result = action(owns);
+    if (!owns()) throw new InboxThreadMutationError();
+    return result;
+  }
+  finally { if (owns()) lock.release(); }
 }
