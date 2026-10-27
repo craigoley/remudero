@@ -3,8 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
-  risk: medium
+  verify: human
+  risk: high
   band_meaning: span
   priority: 3
   status: queued
@@ -42,14 +42,3 @@
     Use literal fixed/deleted/restored controls with the same committed physical suite; test real descendants including one with private stdio and an unrelated sibling control. Verify the original ordinary-completion, silence, total and output limits and spawn-error regressions. Run caller/census and mapped changed-source coverage, normal full hosted/native/protected automatic merge, then natural source adoption/effect. No manual restart, retro, release, kill, marker/cap/routing change or waived gates.
   falsifier: |
     With exactly the same assertions and fixture files, remove group ownership/signaling and restore the original child-only termination: the known descendant must survive long enough to fail the post-result write control. Restore the entire fixed tree for zero failures. Refused admission, missing summaries, empty child starts, unknown process identity or unchanged-bound timeouts are not discrimination. If the real nested replay does not distinguish the original behavior, stop rather than ship a speculative cleanup.
-  risk_ruling:
-    verdict: "low"
-    action: proceed
-    confidence: 0.8
-    reasons:
-      - "The declared files are one library file and one unit test. The description limits the work to a source-only watchdog repair and explicitly excludes production retries or signals, policy or cap changes, and paid probes."
-      - "The acceptance criteria are unit tests that can be verified: owned descendants are stopped, a sibling is not signaled, and ordinary and spawn-failure results are preserved."
-      - "The plan states that existing gates stay pinned and that the fix goes through normal CI and review. It does not touch secrets, auth, deletion of data, or merge/deploy policy, and it asks for no operator decision."
-      - "Process-group signaling is somewhat sensitive, but the plan mandates a private owned group and sibling-protection tests. The family has no track record yet (0 merged), which is neutral."
-    judged_at: "2026-10-27T21:13:52.024Z"
-    pin: "c7c8b8f271306ed45735dbb06eb19cc798c2e2422304bd95bd5d08ff8c4a86fe"
