@@ -14,7 +14,7 @@
  * A ticket carries NO authority over any slot record; it orders waiters and nothing else.
  */
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fchmodSync, fstatSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants, fchmodSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
@@ -179,15 +179,13 @@ function writeWhole(path: string, body: string): void {
 }
 
 /**
- * Widen a queue dir WE own to 0o777 through one open descriptor, so the mode is judged and changed on the
- * same inode: a path swapped between a stat and a chmod is never widened, and a symlink is refused, not followed.
+ * Widen a queue dir WE own to 0o777 — the legacy slot dir's own sequence (mkdir, then chmod when we own it).
+ * `lstat` does not follow, so a symlink or a non-directory at `dir` is never widened.
  */
 function widenOwnDir(dir: string): void {
-  const fd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try {
-    const st = fstatSync(fd);
-    if ((st.mode & 0o777) !== 0o777 && st.uid === process.getuid?.()) fchmodSync(fd, 0o777);
-  } finally { closeSync(fd); }
+  const st = lstatSync(dir);
+  if (!st.isDirectory()) throw new Error(`test slot queue path is not a directory: ${dir}`);
+  if ((st.mode & 0o777) !== 0o777 && st.uid === process.getuid?.()) chmodSync(dir, 0o777);
 }
 
 /**
@@ -299,9 +297,9 @@ export function holdRetention(slots: number): number {
  */
 export function recordTestSlotHold(slotDir: string, hold: HoldRecord, slots: number): boolean {
   const queueDir = testSlotQueueDir(slotDir);
-  // Opened as a directory, not stat'd; the temp file below is created O_EXCL|O_NOFOLLOW, so a dir that
+  // Presence check only; the temp file below is created O_EXCL|O_NOFOLLOW, so a dir that
   // changes after this check fails the write rather than redirecting it.
-  try { closeSync(openSync(queueDir, constants.O_RDONLY | constants.O_DIRECTORY)); }
+  try { if (!lstatSync(queueDir).isDirectory()) return false; }
   catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") return false;
