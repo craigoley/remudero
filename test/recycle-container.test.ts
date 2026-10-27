@@ -4,10 +4,9 @@ import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, re
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
 
 /**
@@ -1678,4 +1677,61 @@ test("lifecycle mode grammar falsifiers exercise the real script arms: recycler"
   }
   writeFileSync(script, source);
   assert.equal(modeRecycle(t, ["mode: live"], { scriptPath: script }).status, 0);
+});
+
+test("selected diagnostic stream healthy completion remains private and closes its owned files", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-diagnostic-control-`));
+  const scratch = join(root, "tmp"), bin = join(root, "bin"), effects = join(root, "forbidden-effects");
+  mkdirSync(scratch); mkdirSync(bin);
+  for (const name of ["docker", "az", "systemctl", "sudo", "git", "ssh", "curl"]) {
+    writeFileSync(join(bin, name), '#!/bin/sh\nprintf "FORBIDDEN_EXTERNAL_EFFECT\\n" >> "$DIAGNOSTIC_FORBIDDEN_LOG"\nexit 97\n', { mode: 0o700 });
+  }
+  let closed = false;
+  try {
+    const result = spawnSync("bash", ["-c", [
+      'source "$1"',
+      "SELECTED_REGISTRY_ACTIVE=1; SELECTED_REGISTRY_CALLER=fixture",
+      "selected_registry_diagnostics",
+      "printf 'synthetic-private-diagnostic-canary\\n'",
+      "selected_registry_finish_diagnostics 0",
+    ].join("\n"), "fixture", SCRIPT], {
+      cwd: REPO_ROOT, encoding: "utf8", timeout: 10000,
+      env: { ...process.env, HOME: root, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`, DIAGNOSTIC_FORBIDDEN_LOG: effects },
+    });
+    closed = result.status !== null && result.signal === null && result.error === undefined;
+    assert.equal(closed, true, "a fixture that did not close retains its private directory");
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout + result.stderr, /private details withheld/);
+    assert.doesNotMatch(result.stdout + result.stderr, /synthetic-private-diagnostic-canary/);
+    assert.equal(existsSync(effects), false, "loading and completing diagnostics invokes no external effect");
+    assert.deepEqual(readdirSync(scratch), [], "real completion removes the owned FIFO and directory");
+  } finally { if (closed) rmSync(root, { recursive: true, force: true }); }
+});
+
+test("selected diagnostic EXIT cleanup removes a directory allocated by a failing mktemp command", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-diagnostic-failed-allocation-`));
+  const scratch = join(root, "tmp"), bin = join(root, "bin"), effects = join(root, "forbidden-effects");
+  mkdirSync(scratch); mkdirSync(bin);
+  for (const name of ["docker", "az", "systemctl", "sudo", "git", "ssh", "curl"]) {
+    writeFileSync(join(bin, name), '#!/bin/sh\nprintf "FORBIDDEN_EXTERNAL_EFFECT\\n" >> "$DIAGNOSTIC_FORBIDDEN_LOG"\nexit 97\n', { mode: 0o700 });
+  }
+  let closed = false;
+  try {
+    const result = spawnSync("bash", ["-c", [
+      'source "$1"',
+      "SELECTED_REGISTRY_ACTIVE=1; SELECTED_REGISTRY_CALLER=fixture",
+      // A real directory is returned, then the allocator reports failure. No FIFO/filter exists yet.
+      'mktemp() { command mktemp "$@"; return 91; }',
+      "if selected_registry_diagnostics; then exit 99; else exit 2; fi",
+    ].join("\n"), "fixture", SCRIPT], {
+      cwd: REPO_ROOT, encoding: "utf8", timeout: 10000,
+      env: { ...process.env, HOME: root, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`, DIAGNOSTIC_FORBIDDEN_LOG: effects },
+    });
+    closed = result.status !== null && result.signal === null && result.error === undefined;
+    assert.equal(closed, true, "a fixture that did not close retains its private directory");
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /diagnostics unavailable; no operation started/);
+    assert.equal(existsSync(effects), false, "an allocation refusal starts no external operation");
+    assert.deepEqual(readdirSync(scratch), [], "EXIT cleanup owns an allocation even before a filter PID exists");
+  } finally { if (closed) rmSync(root, { recursive: true, force: true }); }
 });
