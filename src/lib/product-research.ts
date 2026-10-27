@@ -12,7 +12,7 @@ import { productRequestIdSchema, productIdSchema, productTransitionSchema, type 
 import { ProductIntentStore, productStatePaths } from "./product-intent-store.js";
 import { enabledWorkerProviders, type Config } from "./config.js";
 import type { Mount } from "./mounts.js";
-import { ClaudeToolchainBlockedError, spawnWorker, SubscriptionOnlyRefusedError } from "./worker.js";
+import { ClaudeToolchainBlockedError, spawnWorker, SubscriptionOnlyRefusedError, type WorkerResult } from "./worker.js";
 import { ProviderCapacityBlockedError } from "./worker-provider.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
@@ -38,6 +38,31 @@ export interface ProductResearchProvider {
 
 class ResearchProviderUnavailable extends RmdError {
   constructor() { super("usage", GENERIC_EXIT_CODE, "product research provider unavailable"); }
+}
+
+/**
+ * W1-T10617: true only when the worker's own receipt proves it refused before the provider did any work, so research
+ * is `unavailable` (resumable), not a provider failure. THE RECEIPT IS THE PROOF, NEVER A REFUSAL FLAG: any settled
+ * spend, cost, token, served model, session id or output text keeps the result `failed`. It repeats the receipt in
+ * worker.ts's inline `notInvokedBudgetRefusal` ("require the complete zero-work receipt") and is kept local, not
+ * shared, because worker.ts is outside this task's files.
+ * - `budgetRefused` "alone does not prove the model was never invoked", and "seven measured refusals carried a non-zero
+ *   cost" for `usageRefusal` (worker.ts): each qualifies only with the full receipt. A Claude usage refusal carries the
+ *   SDK's session id and refusal text, so it stays `failed`.
+ * - The cash adapter's pre-transport refusals (a declared tool it cannot serve, such as WebSearch without brokered
+ *   search, a missing key or price row, a refused capability grant) set no flag at all; the receipt alone shows them.
+ * - Nothing may be reserved, except on a definite 404 (`openWeightDeploymentAbsent`): the one outcome the adapter
+ *   reserves and then settles to zero, as `sonnetRefusedBeforeTransport` reads it. An unknown outcome stays charged.
+ * - `safeguardRefusal` never qualifies: the model received the request and declined it, which is provider work.
+ * The cash budget fields exist only on a cash result, whose adapter always writes both; absent means none reserved.
+ */
+function refusedBeforeAnyWork(result: WorkerResult): boolean {
+  const { tokens } = result;
+  const reservedNothing = (result.budgetReservedUsd ?? 0) === 0 || result.openWeightDeploymentAbsent !== undefined;
+  return result.isError && result.safeguardRefusal === undefined && reservedNothing &&
+    result.costUsd === 0 && (result.budgetSettledUsd ?? 0) === 0 &&
+    tokens.input === 0 && tokens.output === 0 && tokens.cacheRead === 0 && tokens.cacheCreation === 0 &&
+    result.servedModel === null && result.sessionId === "" && result.text === "" && result.blocks.length === 0;
 }
 
 /** The serve adapter uses the existing worker transport and its configured triage mount. */
@@ -77,7 +102,7 @@ export function realProductResearchProvider(options: {
           error instanceof ClaudeToolchainBlockedError) throw new ResearchProviderUnavailable();
         throw error;
       }
-      if (result.notStarted) throw new ResearchProviderUnavailable();
+      if (result.notStarted || refusedBeforeAnyWork(result)) throw new ResearchProviderUnavailable();
       if (result.isError || input.signal.aborted) throw new Error("research transport unavailable");
       return { ...JSON.parse(result.text) as Record<string, unknown>, spendUsd: result.costUsd };
     },

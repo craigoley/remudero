@@ -9,7 +9,8 @@ import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { buildProductRoutes } from "#src/lib/product-routes.js";
 import { realProductResearchProvider } from "#src/lib/product-research.js";
 import type { Config } from "#src/lib/config.js";
-import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs } from "#src/lib/worker.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { clearOpenWeightAbsence, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
 import { createService, type IdentityProvider } from "#src/lib/service.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
@@ -351,6 +352,186 @@ test("research with no admitted per-call budget is explicitly unavailable withou
     assert.equal(reply.run.outcome, "unavailable");
     assert.equal(reply.run.summary, undefined);
   } finally { await app.close(); }
+});
+
+interface ResearchReply { run: { id: string; outcome: string; failure?: string; summary?: string; spendUsd: number }; replayed: boolean }
+const CASH_DEPLOYMENT = "gpt-oss-120b";
+const NO_TOKENS = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+
+/** W1-T10617: a complete cash worker result that did NO work; each case overrides only what its refusal or work sets. */
+function zeroWorkResult(over: Partial<WorkerResult> = {}): WorkerResult {
+  return { provider: "cash", model: CASH_DEPLOYMENT, servedModel: null, text: "", blocks: [], isError: true, apiError: false,
+    subtype: "openweight_error", stderr: "", costUsd: 0, budgetReservedUsd: 0, budgetSettledUsd: 0, budgetRefused: false,
+    sessionId: "", numTurns: 1, tokens: NO_TOKENS, permissionDenials: [], childEnvKeys: [], effort: "low", modelUsage: {},
+    compactionEvents: [], compactionFailures: [], compactionConfigured: false, qualitySuspect: false, ...over };
+}
+
+/** Serve research through the real adapter on a cash mount; `post` sends one research request for a saved product. */
+async function researchRoute(t: TestContext, config: Config, spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>) {
+  const provider = realProductResearchProvider({
+    mount: { model: "haiku", effort: "low", maxTurns: 1, contextBudget: 1000, provider: "cash" },
+    config, cwd: config.root, settingsFile: join(config.root, "settings.json"), spawn: spawn as typeof spawnWorker,
+  });
+  const app = await server(t, { mount: true, deps: { productResearchProvider: provider, productResearchBudgetUsd: 1 } });
+  const saved = await request(app.url, "/v1/products", "alice", command);
+  assert.ok(saved.body.receipt);
+  const productId = saved.body.receipt.productId;
+  const post = async (requestId: string): Promise<ResearchReply> => {
+    const response = await fetch(`${app.url}/v1/products/research`, { method: "POST",
+      headers: { "x-test-session": "alice", "content-type": "application/json" },
+      body: JSON.stringify({ version: "product-research-v1", requestId, productId, expectedObjectiveRevision: 1 }) });
+    const reply = await response.json() as ResearchReply;
+    assert.equal(response.status, 200);
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/research", "POST", 200)), []);
+    return reply;
+  };
+  return { post, close: () => app.close() };
+}
+
+/** A real cash spawn whose transport is a fixture; HOME is the fixture so no developer credential is read. */
+async function realCashRefusal(config: Config, args: SpawnWorkerArgs, fetchImpl: typeof fetch): Promise<WorkerResult> {
+  const savedHome = process.env.HOME;
+  process.env.HOME = config.root;
+  try {
+    return await spawnWorker({ ...args, routingTrial: { id: "research-refusal", arm: "cash", reason: "fixture", models: [CASH_DEPLOYMENT] },
+      providerRouting: { spawnOpenWeight: async (cashArgs, cfg, selection) => spawnOpenWeightWorker({
+        ...cashArgs, env: { RMD_OPENWEIGHT_API_KEY: "fixture-only-not-a-credential" }, fetchImpl }, cfg, selection) } });
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+  }
+}
+
+function cashConfig(t: TestContext, capUsd: number, cashWebSearch = true): Config {
+  const root = ownedFixtureDir(t, "research-refusal").dir;
+  writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
+  return { root, workerHomeRoot: join(root, "worker-homes"), claudeBin: "/unused", dailyCapUsd: { normal: capUsd, squeezed: capUsd },
+    workerProviders: { enabled: ["cash"], cashEndpoint: "https://fixture.invalid/", cashWebSearch } } as Config;
+}
+
+const zeroWorkReceipt = (result: WorkerResult) => [result.isError, result.budgetSettledUsd, result.costUsd, result.tokens,
+  result.servedModel, result.sessionId, result.text, result.blocks];
+const ZERO_WORK = [true, 0, 0, NO_TOKENS, null, "", "", []];
+
+test("W1-T10617: a zero-work worker budget refusal is unavailable and resumable, not a provider failure", async (t) => {
+  // A cap too small for the first reservation: the real cash adapter refuses before any request is sent.
+  const config = cashConfig(t, 0.000000001);
+  let calls = 0, transported = 0;
+  let refusal: WorkerResult | undefined;
+  const app = await researchRoute(t, config, async (args) => {
+    calls++;
+    if (calls > 1) return zeroWorkResult({ isError: false, subtype: "success", sessionId: "resumed-session", servedModel: CASH_DEPLOYMENT,
+      costUsd: 0.01, budgetReservedUsd: 0.02, budgetSettledUsd: 0.01, tokens: { ...NO_TOKENS, input: 900, output: 40 },
+      text: JSON.stringify({ summary: "Research resumed once the allowance reset." }) });
+    refusal = await realCashRefusal(config, args, async () => {
+      transported++;
+      throw new Error("a refused first reservation must never reach the transport");
+    });
+    return refusal;
+  });
+  try {
+    const refused = await app.post("research-budget-0001");
+    assert.ok(refusal, "the real worker produced the refusal");
+    assert.deepEqual([refusal.budgetRefused, refusal.budgetReservedUsd], [true, 0], refusal.stderr);
+    assert.deepEqual(zeroWorkReceipt(refusal), ZERO_WORK, "the complete zero-work receipt");
+    assert.equal(transported, 0);
+    assert.deepEqual([refused.run.outcome, refused.run.failure, refused.run.summary, refused.run.spendUsd],
+      ["unavailable", undefined, undefined, 0], "a refusal before any work is not a provider failure");
+    const replay = await app.post("research-budget-0001");
+    assert.equal(replay.replayed, true);
+    assert.deepEqual(replay.run, refused.run, "the original unavailable receipt is replayed");
+    assert.equal(calls, 1, "replaying the refused request starts no worker");
+    const resumed = await app.post("research-budget-0002");
+    assert.deepEqual([resumed.run.outcome, resumed.run.spendUsd], ["completed", 0.01], "a new request resumes the same objective");
+    assert.notEqual(resumed.run.id, refused.run.id);
+    assert.equal(calls, 2);
+  } finally { await app.close(); }
+});
+
+test("W1-T10617: a cash deployment absent before any work is unavailable", async (t) => {
+  const config = cashConfig(t, 100);
+  // The adapter remembers an absent deployment process-wide; forget it so no later test inherits it.
+  t.after(clearOpenWeightAbsence);
+  let transported = 0;
+  let absent: WorkerResult | undefined;
+  const app = await researchRoute(t, config, async (args) => {
+    absent = await realCashRefusal(config, args, async () => { transported++; return new Response("{}", { status: 404 }); });
+    return absent;
+  });
+  try {
+    const reply = await app.post("research-absent-0001");
+    assert.ok(absent, "the real worker produced the refusal");
+    assert.equal(absent.openWeightDeploymentAbsent, CASH_DEPLOYMENT, absent.stderr);
+    assert.ok((absent.budgetReservedUsd ?? 0) > 0, "the request was reserved before it was sent");
+    assert.deepEqual(zeroWorkReceipt(absent), ZERO_WORK, "a definite 404 settles to zero and returns no work");
+    assert.equal(transported, 1);
+    assert.deepEqual([reply.run.outcome, reply.run.failure, reply.run.spendUsd], ["unavailable", undefined, 0]);
+  } finally { await app.close(); }
+});
+
+test("W1-T10617: a cash route that cannot serve the declared WebSearch tool is unavailable", async (t) => {
+  // Without brokered search consent the real cash adapter refuses the declared tool before reserving anything.
+  const config = cashConfig(t, 100, false);
+  let transported = 0;
+  let refusal: WorkerResult | undefined;
+  const app = await researchRoute(t, config, async (args) => {
+    refusal = await realCashRefusal(config, args, async () => { transported++; throw new Error("an undeclarable tool must never reach the transport"); });
+    return refusal;
+  });
+  try {
+    const reply = await app.post("research-tool-0001");
+    assert.ok(refusal, "the real worker produced the refusal");
+    assert.match(refusal.stderr, /does not implement declared tool\(s\): WebSearch/);
+    assert.deepEqual([refusal.budgetRefused, refusal.budgetReservedUsd, refusal.usageRefusal, refusal.openWeightDeploymentAbsent],
+      [false, 0, undefined, undefined], "this refusal sets no refusal flag");
+    assert.deepEqual(zeroWorkReceipt(refusal), ZERO_WORK, "the complete zero-work receipt");
+    assert.equal(transported, 0);
+    assert.deepEqual([reply.run.outcome, reply.run.failure, reply.run.spendUsd], ["unavailable", undefined, 0]);
+  } finally { await app.close(); }
+});
+
+test("W1-T10617: a zero-work account usage refusal is unavailable", async (t) => {
+  const app = await researchRoute(t, cashConfig(t, 100), async () => zeroWorkResult({ provider: "codex", subtype: "error_codex",
+    budgetReservedUsd: undefined, budgetSettledUsd: undefined, budgetRefused: undefined, usageRefusal: { matched: "usage limit" } }));
+  try {
+    const reply = await app.post("research-usage-0001");
+    assert.deepEqual([reply.run.outcome, reply.run.failure, reply.run.spendUsd], ["unavailable", undefined, 0]);
+  } finally { await app.close(); }
+});
+
+test("W1-T10617: a refusal or error after provider work stays a provider failure", async (t) => {
+  const worked = { sessionId: "provider-session", servedModel: CASH_DEPLOYMENT, costUsd: 0.01, tokens: { ...NO_TOKENS, input: 900, output: 40 } };
+  const claude = { provider: "claude" as const, budgetReservedUsd: undefined, budgetSettledUsd: undefined, budgetRefused: undefined };
+  const cases: [string, WorkerResult][] = [
+    ["a budget refusal on a later turn after a paid request",
+      zeroWorkResult({ ...worked, budgetRefused: true, budgetReservedUsd: 0.02, budgetSettledUsd: 0.01, numTurns: 2 })],
+    ["a budget refusal after an earlier reservation", zeroWorkResult({ budgetRefused: true, budgetReservedUsd: 0.02 })],
+    ["an error whose reservation stayed charged", zeroWorkResult({ budgetReservedUsd: 0.02, budgetSettledUsd: 0.02, costUsd: 0.02 })],
+    ["a deployment absent after an earlier request stayed charged",
+      zeroWorkResult({ openWeightDeploymentAbsent: CASH_DEPLOYMENT, budgetReservedUsd: 0.04, budgetSettledUsd: 0.02 })],
+    ["a usage refusal carrying the session and its refusal text",
+      zeroWorkResult({ ...claude, usageRefusal: { matched: "session limit" }, sessionId: "sdk-session", text: "You've hit your session limit" })],
+    ["a usage refusal carrying cost", zeroWorkResult({ ...claude, ...worked, usageRefusal: { matched: "usage limit" } })],
+    ["a safeguard refusal of a received request",
+      zeroWorkResult({ ...claude, safeguardRefusal: { category: null, retried: false, originalModel: "haiku" } })],
+    // Each remaining field of the zero-work receipt, alone, is evidence of work.
+    ["an error that reported cost", zeroWorkResult({ costUsd: 0.01 })],
+    ...(["input", "output", "cacheRead", "cacheCreation"] as const).map((field): [string, WorkerResult] =>
+      [`an error that used ${field} tokens`, zeroWorkResult({ tokens: { ...NO_TOKENS, [field]: 1 } })]),
+    ["an error that served a model", zeroWorkResult({ servedModel: CASH_DEPLOYMENT })],
+    ["an error that opened a session", zeroWorkResult({ sessionId: "provider-session" })],
+    ["an error with result text", zeroWorkResult({ text: "partial" })],
+    ["an error with output blocks", zeroWorkResult({ blocks: ["partial"] })],
+    ["an ordinary error after work", zeroWorkResult({ ...worked, text: "partial", blocks: ["partial"] })],
+    ["a non-error result with no output", zeroWorkResult({ isError: false, subtype: "success" })],
+  ];
+  for (const [name, result] of cases) {
+    const app = await researchRoute(t, cashConfig(t, 100), async () => result);
+    try {
+      const reply = await app.post("research-control-0001");
+      assert.deepEqual([reply.run.outcome, reply.run.failure, reply.run.spendUsd], ["failed", "provider_error", 0], name);
+    } finally { await app.close(); }
+  }
 });
 
 const WRECKTERRA_ID = 1432832754;
