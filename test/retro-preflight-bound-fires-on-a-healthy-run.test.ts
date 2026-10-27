@@ -11,7 +11,7 @@
 // any number, and never a real 20-minute wall clock.
 
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -279,17 +279,15 @@ async function untilFixture(predicate: () => boolean, message: string): Promise<
   }
 }
 
-/** An exact fixture PID probe: a failed ps is UNKNOWN, never permission to remove live scratch. */
+/** An exact, signal-zero fixture probe. Only ESRCH proves absence; denied/unknown stays UNKNOWN. */
 function fixturePidEnded(pid: number): boolean {
-  const result = spawnSync("ps", ["-p", String(pid), "-o", "stat="], {
-    encoding: "utf8", timeout: 1_000, maxBuffer: 4096,
-  });
-  if (!result.error && result.status === 1 && result.stdout.trim() === "") return true;
-  assert.equal(result.error, undefined, "fixture liveness must be readable");
-  assert.equal(result.status, 0, "unknown fixture liveness is not absence");
-  const state = result.stdout.trim();
-  assert.ok(state.length > 0, "the exact PID probe must name its state");
-  return state.startsWith("Z"); // A reparented zombie cannot write or execute further fixture code.
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+    throw new Error("fixture liveness must be readable; denied is not absence", { cause: error });
+  }
 }
 
 async function nestedWatchdogFixture(mode: "silence" | "total" | "output"): Promise<void> {
@@ -341,7 +339,7 @@ setTimeout(()=>process.exit(0),6500);`);
     await new Promise(resolve => setTimeout(resolve, 250));
     assert.equal(heart("owned"), ownedAtResult, "the known owned descendant must not keep writing after the result");
     assert.ok(heart("sibling") > siblingAtResult, "an unrelated sibling must remain live and writing");
-    assert.ok(fixturePidEnded(ownedPid), "a stopped heartbeat alone is not teardown evidence");
+    await untilFixture(() => fixturePidEnded(ownedPid!), "a stopped heartbeat alone is not teardown evidence");
   } finally {
     // The original/deleted runner leaves its descendant live. Ask only these fixture actors to exit,
     // then verify exact PIDs before deleting scratch. No foreign PID or inherited group is signalled.
