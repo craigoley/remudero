@@ -20,12 +20,23 @@ const IMPORT_CLI = `import ${JSON.stringify("../src/run-task.js")};\n`;
  *  the tree carries a healthy stand-in and, when `linkModules` is set, the dependency donor it runs from. */
 const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 
-function fixture(root = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-")), linkModules = false) {
+/** The snapshot precheck runs the reach ratchet from the round's own tree, so a tree that must be refused for a new
+ *  importer carries a stand-in suite that fails exactly when `test/new.test.ts` exists (the base tree lacks it). */
+const REACH_STAND_IN = [
+  'import assert from "node:assert/strict";',
+  'import { existsSync } from "node:fs";',
+  'import { test } from "node:test";',
+  'test("reach stand-in refuses the new importer", () => {',
+  '  assert.equal(existsSync("test/new.test.ts"), false, "importerCount: new importer test/new.test.ts");',
+  "});", "",
+].join("\n");
+
+function fixture(root = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-")), linkModules = false, reachText = "export {};\n") {
   const baseline = JSON.parse(readFileSync(join(ROOT, "scripts/affected-reach-baseline.json"), "utf8"));
   const texts: Record<string, string> = {
     "src/run-task.ts": "export {};\n",
     "src/lib/affected-suites.ts": "export {};\n",
-    [REACH]: "export {};\n",
+    [REACH]: reachText,
     [SKILL_CENSUS]: 'import { test } from "node:test";\ntest("skill census stand-in", () => undefined);\n',
     "scripts/affected-reach-baseline.json": JSON.stringify(baseline),
   };
@@ -102,7 +113,7 @@ test("a CommonJS probe loads the harness snapshot functions without git or async
 });
 
 test("test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts: no git on PATH, edited census inputs and a new importer are refused", () => {
-  const f = fixture(undefined, true);
+  const f = fixture(undefined, true, REACH_STAND_IN);
   const reachArgs = ["--test", "--test-reporter=tap", "--import", "tsx"];
   const clean = run(REACH, reachArgs, f.env);
   assert.equal(clean.status, 0, clean.text);
