@@ -10952,11 +10952,14 @@ export function spawnCensusChild(file: string, args: string[], options: SpawnSyn
     const child = execFile(file, args, { cwd: options.cwd, env: options.env, encoding: "utf8", maxBuffer: options.maxBuffer },
       (error, stdout, stderr) => {
         bound?.cancel();
-        const failed = (bound?.timedOut ? bound.timeoutError(file, { stdout, stderr }) : error) as (Error & { code?: unknown; signal?: NodeJS.Signals | null }) | null;
+        // The bound's kill keeps its named error beside the signal, as spawnSync's ETIMEDOUT does: a refusal then says the
+        // budget stopped the child instead of reading as an outside SIGTERM. The output stays on stdout/stderr, so the
+        // error's text cannot be cut away by the refusal's 4,000-character tail.
+        const failed = (bound?.timedOut ? bound.timeoutError(file) : error) as (Error & { code?: unknown; signal?: NodeJS.Signals | null }) | null;
         const status = failed === null ? 0 : typeof failed.code === "number" ? failed.code : null;
         const signal = failed?.signal ?? null;
         resolveChild({ status, signal, stdout: String(stdout), stderr: String(stderr),
-          ...(failed !== null && status === null && signal === null ? { error: failed } : {}) } as CensusChildResult);
+          ...(failed !== null && status === null && (signal === null || bound?.timedOut) ? { error: failed } : {}) } as CensusChildResult);
       });
     const bound = options.timeout ? boundChildByLoopTime(child, options.timeout) : undefined;
   });
