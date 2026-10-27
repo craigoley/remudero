@@ -464,6 +464,16 @@ test("W1-T10823: foreign briefs and ambiguous native runs cannot supply a propos
   assert.equal(ambiguous.observation.state, "unknown");
   assert.equal(ambiguous.observation.proposal, undefined);
   assert.equal(evidenceIds(g).filter((id) => id.endsWith(":proposed")).length, 0);
+  const h = fixture(t);
+  const own = await ok(h.service().execute(actor, h.command()));
+  nativeRun(h, own.observation.operationId, { exit: true });
+  h.row(at(2_100), { run_id: "PLAN-clarify-1", task_id: "PLAN-clarify", step: "plan.start", lane: "plan", mode: "clarify", actor_pid: 8181, brief: "a foreign product brief at the same native run id" });
+  h.row(at(3_000), { run_id: "PLAN-clarify-1", task_id: "PLAN-clarify", step: "pr.opened", lane: "plan", actor_pid: 8181, pr_url: PR_URL });
+  const collision = await ok(h.service({ gateway: false }).execute(actor, h.command()));
+  assert.equal(collision.observation.state, "unknown", "conflicting native starts sharing one run id stay ambiguous");
+  assert.equal(collision.observation.proposal, undefined);
+  assert.equal(evidenceIds(h).filter((id) => id.endsWith(":proposed")).length, 0);
+  assert.equal(h.calls.length, 1);
 });
 
 test("W1-T10823: a completed plan remains visible when its own merge advances the target", async (t) => {

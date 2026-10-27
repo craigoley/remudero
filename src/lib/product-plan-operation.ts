@@ -497,6 +497,11 @@ export class ProductPlanOperationService {
       row.task_id === `PLAN-${record.mode}` && row.mode === record.mode && typeof row.run_id === "string" &&
       typeof row.brief === "string" && digest(row.brief) === record.command.briefDigest && at(row) >= Date.parse(record.requestedAt));
     const runs = new Map(candidates.map((row) => [row.run_id, row]));
+    // Native starts can share a timestamp-based run id; conflicting identities are ambiguous.
+    const conflictingStart = rows.some((row) => row.step === "plan.start" && typeof row.run_id === "string" && runs.has(row.run_id) &&
+      (row.lane !== "plan" || row.task_id !== `PLAN-${record.mode}` || row.mode !== record.mode ||
+        typeof row.brief !== "string" || digest(row.brief) !== record.command.briefDigest));
+    if (conflictingStart) return { ...(pid !== undefined ? { pid } : {}), exited: false, failed: true };
     const run = runs.size === 1 ? [...runs.values()][0] : undefined;
     const pull = run === undefined ? undefined : rows.find((row) => row.step === "pr.opened" && row.run_id === run.run_id && typeof row.pr_url === "string");
     const url = pull?.pr_url as string | undefined;
