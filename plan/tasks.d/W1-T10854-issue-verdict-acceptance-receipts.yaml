@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   band_meaning: span
   priority: 3
@@ -48,3 +48,14 @@
     Use complete physical suite summaries, caller/census membership and committed-tree instrumented coverage. Prove literal deletion controls fail and restoration passes, verify stored executable proof text, then require full hosted/native review and protected merge. Source merge, natural source adoption and real exact-attempt verdict efficacy are separate. No paid/manual production trial.
   falsifier: |
     Delete the final-consumed identity propagation while preserving assertions: the exact join test must fail. Delete the invalid/legacy provenance refusal: the corresponding controls must fail. Delete parser reuse and call it again: the single-parse control must fail. Restore the whole fixed tree and show complete zero-failure physical suite summaries. Collection/admission refusals are not deletion controls.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The description limits the work to adding receipt metadata (consumed-attempt identity and parser state) to the existing issue_revalidation.verdict row. It states that decisions, retries, money, providers and caps are preserved."
+      - "The declared files are a garden lib, run-task, and one test file. None of them touch secrets, auth, deletion, merge/deploy/review policy, or infrastructure. The record explicitly grants no production intervention or paid probe."
+      - "All four acceptance criteria have named unit tests, so the result can be verified. Normal CI and review gates still apply."
+      - "The family has no track record (0 merged), which is a mild caution. The scope is narrow and coherent with the referenced plan items, so it does not raise the risk to high."
+    judged_at: "2026-10-27T14:42:20.849Z"
+    pin: "51b52f4ce89445da4a4ea7bd3c4c1844e0d3894fbbbeb4f9cc970cc62a6120f9"
