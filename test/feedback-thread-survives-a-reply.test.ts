@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import { createService } from "../src/lib/service.js";
-import { buildPanelGraphRoutes, buildSubmitFeedbackRoute, type PanelGraphDeps, type RatifyCliGateway } from "../src/lib/panel-graph.js";
-import { captureFeedback, listFeedback, readFeedbackEntry, setFeedbackStatus, type FeedbackEntry } from "../src/lib/feedback.js";
+import { buildPanelGraphRoutes, buildSubmitFeedbackRoute, captureFeedbackReply, type PanelGraphDeps, type RatifyCliGateway } from "#src/lib/panel-graph.js";
+import { captureFeedback, listFeedback, readFeedbackEntry, setFeedbackStatus, type FeedbackEntry, type CanonicalGrillContinuation } from "#src/lib/feedback.js";
+import { queueFeedbackRecord, readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 import type { GitHub } from "../src/lib/status.js";
 import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
@@ -89,7 +92,7 @@ async function withService<T>(deps: PanelGraphDeps, fn: (baseUrl: string) => Pro
   try {
     return await fn(`http://127.0.0.1:${port}`);
   } finally {
-    server.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }
 
@@ -106,6 +109,91 @@ function grillingEntry(root: string, raw: string): FeedbackEntry {
   const entry = captureFeedback(root, { raw, origin: "cli" });
   return setFeedbackStatus(root, entry.id, "grilling");
 }
+
+/** Protocol fixture for the internal writer's captured evidence. The actual constructor is
+ * exercised through the real Git reader in the companion suite; this tests the writer boundary
+ * without importing a new runtime export that would prevent the unchanged base from executing. */
+function capturedCanonicalParent(t: TestContext) {
+  const dir = tmpRoot(), root = join(dir, "root"), stateRoot = join(dir, "pending");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true }); mkdirSync(stateRoot);
+  const id = "w10789-captured-parent", rel = `plan/feedback/${id}.yaml`, path = join(root, rel);
+  const pending = { id, ts: "2026-10-27T00:00:00.000Z", raw: "Preserve this captured lineage", attachments: ["proof.txt"],
+    origin: "cli", status: "new", proposal_pr: null, summary: null, reply_to: "earlier-parent", thread_id: "earlier-thread",
+    submission_key: "original-capture", source_lineage: { repository: "fixture/repo", sequence: 7 } };
+  writeFileSync(path, stringifyYaml(pending)); queueFeedbackRecord(root, rel, stateRoot);
+  writeFileSync(path, stringifyYaml({ ...pending, status: "grilling", answered_by: null,
+    proposal_pr: "https://github.com/fixture/repo/pull/7", summary: { headline: "Original decision card" } }));
+  const canonical = parseYaml(readFileSync(path, "utf8")) as FeedbackEntry;
+  const digest = (r: unknown) => createHash("sha256").update(JSON.stringify(r)).digest("hex");
+  const continuation: CanonicalGrillContinuation = { root, inboxRoot: stateRoot, canonical,
+    pendingFingerprint: digest(readQueuedFeedbackRecords(stateRoot).get(rel)), canonicalFingerprint: digest(canonical) };
+  const deps = { root, inboxRoot: stateRoot, feedbackLand: {} };
+  const input = { text: "Use the existing verification owner", replyTo: id, submissionKey: "issue#7:comment:9", origin: "issue" as const };
+  const snapshot = () => {
+    const out: Record<string, string> = {};
+    const walk = (p: string): void => { if (!existsSync(p)) return;
+      for (const e of readdirSync(p, { withFileTypes: true })) {
+        const path = join(p, e.name); if (e.isDirectory()) walk(path); else out[path] = readFileSync(path, "utf8");
+      }
+    }; walk(dir); return out;
+  };
+  const rewritePending = (change: (r: Record<string, unknown>) => void) => {
+    const original = readFileSync(path, "utf8"), p = parseYaml(stringifyYaml(pending)) as Record<string, unknown>;
+    change(p); writeFileSync(path, stringifyYaml(p));
+    try { queueFeedbackRecord(root, rel, stateRoot); } finally { writeFileSync(path, original); }
+  };
+  return { root, stateRoot, id, rel, path, canonical, continuation, deps, input, snapshot, rewritePending };
+}
+
+test("W1-T10789: continuation retains the canonical proposal and source metadata", t => {
+  const f = capturedCanonicalParent(t), canonicalBytes = readFileSync(f.path, "utf8");
+  const { entry, landingError } = captureFeedbackReply(f.deps, f.input, f.continuation);
+  assert.equal(landingError, undefined);
+  assert.equal(entry.reply_to, f.id); assert.equal(entry.submission_key, f.input.submissionKey);
+  assert.deepEqual(readQueuedFeedbackRecords(f.stateRoot).get(f.rel), { ...f.canonical, status: "answered", answered_by: entry.id });
+  assert.equal(readFileSync(f.path, "utf8"), canonicalBytes, "the canonical checkout and source history stay untouched");
+});
+
+test("W1-T10789: current queued decisions and legacy reply callers keep their guards", async t => {
+  const cases: Array<[string, (f: ReturnType<typeof capturedCanonicalParent>) => void]> = [
+    ["pending identity changed", f => f.rewritePending(r => { r.answered_by = null; })],
+    ["pending direction changed", f => f.rewritePending(r => { r.raw = "New direction"; })],
+    ["pending decision advanced", f => f.rewritePending(r => { r.status = "rejected"; })],
+    ["canonical metadata changed after capture", f => { f.continuation.canonical.proposal_pr = "https://github.com/fixture/repo/pull/8"; }],
+    ["foreign checkout", f => { f.continuation.root = join(f.root, "other"); }],
+    ["foreign pending scope", f => { f.continuation.inboxRoot = join(f.stateRoot, "other"); }],
+    ["competing answer", f => { captureFeedback(f.root, { raw: "Another accepted answer", origin: "ui", replyTo: f.id, land: { stateRoot: f.stateRoot } }); }],
+  ];
+  for (const [label, change] of cases) await t.test(label, t => {
+    const f = capturedCanonicalParent(t); change(f); const before = f.snapshot();
+    assert.throws(() => captureFeedbackReply(f.deps, f.input, f.continuation), /canonical grill continuation/);
+    assert.deepEqual(f.snapshot(), before, "refusal happens before creating any new reply or changing pending work");
+  });
+  await t.test("missing stable intent or landing bridge refuses before capture", t => {
+    const f = capturedCanonicalParent(t), before = f.snapshot();
+    assert.throws(() => captureFeedbackReply(f.deps, { ...f.input, submissionKey: undefined }, f.continuation), /canonical grill/);
+    assert.throws(() => captureFeedbackReply({ ...f.deps, feedbackLand: undefined }, f.input, f.continuation), /canonical grill/);
+    assert.deepEqual(f.snapshot(), before);
+  });
+  await t.test("canonical base cannot be reused for a different transition", t => {
+    const f = capturedCanonicalParent(t), before = f.snapshot();
+    assert.throws(() => setFeedbackStatus(f.root, f.id, "rejected", { canonicalBase: f.canonical, land: { stateRoot: f.stateRoot } }), /canonical reply parent/);
+    assert.throws(() => setFeedbackStatus(f.root, f.id, "answered", { canonicalBase: f.canonical }), /canonical reply parent/);
+    assert.deepEqual(f.snapshot(), before);
+  });
+  await t.test("ordinary HTTP caller cannot replace a rejected source with client-supplied evidence", async t => {
+    const f = capturedCanonicalParent(t);
+    writeFileSync(f.path, stringifyYaml({ ...f.canonical, status: "rejected" }));
+    const before = f.snapshot();
+    await withService({ ...depsFor(f.root, join(f.root, "plan", "tasks.yaml")), ...f.deps }, async base => {
+      const response = await post(base, "/v1/feedback", WRITE_TOKEN, { ...f.input,
+        continuation: f.continuation, canonicalBase: f.canonical });
+      assert.equal(response.ok, false); await response.text();
+    });
+    assert.deepEqual(f.snapshot(), before);
+  });
+});
 
 // ── 1, 2, 3: the edge lands on BOTH ends, and answering closes the question ─────────────────
 

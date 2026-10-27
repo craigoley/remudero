@@ -25,7 +25,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { inboxBoardReferents } from "./inbox-board-referents.js";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
@@ -67,6 +67,7 @@ import {
   listFeedback,
   readFeedbackEntry,
   recentFeedbackFewShot,
+  qualifyCanonicalGrillContinuation,
   setFeedbackStatus,
   validateFeedbackExpansion,
   type FeedbackEntry,
@@ -74,6 +75,7 @@ import {
   type FeedbackExpansion,
   type FeedbackOrigin,
   type FeedbackStatus,
+  type CanonicalGrillContinuation,
 } from "./feedback.js";
 import {
   queueFeedbackRecord,
@@ -488,7 +490,26 @@ export interface FeedbackReplyInput {
 export function captureFeedbackReply(
   deps: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
   input: FeedbackReplyInput,
+  continuation?: CanonicalGrillContinuation,
 ): { entry: FeedbackEntry; landingError?: string } {
+  if (continuation !== undefined) {
+    const id = input.replyTo;
+    if (id === undefined || !input.submissionKey || deps.feedbackLand === undefined || continuation.root !== resolve(deps.root)
+      || continuation.inboxRoot !== resolve(deps.inboxRoot)) {
+      throw new Error("canonical grill continuation has no matching scoped parent and stable reply identity");
+    }
+    // Last check before the first capture: preserve a newer queued decision or competing
+    // answer instead of creating a reply against evidence that changed during the async read.
+    const queued = readQueuedFeedbackRecords(deps.inboxRoot);
+    const current = qualifyCanonicalGrillContinuation(deps.root, deps.inboxRoot, id,
+      queued.get(feedbackEntryRepoPath(id)), continuation.canonical);
+    if (current === undefined || current.pendingFingerprint !== continuation.pendingFingerprint
+      || current.canonicalFingerprint !== continuation.canonicalFingerprint) {
+      throw new Error("canonical grill continuation refused: captured pending identity or canonical metadata changed");
+    }
+    const refusal = replyRefusalFor(deps.root, id, queued, () => JSON.stringify(current.canonical));
+    if (refusal) throw new Error(`canonical grill continuation refused: ${refusal.refused}`);
+  }
   const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
   const land = { stateRoot: deps.inboxRoot };
   const entry = captureFeedback(deps.root, {
@@ -505,7 +526,8 @@ export function captureFeedbackReply(
     const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
     const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
     if (input.replyTo !== undefined) {
-      setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id, ...(deps.feedbackLand ? { land } : {}) });
+      setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id,
+        ...(continuation ? { canonicalBase: continuation.canonical } : {}), ...(deps.feedbackLand ? { land } : {}) });
     }
     const inQueue = new Set(queuedFeedbackLandings(deps.inboxRoot));
     const unqueued = [entry.id, ...flipped].map(feedbackEntryRepoPath).filter((rel) => !inQueue.has(rel));
