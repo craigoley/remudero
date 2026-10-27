@@ -63,8 +63,9 @@ test("W1-T10617: product research retains sources answers and the objective revi
     savedBeforeProvider = existsSync(researchFile(root)) ? JSON.parse(readFileSync(researchFile(root), "utf8")) : undefined;
     return fixture.research(input);
   } }, clock });
-  const body = command(id, 1, { answers: [{ questionId: "q_constraints", answer: "mobile first, offline tolerant" }] });
-  const invalid = { ...body, answers: [...body.answers as { questionId: string; answer: string }[], { questionId: "q_nonexistent", answer: "x" }] };
+  const answers = [{ questionId: "q_constraints", answer: "mobile first, offline tolerant" }];
+  const body = command(id, 1, { answers });
+  const invalid = { ...body, answers: [...answers, { questionId: "q_nonexistent", answer: "x" }] };
   for (let attempt = 0; attempt < 2; attempt++) {
     assert.equal((await service.run(ACTOR, invalid)).code, "invalid_input");
     assert.equal(inputs.length, 0, "an invalid first request or retry must never invoke the provider");
