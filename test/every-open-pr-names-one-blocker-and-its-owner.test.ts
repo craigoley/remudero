@@ -119,6 +119,20 @@ test("blocker history ignores unrelated rows and never recovers age from a malfo
   assert.equal(blockerFields("awaiting-ci", latest.get(71), NOW + 1000).blocker_age_ms, 0);
 });
 
+test("#14910: a new head restarts a head-scoped stage clock, never a fix-lane one", () => {
+  const since = new Date(NOW - 52 * 60_000).toISOString();
+  const row = { step: "sweep.disposed", pr_number: 71, blocker: "awaiting-arm", blocker_since: since, head_sha: "head-old" };
+  const prior = priorBlockersFromLedger([row]).get(71);
+  assert.equal(prior?.headSha, "head-old");
+  assert.equal(blockerFields("awaiting-arm", prior, NOW, false, undefined, "head-new").blocker_age_ms, 0);
+  assert.equal(blockerFields("awaiting-arm", prior, NOW, false, undefined, "head-old").blocker_since, since);
+  assert.equal(blockerFields("awaiting-arm", prior, NOW).blocker_since, since);
+  const red = priorBlockersFromLedger([{ ...row, blocker: "own-red" }]).get(71);
+  assert.equal(blockerFields("own-red", red, NOW, false, undefined, "head-new").blocker_since, since);
+  const unheaded = priorBlockersFromLedger([{ ...row, head_sha: undefined }]).get(71);
+  assert.equal(blockerFields("awaiting-arm", unheaded, NOW, false, undefined, "head-new").blocker_since, since);
+});
+
 test("the dry-run view carries the same blocker fields without persisting a disposition", async () => {
   const logs: Record<string, unknown>[] = [];
   const d = deps({ dryRun: true, log: (step, fields) => { logs.push({ step, ...fields }); } });
