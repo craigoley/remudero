@@ -813,6 +813,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T2436: `priorPrerequisitePrFor` (run-task.ts) folds these by `pr_url`; the ledger is that
   // capability's only memory, so archived away the rung opens a SECOND prerequisite PR.
   "fix.prerequisite_opened",
+  "fix.prerequisite_dispatch_failed", // completed no-PR attempts are reused at unchanged repair inputs.
   // W1-T3309: `previousInstrumentEntanglementFromLedger` (run-task.ts) replays these rows to compare
   // this fix round's instrument/src paths against the previous round's — an unchanged pair means the
   // last dispatch moved nothing. The read is NOT scoped to head_sha, so rotating the row away leaves

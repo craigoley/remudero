@@ -764,8 +764,8 @@ test("rmd serve starts the read-model worker for every registry instance and sto
     readModel: { tickMs: 20 },
   };
   assert.deepEqual(readModelInstances(deps), [
-    { name: "core", ledgerDir: stateDir, feedbackRoot: root, planPath },
-    { name: "site", ledgerDir: join(stateBase, "site", "state"), repo: "craigoley/remudero-site",
+    { name: "core", ledgerDir: stateDir, boardRoot: root, feedbackRoot: root, planPath },
+    { name: "site", ledgerDir: join(stateBase, "site", "state"), boardRoot: join(stateBase, "site"), repo: "craigoley/remudero-site",
       inbox: { instance: "site", repository: "craigoley/remudero-site", root: join(stateBase, "site", "repos", "remudero-site"),
         planPath: join(stateBase, "site", "repos", "remudero-site", "plan", "tasks.yaml"),
         ledgerPath: join(stateBase, "site", "state", "ledger.ndjson"), inboxRoot: join(stateBase, "site") } },

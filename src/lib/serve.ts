@@ -1,5 +1,4 @@
 import { buildImprovementThreadRoutes } from "./improvement-thread.js";
-import { DEMAND_VIEWS } from "./view-demand.js";
 /**
  * lib/serve.ts — `rmd serve`'s assembler: the FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B).
  *
@@ -104,7 +103,8 @@ import { WORKSTREAMS_VIEW_NAME, WORKSTREAMS_VIEW_VERSION, type WorkstreamsData }
 import { ACTIONS_VIEW_NAME, ACTIONS_VIEW_VERSION, type ActionsData } from "./actions-view.js";
 import { AGENT_VIEW_NAME } from "./agent-view.js";
 import { INCIDENTS_VIEW_NAME } from "./incidents-view.js";
-import { TASK_VIEW_NAME } from "./view-demand.js";
+import { DEMAND_VIEWS, TASK_VIEW_NAME } from "./view-demand.js";
+import { DAILY_PROGRESS_VIEW_NAME, validateDailyProgressRequest } from "./daily-progress-view.js";
 import { consumeHumanGateCounts, unavailableHumanGateCounts, type HumanGateProjection } from "./human-gate.js";
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
 import { withViewShadow } from "./view-shadow.js";
@@ -2959,9 +2959,12 @@ function assembleServeRoutes(
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
     readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME, CODE_HEALTH_VIEW_NAME],
-    demandViews: [...DEMAND_VIEWS, CODE_HEALTH_VIEW_NAME],
+    demandViews: [...DEMAND_VIEWS, CODE_HEALTH_VIEW_NAME, DAILY_PROGRESS_VIEW_NAME],
     requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"], [AGENT_VIEW_NAME]: ["instance", "part"] },
-    requestValidators: { [CODE_HEALTH_VIEW_NAME]: (params, source) => validateCodeHealthRequest(params, source, systemClock.now()) },
+    requestValidators: {
+      [CODE_HEALTH_VIEW_NAME]: (params, source) => validateCodeHealthRequest(params, source, systemClock.now()),
+      [DAILY_PROGRESS_VIEW_NAME]: (params, source) => validateDailyProgressRequest(params, source, systemClock.now()),
+    },
     legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
@@ -3600,13 +3603,15 @@ export function serveGeneration(server: Server): ServeGenerationHooks | undefine
   return serveGenerations.get(server);
 }
 
-export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "instances" | "assistantRepository"> & { panelGraph?: Pick<ServeDeps["panelGraph"], "planPath"> }): ReadModelInstance[] {
-  const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), feedbackRoot: deps.questionsRoot,
+export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "fleetControlRoot" | "instances" | "assistantRepository"> & { panelGraph?: Pick<ServeDeps["panelGraph"], "planPath"> }): ReadModelInstance[] {
+  // Board snapshots live under config.root, where the PR collector writes them (`createBoardSnapshotCache(config.root, …)`
+  // in tick-read-worker.ts); `questionsRoot` is the serving checkout, which holds feedback but never snapshots.
+  const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), boardRoot: deps.fleetControlRoot, feedbackRoot: deps.questionsRoot,
     ...(deps.assistantRepository ? { repo: deps.assistantRepository } : {}), ...(deps.panelGraph?.planPath ? { planPath: deps.panelGraph.planPath } : {}) };
   const others = livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances });
   return [core, ...others.map((instance) => {
     const root = instanceStateRoot({ name: instance.name, repo: instance.repo, project: "", live: true }, dirname(dirname(instance.stateDir)));
-    return { name: instance.name, ledgerDir: instance.stateDir, repo: instance.repo,
+    return { name: instance.name, ledgerDir: instance.stateDir, boardRoot: root.root, repo: instance.repo,
       inbox: { instance: instance.name, repository: instance.repo, root: join(root.root, "repos", instance.repo.split("/")[1]),
         planPath: root.planPath, ledgerPath: root.ledgerPath, inboxRoot: root.root } };
   })];
