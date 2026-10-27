@@ -228,7 +228,7 @@ test("mergeDirectViaRest issues the REST merge through the injected exec, with t
     seen.push({ file, args, opts });
     return "";
   },path=>path.includes('/files?')?[{filename:'docs/rest.md'}]:{state:'open',head:{sha:securedHead},
-    base:{sha:'b'.repeat(40),ref:'main',repo:{full_name:'craigoley/remudero'}},changed_files:1});
+    base:{sha:'b'.repeat(40),ref:'main',repo:{full_name:'craigoley/remudero'}},changed_files:1}, undefined, undefined, () => {});
   assert.equal(seen.length, 1, "exactly one write");
   assert.equal(seen[0].file, "gh");
   assert.deepEqual(seen[0].args, ghMergePrArgv("craigoley", "remudero", 2598,securedHead));
@@ -252,7 +252,7 @@ test('direct merge emits exactly one verified sha and refuses a stale caller hea
  const read=(path:string)=>path.includes('/files?')?[{filename:'docs/rest.md'}]:{state:'open',head:{sha:head},
   base:{sha:'b'.repeat(40),ref:'main',repo:{full_name:'craigoley/remudero'}},changed_files:1};
  const exec=(_file:string,args:string[])=>{seen.push(args);return '';};
- mergeDirectViaRest(PR,exec,read,head);
+ mergeDirectViaRest(PR,exec,read,head,undefined,() => {});
  assert.deepEqual(seen[0].filter(arg=>arg.startsWith('sha=')),['sha='+head]);
  assert.throws(()=>mergeDirectViaRest(PR,exec,read,'c'.repeat(40)),/security merge unknown/);
  assert.equal(seen.length,1,'stale head never reaches REST');

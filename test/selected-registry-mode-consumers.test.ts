@@ -409,7 +409,7 @@ test("selected mode rechecks after actual asynchronous security admission before
         output: { title: "No new alerts in code changed by this pull request",
           summary: "[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A11468+tool%3ACodeQL+is%3Aopen)." } }] };
       return { state: "open", head: { sha: head }, base: { sha: base, ref: "main", repo: { full_name: "craigoley/remudero" } }, changed_files: 1 };
-    }, head, q);
+    }, head, q, () => {});
     assert.ok(reads > 0); assert.equal(writes, 1, "SHADOW observes, it does not deny the security-approved independent effect");
     assert.equal(rows.at(-1)?.selected_outcome, "would-refuse"); assert.equal(rows.at(-1)?.reason, "revision_changed");
     assert.equal(rows.at(-1)?.binding_digest, original); assert.equal(rows.at(-1)?.publication_permission, "not-granted");
