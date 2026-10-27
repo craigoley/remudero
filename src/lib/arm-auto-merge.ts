@@ -1462,6 +1462,21 @@ export const REST_MERGE_UNSETTLED_MAX_READS = 3;
 /** W1-T1280 — the short interval between one `UNKNOWN` re-read and the next. */
 export const REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS = 2_000;
 
+function operatorHoldRefusal(
+  prUrl: string,
+  deps: Pick<ArmDeps<true>, "say"> & Partial<Pick<ArmDeps<true>, "ledgerLines">>,
+): ArmAttemptResult | undefined {
+  const holdLedgerLines = deps.ledgerLines?.();
+  const prNumber = prNumberFromRef(prUrl);
+  const hold = holdLedgerLines && prNumber !== undefined ? automergeHoldFromLedger(holdLedgerLines, prNumber) : undefined;
+  if (!hold) return undefined;
+  deps.say(
+    `automerge.hold_refused (W1-T1000002): operator hold engaged by ${hold.by} (${hold.reason}) — ` +
+      `arm withheld: ${prUrl}`,
+  );
+  return { outcome: "hold-refused" };
+}
+
 export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps<false>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
@@ -1506,19 +1521,8 @@ function* attemptArmSteps(
     );
     return { outcome: "draft-refused" };
   }
-  // MERGE (W1-T1000002 x W1-T1079): every caller reads one type.
-  const holdLedgerLines = deps.ledgerLines?.();
-  if (holdLedgerLines) {
-    const prNumber = prNumberFromRef(prUrl);
-    const hold = prNumber !== undefined ? automergeHoldFromLedger(holdLedgerLines, prNumber) : undefined;
-    if (hold) {
-      deps.say(
-        `automerge.hold_refused (W1-T1000002): operator hold engaged by ${hold.by} (${hold.reason}) — ` +
-          `arm withheld: ${prUrl}`,
-      );
-      return { outcome: "hold-refused" };
-    }
-  }
+  const heldAtEntry = operatorHoldRefusal(prUrl, deps);
+  if (heldAtEntry) return heldAtEntry;
   if (deps.stackPrerequisite) {
     let stack: StackPrerequisiteCheck;
     try {
@@ -1577,6 +1581,8 @@ function* attemptArmSteps(
   if ("hold" in judged) return judged.hold;
   try {
     yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
+    const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
+    if (heldBeforeWrite) return heldBeforeWrite;
     yield* step(() => deps.armAuto(prUrl));
     return { outcome: "armed", ...(judged.judge ? { ratchetJudge: judged.judge } : {}) };
   } catch (e) {
@@ -1603,6 +1609,8 @@ function* attemptArmSteps(
       if (!preflight.proceed) return preflight.result;
       try {
         yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
+        const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
+        if (heldBeforeWrite) return heldBeforeWrite;
         yield* step(() => deps.mergeDirect(prUrl));
         deps.say(`automerge.rate_limited_rest_merge (W1-T1255; arm refused on quota, PR already green): ${prUrl}`);
         return { outcome: "direct-merged", error: msg, rateLimit: quota, directMergePreflight: preflight.evidence };
@@ -1636,6 +1644,8 @@ function* attemptArmSteps(
               if (!retryPreflight.proceed) return retryPreflight.result;
               try {
                 yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
+                const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
+                if (heldBeforeWrite) return heldBeforeWrite;
                 yield* step(() => deps.mergeDirect(prUrl));
                 deps.say(
                   `automerge.rate_limited_rest_merge (W1-T1255; settled mergeable on retry ${read}): ${prUrl}`,
@@ -1679,11 +1689,14 @@ function* attemptArmSteps(
 /** The REST merge once {@link directMergePreflight} has let it through. */
 function* mergeDirectAfterPreflightSteps(
   prUrl: string,
-  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say" | "contributorAdmission">,
+  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say" | "contributorAdmission"> &
+    Partial<Pick<ArmDeps<true>, "ledgerLines">>,
   evidence: DirectMergePreflightEvidence | undefined,
 ): Steps<ArmAttemptResult> {
   try {
     yield* step(() => deps.contributorAdmission?.(prUrl));
+    const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
+    if (heldBeforeWrite) return heldBeforeWrite;
     yield* step(() => deps.mergeDirect(prUrl));
     deps.say(`automerge.clean_status_direct_merge (already green — merged now): ${prUrl}`);
     return { outcome: "direct-merged", directMergePreflight: evidence };
@@ -1875,10 +1888,12 @@ function* attemptPlanPrMergeSteps(
  */
 function* attemptQueueArmSteps(
   prUrl: string,
-  deps: Pick<ArmDeps<true>, "armAuto" | "isMerged" | "say"> & Partial<Pick<ArmDeps<true>, "enqueue" | "contributorAdmission">>,
+  deps: Pick<ArmDeps<true>, "armAuto" | "isMerged" | "say"> & Partial<Pick<ArmDeps<true>, "enqueue" | "contributorAdmission" | "ledgerLines">>,
 ): Steps<ArmAttemptResult> {
   try {
     yield* step(() => deps.contributorAdmission?.(prUrl));
+    const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
+    if (heldBeforeWrite) return heldBeforeWrite;
     yield* step(() => deps.armAuto(prUrl));
     deps.say(`automerge.queued (W1-T4405): auto-merge armed on a merge-queue branch — the queue merges it: ${prUrl}`);
     return { outcome: "armed" };
@@ -1892,6 +1907,8 @@ function* attemptQueueArmSteps(
     if (armFailureAction(msg) === "direct-merge" && enqueue) {
       try {
         yield* step(() => deps.contributorAdmission?.(prUrl));
+        const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
+        if (heldBeforeWrite) return heldBeforeWrite;
         yield* step(() => enqueue(prUrl));
         deps.say(`automerge.enqueued (W1-T4405): already green — added to the merge queue, never merged around it: ${prUrl}`);
         return { outcome: "armed" };
