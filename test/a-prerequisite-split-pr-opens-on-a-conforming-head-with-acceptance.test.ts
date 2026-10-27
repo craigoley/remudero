@@ -119,6 +119,8 @@ async function drive(over: {
   priorRows?: Array<Record<string, unknown>>;
   reviewHead?: string;
   bodySha256?: string;
+  constraint?: string;
+  progressApproach?: string;
   taskPatch?: { files?: string[]; design?: string; amendment?: string };
   report?: string;
   onSpawn?: (args: { prompt: string; env?: Record<string, string> }) => void;
@@ -158,7 +160,7 @@ async function drive(over: {
     ...(over.head ? { readLiveHead: async () => over.head!(d.minted()) } : {}),
     ...(over.body ? { fetchPrBody: over.body } : {}),
   };
-  const outcome = await runFixRung({ ...opts(), ...(over.root ? { config: { root: over.root }, worktreePath: over.root } : {}), task: { ...opts().task, ...over.taskPatch }, prBodySha256: over.bodySha256, initialReview: { ...entangledReview(), ...(over.reviewHead ? { headSha: over.reviewHead } : {}) }, deps } as never);
+  const outcome = await runFixRung({ ...opts(), ...(over.root ? { config: { root: over.root }, worktreePath: over.root } : {}), task: { ...opts().task, ...over.taskPatch }, prBodySha256: over.bodySha256, constraint: over.constraint, progressApproach: over.progressApproach, initialReview: { ...entangledReview(), ...(over.reviewHead ? { headSha: over.reviewHead } : {}) }, deps } as never);
   return { outcome, ...d };
 }
 
@@ -385,4 +387,23 @@ test("a completed no-PR prerequisite refusal remains effective after real ledger
   const run = { step: "run.start", run_id: "repair-attribution", task_id: opts().taskId };
   assert.equal(gatherRuns([run, { ...marker, run_id: run.run_id }])[0]!.prUrl, undefined, "a refusal names a repair target rather than an opened PR");
   assert.equal(gatherRuns([run, { ...marker, run_id: run.run_id, pr_url: opts().prUrl }])[0]!.prUrl, opts().prUrl, "positive control: the generic opened-PR field would misattribute this repair target");
+});
+
+
+test("a new operator instruction requalifies a no-PR attempt once while model-only advice does not", async t => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prerequisite-operator-input-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let spawns = 0;
+  const input = { root, report: "No addressable prerequisite receipt.", constraint: "operator: split the existing instrument", onSpawn: () => { spawns++; } };
+  const first = await drive(input);
+  await drive({ ...input, priorRows: first.lines, progressApproach: "model changed its suggested approach" });
+  assert.equal(spawns, 1, "model-only advice is not new operator authority or dependency evidence");
+  const changed = { ...input, constraint: "operator: qualify the newly supplied dependency under the existing gates" };
+  const second = await drive({ ...changed, priorRows: first.lines });
+  assert.equal(spawns, 2, "a new operator instruction receives the existing qualification once");
+  const history = [...first.lines, ...second.lines];
+  await drive({ ...changed, priorRows: history });
+  await drive({ ...changed, priorRows: history, constraint: `  ${changed.constraint}\n` });
+  await drive({ ...changed, priorRows: history, constraint: undefined });
+  assert.equal(spawns, 2, "the same or consumed instruction cannot manufacture another attempt");
 });
