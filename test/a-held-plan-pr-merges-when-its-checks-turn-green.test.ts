@@ -21,6 +21,7 @@ import {
 } from "../src/lib/arm-auto-merge.js";
 import { selectLightPassPlanMerge, selectLightPassPlanMerges } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { rotateLedger } from "#src/lib/ledger.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { lightPassActionable } from "../src/run-task.js";
 import {
@@ -242,4 +243,20 @@ test("a genuine current-head review hold reaches the existing serial plan merge 
     { ...row, pr_number: 14829 }, { ...row, pr_url: "https://github.com/craigoley/remudero/pull/14829" },
     { ...row, ts: "unreadable" }, { ...row, mergeable_state: "dirty" },
   ]) assert.equal(heldPlanPrFromLedger([bad], held), undefined, "incomplete, conflicting or foreign evidence grants no held priority");
+});
+
+
+test("a held plan remains selectable after real rotation archives its unregistered companion", () => {
+  const pr = { ...planPr(14828), headSha: "275ac3e9515e21507a2c69c066c101e1230c776f" };
+  const at = "2026-10-27T13:33:03.932Z";
+  const primary = { ts: at, step: "automerge.arm_skipped", outcome: "plan-pr-held", lane: "review",
+    head_sha: pr.headSha, pr_number: pr.prNumber, pr_url: pr.prUrl,
+    plan_touch: "touched", mergeable_state: "blocked", remedy: "retry-later" };
+  const path = ledgerWith([primary, { ...primary, step: "automerge.plan_pr_held", head_sha: undefined },
+    { ts: at, step: "fixture.noise", padding: "x".repeat(4096) }]);
+  assert.equal(rotateLedger(path, { ceilingBytes: 1000, smoothingWindowMs: 0, now: () => new Date(at) }).rotated, true);
+  const live = readLedgerLines(path);
+  assert.ok(live.some(row => row.step === "automerge.arm_skipped"), "existing retention preserves the deciding primary row");
+  assert.equal(live.some(row => row.step === "automerge.plan_pr_held"), false, "the real companion is only in the archive");
+  assert.deepEqual(heldPlanPrFromLedger(live, pr), { heldAtMs: Date.parse(at), trigger: "checks-green" });
 });
