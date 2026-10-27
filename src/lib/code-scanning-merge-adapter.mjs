@@ -96,8 +96,7 @@ export async function readSecurityMergeDecision(target, read) {
  */
 export async function publishSecurityMergeDecision(target, api, targetUrl) {
   const observed = await readSecurityMergeDecision(target, api.read);
-  if (!sha(observed.headSha) || (target.expectedHead !== undefined && target.expectedHead !== observed.headSha))
-    return {...observed,published:false};
+  if (!sha(observed.headSha)) return {...observed,published:false};
   const live = await api.read(`repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`);
   if (live?.head?.sha !== observed.headSha || live.state !== 'open' || live.base?.sha !== observed.baseSha ||
       live.base?.ref !== 'main' || live.base?.repo?.full_name !== 'craigoley/remudero')

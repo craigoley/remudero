@@ -36,21 +36,6 @@ export async function runSecurityMergeProducer(eventName, event, transport, targ
   const results=[];
   for (const pr of candidates) results.push(await publishSecurityMergeDecision({owner,repo,prNumber:pr.number,
     expectedHead:pr.head?.sha},transport,targetUrl));
-  // The workflow can finish before GitHub's separate CodeQL check finishes processing SARIF.
-  // Reobserve only that positively identified pending analysis, within the existing five-minute
-  // workflow deadline. Every observation still uses the complete classifier and fresh head/base.
-  if (eventName === 'workflow_run' && event.workflow_run.name === 'CodeQL' &&
-      event.workflow_run.status === 'completed' && event.workflow_run.conclusion === 'success') {
-    for (let round=0; round<3; round++) {
-      const pending=results.flatMap((result,i)=>result.published === true &&
-        result.decision.reason === 'security-analysis-pending' && result.observation?.trustedCodeqlCount > 0 &&
-        result.observation.latest?.status !== 'completed' ? [i] : []);
-      if (pending.length === 0) break;
-      await (transport.wait ?? delay)(60_000);
-      for (const i of pending) results[i]=await publishSecurityMergeDecision({owner,repo,
-        prNumber:candidates[i].number,expectedHead:results[i].headSha},transport,targetUrl);
-    }
-  }
   return results;
 }
 
