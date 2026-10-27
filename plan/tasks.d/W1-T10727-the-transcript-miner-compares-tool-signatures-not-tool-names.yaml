@@ -12,7 +12,8 @@
   origin: "operator ask 2026-10-26: review the codebase against the backlog and scan Swamp for ideas, leaning into automation and self-improvement (MASTER-PLAN §4H)"
   plan_refs: [W1-T4668]
   files: [src/lib/workflow-mining.ts, test/learning/the-transcript-miner-compares-tool-signatures-not-tool-names.test.ts]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   priority: 3
   attempts: 0
   rationale: |
@@ -59,3 +60,26 @@
     the hold.
     Workers run with the plan's text, never this session's. The census verb is `rmd procedures` (see
     docs/cli-reference.md once #14473 merges).
+  amendment: |
+    Withdrawal disposition 2026-10-26, on the measurement the hold named. Claims no remedy credit: nothing was built.
+    WHERE: the core daemon (instance `core`, container remudero-daemon on the Azure host), ledger union at
+    /home/node/Remudero/state (host /home/craigoleyagent/rmd-state2/state), 621 archives plus the live file, no unread
+    source. Live tree c6ad432e0, which contains #14473 (8bc7bcc10).
+    MEASURED: `rmd procedures --days 13 --json` (2026-10-13T19:16Z to 2026-10-26T19:16Z; 13 whole days since
+    signatures began). Control: 5952 of 5979 tool rows carry a signature (coverage 0.9955), 285 merged runs.
+    Types: diagnose 10 clean / 1 repaired, implement 130 / 133, recon 10 / 1.
+    THE MINER'S RULE, NOT THE 0.8 THIS SHARD'S RATIONALE STATES: `mineTranscriptWorkflows` keeps a step only when EVERY
+    clean run took it (clean share 1.0) and NO repaired run did (repaired share 0), with at least 2 clean runs and at
+    least 1 repaired run. The rationale's "clean-run share of 0.8 or more ... the same all-or-nothing test" was wrong:
+    the miner's test is 1.0.
+    RESULT: no task type has a step with clean share 1.0 and repaired share 0. None reaches even the 0.8 context
+    test. The highest implement clean shares are Bash:cat, Bash:grep and Bash:sed at 0.51, with repaired shares
+    0.37 to 0.43.
+    ROBUSTNESS: most codex-provider runs carry no tool-executing worker.activity row (47 of 67 clean codex implement
+    runs; all 8 clean codex diagnose and all 8 clean codex recon runs), which caps every share for those types. The
+    same census over claude-provider runs only (coverage 0.9951; implement 62 clean / 57 repaired) and over runs with
+    any tool row (implement 82 / 67) still finds no step at 1.0/0 and none at 0.8/0; the top implement steps occur
+    in clean and repaired runs alike (Bash:grep 0.82 clean vs 0.86 repaired, claude-only). Switching the miner to
+    signatures would still mine nothing, so per this shard's own hold condition it closes instead.
+    Context only: `--days 60` reads coverage 0.2468 (rows before 2026-10-13 carry no signature), which is why the
+    13-day window decides.

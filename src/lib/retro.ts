@@ -13,7 +13,7 @@ import fsMarker from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { updateProposalRegistry, updateProposalRegistryAsync, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
-import { tryEscalate } from "./escalate.js";
+import { ghIssueGateway, tryEscalate } from "./escalate.js";
 import { appendLedger, type LedgerLine, type LedgerWriterDeps } from "./ledger.js";
 import { promotionTaint } from "./learnings.js";
 import type { Lifecycle, LearningEntry, PromotionResult, PromotionTaintResult } from "./learnings.js";
@@ -4620,7 +4620,12 @@ export function defaultRetroBackoffPolicy(): RetroBackoffPolicy {
 
 export type RetroBackoffDecision =
   | { eligible: true }
-  | { eligible: false; streak: number; nextEligibleAt: string; mergesFloor: number };
+  | { eligible: false; streak: number; nextEligibleAt: string; mergesFloor: number; nextEligibleAtState?: never }
+  | { eligible: false; streak: number; nextEligibleAt: null; mergesFloor: number; nextEligibleAtState: "outside-date-range" };
+
+// ECMAScript TimeClip's representation limit, not a retry-policy ceiling:
+// https://tc39.es/ecma262/2025/multipage/numbers-and-dates.html#sec-timeclip
+const MAX_FORMATTABLE_DATE_MS = 8_640_000_000_000_000;
 
 /** PURE (W1-T4664). Decide whether a new automated retro attempt is due, given the last recorded
  *  attempt (if any) and the CURRENT `mergesSinceMarker`/`markerTs`/`now` the trigger is about to
@@ -4643,6 +4648,13 @@ export function evaluateRetroBackoff(
   const mergesFloor = lastAttempt.mergesSinceMarker + policy.mergesThreshold;
   if (now.getTime() >= nextEligibleAtMs || mergesSinceMarker >= mergesFloor) {
     return { eligible: true };
+  }
+  // The default six-hour delay reaches beyond Date at streak30 (and can overflow Number later).
+  // Eligibility above still compares the ORIGINAL deadline and merge floor; never clamp it
+  // to a fabricated date or let formatting turn a valid refusal into a trigger exception.
+  if (Math.abs(nextEligibleAtMs) > MAX_FORMATTABLE_DATE_MS) {
+    return { eligible: false, streak: lastAttempt.streak, nextEligibleAt: null, mergesFloor,
+      nextEligibleAtState: "outside-date-range" };
   }
   return {
     eligible: false,
@@ -5247,7 +5259,12 @@ export interface RetroPublicationEscalationCtx {
   repo: string;
   ledgerPath: string;
   runId: string;
+  /** Absent: the real `gh` gateway for `owner/repo`, as every other run-task.ts escalation builds it. Before this
+   *  default the only production caller passed none, so `tryEscalate` read `listOpen` off `undefined` and every
+   *  retro publication escalation landed as `escalation.failed` with `delivered: false`. */
   issues?: Parameters<typeof tryEscalate>[1]["issues"];
+  /** The raw `gh` stand-in for that default gateway (`ghIssueGateway`'s own `opts.exec`); tests only. */
+  ghExec?: (args: string[]) => string;
   episodeMs?: number;
   strikeCap?: number;
   nowMs?: number;
@@ -5346,7 +5363,8 @@ export function escalateRetroPublicationFailure(
       ],
       recommendation: "fix the failing suite",
     },
-    { issues: ctx.issues ?? undefined, ledgerPath: ctx.ledgerPath, runId: ctx.runId } as Parameters<typeof tryEscalate>[1],
+    { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo, ctx.ghExec ? { exec: ctx.ghExec } : {}),
+      ledgerPath: ctx.ledgerPath, runId: ctx.runId } as Parameters<typeof tryEscalate>[1],
   );
   appendLedger(ctx.ledgerPath, {
     run_id: ctx.runId,

@@ -1,0 +1,171 @@
+- id: W1-T10766
+  title: "THE CORE STATE SNAPSHOT SURVIVES AN ENGINE TREE REAPED MID-WALK — since W1-T10086 shipped, core's nightly snapshot still fails whenever a reaper removes an engines/<hash>/ worktree while snapshotState walks it, because only the copier tolerates a vanished entry; the walk's realpath and the engine-link lstat throw ENOENT, and the 11 GB of engine worktree payload it walks is regenerable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern, what snapshotState does when an engine tree vanishes or is regenerable; no reaper, cron, heartbeat or alarm change
+  band_meaning: span
+  priority: 1
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: core's verified state backup failed 9 of the last 12 nights; read-only on the Azure host (reclaim.log, receipt, ledger rotations) and reproduced on origin/main 7b75a38f7"
+  plan_refs: [W1-T10086, W1-T5545, W1-T5546, W1-T5681, W1-T234, W1-T9077, W1-T9738, W1-T10756]
+  files:
+    - src/lib/ledger.ts
+    - src/lib/state-backup-engine-links.ts
+    - test/ledger/a-state-snapshot-survives-an-engine-reaped-mid-walk.test.ts
+    - test/state-backup.test.ts
+  rationale: |
+    READ 2026-10-26 on origin/main 7b75a38f7, and read-only on the Azure host at 22:00-22:40Z.
+
+    THE NINE FAILED NIGHTS (~/reclaim.log, `^host-update: STATE SNAPSHOT FAILED` = 9; nights are dated
+    by the site/console archives of the same run). Every failure is the core root
+    /home/craigoleyagent/rmd-state2/state, and every one is ENOENT on an engines/<hash> path:
+    - 10-15, 10-16, 10-17, 10-18: `stat engines/01c2f02f…/node_modules`. Seven nights are the PRE-FIX
+      class: listStateFiles followed a dangling node_modules link with statSync.
+    - 10-19, 10-20, 10-21: `stat engines/02613aa4…/node_modules`. Same class. W1-T10086 (#13317)
+      merged 2026-10-22T01:48Z, and the 10-22 run verified, so the fix is live.
+    - 10-23 (log line ~2783): `lstat engines/77b7dd63…`, cause stack `realpathSync` ← `walk`
+      (ledger.ts:2310 in that image, :2316 now) ← listStateFiles ← snapshotState. That is a POST-FIX
+      race: readdir listed the engine, and it was gone when the walk descended into it.
+    - 10-26 (log line ~3006): `lstat engines/a1b89b5a…/node_modules`, cause stack `lstatSync` ←
+      state-backup-engine-links.ts:107 (the `paths` filter) ← preserveEngineDependencyLinks ←
+      ledger.ts:2475. That is also a POST-FIX race: the engine was listed, then removed before its link
+      was lstat'ed. The trace's line numbers match current main exactly.
+    Verified nights since the fix: 10-22, 10-24 and 10-25. So 2 of 5 nights still fail.
+    Site and console have no engines/ and verify nightly.
+
+    WHAT REMOVES THE ENGINE. Engines are detached git worktrees (engine-tree.ts:183
+    removeEngineDir). They live under neither worktreesDir nor adhocLaneRoot, so
+    `unmanagedWorktreeLanes` (worker.ts:7403) lists them as unmanaged lanes, and the ad-hoc lane reap
+    rung (worker.ts ~7344-7365) reaps them (dry_run=false). The ledger shows it at both post-fix
+    failures:
+    - 10-23T05:14:49Z `adhoc_lane.unmanaged` count 37, reaped 30. That row lists 77b7dd63, and the
+      core snapshot failed moments later (the site snapshot verified at 05:16:26).
+    - 10-26T04:20:48Z `adhoc_lane.unmanaged` count 60, reaped 1. That row lists a1b89b5a; every later
+      row omits it, and the core snapshot failed at about 04:21 (the receipt is stamped 04:25:32Z).
+    `pruneEngineTrees` (engine-tree.ts:384) is a second, independent remover, and it runs after every
+    store fill. There was no `engine.pruned` row in either window, but it can strike the same way.
+    Whether the lane reaper should touch engines at all is a SEPARATE question and is not in this
+    shard. The snapshot must survive any legitimate remover.
+
+    WHY W1-T10086 IS NOT SUFFICIENT. It fixed what the snapshot did with a link that is present.
+    It did not fix an engine that vanishes between the listing and a later touch. The vanish
+    tolerance lives only in the copier (ledger.ts:2421-2424: ENOENT and gone means it is recorded in
+    `vanished`). Every touch before or after the copy throws:
+    - (a) walk: `realpathSync(absDir)` at ledger.ts:2316, `readdirSync(absDir)` at :2319, and
+      `statSync` of a symlink at :2328.
+    - (b) preservation: the `lstatSync` filter at state-backup-engine-links.ts:107. linkEvidence also
+      throws ENOENT at :68/:71 (lstat), :75 (evidence read) and :99 (readlink).
+    - (c) copy, then validate: the link is restored into staging BEFORE the copy
+      (preserveEngineDependencyLinks → restoreEngineDependencyLinks). An engine reaped during the
+      copy therefore records engine.json as `vanished`, and validateEngineDependencyLinks (called at
+      ledger.ts:2497) then refuses "missing reconstruction evidence". This has not fired in
+      production yet.
+    REPRODUCED on 7b75a38f7. A throwaway script used module.syncBuiltinESMExports to delete the
+    engine right before the first fs call on its path:
+    - (a) gives `failed: ENOENT … lstat '…/engines/<h>'`, the 10-23 message;
+    - (b) gives `failed: ENOENT … lstat '…/engines/<h>/node_modules'`, the 10-26 message;
+    - (c), via the existing `beforeCopy` seam, gives `engine dependency reconstruction: invalid
+      archive`;
+    - the unstruck control publishes.
+    #13762 (10-23) already removed the late re-walk of engines because it "races pruning". It left
+    (a), (b) and (c) unguarded.
+
+    THE PAYLOAD THE WALK RACES IS REGENERABLE. state/engines holds 54 engine worktrees: 587,368 files
+    and 11 GB, against 28,227 files and 6.0 GB for the rest of state/. The 10-25 archive is 13 GB, and
+    7.9 GB of it is engines/ (42 engines). An engine is a detached worktree of engine.json's `sha`, plus
+    the stored bundle for its sourceHash, plus the node_modules link that W1-T10086 preserves. Each of
+    these is rebuilt by ensureEngineTree (W1-T9077). W1-T234 scopes the backup to what is
+    irreplaceable. The worktree payload is not irreplaceable. The reconstruction evidence
+    (engine.json, the pin files) and the link text are what W1-T10086's manifest already validates.
+    Walking 95% of the files for regenerable bytes is also what makes the race window wide.
+
+    THE ALARM EXISTS, so this shard adds none. W1-T5681 (#9335) is live:
+    - the receipt reads result=failed, ts=2026-10-26T04:25:32Z, offhost=ok;
+    - heartbeat-azure carries `backup_verdict=FAILED: …`;
+    - the host-resource gardener escalated to #12064 (open since 10-15) and appended re-escalations
+      on 10-23 and 10-26.
+
+    RESTORABILITY TODAY.
+    - The off-host copy is a nightly incremental Azure snapshot of remudero-data (LUN 0 → nvme0n3p1,
+      which holds rmd-state2, rmd-site-state and /mnt/rmd), verified and kept 7. It is a
+      crash-consistent block image, and it is restorable on its own:
+      - ext4 journal replay;
+      - append-only ledger.ndjson, with at most a torn final line;
+      - immutable .gz rotations;
+      - atomic tmp+rename JSON state;
+      - read-model/*.sqlite, which is WAL crash-safe and rebuildable by `rmd read-model rebuild`.
+    - What it lacks is the app-level guarantees:
+      - nobody has asserted that the ledger parses or that the proposals register is present in it;
+      - no restore drill has been run;
+      - there is no file-level restore verb. Recovery means a disk from the snapshot, attached and
+        mounted, and then copying state/ out.
+    - The local verified archive gives exactly those guarantees, but it lives on the same disk. So
+      the off-host snapshot covers durability, and the verified archive is what this task restores.
+
+  design: |
+    1. A vanished entry is recorded at EVERY touch, not only in the copier. Use the copier's rule:
+       the error is ENOENT AND an lstat (throwIfNoEntry:false) confirms the path is gone. Then the
+       entry is pushed to `vanished` instead of thrown. This covers:
+       - the walk's realpath, readdir and symlink stat (ledger.ts:2316/2319/2328);
+       - preservation's lstat filter (state-backup-engine-links.ts:107);
+       - linkEvidence's lstat, evidence read and readlink.
+       Any other error code (EACCES, ELOOP, EIO) and a path that still exists keep throwing exactly
+       as today.
+    2. The unit of vanishing for an engine is its whole engines/<hash>/ tree. If any member vanished
+       at any phase, drop that engine's link, its evidence files and its manifest entry from the
+       staged archive together, and record `engines/<hash>` in `vanished`. An archive never holds a
+       link without its evidence, and validateEngineDependencyLinks never sees half an engine.
+       Removal happens in staging only. Never touch live state.
+    3. Record an engine tree, do not copy it. Under engines/<hash>/, stage only:
+       - the node_modules link (W1-T10086, verbatim);
+       - the reconstruction evidence linkEvidence reads (engine.json plus the PIN_FILES).
+       Do not descend into the worktree payload. Nothing outside engines/<64-hex>/ changes coverage.
+       A real node_modules directory, every other directory and the critical files keep today's
+       behaviour. Restore keeps reporting the engine as requiring reconstruction.
+    4. Unchanged guarantees:
+       - the ledger and the proposals register, missing or unparseable, still refuse
+         (ledger.ts:2501-2510);
+       - a link cycle still refuses;
+       - a race outlasting maxRaceAttempts still refuses;
+       - no archive is published partially.
+       `vanished` stays in the returned report.
+    5. Strike points for the tests follow the existing `beforeCopy`/`afterLedgerRead` pattern, as
+       named test-only hooks in SnapshotStateOptions: one before the walk descends into an entry, and
+       one before link preservation. Or the tests may use module.syncBuiltinESMExports. Put the
+       tests in the new suite, whose path `rmd test-place` computed.
+    NOT IN SCOPE, each a separate item:
+    - the ad-hoc lane reaper treating engine worktrees as unmanaged lanes (worker.ts:7403);
+    - the receipt/beat `reason`, which keeps only the first log line ("… exited 1:") and drops the
+      ENOENT cause;
+    - the cron line's checkout (W1-T10756).
+  acceptance:
+    - claim: "an engine tree reaped after the walk lists engines/ but before it descends into it is recorded as vanished, and the snapshot publishes with the ledger and the proposals register"
+      proof: 'grep: test("W1-T10766: an engine reaped before the walk descends into it is recorded as vanished" in test/ledger/a-state-snapshot-survives-an-engine-reaped-mid-walk.test.ts'
+    - claim: "an engine tree reaped between the walk and engine-link preservation is recorded as vanished instead of failing the snapshot on lstat ENOENT"
+      proof: 'grep: test("W1-T10766: an engine reaped before its link is preserved is recorded as vanished" in test/ledger/a-state-snapshot-survives-an-engine-reaped-mid-walk.test.ts'
+    - claim: "an engine tree reaped during the copy leaves neither its link nor its manifest entry in the archive, and the archive validates and restores"
+      proof: 'grep: test("W1-T10766: an engine reaped during the copy leaves no half-recorded link" in test/ledger/a-state-snapshot-survives-an-engine-reaped-mid-walk.test.ts'
+    - claim: "a snapshot stages an engine's reconstruction evidence and dependency link but never its worktree payload, and the restored engine is reported as requiring reconstruction"
+      proof: 'grep: test("W1-T10766: an engine tree is recorded by its evidence, not copied" in test/ledger/a-state-snapshot-survives-an-engine-reaped-mid-walk.test.ts'
+  falsifier: |
+    Each mutation below must turn the named case red:
+    - Restore the throwing realpathSync/readdirSync in listStateFiles: the descend case fails with
+      the 10-23 message, `ENOENT … lstat '…/engines/<h>'`.
+    - Restore the unguarded lstat filter at state-backup-engine-links.ts:107: the preservation case
+      fails with the 10-26 message.
+    - Keep the link that was preserved before the copy and drop only the vanished files: the copy
+      case fails with "missing reconstruction evidence".
+    - Walk and copy the engine's payload again: the recorded-not-copied case finds the payload file
+      in the archive.
+    GUARDS that held at base and must still hold:
+    - W1-T10086's five tests in test/state-backup.test.ts, which include "engine dependency
+      references do not excuse missing irreplaceable state";
+    - acceptance 3b, where a lost ledger refuses;
+    - the directory-link-cycle refusal;
+    - W1-T5545's live-safe suites (torn tail, ledger grows during the copy);
+    - an ENOENT on a path that still exists, or any non-ENOENT error, still throws.
