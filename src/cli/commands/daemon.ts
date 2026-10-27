@@ -1725,12 +1725,12 @@ export async function daemonCommand(
         recommendationBackfill: {
           stateDir: join(config.root, "state"),
           readProposals: () => parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json"))),
-          evidence: gitRecommendationEvidence((args) => hostWorktreeGitAsync(repoRoot, args, { maxBuffer: 1 << 26 }), {
-            planDir: relative(repoRoot, resolveRepoLayout(repoRoot).planDir),
-            planMonolith: relative(repoRoot, resolveRepoLayout(repoRoot).planMonolith),
-          }),
+          evidence: gitRecommendationEvidence((args) => hostWorktreeGitAsync(targetCheckoutRoot, args, { maxBuffer: 1 << 26 }), {
+            planDir: relative(targetCheckoutRoot, resolveRepoLayout(targetCheckoutRoot).planDir),
+            planMonolith: relative(targetCheckoutRoot, resolveRepoLayout(targetCheckoutRoot).planMonolith),
+          }, { repository: `${target.owner}/${target.repo}`, checkoutRoot: targetCheckoutRoot }),
           summarize: inboxRecommendationWriter(config, log),
-          readSeed: () => readFileIfExists(join(repoRoot, RECOMMENDATION_SEED_PATH)),
+          readSeed: () => readFileIfExists(join(targetCheckoutRoot, RECOMMENDATION_SEED_PATH)),
         },
         fleetLane: {
           stateDir: join(config.root, "state"),
