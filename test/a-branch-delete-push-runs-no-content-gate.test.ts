@@ -125,6 +125,24 @@ test("a real dispatch-claim push runs no source-content gate", () => {
   assert.match(result.stderr, /dispatch-claim-only.*skipped.*NOT a pass/);
   assert.equal(execFileSync("git", ["--git-dir", remote, "rev-parse", "refs/rmd-dispatch/W1-T10760"],
     { encoding: "utf8" }).trim(), head, "positive control: Git actually published the exact claim anchor");
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "renew"], { cwd: dir });
+  const renewed = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+  const leasedPush = (value: string) => spawnSync("git", ["push",
+    `--force-with-lease=refs/rmd-dispatch/W1-T10760:${head}`, remote, `${value}:refs/rmd-dispatch/W1-T10760`], {
+    cwd: dir, encoding: "utf8",
+    env: { PATH: process.env.PATH ?? "", HOME: dir, RMD_PREPUSH_GATES: "1", GATE_LOG: log },
+  });
+  const renewal = leasedPush(renewed);
+  assert.equal(renewal.error, undefined);
+  assert.equal(renewal.status, 0, renewal.stderr);
+  assert.match(renewal.stderr, /dispatch-claim-only/);
+  const stale = leasedPush(head);
+  assert.equal(stale.error, undefined);
+  assert.notEqual(stale.status, 0, "skipping content gates cannot relax Git's exact lease");
+  assert.match(stale.stderr, /stale info/);
+  assert.equal(execFileSync("git", ["--git-dir", remote, "rev-parse", "refs/rmd-dispatch/W1-T10760"],
+    { encoding: "utf8" }).trim(), renewed, "a stale keeper cannot overwrite the current claim anchor");
+  assert.equal(existsSync(log), false);
 });
 
 test("dispatch claims and deletions together have no source content to judge", () => {
@@ -158,6 +176,7 @@ test("a similar ref name or malformed claim update never gains the metadata excl
     `HEAD ${SHA} refs/rmd-dispatch/ ${ZERO}\n`,
     `HEAD not-a-sha refs/rmd-dispatch/W1-T10760 ${ZERO}\n`,
     `HEAD ${SHA} refs/rmd-dispatch/W1-T10760 bad-remote-sha\n`,
+    `HEAD ${"a".repeat(64)} refs/rmd-dispatch/W1-T10760 ${ZERO}\n`,
   ]) {
     const { dir, log } = fixture();
     const result = push(dir, log, input);
