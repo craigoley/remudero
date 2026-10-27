@@ -203,7 +203,7 @@ test("unsupported Script comments and keyword-named method contexts refuse witho
 });
 
 // @census-reads: src/ scripts/ bin/ test/ — compatibility of the physical inputs current lexical consumers scan.
-test("legacy output equals the committed base over every physical tracked code input; strict refusals are counted separately", async t => {
+test("legacy output equals the committed base over every physical tracked code input; strict refusals are counted separately and refused in src", async t => {
   const base = "98bc4f34d178ea25775c8020172b55cf1d0852f5";
   const original = execFileSync("git", ["show", `${base}:src/lib/test-impact-map.ts`], { cwd: REPO, encoding: "utf8" });
   const dir = mkdtempSync(join(tmpdir(), "rmd-lexical-base-"));
@@ -250,6 +250,10 @@ test("legacy output equals the committed base over every physical tracked code i
     legacyMismatches: 0, strictCompleted: completed, bytes, sha256: corpus.digest("hex"), strictUnknowns: unknowns } }));
   assert.equal(comparisons, paths.length * 5);
   assert.equal(completed + unknowns.length, paths.length);
+  // W1-T10250 design step 4: a PR touching a src file the conservative lexer refuses cannot name its changed
+  // symbols, so preflight-author falls back to the full suite set. Refuse that regression here, once.
+  const srcUnknowns = unknowns.filter(({ path }) => /^src\/.*\.ts$/.test(path));
+  assert.deepEqual(srcUnknowns, [], `the conservative lexer refuses ${srcUnknowns.length} src file(s)`);
   assert.match(strictMask('function owner() { return /`/.test(value); }\nfunction actualLater() {}'), /function actualLater/);
   assert.throws(() => strictMask('await / liveCall() /g;'), /lexical context unknown/);
 });

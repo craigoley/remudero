@@ -328,6 +328,8 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/products/build",
   // Assembled default-transport HTTP proof: W1-T10618 in test/console-api/serve/product-routes.test.ts.
   "POST /v1/products/case",
+  // Assembled default-transport HTTP proof: W1-T10619 in test/console-api/serve/product-routes.test.ts.
+  "POST /v1/products/evaluation",
   "POST /v1/control/assistant-action",
   "POST /v1/control/stop",
   "POST /v1/control/resume",
