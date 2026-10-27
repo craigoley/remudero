@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { after, before, test } from "node:test";
 
 import {
   approveRunBranch,
@@ -14,26 +13,41 @@ import {
   RatificationDraftRefusedError,
   ratificationPrBody,
   type RatificationPayload,
-} from "../src/lib/inbox.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { fixedClock, systemClock } from "../src/lib/clock.js";
-import { changedFilesBlockDrift } from "../src/lib/plan-pr-emitter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { approveCommand } from "../src/run-task.js";
-import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/inbox.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { fixedClock, systemClock } from "#src/lib/clock.js";
+import { changedFilesBlockDrift } from "#src/lib/plan-pr-emitter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { approveCommand } from "#src/run-task.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY, type GitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T4706. W1-T4700 routed the SINGLE approve through `fileRatificationDraft` (the stamp and repo
 // re-check, and a PR body naming only the paths written). The BATCH lane still wrote through the
 // bare shard writer and listed MASTER-PLAN.md unconditionally, and a ratify PR joined by a later
 // approve kept the first approve's body — #7608 was two proposals joined, five shards under a
 // two-shard body. The drives below run the REAL un-injected gateways offline: a bare throwaway
-// origin, a `gh` shim on PATH, and `approveCommand` itself.
+// origin, a `gh` shim on PATH, and `approveCommand` itself. Each drive owns its harness-hook
+// fixture too: a tiny seed repo cannot qualify the install's whole pre-push recipe. An ambient
+// refusing hook makes an escaped fixture dependency fail, rather than run that recipe.
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const KNOWN = new Set(["none", "remudero"]);
 const OWN_PR_URL = "https://github.com/craigoley/remudero/pull/4706";
 const PRIOR_PR_URL = "https://github.com/craigoley/remudero/pull/4437";
+
+const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+const ambientHooks = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t4706-ambient-hooks-`));
+const ambientCalls = join(ambientHooks, "calls");
+writeFileSync(join(ambientHooks, "pre-push"), `#!/bin/sh\nprintf ambient >> ${shellQuote(ambientCalls)}\nexit 91\n`);
+chmodSync(join(ambientHooks, "pre-push"), 0o755);
+const inheritedHooks = process.env.RMD_HARNESS_HOOKS_DIR;
+before(() => { process.env.RMD_HARNESS_HOOKS_DIR = ambientHooks; });
+after(() => {
+  if (inheritedHooks === undefined) delete process.env.RMD_HARNESS_HOOKS_DIR;
+  else process.env.RMD_HARNESS_HOOKS_DIR = inheritedHooks;
+  rmSync(ambientHooks, { recursive: true, force: true });
+});
 
 // ── #7608's own fragment: five malformed tasks under a two-id stamp ─────────────────────────
 const PROPOSAL_7608 = "verify-human-automate:W1-T4471";
@@ -112,6 +126,7 @@ interface Drive {
   ledger: Array<Record<string, unknown>>;
   /** The shim's raw call log: one `$*` per call, a multi-line body spilling across lines. */
   rawCalls: string;
+  gateCalls: string;
 }
 
 /** A GET route's JSON, safe inside the shim's double-quoted `echo`: newline, backtick and `$` as JSON escapes. */
@@ -126,6 +141,7 @@ async function drive(opts: {
   prior?: (seed: GitRepo) => void;
   ledgerSeed?: Array<Record<string, unknown>>;
   routes: GhShimRoute[];
+  gateExitCode?: 0 | 73;
 }): Promise<Drive> {
   const origin = gitRepo({ bare: true, kind: "t4706-origin" });
   const seed = gitRepo({ kind: "t4706-seed" });
@@ -154,6 +170,8 @@ async function drive(opts: {
   execFileSync("git", ["clone", "--quiet", origin.dir, checkoutDir]);
   execFileSync("git", ["-C", checkoutDir, "config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name]);
   execFileSync("git", ["-C", checkoutDir, "config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email]);
+  // Make the real push leaf exercise its hook on every host, including CI with no global config.
+  execFileSync("git", ["-C", checkoutDir, "config", "core.hooksPath", "hooks"]);
 
   const config = { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT };
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
@@ -169,24 +187,47 @@ async function drive(opts: {
   writeFileSync(ledgerFile, (opts.ledgerSeed ?? []).map((r) => JSON.stringify(r) + "\n").join(""));
 
   const shim = ghShim(opts.routes, { kind: "t4706-gh" });
+  writeFileSync(join(shim.dir, "calls.log"), "");
+  const hooks = join(root, "harness-hooks");
+  const gateCalls = join(root, "gate-calls");
+  mkdirSync(hooks);
+  writeFileSync(gateCalls, "");
+  writeFileSync(join(hooks, "pre-push"), [
+    "#!/bin/sh", "set -eu",
+    '[ "$1" = origin ] || exit 76',
+    `[ "$2" = ${shellQuote(origin.dir)} ] || exit 77`,
+    "while read -r local_ref local_sha remote_ref remote_sha; do",
+    `  printf '%s %s %s %s\\n' "$local_ref" "$local_sha" "$remote_ref" "$remote_sha" >> ${shellQuote(gateCalls)}`,
+    `  case "$remote_ref" in refs/heads/run-*) exit ${opts.gateExitCode ?? 0} ;; esac`,
+    "done", "exit 0", "",
+  ].join("\n"));
+  chmodSync(join(hooks, "pre-push"), 0o755);
+  after(() => {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
   const savedHome = process.env.HOME;
   const savedPath = process.env.PATH;
+  const savedHooks = process.env.RMD_HARNESS_HOOKS_DIR;
   let error: unknown;
   try {
     process.env.HOME = home;
     process.env.PATH = `${shim.dir}:${savedPath}`;
+    process.env.RMD_HARNESS_HOOKS_DIR = hooks;
     await withLiveWritesAllowed(() => approveCommand(opts.ids, { config: config as never }));
   } catch (e) {
     error = e;
   } finally {
     process.env.HOME = savedHome;
     process.env.PATH = savedPath;
+    if (savedHooks === undefined) delete process.env.RMD_HARNESS_HOOKS_DIR;
+    else process.env.RMD_HARNESS_HOOKS_DIR = savedHooks;
   }
   const ledger = readFileSync(ledgerFile, "utf8")
     .split("\n")
     .filter(Boolean)
     .map((l) => JSON.parse(l) as Record<string, unknown>);
-  return { origin, root, error, ledger, rawCalls: readFileSync(join(shim.dir, "calls.log"), "utf8") };
+  return { origin, root, error, ledger, rawCalls: readFileSync(join(shim.dir, "calls.log"), "utf8"), gateCalls: readFileSync(gateCalls, "utf8") };
 }
 
 /** Every body a write call carried, in order. A body is one argv value that may span lines, so the
@@ -212,6 +253,40 @@ const BATCH_ROUTES: GhShimRoute[] = [
   { when: "pulls?head=", stdout: "[]" },
   { when: "/pulls/", stdout: JSON.stringify({ number: 4706, html_url: OWN_PR_URL, state: "open", head: { ref: "someone-elses-branch", sha: "0" } }) },
 ];
+
+test("batch approval fixtures isolate their harness hook and keep the real bare-remote push", async () => {
+  const d = await drive({
+    ids: ["P-HOOK-A", "P-HOOK-B"],
+    drafts: {
+      "P-HOOK-A": draftFor("P-HOOK-A", "Rotate the quux ledger for the hook fixture", "src/lib/ledger.ts"),
+      "P-HOOK-B": draftFor("P-HOOK-B", "Index the zorble registry for the hook fixture", "src/lib/relint.ts"),
+    },
+    routes: BATCH_ROUTES,
+  });
+  assert.equal(d.error, undefined, String(d.error));
+  assert.equal(runBranches(d.origin).length, 1, "the source branch really reaches the bare origin");
+  assert.match(d.gateCalls, /refs\/heads\/run-/, "the real push leaf invoked the fixture-owned hook");
+  assert.equal(existsSync(ambientCalls), false, "the install's inherited hook was never consulted");
+  assert.equal(process.env.RMD_HARNESS_HOOKS_DIR, ambientHooks, "the drive restores its caller's hook selection");
+});
+
+test("batch approval fixtures preserve a real hook refusal before a branch or PR reaches the remote", async () => {
+  const d = await drive({
+    ids: ["P-REFUSE-A", "P-REFUSE-B"],
+    drafts: {
+      "P-REFUSE-A": draftFor("P-REFUSE-A", "Rotate the quux ledger for the refusal fixture", "src/lib/ledger.ts"),
+      "P-REFUSE-B": draftFor("P-REFUSE-B", "Index the zorble registry for the refusal fixture", "src/lib/relint.ts"),
+    },
+    gateExitCode: 73,
+    routes: BATCH_ROUTES,
+  });
+  assert.match(String(d.error), /pre-push gate.*refused this push \(exit 73\)/s);
+  assert.ok(d.gateCalls.length > 0, "the refusal came from an executed private hook");
+  assert.deepEqual(runBranches(d.origin), [], "the refused branch was not pushed");
+  assert.deepEqual(writtenBodies(d.rawCalls, "--method POST"), [], "the refused push opened no PR");
+  assert.equal(existsSync(ambientCalls), false);
+  assert.equal(process.env.RMD_HARNESS_HOOKS_DIR, ambientHooks, "failure also restores the caller's hook selection");
+});
 
 test("a batch approve refuses a fragment the single lane refuses: nothing is minted, written, pushed or opened", async () => {
   const d = await drive({

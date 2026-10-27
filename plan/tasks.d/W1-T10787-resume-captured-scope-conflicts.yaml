@@ -1,0 +1,47 @@
+- id: W1-T10787
+  title: "A merged scope amendment reaches bounded captured-conflict repair when its branch update fails"
+  repo: remudero
+  depends_on: []
+  type: implement
+  principles:
+    tdd: strict
+  budget_usd: 30
+  verify: auto
+  risk: high
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "feedback#fb-1793059243092-5bfa75"
+  files:
+    - src/cli/commands/fix.ts
+    - test/a-merged-scope-amendment-fixes-in-the-same-round.test.ts
+  acceptance:
+    - claim: "an actual conflicted scope merge with a refused branch update reaches the bounded repair"
+      proof: "unit test: W1-T10787: an actual conflicted scope merge with a refused branch update reaches the bounded repair"
+    - claim: "a successful branch update retains its existing zero-worker fallback"
+      proof: "unit test: W1-T10787: a successful branch update retains its existing zero-worker fallback"
+    - claim: "missing conflict evidence or an unproved amended contract never dispatches repair"
+      proof: "unit test: W1-T10787: missing conflict evidence or an unproved amended contract never dispatches repair"
+    - claim: "the resumed scope repair preserves its original publish base and requires fresh evidence"
+      proof: "unit test: W1-T10787: the resumed scope repair preserves its original publish base and requires fresh evidence"
+  note: "Bounded functional new-product blocker. Do not duplicate the scope-authority-history repair or take over PR14531."
+  rationale: |
+    The user authorized completion of the Console/Wreckterra new-product flow through normal existing gates. Core PR14531 at4cfb73ed7eb3d1e8163c75940c95e41a3d437380 remains under its native owner; this is a separate controller remedy, not a hand push or source takeover.
+    Scope amendment14576 merged ea917430568c5eba0280cbbf7a300b8b44bd39e8. Native scope rows21:58:53.426Z and22:05:41.743Z repeated branch_update_requested after local conflicts and remoteHTTP422. The pendingScope catch aborts, calls updateBranch and returns before the existing captured-conflict worker.
+    The native23:43:31 sweep captured real conflicts in six files. The current real-git W1-T9805 fixture already covers successful updateBranch fallback; preserve that behavior.
+    At2026-10-27T01:06:33.899Z the operator sweep read main dfea6c7ac433a15911c2accb4f874f973e9b8f03 and all23complete API open-head trees. All remote heads matched. Subject controls were positive;597main matches and0added subject matches per open head. Neighboring9802/9804/9805/10043/10259/10387 and authority-history14635 are different duties.
+    GRILL14647 was answered sweep-then-file by authenticatedcao825 in comment6431236251 after that sweep. The linked answer has not yet resumed triage. This is the concrete normal operator proposal with machine authorship, not an invented risk ruling or dispatch grant.
+    Normal final duplicate, reservation, ownership, exact-record risk judgment, author/hosted/native review, protected merge and deployment checks remain required. No new services, credentials, caps, policy exclusions, manual restart or claim deletion. WRECK tasks and Console148-150 holds remain.
+  design: "Use the existing bounded conflict mode only after the merged amendment, actual captured local conflicts, unsuccessful normal remote update and expanded task contract are positively established. Preserve original publish-base identity and fresh-head checks. Do not infer conflict evidence from dirty state or silently grant scope. Preserve successful updateBranch stand-down with zero worker dispatch. Non-conflict errors, changed head, unmerged scope and unavailable or unproved evidence still stand down. Extend the existing real-git fixture, exercise the default seam and each new catch/refusal arm, and delete/restore the fix to demonstrate a load-bearing regression. No source change to the product PR is part of this task."
+  falsifier: "Delete only the bounded re-entry fix and rerun the literal regression: it must fail; restoration must pass with nonzero test counts. Preserve the existing successful-update fallback and negative evidence controls. Full hosted review and runtime adoption stay separate."
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-27T02:45:40.555Z"
+    pin: "7bf8d246523cb5a6e951edc3de8a5fb6c8f10a2369d2ccdf89b707a1640e31ae"
+    operator_release_pin: "1a6cc289031f5edd861c3b2a5dcf0a6449c13e133eb0a5296b22d859ad9ddf85"
+
+# reservation hand-off: codex/file-scope-reentry-1793065581038 -> run-unfiled-1793071000000

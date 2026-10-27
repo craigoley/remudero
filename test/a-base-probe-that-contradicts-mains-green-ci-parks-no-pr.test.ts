@@ -1,4 +1,3 @@
-// test/a-base-probe-that-contradicts-mains-green-ci-parks-no-pr.test.ts
 //
 // LIVE 2026-10-09: #10296's red test-slow shard named test/plan-resequence-pr-invalidation-wiring.test.ts.
 // The daemon's local base probe found that file failing at eight successive main tips (d11071433,
@@ -7,8 +6,8 @@
 // sat red for two hours with no fix round and no exit. CI's verdict on main now outranks the probe.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ciContradictedProbeFiles } from "../src/lib/base-reproduction.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import { ciContradictedProbeFiles } from "#src/lib/base-reproduction.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 
 const NOW = Date.now();
 const MAIN = "b".repeat(40);

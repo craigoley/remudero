@@ -1,0 +1,321 @@
+import { execFile, spawn, type ChildProcess, type ExecFileOptionsWithStringEncoding } from "node:child_process";
+import { performance } from "node:perf_hooks";
+import { createInterface } from "node:readline";
+import { clockFromMillisFn, type Clock } from "./clock.js";
+import { boundChildByLoopTime, execFileLoopBounded, LoopBoundedChildTimeout, type LoopBound } from "./loop-bounded-child.js";
+
+/** The sub-millisecond reading a spawn's loop time is measured with, through the Clock port. */
+const monotonicClock = (): Clock => clockFromMillisFn(() => performance.now());
+
+/**
+ * W1-T9754 — A SMALL LONG-LIVED PROCESS THAT FORKS ON THE DAEMON'S BEHALF.
+ *
+ * The synchronous part of a child spawn (the fork copying the parent's page tables) runs on the calling thread and
+ * grows with the parent's resident size: measured on this host, p50 2 ms at 50 MB, 87 ms at 587 MB, 161 ms at 1.1 GB.
+ * The daemon runs at 1.5-2 GB and awaits hundreds of children a landing pass. The helper is one node process started
+ * once, with a small heap: the daemon writes a request line to its stdin, the helper forks, and the answer comes back
+ * on its stdout, so the fork costs the helper's size and the daemon's loop pays only a pipe write.
+ *
+ * Any doubt falls back to a direct spawn and the result names why. A request already written when the helper dies is
+ * never re-run: it may have had an effect, so it settles as failed with `helper_died_in_flight`.
+ */
+
+export type SpawnVia = "helper" | "direct";
+
+export interface SpawnRequest {
+  file: string;
+  args?: readonly string[];
+  cwd?: string;
+  /** The child's whole environment; absent means this process's own at call time, exactly as a direct spawn. */
+  env?: NodeJS.ProcessEnv;
+  input?: string | Buffer;
+  timeoutMs?: number;
+  killSignal?: NodeJS.Signals;
+  maxBuffer?: number;
+}
+
+export interface SpawnResult {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+  /** A spawn that never produced an exit: `ENOENT`, `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`, `helper_died_in_flight`. */
+  error?: string;
+  /** The child was stopped at its `timeoutMs` budget, even if it trapped the signal and exited 0. */
+  timedOut?: boolean;
+  via: SpawnVia;
+  /** Why a request meant for the helper ran directly. */
+  reason?: string;
+  /** The time the call held this process's loop before it returned. */
+  sync_ms: number;
+}
+
+export interface SpawnHelper {
+  readonly pid: number | undefined;
+  /** Undefined while the helper can take a request; otherwise why it cannot. */
+  unhealthy(): string | undefined;
+  run(request: SpawnRequest): Promise<SpawnResult>;
+  /** Writes the `spawn.routed` row of a spawn the caller ran directly without asking the helper, naming why. */
+  noteDirect(file: string, syncMs: number, reason: string): void;
+  stop(): void;
+}
+
+export interface SpawnHelperOptions {
+  /** Each routed spawn's row: `spawn.routed` with `via`, its synchronous loop ms and any fallback reason. */
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** The helper's old-space ceiling, in MB. Its resident size is what it touches, not this bound. */
+  heapMb?: number;
+  /** The monotonic reading `sync_ms` is measured with; absent, `performance.now()`. */
+  clock?: Clock;
+  /** The helper's program; absent, {@link HELPER_SOURCE}. A test seam for a helper that dies or garbles. */
+  source?: string;
+}
+
+/** The helper's whole program: CommonJS on `node -e`, so it loads nothing from this repository. */
+export const HELPER_SOURCE = String.raw`
+const cp = require("node:child_process");
+const rl = require("node:readline").createInterface({ input: process.stdin });
+const b64 = (v) => Buffer.isBuffer(v) ? v.toString("base64") : Buffer.from(String(v ?? "")).toString("base64");
+rl.on("line", (line) => {
+  let req;
+  try { req = JSON.parse(line); } catch (error) {
+    return; /* Reason: the parent writes only JSON lines; a line with no id has no request to answer. */
+  }
+  let child;
+  let timer;
+  let timedOut = false;
+  const answer = (err, stdout, stderr) => {
+    clearTimeout(timer);
+    process.stdout.write(JSON.stringify({ id: req.id, code: err ? err.code : 0, signal: err ? err.signal ?? null : null,
+      timedOut, stdout: b64(stdout), stderr: b64(stderr) }) + "\n");
+  };
+  try {
+    child = cp.execFile(req.file, req.args, { cwd: req.cwd, env: req.env, maxBuffer: req.maxBuffer, encoding: "buffer" }, answer);
+  } catch (error) {
+    answer(error, "", ""); /* Reason: a spawn that throws settles as that error, as execFile's own does. */
+  }
+  if (!child) return;
+  if (req.timeoutMs > 0) {
+    // This loop is never held, so a plain timer is the budget; the kill is child.kill, which keeps the unread stdout.
+    timer = setTimeout(() => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      timedOut = true;
+      child.kill(req.killSignal || "SIGTERM");
+    }, req.timeoutMs);
+  }
+  child.stdin?.on("error", () => {});
+  child.stdin?.end(req.input === undefined ? undefined : Buffer.from(req.input, "base64"));
+});
+rl.on("close", () => process.exit(0));
+`;
+
+const decode = (text: unknown): string => Buffer.from(String(text ?? ""), "base64").toString("utf8");
+
+/** One shape for both paths: execFile's error carries a numeric exit code, or a string code when nothing exited. */
+function settled(code: unknown, signal: unknown, stdout: string, stderr: string):
+  Pick<SpawnResult, "exitCode" | "signal" | "stdout" | "stderr" | "error"> {
+  const out: Pick<SpawnResult, "exitCode" | "signal" | "stdout" | "stderr" | "error"> = {
+    exitCode: code === undefined || code === null ? (signal ? null : 0) : typeof code === "number" ? code : null,
+    signal: typeof signal === "string" ? signal as NodeJS.Signals : null, stdout, stderr };
+  if (typeof code === "string") out.error = code;
+  return out;
+}
+
+/** The direct path, the one every fallback takes: a spawn from this process, its fork on this loop. */
+export function runDirect(request: SpawnRequest, clock: Clock = monotonicClock(), reason?: string):
+  Promise<SpawnResult> {
+  const now = clock.now;
+  const began = now();
+  let syncMs = 0;
+  return new Promise((resolve) => {
+    let bound: LoopBound | undefined;
+    const answer = (err: (Error & { code?: unknown; signal?: unknown }) | null, stdout: unknown, stderr: unknown): void => {
+      bound?.cancel();
+      resolve({ ...settled(err?.code, err?.signal, String(stdout ?? ""), String(stderr ?? "")), via: "direct",
+        ...(bound?.timedOut ? { timedOut: true } : {}),
+        ...(reason === undefined ? {} : { reason }), sync_ms: syncMs });
+    };
+    let child: ChildProcess;
+    try {
+      // No execFile `timeout`: that is a wall-clock timer, which on a held loop destroys a finished child's stdout.
+      child = execFile(request.file, [...(request.args ?? [])], { cwd: request.cwd, env: request.env,
+        maxBuffer: request.maxBuffer, encoding: "utf8" }, answer);
+    } catch (error) {
+      // Reason: execFile throws on an argument it refuses; that settles as its error code, never as a throw.
+      syncMs = now() - began;
+      answer(error as Error & { code?: unknown }, "", "");
+      return;
+    }
+    if (request.timeoutMs !== undefined && request.timeoutMs > 0) {
+      bound = boundChildByLoopTime(child, request.timeoutMs, { killSignal: request.killSignal });
+    }
+    child.stdin?.on("error", () => { /* Reason: a child that exits before reading its input settles by its exit. */ });
+    child.stdin?.end(request.input);
+    syncMs = now() - began;
+  });
+}
+
+type Pending = { resolve: (result: SpawnResult) => void; syncMs: number };
+
+/** Start the helper once; every `run` after that writes one line and awaits one answer. */
+export function startSpawnHelper(options: SpawnHelperOptions = {}): SpawnHelper {
+  const clock = options.clock ?? monotonicClock();
+  const now = clock.now;
+  const pending = new Map<number, Pending>();
+  let nextId = 1;
+  let dead: string | undefined;
+  // The one fork this process pays for the helper, at boot while the daemon is still small.
+  const child = spawn(process.execPath, [`--max-old-space-size=${options.heapMb ?? 256}`, "-e",
+    options.source ?? HELPER_SOURCE], { stdio: ["pipe", "pipe", "ignore"] });
+  const refs = (): void => {
+    const ref = pending.size > 0 ? "ref" : "unref";
+    child[ref]();
+    (child.stdout as unknown as { [k: string]: (() => void) | undefined } | null)?.[ref]?.();
+    (child.stdin as unknown as { [k: string]: (() => void) | undefined } | null)?.[ref]?.();
+  };
+  const die = (why: string): void => {
+    dead ??= why;
+    for (const [id, waiting] of pending) {
+      pending.delete(id);
+      waiting.resolve({ exitCode: null, signal: null, stdout: "", stderr: "", error: "helper_died_in_flight",
+        via: "helper", reason: dead, sync_ms: waiting.syncMs });
+    }
+    refs();
+  };
+  child.on("error", (error) => die(`helper_error: ${String(error?.message ?? error).slice(0, 120)}`));
+  child.on("exit", (code, signal) => die(`helper_exited: ${signal ?? code}`));
+  child.stdin?.on("error", (error) => die(`helper_stdin_closed: ${String(error?.message ?? error).slice(0, 120)}`));
+  if (child.stdout) {
+    createInterface({ input: child.stdout }).on("line", (line) => {
+      let answer: { id?: number; code?: unknown; signal?: unknown; timedOut?: unknown; stdout?: string; stderr?: string };
+      try { answer = JSON.parse(line); } catch (error) {
+        // Reason: an unreadable answer means the protocol is lost; every waiting request is failed and named.
+        die(`helper_garbled: ${String((error as Error)?.message ?? error).slice(0, 80)}`);
+        return;
+      }
+      const waiting = pending.get(Number(answer.id));
+      if (!waiting) return;
+      pending.delete(Number(answer.id));
+      refs();
+      waiting.resolve({ ...settled(answer.code, answer.signal, decode(answer.stdout), decode(answer.stderr)),
+        ...(answer.timedOut === true ? { timedOut: true } : {}), via: "helper", sync_ms: waiting.syncMs });
+    });
+  }
+  refs();
+  function row(file: string, via: SpawnVia, syncMs: number, reason: string | undefined): void {
+    try {
+      options.log?.("spawn.routed", { via, sync_ms: Math.round(syncMs * 100) / 100, command: file.split("/").pop(),
+        ...(reason === undefined ? {} : { reason }) });
+    } catch (error) {
+      void error; // Reason: the row is observability; a throwing logger must never cost the spawn's result.
+    }
+  }
+  function routed(result: Promise<SpawnResult>, file: string): Promise<SpawnResult> {
+    if (!options.log) return result;
+    return result.then((settledResult) => {
+      row(file, settledResult.via, settledResult.sync_ms, settledResult.reason);
+      return settledResult;
+    });
+  }
+  const unhealthy = (): string | undefined =>
+    dead ?? (child.stdin && !child.stdin.destroyed && child.stdin.writable ? undefined : "helper_stdin_closed");
+  return {
+    pid: child.pid,
+    unhealthy,
+    run(request) {
+      const began = now();
+      const why = unhealthy();
+      if (why !== undefined) return routed(runDirect(request, clock, why), request.file);
+      const id = nextId++;
+      const line = JSON.stringify({ id, file: request.file, args: request.args ?? [], cwd: request.cwd,
+        env: request.env ?? process.env, timeoutMs: request.timeoutMs, killSignal: request.killSignal,
+        maxBuffer: request.maxBuffer,
+        input: request.input === undefined ? undefined : Buffer.from(request.input).toString("base64") });
+      return routed(new Promise<SpawnResult>((resolve) => {
+        const waiting: Pending = { resolve, syncMs: 0 };
+        pending.set(id, waiting);
+        refs();
+        child.stdin?.write(`${line}\n`);
+        waiting.syncMs = now() - began;
+      }), request.file);
+    },
+    noteDirect: (file, syncMs, reason) => row(file, "direct", syncMs, reason),
+    stop() {
+      die("helper_stopped");
+      child.stdin?.end();
+      child.kill();
+    },
+  };
+}
+
+let installed: SpawnHelper | undefined;
+
+/** The daemon's one helper, installed at boot (W1-T9754); a caller that awaits a child routes through it. */
+export function installSpawnHelper(helper: SpawnHelper | undefined): void {
+  installed = helper;
+}
+
+/** The helper {@link installSpawnHelper} holds, if any. */
+export function installedSpawnHelper(): SpawnHelper | undefined {
+  return installed;
+}
+
+/** Through the installed helper while it is healthy; otherwise a direct spawn whose result names why. */
+export function runRouted(request: SpawnRequest): Promise<SpawnResult> {
+  return installed ? installed.run(request) : runDirect(request, undefined, "helper_not_installed");
+}
+
+export type ExecFileRoutedOptions = ExecFileOptionsWithStringEncoding & { escalateAfterMs?: number };
+
+const ROUTABLE_OPTIONS = new Set(["cwd", "env", "encoding", "maxBuffer", "timeout", "killSignal", "escalateAfterMs"]);
+
+/** Why an execFile call's options cannot be carried over the helper's pipe; undefined when they can. */
+function unroutable(options: ExecFileRoutedOptions): string | undefined {
+  const extra = Object.entries(options).filter(([key, value]) => value !== undefined && !ROUTABLE_OPTIONS.has(key));
+  if (extra.length > 0) return `unsupported_option: ${extra.map(([key]) => key).join(",")}`;
+  if (options.encoding !== undefined && options.encoding !== "utf8" && options.encoding !== "utf-8") return "unsupported_encoding";
+  if (typeof options.killSignal === "number") return "numeric_kill_signal";
+  if (options.escalateAfterMs !== undefined && options.escalateAfterMs > 0) return "escalation_requested";
+  return undefined;
+}
+
+/** What a failed routed spawn rejects with: `execFile`'s own shape (`code`, `signal`, `stdout`, `stderr`), or the
+ *  named {@link LoopBoundedChildTimeout} for a child stopped at its budget. */
+function failure(file: string, args: readonly string[], result: SpawnResult, options: ExecFileRoutedOptions): Error {
+  const label = [file, ...args].join(" ");
+  if (result.timedOut) {
+    const sent = typeof options.killSignal === "string" ? options.killSignal : "SIGTERM";
+    return new LoopBoundedChildTimeout(label, options.timeout ?? 0,
+      { signal: result.signal ?? sent, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr });
+  }
+  const error = new Error(result.error !== undefined && result.exitCode === null && result.signal === null
+    ? `spawn ${file} ${result.error}` : `Command failed: ${label}\n${result.stderr}`);
+  return Object.assign(error, { code: result.error ?? result.exitCode, signal: result.signal, killed: result.signal !== null,
+    cmd: label, stdout: result.stdout, stderr: result.stderr });
+}
+
+/**
+ * The awaited-child seam the landing, the git leaves and the gh transport call (W1-T9754): `execFileLoopBounded`'s
+ * contract (resolves `{stdout, stderr}`, rejects like `execFile`, a child stopped at its budget rejects with
+ * {@link LoopBoundedChildTimeout}), through the installed spawn helper while it is healthy. With no helper installed it
+ * IS `execFileLoopBounded`. Any doubt (options the pipe cannot carry, an unhealthy helper) runs the spawn directly, and
+ * the `spawn.routed` row names why. A caller that reads `.child` does not use this seam.
+ */
+export function execFileRouted(file: string, args: readonly string[], options: ExecFileRoutedOptions):
+  Promise<{ stdout: string; stderr: string }> {
+  const helper = installed;
+  if (helper === undefined) return execFileLoopBounded(file, args, options);
+  const why = unroutable(options);
+  if (why !== undefined) {
+    const began = performance.now();
+    const direct = execFileLoopBounded(file, args, options);
+    helper.noteDirect(file, performance.now() - began, why);
+    return direct;
+  }
+  return helper.run({ file, args, cwd: options.cwd === undefined ? undefined : String(options.cwd), env: options.env,
+    timeoutMs: options.timeout, killSignal: typeof options.killSignal === "string" ? options.killSignal : undefined,
+    maxBuffer: options.maxBuffer }).then((result) => {
+    if (result.exitCode === 0 && result.error === undefined && !result.timedOut) return { stdout: result.stdout, stderr: result.stderr };
+    throw failure(file, args, result, options);
+  });
+}

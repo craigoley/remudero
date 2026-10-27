@@ -17,6 +17,10 @@ credentials, state or ledger/history. Preserve unpublished commits, dirty/untrac
 unversioned scripts/reports and durable validation evidence. Do not stop another worker or remove
 an active claim/lock. Unclear ownership, activity, publication or data safety means keep the path.
 
+Create a disposable worktree with `rmd worktree add <dir> -b <branch> <base>`: on APFS it clones the
+operator checkout's unchanged files copy-on-write instead of writing a second ~128 MB copy, and off
+APFS it falls back to a normal checkout. `rmd hand-worktree` materializes through the same code.
+
 The harness owns its worktree teardown; hand-created checkouts that are no longer needed go through
 the existing guarded publication-aware retirement path, never a blanket recursive delete. The
 six-hour janitor is a crash/backstop reaper, not a substitute for finishing your own cleanup.

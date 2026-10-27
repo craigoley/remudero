@@ -12,7 +12,7 @@ import { MERGED_RULES_FILE } from "./learnings.js";
 import { GUARD_RETIREMENT_ZERO_STREAK } from "./retro-closure.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { hostWorktreeGit } from "./worktree-git.js";
-import { buildSkillEffectivenessReport, loadInjectableSkills, stageSkillLifecycleProposal, type InjectableSkill } from "./skill-workshop.js";
+import { buildSkillEffectivenessReport, loadInjectableSkills, SKILL_EFFECTIVENESS_LEDGER_STEPS, stageSkillLifecycleProposal, type InjectableSkill } from "./skill-workshop.js";
 import { updateProposalRegistry, type Proposal } from "./inbox.js";
 import {
   gardenStatePath,
@@ -697,7 +697,7 @@ export function skillLifecycleCandidates(skillUsage: SkillUsage, approvedNames: 
  *  more evidence accrues. */
 export function stageSkillLifecycleForAction(stateDir: string, repoRoot: string, action: GardenAction): void {
   try {
-    const ledger = readLedgerUnionRecordsSync(stateDir, { step: ["skills.selection", "verdict"] });
+    const ledger = readLedgerUnionRecordsSync(stateDir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS });
     const report = buildSkillEffectivenessReport(ledger.rows, action.target);
     stageSkillLifecycleProposal(join(stateDir, "inbox-proposals.json"), join(repoRoot, ".claude", "skills"), report);
   } catch {
