@@ -345,6 +345,7 @@ setTimeout(()=>process.exit(0),6500);`);
       assert.equal((result.error as NodeJS.ErrnoException | undefined)?.code, mode === "output" ? "ENOBUFS" : "ETIMEDOUT");
     }
     assert.equal(result.cleanupError, undefined);
+    if (mode === "output") assert.ok(Buffer.byteLength(result.stdout + result.stderr) <= 1024, "group cleanup must retain the existing capture ceiling");
     if (mode === "resistant") {
       assert.equal(result.signal, "SIGKILL", "a TERM-resistant leader requires the bounded escalation");
       assert.ok(responsiveTicks > 10, "waiting for teardown must leave the caller event loop responsive");
