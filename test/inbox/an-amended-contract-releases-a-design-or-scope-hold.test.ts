@@ -435,6 +435,20 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
     assert.deepEqual([f.state.refreshed, f.state.dispatched, f.state.admissions], [0, 0, 0]);
   });
 
+  test("a rotated instrument scope hold can be selected from complete history", async () => {
+    const archived = { step: "fix.scope_amendment", task_id: TASK, pr_number: 13039, head_sha: HEAD,
+      outcome: "instrument-escalated", paths: ["scripts/preflight-author.mjs"],
+      issue_url: "https://github.com/o/remudero/issues/13106", contract_revision: "contract-A" };
+    const f = fixture([]);
+    f.state.revision = "contract-B";
+    let historyReads = 0;
+    const capability = await lightPassHeadContractRefresh([pr()], { ...f.deps,
+      readHeadContractRefreshHistory: async () => { historyReads++; return { complete: true, lines: [archived] }; } });
+    assert.equal(capability.headContractRefreshFor?.(pr()), f.deps.updateBranch,
+      "rotating a positively recorded hold must not make its answered amendment undiscoverable");
+    assert.equal(historyReads, 1);
+  });
+
   test("a fix round's NEEDS_DESIGN row records the contract it worked on", async (t) => {
     const repo = gitRepo({ scope: t, kind: "design-contract" });
     repo.git("config", "user.name", "fixture");
