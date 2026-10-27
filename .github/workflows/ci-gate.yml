@@ -285,6 +285,8 @@ jobs:
             # never the full external_id, so a rerun of the posting job still supersedes its own
             # earlier post, while a later same-name job success can no longer hide a failed post
             # (#8905). A name is not ready while ANY of its groups is incomplete (steps 1 and 3).
+            # A newer check can lack started_at before its attempt begins. Its newer id must
+            # remain visible rather than borrowing an old timestamped success.
             # (`--slurp` can't combine with `-q`, so flatten the page array with a separate jq.)
             local raw attempt=1
             while [ "${attempt}" -le "${RETRY_ATTEMPTS}" ]; do
