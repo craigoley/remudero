@@ -30,6 +30,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { queueFeedbackRecord, readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const FB_ID = "fb-1789382125003-abdb87";
 
@@ -114,7 +115,8 @@ function appliedRows(ledgerPath: string): Array<Record<string, unknown>> {
 
 /** Actual private Git/main and pending YAML, with no injected Git or reply writer. */
 function canonicalContinuationFixture(t: TestContext, queue = true) {
-  const dir = tmpDir("canonical-continuation"), root = join(dir, "root"), stateRoot = join(dir, "pending");
+  const dir = tmpDir("canonical-continuation"), stateRoot = join(dir, "pending");
+  const { dir: root, git } = gitRepo({ scope: t, seedCommit: false, kind: "w10789-canonical-continuation" });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
   mkdirSync(stateRoot);
@@ -133,10 +135,7 @@ function canonicalContinuationFixture(t: TestContext, queue = true) {
       decision: "Choose its existing owner", options: [{ label: "site-intake", consequence: "Keep the existing owner" },
         { label: "core-proof-runner", consequence: "Request a separate owner" }] } };
   writeFileSync(path, stringifyYaml(canonical));
-  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe",
-    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" } });
-  git("init", "-q"); git("config", "user.name", "Continuation Fixture");
-  git("config", "user.email", "fixture@example.invalid"); git("add", "--", rel);
+  git("add", "--", rel);
   git("commit", "-qm", "Canonical grilling fixture"); git("update-ref", "refs/remotes/origin/main", "HEAD");
   const head = git("rev-parse", "HEAD"), ledgerPath = join(dir, "ledger.ndjson");
   const feedback = { root, inboxRoot: stateRoot, feedbackLand: {} };
@@ -173,7 +172,7 @@ test("W1-T10789: canonical grilling advances an unchanged older capture exactly 
     assert.deepEqual(await continueCanonical(f), { accepted: 0, ignored: 0, unreadable: 0 });
     assert.deepEqual(snapshot(f), before); assert.equal(appliedRows(f.ledgerPath).length, 1);
     assert.equal(f.git("rev-parse", "HEAD"), f.head);
-    assert.equal(f.git("status", "--porcelain", "--untracked-files=all"), "?? plan/questions.ndjson\n",
+    assert.equal(f.git("status", "--porcelain", "--untracked-files=all"), "?? plan/questions.ndjson",
       "only the already-recognized answer's question-store history is added to the checkout");
   });
 });
