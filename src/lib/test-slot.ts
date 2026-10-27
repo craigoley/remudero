@@ -11,7 +11,8 @@
  *
  * LEGACY tiered fallback (private v1 coordination instead requires an admitted lease):
  *   free slot        → run at {@link testRunConcurrency}, niced;
- *   all slots live   → wait (and say so), re-checking every poll;
+ *   all slots live   → wait (and say so), re-checking every poll; unless RMD_TEST_SLOTS fixes the pool, a slot is
+ *                      open only while the live holders' granted CPU and the non-test load leave one worker (W1-T9952);
  *   memory short     → a run that names its peak waits while the host's memory headroom cannot hold it plus the live
  *                      holders' named peaks — the CPU-derived count is the most slots, memory decides how many of them
  *                      are open, and a run with no other holder always goes;
