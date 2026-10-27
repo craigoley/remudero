@@ -6,10 +6,10 @@ import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
-import { fixedClock } from "../src/lib/clock.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { ORACLE_CLOSED_LAG_MS, ORACLE_SEED_ROWS_PER_MS, READ_MODEL_CONSISTENCY_STEP, readIngestMark } from "../src/lib/read-model-consistency.js";
-import { acquireLease, openReadModel } from "../src/lib/read-model-db.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { ORACLE_CLOSED_LAG_MS, ORACLE_SEED_ROWS_PER_MS, READ_MODEL_CONSISTENCY_STEP, readIngestMark } from "#src/lib/read-model-consistency.js";
+import { acquireLease, openReadModel } from "#src/lib/read-model-db.js";
 import {
   createReadModelTicker,
   inProcessOracle,
@@ -19,8 +19,8 @@ import {
   type OracleSliceResult,
   type ReadModelOracle,
   type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const LIVE = "ledger.ndjson";
 const HOUR = 3_600_000;

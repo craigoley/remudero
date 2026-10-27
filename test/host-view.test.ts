@@ -11,9 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
-import { buildAccountUsageRoute, CREDIT_STATE_STEP, type AccountUsageDeps } from "../src/lib/account-usage.js";
-import type { Clock } from "../src/lib/clock.js";
-import { requestPause } from "../src/lib/fleet-control.js";
+import { buildAccountUsageRoute, CREDIT_STATE_STEP, type AccountUsageDeps } from "#src/lib/account-usage.js";
+import type { Clock } from "#src/lib/clock.js";
+import { requestPause } from "#src/lib/fleet-control.js";
 import {
   createHostView,
   HOST_PROBE_INTERVAL_MS,
@@ -24,20 +24,20 @@ import {
   readGhRateLimitRemainingAsync,
   type HostViewConfig,
   type HostViewData,
-} from "../src/lib/host-view.js";
-import type { LatestMeasurementRowsResult } from "../src/lib/measurement-cadence.js";
-import { buildControlStatusRoute, controlStatusBody } from "../src/lib/panel-actions.js";
-import { buildSkillsRoute } from "../src/lib/panel-skills.js";
-import { writeProviderRoutingStatus } from "../src/lib/provider-routing-status.js";
-import { runSlowLaneWorker, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
-import { ledgerSource } from "../src/lib/read-model-worker.js";
-import { buildProviderRoutingRoute, buildSelfMeasurementRoute } from "../src/lib/serve.js";
-import type { Route } from "../src/lib/service.js";
-import type { ReadModelInstanceState } from "../src/lib/task-view.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { createViewShadow, legacyViewSampler, type ShadowEvidence, type ShadowRequest } from "../src/lib/view-shadow.js";
-import { buildViewRoutes, oldestAsOf } from "../src/lib/views.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/host-view.js";
+import type { LatestMeasurementRowsResult } from "#src/lib/measurement-cadence.js";
+import { buildControlStatusRoute, controlStatusBody } from "#src/lib/panel-actions.js";
+import { buildSkillsRoute } from "#src/lib/panel-skills.js";
+import { writeProviderRoutingStatus } from "#src/lib/provider-routing-status.js";
+import { runSlowLaneWorker, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
+import { ledgerSource } from "#src/lib/read-model-worker.js";
+import { buildProviderRoutingRoute, buildSelfMeasurementRoute } from "#src/lib/serve.js";
+import type { Route } from "#src/lib/service.js";
+import type { ReadModelInstanceState } from "#src/lib/task-view.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { createViewShadow, legacyViewSampler, type ShadowEvidence, type ShadowRequest } from "#src/lib/view-shadow.js";
+import { buildViewRoutes, oldestAsOf } from "#src/lib/views.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const CAPTURED = new URL("./fixtures/account-usage/claude-json.json", import.meta.url);
 const SKILL = new URL("../.remudero/skills/review.yaml", import.meta.url);

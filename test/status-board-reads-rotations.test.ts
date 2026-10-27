@@ -15,14 +15,14 @@
  * measured 173 ms / 0.32 GiB against the same 669-rotation corpus.
  */
 import assert from "node:assert/strict";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readLedgerLines, readLedgerUnionBounded, STATUS_BOARD_WINDOW_MS } from "../src/lib/status.js";
-import { buildStatusBoard } from "../src/lib/status-board.js";
+import { readLedgerLines, readLedgerUnionBounded, STATUS_BOARD_WINDOW_MS } from "#src/lib/status.js";
+import { buildStatusBoard } from "#src/lib/status-board.js";
 
 const row = (step: string, extra: Record<string, unknown> = {}): string =>
   JSON.stringify({ ts: "2026-08-12T12:00:00.000Z", step, ...extra });

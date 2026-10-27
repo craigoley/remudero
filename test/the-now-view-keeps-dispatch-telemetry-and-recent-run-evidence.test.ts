@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { test } from "node:test";
-import { computeBoardSnapshot, computeRecentActivity, createRecentActivityCache } from "../src/lib/board.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { createLedgerProjector, ledgerLineIdentity, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { assembleNowView } from "../src/lib/now-view.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { acquireLease, withWriteTransaction } from "../src/lib/read-model-db.js";
-import { projectRecentEntry, readRecentActivity } from "../src/lib/recent-projection.js";
-import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { computeBoardSnapshot, computeRecentActivity, createRecentActivityCache } from "#src/lib/board.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { createLedgerProjector, ledgerLineIdentity, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { assembleNowView } from "#src/lib/now-view.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { acquireLease, withWriteTransaction } from "#src/lib/read-model-db.js";
+import { projectRecentEntry, readRecentActivity } from "#src/lib/recent-projection.js";
+import type { GitHub } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const NOW = Date.parse("2026-10-16T12:00:00Z");
 const task: Task = { id: "W1-T1", title: "worker telemetry", repo: "remudero", depends_on: [], type: "implement", risk: "medium", verify: "auto", status: "queued", attempts: 0 };

@@ -17,17 +17,17 @@ import {
   type BoardProjectionOptions,
   type BoardRetentionRule,
   type Row,
-} from "../src/lib/board-projection.js";
-import type { Clock } from "../src/lib/clock.js";
-import type { FeedbackEntry } from "../src/lib/feedback.js";
-import { PLAN_ONLY_REVIEW_MARKER_STEP } from "../src/lib/ledger-carry.js";
-import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
-import { createNowView, type NowViewContext, type NowViewData, type NowViewOptions } from "../src/lib/now-view.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { acquireLease, type ReadModelDb, type ReadModelLease } from "../src/lib/read-model-db.js";
-import { computeBoardSnapshot } from "../src/lib/board.js";
-import { projectPlan, type GitHub, type PrRef } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/board-projection.js";
+import type { Clock } from "#src/lib/clock.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
+import { PLAN_ONLY_REVIEW_MARKER_STEP } from "#src/lib/ledger-carry.js";
+import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "#src/lib/ledger-projector.js";
+import { createNowView, type NowViewContext, type NowViewData, type NowViewOptions } from "#src/lib/now-view.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { acquireLease, type ReadModelDb, type ReadModelLease } from "#src/lib/read-model-db.js";
+import { computeBoardSnapshot } from "#src/lib/board.js";
+import { projectPlan, type GitHub, type PrRef } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 

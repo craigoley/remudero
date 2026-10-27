@@ -10,8 +10,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
-import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
+import type { Task } from "#src/lib/plan.js";
+import { deriveStatus, type GitHub, type PrRef } from "#src/lib/status.js";
 
 function task(over: Partial<Task> = {}): Task {
   return {

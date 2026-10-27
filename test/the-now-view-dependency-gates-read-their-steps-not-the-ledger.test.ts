@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { BoardRow, BoardSnapshot } from "../src/lib/board.js";
-import type { Row } from "../src/lib/board-projection.js";
-import { projectHumanGates } from "../src/lib/human-gate.js";
-import { nowDependencyVerificationGates } from "../src/lib/now-view.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { buildLedgerIndex, noteLedgerGeneration } from "../src/lib/status.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import type { BoardRow, BoardSnapshot } from "#src/lib/board.js";
+import type { Row } from "#src/lib/board-projection.js";
+import { projectHumanGates } from "#src/lib/human-gate.js";
+import { nowDependencyVerificationGates } from "#src/lib/now-view.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { buildLedgerIndex, noteLedgerGeneration } from "#src/lib/status.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const AT = "2026-10-08T12:00:00.000Z";
 const REPO = "example/repo";

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deriveStatus, projectPlan, type DeriveDeps } from "../src/lib/status.js";
+import { deriveStatus, projectPlan, type DeriveDeps } from "#src/lib/status.js";
 import {
   CORPUS_MIN_LEDGER_LINES,
   CORPUS_MIN_TASKS,
@@ -9,7 +9,7 @@ import {
   loadCorpusGithub,
   loadCorpusLedgerLines,
   loadCorpusPlan,
-} from "./fixtures/w1-t187/load.js";
+} from "#test/fixtures/w1-t187/load.js";
 
 /**
  * W1-T187 acceptance criterion 1 — "the hoisted read is DERIVATION-EQUIVALENT — every task's

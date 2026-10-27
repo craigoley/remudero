@@ -17,12 +17,12 @@ import {
   deriveAnalyticsSnapshotFromStream,
   writeAnalyticsCheckpoint,
   type AnalyticsSnapshot,
-} from "../src/lib/analytics-route.js";
-import { fiveLedgerBackedHistoricalSeries, generateFiveLedgerBackedHistoricalSeries } from "../src/lib/analytics-timeseries.js";
-import { readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
-import { clockFromIsoFn, fixedClock } from "../src/lib/clock.js";
-import { terminalVerdictFields } from "../src/run-task.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/analytics-route.js";
+import { fiveLedgerBackedHistoricalSeries, generateFiveLedgerBackedHistoricalSeries } from "#src/lib/analytics-timeseries.js";
+import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
+import { clockFromIsoFn, fixedClock } from "#src/lib/clock.js";
+import { terminalVerdictFields } from "#src/run-task.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 function tmpStateDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -538,8 +538,8 @@ test("deriveAnalyticsSnapshotFromLedger streams a replaying rotation union to th
 
 test("deriveAnalyticsSnapshotFromStream does not retain a response-irrelevant corpus", () => {
   const script = `
-    import { deriveAnalyticsSnapshotFromStream } from "./src/lib/analytics-route.js";
-    import { fixedClock } from "./src/lib/clock.js";
+    import { deriveAnalyticsSnapshotFromStream } from "#test/src/lib/analytics-route.js";
+    import { fixedClock } from "#test/src/lib/clock.js";
     async function* rows() {
       for (let i = 0; i < 20000; i += 1) {
         yield { step: "irrelevant", payload: Buffer.alloc(8192, i % 251).toString("hex") + i };

@@ -25,9 +25,9 @@ import {
   type ServiceLivenessRow,
   type ServiceName,
   type StatusBoardDeps,
-} from "../src/lib/status-board.js";
-import { DEFAULT_CRASHLOOP_WINDOW, detectDaemonCrashLoop, type DaemonBootTimestamp } from "../src/lib/daemon.js";
-import { queryLaunchdListStatusSensed, queryLaunchdServiceSensed } from "../src/run-task.js";
+} from "#src/lib/status-board.js";
+import { DEFAULT_CRASHLOOP_WINDOW, detectDaemonCrashLoop, type DaemonBootTimestamp } from "#src/lib/daemon.js";
+import { queryLaunchdListStatusSensed, queryLaunchdServiceSensed } from "#src/run-task.js";
 
 const NOW_ISO = "2026-08-28T23:42:51.000Z";
 const NOW_MS = Date.parse(NOW_ISO);

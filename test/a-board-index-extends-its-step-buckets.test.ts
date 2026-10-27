@@ -14,15 +14,15 @@ import {
   type BoardProjection,
   type BoardProjectionOptions,
   type Row,
-} from "../src/lib/board-projection.js";
-import type { Clock } from "../src/lib/clock.js";
-import { PLAN_ONLY_REVIEW_MARKER_STEP } from "../src/lib/ledger-carry.js";
-import { rotateLedger } from "../src/lib/ledger.js";
-import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { acquireLease, type ReadModelDb, type ReadModelStatement } from "../src/lib/read-model-db.js";
-import type { GitHub, LedgerIndex, PrRef } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/board-projection.js";
+import type { Clock } from "#src/lib/clock.js";
+import { PLAN_ONLY_REVIEW_MARKER_STEP } from "#src/lib/ledger-carry.js";
+import { rotateLedger } from "#src/lib/ledger.js";
+import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "#src/lib/ledger-projector.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { acquireLease, type ReadModelDb, type ReadModelStatement } from "#src/lib/read-model-db.js";
+import type { GitHub, LedgerIndex, PrRef } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 

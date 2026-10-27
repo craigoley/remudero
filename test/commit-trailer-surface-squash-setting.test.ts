@@ -31,8 +31,8 @@ import {
   ghGateway,
   projectPlan,
   type BatchedPr,
-} from "../src/lib/status.js";
-import type { Plan } from "../src/lib/plan.js";
+} from "#src/lib/status.js";
+import type { Plan } from "#src/lib/plan.js";
 
 const SRC = new URL("../src/lib/status.ts", import.meta.url);
 

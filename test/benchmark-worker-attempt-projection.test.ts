@@ -3,8 +3,8 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger } from "../src/lib/analytics-route.js";
-import { fixedClock } from "../src/lib/clock.js";
+import { deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger } from "#src/lib/analytics-route.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 const at = "2026-09-26T19:00:00.000Z";
 function assignment(id: string, model: string) {

@@ -3,12 +3,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadPlan } from "../src/lib/plan.js";
-import { classifyProposal } from "../src/lib/inbox.js";
-import { buildBatchedGithub, ghGateway } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildDepsReadinessAccessors, buildIntakeRungsDaemonHooks, inboxCommand, ledgerPathFor } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { classifyProposal } from "#src/lib/inbox.js";
+import { buildBatchedGithub, ghGateway } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildDepsReadinessAccessors, buildIntakeRungsDaemonHooks, inboxCommand, ledgerPathFor } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const PROOF = "unit test: test/the-inbox-intake-rung-derives-readiness-from-the-batched-gateway.test.ts";
 

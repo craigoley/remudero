@@ -9,12 +9,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { once } from "node:events";
 
-import { buildAssistantControlRoute, buildAssistantControlCapabilityRoute, buildAssistantControlReceiptRoute } from "../src/lib/panel-actions.js";
-import type { AssistantActionDiscovery } from "../src/lib/assistant-action-discovery.js";
-import { instanceRouteSet, mountUnderInstance } from "../src/lib/instance-gateway.js";
-import { createService, type Route, type Scope } from "../src/lib/service.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { isPaused } from "../src/lib/fleet-control.js";
+import { buildAssistantControlRoute, buildAssistantControlCapabilityRoute, buildAssistantControlReceiptRoute } from "#src/lib/panel-actions.js";
+import type { AssistantActionDiscovery } from "#src/lib/assistant-action-discovery.js";
+import { instanceRouteSet, mountUnderInstance } from "#src/lib/instance-gateway.js";
+import { createService, type Route, type Scope } from "#src/lib/service.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { isPaused } from "#src/lib/fleet-control.js";
 
 function root() { return mkdtempSync(join(tmpdir(), "rmd-assistant-control-")); }
 function ledger(rootPath: string) { return join(rootPath, "state", "ledger.ndjson"); }
@@ -58,8 +58,8 @@ function controlRoutes(deps: Parameters<typeof buildAssistantControlRoute>[0]): 
 }
 
 const childServer = `
-import { createService } from "./src/lib/service.ts";
-import { buildAssistantControlRoute, buildAssistantActionDiscoveryRoute } from "./src/lib/panel-actions.ts";
+import { createService } from "#test/src/lib/service.ts";
+import { buildAssistantControlRoute, buildAssistantActionDiscoveryRoute } from "#test/src/lib/panel-actions.ts";
 import { join } from "node:path";
 const root = process.env.RMD_TEST_CONTROL_ROOT;
 const deps = { root, ledgerPath: join(root, "state", "ledger.ndjson"), claimRoot: root, instance: "core",

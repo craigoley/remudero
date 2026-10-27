@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { createReadModelTicker, createReadModelWorker, READ_MODEL_SWITCH_RECHECK_MS, threadViews, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { shadowReadiness, viewShadowPath, withViewShadow } from "../src/lib/view-shadow.js";
-import { readShadowCounters } from "../src/lib/view-shadow-store.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { trackWorkerThreads } from "../src/lib/worker-heaps.js";
+import { createReadModelTicker, createReadModelWorker, READ_MODEL_SWITCH_RECHECK_MS, threadViews, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { shadowReadiness, viewShadowPath, withViewShadow } from "#src/lib/view-shadow.js";
+import { readShadowCounters } from "#src/lib/view-shadow-store.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { trackWorkerThreads } from "#src/lib/worker-heaps.js";
 
 async function until(done: () => boolean, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;

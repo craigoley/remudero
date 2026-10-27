@@ -5,7 +5,7 @@
 // its host; a later boot on another host is a changed environment.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { latestIndependentFailureBlock } from "../src/lib/status.js";
+import { latestIndependentFailureBlock } from "#src/lib/status.js";
 
 const TASK = "CONSOLE-T76";
 const T0 = Date.parse("2026-09-27T01:45:00.000Z");

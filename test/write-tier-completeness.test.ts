@@ -3,14 +3,14 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { assertWriteTiersComplete, writeRoutesMissingTier, type Route } from "../src/lib/service.js";
-import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import type { Plan } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
+import { assertWriteTiersComplete, writeRoutesMissingTier, type Route } from "#src/lib/service.js";
+import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import type { Plan } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
 
 // ── W1-T404 acceptance 4: "every write-scoped route in the real assembled route table carries a
 // tier, and a route added without one fails rather than defaulting" ──

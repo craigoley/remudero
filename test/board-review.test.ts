@@ -16,9 +16,9 @@ import {
   recordBoardReviewFire,
   type BoardItem,
   type BoardReviewPolicy,
-} from "../src/lib/board-review.js";
-import { runMeasurementCadenceReport } from "../src/lib/measurement-cadence.js";
-import type { Proposal } from "../src/lib/inbox.js";
+} from "#src/lib/board-review.js";
+import { runMeasurementCadenceReport } from "#src/lib/measurement-cadence.js";
+import type { Proposal } from "#src/lib/inbox.js";
 
 function tmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

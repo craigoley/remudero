@@ -20,12 +20,12 @@ import {
   writeAnalyticsCheckpoint,
   type AnalyticsSnapshot,
   type AnalyticsTimer,
-} from "../src/lib/analytics-route.js";
-import { openLedgerUnion, type LedgerUnionStreamIO } from "../src/lib/ledger-union.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { buildServeServer, gateStaleCodeExit, type ServeDeps } from "../src/lib/serve.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
+} from "#src/lib/analytics-route.js";
+import { openLedgerUnion, type LedgerUnionStreamIO } from "#src/lib/ledger-union.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { buildServeServer, gateStaleCodeExit, type ServeDeps } from "#src/lib/serve.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

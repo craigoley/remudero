@@ -3,16 +3,16 @@ import type { AddressInfo } from "node:net";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { coldAnalyticsSnapshot, type AnalyticsSnapshot } from "../src/lib/analytics-route.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { navBadgeView, operatorAgentCandidates, visibleOperatorAgentProposals, type NavBadgeData, type NavBadgeScope } from "../src/lib/nav-badge-view.js";
-import type { OperatorAgentHistory, OperatorAgentMemorySource } from "../src/lib/operator-agent.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { createService } from "../src/lib/service.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { createViewShadow, legacyViewSampler, type ShadowEvidence, type ShadowRequest } from "../src/lib/view-shadow.js";
-import { buildViewRoutes, renderView, type ViewBody, type ViewDefinition } from "../src/lib/views.js";
+import { coldAnalyticsSnapshot, type AnalyticsSnapshot } from "#src/lib/analytics-route.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { navBadgeView, operatorAgentCandidates, visibleOperatorAgentProposals, type NavBadgeData, type NavBadgeScope } from "#src/lib/nav-badge-view.js";
+import type { OperatorAgentHistory, OperatorAgentMemorySource } from "#src/lib/operator-agent.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { createService } from "#src/lib/service.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { createViewShadow, legacyViewSampler, type ShadowEvidence, type ShadowRequest } from "#src/lib/view-shadow.js";
+import { buildViewRoutes, renderView, type ViewBody, type ViewDefinition } from "#src/lib/views.js";
 
 // The console sidebar's agent badge cost ~12 upstream reads (~370 KB) per page view and re-derived
 // operator-agent proposals in the console. GET /v1/views/nav-badge answers the counts from serve's caches.

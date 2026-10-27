@@ -4,15 +4,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock, type Clock } from "../src/lib/clock.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import { gardenStatePath } from "../src/lib/gardener.js";
-import { productionGardenerOverseerPorts, runGardenerOverseer, type GardenerOverseerPorts } from "../src/lib/gardener-overseer.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { ORACLE_AGREE_RUNS_TO_CLEAR, READ_MODEL_CONSISTENCY_CLEARED_STEP, runConsistencyCheck, type ConsistencyCheckOptions } from "../src/lib/read-model-consistency.js";
-import { acquireLease, type ReadModelDb, type ReadModelLease } from "../src/lib/read-model-db.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import { gardenStatePath } from "#src/lib/gardener.js";
+import { productionGardenerOverseerPorts, runGardenerOverseer, type GardenerOverseerPorts } from "#src/lib/gardener-overseer.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { ORACLE_AGREE_RUNS_TO_CLEAR, READ_MODEL_CONSISTENCY_CLEARED_STEP, runConsistencyCheck, type ConsistencyCheckOptions } from "#src/lib/read-model-consistency.js";
+import { acquireLease, type ReadModelDb, type ReadModelLease } from "#src/lib/read-model-db.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const HOUR = 3_600_000;
 const T0 = Date.parse("2026-09-20T00:00:00Z");

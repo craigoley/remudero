@@ -3,8 +3,8 @@ import { existsSync, openSync, closeSync, fstatSync, readFileSync, rmSync, write
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import {
   acquireLease,
   attachReadModel,
@@ -13,7 +13,7 @@ import {
   readModelDirtyMarkerPath,
   readModelPath,
   readModelPointerPath,
-} from "../src/lib/read-model-db.js";
+} from "#src/lib/read-model-db.js";
 import {
   READ_MODEL_INTEGRITY_INTERVAL_MS,
   checkReadModelIntegrity,
@@ -22,8 +22,8 @@ import {
   type IntegrityRequest,
   type IntegrityResult,
   type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const NOW = T0 + 3_600_000;
