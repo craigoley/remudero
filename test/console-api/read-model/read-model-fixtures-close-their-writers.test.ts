@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setImmediate as turn } from "node:timers/promises";
 import { acquireLease, flushReadModelTransactions, openReadModel } from "#src/lib/read-model-db.js";
 import { closeReadModelFixture, readModelFixtureDir, type ReadModelFixtureScope } from "#test/helpers/read-model-fixture.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { fixtureRetentionReason } from "#test/setup/retained-fixtures.js";
 
 function capturedScope() {
@@ -13,7 +14,7 @@ function capturedScope() {
   return { scope, finish: () => finish() };
 }
 
-test("read-model fixture cleanup waits for real writer closure and diagnostic publication before removing roots", async () => {
+async function verifyWriterClosure() {
   const control = capturedScope();
   const state = readModelFixtureDir(control.scope, "read-model-cleanup-state");
   const ledger = readModelFixtureDir(control.scope, "read-model-cleanup-ledger");
@@ -44,9 +45,11 @@ test("read-model fixture cleanup waits for real writer closure and diagnostic pu
   assert.equal(existsSync(ledger), false);
   await turn();
   assert.equal(existsSync(state), false, "the diagnostic publisher cannot recreate disposed fixture storage");
-});
+}
 
-test("read-model fixture cleanup retains evidence and still closes other writers after a closure failure", async () => {
+test("read-model fixture cleanup waits for real writer closure and diagnostic publication before removing roots", verifyWriterClosure);
+
+async function verifyFailedClosure() {
   const control = capturedScope();
   const dir = readModelFixtureDir(control.scope, "read-model-cleanup-refusal");
   const original = new Error("writer closure not proven");
@@ -61,4 +64,25 @@ test("read-model fixture cleanup retains evidence and still closes other writers
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+test("read-model fixture cleanup retains evidence and still closes other writers after a closure failure", verifyFailedClosure);
+
+
+test("the four observed read-model fixtures wire owned scratch and writer closure to the verified cleanup", async () => {
+  for (const file of [
+    "test/read-model-oracle-never-blocks-projection.test.ts",
+    "test/a-read-model-upgrade-never-re-reads-the-corpus.test.ts",
+    "test/a-view-body-is-behind-only-by-the-rows-it-reads.test.ts",
+    "test/a-view-unit-s-measured-cost-survives-a-restart.test.ts",
+  ]) {
+    const source = readFileSync(join(REPO_ROOT, file), "utf8");
+    assert.match(source, /from "#test\/helpers\/read-model-fixture\.js"/, file);
+    assert.match(source, /readModelFixtureDir\(t,/, file);
+    assert.match(source, /closeReadModelFixture\(t,/, file);
+    assert.doesNotMatch(source, /t\.after\(/, `${file}: resource hooks all join the ordered cleanup`);
+    assert.doesNotMatch(source, /rmSync\(/, `${file}: scratch is removed only after registered writers close`);
+  }
+  await verifyWriterClosure();
+  await verifyFailedClosure();
 });
