@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   armAutoMerge,
@@ -1166,7 +1166,10 @@ const armVerdictCases = [
   { mode: "live", title: "W1-T975: a live run records its verdict and arms auto-merge using only its run-owned hold ledger" },
   { mode: "shadow", title: "W1-T975: a shadow run records its verdict and does not arm auto-merge" },
 ] as const;
-for (const { mode, title } of armVerdictCases) test(title, async (t) => {
+for (const { mode, title } of armVerdictCases) test(title, async (t) => runArmVerdictFixture(t, mode));
+test("legacy arm uses its ledger when HOME has no Remudero configuration", async (t) => runArmVerdictFixture(t, "live"));
+
+async function runArmVerdictFixture(t: TestContext, mode: "live" | "shadow") {
   const root = mkdtempSync(join(tmpdir(), "arm-verdict-merged-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
@@ -1285,7 +1288,7 @@ for (const { mode, title } of armVerdictCases) test(title, async (t) => {
     rmSync(fixtureHome, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
-});
+}
 
 // Re-exported so `armAutoMerge`'s own (unmodified) 6-call-site contract is
 // still importable from this file without an unused-import lint complaint —
