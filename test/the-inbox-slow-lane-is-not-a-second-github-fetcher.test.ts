@@ -1,3 +1,6 @@
+import { captureFeedback, feedbackEntryRepoPath, readFeedbackEntry, type FeedbackEntry } from "#src/lib/feedback.js";
+import { readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
+import { createChangedFilesCache } from "#src/lib/changed-files-cache.js";
 // Arch E27, after D4 (#8416): switches.json `github` picks the ONE keep-warm that walks serve's GitHub
 // gateway, but the inbox slow lane (#8264) built its own gateway and listed PRs every 150 s whatever the
 // switch said: a second fetcher. The lane now reads the board snapshot the owner's walks persist, the
@@ -268,4 +271,33 @@ test("the inbox names a missing or stale github snapshot instead of fetching one
 
 test("the slow lane refuses a trace read rather than calling github", () => {
   assert.throws(() => slowLaneTraceGithub.prView(1), /the slow lane makes no GitHub call/);
+});
+
+test("hand-route feedback reconciliation reuses the existing slow-lane snapshot and writer", async (t) => {
+  const shim = recordGh(t);
+  const time = manualTime(T0);
+  const root = coreRoot(t);
+  const entry = captureFeedback(root, { raw: "The merged source repair resolves this entry", origin: "cli" });
+  const other = captureFeedback(root, { raw: "A different unanswered entry", origin: "cli" });
+  const row = { ...pull(41, "MERGED"), body: "Resolves feedback `" + entry.id + "`" };
+  const board = createBoardSnapshotCache(root, "o", "r");
+  assert.equal(board.commitClosed([row]), true);
+  assert.equal(board.commitIssues([]), true);
+  assert.equal(board.commitOpen!([], time.clock.now()), true);
+  const files = createChangedFilesCache(root, "o", "r", { clock: time.clock, fetch: async () => ["src/lib/panel-graph.ts"] });
+  assert.equal(files.lookup(row.url, row.state, row.headRefOid), undefined);
+  await files.settle();
+  assert.equal(files.evidence!(row.url, row.state, row.headRefOid).status, "complete", "the maintained producer writes exact-head evidence");
+  const world = laneWorld(t, time, root);
+  await world.hold();
+  const queued = readQueuedFeedbackRecords(root);
+  const proposed = queued.get(feedbackEntryRepoPath(entry.id)) as unknown as FeedbackEntry;
+  assert.ok(proposed, "the production default slow-lane unit must reach the real landing queue");
+  assert.equal(proposed.status, "accepted");
+  assert.equal(proposed.proposal_pr, row.url);
+  assert.equal(readFeedbackEntry(root, entry.id).status, "new", "no direct lifecycle mutation before reviewed landing");
+  assert.equal(readFeedbackEntry(root, other.id).status, "new");
+  await world.pass();
+  assert.deepEqual(readQueuedFeedbackRecords(root), queued, "the next ordinary pass is idempotent");
+  assert.equal(shim.calls().length, 0, "the production default snapshot and qualification reader spawn no second GitHub fetcher");
 });
