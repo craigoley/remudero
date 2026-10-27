@@ -692,13 +692,14 @@ export function skillLifecycleCandidates(skillUsage: SkillUsage, approvedNames: 
 
 /** Build this skill's effectiveness report from the ledger and stage its retirement proposal —
  *  `stageSkillLifecycleProposal` ON SCHEDULE instead of only by hand (`rmd skill lifecycle`).
- *  BEST-EFFORT: an unreadable or incomplete ledger stages nothing, silently, and a report that does
- *  not clear `stageSkillLifecycleProposal`'s own bar (not yet RETIRE-CANDIDATE) stages nothing and
- *  withdraws a retirement staged earlier — the next pass tries again once more evidence accrues. */
+ *  BEST-EFFORT: an unreadable ledger or a report that does not clear `stageSkillLifecycleProposal`'s
+ *  own bar (not yet RETIRE-CANDIDATE) stages nothing, silently — the next pass tries again once
+ *  more evidence accrues. */
 export function stageSkillLifecycleForAction(stateDir: string, repoRoot: string, action: GardenAction): void {
   try {
-    // Complete reads only: a refused report now withdraws a staged retirement, and a partial ledger is not evidence.
     const ledger = readLedgerUnionRecordsSync(stateDir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS, refuseIncomplete: true });
+    // A partial read is not evidence either way: staging from it could withdraw a staged retirement
+    // the full ledger still supports, so an incomplete union leaves the registry untouched.
     if (!ledger.ok) return;
     const report = buildSkillEffectivenessReport(ledger.rows, action.target);
     stageSkillLifecycleProposal(join(stateDir, "inbox-proposals.json"), join(repoRoot, ".claude", "skills"), report);
@@ -982,7 +983,9 @@ function passClaims(actions: GardenAction[], located: Record<string, string>, he
   const proved = actions.filter((a) => located[a.target]);
   return [
     { claim: "this pass is recorded in the garden log", proof: `grep: ^${heading}$ in ${GARDEN_LOG}` },
-    ...proved.map((a) => ({ claim: `the gardener's ${a.class} of ${a.target} is marked in its entry`, proof: `grep: ${gardenMarker(a)}$ in ${located[a.target]}` })),
+    // The proof anchors on the entry's DATA line, never on the `# knowledge gardener:` marker: the reviewer
+    // reads a YAML `#` line as a comment (W1-T10372), so a proof matching only the marker is capped stale.
+    ...proved.map((a) => ({ claim: `the gardener's ${a.class} of ${a.target} is marked in its entry`, proof: `grep: ${a.into ? `superseded_by: ${a.into}` : "lifecycle: superseded"}$ in ${located[a.target]}` })),
   ];
 }
 
