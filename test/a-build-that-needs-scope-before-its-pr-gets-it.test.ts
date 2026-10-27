@@ -329,7 +329,13 @@ test("scope recovery never reads a companion through a replaced ancestor or leaf
   const save = (swap: () => void) => amendments.saveBuildScopeRecovery({
     root, taskId: TASK_ID, branch: `run-${TASK_ID}-1`, amendmentUrl: "https://github.com/acme/remudero/pull/7",
     worktreePath: root, headSha: "a".repeat(40), companions: ["src/lib/companion.ts"],
-    git: (args) => args[0] === "diff" ? (args.includes("--name-only") ? "src/consumer.ts\0" : "saved patch") : "a".repeat(40),
+    git: (args) => {
+      if (args[0] !== "diff") return "a".repeat(40);
+      if (args.includes("--name-only")) return "src/consumer.ts\0";
+      const output = args.find(arg => arg.startsWith("--output="));
+      if (output) writeFileSync(output.slice("--output=".length), "saved patch");
+      return "";
+    },
     // The real descriptor-relative reader, run right after the path is swapped: no check-then-open window is left to win.
     io: { run: (script, input) => { swap(); return execFileSync("python3", ["-I", "-c", script], { input, encoding: "utf8" }); } },
   });

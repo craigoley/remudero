@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { requiredCompanions, runTask } from "#src/run-task.js";
-import type { ScopeAmendmentOutcome, ScopeAmendmentRequest } from "#src/lib/proof-amendment.js";
+import { readBuildScopeRecovery, type ScopeAmendmentOutcome, type ScopeAmendmentRequest } from "#src/lib/proof-amendment.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult, spawnWorker } from "#src/lib/worker.js";
@@ -205,6 +205,12 @@ test("a committed source larger than the Git pipe buffer still asks for its exac
     assert.ok(asked[0]!.importers?.includes("src/lib/task-linter.ts"));
     assert.equal(created.length, 0, "the undeclared source is never published without normal scope qualification");
     assert.equal(result.verdict, "no_pr");
+    const recovery = f.rows().findLast(row => row.step === "implement.scope_needed" && typeof row.recovery_path === "string");
+    assert.ok(recovery, "the exact source and companion recovery is preserved before cleanup");
+    const saved = readBuildScopeRecovery(String(recovery.recovery_path), TASK_ID);
+    if (saved.status !== "verified") assert.fail(saved.reason);
+    assert.ok(Buffer.byteLength(saved.data.patch, "utf8") > 1024 * 1024);
+    assert.ok(saved.data.patch.includes("é".repeat(600_000)), "the complete multi-byte patch payload survives");
   } finally {
     f.cleanup();
   }
