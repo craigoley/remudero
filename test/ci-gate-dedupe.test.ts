@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { readFile, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -162,10 +162,10 @@ test("the real CI inventory query and jq retain posted results across attempts",
       { when: "/check-runs?", stdout: JSON.stringify([{ check_runs: [clonedJob] }]) },
     ], { kind: "retained-posted-attempts" });
     try {
-      const endpoint = query[1].replace("${REPO}", "example/example").replace("${SHA}", "deadbeef");
-      const read = spawnSync(join(shim.dir, "gh"), ["api", endpoint, "--paginate", "--slurp"], { encoding: "utf8" });
+      const endpoint: string = query[1].replace("${REPO}", "example/example").replace("${SHA}", "deadbeef");
+      const read: SpawnSyncReturns<string> = spawnSync(join(shim.dir, "gh"), ["api", endpoint, "--paginate", "--slurp"], { encoding: "utf8" });
       assert.equal(read.status, 0, read.stderr);
-      const projected = spawnSync("jq", ["-c", filter[1]], { input: read.stdout, encoding: "utf8" });
+      const projected: SpawnSyncReturns<string> = spawnSync("jq", ["-c", filter[1]], { input: read.stdout, encoding: "utf8" });
       assert.equal(projected.status, 0, projected.stderr);
       const runs = JSON.parse(projected.stdout) as Array<{ name: string; producer: string; conclusion: string }>;
       const posted = runs.filter(run => run.name === "rule-checks" && run.producer === "posted");
