@@ -4067,7 +4067,8 @@ test("the real daemon command clears the exact repository-scoped kick marker", a
 });
 
 test("a repo-scoped kick is consumed once without consuming another repository's intent", async () => {
-  const { requestKick, pendingKicks: readKicks, clearKick: clear, kickFilePath } = await import("#src/lib/fleet-control.js");
+  const { requestKick, kickFilePath } = await import("#src/lib/fleet-control.js");
+  const { daemonKickPort } = await import("#src/cli/commands/daemon.js");
   const { home, root } = claudeWiringFixtureHome();
   try {
     const plan = fixturePlan(), task = plan.byId.get("D")!;
@@ -4076,7 +4077,7 @@ test("a repo-scoped kick is consumed once without consuming another repository's
     const spawned: string[] = [];
     await runDaemon(plan, { refreshMerged: () => NONE_MERGED, targetRepo: task.repo,
       runOne: async id => { spawned.push(id); return okResult(id); },
-      pendingKicks: () => readKicks(root), clearKick: (id, repo) => { clear(root, id, repo); },
+      ...daemonKickPort(root, { repo: task.repo, isSelf: true }),
       sleep: async () => {} }, { headroomEnabled: false, max: 1 });
     assert.deepEqual(spawned, [task.id]);
     assert.equal(existsSync(kickFilePath(root, task.id, task.repo)), false);
@@ -4085,7 +4086,8 @@ test("a repo-scoped kick is consumed once without consuming another repository's
 });
 
 test("an old kick cannot bypass an existing PR or unreadable ownership", async () => {
-  const { requestKick, pendingKicks: readKicks, clearKick: clear, kickFilePath } = await import("#src/lib/fleet-control.js");
+  const { requestKick, kickFilePath } = await import("#src/lib/fleet-control.js");
+  const { daemonKickPort } = await import("#src/cli/commands/daemon.js");
   for (const unknown of [false, true]) {
     const { home, root } = claudeWiringFixtureHome();
     try {
@@ -4097,7 +4099,7 @@ test("an old kick cannot bypass an existing PR or unreadable ownership", async (
       await runDaemon(plan, { refreshMerged: () => NONE_MERGED, targetRepo: task.repo,
         isOpenPr: () => unknown ? undefined : 14729, isCreditIndeterminate: () => unknown,
         runOne: async id => { spawned.push(id); return okResult(id); },
-        pendingKicks: () => readKicks(root), clearKick: (id, repo) => { clear(root, id, repo); },
+        ...daemonKickPort(root, { repo: task.repo, isSelf: true }),
         checkStop: () => stopDetail(root), sleep: async () => { requestStop(root, "fixture complete"); },
         log: (step, extra = {}) => lines.push({ step, extra }) }, { headroomEnabled: false, max: 1 });
       assert.deepEqual(spawned, []);
