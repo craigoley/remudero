@@ -118,8 +118,13 @@ test("W1-T3792: Codex resume preserves read-only and non-repository boundaries",
     assert.equal(writer.includes("--skip-git-repo-check"), false, "a writer outside Git receives no trust bypass");
     assert.deepEqual(
       writer.flatMap((arg, index) => (arg === "--add-dir" ? [writer[index + 1]] : [])),
-      [nativeCacheRoot()],
-      "an unproven repository layout earns no writable root beyond the private native cache",
+      [],
+      "an unverified repository earns no writable root at all, not even the private native cache",
+    );
+    assert.equal(
+      writer.some((arg) => arg.includes("SWC_NATIVE_BINDING_CACHE")),
+      false,
+      "and no native-cache setting is handed to its shell",
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

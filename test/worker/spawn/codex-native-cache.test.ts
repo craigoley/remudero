@@ -10,28 +10,42 @@ import { test } from "node:test";
 import { spawnCodexWorker } from "#src/lib/worker-provider.js";
 import { prepareWorkerNativeCache } from "#src/lib/worker-native-cache.js";
 import type { ContainedSpawnOptions } from "#src/lib/worker-containment.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const posix = { skip: process.platform === "win32" ? "POSIX native-cache permissions" : false };
 const require = createRequire(import.meta.url);
 
+/** `repo`: a real `git init` checkout (the probe answers true). `plain`: an existing directory that is no
+ *  repository (the probe refuses). `repo-without-git`: the same checkout with `git` absent from PATH for the
+ *  probe, so the trusted Git probe itself is unavailable. */
+type WriterCwd = "repo" | "plain" | "repo-without-git";
+
 async function writerOptions(inspect: (options: ContainedSpawnOptions, root: string, home: string) => void,
-  mode: "writer" | "reader" | "review" = "writer") {
+  mode: "writer" | "reader" | "review" = "writer", cwdKind: WriterCwd = "repo") {
   const root = mkdtempSync(join(tmpdir(), "rmd-native-cache-test-"));
   const home = join(root, "host-home"), unsafe = join(root, "unsafe-worker-parent");
   mkdirSync(home, { mode: 0o700 });
   mkdirSync(unsafe); chmodSync(unsafe, 0o777);
   mkdirSync(join(unsafe, "tmp"));
   const workerHome = join(unsafe, "worker-home"); mkdirSync(workerHome);
-  const saved = { HOME: process.env.HOME, TMPDIR: process.env.TMPDIR };
+  // The shared fixture builds the real checkout (fixture-copy census: no hand-rolled `git init`).
+  const repo = cwdKind === "plain" ? undefined : gitRepo({ seedCommit: false, kind: "native-cache-checkout" });
+  const cwd = repo?.dir ?? join(root, "checkout");
+  if (repo === undefined) mkdirSync(cwd);
+  const noGitBin = join(root, "no-git-bin"); mkdirSync(noGitBin);
+  const saved = { HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, PATH: process.env.PATH };
   process.env.HOME = home; process.env.TMPDIR = join(unsafe, "tmp");
+  if (cwdKind === "repo-without-git") process.env.PATH = noGitBin;
   const streams = { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() };
   const child = Object.assign(new EventEmitter(), streams);
   try {
-    await spawnCodexWorker({ cwd: REPO_ROOT, prompt: "fixture only", workerHome,
+    await spawnCodexWorker({ cwd: mode === "writer" ? cwd : REPO_ROOT, prompt: "fixture only", workerHome,
       settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: mode === "reader" ? ["Read"] : ["Read", "Edit"],
       ...(mode === "review" ? { sandboxIntent: "disposable-review" as const, sandboxReadRoots: [REPO_ROOT] } : {}),
       containment: { spawn(options) {
+        // The probe has run by now; only the probe is denied `git`, never the rest of the test.
+        if (saved.PATH === undefined) delete process.env.PATH; else process.env.PATH = saved.PATH;
         inspect(options, root, home);
         queueMicrotask(() => {
           streams.stdout.end(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } }) + "\n");
@@ -43,10 +57,11 @@ async function writerOptions(inspect: (options: ContainedSpawnOptions, root: str
       enabled: ["codex"], codexBin: process.execPath, codexModel: "gpt-6-luna", codexHome: join(root, "codex-state"),
     } });
   } finally {
-    for (const key of ["HOME", "TMPDIR"] as const) {
+    for (const key of ["HOME", "TMPDIR", "PATH"] as const) {
       if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key];
     }
     rmSync(root, { recursive: true, force: true });
+    repo?.cleanup();
   }
 }
 
@@ -114,6 +129,31 @@ test("read-only and disposable-review workers receive no native-cache write gran
     assert.equal(existsSync(join(home, ".cache")), false);
     assert.notEqual(options.env.HOME, home);
   }, mode);
+});
+
+function assertNoNativeCache(options: ContainedSpawnOptions, home: string) {
+  assert.equal(shellCache(options), undefined, "no shell native-cache setting");
+  assert.equal(options.env.SWC_NATIVE_BINDING_CACHE, undefined, "no native-cache environment");
+  assert.equal(options.args.includes("--add-dir"), false, "no write grant of any kind");
+  assert.equal(options.args.some(arg => arg.includes("swc-native")), false, "the namespace is named nowhere in argv");
+  assert.equal(existsSync(join(home, ".cache")), false, "no namespace is created under the operator home");
+  assert.equal(options.args[options.args.indexOf("--sandbox") + 1], "workspace-write", "the writer itself still runs contained");
+}
+
+test("Codex writers without a verified Git repository receive no native-cache grant or namespace", posix, async () => {
+  let observed = 0;
+  await writerOptions((options, _root, home) => { observed++; assertNoNativeCache(options, home); }, "writer", "plain");
+  assert.equal(observed, 1, "the writer was actually spawned, so the absence is the policy's answer");
+});
+
+test("Codex native-cache eligibility stays closed when the trusted Git probe is unavailable", posix, async () => {
+  let observed = 0;
+  await writerOptions((options, _root, home) => { observed++; assertNoNativeCache(options, home); }, "writer", "repo-without-git");
+  assert.equal(observed, 1, "the writer was actually spawned, so the absence is the policy's answer");
+  // Positive control: the very same checkout earns the grant once the probe can run.
+  await writerOptions((options, _root, home) => {
+    assert.equal(shellCache(options), join(home, ".cache", "remudero", "swc-native"));
+  }, "writer", "repo");
 });
 
 function cacheFixture(check: (home: string) => void) {

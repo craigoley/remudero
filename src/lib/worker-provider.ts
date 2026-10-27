@@ -33,7 +33,7 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { fixedClock, loopAvailableDeadline, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
-import { hostWorktreeGit, recordedWorktreeGitDir } from "./worktree-git.js";
+import { hostWorktreeGit, hostWorktreeGitAsync, recordedWorktreeGitDir } from "./worktree-git.js";
 import { aliasRewriteFields, rewriteAddedTestImports, type AddedTestAliasRewrite } from "./added-test-alias-rewrite.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
@@ -2801,11 +2801,30 @@ export async function spawnCodexWorker(
   config: Config,
   selection?: Pick<ProviderCapacity, "model" | "effort">,
 ): Promise<CodexWorkerResult> {
-  return withTempDir("codex-worker", (privateTmpDir) => {
-    const nativeCacheRoot = process.platform !== "win32" && !codexReadOnly(args) && args.sandboxIntent !== "disposable-review"
+  return withTempDir("codex-worker", async (privateTmpDir) => {
+    // The native-cache namespace and its `--add-dir` write grant exist only for a writer whose cwd the
+    // hardened Git adapter POSITIVELY verifies as a worktree. Anything else gets neither the setting,
+    // the grant, nor a created directory.
+    const nativeCacheRoot = process.platform !== "win32" && !codexReadOnly(args) && args.sandboxIntent !== "disposable-review" &&
+      await verifiedGitWorktree(args.cwd)
       ? prepareWorkerNativeCache() : undefined;
     return spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, nativeCacheRoot);
   });
+}
+
+/**
+ * Native-cache eligibility: the trusted (pinned, config-vetted) Git adapter must answer
+ * `rev-parse --is-inside-work-tree` with `true`. A missing `git`, a refused pointer, a non-repository
+ * or a timed-out probe is NOT an answer, so eligibility stays closed (fail closed on every doubt).
+ */
+async function verifiedGitWorktree(cwd: string): Promise<boolean> {
+  try {
+    return (await hostWorktreeGitAsync(cwd, ["rev-parse", "--is-inside-work-tree"])).trim() === "true";
+  } catch {
+    // The probe is unavailable or refused (git absent, pointer refused, not a repository, timeout): the
+    // repository is unverified, so no cache grant or namespace is created.
+    return false;
+  }
 }
 
 /** Azure deployment authentication is process-local to the daemon. It is deliberately not a
