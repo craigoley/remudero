@@ -697,7 +697,10 @@ export function skillLifecycleCandidates(skillUsage: SkillUsage, approvedNames: 
  *  more evidence accrues. */
 export function stageSkillLifecycleForAction(stateDir: string, repoRoot: string, action: GardenAction): void {
   try {
-    const ledger = readLedgerUnionRecordsSync(stateDir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS });
+    const ledger = readLedgerUnionRecordsSync(stateDir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS, refuseIncomplete: true });
+    // A partial read is not evidence either way: staging from it could withdraw a staged retirement
+    // the full ledger still supports, so an incomplete union leaves the registry untouched.
+    if (!ledger.ok) return;
     const report = buildSkillEffectivenessReport(ledger.rows, action.target);
     stageSkillLifecycleProposal(join(stateDir, "inbox-proposals.json"), join(repoRoot, ".claude", "skills"), report);
   } catch {
