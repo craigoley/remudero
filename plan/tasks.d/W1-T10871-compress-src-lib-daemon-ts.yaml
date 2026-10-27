@@ -23,3 +23,11 @@
     Add the named regression in test/daemon/compress-src-lib-daemon-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
     Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
     Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it touches secrets, auth, tokens or permissions (\"tokens\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-27T19:06:48.766Z"
+    pin: "7c8355d9baff9cfc3c8893590b6334ce8eb99fb6af5646641e99fa98a73dc2d2"
