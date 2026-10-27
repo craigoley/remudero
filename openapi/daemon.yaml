@@ -372,6 +372,52 @@ components:
         error: { type: string, enum: [unauthorized, forbidden, confirm_nonce_required] }
         required_scope: { type: string, enum: [write] }
         required_tier: { type: string, enum: [high] }
+    ProductRepositoryPreview:
+      type: object
+      additionalProperties: false
+      description: >
+        A server observation of the exact repository a create or adopt would act on, taken at observedAt.
+        It is informational: it writes nothing and authorizes nothing, and the mutation rechecks every
+        prerequisite itself. state ready means the exact adoption target exists, or the creation target
+        is absent and the owner namespace allows creation. absent, conflict, stale, denied and unavailable
+        are never ready; reasons name why. creation reports the provider's answer for the owner namespace
+        and is not_checked when the repository read did not succeed or a product-level state decided first.
+      required: [version, productId, revision, objectiveRevision, action, target, state, reasons, repository, creation, observedAt]
+      properties:
+        version: { type: string, enum: [product-repository-preview-v1] }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        revision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        objectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        action: { type: string, enum: [adopt, create] }
+        target:
+          type: object
+          additionalProperties: false
+          required: [owner, name]
+          properties:
+            owner: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+            name: { type: string, minLength: 1, maxLength: 100, pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$' }
+        state: { type: string, enum: [ready, absent, conflict, stale, denied, unavailable] }
+        reasons:
+          type: array
+          maxItems: 4
+          items:
+            type: string
+            enum: [stale_revision, requested_repository_mismatch, product_already_bound, bound_repository_mismatch, repository_exists, repository_absent, provider_unreadable, creation_denied, creation_unknown]
+        repository:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [provider, id, owner, name, defaultBranch, visibility]
+              properties:
+                provider: { type: string, enum: [github] }
+                id: { type: integer, minimum: 1, maximum: 9007199254740991 }
+                owner: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+                name: { type: string, minLength: 1, maxLength: 100, pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$' }
+                defaultBranch: { type: string, minLength: 1, maxLength: 255 }
+                visibility: { type: string, enum: [public, private, internal] }
+            - { type: "null" }
+        creation: { type: string, enum: [user, org, denied, unknown, not_checked] }
+        observedAt: { type: string, format: date-time }
     ProductDeploymentRepository:
       type: object
       additionalProperties: false
@@ -14725,6 +14771,83 @@ paths:
               schema: { $ref: "#/components/schemas/ProductRepositoryError" }
         "503":
           description: busy, corrupt, unavailable, provider_unreadable, outcome_unknown or recovery_required; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+  /v1/products/repository-preview:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Browser owner fields, actor headers and
+          shared bearers cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema: { type: string, minLength: 1 }
+    get:
+      summary: Preview the exact GitHub repository a product create or adopt would act on, without mutation.
+      description: >
+        Requires the verified operator and the sensitive read grant. Supply exactly one each of id, action,
+        owner and name, and optionally expectedRevision and expectedObjectiveRevision; duplicate and unknown
+        keys fail. The server reads the product and the provider through the same scoped transport as the
+        mutation and returns the observed repository identity, visibility and default branch, namespace
+        creation availability and explicit readiness reasons. Nothing is written: no product record,
+        operation journal, repository or enrollment. Unreadable provider metadata is state unavailable,
+        never ready. The preview authorizes nothing; POST /v1/products/repository rechecks independently.
+        Responses use Cache-Control private, no-store.
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/ProductId" }
+        - name: action
+          in: query
+          required: true
+          schema: { type: string, enum: [adopt, create] }
+        - name: owner
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+        - name: name
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 100, pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$' }
+        - name: expectedRevision
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        - name: expectedObjectiveRevision
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 9007199254740991 }
+      responses:
+        "200":
+          description: The observation, including absent, conflict, stale, denied and unavailable states.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryPreview" }
+        "400":
+          description: Missing, duplicate, unknown or malformed query keys.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAccessError" }
+        "403":
+          description: The verified operator identity or sensitive read grant is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductRepositoryError"
+                  - $ref: "#/components/schemas/ProductAccessError"
+        "404":
+          description: The product does not exist for this operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+        "503":
+          description: The product state is busy, corrupt or unavailable; no success is fabricated.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductRepositoryError" }

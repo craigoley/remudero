@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: { tdd: strict }
   budget_usd: 60.00
   rationale: "From a read-only comparison with nanocoai/nanoclaw, whose scripts/skill-conformance.test.ts discovers every skill and enforces invariants with no per-skill test file. RE-VERIFIED at current main: two skills carry applies-to: (proof-preflight, ci-state-forensics, both applies-to: implement), each with its own hand-written test (test/a-proof-preflight-skill-is-selectable-and-bounded.test.ts, test/a-ci-state-forensics-skill-is-selectable-and-bounded.test.ts). A third skill gets no test unless its author writes one. LINE DRIFT since the entry was read at efd226b50: TASK_TYPES is now src/lib/plan.ts:124 (not 105) and scanSkillDraft is src/lib/skill-workshop.ts:308 (not 307); DEFAULT_KNOWLEDGE_BUDGET_CHARS is still src/lib/learnings.ts:49 (8148); observeSkillSelection is skill-workshop.ts:712. NOTE: no skill carries when-paths: today, so the glob check is vacuous on the live tree and is proven by the fixture."
@@ -46,3 +46,13 @@
   # backlog gardener: band=4 evidence=27ce200e0ea1f88a
   attempts: 0
   note: "verify:human — required cross-catalog registration; normal high-risk judgment and existing dispatch hold retained; discovery test over existing exports plus required catalog and real pre-push execution registration; no selection, scanning, limit or permission change."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The filed scope adds a discovery census, catalog registration, pre-push execution registration, and associated tests, consistent with the repository's established census practice."
+      - "The note explicitly limits the task to existing exports with no selection, scanning, limit, or permission change; the supplied scope identifies no destructive or irreversible action."
+      - "Acceptance requires named rejection fixtures for typo'd applies-to and dead when-paths; the rationale explicitly acknowledges that live when-paths coverage is currently vacuous."
+    judged_at: "2026-10-26T23:14:17.986Z"
+    pin: "4435ec2d9cb96f17a82dc6bb19b9e8444638b3894f1c850f444874fa76a622aa"

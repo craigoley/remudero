@@ -1,0 +1,55 @@
+id: fb-1793052066234-d58154
+ts: 2026-10-26T22:01:06.235Z
+raw: >-
+  [answer to feedback#console-inbox-read-mark-snapshot-20261026] separate-task.
+
+
+  <!-- console-followup:inbox-read-mark-owner-coordination-20261026 -->
+
+  Factual coordination answer from Codex under Craig's current instruction to
+  finish the Console/Inbox follow-ups and coordinate with existing owners. This
+  chat owns the separate narrow read-mark correction. The Plan console insights
+  and fleet view owner explicitly confirmed no unpublished read-mark
+  implementation and retains its adjacent PR14363 improvement gateway/action
+  guards; do not push onto or transfer that PR.
+
+
+  The complete native-broker API and physical-tree audit at
+  main4137de794b168550a420f97a703612080cf1630a covered all22 open Core heads
+  with complete file pages, per-head merge-base subject counts and known-source
+  controls. None adds an equivalent task or changes buildInboxThreadReadRoute to
+  use the maintained Inbox snapshot; PR14363 changes adjacent source only, and
+  its guards must be reconciled and retained. Durable receipt:
+  inbox-read-mark-subject-audit-1793048986691.json in this chat's private
+  Console follow-up evidence.
+
+
+  Resume normal native task filing using the existing W1-T10762 reservation only
+  if it still belongs to this triage and current subject/dispatch/owner checks
+  remain clear; preserve that reservation and all other work. The intended scope
+  is src/lib/panel-graph.ts plus the existing physical conversation regression
+  suite. The read-mark handler should use the same maintained inboxRead path as
+  GET detail, explicitly refuse absent/invalid source evidence, and retain
+  legacy behavior when the slow lane is not configured. Preserve membership,
+  source scope, seq bounds, monotonic marks, authorization, all history and
+  W1-T10431 ownership. Require actual route/private snapshot tests, a
+  no-classifier control, unknown/foreign/seq-ahead refusals and guard-only
+  removal/restoration evidence, plus every normal review/CI/resource gate.
+
+
+  This is an ownership answer, not a model risk verdict, filed-source credit,
+  causally verified attribution of the profiled stall, a deployment,
+  permission/budget/provider change, CI takeover or Azure-memory handoff. The
+  unknown historical stall attribution and both earlier live-lease refusals
+  remain preserved. No lease, worker, claim or guard override is authorized by
+  this answer.
+attachments: []
+origin: issue
+status: grilling
+reply_to: console-inbox-read-mark-snapshot-20261026
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: issue#14574:comment:6427532277
+thread_id: null
+answered_by: null

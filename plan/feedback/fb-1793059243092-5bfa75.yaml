@@ -1,0 +1,59 @@
+id: fb-1793059243092-5bfa75
+ts: 2026-10-27T00:00:43.093Z
+raw: >-
+  Functional new-product blocker: PR14531 (W1-T10615,
+  head4cfb73ed7eb3d1e8163c75940c95e41a3d437380) cannot enter its normal
+  captured-conflict repair after its required scope amendment PR14576 merged at
+  ea917430568c5eba0280cbbf7a300b8b44bd39e8. The source in
+  src/cli/commands/fix.ts pendingScope branch (~3621-3677 at4e339a938) attempts
+  a local merge, catches actual merge conflicts, aborts it, tries updateBranch,
+  and returns stood_down even when GitHub refuses updateBranch withHTTP422.
+  Native fix.scope_amendment rows21:58:53.426Z and22:05:41.743Z repeat
+  branch_update_requested; source head stays4cfb. Latest normal sweep23:43:31
+  already captured actual conflicts on openapi/daemon.yaml,
+  packages/api-client/src/schema.d.ts, src/lib/product-routes.ts,
+  src/lib/serve.ts, test/console-api/serve/product-routes.test.ts and
+  test/route-wiring.test.ts, but the pre-worker pendingScope path strands that
+  repair. Native pr-owner reports OWNED; do not hand-push14531 or replace its
+  worker.
+
+
+  Propose a separate bounded functional fix to reconnect a proven merged scope
+  amendment plus actual captured conflict evidence to the existing bounded
+  conflict repair when the local merge and normal remote branch update cannot
+  complete. Preserve the expanded task contract, original publish-base SHA,
+  actual conflict hunks, normal worker ownership/strike limits, CI and semantic
+  review. Do not infer permission from dirty state or fabricate conflict
+  evidence. Preserve the existing successful updateBranch fallback. Non-conflict
+  errors, unavailable evidence, an unmerged amendment, changed head, or unproven
+  contract must still refuse.
+
+
+  Regression direction: extend the real-git fixture in
+  test/a-merged-scope-amendment-fixes-in-the-same-round.test.ts. Existing
+  W1-T9805 conflicting-local-merge test has a fake updateBranch that succeeds
+  and must keep its zero-worker stood_down behavior. Add the captured-conflict
+  plus remoteHTTP422 case, negative evidence controls, and delete/restore the
+  fix to prove the regression is load-bearing. Check current main and every open
+  PR head before filing to avoid duplicates. Recovery chat confirmed it owns no
+  task/source writer for this exact pendingScope-to-captured-conflict re-entry
+  subject; #14515 and#14561 have narrower downstream duties.
+
+
+  Scope is Console/game delivery functionality only. Do not add
+  scanner/auth/credential/host investigations, change caps/holds, restart
+  services, delete claims, or bypass normal gates. Wreckterra first gameplay
+  must still be admitted through Console C4; all WRECK-T1..6 holds remain until
+  that flow is ready.
+attachments:
+  - https://github.com/craigoley/remudero/pull/14531
+  - https://github.com/craigoley/remudero/pull/14576
+origin: cli
+status: grilling
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
+answered_by: null
