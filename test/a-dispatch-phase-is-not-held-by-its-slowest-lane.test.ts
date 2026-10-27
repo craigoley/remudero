@@ -165,7 +165,7 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
       spawn: async (args) => {
         if (++resumedCalls === 1) return worker("RECON REPORT\nOBSERVED: restored checkpoint\n");
         if (mainMoves === "conflict") {
-          assert.match(readFileSync(join(args.cwd, "src/change.ts"), "utf8"), /^<{7} /m, "the resumed worker meets main's merge conflict");
+          assert.match(seed.git("-C", args.cwd, "grep", "-E", "^<{7} ", "--", "src/change.ts"), /<{7} /, "the resumed worker meets main's merge conflict");
           assert.match(args.prompt, /src\/change\.ts/, "the prompt names the conflicted path");
           writeFileSync(join(args.cwd, "src/change.ts"), "export const value = 42;\n");
           seed.git("-C", args.cwd, "add", "src/change.ts");

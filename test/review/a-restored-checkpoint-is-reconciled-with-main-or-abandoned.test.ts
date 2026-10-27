@@ -133,6 +133,16 @@ function buildFixture(opts: { install?: boolean; withProof?: boolean } = {}): Fi
 const rowsOf = (fx: Fixture): Row[] => readFileSync(fx.ledgerPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row);
 const stepRows = (rows: Row[], step: string): Row[] => rows.filter((row) => row.step === step);
 const inTree = (fx: Fixture, cwd: string, ...args: string[]): string => fx.seed.git("-C", cwd, ...args);
+/** Does the conflicted file still hold a conflict marker? Asked of git, which reads the working tree. */
+const hasMarker = (cwd: string): boolean => {
+  try {
+    execFileSync("git", ["-C", cwd, "grep", "-q", "-E", "^<{7} ", "--", "src/change.ts"]);
+    return true;
+  } catch (error) {
+    void error; // git grep exits 1 when no line matches
+    return false;
+  }
+};
 
 interface Drive {
   /** What the implement worker does; `n` counts every spawn, recon first. */
@@ -202,7 +212,7 @@ test("W1-T10752: a conflicting checkpoint is merged with main and the worker res
   assert.equal(restored.mainSha, main);
   assert.equal(restored.headSha, fx.checkpoint.headSha, "the checkpoint stays the first parent");
   assert.equal(clone.git("rev-parse", "MERGE_HEAD"), main);
-  assert.match(readFileSync(join(clone.dir, "src/change.ts"), "utf8"), /^<{7} /m);
+  assert.equal(hasMarker(clone.dir), true);
   assert.deepEqual(restoreRows, []);
 
   // The real dispatch: the worker is told, resolves, commits, and the merge has both parents.
@@ -211,7 +221,7 @@ test("W1-T10752: a conflicting checkpoint is merged with main and the worker res
     gate: true, yieldAfterGate: true,
     implement: (args) => {
       seen.mergeHead = inTree(fx, args.cwd, "rev-parse", "MERGE_HEAD");
-      seen.marker = /^<{7} /m.test(readFileSync(join(args.cwd, "src/change.ts"), "utf8"));
+      seen.marker = hasMarker(args.cwd);
       writeFileSync(join(args.cwd, "src/change.ts"), "export const value = 42;\n");
       inTree(fx, args.cwd, "add", "src/change.ts");
       inTree(fx, args.cwd, "commit", "-q", "--no-edit");

@@ -5201,24 +5201,38 @@ export function reprovisionWorktreeDependencies(
   const fromHash = linked ? linkedInstallInputsHash(dest) : "";
   if (fromHash === toHash) return { kind: "unchanged", hash: toHash };
   const name = readPackageName(worktreePath);
-  const failed = (stage: string, why: string): ReprovisionOutcome => {
-    opts.log?.("deps.install_failed", { package: name.kind === "named" ? name.name : undefined, worktreePath, stage, reason: why,
-      fallback: linked ? dest : null, reprovision: reason, from_hash: fromHash, to_hash: toHash });
-    return { kind: "failed", fromHash, toHash, stage, reason: why };
-  };
-  if (name.kind !== "named") return failed("package_name", name.kind === "unreadable" ? name.error : "package.json names no package");
-  if (linked && !linked.isSymbolicLink()) return failed("not_a_link", `${dest} is a real directory; refusing to replace it`);
+  const failure = (stage: string, why: string): ReprovisionOutcome => ({ kind: "failed", fromHash, toHash, stage, reason: why });
+  /** The same `deps.install_failed` row the add path writes, naming the link that stays in place. */
+  const failedRow = (stage: string, why: string): Record<string, unknown> => ({ package: name.kind === "named" ? name.name : undefined,
+    worktreePath, stage, reason: why, fallback: linked ? dest : null, reprovision: reason, from_hash: fromHash, to_hash: toHash });
+  if (name.kind !== "named") {
+    const why = name.kind === "unreadable" ? name.error : "package.json names no package";
+    opts.log?.("deps.install_failed", failedRow("package_name", why));
+    return failure("package_name", why);
+  }
+  if (linked && !linked.isSymbolicLink()) {
+    const why = `${dest} is a real directory; refusing to replace it`;
+    opts.log?.("deps.install_failed", failedRow("not_a_link", why));
+    return failure("not_a_link", why);
+  }
   let tree: string;
   try {
     tree = realpathSync(provisionDependencyTree(repoDir, worktreePath, name.name, opts));
   } catch (e) {
-    return failed((e as { depsStage?: string } | null)?.depsStage ?? "unexpected", String((e as Error)?.message ?? e));
+    // The provisioning failure is ledgered as deps.install_failed and returned as kind "failed"; the old link stays.
+    const stage = (e as { depsStage?: string } | null)?.depsStage ?? "unexpected";
+    const why = String((e as Error)?.message ?? e);
+    opts.log?.("deps.install_failed", failedRow(stage, why));
+    return failure(stage, why);
   }
   try {
     if (linked) unlinkSync(dest);
     symlinkSync(tree, dest, "dir");
   } catch (e) {
-    return failed("relink", String((e as Error)?.message ?? e));
+    // A relink that could not complete is ledgered as deps.install_failed and returned as kind "failed".
+    const why = String((e as Error)?.message ?? e);
+    opts.log?.("deps.install_failed", failedRow("relink", why));
+    return failure("relink", why);
   }
   opts.log?.("deps.reprovisioned", { package: name.name, worktreePath, from_hash: fromHash, to_hash: toHash, reason, node_modules: tree });
   return { kind: "reprovisioned", fromHash, toHash, nodeModules: tree };
