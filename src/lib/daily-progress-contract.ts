@@ -136,14 +136,14 @@ function calendarWindow(report: DailyProgressReport): ContractResult<true> {
   }
 }
 
-function sourceIdentity(v: unknown): v is ExpectedDailySource {
+function dailyProgressSourceIdentity(v: unknown): v is ExpectedDailySource {
   return record(v) && text(v.id) && repository(v.repository) && ["pull_requests", "ledger_activity", "deployments"].includes(String(v.kind)) &&
     (v.instanceId === null || text(v.instanceId, 128)) && typeof v.required === "boolean";
 }
 
 function sourceShape(v: unknown, report: DailyProgressReport): v is SourceCoverage {
   if (!record(v) || !only(v, "id repository kind instanceId required state lastAttemptAt lastSuccessAt coverageStart coverageThrough nextDueAt reason")) return false;
-  if (!sourceIdentity(v) || !states.includes(String(v.state))) return false;
+  if (!dailyProgressSourceIdentity(v) || !states.includes(String(v.state))) return false;
   if (![v.lastAttemptAt, v.lastSuccessAt, v.coverageStart, v.coverageThrough, v.nextDueAt].every((x) => x === null || instant(x)) || !(v.reason === null || text(v.reason, 2048))) return false;
   if (v.state !== "complete" && !text(v.reason, 2048)) return false;
   const t = (x: unknown) => typeof x === "string" ? Date.parse(x) : undefined;
@@ -191,7 +191,7 @@ export function validateDailyProgressReport(value: unknown): ContractResult<Dail
   if (!record(c) || !only(c, "state expectedRepositories includedRepositories expectedSources sources") || !states.includes(c.state) || !repoList(c.expectedRepositories) || !repoList(c.includedRepositories)) return fail("invalid source coverage inventory");
   const expected = new Set(c.expectedRepositories.map(repoKey)), included = new Set(c.includedRepositories.map(repoKey));
   if ([...included].some((r) => !expected.has(r)) || (scope.kind === "repository" && (expected.size !== 1 || !expected.has(repoKey(scope.repository))))) return fail("report repositories contradict its scope");
-  if (!Array.isArray(c.expectedSources) || c.expectedSources.length > 1024 || !c.expectedSources.every((s) => record(s) && only(s, "id repository kind instanceId required") && sourceIdentity(s)) || new Set(c.expectedSources.map((s) => s.id)).size !== c.expectedSources.length) return fail("invalid or duplicate expected source identities");
+  if (!Array.isArray(c.expectedSources) || c.expectedSources.length > 1024 || !c.expectedSources.every((s) => record(s) && only(s, "id repository kind instanceId required") && dailyProgressSourceIdentity(s)) || new Set(c.expectedSources.map((s) => s.id)).size !== c.expectedSources.length) return fail("invalid or duplicate expected source identities");
   const instanceRepositories = new Map<string, string>();
   for (const s of c.expectedSources) {
     if (!expected.has(repoKey(s.repository))) return fail("expected source belongs to a foreign repository");
