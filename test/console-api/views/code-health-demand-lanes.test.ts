@@ -53,6 +53,7 @@ test("code health production factory reads configured durable state before the p
     inventory(stateDir); const clock = fixedClock(Date.now()), demand = createDemandBook({ clock });
     const factory = readModelLaneViews({ stateDir, instances: [] }, clock, () => undefined, demand).find(view => view.name === CODE_HEALTH_VIEW_NAME);
     assert.ok(factory, "positive control: the production lane registers Code health");
+    assert.ok("create" in factory, "positive control: Code health registers its production factory");
     const rows = factory.create().materialize({ now: clock.now(), instances: [] });
     assert.ok(rows.some(row => row.key === CODE_HEALTH_SCOPE_KEY), "configured repository scope must not depend on an attached projector database");
   });
