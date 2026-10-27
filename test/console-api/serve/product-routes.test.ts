@@ -205,6 +205,9 @@ test("W1-T10617: the assembled HTTP research route invokes the production worker
 const { writeFileSync } = require('node:fs');
 const input = JSON.parse(process.argv[2]);
 if (!input.prompt.includes('Objective revision: 1') || input.tools.join(',') !== 'WebSearch') process.exit(2);
+const contextLine = input.prompt.split('\\n').find(line => line.startsWith('Objective and source data: '));
+const context = JSON.parse(contextLine.slice('Objective and source data: '.length));
+if (!context.acceptedAnswers.some(answer => answer.questionId === 'q_audience' && answer.answer === 'commuters')) process.exit(3);
 writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmish needs zone boundaries.', questions: [{ text: 'Which park zones are in scope?' }] }));
 `);
   let calls = 0;

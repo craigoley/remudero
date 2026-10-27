@@ -56,7 +56,8 @@ function replaceStateMode(file: string, body: string, mode: number): void {
 }
 
 test("W1-T10617: product research retains sources answers and the objective revision", async (t) => {
-  const { root, store, id } = seed(t);
+  const objective = "Complete one Central Park skirmish during a commute";
+  const { root, store, id } = seed(t, { objective });
   const { fixture, inputs } = provider();
   let savedBeforeProvider: ReturnType<typeof JSON.parse>;
   const service = new ProductResearchService({ root, store, provider: { ...fixture, research: async (input) => {
@@ -94,7 +95,17 @@ test("W1-T10617: product research retains sources answers and the objective revi
   const record = stored.products[id];
   assert.equal(record.runs.length, 1);
   assert.equal(record.answers[0].objectiveRevision, 1);
-  assert.equal(Object.keys(stored.receipts).length, 1);
+  const receipt = Object.values<{ runId: string; request: Record<string, unknown> }>(stored.receipts)
+    .find((item) => item.runId === view.run?.id);
+  assert.ok(receipt, "the request receipt links to the retained run");
+  assert.deepEqual(receipt.request, { command: body, objective, objectiveRevision: 1, productRevision: 1,
+    sources: SOURCES, provider: "fixture-research", budgetUsd: 0,
+    acceptedAnswers: [{ questionId: "q_constraints", text: "Which platform and quality constraints are fixed?", answer: answers[0].answer }] });
+  const { signal, requestId, ...providerInput } = inputs[0] as Parameters<ProductResearchProvider["research"]>[0];
+  assert.equal(requestId, receipt.runId);
+  assert.ok(signal instanceof AbortSignal);
+  const { command: retainedCommand, productRevision, provider: retainedProvider, ...retainedInput } = receipt.request;
+  assert.deepEqual(providerInput, retainedInput, "the retained snapshot is the actual provider input");
 
   // The canonical product record carries the run as research stage evidence for the same revision.
   const product = store.read(ACTOR, id);
@@ -108,6 +119,16 @@ test("W1-T10617: product research retains sources answers and the objective revi
   assert.equal((await service.run("clerk:bob", command(id, 1))).code, "not_found");
   assert.equal((await service.run(ACTOR, { ...command(id, 1), owner: "clerk:bob" })).code, "invalid_input");
   assert.equal((await service.run(ACTOR, command(id, 1, { answers: [{ questionId: "q_nonexistent", answer: "x" }] }))).code, "invalid_input");
+
+  const changed = store.write(ACTOR, { version: "product-intent-v1", requestId: rid("rebrief"), id,
+    expectedRevision: product.value.revision, brief: { ...brief, objective: "Explore another city", research: [] } });
+  assert.ok(changed.ok);
+  await ok(new ProductResearchService({ root, provider: fixture, clock }), command(id, 2));
+  const history = JSON.parse(readFileSync(researchFile(root), "utf8"));
+  const historicalReceipt = Object.values<{ runId: string; request: Record<string, unknown> }>(history.receipts)
+    .find((item) => item.runId === receipt.runId);
+  assert.deepEqual(historicalReceipt?.request, receipt.request, "replacing the brief preserves the original objective, sources and command");
+  assert.deepEqual(history.products[id].runs.find((run: { id: string }) => run.id === receipt.runId), record.runs[0]);
 });
 
 test("product research refuses provider work until submitted answers are durable and retries safely", async (t) => {
@@ -136,6 +157,30 @@ test("product research refuses provider work until submitted answers are durable
   }
 });
 
+test("product research bounds the retained request and clarification context before provider work", async (t) => {
+  const largeBrief = { idea: "i".repeat(5600), research: Array.from({ length: 4 }, () => ({
+    label: "s".repeat(120), url: "https://example.com/" + "s".repeat(2028),
+  })) };
+  const { root, store, id } = seed(t, largeBrief);
+  const { fixture, inputs } = provider({ output: { summary: "Needs clarification", questions:
+    Array.from({ length: 8 }, (_, i) => ({ text: `${i}${"?".repeat(499)}` })) } });
+  const service = new ProductResearchService({ root, provider: fixture, clock });
+  const first = await ok(service, command(id, 1));
+  const product = store.read(ACTOR, id); assert.ok(product.ok);
+  assert.ok(store.write(ACTOR, { version: "product-intent-v1", requestId: rid("large-context"), id,
+    expectedRevision: product.value.revision, brief: { ...largeBrief, name: "Renamed" } }).ok);
+  const body = command(id, 2, { answers: first.open.map((item) => ({ questionId: item.id, answer: "a".repeat(2000) })) });
+  assert.equal((await service.run(ACTOR, body)).code, "capacity", "bounded command plus retained context must fit the existing byte limit");
+  assert.equal(inputs.length, 1, "an oversized request cannot start another provider call");
+  const renamed = store.read(ACTOR, id); assert.ok(renamed.ok);
+  assert.ok(store.write(ACTOR, { version: "product-intent-v1", requestId: rid("bounded-context"), id,
+    expectedRevision: renamed.value.revision, brief: { ...largeBrief, research: [] } }).ok);
+  const recovered = await ok(new ProductResearchService({ root, provider: fixture, clock }), command(id, 3));
+  assert.equal(recovered.run?.outcome, "completed");
+  assert.equal(recovered.accepted.length, first.open.length, "shrinking the request preserves unaffected accepted answers");
+  assert.equal(inputs.length, 2);
+});
+
 test("W1-T10617: a missing research provider is unavailable and fabricates no report", async (t) => {
   const { root, store, id } = seed(t);
   const service = new ProductResearchService({ root, store, clock });
@@ -152,16 +197,24 @@ test("W1-T10617: a missing research provider is unavailable and fabricates no re
 
 test("W1-T10617: accepted product answers are not asked again after resume", async (t) => {
   const { root, store, id } = seed(t);
-  const { fixture, inputs } = provider();
+  const { fixture, inputs } = provider({ output: { summary: "Audience and constraints need clarification", questions: [
+    { text: "Who is the first audience?" }, { text: "  WHO is the first audience? " },
+    { text: "Which platform and quality constraints are fixed?" }, { text: "Which park zones are in scope?" },
+  ] } });
   const first = new ProductResearchService({ root, store, provider: fixture, clock });
   const view = await ok(first, command(id, 1, { answers: [
     { questionId: "q_audience", answer: "commuters" }, { questionId: "q_constraints", answer: "mobile first" }] }));
   assert.ok(!view.open.some((item) => item.id === "q_audience" || item.id === "q_constraints"));
+  assert.deepEqual(view.open.map((item) => item.text), ["What should a player accomplish in one session?",
+    "What build budget and concurrency are acceptable?", "Which park zones are in scope?"], "provider echoes of accepted catalog questions are reconciled by text");
+  assert.deepEqual((inputs[0] as Parameters<ProductResearchProvider["research"]>[0]).acceptedAnswers,
+    view.accepted.map(({ questionId, text, answer }) => ({ questionId, text, answer })), "research receives accepted clarification context");
 
   const resumed = new ProductResearchService({ root, provider: fixture, clock });
   const after = await ok(resumed, command(id, 1));
   assert.deepEqual(after.accepted.map((item) => item.questionId).sort(), ["q_audience", "q_constraints"]);
   assert.ok(!after.open.some((item) => item.id === "q_audience" || item.id === "q_constraints"));
+  assert.deepEqual(after.open, view.open, "a fresh service cannot reintroduce an accepted question under a provider ID");
   assert.equal(inputs.length, 1, "a completed run is not repeated and spends nothing again");
   assert.equal((await resumed.run(ACTOR, command(id, 1, { answers: [{ questionId: "q_audience", answer: "tourists" }] }))).code, "already_answered");
   assert.equal((await ok(resumed, command(id, 1, { answers: [{ questionId: "q_audience", answer: "commuters" }] }))).accepted.length, 2);
@@ -180,6 +233,23 @@ test("W1-T10617: accepted product answers are not asked again after resume", asy
   const answers = JSON.parse(readFileSync(researchFile(root), "utf8")).products[id].answers as { questionId: string; status: string; objectiveRevision: number }[];
   assert.deepEqual(answers.map((item) => [item.questionId, item.status, item.objectiveRevision]),
     [["q_audience", "invalidated", 1], ["q_constraints", "accepted", 1]]);
+
+  const pending = seed(t);
+  const unanswered = await ok(new ProductResearchService({ root: pending.root, provider: fixture, clock }), command(pending.id, 1));
+  const zones = unanswered.open.find((item) => item.origin === "provider")!;
+  assert.ok(unanswered.open.some((item) => item.id === "q_audience"));
+  const answered = await ok(new ProductResearchService({ root: pending.root, provider: fixture, clock }), command(pending.id, 1, {
+    answers: [{ questionId: "q_audience", answer: "commuters" }, { questionId: zones.id, answer: "Bethesda only" }],
+  }));
+  assert.ok(!answered.open.some((item) => /first audience|park zones/i.test(item.text)), "accepting previously open questions removes them by text and ID");
+  const currentPending = pending.store.read(ACTOR, pending.id); assert.ok(currentPending.ok);
+  assert.ok(pending.store.write(ACTOR, { version: "product-intent-v1", requestId: rid("rename"), id: pending.id,
+    expectedRevision: currentPending.value.revision, brief: { ...brief, name: "Renamed product" } }).ok);
+  const sameScope = await ok(new ProductResearchService({ root: pending.root, provider: fixture, clock }), command(pending.id, 2));
+  assert.deepEqual(sameScope.accepted, answered.accepted, "a name change preserves accepted catalog and provider answers");
+  assert.ok(!sameScope.open.some((item) => /first audience|park zones/i.test(item.text)), "provider echoes stay closed after a fresh run in the same scope");
+  assert.deepEqual((inputs.at(-1) as Parameters<ProductResearchProvider["research"]>[0]).acceptedAnswers,
+    answered.accepted.map(({ questionId, text, answer }) => ({ questionId, text, answer })));
 });
 
 test("W1-T10617: untrusted research text grants no provider or spending authority", async (t) => {
@@ -193,7 +263,7 @@ test("W1-T10617: untrusted research text grants no provider or spending authorit
   assert.equal(view.run?.provider, "fixture-research", "only the configured provider is ever recorded");
   assert.equal(view.run?.budgetUsd, 0, "the configured ceiling is untouched");
   assert.equal(view.run?.executionAuthority, "none");
-  assert.deepEqual(Object.keys(smuggled.inputs[0] as object).sort(), ["budgetUsd", "objective", "objectiveRevision", "requestId", "signal", "sources"]);
+  assert.deepEqual(Object.keys(smuggled.inputs[0] as object).sort(), ["acceptedAnswers", "budgetUsd", "objective", "objectiveRevision", "requestId", "signal", "sources"]);
   assert.equal((smuggled.inputs[0] as { budgetUsd: number }).budgetUsd, 0);
   assert.equal(view.run?.sources[0]?.disposition, "data");
   const product = store.read(ACTOR, id);
