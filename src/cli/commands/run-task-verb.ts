@@ -1837,21 +1837,24 @@ async function checkpointSupersededBy(
   mergedTree: string | undefined,
   git: (args: string[]) => Promise<string>,
 ): Promise<{ kind: "tree-equal" | "blobs-equal" | "task-credited"; creditSha?: string } | undefined> {
-  if (mergedTree !== undefined && mergedTree === (await git(["rev-parse", `${mainSha}^{tree}`])).trim()) return { kind: "tree-equal" };
-  const blob = async (rev: string, path: string): Promise<string> => git(["rev-parse", "--verify", "--quiet", `${rev}:${path}`]).then(
-    (id) => id.trim(),
-    (error) => {
-      void error; // an absent path has no blob; two absences are equal
-      return "";
-    },
-  );
+  // A checkpoint that changed nothing carries nothing for main to already hold, so only task credit can supersede it.
   const changed = (await git(["diff", "--name-only", "--no-renames", mergeBase, checkpoint.headSha])).split("\n").filter(Boolean);
-  let equal = changed.length > 0;
-  for (const path of changed) {
-    if (!equal) break;
-    equal = (await blob(checkpoint.headSha, path)) === (await blob(mainSha, path));
+  if (changed.length > 0) {
+    if (mergedTree !== undefined && mergedTree === (await git(["rev-parse", `${mainSha}^{tree}`])).trim()) return { kind: "tree-equal" };
+    const blob = async (rev: string, path: string): Promise<string> => git(["rev-parse", "--verify", "--quiet", `${rev}:${path}`]).then(
+      (id) => id.trim(),
+      (error) => {
+        void error; // an absent path has no blob; two absences are equal
+        return "";
+      },
+    );
+    let equal = true;
+    for (const path of changed) {
+      if (!equal) break;
+      equal = (await blob(checkpoint.headSha, path)) === (await blob(mainSha, path));
+    }
+    if (equal) return { kind: "blobs-equal" };
   }
-  if (equal) return { kind: "blobs-equal" };
   const headTime = Number((await git(["log", "-1", "--format=%ct", checkpoint.headSha])).trim());
   const escaped = taskId.replace(/[.*[\]\\^$]/g, "\\$&");
   const credited = (await git(["log", mainSha, `--grep=^Remudero-Task: ${escaped}$`, "--format=%H %ct"])).split("\n").filter(Boolean)
