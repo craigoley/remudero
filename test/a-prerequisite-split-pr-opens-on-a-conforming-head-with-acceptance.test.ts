@@ -373,8 +373,11 @@ test("a completed no-PR prerequisite refusal remains effective after real ledger
   const first = await drive(input);
   const marker = first.lines.find(row => row.step === "fix.prerequisite_dispatch_failed")!;
   const path = join(root, "rotation.ndjson");
-  appendLedger(path, { ...marker, run_id: "FIX-rotation", task_id: opts().taskId, step: "fix.prerequisite_dispatch_failed" });
-  assert.equal(rotateLedger(path, { ceilingBytes: 1, smoothingWindowMs: 0 }).rotated, true);
+  const noCeiling = { ceilingBytes: Number.MAX_SAFE_INTEGER };
+  appendLedger(path, { ...marker, run_id: "FIX-rotation", task_id: opts().taskId, step: "fix.prerequisite_dispatch_failed" }, noCeiling);
+  const ceiling = Buffer.byteLength(JSON.stringify(marker)) * 4;
+  appendLedger(path, { run_id: "noise", task_id: "NOISE", step: "test.noise", detail: "x".repeat(ceiling * 2) }, noCeiling);
+  assert.equal(rotateLedger(path, { ceilingBytes: ceiling, smoothingWindowMs: 0 }).rotated, true);
   const retained = readLedgerLines(path);
   assert.ok(retained.some(row => row.step === "fix.prerequisite_dispatch_failed" && row.prerequisite_outcome === "completed-no-pr"));
   await drive({ ...input, priorRows: retained });
