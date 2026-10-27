@@ -520,3 +520,30 @@ test("check-proof refuses --repo when its owner/name value is missing or malform
     console.error = realError;
   }
 });
+
+
+test("a check-proof base never expands an ambiguous title without the full-suite opt-in", () => {
+  const markerRoot = mkdtempSync(join(tmpdir(), "rmd-proof-unrequested-"));
+  const marker = join(markerRoot, "loaded");
+  const title = "base scope marker new";
+  const repo = twoCommitRepo({
+    "test/proof.test.ts": 'import { test } from "node:test"; const suffix = "old"; test(`base scope marker ${suffix}`, () => {});\n',
+    "test/unrelated.test.ts": `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "loaded");\n`,
+  }, {
+    "test/proof.test.ts": `import { test } from "node:test"; test(${JSON.stringify(title)}, () => {});\n`,
+  });
+  try {
+    const result = runCheckProof(["--base", "HEAD~1", "unit test:", title], repo);
+    assert.equal(result.code, CHECK_PROOF_EXIT.pass, "the head verdict remains distinct from unknown base evidence");
+    assert.equal(existsSync(marker), false, "the base must not import an unrelated suite without explicit opt-in");
+    assert.match(result.out, /base:.*UNKNOWN.*unresolvable/);
+    assert.match(result.out, /discrimination: unknown/);
+    assert.match(result.out, /--allow-full-suite/);
+    const allowed = runCheckProof(["--allow-full-suite", "--base", "HEAD~1", "unit test:", title], repo);
+    assert.equal(allowed.code, CHECK_PROOF_EXIT.pass);
+    assert.equal(existsSync(marker), true, "positive control: explicit opt-in still executes the bounded two-file fixture pool");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(markerRoot, { recursive: true, force: true });
+  }
+});
