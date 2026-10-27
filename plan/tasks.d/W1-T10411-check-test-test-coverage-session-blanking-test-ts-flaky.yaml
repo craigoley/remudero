@@ -17,12 +17,8 @@
     - scripts/coverage-session-blanking-check.mjs
     - test/ci/coverage/check-test-test-coverage-session-blanking-test-ts-flaky.test.ts
   acceptance:
-    - claim: "Changed-test coverage-blanking findings refuse the author run before heavy selection or admission, without retry or caller mutation"
-      proof: "unit test: W1-T10411: check:test:test/coverage-session-blanking.test.ts:flaky is prevented, not retried"
-    - claim: "Healthy blanking forms continue to selection while unchanged and deleted tests stay outside the changed-file precheck"
-      proof: "unit test: author blanking precheck admits both blanking forms and ignores deleted and unchanged tests"
-    - claim: "Unreadable changed-test evidence refuses before selection rather than certifying a clean scan"
-      proof: "unit test: author blanking precheck refuses unreadable changed tests before selection"
+    - claim: "the harness no longer spends a fix round on check:test:test/coverage-session-blanking.test.ts:flaky"
+      proof: "grep: test(\"W1-T10411: check:test:test/coverage-session-blanking.test.ts:flaky is prevented, not retried\" in test/ci/coverage/check-test-test-coverage-session-blanking-test-ts-flaky.test.ts"
   design: |
     Implement the already-approved changed-test coverage-blanking precheck in scripts/preflight-author.mjs,
     using the existing scripts/coverage-session-blanking-check.mjs scanner without changing its semantics.
@@ -104,3 +100,14 @@
     risk high/span, all historical observations and scanner protections remain. Genuine normal
     risk qualification and an explicit operator release are required; no machine release, retry,
     source ownership takeover or merge-gate exemption is granted.
+    Post-merge closeout: the task already shipped and was retired before this approval
+    arrived. Preserve that terminal disposition and the original filed acceptance history.
+    The approved executable controls below are retrospective qualification requirements,
+    not a new dispatch grant or new implementation credit:
+      acceptance:
+        - claim: "Changed-test coverage-blanking findings refuse the author run before heavy selection or admission, without retry or caller mutation"
+          proof: "unit test: W1-T10411: check:test:test/coverage-session-blanking.test.ts:flaky is prevented, not retried"
+        - claim: "Healthy blanking forms continue to selection while unchanged and deleted tests stay outside the changed-file precheck"
+          proof: "unit test: author blanking precheck admits both blanking forms and ignores deleted and unchanged tests"
+        - claim: "Unreadable changed-test evidence refuses before selection rather than certifying a clean scan"
+          proof: "unit test: author blanking precheck refuses unreadable changed tests before selection"
