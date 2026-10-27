@@ -8,18 +8,16 @@ import type { IssueGateway } from "../src/lib/escalate.js";
 import { DIR_GATE_RELIST_MS, MIN_TRANSACTION_LINES, createLedgerProjector, openProjectorReadModel, type LedgerProjectorOptions } from "../src/lib/ledger-projector.js";
 import { acquireLease } from "../src/lib/read-model-db.js";
 import { READ_MODEL_STALL_MS, createReadModelTicker, createReadModelWorker, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { closeReadModelFixture, readModelFixtureDir, type ReadModelFixtureScope } from "#test/helpers/read-model-fixture.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";
 const SILENT_WORKER = new URL("data:text/javascript,setInterval(() => {}, 1000)");
 
-type TestCtx = { after: (fn: () => void) => void };
+type TestCtx = ReadModelFixtureScope;
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
+  return readModelFixtureDir(t, kind);
 }
 
 /** A clock the test moves by hand; `perRead` also moves it on every reading, so work looks slow. */
@@ -47,7 +45,7 @@ function archiveName(ms: number): string {
 
 function projector(t: TestCtx, ledgerDir: string, clock: Clock, stateDir: string, extra: Partial<LedgerProjectorOptions> = {}) {
   const db = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => db.close());
+  closeReadModelFixture(t, () => db.close());
   const got = acquireLease(db, { clock, holder: "proj-fix" });
   if (!got.ok) throw new Error(`lease held by ${got.heldBy}`);
   const p = createLedgerProjector({ ledgerDir, db, lease: got.lease, clock, ...extra });
@@ -136,7 +134,7 @@ test("a read-model instance with work outstanding and no commit is ledgered stal
     escalation: { issues, ledgerPath: join(stateDir, LIVE), runId: "read-model" },
     post: (m: ReadModelWorkerMessage) => void (m.type === "log" && logs.push({ step: m.step, extra: m.extra })),
   });
-  t.after(() => ticker.release());
+  closeReadModelFixture(t, () => ticker.release());
   const steps = (): string[] => logs.map((l) => l.step).filter((s) => /stall/.test(s));
   ticker.start();
   ticker.tick();
@@ -166,7 +164,7 @@ test("a read-model worker that posts nothing is ledgered silent and then recycle
     stateDir, instances: [{ name: "core", ledgerDir: stateDir }], workerUrl: SILENT_WORKER, stopWaitMs: 20, clock: hand.clock,
     log: (step) => void logged.push(step), every: (run) => ((watch = run), () => undefined),
   });
-  t.after(() => handle.stop());
+  closeReadModelFixture(t, async () => { await handle.pause?.(); handle.stop(); });
   handle.start();
   watch?.();
   const rows = (): string[] => logged.filter((s) => /worker_(silent|recycled|exited)/.test(s));
