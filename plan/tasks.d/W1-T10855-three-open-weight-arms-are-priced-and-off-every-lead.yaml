@@ -1,0 +1,84 @@
+- id: W1-T10855
+  title: "THREE OPEN-WEIGHT ARMS ARE PRICED, SHAPED AND OFF EVERY LEAD — DeepSeek-V4-Flash, DeepSeek-V4.1-Flash and Kimi-K2.6 get price, context, temperature and reasoning-effort rows (json_object for the two DeepSeek deployments only), a cached token is reserved at the full input rate, and no cash row names them"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: medium
+  band_meaning: span
+  origin: "operator ruling, Craig 2026-10-27, after the open-weight Azure sweep: \"V4-Flash + V4.1 + Kimi\" become bake-off arms; Fireworks stays off"
+  plan_refs: [W1-T3695, W1-T4079, W1-T10839, W1-T10840, W1-T10856, W1-T10857, W1-T10858]
+  files:
+    - src/lib/worker-provider.ts
+    - test/worker/spawn/three-open-weight-arms-are-priced-and-off-every-lead.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED ON origin/main 742487eb2 AND AGAINST THE LIVE ACCOUNT (2026-10-27). Deployments on synthwatch-foundry
+    (eastus2), each GlobalStandard at capacity 20 and pinned to versionUpgradeOption NoAutoUpgrade by the operator's
+    session the same day: DeepSeek-V4-Flash (2026-04-23, existing, zero traffic in 30 days), DeepSeek-V4.1-Flash
+    (2026-09-10, preview; Microsoft ends its preview inference 2026-12-15) and Kimi-K2.6 (2026-04-20, preview). On
+    `openai/deployments/<name>/chat/completions?api-version=2024-10-21` (the adapter's own route, `openWeightEndpoint`)
+    each returned `finish_reason: tool_calls` with correct arguments under `temperature: 0` and `tool_choice: auto`.
+    MEASURED 2026-10-27 with the adapter's URL and api-version:
+    - json_object: DeepSeek-V4.1-Flash HTTP 200 with a clean `{"ok": true}`; DeepSeek-V4-Flash measured clean by
+      W1-T3695. Kimi-K2.6 also returned 200 and clean JSON, but Microsoft Learn lists its response format as text only
+      and the probe's prompt itself asked for JSON, so one probe does not discriminate; Kimi declares nothing.
+    - THINKING. On Azure neither DeepSeek deployment thinks by default: with no `reasoning_effort` both answered with
+      no `reasoning_content` (2 to 83 completion tokens). `reasoning_effort: "high"` turned thinking on for both
+      (`reasoning_content` of 640 and 150 chars, completion tokens 219 and 59, so reasoning bills as completion).
+      `thinking: {type: "enabled"}` and `chat_template_kwargs` changed nothing. Today's chat-completions body sends
+      `reasoning_effort` only for gpt-6-luna with tools ("none"), so every DeepSeek request is thinking-OFF unless
+      a row admits an effort. Thinking ON is what risks OPENWEIGHT_MAX_COMPLETION_TOKENS (8,000).
+    - PRICES (Azure Retail Prices API, serviceName "Foundry Models", Global Standard, per 1M tokens, in/out/cached):
+      DeepSeek-V4-Flash 0.19 / 0.51 / 0.028 (meters effective 2026-08-01); DeepSeek-V4.1-Flash 0.30 / 1.20 / 0.006
+      (effective 2026-10-01); Kimi-K2.6 0.95 / 4.00 / 0.16.
+    - WINDOWS: DeepSeek-V4-Flash 1M input / 384K output (Learn, "models sold by Azure"); DeepSeek-V4.1-Flash 1M from
+      third-party sources only; Kimi-K2.6 262K (Learn).
+    W1-T3695 deliberately left DeepSeek out of OPENWEIGHT_PRICES because no published rate existed and Microsoft Q&A
+    threads report ~357x billing on cached tokens. The published meters now exist; the dispute does not go away, so
+    this task reserves conservatively and leaves the lead question to W1-T10858's invoice reconciliation.
+    `openWeightDeploymentReady` admits a deployment once all three of OPENWEIGHT_PRICES, OPENWEIGHT_TEMPERATURE and
+    OPENWEIGHT_CONTEXT_WINDOWS hold a row, which is also what W1-T10840's deployment bake-off enumerates. Nothing else
+    reads the price table (a `git grep OPENWEIGHT_PRICES -- src` finds only src/lib/worker-provider.ts), and
+    `selectOpenWeightModel` routes only deployments named in a .remudero/mounts.yaml `cash` row.
+    ORDERING: W1-T10839 (filed in open PR #14838) adds Terra 6.1 rows to the same tables. Build after it lands where
+    possible; a textual conflict in the row tables is resolved by keeping both rows.
+  design: |
+    (i) PRICE ROWS in OPENWEIGHT_PRICES, readAt 2026-10-27, each comment citing the Retail Prices API meter and its
+    effective date. `reservationInputUsdPerMillion` equals the input rate and `cachedInputUsdPerMillion` is NOT used to
+    lower a reservation: a cached token is reserved at the full input rate until W1-T10858 reconciles an invoice, so the
+    disputed cached billing can only make a reservation too high, never too low. No `unbilledAzureOpenAi429` (these are
+    not Azure OpenAI family models). No longContext tier (none is published).
+    (ii) CONTEXT ROWS in OPENWEIGHT_CONTEXT_WINDOWS: DeepSeek-V4-Flash 1,000,000 (Learn); Kimi-K2.6 262,144 (Learn);
+    DeepSeek-V4.1-Flash 1,000,000 with a comment saying the figure is third-party and unconfirmed on Azure. An
+    over-stated window costs one request Azure refuses as too long, never an under-reservation (the window gates
+    fit, not price), and W1-T10857's bake-off records such a refusal as a named outcome.
+    (iii) TEMPERATURE ROWS: 0 for all three (measured 2026-10-27).
+    (iv) RESPONSE FORMATS: json_object for DeepSeek-V4-Flash and DeepSeek-V4.1-Flash; Kimi-K2.6 gets no row.
+    (v) REASONING EFFORT. Add one table, keyed exactly as OPENWEIGHT_PRICES and read by table lookup, naming the
+    chat-completions `reasoning_effort` values a deployment admits (both DeepSeek deployments: low, medium, high; Kimi
+    none). The chat-completions body sends `reasoning_effort` ONLY when the selection carries an effort the row admits;
+    an unlisted deployment or effort sends no field, so every existing deployment's request body is byte-identical.
+    The gpt-6-luna tools "none" rule is unchanged. The cash request-effort receipt (src/lib/cash-request-effort.ts)
+    already records whether the parameter was present.
+    (vi) UPDATE the W1-T3695 comment above `openWeightEndpoint`: the price is now published; the billing dispute is
+    carried by the conservative reservation and W1-T10858.
+    (vii) NO ROUTING. No .remudero/mounts.yaml row, fallback list, Sonnet alternative or bake-off candidate list changes
+    here; the arms enter the bake-off through readiness alone (W1-T10840 / W1-T10857).
+  acceptance:
+    - claim: "The three deployments are ready with their published price, context and temperature rows"
+      proof: 'grep: test("W1-T10855: the three open-weight deployments are ready with their published rows" in test/worker/spawn/three-open-weight-arms-are-priced-and-off-every-lead.test.ts'
+    - claim: "A cached DeepSeek token is reserved at the full input rate"
+      proof: 'grep: test("W1-T10855: a cached DeepSeek token is reserved at the full input rate" in test/worker/spawn/three-open-weight-arms-are-priced-and-off-every-lead.test.ts'
+    - claim: "json_object is declared for both DeepSeek deployments and refused for Kimi-K2.6"
+      proof: 'grep: test("W1-T10855: json_object is declared for both DeepSeek deployments and refused for Kimi" in test/worker/spawn/three-open-weight-arms-are-priced-and-off-every-lead.test.ts'
+    - claim: "reasoning_effort is sent only for an effort the deployment's row admits, and every other request body is unchanged"
+      proof: 'grep: test("W1-T10855: reasoning_effort is sent only for an admitted effort" in test/worker/spawn/three-open-weight-arms-are-priced-and-off-every-lead.test.ts'
+  falsifier: |
+    Name any of the three deployments in a .remudero/mounts.yaml cash row, FALLBACK_OPENWEIGHT_MODELS or
+    cashSonnetAlternatives; reserve a cached DeepSeek token at the cached rate; declare json_object for Kimi-K2.6; or
+    send reasoning_effort to a deployment or effort no row admits (a gpt-5-nano body gaining the field).

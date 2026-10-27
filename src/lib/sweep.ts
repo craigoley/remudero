@@ -5796,6 +5796,9 @@ export type CiInfrastructureFailureSignature =
 const FINALIZE_TRANSPORT_RESET_LINE =
   /Failed to FinalizeArtifact: Unable to make request:\s*(?:ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|socket hang up)\b/;
 
+/** W1-T10816: the upload step's success line, as actions/upload-artifact really prints it, or W1-T3194's wording. */
+const ARTIFACT_UPLOADED_LINE = /Finished uploading artifact content to blob storage!|artifact upload completed successfully/i;
+
 /** The classified error line itself, at most 200 chars, for the requeue row. */
 export function ciInfrastructureMatchedError(logTail: string): string | undefined {
   return logTail.split("\n").find((line) => line.includes("Failed to FinalizeArtifact"))?.trim().slice(0, 200);
@@ -5812,7 +5815,7 @@ function finalizeResetAfterPassingSummary(text: string): boolean {
   if ([...text.matchAll(/(\d+)\/(\d+) file\(s\) reported/g)].some((m) => m[1] !== m[2])) return false;
   const tests = [...text.matchAll(/^\s*# tests (\d+)\s*$/gm)].at(-1);
   if (!tests || Number(tests[1]) <= 0 || !/^\s*# fail 0\s*$/m.test(text)) return false;
-  const uploadedAt = text.search(/Finished uploading artifact content to blob storage!|artifact upload completed successfully/i);
+  const uploadedAt = text.search(ARTIFACT_UPLOADED_LINE);
   const finalizingAt = text.search(/finalizing artifact upload/i);
   return tests.index! < uploadedAt && uploadedAt < finalizingAt && finalizingAt < text.search(FINALIZE_TRANSPORT_RESET_LINE);
 }
@@ -5829,7 +5832,7 @@ export function classifyCiInfrastructureFailure(
   ) {
     return undefined;
   }
-  const uploadedAt = text.search(/artifact upload completed successfully/i);
+  const uploadedAt = text.search(ARTIFACT_UPLOADED_LINE);
   const finalizingAt = text.search(/finalizing artifact upload/i);
   const failedAt = text.search(
     /Failed to FinalizeArtifact[^\n]*(?:403[^\n]*Forbidden|Forbidden[^\n]*403)[^\n]*Error from intermediary/i,

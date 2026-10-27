@@ -1,5 +1,6 @@
+import { closeReadModelFixture, readModelFixtureDir, type ReadModelFixtureScope } from "#test/helpers/read-model-fixture.js";
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
@@ -7,16 +8,14 @@ import type { Clock } from "#src/lib/clock.js";
 import { MIN_TRANSACTION_LINES, createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
 import { READ_MODEL_STALL_MS, createReadModelTicker, createReadModelWorker, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";
 
-type TestCtx = { after: (fn: () => void) => void };
+type TestCtx = ReadModelFixtureScope;
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind);
   return dir;
 }
 
@@ -90,7 +89,7 @@ test("upgrading from old-identity checkpoints re-reads nothing already checkpoin
   writeFileSync(join(ledgerDir, LIVE), rows(50, T0 + 300_000, "live"));
   const clock = handClock(T0 + 3_600_000).clock;
   const db = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => db.close());
+  closeReadModelFixture(t, () => db.close());
   const got = acquireLease(db, { clock, holder: "reingest" });
   if (!got.ok) throw new Error(`lease held by ${got.heldBy}`);
   createLedgerProjector({ ledgerDir, db, lease: got.lease, clock }).tick();
@@ -119,7 +118,7 @@ test("an unmeasured rate is calibrated on a small first transaction instead of a
   writeFileSync(join(ledgerDir, archiveName(T0, true)), gzipSync(rows(2_000, T0, "big")));
   const clock = handClock(T0 + 3_600_000).clock;
   const db = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => db.close());
+  closeReadModelFixture(t, () => db.close());
   const got = acquireLease(db, { clock, holder: "reingest" });
   if (!got.ok) throw new Error(`lease held by ${got.heldBy}`);
   const commits: number[] = [];
@@ -137,7 +136,7 @@ test("the read-model ticker heartbeats around a store open and on every commit",
     stateDir, instances: [{ name: "core", ledgerDir }], clock: handClock(T0 + 60_000).clock, holder: "reingest", oracle: "off", views: [],
     post: (m: ReadModelWorkerMessage) => void (m.type === "progress" && progress.push(`${m.instance}:${m.phase}`)),
   });
-  t.after(() => ticker.release());
+  closeReadModelFixture(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   assert.deepEqual(progress, ["core:open", "core:opened", "core:commit"]);
@@ -154,7 +153,7 @@ test("a long catch-up with progress is never recycled by the silent-worker watch
     workerUrl: scriptedWorker(`setInterval(() => parentPort.postMessage({ type: "progress", instance: "core", phase: "commit", rows: 64 }), 2);`),
     log: (step) => void logged.push(step), every: (run) => ((watch = run), () => undefined),
   });
-  t.after(() => handle.stop());
+  closeReadModelFixture(t, async () => { await handle.pause?.(); handle.stop(); });
   handle.start();
   // Twenty minutes of catch-up, each minute carrying commits: no bound is ever reached.
   for (let minute = 0; minute < 20; minute++) {
@@ -176,7 +175,7 @@ test("a truly stuck worker is recycled and the row names the phase it went silen
     workerUrl: scriptedWorker(`parentPort.postMessage({ type: "progress", instance: "core", phase: "commit", rows: 64 }); setInterval(() => {}, 1000);`),
     log: (step, extra) => void logged.push({ step, ...(extra ? { extra } : {}) }), every: (run) => ((watch = run), () => undefined),
   });
-  t.after(() => handle.stop());
+  closeReadModelFixture(t, async () => { await handle.pause?.(); handle.stop(); });
   const committed = messages.next(isProgress("commit"));
   handle.start();
   await committed;
@@ -201,7 +200,7 @@ test("a store open is given twice the slowest open the worker reported before it
     log: (step) => void logged.push(step),
     every: (run) => ((watch = run), () => undefined),
   });
-  t.after(() => handle.stop());
+  closeReadModelFixture(t, async () => { await handle.pause?.(); handle.stop(); });
   const opening = messages.next(isProgress("open"));
   handle.start();
   await opening;

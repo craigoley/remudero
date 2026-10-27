@@ -1,0 +1,70 @@
+- id: W1-T10856
+  title: "A CASH DEPLOYMENT LEARNS ITS PER-MINUTE TOKEN CEILING FROM ITS OWN RESPONSES — x-ratelimit-limit-tokens becomes a second fit ceiling beside the context window, a request above it walks the ladder pre-transport with a capacity_shortfall row, and an oversized 429 is never retried"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling, Craig 2026-10-27 (open-weight arms); measured the same day: a 25K-token prompt to DeepSeek-V4-Flash at 20K TPM returned 429 RateLimitReached on the first try"
+  plan_refs: [W1-T3613, W1-T10837, W1-T10855, W1-T10857, W1-T10859]
+  files:
+    - src/lib/worker-provider.ts
+    - docs/model-routing.md
+    - test/worker/spawn/a-deployment-learns-its-per-minute-token-ceiling.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-27 against synthwatch-foundry (eastus2). Azure enforces a deployment's tokens-per-minute quota
+    as a PER-REQUEST CEILING for partner models as well as OpenAI ones: a ~25K-token prompt to DeepSeek-V4-Flash
+    (GlobalStandard capacity 20 = 20,000 TPM) returned HTTP 429 `RateLimitReached` ("exceeded token rate limit")
+    immediately, while a 300-token tool call on the same deployment succeeded. Waiting does not help; the request can
+    never fit. Partner models (DeepSeek, Kimi, Mistral) default to 20 quota units, and raising quota is a portal form.
+    inbox_draft sends ~205K-259K tokens per request, so a 20K deployment fails every inbox_draft request, which reads
+    as "the model is broken".
+    THE LIMIT IS READABLE WITHOUT MANAGEMENT CREDENTIALS. Every successful chat-completions response carries
+    `x-ratelimit-limit-tokens` and `x-ratelimit-renewalperiod-tokens`, measured the same day: DeepSeek-V4-Flash and
+    Kimi-K2.6 report 20000 / 60, gpt-5-nano reports 450000 / 60. The daemon holds only data-plane keys, so this is
+    the one capacity source it can read; `cashHttpFailure` (src/lib/worker-provider.ts) already reads the
+    `x-ratelimit-remaining-*` headers on a failure, but nothing reads the LIMIT, and nothing reads headers on success.
+    `openWeightDeploymentHolds` gates fit on OPENWEIGHT_CONTEXT_WINDOWS alone (W1-T3613), and
+    `selectOpenWeightModel` already walks past a candidate that cannot hold the request. A git grep of src for
+    x-ratelimit-limit-tokens finds nothing at 742487eb2.
+  design: |
+    (i) LEARN. On every cash chat-completions and Responses response (success or failure), read
+    `x-ratelimit-limit-tokens` and `x-ratelimit-renewalperiod-tokens` with the same bounded unsigned-integer parse
+    `cashHttpFailure` uses, and record {limitTokens, renewalSeconds, observedAt} per deployment (keyed as
+    OPENWEIGHT_PRICES, and per endpoint once W1-T10837's resolver exists) in one small atomic state file under the
+    daemon state root. A changed limit (a quota raise or cut) replaces the old one and writes one
+    `cash.capacity.observed` ledger row; an unchanged limit writes nothing. No constant, default or config number is
+    introduced: the ceiling is whatever the deployment last reported.
+    (ii) SECOND FIT CEILING. `openWeightDeploymentHolds` (and the refusal text of `OpenWeightRequestTooLargeError`)
+    treats a deployment's effective window as the smaller of its context window and its learned per-minute limit,
+    using the same `estimatedTokens + OPENWEIGHT_MAX_COMPLETION_TOKENS` sum. A deployment with no learned limit is
+    gated by its context window exactly as today, so the first request still teaches the limit. The selection walks to
+    the next candidate and writes a `capacity_shortfall` reason naming the deployment, the request's estimate and the
+    learned limit.
+    (iii) AN OVERSIZED 429 IS NOT TRANSIENT. A 429 whose request estimate exceeds the limit carried by that same
+    response is classified as capacity_shortfall: it is never retried after `retry-after`, it moves to the selection's
+    next alternative, and it records the learned limit so the next request skips the deployment pre-transport. A 429
+    under the limit keeps today's transient handling.
+    (iv) LANE READINESS SEAM. Export one pure function answering whether a deployment's learned limit covers a given
+    token need (prompt plus completion), returning the shortfall when it does not, for W1-T10857 and W1-T10859 to call
+    with a lane's OBSERVED prompt sizes.
+    (v) docs/model-routing.md: the ceiling, where it is learned, and that raising quota is the operator's portal step.
+  acceptance:
+    - claim: "A response's x-ratelimit-limit-tokens is recorded per deployment and a change writes one ledger row"
+      proof: 'grep: test("W1-T10856: a response teaches the deployment its per-minute token ceiling" in test/worker/spawn/a-deployment-learns-its-per-minute-token-ceiling.test.ts'
+    - claim: "A request above the learned ceiling walks to the next candidate before transport with a capacity_shortfall reason"
+      proof: 'grep: test("W1-T10856: a request above the learned ceiling walks the ladder before transport" in test/worker/spawn/a-deployment-learns-its-per-minute-token-ceiling.test.ts'
+    - claim: "An oversized 429 is classified as a capacity shortfall and never retried"
+      proof: 'grep: test("W1-T10856: an oversized 429 is a capacity shortfall and is never retried" in test/worker/spawn/a-deployment-learns-its-per-minute-token-ceiling.test.ts'
+    - claim: "The adapter reads the per-minute limit header"
+      proof: 'grep: x-ratelimit-limit-tokens in src/lib/worker-provider.ts'
+  falsifier: |
+    Introduce a fixed TPM number or default; gate a deployment with no learned limit (it must fall back to its context
+    window); retry a 429 whose request exceeds the limit that response reported; or let a learned limit leak a header
+    value other than the two integers into a ledger row.

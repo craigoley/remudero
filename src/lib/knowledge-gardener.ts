@@ -692,12 +692,14 @@ export function skillLifecycleCandidates(skillUsage: SkillUsage, approvedNames: 
 
 /** Build this skill's effectiveness report from the ledger and stage its retirement proposal —
  *  `stageSkillLifecycleProposal` ON SCHEDULE instead of only by hand (`rmd skill lifecycle`).
- *  BEST-EFFORT: an unreadable ledger or a report that does not clear `stageSkillLifecycleProposal`'s
- *  own bar (not yet RETIRE-CANDIDATE) stages nothing, silently — the next pass tries again once
- *  more evidence accrues. */
+ *  BEST-EFFORT: an unreadable or incomplete ledger stages nothing, silently, and a report that does
+ *  not clear `stageSkillLifecycleProposal`'s own bar (not yet RETIRE-CANDIDATE) stages nothing and
+ *  withdraws a retirement staged earlier — the next pass tries again once more evidence accrues. */
 export function stageSkillLifecycleForAction(stateDir: string, repoRoot: string, action: GardenAction): void {
   try {
-    const ledger = readLedgerUnionRecordsSync(stateDir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS });
+    // Complete reads only: a refused report now withdraws a staged retirement, and a partial ledger is not evidence.
+    const ledger = readLedgerUnionRecordsSync(stateDir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS, refuseIncomplete: true });
+    if (!ledger.ok) return;
     const report = buildSkillEffectivenessReport(ledger.rows, action.target);
     stageSkillLifecycleProposal(join(stateDir, "inbox-proposals.json"), join(repoRoot, ".claude", "skills"), report);
   } catch {

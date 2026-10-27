@@ -1526,6 +1526,7 @@ import {
   describeSkillInjectionReachability,
   loadInjectableSkills,
   observeSkillSelection,
+  recheckSkillRetirement,
   renderSkillEffectivenessReport,
   renderSkillsPart,
   SKILL_EFFECTIVENESS_LEDGER_STEPS,
@@ -1534,6 +1535,7 @@ import {
   skillWithheldForRun,
   stageSkillDrafts,
   stageSkillLifecycleProposal,
+  withdrawSkillLifecycleProposal,
   workerAllowlistFromCapabilityContext,
   skillDraftConsumerLanes,
   type WorkerAllowlist,
@@ -37502,6 +37504,22 @@ export async function approveCommand(
         console.error(`rmd approve: ${refusal}`);
         return 1;
       }
+      // The proposal carries the evidence as it stood at staging. Re-judged now, a stale one is withdrawn rather
+      // than allowed to delete a skill the ledger no longer condemns; an unreadable ledger refuses and keeps it.
+      const recheck = recheckSkillRetirement(dirname(ledgerPathFor(config)), classification.lifecycleAction);
+      if (recheck.verdict !== "qualifies") {
+        const withdrawn = recheck.verdict === "stale" && withdrawSkillLifecycleProposal(registryPath, proposalId);
+        appendLedger(ledgerPath, {
+          run_id: runId,
+          task_id: proposalId,
+          step: "ratify.approve_refused",
+          state: `evidence_${recheck.verdict}`,
+          reason: recheck.reason,
+          withdrawn,
+        });
+        console.error(`rmd approve: ${recheck.reason}${withdrawn ? `; withdrew ${proposalId} from the inbox` : ""}`);
+        return 1;
+      }
       const branch = createSkillLifecycleBranch(classification.lifecycleAction);
       const prUrl = openSkillLifecyclePr(branch, classification.lifecycleAction);
       const prNumber = Number(prUrl.match(/\/pull\/(\d+)/)?.[1]);
@@ -40110,7 +40128,8 @@ export function skillLifecycleCommand(
   if (staged.refused) {
     (deps.error ?? console.error)(
       `rmd skill lifecycle: REFUSED ${staged.reason}; selected terminal_runs=${report.selected.terminal_runs}, ` +
-      `control terminal_runs=${report.control.terminal_runs}`,
+      `control terminal_runs=${report.control.terminal_runs}` +
+      (staged.withdrawn ? "; withdrew the stale staged retirement from the inbox" : ""),
     );
     return report.status === "REVIEW-CANDIDATE" ? 0 : 1;
   }
