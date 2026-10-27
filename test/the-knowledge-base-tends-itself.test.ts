@@ -244,7 +244,7 @@ test("W1-T4095: a pass lands its changes as one reviewed PR", async () => {
   assert.ok(landed[0]!.paths.every((p) => !p.startsWith("src/")), "the gardener never edits code");
   // The body's proofs name text only this pass wrote.
   assert.match(landed[0]!.body, /proof: grep: \^## Pass 2026-09-23T03:00:00\.000Z\$ in docs\/knowledge-garden-log\.md/);
-  assert.match(landed[0]!.body, /proof: grep: knowledge gardener: merge ledger-union-again\$ in learnings\/core\.yaml/);
+  assert.match(landed[0]!.body, /proof: grep: superseded_by: ledger-union\$ in learnings\/core\.yaml/);
   assert.match(readFileSync(join(root, GARDEN_LOG), "utf8"), /## Pass 2026-09-23T03:00:00\.000Z\n\n- merge ledger-union-again into ledger-union/);
   // Nothing changed since: the next tick reads the modification times and stops there.
   const again = await runGardenPass({ stateDir: join(root, "state"), repoRoot: root, openWorkspace: () => { throw new Error("must not open"); }, log: () => {} });
