@@ -6,7 +6,7 @@
   principles:
     tdd: strict
   risk: low
-  band_meaning: impact
+  band_meaning: blast-radius
   author_class: machine
   origin: "cockpit-source-readability: exact Effects integration census exposes an unrelated private function name collision, 2026-10-27"
   status: queued
