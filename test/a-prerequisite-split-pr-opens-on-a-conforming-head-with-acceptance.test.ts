@@ -113,6 +113,10 @@ interface Drive {
  *  "the worker obeyed" or "the worker did not" without the test guessing the epoch. */
 async function drive(over: {
   root?: string;
+  priorRows?: Array<Record<string, unknown>>;
+  reviewHead?: string;
+  bodySha256?: string;
+  taskPatch?: { files?: string[]; design?: string; amendment?: string };
   report?: string;
   onSpawn?: (args: { prompt: string; env?: Record<string, string> }) => void;
   head?: (minted: string) => { ok: boolean; headSha?: string; headRefName?: string };
@@ -146,12 +150,12 @@ async function drive(over: {
     log: (step: string, extra?: Record<string, unknown>) => d.lines.push({ step, ...(extra ?? {}) }),
     say: () => {},
     account: (r: WorkerResult) => r,
-    ledgerLines: () => [],
+    ledgerLines: () => (over.priorRows ?? []).map(row => ({ task_id: opts().taskId, ...row })),
     readPrerequisiteState: async () => ({ ok: true, state: "OPEN" }),
     ...(over.head ? { readLiveHead: async () => over.head!(d.minted()) } : {}),
     ...(over.body ? { fetchPrBody: over.body } : {}),
   };
-  const outcome = await runFixRung({ ...opts(), ...(over.root ? { config: { root: over.root }, worktreePath: over.root } : {}), initialReview: entangledReview(), deps } as never);
+  const outcome = await runFixRung({ ...opts(), ...(over.root ? { config: { root: over.root }, worktreePath: over.root } : {}), task: { ...opts().task, ...over.taskPatch }, prBodySha256: over.bodySha256, initialReview: { ...entangledReview(), ...(over.reviewHead ? { headSha: over.reviewHead } : {}) }, deps } as never);
   return { outcome, ...d };
 }
 
@@ -308,4 +312,51 @@ test("a repeated prerequisite worker can read the prior refusal in the same daem
   assert.ok(copied?.includes(reason), "the actual next spawn receives a readable bounded predecessor copy");
   assert.ok(scratch && !existsSync(scratch), "only this spawn's temporary copies are retired");
   assert.equal(listArchivedTranscripts(root, opts().taskId).length, 2, "same-daemon attempts do not overwrite each other");
+});
+
+
+test("a completed no-PR prerequisite attempt is not repeated until its repair inputs change", async t => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prerequisite-no-pr-reuse-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let spawns = 0;
+  const input = { root, report: "No PR: the required instrument reads a collector absent on main.", bodySha256: "body-a", onSpawn: () => { spawns++; } };
+  const first = await drive(input);
+  assert.equal(spawns, 1);
+  assert.equal(first.outcome.outcome, "escalated");
+  const unchanged = await drive({ ...input, priorRows: first.lines });
+  assert.equal(spawns, 1, "unchanged head, contract, narrative and body cannot launch another prerequisite worker");
+  assert.equal(unchanged.outcome.outcome, "escalated", "the existing operator disposition remains");
+  assert.deepEqual(unchanged.ciWaits, []);
+  const marker = first.lines.find(row => row.step === "fix.prerequisite_dispatch_failed");
+  assert.equal(marker?.prerequisite_outcome, "completed-no-pr");
+  assert.equal(marker?.pr_url, opts().prUrl);
+  assert.equal(marker?.read_head_sha, "deadbeef");
+  assert.equal(typeof marker?.read_contract_revision, "string");
+  assert.equal(typeof marker?.read_task_semantic_revision, "string");
+  assert.equal(marker?.read_body_sha256, "body-a");
+  for (const changed of [{ reviewHead: "new-head" }, { bodySha256: "body-b" },
+    { taskPatch: { files: ["src/qualified-new-companion.ts"] } }, { taskPatch: { design: "operator-qualified revised design" } }]) {
+    const before = spawns;
+    await drive({ ...input, priorRows: first.lines, ...changed });
+    assert.equal(spawns, before + 1, "a positively changed repair input returns to existing qualification");
+  }
+});
+
+test("an unbound or foreign no-PR record cannot replace an observed prerequisite attempt", async t => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prerequisite-no-pr-negative-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let spawns = 0;
+  const input = { root, report: "No PR could be built.", onSpawn: () => { spawns++; } };
+  const first = await drive(input);
+  const marker = first.lines.find(row => row.step === "fix.prerequisite_dispatch_failed")!;
+  for (const row of [{ ...marker, read_head_sha: undefined }, { ...marker, read_contract_revision: undefined },
+    { ...marker, prerequisite_outcome: undefined }, { ...marker, pr_url: "https://github.com/acme/foreign/pull/4242" }]) {
+    const before = spawns;
+    await drive({ ...input, priorRows: [row] });
+    assert.equal(spawns, before + 1, "historical/unbound/foreign evidence cannot suppress a first qualified attempt");
+  }
+  const before = spawns;
+  const existing = await drive({ ...input, priorRows: [...first.lines, { step: "fix.prerequisite_opened", pr_url: opts().prUrl, prerequisite_pr: 9206 }] });
+  assert.equal(spawns, before, "a real prerequisite already opened retains the existing owned route");
+  assert.equal(existing.outcome.outcome, "parked");
 });
