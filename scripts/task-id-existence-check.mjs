@@ -24,7 +24,6 @@
 // Exported pure pieces let the fixture test drive each surface independently; main is exported so
 // the CLI itself (spawn + exit code) can be proved too.
 
-import { isAlias, isMap, isScalar, isSeq, parseDocument, visit } from "yaml";
 import * as nodeFs from "node:fs";
 import { readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -38,6 +37,18 @@ import {
   parseReservationHolderLine,
   RESERVATION_PUSH_GRACE_MS,
 } from "../src/lib/reservation-chain.mjs";
+
+// W1-T10819: `yaml` is OPTIONAL here. The plan-PR preflight runs this file from a detached copy of the
+// tree with no node_modules, where a static import crashed the whole gate (ERR_MODULE_NOT_FOUND). Without
+// the parser no feedback record can be classified, so every one keeps the ordinary physical-text scan --
+// the strict direction: an id quoted in feedback is then reported, never silently exempted.
+let yamlParser = null;
+try {
+  yamlParser = await import("yaml");
+} catch (err) {
+  yamlParser = null;
+  void err; // unavailable parser == strict scan; the gate itself must still run.
+}
 
 export {
   parseReservationHolderFields,
@@ -95,8 +106,9 @@ function walkFiles(dir, files) {
  * Do not turn the AST into JavaScript objects or expand aliases to classify untrusted YAML. */
 function feedbackRawDataSpan(rel, text) {
   const path = /^plan\/feedback\/(fb-[0-9]+-[a-f0-9]{6})\.yaml$/.exec(rel);
-  if (!path) return null;
-  const doc = parseDocument(text, { keepSourceTokens: true, uniqueKeys: true, strict: true });
+  if (!path || !yamlParser) return null;
+  const { isAlias, isMap, isScalar, isSeq, parseDocument, visit } = yamlParser;
+  const doc =parseDocument(text, { keepSourceTokens: true, uniqueKeys: true, strict: true });
   if (doc.errors.length || doc.warnings.length || !isMap(doc.contents)) return null;
   let unambiguous = true;
   visit(doc, (_key, node) => {

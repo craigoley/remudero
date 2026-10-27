@@ -820,6 +820,33 @@ test("task-id-existence: feedback data classification preserves existence guards
   } finally { cleanup(root, remote); }
 });
 
+test("task-id-existence: a tree without the yaml package still runs, with the strict feedback scan", () => {
+  // The plan-PR preflight runs a detached copy of the tree with no node_modules; a static `yaml` import
+  // crashed the gate there with ERR_MODULE_NOT_FOUND instead of producing a verdict.
+  const copy = mkTmp("no-node-modules"), remote = makeEmptyBareRemote();
+  try {
+    for (const rel of ["scripts/task-id-existence-check.mjs", "scripts/lib/git.mjs", "scripts/lib/argv.mjs", "src/lib/reservation-chain.mjs"]) {
+      mkdirSync(dirname(join(copy, rel)), { recursive: true });
+      writeFileSync(join(copy, rel), readFileSync(join(REPO_ROOT, rel)));
+    }
+    mkdirSync(join(copy, "src"), { recursive: true });
+    mkdirSync(join(copy, "plan", "feedback"), { recursive: true });
+    writeFileSync(join(copy, "plan", "tasks.yaml"), "# empty\n");
+    writeBaseline(copy, []);
+    const run = () => spawnSync(process.execPath, [join(copy, "scripts", "task-id-existence-check.mjs"),
+      "--cwd", copy, "--baseline", join(copy, "baseline.json"), "--remote", remote], { cwd: copy, encoding: "utf8" });
+    const clean = run();
+    assert.equal(clean.status, 0, clean.stdout + clean.stderr);
+    assert.doesNotMatch(clean.stderr, /ERR_MODULE_NOT_FOUND/);
+    assert.match(clean.stdout, /OK/);
+    writeFileSync(join(copy, "plan", "feedback", `${QUOTED_FEEDBACK_ID}.yaml`), quotedFeedback('"Historical W1-T88990"'));
+    const strict = run();
+    assert.equal(strict.status, 1, strict.stdout + strict.stderr);
+    assert.match(strict.stderr, /W1-T88990/);
+    assert.doesNotMatch(strict.stderr, /ERR_MODULE_NOT_FOUND/);
+  } finally { cleanup(copy, remote); }
+});
+
 test("task-id-existence: quoted feedback regression controls are load bearing", () => {
   withQuotedFeedback((root, remote) => {
     // Same physical ID on both sides defeats a decoded-value or whole-node/file exclusion.
