@@ -1355,7 +1355,7 @@ function commentMaskByLine(fileText: string, grammar: CommentGrammar = "js"): bo
 }
 
 /** A block-scalar header (`key: |`, `- >-`, `|2+`) at the end of a line's non-comment text. */
-const YAML_BLOCK_SCALAR_HEADER_RE = /(?:^|\s)[|>][-+1-9]{0,2}$/;
+export const YAML_BLOCK_SCALAR_HEADER_RE = /(?:^|\s)[|>][-+1-9]{0,2}$/;
 
 /** YAML's comment grammar: a `#` at line start or after whitespace runs to end of line, unless it
  *  sits inside a quoted scalar (which may span lines) or a block scalar's content. A quote opens a

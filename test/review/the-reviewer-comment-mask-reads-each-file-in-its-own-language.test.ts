@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { AcceptanceCriterion } from "#src/lib/plan.js";
-import { judgeReview, matchedLinesAreAllComments } from "#src/lib/review.js";
+import { judgeReview, matchedLinesAreAllComments, YAML_BLOCK_SCALAR_HEADER_RE } from "#src/lib/review.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 function withFixtureCheckout(files: Record<string, string>, run: (cwd: string) => void): void {
@@ -96,4 +96,11 @@ test("a Markdown file or an unknown extension masks nothing", () => {
     assert.equal(matchedLinesAreAllComments(["2:* a bullet"], ctx("^[*] a")), false);
     assert.equal(matchedLinesAreAllComments(["* a bullet"], ctx("^[*] a")), false);
   }
+});
+
+test("a block-scalar header opens content only at the end of a line's non-comment text", () => {
+  assert.equal(YAML_BLOCK_SCALAR_HEADER_RE.test("rationale: |"), true);
+  assert.equal(YAML_BLOCK_SCALAR_HEADER_RE.test("  - claim: >-"), true);
+  assert.equal(YAML_BLOCK_SCALAR_HEADER_RE.test("note: a | b"), false);
+  assert.equal(YAML_BLOCK_SCALAR_HEADER_RE.test("path: src/lib/x|y"), false);
 });
