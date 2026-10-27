@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -364,8 +364,12 @@ test("W1-T10772: unverified and unwritable note stores refuse writes", async () 
   assert.equal(await noteCommand([entry.taskId, entry.note], { root, noteStore: undefined, log: () => {} }), 1);
   assert.equal(appendOperatorNote({ ...store }, entry), false, "a structural copy has not been verified");
   assert.deepEqual(loadOperatorNotesForTask({ ...store }, entry.taskId), []);
+  const blockedPath = join(store.stateDir, "operator-notes", "acme%2Fremudero.ndjson");
   for (const candidate of [undefined, { ...store }, store]) {
-    if (candidate === store) chmodSync(store.stateDir, 0o500);
+    // A directory at the note file path denies appends for every uid, including root.
+    if (candidate === store) mkdirSync(blockedPath, { recursive: true });
+    assert.equal(appendOperatorNote(candidate, entry), false);
+    assert.equal(await noteCommand([entry.taskId, entry.note], { root, noteStore: candidate, log: () => {} }), 1);
     const server = createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: [
       buildAddOperatorNoteRoute({ root, store: candidate, ledgerPath: join(root, "ledger.ndjson") }),
     ] });
@@ -376,7 +380,7 @@ test("W1-T10772: unverified and unwritable note stores refuse writes", async () 
       assert.deepEqual(await result.json(), { error: "write_failed" });
     } finally {
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-      chmodSync(store.stateDir, 0o700);
+      rmSync(blockedPath, { recursive: true, force: true });
     }
   }
   assert.equal(existsSync(join(root, "ledger.ndjson")), false);

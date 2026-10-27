@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -454,7 +454,8 @@ test("W1-T10772: accepted guidance survives a serving generation switch", async 
     assert.notEqual(receipt.ts, "1999-01-01T00:00:00.000Z");
     const nextRoot = join(h.fleetRoot, "generation-b");
     mkdirSync(nextRoot);
-    for (const root of [h.questionsRoot, join(h.questionsRoot, "plan"), nextRoot]) chmodSync(root, 0o500);
+    const generationRoots = [h.questionsRoot, nextRoot];
+    const generationFiles = generationRoots.map(root => readdirSync(root, { recursive: true }).sort());
     const store = operatorNoteStore({ stateDir: join(h.fleetRoot, "state"), repository: "acme/remudero", legacyRoot: nextRoot });
     const server = buildServeServer({ ...h.deps, questionsRoot: nextRoot, operatorNoteStore: store });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -488,9 +489,10 @@ test("W1-T10772: accepted guidance survives a serving generation switch", async 
       } finally {
         await new Promise<void>((resolve, reject) => foreign.close(error => error ? reject(error) : resolve()));
       }
+      assert.deepEqual(generationRoots.map(root => readdirSync(root, { recursive: true }).sort()), generationFiles,
+        "guidance reads and refused writes must leave both code generations unchanged");
     } finally {
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-      for (const root of [h.questionsRoot, join(h.questionsRoot, "plan"), nextRoot]) chmodSync(root, 0o700);
       rmSync(nextRoot, { recursive: true, force: true });
     }
   });
