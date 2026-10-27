@@ -6,7 +6,7 @@ import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { appendOperatorNote, loadOperatorNotesForTask } from "../src/lib/operator-notes.js";
+import { appendOperatorNote, loadOperatorNotesForTask, operatorNoteStore } from "#src/lib/operator-notes.js";
 import type { Plan } from "../src/lib/plan.js";
 import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { ghShim } from "./helpers/gh-shim.js";
@@ -31,6 +31,9 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
 function fixture(t: { after: (fn: () => void) => void }) {
   const root = mkdtempSync(join(tmpdir(), "rmd-strike-ladder-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "state"));
+  const store = operatorNoteStore({ stateDir: join(root, "state"), repository: "acme/remudero", legacyRoot: root });
+  assert.ok(store);
   const rows: Record<string, unknown>[] = [
     { step: "fix.dispatch", task_id: "W1-T5536", head_sha: "old-head", ts: stamp(-2000), strike: 1 },
     { step: "fix.commit_refused", task_id: "W1-T5536", head_sha: "old-head", reason: "the worker changed nothing", strike: 1 },
@@ -78,9 +81,9 @@ function fixture(t: { after: (fn: () => void) => void }) {
     readLedger: () => rows, appendLine: (_path, row) => { rows.push({ ts: stamp(), ...row }); }, now: () => NOW,
   };
   const spend = (n: number, taskId = "W1-T5536") => {
-    for (let i = 0; i < n; i++) assert.equal(appendOperatorNote(root, { taskId, author: "strike-ladder", ts: stamp(), note: `prior rebuild ${i}` }), true);
+    for (let i = 0; i < n; i++) assert.equal(appendOperatorNote(store, { taskId, author: "strike-ladder", ts: stamp(), note: `prior rebuild ${i}` }), true);
   };
-  return { root, rows, calls, open, commands, deps, spend, effects, issues,
+  return { root, store, rows, calls, open, commands, deps, spend, effects, issues,
     author: (value: string | undefined) => { author = value; },
     failList: () => { failList = true; }, closeTakes: (value: boolean) => { closeTakes = value; },
     sweep: (prs: OpenPrView[] = [pr()]) => runSweep(prs, deps),
@@ -122,28 +125,28 @@ test("W1-T5536: an unmoved base closes the PR and requeues its task with a failu
   const f = fixture(t);
   await f.sweep();
   assert.deepEqual(f.calls.slice(0, 3).map(c => c.split(":")[0]), ["live", "close", "live"]);
-  const notes = loadOperatorNotesForTask(f.root, "W1-T5536");
+  const notes = loadOperatorNotesForTask(f.store, "W1-T5536");
   assert.equal(notes.length, 1);
   assert.equal(notes[0].author, "strike-ladder");
   for (const text of ["5536", "old-head", "check:ci#a broken invariant", "ci (3/8)", "strike", "the worker changed nothing"]) assert.ok(notes[0].note.includes(text), text);
-  assert.deepEqual(loadOperatorNotesForTask(f.root, "W1-T9999"), []);
+  assert.deepEqual(loadOperatorNotesForTask(f.store, "W1-T9999"), []);
   assert.ok(f.rows.some(r => r.step === "sweep.strike_ladder.requeued" && r.rebuild === 1));
   const second = pr({ prNumber: 5537, prUrl: "https://github.com/acme/remudero/pull/5537", headSha: "second-build" });
   // W1-T5690: one rebuild per task per UTC day — the same day's second build gets the digest.
   await f.sweep([second]);
-  assert.equal(loadOperatorNotesForTask(f.root, "W1-T5536").length, 1);
+  assert.equal(loadOperatorNotesForTask(f.store, "W1-T5536").length, 1);
   f.deps.now = () => NOW + 24 * 60 * 60_000;
   await f.sweep([second]);
-  assert.equal(loadOperatorNotesForTask(f.root, "W1-T5536").length, 2);
+  assert.equal(loadOperatorNotesForTask(f.store, "W1-T5536").length, 2);
   assert.ok(f.rows.some(r => r.step === "sweep.strike_ladder.requeued" && r.rebuild === 2));
   const refused = fixture(t);
   refused.closeTakes(false);
   await refused.sweep();
-  assert.deepEqual(loadOperatorNotesForTask(refused.root, "W1-T5536"), []);
+  assert.deepEqual(loadOperatorNotesForTask(refused.store, "W1-T5536"), []);
   assert.equal(refused.rows.some(r => r.step === "sweep.strike_ladder.requeued"), false);
   refused.closeTakes(true);
   await refused.sweep();
-  assert.equal(loadOperatorNotesForTask(refused.root, "W1-T5536").length, 1);
+  assert.equal(loadOperatorNotesForTask(refused.store, "W1-T5536").length, 1);
 });
 
 test("W1-T5536: a spent rebuild budget or an unrequeueable PR opens one assigned digest per cause", async (t) => {
@@ -233,7 +236,7 @@ test("W1-T5536: callers without ladder effects keep head-bound escalation and vi
   assert.equal(f.calls.filter(c => c === "escalate").length, 2);
   assert.equal(f.calls.some(c => c.startsWith("close:")), false);
   assert.equal(f.open.length, 0);
-  assert.deepEqual(loadOperatorNotesForTask(f.root, "W1-T5536"), []);
+  assert.deepEqual(loadOperatorNotesForTask(f.store, "W1-T5536"), []);
 });
 
 test("W1-T5536: missing-trailer repair precedes the configured exhaustion ladder", async (t) => {
@@ -255,7 +258,7 @@ test("W1-T5536: missing-trailer repair precedes the configured exhaustion ladder
   assert.equal(f.calls.includes("escalate"), false);
   assert.equal(f.calls.some(c => c.startsWith("close:")), false);
   assert.equal(f.open.length, 0);
-  assert.deepEqual(loadOperatorNotesForTask(f.root, "W1-T5536"), []);
+  assert.deepEqual(loadOperatorNotesForTask(f.store, "W1-T5536"), []);
 });
 
 test("W1-T5536: pure decisions preserve unreadable inputs, attempt history and cause identity", () => {
@@ -350,7 +353,7 @@ test("W1-T5536: failed refreshes, notes and ownership reads carry a retryable ho
     ? { ok: true, state: "OPEN", headSha: "old-head" }
     : { ok: true, state: "CLOSED", headSha: "unexpected-head" };
   await moved.sweep();
-  assert.deepEqual(loadOperatorNotesForTask(moved.root, "W1-T5536"), []);
+  assert.deepEqual(loadOperatorNotesForTask(moved.store, "W1-T5536"), []);
 });
 
 test("W1-T5536: unavailable digest effects and write failures remain visible without escalation", async (t) => {
@@ -376,7 +379,7 @@ test("W1-T5536: unavailable digest effects and write failures remain visible wit
   dry.deps.dryRun = true;
   await dry.sweep();
   assert.deepEqual(dry.calls, []);
-  assert.deepEqual(loadOperatorNotesForTask(dry.root, "W1-T5536"), []);
+  assert.deepEqual(loadOperatorNotesForTask(dry.store, "W1-T5536"), []);
   const released = fixture(t);
   released.deps.readRedBaseRefreshFacts = () => ({ behindBy: 3, baseChangedFiles: ["test/ladder.test.ts"] });
   await released.sweep([pr({ currentMergeBaseSha: "old-main" })]);
