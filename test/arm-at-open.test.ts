@@ -1170,12 +1170,8 @@ for (const mode of ["live", "shadow"] as const) test(`W1-T975: a ${mode} run rec
 
   armOpenGitFixture(root);
 
-  // The real arm deps load the HOST config for the merge write's operator-hold fence, which fails
-  // closed on an absent ledger: point a fixture HOME's config at this run's own root, whose ledger
-  // the run writes, so the fence reads real "no hold recorded" evidence instead of the host's.
+  // The run owns its hold ledger; an unrelated ambient HOME must not supply its config.
   const fixtureHome = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}arm-verdict-merged-home-`));
-  mkdirSync(join(fixtureHome, ".config", "remudero"), { recursive: true });
-  writeFileSync(join(fixtureHome, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
   mkdirSync(join(root, "state"), { recursive: true });
   appendFileSync(join(root, "state", "ledger.ndjson"), "");
   const savedHome = process.env.HOME;
