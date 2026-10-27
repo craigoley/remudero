@@ -25,7 +25,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { inboxBoardReferents } from "./inbox-board-referents.js";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
@@ -3510,6 +3510,8 @@ export function buildInboxThreadReadRoute(deps: PanelGraphDeps): Route {
  * The response confirms only a hand-off; the resulting PR surfaces via the console's own polling.
  */
 export interface RatifyCliGateway {
+  /** Available only with the owned fresh-source runner; never falls back to an unowned child. */
+  improvement?(target: { operationId: string; stateDir: string; repoRoot: string }): Promise<RatifyCliHandoff>;
   approve(proposalId: string): void;
   reframe(proposalId: string, feedback: string, input?: InboxInputReference): void;
 }
@@ -3600,6 +3602,10 @@ export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: Ratif
       });
   };
   return {
+    ...(seams ? { improvement(target: { operationId: string; stateDir: string; repoRoot: string }) {
+      if (!/^[a-f0-9]{64}$/.test(target.operationId) || !isAbsolute(target.stateDir) || !isAbsolute(target.repoRoot)) return Promise.resolve<RatifyCliHandoff>({ outcome: "refused" });
+      return handOff(seams, `improvement-action:${target.operationId}`, ["improvement-action", target.operationId, "--state-dir", target.stateDir, "--repo-root", target.repoRoot], `improvement-${target.operationId}`);
+    } } : {}),
     approve(proposalId) {
       if (seams) return handOff(seams, proposalId, ["approve", proposalId], `approve-${proposalId}`).then(() => undefined);
       spawnDetached(["approve", proposalId], `approve-${proposalId}`);
@@ -3912,8 +3918,14 @@ function refuseInformationalProposal(proposals: Proposal[], classifications: Inb
 }
 
 export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxCausalScope): InboxVerbActions {
+  const improvementReviewRequired = (proposalId: string, respond: InboxVerbRespond): boolean => {
+    if (!proposalId.startsWith("improvement:")) return false;
+    respond(409, { error: "improvement_review_required", detail: "Use this improvement's saved conversation to change its goal, request a draft, or review and file its exact draft." });
+    return true;
+  };
   return {
     approve: validatedInboxAction(validateApproveProposal, async (input, actor, respond) => {
+      if (improvementReviewRequired(input.proposalId, respond)) return;
       const taskId = /^verify-human:([A-Za-z0-9-]+)$/.exec(input.proposalId)?.[1];
       const retained = taskId ? await readRetainedHumanReleases(deps) : undefined;
       const receipt = taskId ? retained?.receipts.get(taskId) : undefined;
@@ -3946,6 +3958,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       respond(200, { ok: true, proposalId: input.proposalId, started: true });
     }),
     reframe: validatedInboxAction(validateReframeProposal, (input, actor, respond) => {
+      if (improvementReviewRequired(input.proposalId, respond)) return;
       const { proposals, classifications } = classifyAllProposals(deps);
       if (!proposals.some((p) => p.id === input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });

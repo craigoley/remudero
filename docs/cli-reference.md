@@ -118,6 +118,7 @@ usage:
   rmd peek <runId> [--lines <n>] [--follow]   # Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.
   rmd pr-owner <pr-number>   # Report whether the local ledger shows a fix lane owning one PR.
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
+  rmd improvement-action <operation-id> --state-dir <path>   # Resume one saved planning action through the daemon's admitted workflow.
   rmd inbox [--dry-run]   # The ratification inbox's deterministic core: tier proposals READY/not-ready.
   rmd inbox-bakeoff [--sample <n>]   # Replay real inbox proposals through each draft candidate; rank by clean drafts per dollar.
   rmd approve <P##> [<P##> ...]   # Ratify one or more READY proposals through the gate into a plan PR.
@@ -1175,6 +1176,16 @@ rmd plan --mode=create|clarify|expand [<brief>...]
 ```
 
 the unified Architect PLAN skill (MASTER-PLAN §5B, W1-T45) — ONE ground→research→clear-or-grill-or-propose code path shared by all three modes (Refine=clarify, Expand=expand): create scaffolds new plan/tasks.yaml task(s) for the REQUIRED <brief> initiative; clarify grills (or silently resolves) ambiguous/underspecified existing tasks, <brief> optionally narrowing the focus; expand proposes gap-filling tasks that each cite a research source. CLEAR/GRILL touch nothing and open no PR; PROPOSED opens a plan-only PR (plan/** + MASTER-PLAN.md) gated by ci-gate+remudero-review
+
+### `rmd improvement-action`
+
+Resume one saved planning action through the daemon's admitted workflow.
+
+```
+rmd improvement-action <operation-id> --state-dir <path>
+```
+
+Daemon-owned handoff for an exact saved improvement action. Refuses an unowned process before reading execution configuration, verifies the configured fleet and repository, and revalidates the saved source, goal and reviewed draft. Uses the native bounded Inbox draft and governed filing paths; recovers filing from its native receipt rather than repeating ambiguous work. Saving or queuing a request does not admit a worker or complete, file, merge or deploy a task.
 
 ### `rmd inbox`
 

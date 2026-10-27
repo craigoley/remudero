@@ -139,7 +139,7 @@ const BASELINE_COMMAND_NAMES = [
   "emissions", "escalate", "feedback", "feedback-reconcile", "field-trials", "fix", "hand-runs",
   "hand-worktree",
   "host-alert",
-  "impossible-canary", "inbox", "inbox-bakeoff", "init", "inspect", "install-checkout", "issues",
+  "impossible-canary", "improvement-action", "inbox", "inbox-bakeoff", "init", "inspect", "install-checkout", "issues",
   "garden",
   "gh",
   "gh-broker",
@@ -192,6 +192,7 @@ const BASELINE_COMMAND_NAMES = [
 // `inspect` — explicit, allowlisted state reads before CLI housekeeping — joins the registry.
 // W1-T10270: `review-replay` refreshes the checked-in sample from retained real review inputs.
 // W1-T10079: `reply`, `archive`, `snooze` and `keep` — the console's inbox verbs from one verb table — join the registry.
+// W1-T10561: `improvement-action` resumes a saved planning request through the daemon-owned workflow.
 // `procedures` — a read-only census of the tool-call steps clean merged runs repeat, per task type — joins the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // The reviewed edit is the NAME added to the list above, beside its line of provenance. No count
