@@ -16,7 +16,7 @@ import { test } from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
 import { parse as parseYaml } from "yaml";
 
-import type { Clock } from "../src/lib/clock.js";
+import type { Clock } from "#src/lib/clock.js";
 import {
   benchmarkEvidenceByLane,
   daemonEvidenceCoverageInput,
@@ -33,12 +33,12 @@ import {
   startEvidenceCoverageGardener,
   type EvidenceCoverageInput,
   type EvidenceCoverageFollowup,
-} from "../src/lib/evidence-coverage-gardener.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import { feedbackEntryPath } from "../src/lib/feedback.js";
-import { ledgerLivePath } from "../src/lib/ledger-union.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { daemonCommand } from "../src/run-task.js";
+} from "#src/lib/evidence-coverage-gardener.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import { feedbackEntryPath } from "#src/lib/feedback.js";
+import { ledgerLivePath } from "#src/lib/ledger-union.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { daemonCommand } from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const T0 = Date.parse("2026-09-27T00:00:00.000Z");

@@ -8,10 +8,10 @@ import {
   BOARD_REFRESH_ROLLUP_MS,
   boardRefreshRollup,
   createBoardSnapshotCache,
-} from "../src/lib/board-snapshot-cache.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
-import type { BoardPrRest, RestPullRow } from "../src/lib/open-prs-rest.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/board-snapshot-cache.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
+import type { BoardPrRest, RestPullRow } from "#src/lib/open-prs-rest.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 function journal() {
   const rows: Array<{ event: string; extra: Record<string, unknown> }> = [];

@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import type { Plan } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import type { Plan } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
 
 // ── A REFUSED ACTION MUST EXPLAIN ITSELF ─────────────────────────────────────────────────────
 //

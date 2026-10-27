@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkCommitMessage, wrapBodyLines } from "../src/lib/commit-message.js";
+import { checkCommitMessage, wrapBodyLines } from "#src/lib/commit-message.js";
 
 const cause = "ci-friction:check:ci-log:coverage-ratchet:diff-coverage-blocked-this-diff-adds-source-line-s-with-zero";
 

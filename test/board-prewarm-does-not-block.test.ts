@@ -29,9 +29,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { buildBatchedGithub, GH_CALL_TIMEOUT_MS, postPrewarmWorkerResponse, type GitHub } from "../src/lib/status.js";
-import { gatePrewarmOnClients, DEFAULT_BOARD_PREWARM_MS } from "../src/lib/serve.js";
-import type { SseRoute, SseSend } from "../src/lib/service.js";
+import { buildBatchedGithub, GH_CALL_TIMEOUT_MS, postPrewarmWorkerResponse, type GitHub } from "#src/lib/status.js";
+import { gatePrewarmOnClients, DEFAULT_BOARD_PREWARM_MS } from "#src/lib/serve.js";
+import type { SseRoute, SseSend } from "#src/lib/service.js";
 
 const GH_SLEEP_MS = 250;
 

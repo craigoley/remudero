@@ -6,15 +6,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   FLAKE_INCIDENT_POLICY, flakeIncidentOrigin, runFlakeIncidentGardener, testSourcePaths,
-} from "../src/lib/flake-incident-gardener.js";
-import { selectorShadowGardenPass } from "../src/lib/garden-registry.js";
+} from "#src/lib/flake-incident-gardener.js";
+import { selectorShadowGardenPass } from "#src/lib/garden-registry.js";
 import {
   readSelectorShadowRunsAsync, SELECTOR_SHADOW_SHARDS, selectorShadowFlakeEvidence, selectorShadowFlakeLedger,
-} from "../src/lib/selector-shadow-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/selector-shadow-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const TEST_FILE = "test/operator-agent-scan-routes-never-block-the-loop.test.ts";
 const TITLE = "after a rotation lands the emergency status answers within budget and sees the new stop";
@@ -185,7 +185,7 @@ test("W1-T6406: the policy is tiered — one PR is noise, two watch, three file"
 
 test("W1-T6406: the modules a test imports are the source its failure could come from", () => {
   assert.deepEqual(
-    testSourcePaths("test/a.test.ts", `import x from "../src/lib/x.js";\nconst y = await import("./helpers/y.ts");\nimport z from "zod";`),
+    testSourcePaths("test/a.test.ts", `import x from "#src/lib/x.js";\nconst y = await import("#test/helpers/y.ts");\nimport z from "zod";`),
     ["src/lib/x.ts", "test/helpers/y.ts"],
   );
   assert.deepEqual(testSourcePaths("test/a.test.ts", undefined), []);

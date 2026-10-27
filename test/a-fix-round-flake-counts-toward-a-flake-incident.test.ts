@@ -8,9 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { FLAKE_INCIDENT_DIGEST_VERSION, FLAKE_INCIDENT_EVIDENCE_STEPS, runFlakeIncidentGardener } from "../src/lib/flake-incident-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { FLAKE_INCIDENT_DIGEST_VERSION, FLAKE_INCIDENT_EVIDENCE_STEPS, runFlakeIncidentGardener } from "#src/lib/flake-incident-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const TEST_FILE = "test/the-state-snapshot-actually-runs-on-this-host.test.ts";
 const NOW = Date.parse("2026-10-14T14:00:00Z");

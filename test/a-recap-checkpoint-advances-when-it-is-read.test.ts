@@ -17,11 +17,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { buildStatusRoute, RECAP_ACK_HEADER, type BoardDeps } from "../src/lib/board.js";
-import { createLastSeenStore, hashToken, type LastSeenStore } from "../src/lib/last-seen.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { createService } from "#src/lib/service.js";
+import { buildStatusRoute, RECAP_ACK_HEADER, type BoardDeps } from "#src/lib/board.js";
+import { createLastSeenStore, hashToken, type LastSeenStore } from "#src/lib/last-seen.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const READ_TOKEN = "recap-checkpoint-read-token";
 const OTHER_TOKEN = "recap-checkpoint-other-token";

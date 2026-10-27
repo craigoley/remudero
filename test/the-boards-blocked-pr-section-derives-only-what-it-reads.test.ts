@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { test } from "node:test";
-import { computeBoardSnapshot } from "../src/lib/board.js";
-import type { Plan } from "../src/lib/plan.js";
-import * as statusBoard from "../src/lib/status-board.js";
-import type { GitHub } from "../src/lib/status.js";
+import { computeBoardSnapshot } from "#src/lib/board.js";
+import type { Plan } from "#src/lib/plan.js";
+import * as statusBoard from "#src/lib/status-board.js";
+import type { GitHub } from "#src/lib/status.js";
 
 const ROOT = "/nonexistent-rmd-board-root";
 const plan: Plan = { tasks: [], byId: new Map() };

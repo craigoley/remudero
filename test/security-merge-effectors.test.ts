@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import {rmSync} from 'node:fs';
 import {test,type TestContext} from 'node:test';
-import {armFailureAction,armFailureIsRateLimited,realArmDeps,realArmDepsAsync} from '../src/lib/arm-auto-merge.js';
-import {ghPrMergeSquash} from '../src/lib/worker.js';
-import {SecurityMergeRefused} from '../src/lib/security-merge-admission.js';
-import {withLiveWritesAllowed} from '../src/lib/live-write-guard.js';
-import {ghShim} from './helpers/gh-shim.js';
+import {armFailureAction,armFailureIsRateLimited,realArmDeps,realArmDepsAsync} from '#src/lib/arm-auto-merge.js';
+import {ghPrMergeSquash} from '#src/lib/worker.js';
+import {SecurityMergeRefused} from '#src/lib/security-merge-admission.js';
+import {withLiveWritesAllowed} from '#src/lib/live-write-guard.js';
+import {ghShim} from '#test/helpers/gh-shim.js';
 const head='a'.repeat(40),url='https://github.com/craigoley/remudero/pull/11468';
 const clean={id:1,name:'CodeQL',head_sha:head,status:'completed',conclusion:'success',
  app:{id:57789,slug:'github-advanced-security',owner:{login:'github'}},

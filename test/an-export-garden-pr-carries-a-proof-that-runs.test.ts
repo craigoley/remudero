@@ -16,17 +16,17 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { applyExportDeletions, exportGardenCandidates, exportGardenSpec, exportInventory } from "../src/lib/export-gardener.js";
-import { writeAtomic } from "../src/lib/fs-race-safe.js";
-import { adoptionLatestPath, adoptionProposalId } from "../src/lib/measurement-cadence.js";
-import { acceptanceAuthorTimeCheck, parseAcceptanceBlock, parseWhitelistedProof } from "../src/lib/review.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { applyExportDeletions, exportGardenCandidates, exportGardenSpec, exportInventory } from "#src/lib/export-gardener.js";
+import { writeAtomic } from "#src/lib/fs-race-safe.js";
+import { adoptionLatestPath, adoptionProposalId } from "#src/lib/measurement-cadence.js";
+import { acceptanceAuthorTimeCheck, parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const TESTS = "test/export-gardener-removes-unreferenced-exports.test.ts";
 const SOURCE = "src/lib/dead-thing.ts";
 const DEAD_TEXT = `import { join } from "node:path";\n\nexport function used(): string {\n  return join("a", "b");\n}\n\n/** deadA: nothing calls this. */\nexport function deadA(): number {\n  return 1;\n}\n`;
-const SEEDED_TESTS = `import assert from "node:assert/strict";\nimport { join } from "node:path";\nimport { test } from "node:test";\nimport { used } from "../src/lib/dead-thing.js";\n\ntest("used still joins its path components", () => {\n  assert.equal(used(), join("a", "b"));\n});\n`;
+const SEEDED_TESTS = `import assert from "node:assert/strict";\nimport { join } from "node:path";\nimport { test } from "node:test";\nimport { used } from "#src/lib/dead-thing.js";\n\ntest("used still joins its path components", () => {\n  assert.equal(used(), join("a", "b"));\n});\n`;
 const TITLE = "deadA is not exported from dead-thing";
 
 function fixture(files: Record<string, string>): { repo: GitRepo; stateDir: string } {
@@ -95,7 +95,7 @@ test("W1-T5278 criterion 1: an export-garden PR body carries one runnable unit t
   const tests = readFileSync(join(repo.dir, TESTS), "utf8");
   assert.equal(
     tests,
-    `${SEEDED_TESTS}\ntest("${TITLE}", async () => {\n  const module = await import("../src/lib/dead-thing.js");\n  assert.equal(Object.hasOwn(module, "deadA"), false);\n});\n`,
+    `${SEEDED_TESTS}\ntest("${TITLE}", async () => {\n  const module = await import("#src/lib/dead-thing.js");\n  assert.equal(Object.hasOwn(module, "deadA"), false);\n});\n`,
   );
   assert.doesNotMatch(readFileSync(join(repo.dir, SOURCE), "utf8"), /deadA/);
 
@@ -109,7 +109,7 @@ test("W1-T5278 criterion 1: an export-garden PR body carries one runnable unit t
 });
 
 test("W1-T5278: a deletion whose test title already exists is withdrawn, not shipped without a proof", () => {
-  const already = `${SEEDED_TESTS}\ntest("${TITLE}", async () => {\n  const module = await import("../src/lib/dead-thing.js");\n  assert.equal(Object.hasOwn(module, "deadA"), false);\n});\n`;
+  const already = `${SEEDED_TESTS}\ntest("${TITLE}", async () => {\n  const module = await import("#src/lib/dead-thing.js");\n  assert.equal(Object.hasOwn(module, "deadA"), false);\n});\n`;
   const { repo, stateDir } = fixture({ [SOURCE]: DEAD_TEXT });
   // Written after the seed commit: a TRACKED mention of the name is a reference, and the export
   // would never be a candidate; an untracked one is invisible to `git grep`, so only the title

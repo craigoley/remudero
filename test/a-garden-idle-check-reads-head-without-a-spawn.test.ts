@@ -9,15 +9,15 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ciFrictionGardenSpec, type CiFrictionGardenSources } from "../src/lib/ci-friction-gardener.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { flowGardenSpec, type FlowGardenSources } from "../src/lib/flow-remedy-gardener.js";
-import type { GardenerDeps } from "../src/lib/gardener.js";
-import { gateGardenSpec, type GateProbes } from "../src/lib/gate-gardener.js";
-import { hotFileGardenSpec, type HotFileGardenSources } from "../src/lib/hot-file-gardener.js";
-import { startReadPlaneTelemetry } from "../src/lib/read-plane.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { ciFrictionGardenSpec, type CiFrictionGardenSources } from "#src/lib/ci-friction-gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { flowGardenSpec, type FlowGardenSources } from "#src/lib/flow-remedy-gardener.js";
+import type { GardenerDeps } from "#src/lib/gardener.js";
+import { gateGardenSpec, type GateProbes } from "#src/lib/gate-gardener.js";
+import { hotFileGardenSpec, type HotFileGardenSources } from "#src/lib/hot-file-gardener.js";
+import { startReadPlaneTelemetry } from "#src/lib/read-plane.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const NOW = Date.parse("2026-10-10T08:11:33.555Z");
 
@@ -73,7 +73,7 @@ test("unit test: a garden's idle check reads HEAD from the ref files and spawns 
 
 test("unit test: headShaFromRefFiles answers what git rev-parse HEAD answers, or nothing", async (t) => {
   // Loaded here, not at the top, so the file still loads on a tree without the module and this test is what fails.
-  const { checkoutHeadStamp, headShaFromRefFiles } = await import("../src/lib/checkout-head.js");
+  const { checkoutHeadStamp, headShaFromRefFiles } = await import("#src/lib/checkout-head.js");
   const repo = gitRepo({ kind: "head-ref-files" });
   t.after(() => repo.cleanup());
   const rev = (dir: string) => execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();

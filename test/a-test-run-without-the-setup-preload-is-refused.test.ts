@@ -94,7 +94,7 @@ test("the deny floor admits the same run with the preload in either --import for
       "node --test --import tsx --import=./test/setup/tmp-hygiene.ts test/run-task.test.ts",
       "node --import tsx --import test/setup/tmp-hygiene.ts --test 'test/*.test.ts'",
       `node --import tsx --import ${f.withPreload}/test/setup/tmp-hygiene.ts --test test/a.test.ts`,
-      'node --import tsx --import "./test/setup/tmp-hygiene.ts" --test test/a.test.ts',
+      'node --import tsx --import "#test/test/setup/tmp-hygiene.ts" --test test/a.test.ts',
       "timeout 600 node --import tsx --import ./test/setup/tmp-hygiene.ts --test test/a.test.ts 2>&1 | tail",
       'NODE_OPTIONS="--import ./test/setup/tmp-hygiene.ts" node --import tsx --test test/a.test.ts',
       `cd ${f.withPreload} && node --test --import tsx --import=./test/setup/tmp-hygiene.ts test/a.test.ts`,

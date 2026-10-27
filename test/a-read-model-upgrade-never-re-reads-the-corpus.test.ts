@@ -3,11 +3,11 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import type { Clock } from "../src/lib/clock.js";
-import { MIN_TRANSACTION_LINES, createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { acquireLease } from "../src/lib/read-model-db.js";
-import { READ_MODEL_STALL_MS, createReadModelTicker, createReadModelWorker, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import type { Clock } from "#src/lib/clock.js";
+import { MIN_TRANSACTION_LINES, createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { acquireLease } from "#src/lib/read-model-db.js";
+import { READ_MODEL_STALL_MS, createReadModelTicker, createReadModelWorker, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";

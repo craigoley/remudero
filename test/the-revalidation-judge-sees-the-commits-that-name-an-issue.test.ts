@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   commitsNamingIssue, isAbsenceOnlyCitation, parseMainCommitLog, productionIssueRevalidationPorts,
   type ProductionIssueRevalidationOpts, type RevalidationIssue,
-} from "../src/lib/issue-revalidation-garden.js";
+} from "#src/lib/issue-revalidation-garden.js";
 
 const NOW = Date.UTC(2026, 9, 13, 21);
 const clock = fixedClock(NOW);

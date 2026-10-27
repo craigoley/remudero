@@ -19,10 +19,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import * as leaf from "../src/lib/worktree-git.js";
-import { wireCredentialHelperSocket } from "../src/lib/worker.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as leaf from "#src/lib/worktree-git.js";
+import { wireCredentialHelperSocket } from "#src/lib/worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const SOCKET_PASS = "fixture-socket-pass";
 const SAVED = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "SSH_ASKPASS"] as const;

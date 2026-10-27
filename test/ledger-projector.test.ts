@@ -6,8 +6,8 @@ import { basename, join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
-import { compactRotations, rotateLedger } from "../src/lib/ledger.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
+import { compactRotations, rotateLedger } from "#src/lib/ledger.js";
 import {
   ACTIVITY_RING_ROWS,
   DIR_GATE_RELIST_MS,
@@ -22,10 +22,10 @@ import {
   RUN_WORKER_PROJECTION,
   runWorkerRow,
   type LedgerProjectorOptions,
-} from "../src/lib/ledger-projector.js";
-import { acquireLease, ReadModelError, type ReadModelDb } from "../src/lib/read-model-db.js";
+} from "#src/lib/ledger-projector.js";
+import { acquireLease, ReadModelError, type ReadModelDb } from "#src/lib/read-model-db.js";
 import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { retainFixture } from "#test/setup/retained-fixtures.js";
 

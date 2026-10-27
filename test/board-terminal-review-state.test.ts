@@ -3,9 +3,9 @@ import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { computeBoardSnapshot, deriveReviewState, type BoardDeps } from "../src/lib/board.js";
-import { buildBatchedGithub, type GitHub, type PrRef } from "../src/lib/status.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { computeBoardSnapshot, deriveReviewState, type BoardDeps } from "#src/lib/board.js";
+import { buildBatchedGithub, type GitHub, type PrRef } from "#src/lib/status.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 // ── W1-T2235 ─────────────────────────────────────────────────────────────────────────────────
 //

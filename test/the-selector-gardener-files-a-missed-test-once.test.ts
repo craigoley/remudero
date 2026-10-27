@@ -4,16 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { loadPlanFromYaml } from "../src/lib/plan.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
 import {
   SELECTOR_SHADOW_MISS_TEST_PATH,
   SELECTOR_SHADOW_SHARDS,
   runSelectorShadowGardener,
   selectorShadowStructuralTestPath,
   type SelectorShadowRun,
-} from "../src/lib/selector-shadow-gardener.js";
-import { lintTask } from "../src/lib/task-linter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/selector-shadow-gardener.js";
+import { lintTask } from "#src/lib/task-linter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const TEST_FILE = "test/cold-status-reads-return-within-the-client-budget.test.ts";
 

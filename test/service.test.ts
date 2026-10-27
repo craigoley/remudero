@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService, type Route, type SseRoute } from "../src/lib/service.js";
+import { createService, type Route, type SseRoute } from "#src/lib/service.js";
 
 // ── W3-T1a: daemon service surface v0 (MASTER-PLAN §7A) ──
 //

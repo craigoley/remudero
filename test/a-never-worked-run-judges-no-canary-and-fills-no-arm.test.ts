@@ -1,4 +1,3 @@
-// test/a-never-worked-run-judges-no-canary-and-fills-no-arm.test.ts
 //
 // W1-T4726 — W1-T4711 flags a thrown, refused or backfilled run `neverWorked` on its RunSummary and
 // keeps it out of the per-class samples. Three readers still took it as settled work: the config
@@ -11,9 +10,9 @@ import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { cohortOutcome, splitCohort, type ConfigCohort } from "../src/lib/config-gardener.js";
-import { cohortGuardObservations } from "../src/lib/experiment-promotion.js";
-import { gatherRuns, type LedgerRecord, type RunSummary } from "../src/lib/retro.js";
+import { cohortOutcome, splitCohort, type ConfigCohort } from "#src/lib/config-gardener.js";
+import { cohortGuardObservations } from "#src/lib/experiment-promotion.js";
+import { gatherRuns, type LedgerRecord, type RunSummary } from "#src/lib/retro.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(__dirname, "..", "scripts", "mount-headroom-sweep.mjs");

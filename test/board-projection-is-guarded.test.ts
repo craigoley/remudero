@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { boardMessageFooter, renderStatusBoardText, type StatusBoardModel } from "../src/lib/status-board.js";
+import { boardMessageFooter, renderStatusBoardText, type StatusBoardModel } from "#src/lib/status-board.js";
 
 // ── W1-T2826 ────────────────────────────────────────────────────────────────────────────────────
 // checkBoardSectionSafe's doc promises "a checker failure must never reach the operator as a broken

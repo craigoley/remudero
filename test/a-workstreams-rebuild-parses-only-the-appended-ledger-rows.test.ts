@@ -3,10 +3,10 @@ import fs, { appendFileSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFi
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
-import { buildBatchedGithub, readLedgerLines, type LedgerLines } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import * as workstreams from "../src/lib/workstreams-view.js";
+import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
+import { buildBatchedGithub, readLedgerLines, type LedgerLines } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import * as workstreams from "#src/lib/workstreams-view.js";
 
 function fixture(t: TestContext) {
   const root = makeTempDir("workstreams-ledger-tail");

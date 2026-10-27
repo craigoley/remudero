@@ -19,9 +19,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
 
-import { compactRotations, compactedArchiveName } from "../src/lib/ledger.js";
-import { openLedgerUnion, rotationStampIso } from "../src/lib/ledger-union.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { compactRotations, compactedArchiveName } from "#src/lib/ledger.js";
+import { openLedgerUnion, rotationStampIso } from "#src/lib/ledger-union.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 function tmp(kind: string): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${kind}`));

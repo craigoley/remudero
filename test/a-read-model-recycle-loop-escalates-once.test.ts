@@ -3,14 +3,14 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import type { Clock } from "../src/lib/clock.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
+import type { Clock } from "#src/lib/clock.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
 import {
   READ_MODEL_STALL_MS, answerReadModelIssueRequest, createReadModelWorker, threadIssueRequest,
   type ReadModelIssueAnswer, type ReadModelIssueRequest, type ReadModelWorkerHandle,
-} from "../src/lib/read-model-worker.js";
-import type { ShadowRequest } from "../src/lib/view-shadow.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/read-model-worker.js";
+import type { ShadowRequest } from "#src/lib/view-shadow.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-10-01T12:00:00.000Z");
 /** Far past any watchdog bound the tests reach, so every advance recycles a silent worker. */

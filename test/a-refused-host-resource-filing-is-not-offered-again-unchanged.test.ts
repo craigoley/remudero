@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   consumerShardYaml,
   runHostResourcePass,
@@ -24,9 +24,9 @@ import {
   type ConsumerFiling,
   type HostResourcePorts,
   type HostSample,
-} from "../src/lib/host-resource-gardener.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/host-resource-gardener.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const HOUR = 3_600_000;
 const NOW = Date.parse("2026-10-14T12:00:00.000Z");

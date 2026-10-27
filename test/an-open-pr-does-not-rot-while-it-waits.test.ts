@@ -6,7 +6,7 @@ import {
   classifyUpdateBranchFailure,
   DISTANCE_REFRESH_ROTATION_MS,
   ghUpdateBranchArgv,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 import {
   DEFAULT_SWEEP_POLICY,
   openPrsBehindMain,
@@ -16,7 +16,7 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 // EVERY threshold comparison in this suite reads THIS constant, never the wall clock: `deps()`
 // below injects `now: () => NOW`, `selectUpdateBranchTarget` takes it as an explicit argument, and

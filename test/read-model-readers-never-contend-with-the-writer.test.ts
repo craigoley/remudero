@@ -10,8 +10,8 @@ import {
   openReadModel,
   openScratchReadModel,
   withWriteTransaction,
-} from "../src/lib/read-model-db.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/read-model-db.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 function fixture(t: TestContext, prefix: string) {
   const stateDir = makeTempDir(prefix);

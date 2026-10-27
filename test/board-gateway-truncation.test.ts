@@ -3,9 +3,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
-import { BOARD_MAX_PAGES, fetchBoardPrsRest, type GhApiFetcher, type RestPullRow } from "../src/lib/open-prs-rest.js";
-import { buildBatchedGithub, deriveStatus } from "../src/lib/status.js";
+import type { Task } from "#src/lib/plan.js";
+import { BOARD_MAX_PAGES, fetchBoardPrsRest, type GhApiFetcher, type RestPullRow } from "#src/lib/open-prs-rest.js";
+import { buildBatchedGithub, deriveStatus } from "#src/lib/status.js";
 
 /**
  * W1-T415: `fetchBoardPrsRest` computes `truncated` (open-prs-rest.ts, set when a walk hits

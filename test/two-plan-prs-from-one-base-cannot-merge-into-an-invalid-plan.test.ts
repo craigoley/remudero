@@ -5,9 +5,9 @@
 // the tree that will actually land. Every other behind PR keeps W1-T3694's as-is merge.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import * as armModule from "../src/lib/arm-auto-merge.js";
-import { attemptArm, logArmAttribution, realArmDeps, type ArmDeps } from "../src/lib/arm-auto-merge.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import * as armModule from "#src/lib/arm-auto-merge.js";
+import { attemptArm, logArmAttribution, realArmDeps, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 type PlanTouch = "touched" | "untouched" | "unreadable";
 type Fetch = (args: string[]) => unknown;

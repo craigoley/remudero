@@ -7,8 +7,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { namedInSourcePatterns, readNamedInSource } from "../src/lib/branch-reaper.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { namedInSourcePatterns, readNamedInSource } from "#src/lib/branch-reaper.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const NAMES = ["heartbeat", "heartbeat-azure", "diag/drain.x", "a.b", "c+d", "absent-name", "main"];
 

@@ -16,10 +16,10 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { decideAutoMergeArm, judgeReview } from "../src/lib/review.js";
-import { fileDiff, knowledgeGardenSpec, KNOWLEDGE_RETIRE_GOLDEN, type GardenAction, type GardenWorkspace } from "../src/lib/knowledge-gardener.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { decideAutoMergeArm, judgeReview } from "#src/lib/review.js";
+import { fileDiff, knowledgeGardenSpec, KNOWLEDGE_RETIRE_GOLDEN, type GardenAction, type GardenWorkspace } from "#src/lib/knowledge-gardener.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const gate = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "prompt-surface-gate.mjs")).href)) as {

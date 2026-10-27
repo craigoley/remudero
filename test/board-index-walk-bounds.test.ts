@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { NEEDS_HUMAN_LABEL } from "../src/lib/escalate.js";
+import { NEEDS_HUMAN_LABEL } from "#src/lib/escalate.js";
 import {
   BOARD_MAX_PAGES,
   boardIssuesRestArgs,
@@ -10,9 +10,9 @@ import {
   fetchLabelledIssuesRest,
   mapBoardPr,
   type RestPullRow,
-} from "../src/lib/open-prs-rest.js";
-import { DEFAULT_BOARD_POLL_TTL_MS } from "../src/lib/serve.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
+} from "#src/lib/open-prs-rest.js";
+import { DEFAULT_BOARD_POLL_TTL_MS } from "#src/lib/serve.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
 
 /**
  * W1-T2222: the board's index walk re-reads the whole corpus every poll cycle, and the issue half

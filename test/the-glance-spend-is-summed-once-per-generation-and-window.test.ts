@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import * as glance from "../src/lib/glance.js";
-import { noteLedgerGeneration } from "../src/lib/status.js";
+import * as glance from "#src/lib/glance.js";
+import { noteLedgerGeneration } from "#src/lib/status.js";
 
 const NOW = Date.parse("2026-10-07T12:00:00.000Z");
 type Rows = Array<Record<string, unknown>>;

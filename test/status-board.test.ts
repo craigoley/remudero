@@ -17,22 +17,22 @@ import {
   type QueueHeadSection,
   type ServiceName,
   type StatusBoardDeps,
-} from "../src/lib/status-board.js";
-import type { DispatchFilterReason } from "../src/lib/drain.js";
+} from "#src/lib/status-board.js";
+import type { DispatchFilterReason } from "#src/lib/drain.js";
 import {
   requestDrainNow,
   requestKick,
   requestPause,
   requestStop,
   setQuietHours,
-} from "../src/lib/fleet-control.js";
-import { acquireInflightLock } from "../src/lib/inflight-lock.js";
-import { deployAutoPath, deployFailedAlertPath } from "../src/lib/deployer.js";
-import { statusCommand } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
-import { DEFAULT_MAX_TASK_DISPATCHES, type GitHub, type PrRef, type StatusProjection } from "../src/lib/status.js";
-import type { DraftCache, Proposal } from "../src/lib/inbox.js";
+} from "#src/lib/fleet-control.js";
+import { acquireInflightLock } from "#src/lib/inflight-lock.js";
+import { deployAutoPath, deployFailedAlertPath } from "#src/lib/deployer.js";
+import { statusCommand } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import { loadPlanFromYaml, type Plan } from "#src/lib/plan.js";
+import { DEFAULT_MAX_TASK_DISPATCHES, type GitHub, type PrRef, type StatusProjection } from "#src/lib/status.js";
+import type { DraftCache, Proposal } from "#src/lib/inbox.js";
 
 // ── W1-T279: rmd status, half 1 of 2 — ONE read model over LOCAL truth (LIVENESS / LATCHES /
 // LAST CYCLE), rendered as text or --json from the SAME buildStatusBoard() result. Every test

@@ -37,20 +37,20 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 import {
   buildFixRungDispatchArgs,
   openEscalationStandDownReason,
   resolveClearedEscalation,
   runFixRung,
-} from "./helpers/run-task-test.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { MergeConflictEvidence } from "../src/lib/merge-state.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#test/helpers/run-task-test.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { MergeConflictEvidence } from "#src/lib/merge-state.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = Date.parse("2026-10-05T18:31:04.000Z");
 const TASK_ID = "W1-T5053";

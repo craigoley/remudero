@@ -7,11 +7,11 @@ import { test } from "node:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listProcesses, reclaimStaleGitLocks, type StaleLockReclaimOptions } from "../src/lib/git-lock-reclaim.js";
-import { hashInstallInputs, installHashMarkerPath } from "../src/lib/install-hash.js";
-import { createSlotPreparer, linkTree, prepareSlotDeps, runCommand, type RunCommand } from "../src/lib/serve-slots.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { listProcesses, reclaimStaleGitLocks, type StaleLockReclaimOptions } from "#src/lib/git-lock-reclaim.js";
+import { hashInstallInputs, installHashMarkerPath } from "#src/lib/install-hash.js";
+import { createSlotPreparer, linkTree, prepareSlotDeps, runCommand, type RunCommand } from "#src/lib/serve-slots.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 function slotDir(lock: string, installed?: { marker: boolean }): string {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}slot-`));

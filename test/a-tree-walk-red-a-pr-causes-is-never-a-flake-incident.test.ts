@@ -8,10 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { censusWalksOf, discoverCensusCandidates } from "../src/lib/ci-parity.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { runFlakeIncidentGardener } from "../src/lib/flake-incident-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { censusWalksOf, discoverCensusCandidates } from "#src/lib/ci-parity.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { runFlakeIncidentGardener } from "#src/lib/flake-incident-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = Date.parse("2026-10-10T18:00:00Z");
 /** A census the registry models: catch-erasure-census, walks src/. */
@@ -20,7 +20,7 @@ const REGISTRY_CENSUS = "test/catch-erasure-ratchet.test.ts";
 const UNMODELLED_CENSUS = "test/every-raw-spawn-uses-the-leaf.test.ts";
 const UNMODELLED_SOURCE = [
   `import { readdirSync, readFileSync } from "node:fs";`,
-  `import { maskLiterals } from "../src/lib/test-impact-map.js";`,
+  `import { maskLiterals } from "#src/lib/test-impact-map.js";`,
   `const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => [e.name]);`,
   `for (const f of files(join(REPO, "src"))) readFileSync(f, "utf8");`,
 ].join("\n");
@@ -100,7 +100,7 @@ test("W1-T9708: a test the census recognizer names but the registry does not is 
   assert.deepEqual(censusWalksOf(UNMODELLED_CENSUS, UNMODELLED_SOURCE), candidate!.walks,
     "the gardener reads the walks rmd census-membership reports for the same file");
   assert.deepEqual(censusWalksOf(REGISTRY_CENSUS, undefined), ["src/"], "a registry row needs no source");
-  assert.deepEqual(censusWalksOf("test/plain.test.ts", `import { x } from "../src/lib/x.js";\n`), [],
+  assert.deepEqual(censusWalksOf("test/plain.test.ts", `import { x } from "#src/lib/x.js";\n`), [],
     "a test that walks nothing is no census, however it imports src/");
 
   // W1-T7765's shape: five PRs, every retry also failed, each adding a raw git spawn under src/.

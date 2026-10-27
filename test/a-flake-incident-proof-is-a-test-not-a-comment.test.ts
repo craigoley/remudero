@@ -7,9 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { runFlakeIncidentGardener } from "../src/lib/flake-incident-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { runFlakeIncidentGardener } from "#src/lib/flake-incident-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const TEST_FILE = "test/the-census-roster-is-named-not-numbered.test.ts";
 const TITLE = "runPreflightFast over ONLY the roster's admitted projection passes on a clean HEAD";

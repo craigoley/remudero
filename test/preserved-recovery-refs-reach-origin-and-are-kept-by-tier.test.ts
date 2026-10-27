@@ -12,15 +12,15 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
-import type { DaemonFreshness } from "../src/lib/daemon.js";
-import { gitClaimRunnerAsync } from "../src/lib/dispatch-claim.js";
-import { withLiveEditLadders } from "../src/lib/live-edit-ladder.js";
-import { RECOVERY_REF_STEPS, readRecoveryRecords, recoveryRefMaintainer, recoveryTier } from "../src/lib/recovery-refs.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { liveEditLadderWiring } from "../src/run-task.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
+import type { DaemonFreshness } from "#src/lib/daemon.js";
+import { gitClaimRunnerAsync } from "#src/lib/dispatch-claim.js";
+import { withLiveEditLadders } from "#src/lib/live-edit-ladder.js";
+import { RECOVERY_REF_STEPS, readRecoveryRecords, recoveryRefMaintainer, recoveryTier } from "#src/lib/recovery-refs.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { liveEditLadderWiring } from "#src/run-task.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const HOUR = 3_600_000;
 const T0 = Date.parse("2026-10-11T00:17:00Z");

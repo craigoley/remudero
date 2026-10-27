@@ -16,9 +16,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { fixedClock } from "../src/lib/clock.js";
-import * as gardener from "../src/lib/gate-gardener.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { fixedClock } from "#src/lib/clock.js";
+import * as gardener from "#src/lib/gate-gardener.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 // scripts/** sits outside tsconfig's include, so the .mjs is loaded by URL, as its own suite does.

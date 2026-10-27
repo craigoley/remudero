@@ -6,13 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createService } from "../src/lib/service.js";
-import { adoptPlanSource, planSourceFailed, reloadServePlan, type PlanSourceHolder } from "../src/lib/serve-plan-reload.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { planFilesIdentity } from "../src/lib/thread-plan.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { createService } from "#src/lib/service.js";
+import { adoptPlanSource, planSourceFailed, reloadServePlan, type PlanSourceHolder } from "#src/lib/serve-plan-reload.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { planFilesIdentity } from "#src/lib/thread-plan.js";
 
 // W1-T5639: a source that was never read is repaired by the next successful read, in place: no restart,
 // no rebuilt route, and no reply replay. The inbox memo is keyed by plan object identity, so a new plan reclassifies.

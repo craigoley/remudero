@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
+import { createService } from "#src/lib/service.js";
 import {
   buildStatusRoute,
   isBlockedRow,
@@ -13,12 +13,12 @@ import {
   summarizeCounts,
   type BoardDeps,
   type BoardRow,
-} from "../src/lib/board.js";
-import { runnableCandidates, tallyDispatchFilters, type MergedSet } from "../src/lib/drain.js";
-import { loadPlanFromYaml, type Plan, type Task } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { createLastSeenStore, hashToken } from "../src/lib/last-seen.js";
+} from "#src/lib/board.js";
+import { runnableCandidates, tallyDispatchFilters, type MergedSet } from "#src/lib/drain.js";
+import { loadPlanFromYaml, type Plan, type Task } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { createLastSeenStore, hashToken } from "#src/lib/last-seen.js";
 
 // ── impl-GO: the two console counts an away operator actually scans ────────────────────────────
 //

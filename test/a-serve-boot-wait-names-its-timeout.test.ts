@@ -12,8 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { type ServeChildState, waitForServeBanner } from "./helpers/serve-boot-banner.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { type ServeChildState, waitForServeBanner } from "#test/helpers/serve-boot-banner.js";
 
 function logFixture(t: { after: (fn: () => void) => void }): string {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}serve-boot-banner-`));

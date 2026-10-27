@@ -5,11 +5,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { captureGardenerSpendSource, foldGardenerSpend, GARDENER_SPEND_MAX_BYTES,
-  GARDENER_SPEND_MAX_GARDENS, type GardenerSpendSource } from "../src/lib/gardener-spend.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { fingerprintLedgerLine } from "../src/lib/ledger-union.js";
-import { SPEND_STEP_ROLES, spendAmountUsd } from "../src/lib/spend-rows.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+  GARDENER_SPEND_MAX_GARDENS, type GardenerSpendSource } from "#src/lib/gardener-spend.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { fingerprintLedgerLine } from "#src/lib/ledger-union.js";
+import { SPEND_STEP_ROLES, spendAmountUsd } from "#src/lib/spend-rows.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const repository = "fixture/repo";
 const at = new Date().toISOString();

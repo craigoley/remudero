@@ -3,8 +3,8 @@ import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { CONSOLE_SHA_UNKNOWN, gateStaleCodeExit, isConsoleCodeStale, type StaleCodeExitDeps } from "../src/lib/serve.js";
-import type { Route, SseRoute, SseSend } from "../src/lib/service.js";
+import { CONSOLE_SHA_UNKNOWN, gateStaleCodeExit, isConsoleCodeStale, type StaleCodeExitDeps } from "#src/lib/serve.js";
+import type { Route, SseRoute, SseSend } from "#src/lib/service.js";
 
 // ── W1-T2229 acceptance ──
 //

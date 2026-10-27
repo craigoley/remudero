@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { defectEventsOf } from "../src/lib/fix-lane-gardener.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
+import { defectEventsOf } from "#src/lib/fix-lane-gardener.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
 
 const NOW = Date.UTC(2026, 9, 14, 12);
 const row = (ts: string, id: string): LedgerRecord[] => [

@@ -7,9 +7,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 // Namespace reads, so the file loads at a base without these exports and each test fails on its own.
-import * as blockers from "../src/lib/pr-blocker.js";
-import { hydrateCodeqlHeadAlerts } from "../src/lib/open-prs-rest.js";
-import { runSweep, CODE_SCANNING_FIX_DISPATCH_STEP, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import * as blockers from "#src/lib/pr-blocker.js";
+import { hydrateCodeqlHeadAlerts } from "#src/lib/open-prs-rest.js";
+import { runSweep, CODE_SCANNING_FIX_DISPATCH_STEP, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";

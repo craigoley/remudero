@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import type { Clock } from "../src/lib/clock.js";
-import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "../src/lib/ledger-projector.js";
-import { openReadModel, type ReadModelDb } from "../src/lib/read-model-db.js";
-import { createReadModelTicker, threadViews, type ReadModelInstanceState, type ReadModelViewFactory, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { switchViewsOn } from "./helpers/read-model-switches.js";
+import type { Clock } from "#src/lib/clock.js";
+import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "#src/lib/ledger-projector.js";
+import { openReadModel, type ReadModelDb } from "#src/lib/read-model-db.js";
+import { createReadModelTicker, threadViews, type ReadModelInstanceState, type ReadModelViewFactory, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { switchViewsOn } from "#test/helpers/read-model-switches.js";
 
 const proof = "test/a-view-unit-s-measured-cost-survives-a-restart.test.ts";
 const key = (instance: string | null) => `view_cost:${JSON.stringify(["sample", instance])}`;

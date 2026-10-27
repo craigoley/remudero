@@ -4,10 +4,10 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { IMAGE_RECYCLE_FAILURE_BACKOFF_MS } from "../src/lib/deployer.js";
-import type { Escalation } from "../src/lib/escalate.js";
-import { realServePolicyDeps, runServePolicyCycle, type ServeImageDrift } from "../src/lib/serve-policy-convergence.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { IMAGE_RECYCLE_FAILURE_BACKOFF_MS } from "#src/lib/deployer.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { realServePolicyDeps, runServePolicyCycle, type ServeImageDrift } from "#src/lib/serve-policy-convergence.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const OLD = `sha256:${"b".repeat(64)}`;
 const CURRENT = `sha256:${"e".repeat(64)}`;
@@ -199,7 +199,7 @@ test("the default image seam shells out and reports docker failures as unknown",
   writeFileSync(docker, `#!/bin/sh\ncase "$2" in\nremudero-serve) echo '${OLD}';;\ncustom-primary) echo '${CURRENT}';;\nesac\n`);
   chmodSync(docker, 0o755);
   const run = () => execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
-    `import { realServePolicyDeps } from './src/lib/serve-policy-convergence.ts';
+    `import { realServePolicyDeps } from '#test/src/lib/serve-policy-convergence.ts';
      console.log(JSON.stringify(realServePolicyDeps(${JSON.stringify(f)}).serveImageDrift()));`],
     { cwd: join(import.meta.dirname, ".."), encoding: "utf8", env: { ...process.env, PATH: `${f.root}:${process.env.PATH}` } });
   assert.deepEqual(JSON.parse(run()), DRIFT);

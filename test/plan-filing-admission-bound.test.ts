@@ -3,13 +3,13 @@ import { test } from "node:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildOpenPrViews } from "../src/run-task.js";
+import { buildOpenPrViews } from "#src/run-task.js";
 import {
   PLAN_FILING_FILE_RESPONSE_CAP,
   createPlanFilingFileCache,
   hydratePlanFilingFiles,
   type GhApiFetcher,
-} from "../src/lib/open-prs-rest.js";
+} from "#src/lib/open-prs-rest.js";
 import {
   DEFAULT_SWEEP_POLICY,
   oldestActivityFirst,
@@ -17,7 +17,7 @@ import {
   selectReviewAdmission,
   selectReviewAdmissions,
   type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 // ── W1-T2439 — THE REVIEW CAP IS PRICED FOR A JUDGE 98% OF PLAN-ONLY REVIEWS NEVER SPAWN ────
 //

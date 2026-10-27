@@ -50,7 +50,7 @@ import {
   isLifetimeDispatchCapExceeded,
   isOrphanFaultTripped,
   orphanedRunIds,
-} from "../src/lib/status.js";
+} from "#src/lib/status.js";
 
 const T = "W1-T9999";
 
