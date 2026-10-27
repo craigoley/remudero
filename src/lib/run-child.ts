@@ -1155,12 +1155,14 @@ export function detachedWorkPlacement(
 export const HOSTED_DETACHED_WORK_KINDS: ReadonlySet<DetachedWorkKind> = new Set<DetachedWorkKind>(["review"]);
 
 /** `sweep.runChild.mode` as detached work reads it: `auto` is decided from the ledger evidence the build runs use (W1-T9087). */
-export function detachedWorkModeNow(stateRoot: string, read: () => RunChildMode = () => loadRunChildMode()): DetachedWorkMode {
+export function detachedWorkModeNow(
+  stateRoot: string, read: () => RunChildMode = () => loadRunChildMode(), readUnion: typeof readRunChildModeUnion = readRunChildModeUnion,
+): DetachedWorkMode {
   const policy = readRunChildPolicy(read);
   if (policy.mode === undefined) return "off";
   if (policy.mode !== "auto") return runChildModeFor(policy.mode, emptyRunChildModeEvidence()).mode;
   try {
-    const union = readRunChildModeUnion(stateRoot);
+    const union = readUnion(stateRoot);
     return runChildModeFor("auto", createRunChildModeTracker(runChildModeWindow(union.rows), undefined, union.unread).evidence()).mode;
   } catch (error) {
     void error; // An evidence read that throws decides nothing: the work stays in process, as under mode off.

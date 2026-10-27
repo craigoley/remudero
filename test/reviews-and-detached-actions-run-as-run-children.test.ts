@@ -346,6 +346,10 @@ test("W1-T9114: the production host starts a review as a child only where the le
     assert.equal(detachedWorkModeNow(f.stateRoot, () => "off"), "off");
     assert.notEqual(detachedWorkModeNow(f.stateRoot, () => "auto"), "on");
     assert.equal(detachedWorkModeNow(f.stateRoot, () => { throw new Error("policy unreadable"); }), "off");
+    // An evidence read that throws under `auto` decides nothing: the work stays in process.
+    let readAttempts = 0;
+    assert.equal(detachedWorkModeNow(f.stateRoot, () => "auto", () => { readAttempts += 1; throw new Error("ledger union unreadable"); }), "off");
+    assert.equal(readAttempts, 1, "the evidence read was attempted and its failure settled as off");
   } finally { f.cleanup(); }
 });
 
