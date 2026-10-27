@@ -14,7 +14,10 @@ import { join, sep } from "node:path";
 import { test } from "node:test";
 // @ts-ignore the executable .mjs module has no declaration file.
 import { LOCATION_RELATIVE_ERE, aliasFor, hasLocationRelativeSpecifier, isTransientTestPath, main as codemodMain, rewriteSource } from "#scripts/test-location-codemod.mjs";
+import { repoRoot } from "#test/helpers/repo-root.js";
 
+// The git repository the run is in: the W1-T10595 flake screen plants violations in a scratch copy and runs
+// this file there, so the census below must read that repository, not this file's own checkout.
 const ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
 
 function git(args: string[]): string {
@@ -36,7 +39,7 @@ const imp = (spec: string, name = "x"): string => `import { ${name} } from ${JSO
 const dyn = (spec: string): string => `const m = await import(${JSON.stringify(spec)});`;
 
 function aliasFixtureRoot(): string {
-  return mkdtempSync(join(tmpdir(), "rmd-alias-fixture-"));
+  return realpathSync(mkdtempSync(join(tmpdir(), "rmd-alias-fixture-")));
 }
 
 function populateAliasPackage(dir: string): void {
@@ -106,6 +109,19 @@ test("W1-T9864: location-relative test files never rise above the merge base", (
   }
   const atBase = gitGrepFiles([], [base, "--", "test"]).length;
   const atHead = new Set(gitGrepFiles(["--untracked"], ["--", "test"]).filter((f) => !isTransientTestPath(f))).size;
+  // W1-T9865: the batch-1 folders' representative tests were rewritten, so they must stay location-free —
+  // a state only the codemod's output has, which the merge base does not.
+  const rewrittenAtBatch1 = [
+    "a-better-drafter-retries-the-proposals-a-worse-one-failed",
+    "a-capped-pr-exhausts-repair-before-it-reaches-a-human",
+    "a-cash-worker-reaches-the-web-only-through-an-attributed-search",
+    "a-cancelled-run-is-not-a-failing-check",
+    "a-base-probe-that-contradicts-mains-green-ci-parks-no-pr",
+    "a-blocked-task-with-no-disposition-is-reported",
+  ].map((name) => `test/${name}.test.ts`);
+  // The representative files live in this file's checkout; the screen's scratch repository holds only its plants.
+  const stillRelative = rewrittenAtBatch1.filter((f) => hasLocationRelativeSpecifier(readFileSync(join(repoRoot(), f), "utf8")));
+  assert.deepEqual(stillRelative, [], "the batch-1 representative tests import through the aliases");
   assert.ok(
     atHead <= atBase,
     `${atHead} test files carry a location-relative specifier at HEAD, ${atBase} at merge base ${base.slice(0, 9)} — ` +

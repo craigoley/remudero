@@ -34,7 +34,7 @@
     - claim: Docker bind sources belong to the daemon host; readonly is explicit and default --mount refuses a missing source rather than creating a directory
       src: https://docs.docker.com/engine/storage/bind-mounts/
     - claim: The maintained default mode reader currently reads the repository-layout default and collapses unreadable legacy text to undefined
-      src: src/lib/instance-mode.ts
+      src: https://github.com/craigoley/remudero/blob/c8b43c9fff993c98dff0971e5b83ddb0a4057af9/src/lib/instance-mode.ts
   files: [src/lib/deployer.ts, src/lib/instance-mode.ts, src/lib/config-schema.ts, deploy/recycle-container.sh, deploy/serve-container.sh, test/deployer.test.ts, test/shadow-instance-safety.test.ts, test/recycle-container.test.ts, test/serve-launch-uniformity.test.ts, test/env-var-registry.test.ts, docs/instance-registry-selection-contract.md, src/lib/instance-registry-selection.ts, src/cli/commands/daemon.ts, src/cli/commands/run-task-verb.ts, src/run-task.ts, src/lib/worker-provider.ts, src/lib/worker.ts, test/one-registry-for-the-fleet.test.ts]
   rationale: |
     The operator approved this exact eleven-existing-file scope, USD 12, high/span,
@@ -160,4 +160,4 @@
     reasons:
       - "Operator explicitly approved exactly eighteen existing paths, USD 12/high/span and four behavioral proofs for dormant source-only compatibility; legacy defaults, opt-in SHADOW and owner override preserved. No live selection, automatic image/recycle release, worker stop, schedule, gate waiver or cutover is authorized."
     judged_at: "2026-10-25T14:17:09.765Z"
-    pin: "72d7b3481226458c2fadfbfc398db9bb3ab6ead8e8b483fa18be1d91888fd6d8"
+    pin: "c3dbe72c29572068582a18126f763c9e2da4189814e067102338e6e7c2244e79"

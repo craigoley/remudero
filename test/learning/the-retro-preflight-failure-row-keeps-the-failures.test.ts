@@ -141,3 +141,40 @@ test("retro excerpt never shortens complete failing blocks that fit together", a
   assert.doesNotMatch(out, /failure block omitted/);
   assert.ok(out.endsWith(summary));
 });
+
+test("a no-assertion preflight timeout keeps setup and final progress in both byte shares", async (t) => {
+  const start = "# setup before the selected suites\n";
+  const end = "# Subtest: final-started-case\n";
+  const errStart = "stderr setup\n";
+  const errEnd = "final stderr diagnostic\n";
+  const { out, err, failure, prompts, result } = await retained(t,
+    start + "🙂".repeat(30_000) + end,
+    errStart + "é".repeat(30_000) + errEnd,
+    Object.assign(new Error("fixture timeout"), { code: "ETIMEDOUT" }));
+  assert.ok(out.startsWith(start));
+  assert.ok(out.endsWith(end));
+  assert.ok(err.startsWith(errStart));
+  assert.ok(err.endsWith(errEnd));
+  assert.match(out, /\[\.\.\. middle output omitted \.\.\.\]/);
+  assert.doesNotMatch(out + err, /\uFFFD/);
+  assert.ok(Buffer.byteLength(err) <= Math.floor(RETRO_PREFLIGHT_CAPTURE_BYTES / 3));
+  assert.deepEqual(failure.failing_tests, []);
+  assert.equal(failure.has_summary, false);
+  assert.equal(failure.exit_class, "process_timeout");
+  assert.deepEqual(prompts, []);
+  assert.equal(result.repaired, false);
+});
+
+test("a bounded preflight with no named failure retains its complete summary tail", async (t) => {
+  const passingSummary = "1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n";
+  const { out, err, failure, prompts } = await retained(t,
+    prelude + passingSummary, "small stderr remains intact",
+    Object.assign(new Error("fixture timeout"), { code: "ETIMEDOUT" }));
+  assert.ok(out.startsWith("# successful passing suite\n"));
+  assert.ok(out.endsWith(passingSummary));
+  assert.equal(err, "small stderr remains intact");
+  assert.deepEqual(failure.failing_tests, []);
+  assert.equal(failure.has_summary, true);
+  assert.equal(failure.exit_class, "process_timeout");
+  assert.deepEqual(prompts, []);
+});

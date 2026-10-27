@@ -1,0 +1,53 @@
+- id: W1-T10789
+  title: Carry an already-recorded grill answer past an unchanged older queued capture
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  author_class: machine
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  origin: console-followup:queued-grill-continuation-20261027
+  plan_refs:
+    - W1-T8511
+    - W1-T9734
+    - W1-T10625
+  files:
+    - src/lib/escalation-answers.ts
+    - src/lib/panel-graph.ts
+    - src/lib/feedback.ts
+    - test/a-reply-on-a-feedback-grill-issue-answers-the-feedback-record.test.ts
+    - test/feedback-thread-survives-a-reply.test.ts
+  rationale: |
+    The operator's existing Inbox/read-model follow-up owner supplied one factual answer to GRILL14638. Native evidence records that exact comment as configured-operator and recorded_to_question_store=true at01:10:46Z. The ordinary bookkeeping PR14639 is API-confirmed merged a4eada9c0a910853980b58dc8d44a65bd8d5cbb6 with73 settled green checks. The pending queue nevertheless retains the original fb-1793052066234-d58154 capture at new while origin/main now carries grilling. Two complete landing sweeps explicitly refuse the earlier new status rather than moving upstream backward. applyGrilledFeedbackAnswer returns on that queued non-grilling status before reading the canonical grilling record, so question ingestion does not create a feedback continuation.
+    An isolated two-case real-Git diagnostic on unmodified source equal observed main a4fafe47d392dd6a190ea19cffcdfc956f63ffb8 has one passing ordinary canonical-grilling continuation and one failing unchanged-older-queued-capture case. The latter still records the question answer but creates no reply. Native resource admission, one test slot and complete physical-file TAP capture were retained. This is a demonstrated narrow seam, not a diagnosis of every stale Inbox or a reason to discard pending work.
+    Current main and all20 open Core head trees were physically swept with per-head merge bases and a long-lived plan control. No novel equivalent task or answer-handler change was found. PR14363 touches adjacent panel-graph code; its handler is unchanged. W1-T8511 introduced the existing reply writer, while W1-T9734 converts inline capture to staged capture and does not settle this lifecycle precedence. W1-T10625's owner retains its separately approved hand-route implementation. The CI/queue owner positively confirms no competing queued-grill repair. Coordinate these existing owners and preserve their changes.
+    The native allocator actually reserved W1-T10789 for codex/file-inbox-grill-continuation-20261027 at anchor64b03ea7cd3995a37dc6f3809e53597a02ced176, advancing past other held IDs. This task is machine-authored and needs a genuine exact-record judgment before automatic dispatch. Source implementation remains a separate PR.
+  design: |
+    Qualify one captured feedback target using the existing off-loop origin/main read, the exact pending capture and the already accepted answer's stable submission identity. A canonical grilling record may advance an older queued new capture only when the complete immutable capture identity and content agree and there is no newer queued decision or competing reply. Unknown, unreadable, changed, foreign or contradictory evidence stays refused with an explicit existing diagnostic outcome. A queued answered/rejected or otherwise advanced decision must never be overwritten or revived.
+    Keep captureFeedbackReply as the one writer. Carry the qualified canonical target into its existing status update so proposal_pr, summary, source lineage, original text, attachments and all other metadata survive the answered transition. Recheck the relevant pending-record identity immediately before capture; drift must refuse before creating a new reply. Keep current operator recognition, scope, route checks, comment-key deduplication and legacy callers intact. No new synchronous Git or network work on the daemon loop, and no second reply writer.
+    Do not clear, delete or rewrite the live queue as a repair shortcut, replay old answers, reland a lifecycle regression, synthesize an operator answer or consider a question-store ACK proof that implementation happened. A later normal pass may consume the already accepted exact answer once after the code is reviewed and adopted. Preserve all genuine human holds and the normal landing workflow.
+    Extend the two existing physical suites. Use actual private Git/main and queue fixtures, with ordinary and legacy positive controls; old unchanged new capture plus canonical grilling must create exactly one continuation, retaining canonical metadata and history. Cover repeated passes, pending decision changes, changed raw/attachments/lineage, missing or unreadable main, advanced/rejected/answered targets, a competing reply, and a queue fingerprint changing between qualification and capture. Invalid cases must leave original queue bytes and source history intact and create no reply. Delete the source correction, observe the targeted regression fail, restore it and pass. Preserve all existing assertions, whole-file tests, source-positive coverage, committed author entry, stored executable proofs, hosted checks, governed review and protected merge.
+    This scope changes no routing capability, provider, budget, service, deployment setting, CI infrastructure or Azure memory policy. Actual answer-to-feedback continuation, task filing/build and signed-in behavior are distinct verification steps. This filing does not claim that the read-mark route source task is already filed or that every Inbox item requires a human.
+  acceptance:
+    - claim: A canonical grilling target advances an unchanged older capture once
+      proof: 'unit test: W1-T10789: canonical grilling advances an unchanged older capture exactly once'
+    - claim: Stale or contradictory evidence preserves the pending work
+      proof: 'unit test: W1-T10789: stale or contradictory reply evidence preserves the pending record'
+    - claim: Existing canonical metadata survives the ordinary reply writer
+      proof: 'unit test: W1-T10789: continuation retains the canonical proposal and source metadata'
+    - claim: Current queued decisions and legacy callers retain their existing checks
+      proof: 'unit test: W1-T10789: current queued decisions and legacy reply callers keep their guards'
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The description states this is lifecycle reconciliation for an already-recognized answer, with no new execution or access authority, and it touches no secrets, auth, deletion, or merge/deploy policy."
+      - "The acceptance criteria are four unit tests, so the finding can be verified from what is shown. It also states that pending evidence is preserved and that contradictory or advanced evidence refuses rather than writes."
+      - "The declared files are five existing feedback, reply and test files, and the plan refs W1-T8511, W1-T9734 and W1-T10625 are named for coordination. The family track record is 7 merged, 5 operator-approved and 0 declined."
+    judged_at: "2026-10-27T01:58:57.969Z"
+    pin: "91f496909aca51f2ce38a3c9434594e2d98182588ebfbb44f13fbb2a9d68ed5d"

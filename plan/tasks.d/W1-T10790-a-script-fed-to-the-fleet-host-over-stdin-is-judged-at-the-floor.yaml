@@ -1,0 +1,100 @@
+- id: W1-T10790
+  title: "A SCRIPT FED TO THE FLEET HOST OVER STDIN IS JUDGED AT THE FLOOR — deny-floor rule 16 judges the ssh command line and a heredoc body, but never reads a local file sent as stdin (`ssh remudero 'docker exec -i <c> sh -s' < script.sh`) or a node/python body, so on 2026-10-26 an `rm -f` of git lock files inside fleet containers ran unchecked minutes before the same `rm -f` inline was refused"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 5.00
+  risk: medium  # one concern: rule 16's host mode also reads the stdin body a fleet-host interpreter will run; one hook file and its own new test file
+  band_meaning: span
+  priority: 2  # a tripwire hole on the READ-ONLY fleet host; it has already let a destructive command through once
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-26: a session ran `ssh remudero 'docker exec -i <c> sh -s <arg>' < local-script.sh` whose script removed git lock files inside fleet containers; the inline `rm -f` was refused minutes later"
+  plan_refs: [W1-T9238, W1-T5670]
+  files:
+    - hooks/deny-floor.sh
+    - test/ci/a-script-fed-to-the-fleet-host-over-stdin-is-judged-at-the-floor.test.ts
+  rationale: |
+    REPRODUCED 2026-10-27 on origin/main a4fafe47d by piping the PreToolUse JSON the Bash tool sends into
+    `bash hooks/deny-floor.sh`, the way test/the-house-rules-are-refused-at-the-floor.test.ts drives it. The script
+    file held one line, `rm -f /home/node/x/.git/index.lock`. (This ran under the Mac's bash 3.2; only CI's bash 5
+    shards prove the hook, see design 6.)
+      - `ssh remudero 'docker exec -i c sh -s a' < <file>`                          exit 0 (runs)
+      - `cat <file> | ssh remudero 'docker exec -i c sh -s'`                        exit 0 (runs)
+      - `ssh remudero 'docker exec -i c node -' <<'EOF'` + `require('fs').rmSync(...)` exit 0 (runs)
+      - `ssh remudero 'docker exec -i c bash -s' < <a path that does not exist>`     exit 0 (runs)
+      - `ssh remudero 'rm -f /x/.git/index.lock'` (control)                          exit 2, "destructive process control sent to the fleet host"
+      - `ssh remudero 'docker exec -i c sh -s a' <<'EOF'` + `rm -f ...` (control)    exit 2, the same refusal
+    The last control shows that a SHELL body in a HEREDOC is already judged. The hole is narrower than "stdin":
+    a body from a local file, a body piped from `cat <file>`, a node or python body, and a body the hook cannot read.
+
+    WHY. This was READ on origin/main by symbol, not by line number. In rule 16 (`hr_ssh`):
+    - The word loop after the `remudero` destination skips `'<'` and its target (`i=$((i + 1))`) and the glued
+      `'<'*` form, because they are local redirects. So the file the remote interpreter will run is never opened.
+    - A pipe into ssh hands the previous segment's WORDS (`cat <file>`) to `hr_check`, not the file's text.
+    - `hr_check` parses every body as shell. A node or python body has no shell program word to judge, so
+      `fs.rmSync`, `process.kill` and `os.remove` pass.
+
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d on origin/main for deny-floor shards that mention stdin or heredoc.
+    W1-T5670 (queued) stops a heredoc body that NAMES gh from counting as a gh call. That is the gh-floor direction,
+    and it shares only the file. W1-T9238 (merged) added host-write redirects INSIDE the remote command. No shard
+    reads a stdin body. The titles of the 23 open PRs were read on 2026-10-27. None names rule 16; #14654 is pre-push only.
+  design: |
+    1. WHICH BODIES ARE READ. A body is read only when ssh's target is the fleet host (`hr_ssh` resolved
+       `remudero`) AND the remote command consumes stdin as a program. That is true in each of these cases:
+       - the remote command is empty (a login shell reads stdin);
+       - the command, after `docker exec` and its options (with `-i`), ends at `sh`, `bash`, `dash`, `zsh` or `ksh`
+         with `-s` or with no `-c` and no script operand;
+       - the command ends at `node` with `-` or no script;
+       - the command ends at `python`, `python3` or a `python3.<n>` with `-` or no script.
+       A data consumer (`ssh remudero 'wc -l' < file`) is not judged as a program. Its stdin is data, and reading it
+       as shell would refuse innocent text.
+    2. WHERE THE BODY COMES FROM. There are three sources, judged identically:
+       - the heredoc body hr_tokens already attaches;
+       - the target of a `<` redirect on the ssh segment (spaced or glued). The hook resolves it on the Mac:
+         `~/` becomes $HOME, a relative path is taken from the tool call's `cwd`, and the hook reads it;
+       - a pipe whose previous segment is `cat <one local file>`.
+       A here-string keeps today's handling.
+    3. HOW IT IS JUDGED.
+       - A shell body goes through `hr_check "<body>" host`. These are the same host-write (W1-T9238) and
+         process-control rules an inline command gets, and the same refusal text.
+       - A node or python body is scanned for the host-write and process-control CALLS of that language. Node:
+         fs write, append, unlink, rm, rmdir, rename, mkdir, copy and createWriteStream (sync and promise forms),
+         process.kill, and child_process exec, execSync, spawn and spawnSync. Python: os.remove, unlink, rmdir,
+         kill and rename, shutil.rmtree and move, open(...) in a w, a or x mode, and subprocess.
+       - A string literal handed to child_process or subprocess is also run through `hr_check ... host`. The
+         refusal names the language and the call.
+    4. FAIL-CLOSED WHEN UNREADABLE. Each of these is refused with the house rule `host`, naming why it could not be
+       read: the body source does not exist or is not a regular readable file; the source holds a `$`/backtick
+       expansion the hook cannot resolve; the pipe producer is anything other than `cat <file>`; or the interpreter
+       is fed stdin but is not one design 1 can judge. Nothing that is not sent to the fleet host is read or refused.
+    5. READ-ONLY BODIES RUN. Each of these still exits 0: a shell body of `ps`, `docker ps`, `cat` and `ls`; a node
+       probe that reads a file and prints booleans (`fs.existsSync`, `fs.readFileSync`, `console.log`); and a python
+       probe that reads and prints. RMD_HOUSE_RULE_OVERRIDE=host keeps working, as for every other host refusal.
+    6. BASH 5 IS THE PROOF. The Mac has bash 3.2. The hook runs under `set -u`, so every new array is initialised
+       (`x=()`). The cases go in a new suite, test/ci/a-script-fed-to-the-fleet-host-over-stdin-is-judged-at-the-floor.test.ts,
+       in the folder `rmd test-place` computes (ci/, as for both existing hook suites). CI's bash 5 shards run it.
+       Extending test/a-host-write-by-redirect-is-refused-at-the-floor.test.ts was considered, but lint-plan Rule 19
+       counts that file as a second concern. Each case writes its script into the test's own temp dir and drives the
+       hook the way that file's `run` helper does. Every refused shape is paired with an allowed near-miss, so
+       deleting the rule fails both.
+  acceptance:
+    - claim: "a shell body fed to the fleet host from a local file by a < redirect or by cat into the pipe is judged by the host rules, and an rm -f in it is refused"
+      proof: 'grep: test("W1-T10790: a shell script fed to the fleet host from a local file is judged by the host rules" in test/ci/a-script-fed-to-the-fleet-host-over-stdin-is-judged-at-the-floor.test.ts'
+    - claim: "a node or python body fed to the fleet host by heredoc or by file is refused when it calls a file-write or process-control API"
+      proof: 'grep: test("W1-T10790: a node or python body fed to the fleet host is refused when it writes or kills" in test/ci/a-script-fed-to-the-fleet-host-over-stdin-is-judged-at-the-floor.test.ts'
+    - claim: "a stdin body for the fleet host that cannot be read (missing file, unresolved expansion, unknown producer or interpreter) is refused, fail-closed"
+      proof: 'grep: test("W1-T10790: an unreadable stdin body sent to the fleet host is refused" in test/ci/a-script-fed-to-the-fleet-host-over-stdin-is-judged-at-the-floor.test.ts'
+    - claim: "read-only stdin bodies to the fleet host still run, and a file fed to a data consumer or to a local interpreter is not judged"
+      proof: 'grep: test("W1-T10790: read-only stdin probes and stdin data still run" in test/ci/a-script-fed-to-the-fleet-host-over-stdin-is-judged-at-the-floor.test.ts'
+  falsifier: |
+    At base the first three cases fail: every shape in them exits 0. The fourth passes only beside its refused pair.
+    - Keep skipping the `<` target in `hr_ssh`: the file case of the first test exits 0.
+    - Judge a node or python body as shell: `fs.rmSync` exits 0 and the second test fails.
+    - Treat an unreadable file as an empty body: the third test fails.
+    - Read every `<` target as a program (`ssh remudero 'wc -l' < f` with `rm -f` text): the fourth test fails.
+    - Flag `fs.readFileSync` as a write: the node probe is refused and the fourth test fails.
+    GUARDS that held at base and must still hold: every case in test/the-house-rules-are-refused-at-the-floor.test.ts
+    and every case in test/a-host-write-by-redirect-is-refused-at-the-floor.test.ts.

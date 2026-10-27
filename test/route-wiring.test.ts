@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -305,12 +305,22 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([
+  // Assembled HTTP, distinct stores and durable decisions: test/console-api/serve/improvement-thread-route.test.ts.
+  "POST /v1/improvements/threads",
+  "POST /v1/improvements/threads/draft",
+  "POST /v1/improvements/threads/file",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts, W1-T10612 identity/mount test.
   "POST /v1/products",
+  // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts invokes the
+  // production research adapter through a disposable child process after actor verification,
+  // including disabled-provider/toolchain refusals and recovery for the same objective.
+  "POST /v1/products/research",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts and the production-assembly test below (W1-T10613).
   "POST /v1/products/repository",
   // Assembled HTTP proof over the real default Vercel transport: test/console-api/serve/product-routes.test.ts (W1-T10616).
   "POST /v1/products/deployment",
+  // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts and the production-assembly test below (W1-T10615).
+  "POST /v1/products/build",
   "POST /v1/control/assistant-action",
   "POST /v1/control/stop",
   "POST /v1/control/resume",
@@ -522,6 +532,24 @@ test("POST /v1/products persists only the verified operator's brief under the fl
   }, true);
 });
 
+test("POST /v1/products/research records research evidence for the verified operator under the fleet root", async () => {
+  await withProductionServer(async (h) => {
+    const headers = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json",
+      [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+    const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify({
+      version: "product-intent-v1", requestId: "wiring-research-0001", expectedRevision: 0, brief: { idea: "private research wiring fixture" } }) });
+    const { receipt } = await saved.json() as { receipt: { productId: string } };
+    const command = { version: "product-research-v1", requestId: "wiring-research-0002", productId: receipt.productId, expectedObjectiveRevision: 1 };
+    assert.equal((await post(h.base, "/v1/products/research", command)).status, 403);
+    const run = await fetch(`${h.base}/v1/products/research`, { method: "POST", headers, body: JSON.stringify(command) });
+    assert.equal(run.status, 200);
+    assert.equal((await run.json()).run.outcome, "unavailable");
+    assert.ok(existsSync(join(h.fleetRoot, "state/products/v1/research")));
+    assert.ok(!existsSync(join(h.questionsRoot, "state/products")));
+    assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "research evidence preserves the ledger");
+  }, true);
+});
+
 test("W1-T10613: POST /v1/products/repository is high tier, confirmed, and journals under the fleet root", async () => {
   const shim = ghShim([{ when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: 1432832754, name: "wreckterra",
     owner: { login: "craigoley" }, private: false, default_branch: "main" }) }]);
@@ -553,6 +581,59 @@ test("W1-T10613: POST /v1/products/repository is high tier, confirmed, and journ
       assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "adoption preserves the ledger");
     }, true, true);
   } finally { process.env.PATH = originalPath; }
+});
+
+test("W1-T10726: GET /v1/products/repository-preview is verified-operator read-only over the fleet root", async () => {
+  const shim = ghShim([{ when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: 1432832754, name: "wreckterra",
+    owner: { login: "craigoley" }, private: false, default_branch: "main" }) }, { when: "api user", stdout: JSON.stringify({ login: "craigoley" }) }]);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  try {
+    await withProductionServer(async (h) => {
+      const headers: Record<string, string> = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json",
+        [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+      const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify({ version: "product-intent-v1",
+        requestId: "wiring-preview-0001", expectedRevision: 0, brief: { idea: "private preview wiring fixture" } }) });
+      const { receipt } = await saved.json() as { receipt: { productId: string } };
+      const url = `${h.base}/v1/products/repository-preview?id=${receipt.productId}&action=adopt&owner=craigoley&name=wreckterra`;
+      const anonymous = await fetch(url, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+      assert.equal(anonymous.status, 403, "a read grant without a verified operator previews nothing");
+      const before = readdirSync(h.fleetRoot, { recursive: true }).sort();
+      const preview = await fetch(url, { headers: { authorization: `Bearer ${READ_TOKEN}`, [OPERATOR_SESSION_HEADER]: h.operatorSession! } });
+      assert.equal(preview.status, 200);
+      assert.equal(preview.headers.get("cache-control"), "private, no-store");
+      const body = await preview.json() as { state: string; repository: { id: number } };
+      assert.equal(body.state, "ready");
+      assert.equal(body.repository.id, 1432832754);
+      assert.deepEqual(readdirSync(h.fleetRoot, { recursive: true }).sort(), before, "preview writes nothing under the fleet root");
+      assert.ok(!shim.calls().some((call) => call.includes("-X POST")), "preview makes no create call");
+      assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "preview preserves the ledger");
+    }, true);
+  } finally { process.env.PATH = originalPath; }
+});
+
+test("W1-T10615: POST /v1/products/build is high tier, confirmed, and reads the product from the fleet root", async () => {
+  await withProductionServer(async (h) => {
+    const headers: Record<string, string> = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json",
+      [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+    const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify({ version: "product-intent-v1",
+      requestId: "wiring-product-0003", expectedRevision: 0, brief: { idea: "private build wiring fixture" } }) });
+    const { receipt } = await saved.json() as { receipt: { productId: string } };
+    const payload = JSON.stringify({ version: "product-build-v1", requestId: "wiring-build-000001", productId: receipt.productId,
+      planEvidenceId: "plan-approved-1", taskId: "W9-T1", expectedRevision: 1, expectedObjectiveRevision: 1 });
+    const refused = await fetch(`${h.base}/v1/products/build`, { method: "POST", headers, body: payload });
+    assert.equal(refused.status, 403);
+    assert.equal((await refused.json()).error, "confirm_nonce_required");
+    const confirmed = await fetch(`${h.base}/v1/confirm`, { method: "POST", headers,
+      body: JSON.stringify({ method: "POST", path: "/v1/products/build", payload }) });
+    assert.equal(confirmed.status, 200);
+    const { nonce } = await confirmed.json() as { nonce: string };
+    const started = await fetch(`${h.base}/v1/products/build`, { method: "POST", headers: { ...headers, "x-confirm-nonce": nonce }, body: payload });
+    assert.equal(started.status, 409, "the production handler found the product under the fleet root and refused: no repository yet");
+    assert.equal((await started.json()).error, "repository_missing");
+    assert.ok(!existsSync(join(h.fleetRoot, "state", "KICK_REQUESTED-wreckterra:W9-T1")), "a refusal writes no marker");
+    assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "a refused build preserves the ledger");
+  }, true, true);
 });
 
 test("POST /v1/control/assistant-action binds a verified operator to the fleet root and ledger", async () => {

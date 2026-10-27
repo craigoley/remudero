@@ -705,8 +705,10 @@ test("Codex model override fails closed when the account does not expose it", ()
   assert.match(selected.detail ?? "", /not available/);
 });
 
-test("Codex capacity RPC discovers models and selects the matching independent bucket", async () => {
+test("Codex capacity RPC discovers models and selects the matching independent bucket", async (t) => {
   clearCodexCapacityCache();
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-capacity-owned-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -722,14 +724,14 @@ test("Codex capacity RPC discovers models and selects the matching independent b
     }
   });
   const selected = await readCodexCapacity(
-    { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+    { claudeBin: "/unused", root, workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
     { requestedModel: "haiku", requestedEffort: "low", spawn: () => proc as never, capabilities: CAPABILITY_FIXTURE },
   );
   assert.equal(selected.model, "gpt-5.3-codex-spark");
   assert.deepEqual(requests, ["initialize", "initialized", "account/rateLimits/read", "model/list"]);
 
   const cached = await readCodexCapacity(
-    { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+    { claudeBin: "/unused", root, workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
     { requestedModel: "haiku", requestedEffort: "low", spawn: () => { throw new Error("cache miss"); }, capabilities: CAPABILITY_FIXTURE },
   );
   assert.equal(cached.model, selected.model);
@@ -740,7 +742,7 @@ test("Codex capacity RPC discovers models and selects the matching independent b
     if (request.id === 3) stdout.write(`${JSON.stringify({ id: 3, result: { data: visibleCodexModels, nextCursor: null } })}\n`);
   });
   const refreshed = await readCodexCapacity(
-    { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+    { claudeBin: "/unused", root, workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
     {
       requestedModel: "haiku",
       requestedEffort: "low",
@@ -758,7 +760,7 @@ test("Codex capacity RPC discovers models and selects the matching independent b
     if (request.id === 3) stdout.write(`${JSON.stringify({ id: 3, result: { data: visibleCodexModels, nextCursor: null } })}\n`);
   });
   const disappeared = await readCodexCapacity(
-    { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+    { claudeBin: "/unused", root, workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
     {
       forceRefresh: true,
       selectedModel: "gpt-no-longer-visible",

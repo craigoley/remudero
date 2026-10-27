@@ -2279,7 +2279,8 @@ class CodexJsonlAccumulator {
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
   ) as Record<CodexEventByteKind, number>;
 
-  constructor(private nowMs: number, private readonly pendingFile?: string, private readonly observeToolLineage?: (raw: unknown) => void) {}
+  constructor(private nowMs: number, private readonly pendingFile?: string, private readonly observeToolLineage?: (raw: unknown) => void,
+    private readonly observeMessage?: (text: string, tsMs: number) => void) {}
 
   push(chunk: string, nowMs = this.nowMs): void {
     this.nowMs = nowMs;
@@ -2417,6 +2418,7 @@ class CodexJsonlAccumulator {
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
       this.blocks.push(event.item.text);
       this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
+      this.observeMessage?.(event.item.text, this.nowMs);
     }
     if (event.type === "turn.completed") {
       this.turnInProgress = false;
@@ -5408,7 +5410,8 @@ async function spawnCodexWorkerInPrivateTemp(
   const startedAt = Date.now();
   const toolLineage = createWorkerToolLineage({ provider: "codex", root: config.root, runId: args.runId, taskId: args.taskId });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
-  const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"), raw => observeWorkerToolLineage(toolLineage, raw));
+  const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"), raw => observeWorkerToolLineage(toolLineage, raw),
+    (text, tsMs) => args.streamObserver?.({ kind: "message", tsMs, text }));
   const stdoutDecoder = new StringDecoder("utf8");
   let stdoutBytes = 0;
   const stderrRetainer = new CodexStderrRetainer();

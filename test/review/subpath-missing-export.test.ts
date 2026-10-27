@@ -187,3 +187,26 @@ test("subpath package metadata keeps its exact byte bound with healthy controls"
   f.put(f.head, "package.json", text);
   assert.match(String(await baseLacksPrAddedExports(f.output(), f.base, f.head)), /base lacks export/);
 });
+
+
+test("an aliased proof root attributes real Node output only inside its canonical base", async t => {
+  const f = fixture(t);
+  const source = 'import {test} from "node:test";import {added} from "#src/a.js";test("root alias export",()=>{if(added!==3)throw Error("wrong export")});\n';
+  for (const root of [f.base, f.head]) f.put(root, "test/probe.test.ts", source);
+  const baseAlias = join(f.dir, "base-alias"), headAlias = join(f.dir, "head-alias");
+  symlinkSync(f.base, baseAlias, "dir"); symlinkSync(f.head, headAlias, "dir");
+  const env: NodeJS.ProcessEnv = { ...process.env, TSX_DISABLE_CACHE: "1" };
+  delete env.NODE_TEST_CONTEXT;
+  const run = (cwd: string) => spawnSync(process.execPath, ["--import", join(process.cwd(), "node_modules/tsx/dist/loader.mjs"),
+    "--test", "--test-reporter=tap", "test/probe.test.ts"], { cwd, env, encoding: "utf8", timeout: 10000, maxBuffer: 1024 ** 2 });
+  const head = run(headAlias), base = run(baseAlias);
+  assert.equal(head.status, 0, head.stdout + head.stderr);
+  assert.equal(base.status, 1, base.stdout + base.stderr);
+  assert.match(base.stdout, /does not provide an export named 'added'/);
+  assert.match(String(await baseLacksPrAddedExports(base.stdout + base.stderr, baseAlias, headAlias)), /base lacks export\(s\) added/);
+  const foreign = realpathSync(f.base) + "-outside/test/probe.test.ts";
+  const escaped = `# ${foreign}:1\n# SyntaxError: The requested module '#src/a.js' does not provide an export named 'added'\n`;
+  assert.equal(await baseLacksPrAddedExports(escaped, baseAlias, headAlias), undefined);
+  rmSync(baseAlias); symlinkSync(baseAlias, baseAlias);
+  assert.equal(await baseLacksPrAddedExports(base.stdout + base.stderr, baseAlias, headAlias), undefined, "an unresolvable trusted root stays unknown");
+});

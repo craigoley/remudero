@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import { createHash, randomBytes } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { feedbackLineageAuthority, observeFeedbackAdmission } from "./authority.js";
 import { fixedClock, systemClock } from "./clock.js";
 import {
@@ -1022,6 +1023,49 @@ export function listFeedback(root: string, opts: { status?: FeedbackStatus } = {
   return opts.status ? entries.filter((e) => e.status === opts.status) : entries;
 }
 
+/** A private, already-read canonical parent for an unchanged older capture. This is source
+ * evidence for the existing reply writer, never authority supplied by an HTTP client. */
+export interface CanonicalGrillContinuation {
+  root: string;
+  inboxRoot: string;
+  pendingFingerprint: string;
+  canonicalFingerprint: string;
+  canonical: FeedbackEntry;
+}
+
+/** W1-T10789: permit only the demonstrated new -> canonical grilling precedence. Compare
+ * every captured field, including unknown lineage fields; only the four existing lifecycle
+ * fields may differ. A newer queued decision is never a candidate for this continuation. */
+export function qualifyCanonicalGrillContinuation(
+  root: string,
+  inboxRoot: string,
+  id: string,
+  pending: Record<string, unknown> | undefined,
+  canonical: unknown,
+): CanonicalGrillContinuation | undefined {
+  const record = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  const captured = (value: unknown): value is Record<string, unknown> => record(value)
+    && value.id === id && typeof value.ts === "string" && Number.isFinite(Date.parse(value.ts))
+    && typeof value.raw === "string" && typeof value.origin === "string"
+    && Array.isArray(value.attachments) && value.attachments.every(a => typeof a === "string");
+  if (!captured(pending) || !captured(canonical) || pending.status !== "new" || canonical.status !== "grilling"
+    || pending.answered_by != null || canonical.answered_by != null
+    || pending.proposal_pr != null || pending.summary != null) return undefined;
+  const immutable = ({ status: _status, proposal_pr: _proposal, summary: _summary,
+    answered_by: _answer, ...rest }: Record<string, unknown>) => rest;
+  if (!isDeepStrictEqual(immutable(pending), immutable(canonical))) return undefined;
+  // Both values came from YAML. Refuse non-JSON values rather than silently losing metadata
+  // when copying the captured evidence (cycles, NaN, undefined properties, dates, etc.).
+  const pendingJson = JSON.stringify(pending), canonicalJson = JSON.stringify(canonical);
+  if (pendingJson.length > 128 * 1024 || canonicalJson.length > 128 * 1024) return undefined;
+  const copied = JSON.parse(canonicalJson);
+  if (!isDeepStrictEqual(JSON.parse(pendingJson), pending) || !isDeepStrictEqual(copied, canonical)) return undefined;
+  return { root: resolve(root), inboxRoot: resolve(inboxRoot),
+    pendingFingerprint: createHash("sha256").update(pendingJson).digest("hex"),
+    canonicalFingerprint: createHash("sha256").update(canonicalJson).digest("hex"), canonical: copied as FeedbackEntry };
+}
+
 /** Move a feedback entry to a new lifecycle status (the write primitive `rmd triage`, W1-T41,
  * and the gate use). Rejects an unknown status; leaves which transition is legal to the caller.
  *
@@ -1042,6 +1086,9 @@ export function setFeedbackStatus(
      * `buildSubmitFeedbackRoute` in the same call that moves a `grilling` target to
      * `status: "answered"`. `undefined` leaves whatever this entry already had. */
     answeredBy?: string | null;
+    /** Internal W1-T10789 continuation only. Its caller rechecks the pending capture immediately
+     * before creating the reply; this carries the complete canonical metadata into that same writer. */
+    canonicalBase?: FeedbackEntry;
   } = {},
 ): FeedbackEntry {
   if (!(FEEDBACK_STATUSES as readonly string[]).includes(status)) {
@@ -1049,7 +1096,11 @@ export function setFeedbackStatus(
   }
   // W1-T5628: a queued record is newer than the checkout, and a console capture exists only there.
   const queued = opts.land?.stateRoot === undefined ? undefined : readQueuedFeedbackRecords(opts.land.stateRoot).get(feedbackEntryRepoPath(id));
-  const entry = (queued as unknown as FeedbackEntry | undefined) ?? readFeedbackEntry(root, id);
+  if (opts.canonicalBase !== undefined && (opts.canonicalBase.id !== id
+    || opts.canonicalBase.status !== "grilling" || status !== "answered" || opts.land?.stateRoot === undefined)) {
+    throw new FeedbackError("canonical reply parent must name this grilling entry and its queued answered transition");
+  }
+  const entry = opts.canonicalBase ?? (queued as unknown as FeedbackEntry | undefined) ?? readFeedbackEntry(root, id);
   const updated: FeedbackEntry = {
     ...entry,
     status,

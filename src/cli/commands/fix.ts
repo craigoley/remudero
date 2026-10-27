@@ -7,6 +7,7 @@ import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, r
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
 import { fixRoundBaseHead } from "../../lib/fix-round-base.js";
 import { admittedFixTestPaths } from "../../lib/fix-test-scope.js";
+import { readFixScopeHistory } from "../../lib/fix-scope-history.js";
 import { CONFLICT_REPAIR_HANDOFF_REASON, fixRungInputFields, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, requeuedCheckKeysFromLedger, type JobRequeueOutcome } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync } from "../../lib/github-transport.js";
 import { createHash } from "node:crypto";
@@ -49,6 +50,7 @@ import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
 import { dropDerivativeAggregateCiFailure } from "../../lib/derivative-ci-failure.js";
 import { ghJson, parseReport, foreignTreeStandDownReason, workerTranscript, worktreeAdd, worktreeRemove, type SpawnWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, workerContinuation } from "../../lib/worker.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "../../lib/worktree-git.js";
+import type { MergeConflictEvidence } from "../../lib/merge-state.js";
 import { runStepsAsync, runStepsSync, step } from "../../lib/git-push.js";
 import { FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "../../lib/fix-fence.js";
 import { assertLiveWriteAllowed } from "../../lib/live-write-guard.js";
@@ -2065,6 +2067,37 @@ async function routeFix(
   };
 }
 
+/**
+ * W1-T10787: the conflict the LOCAL scope merge actually produced, read from the unmerged index while the merge is
+ * still pending (before `merge --abort`). Nothing is inferred from a dirty tree: a merge that stopped without unmerged
+ * paths, or whose sides cannot be read, yields `undefined` and the caller keeps its stand-down.
+ */
+async function capturedScopeMergeConflict(
+  git: (args: string[]) => Promise<string>,
+): Promise<MergeConflictEvidence | undefined> {
+  const paths = (await git(["diff", "--name-only", "--diff-filter=U", "-z"])).split("\0").filter(Boolean);
+  if (paths.length === 0) return undefined;
+  const headSha = (await git(["rev-parse", "HEAD"])).trim();
+  const mainSha = (await git(["rev-parse", "refs/remotes/origin/main"])).trim();
+  const base = (await git(["merge-base", headSha, mainSha])).trim();
+  const removed = async (tip: string): Promise<Map<string, number>> => {
+    const out = new Map<string, number>();
+    for (const entry of (await git(["diff", "--numstat", "-z", "--no-renames", base, tip, "--"])).split("\0").filter(Boolean)) {
+      const match = /^([^\t]+)\t([^\t]+)\t([\s\S]+)$/.exec(entry);
+      if (match) out.set(match[3]!, /^\d+$/.test(match[2]!) ? Number(match[2]) : 0);
+    }
+    return out;
+  };
+  const ours = await removed(headSha);
+  const theirs = await removed(mainSha);
+  const evidence: MergeConflictEvidence = {
+    files: paths.map((path) => ({ path, oursDeleted: ours.get(path) ?? 0, theirsDeleted: theirs.get(path) ?? 0 })),
+    oursLog: (await git(["log", "--reverse", "--format=%h %s", `${base}..${headSha}`, "--"])).trim(),
+    theirsLog: (await git(["log", "--reverse", "--format=%h %s", `${base}..${mainSha}`, "--"])).trim(),
+  };
+  return hasCapturedMergeConflictEvidence(evidence) ? evidence : undefined;
+}
+
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   pendingAnswer?: OpenPrView["pendingAnswer"];
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
@@ -2277,8 +2310,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   // for this PR by answering its scope question (unfiledScopeGrant, #14217). Read per round: an answer can land mid-rung.
   const branchTaskId = taskIdFromRunBranch(opts.branch);
   const unfiledScope = opts.taskId === `PR-${prNumber}` && (branchTaskId === undefined || branchTaskId === UNFILED_RUN_SENTINEL);
-  const unfiledGrantNow = () => unfiledScope && prNumber !== undefined
-    ? unfiledScopeGrant((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), { prNumber }) : undefined;
+  const unfiledGrantNow = async () => unfiledScope && prNumber !== undefined
+    ? unfiledScopeGrant(deps.ledgerLines ? deps.ledgerLines() : await readFixScopeHistory(deps.ledgerPath, prNumber), { prNumber }) : undefined;
   const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false): Promise<ScopeAmendmentOutcome> => {
     let outcome: ScopeAmendmentOutcome;
     try {
@@ -3125,7 +3158,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       ...offeredCensusBaselines().map((path) => ({ path, job: "census-precheck" })),
       ...namedReachablePaths,
     ];
-    const unfiledGrant = unfiledGrantNow();
+    let unfiledGrant: Awaited<ReturnType<typeof unfiledGrantNow>>;
+    try { unfiledGrant = await unfiledGrantNow(); }
+    catch (error) {
+      const reason = `scope authority UNKNOWN: ${String(error)}`;
+      deps.log("fix.stood_down", { site: "rung.scope_authority_unreadable", strike: strikes + 1, reason });
+      deps.say(`fix rung: ${reason} — standing down before spending a worker round`);
+      return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+    }
     if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
       let currentDiffFiles: string[] | undefined;
       try {
@@ -3623,6 +3663,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       ["created", "resumed", "branch_update_requested"].includes(String(row.outcome)));
     let scopeMergeStartSha: string | undefined;
     let scopeRecoveryEvidence: string | undefined;
+    let conflictRepairMainSha: string | undefined;
     if (pendingScope && Array.isArray(pendingScope.paths)) {
       const paths = pendingScope.paths as string[];
       const resumed = await amendScope(paths, paths, priorHeadSha);
@@ -3653,11 +3694,23 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         opts.task = { ...opts.task, files: contract.taskDeclaredFiles, acceptance: contract.criteria };
       } catch (error) {
         let reason = `${String(error)}\n${String((error as { stdout?: unknown }).stdout ?? "")}\n${String((error as { stderr?: unknown }).stderr ?? "")}`;
-        if (mergeAttempted && mergeSha === undefined) try {
-          await git(["merge", "--abort"]);
-        } catch (abortError) {
-          const error = String(abortError);
-          reason += `; merge abort: ${error}`;
+        // W1-T10787: the conflict is read while the merge is still pending; an unreadable one is a named gap, never evidence.
+        let conflict: MergeConflictEvidence | undefined;
+        let abortFailed = false;
+        if (mergeAttempted && mergeSha === undefined) {
+          try {
+            conflict = await capturedScopeMergeConflict(git);
+          } catch (captureError) {
+            const error = String(captureError);
+            reason += `; conflict evidence: ${error}`;
+          }
+          try {
+            await git(["merge", "--abort"]);
+          } catch (abortError) {
+            const error = String(abortError);
+            reason += `; merge abort: ${error}`;
+            abortFailed = true;
+          }
         }
         let update: { ok: boolean; error?: string };
         try {
@@ -3672,7 +3725,32 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         }
         deps.log("fix.scope_amendment", { outcome: "branch_update_requested", ...update, reason,
           paths, head_sha: priorHeadSha, pr_number: prNumber, amendment_number: resumed.amendmentNumber, merged_locally: false });
-        return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+        // W1-T10787: only a refused remote update, a real captured local conflict, a clean aborted worktree and the
+        // amended contract proved on main re-enter the bounded conflict repair; a successful update keeps its stand-down.
+        let admitted: string | undefined;
+        if (!update.ok && conflict !== undefined && !abortFailed) try {
+          if ((await git(["status", "--porcelain", "-z", host.GIT_UNTRACKED_FILES_ALL])).trim()) {
+            throw new Error("the worktree is not clean after the aborted scope merge");
+          }
+          if ((await git(["rev-parse", "HEAD"])).trim() !== priorHeadSha) throw new Error("the worktree head moved off the reviewed head");
+          const mainSha = (await git(["rev-parse", "refs/remotes/origin/main"])).trim();
+          const contract = await resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${opts.taskId}`,
+            opts.worktreePath, "plan/tasks.yaml", mainSha, git);
+          const declaredFiles = contract.taskDeclaredFiles;
+          if (contract.divergence || declaredFiles === undefined || !paths.every((path) => declaredFiles.includes(path))) {
+            throw new Error(`the amended task contract on main does not admit the amendment paths: ${contract.divergence?.reason ?? JSON.stringify(declaredFiles)}`);
+          }
+          opts.task = { ...opts.task, files: declaredFiles, acceptance: contract.criteria };
+          admitted = mainSha;
+        } catch (proofError) {
+          deps.log("fix.scope_amendment", { outcome: "conflict_repair_refused", reason: String(proofError), paths,
+            head_sha: priorHeadSha, pr_number: prNumber, amendment_number: resumed.amendmentNumber });
+        }
+        if (admitted === undefined || conflict === undefined) {
+          return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+        }
+        currentMergeConflict ??= conflict;
+        conflictRepairMainSha = admitted;
       }
       let recovery: Record<string, unknown>;
       try {
@@ -3684,8 +3762,12 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         recovery = { recovery_status: "unavailable", recovery_reason: reason };
         scopeRecoveryEvidence = `Scope amendment #${resumed.amendmentNumber} admitted ${paths.join(", ")}. Saved work unavailable: ${reason}. Repair these admitted paths against the red below.`;
       }
-      deps.log("fix.scope_amendment", { outcome: "amendment_merged", merged_locally: true, merge_sha: mergeSha,
-        amendment_number: resumed.amendmentNumber, paths, head_sha: priorHeadSha, pr_number: prNumber, ...recovery });
+      deps.log("fix.scope_amendment", conflictRepairMainSha === undefined
+        ? { outcome: "amendment_merged", merged_locally: true, merge_sha: mergeSha,
+          amendment_number: resumed.amendmentNumber, paths, head_sha: priorHeadSha, pr_number: prNumber, ...recovery }
+        : { outcome: "conflict_repair_resumed", merged_locally: false, main_sha: conflictRepairMainSha,
+          conflicted_files: conflictedFilePaths(currentMergeConflict), amendment_number: resumed.amendmentNumber,
+          paths, head_sha: priorHeadSha, pr_number: prNumber, ...recovery });
     }
     // W1-T9807: a main-owned refusal is retried, without a worker, at the first head holding the main it compared.
     const lastScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" && row.task_id === opts.taskId && row.pr_number === prNumber);
@@ -3942,6 +4024,19 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // The unpublished local merge is the commit base; the push still leases the PR's original tip.
     const roundPushBaseSha = scopeMergeStartSha ?? roundBase.baseSha;
     if (roundBase.advanced) deps.log("fix.round_head_advanced", { head_sha: priorHeadSha, round_base_sha: roundBase.baseSha, reason: roundBase.reason });
+    if (roundBase.advanced && scopeMergeStartSha === undefined) {
+      let publishedHead: string | undefined;
+      try { publishedHead = await (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch); }
+      catch { deps.log("fix.evidence_head_unread", { head_sha: priorHeadSha, worktree_head_sha: roundBase.baseSha,
+        reason: "remote branch head read failed; no published advance was established" }); }
+      // A retained unpublished commit is still this round's existing recovery input, not proof the PR moved.
+      if (publishedHead !== undefined && publishedHead !== priorHeadSha) {
+        const reason = `published branch advanced from ${priorHeadSha} to ${publishedHead} before the worker started; the ordinary sweep must read fresh exact-head failure evidence`;
+        deps.log("fix.evidence_head_superseded", { head_sha: priorHeadSha, current_head_sha: publishedHead, worktree_head_sha: roundBase.baseSha, reason });
+        deps.log("fix.stood_down", { head_sha: priorHeadSha, current_head_sha: publishedHead, site: "rung.evidence_head", reason });
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+      }
+    }
     const fixRoundStartedAtMs = systemClock.now();
     const roundId = `${opts.runId}:${attempt + retriggers}:${fixRoundStartedAtMs}`;
     const fixReceipt = host.fixWorkerReceipt(deps.spawn, deps.log, host.fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),

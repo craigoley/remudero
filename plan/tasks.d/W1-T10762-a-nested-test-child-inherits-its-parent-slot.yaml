@@ -1,0 +1,52 @@
+- id: W1-T10762
+  title: "A NESTED `node --test` CHILD WAITS THE FULL 45-MINUTE BOUND ON ITS OWN PARENT'S SLOT — `inheritedTestSlot` returns nothing whenever `NODE_TEST_CONTEXT` is set, so a test file under a parent that holds the only slot of a private `RMD_TEST_SLOT_DIR` polls that slot until `wait_bound_exceeded`; inherit the live ancestor's claim there too"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — which descendants inherit a parent claim; slot capacity, reclaim and heartbeat rules are untouched
+  band_meaning: blast-radius
+  origin: "operator recon 2026-10-26 (E5): reproduce the 2026-10-13 private-RMD_TEST_SLOT_DIR nested-test wait after #12570, #13304, #13363, #14360 and W1-T8047"
+  plan_refs: [W1-T8047, W1-T9928]
+  files: [src/lib/test-slot.ts, test/ci/suites/a-nested-test-child-inherits-its-parent-slot.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 7b75a38f7 (2026-10-26). REPRODUCED on the Azure host (Linux), outside every container, with a
+    private slot directory and no fleet slot touched.
+    - Repro: a parent calls `acquireTestSlot("e5-parent", { dir, slots: 1 })` on a fresh private dir, then spawns
+      `node --import tsx --test child.test.ts` with the lease's `childEnvironment` plus `RMD_TEST_SLOT_DIR=dir`. The
+      child test calls `acquireTestSlot("e5-child", { dir, slots: 1, waitBoundMs: 240000 })`.
+      OBSERVED: `outcome=wait_bound_exceeded waitedMs=240057 note=test slot WAIT BOUND EXCEEDED after 240s (slot 1:
+      pid 3618172 on Remudero (e5-parent)); ran UNSLOTTED`. With the default `TEST_SLOT_WAIT_BOUND_MS` (45 minutes)
+      that is the 2026-10-13 incident: nested tests waiting 45 minutes on their own parent's slot.
+    - Cause: `inheritedTestSlot` begins `if (!raw || process.env.NODE_TEST_CONTEXT) return {};`. The `node --test`
+      runner sets `NODE_TEST_CONTEXT` in every test-file child, so a test file never inherits the claim its own
+      ancestor holds and falls through to ordinary polling against that holder. The early return came in #10197
+      (c0f6b6f83, 2026-10-09). #12167 (b0502e67f) kept it.
+    - The fixes since 10-13 (#12570, #13304, #13363, #14360) changed reclaim, heartbeat and namespace rules. None
+      changed this early return.
+  design: |
+    1. Read #10197's tests first. They are why the early return exists: a fixture test must not adopt a REAL
+       author's lease. Keep that guarantee: under `NODE_TEST_CONTEXT`, inherit only when the claim's directory is
+       this process's own `RMD_TEST_SLOT_DIR` AND every check `inheritedTestSlot` already makes passes (same holder,
+       live owner with its recorded start, owner is an ancestor). Any other claim under `NODE_TEST_CONTEXT` returns
+       `{}` exactly as today.
+    2. Nothing else changes: capacity, reclaim, heartbeat and `wait_bound_exceeded` keep their rules.
+    New tests go in test/ci/suites/a-nested-test-child-inherits-its-parent-slot.test.ts (folder from
+    `rmd test-place`). Import through `#src/*`, and use `test(` titles exactly as in the proofs below. Drive a REAL
+    nested `node --test` child (the repro above, with `waitBoundMs` of a few seconds), never a faked
+    `NODE_TEST_CONTEXT` in-process.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/ci/suites/a-nested-test-child-inherits-its-parent-slot.test.ts"
+    - claim: "a nested node --test child under a parent holding the only private slot inherits it without waiting"
+      proof: 'grep: test("W1-T10762: a nested node --test child under a parent holding the only private slot inherits it without waiting" in test/ci/suites/a-nested-test-child-inherits-its-parent-slot.test.ts'
+    - claim: "a nested node --test child never inherits a claim from another slot directory"
+      proof: 'grep: test("W1-T10762: a nested node --test child never inherits a claim from another slot directory" in test/ci/suites/a-nested-test-child-inherits-its-parent-slot.test.ts'
+  falsifier: |
+    Restore `if (!raw || process.env.NODE_TEST_CONTEXT) return {};`. The first test's child then reports
+    `wait_bound_exceeded` after its bound instead of an inherited lease.

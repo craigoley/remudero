@@ -1,0 +1,33 @@
+id: incident-22aeb78c17dac0ab
+ts: 2026-10-26T22:39:15.745Z
+raw: >-
+  Incident 22aeb78c17da: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  operator requires a fresh branch/worktree and preservation of the old branch,
+  but this round mandates same-branch edits and prohibits the git operations
+  needed to rebuild; harness must reconcile these workflow constraints
+
+  First seen: 2026-10-26T22:36:43.642Z
+
+  Last seen: 2026-10-26T22:36:43.642Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=14367 escalated: already escalated (reason unreadable: no escalation of this PR at head 7af725e is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793048031752:1:1793053593717) — operator requires a fresh branch/worktree and preservation of the old branch, but this round mandates same-branch edits and prohibits the git operations needed to rebuild; harness must reconcile these workflow constraints
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#22aeb78c17dac0ab3ec993e71da2f99450d35486b63f13fbb715df7e43157c4b
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -3,14 +3,17 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
-  risk: low
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
+  risk: high
+  band_meaning: span
   priority: 1.45
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-10-27T05:40:07.911Z
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/coverage-session-blanking.test.ts:flaky"
   files:
+    - scripts/preflight-author.mjs
     - scripts/coverage-session-blanking-check.mjs
     - test/ci/coverage/check-test-test-coverage-session-blanking-test-ts-flaky.test.ts
   acceptance:
@@ -65,14 +68,24 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  amendment: |
+    Approved operator scope decision 2026-10-26: add only scripts/preflight-author.mjs
+    to let the existing author entry call the coverage-blanking check for positively
+    observed changed test paths before heavy selection/admission. The native test already
+    exercises that caller, but the current scope does not permit its production repair.
+    Preserve every original criterion, proof, observation, budget and existing path.
+    Declare risk high / band_meaning span for the two-concern caller/check change;
+    remove the stale low-risk ruling and require genuine normal requalification.
+    Preserve scanner semantics and corpus protection; this grants no ignore, relaxed
+    threshold, baseline population change, automatic retry, claim or worker action.
+    Missing/unreadable changed-test evidence must refuse, not certify a clean scan.
+    Native repair retains source ownership; normal ruling, hosted tests, coverage,
+    security and semantic qualification remain required. No remedy credit before effect.
   risk_ruling:
-    verdict: "low"
-    action: proceed
-    confidence: 0.8
+    verdict: "high"
+    action: escalate
+    confidence: 0.93
     reasons:
-      - "Declared files are one check script (scripts/coverage-session-blanking-check.mjs) and one new test file; none relate to secrets, auth, deploy, merge or review policy."
-      - "The description is a defect statement about a flaky test, with failing assertions cited in the rationale (e.g. unblanked env findings in specific test files), so the finding is verifiable from what is shown."
-      - "The family track record (39 merged, 58 declined, mean 0.67) is mediocre but not a failing pattern, and the PR still passes CI and review."
-      - "The evidence notes the new test file is absent at base, which is expected for an implement task that creates it."
-    judged_at: "2026-10-22T14:39:00.413Z"
-    pin: "f0df7f5c065f66a0b0f33df1b4eae1667cde6269a0ea7e9f4ccb0402eb6e82c9"
+      - "high-risk verdict at confidence 0.93 — on the change's description/files alone, no diff was read — The cited failures report concrete scanner findings in tracked tests; the supplied evidence does not establish that these failures are flaky.; on the change's description/files alone, no diff was read — The filing proposes implementation changes to the scanner and author preflight without describing a preventive mechanism. Its sole acceptance proof checks for test-title text, leaving the claimed prevention unverifiable from what is shown."
+    judged_at: "2026-10-27T01:26:42.829Z"
+    pin: "7b99dd05697c7837c165af0f52a96e0a57b001e3d97dcc81a77b9dad362b8cb1"

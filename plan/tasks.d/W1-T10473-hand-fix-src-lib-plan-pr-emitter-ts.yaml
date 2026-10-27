@@ -3,10 +3,11 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: low
   priority: 1.65
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 2 (cause stopped) of the operator's mechanical rulings (2026-10-21, W1-T10371): the symptom had 0 occurrence(s) across 7 day(s), never seen. Retired by the machine-filing judge, 2026-10-27T05:40:07.947Z
   attempts: 0
   author_class: machine
   origin: "ci-friction:hand_fix:src/lib/plan-pr-emitter.ts"

@@ -11,9 +11,9 @@ import {
   type DraftAttemptCache,
   type DraftCache,
   type Proposal,
-} from "../src/lib/inbox.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
+} from "#src/lib/inbox.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
 
 const proposal: Proposal = { id: "P1", summary: "needs a draft", evidenceAnchors: [] };
 const nanoLane = { leadDeployment: "gpt-5-nano", effort: "high", escalationDeployment: "sonnet", escalationEffort: "medium" };

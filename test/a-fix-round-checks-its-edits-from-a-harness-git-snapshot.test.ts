@@ -68,11 +68,16 @@ test("a CommonJS probe loads the harness snapshot functions without git or async
     `});`,
     `if (!snapshot) throw new Error("snapshot was not written");`,
     `const calls = [];`,
+    `const budgetCalls = [];`,
     `const checked = harness.checkFixCensusSnapshot(root, snapshot, () => {}, (_file, args, opts) => {`,
+    `  if (args.includes("--snapshot-budget")) {`,
+    `    budgetCalls.push({ args, snapshot: opts.env.RMD_CENSUS_SNAPSHOT });`,
+    `    return require("node:child_process").spawnSync(_file, args, opts);`,
+    `  }`,
     `  calls.push({ args, snapshot: opts.env.RMD_CENSUS_SNAPSHOT });`,
     `  return { status: 0, stdout: "# tests 4\\n# pass 4\\n# fail 0\\n", stderr: "" };`,
     `});`,
-    `process.stdout.write(JSON.stringify({ snapshot, checked, calls }));`,
+    `process.stdout.write(JSON.stringify({ snapshot, checked, calls, budgetCalls }));`,
   ].join("\n"));
   const result = spawnSync(process.execPath, ["--import", "tsx", script],
     { cwd: ROOT, env: f.env, encoding: "utf8", timeout: 60_000 });
@@ -80,6 +85,7 @@ test("a CommonJS probe loads the harness snapshot functions without git or async
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const output = JSON.parse(result.stdout);
+  assert.equal(output.budgetCalls.length, 1, "the actual trusted budget inspector is executed once before the two original checks");
   assert.deepEqual(output.checked, {});
   assert.deepEqual(readCensusSnapshot(output.snapshot).headPaths, tracked);
   assert.equal(statSync(output.snapshot).mode & 0o777, 0o444);

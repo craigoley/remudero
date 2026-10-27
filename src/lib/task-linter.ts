@@ -1529,6 +1529,7 @@ export function proofBaseDiscriminationViolations(task: Task, opts: LintOpts = {
   const violations: LintViolation[] = [];
   (task.acceptance ?? []).forEach((c, i) => {
     if (c.satisfied_by) return; // Architect-only; no proof text to parse
+    if ((c as { kind?: unknown }).kind === "guard") return;
     const whitelisted = parseWhitelistedProof(c.proof ?? "");
     if (!whitelisted) return; // does not parse — proof-dialect's concern, not this one
     // ONLY the pure-path test form. A name-filtered proof's discrimination turns on whether the
@@ -1549,7 +1550,9 @@ export function proofBaseDiscriminationViolations(task: Task, opts: LintOpts = {
         "check names it and the PR can merge on prose. This is a WARN, not a refusal, because file " +
         "presence at base is only a HEURISTIC for passing there: a task REPAIRING a currently-failing " +
         `test legitimately names an existing file. If this criterion is proving NEW behaviour in ` +
-        `"${path}", prove it with a \`grep:\` on the changed line instead, which can miss at base.`,
+        `"${path}", prove it with a \`grep:\` on the changed line instead, which can miss at base. ` +
+        "If it protects behaviour the build must not break, declare `kind: guard` (review still " +
+        "executes it at head) and keep a discriminating `grep:` on the new test title beside it.",
     });
   });
   return violations;

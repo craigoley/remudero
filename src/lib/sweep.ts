@@ -295,7 +295,9 @@ import {
   runsForHeadRestArgs,
   fetchWorkflowRunObservations,
   GhPaceFloorStandDownError,
+  isHumanHoldCandidate,
   isScannerBlockerCandidate,
+  mergesDirectlyAsPlanPr,
   paceGhEntry,
   type GhApiFetcher,
   type GhCallPacer,
@@ -7086,8 +7088,9 @@ export interface OpenPrView {
    *  escalation names THIS reported value, never only the {@link MergeState} bucket. */
   mergeableState?: string;
   /** W1-T3980 — the bounded scanner read taken ONLY for {@link isScannerBlockerCandidate}'s
-   *  population (armed, green, review success, `mergeable`, raw `blocked`). `undefined` means not
-   *  a candidate or over the per-pass cap, and every row behaves exactly as before. */
+   *  population (armed, green, review success, `mergeable`, raw `blocked`), plus the review-hold read
+   *  alone for an unarmed plan PR in that state ({@link isHumanHoldCandidate}). `undefined` means not
+   *  a candidate, over the per-pass cap, or no hold on such a plan PR, and every row behaves as before. */
   scannerBlocker?: ScannerBlockerObservation;
   /** W1-T5633 — the open high CodeQL alerts analysed at THIS head, read ONLY when the head's latest
    *  `CodeQL` results check concluded failure. `undefined` (no such check, a green one, an unread
@@ -7242,7 +7245,7 @@ export const REQUIRED_CHECK_FAIL = new Set([
   "STALE",
 ]);
 
-function rollupProducerKey(c: RollupCheckEntry): { key: string; known: boolean } {
+export function rollupProducerKey(c: RollupCheckEntry): { key: string; known: boolean } {
   const posted = /^(?:run:\d+:\d+:)?job:\d+$/.test(c.externalId ?? "");
   const kind = c.context !== undefined && c.name === undefined ? "status" : "check";
   const identifiedWorkflow = c.workflowId !== undefined ? `workflow:${c.workflowId}`
@@ -9577,10 +9580,11 @@ function refusedHeadContract(lines: readonly Record<string, unknown>[], pr: Open
 async function headContractRefreshHistory(deps: Pick<SweepDeps, "ledgerPath" | "readHeadContractRefreshHistory">) {
   if (deps.readHeadContractRefreshHistory) return deps.readHeadContractRefreshHistory();
   headContractHistoryReader ??= createEscalationTriageHistoryReader({ parseAll: true, slice: {
-    holder: "sweep.head-contract-refresh", version: "1",
-    steps: [HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, CONTRACT_AMENDED_REFRESH_STEP],
+    holder: "sweep.head-contract-refresh", version: "2",
+    steps: [HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, CONTRACT_AMENDED_REFRESH_STEP, "fix.contract_hold", "fix.scope_amendment"],
     project: row => ({ step: row.step, task_id: row.task_id, pr_number: row.pr_number, head_sha: row.head_sha,
-      contract_revision: row.contract_revision, outcome: row.outcome }),
+      contract_revision: row.contract_revision, outcome: row.outcome, kind: row.kind, pr_url: row.pr_url,
+      paths: row.paths, issue_url: row.issue_url }),
   } });
   const read = await headContractHistoryReader(dirname(deps.ledgerPath));
   // The incremental step reader only parses live lines that mention a tracked step or have
@@ -9615,22 +9619,33 @@ function headContractRefreshAttempted(lines: readonly Record<string, unknown>[],
 export async function lightPassHeadContractRefresh(
   prs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "readLedger" | "readHeadContractRefreshHistory" | "readTaskContractRevision" | "updateBranch" | "log">,
-): Promise<Pick<SweepDeps, "headContractRefreshFor" | "readHeadContractRefreshHistory">> {
+): Promise<Pick<SweepDeps, "headContractRefreshFor" | "headContractHoldEvidenceFor" | "readHeadContractRefreshHistory">> {
   if (!deps.updateBranch || headContractRefreshInFlight) return {};
   try {
-    const lines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath); // ledger-read-intent: live — candidate holds; attempts use the strict union below.
-    const candidates = prs.flatMap(pr => {
-      const hold = refusedHeadContract(lines, pr);
-      const revision = hold && pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
-      return hold && revision !== undefined && revision !== hold.contract_revision ? [{ pr, revision }] : [];
-    });
-    if (candidates.length === 0) return {};
+    if (!prs.some(pr => pr.taskId !== undefined)) return {};
+    (deps.readLedger ?? readLedgerLines)(deps.ledgerPath); // Validate the live caller boundary; strict history supplies the rows.
     const history = await headContractRefreshHistory(deps);
     if (!history.complete) return {};
+    const lines = history.lines; // Holds and attempts must both survive rotation in the same strict union.
+    const candidates = prs.flatMap(pr => {
+      const hold = refusedHeadContract(lines, pr);
+      const scope = scopeEscalationStandDown(lines, pr);
+      const scopeRevision = scope?.kind !== "unfiled" && scope?.contractRevision !== undefined &&
+        lines.some(row => row.step === "fix.scope_amendment" && row.task_id === fixLedgerTaskIdFor(pr) &&
+          row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.contract_revision === scope.contractRevision)
+        ? scope.contractRevision : undefined;
+      const standingOn = hold?.contract_revision ?? scopeRevision;
+      const revision = standingOn !== undefined && pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+      return standingOn !== undefined && revision !== undefined && revision !== standingOn ? [{ pr, revision }] : [];
+    });
+    if (candidates.length === 0) return {};
     const selected = candidates.filter(({ pr, revision }) => !headContractRefreshAttempted(history.lines, pr, revision))
       .sort((a, b) => a.pr.prNumber - b.pr.prNumber)[0];
     return selected === undefined ? {} : {
       readHeadContractRefreshHistory: deps.readHeadContractRefreshHistory,
+      headContractHoldEvidenceFor: pr => pr.prNumber === selected.pr.prNumber && pr.headSha === selected.pr.headSha &&
+        pr.taskId === selected.pr.taskId && deps.readTaskContractRevision?.(pr.taskId!) === selected.revision
+        ? lines : undefined,
       headContractRefreshFor: pr => pr.prNumber === selected.pr.prNumber && pr.headSha === selected.pr.headSha &&
         pr.taskId !== undefined && deps.readTaskContractRevision?.(pr.taskId) === selected.revision
         ? deps.updateBranch : undefined,
@@ -11508,7 +11523,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // A HUMAN HOLD IS THE BLOCKER. An armed, green, reviewed PR that GitHub reports `blocked` because a
     // reviewer's standing verdict is CHANGES_REQUESTED read as `mergeable`: re-arming changed nothing, a
     // positive distance pressed update-branch after every main move, and it waited forever with nothing
-    // said. No automation may clear a person's hold, so it is named once per head instead.
+    // said. No automation may clear a person's hold, so it is named once per head instead. An unarmed
+    // plan PR (#14599) is held here too, ordered before `mergeable`, so its direct merge is not retried.
     disposition: "blocked-ambiguous",
     when: (pr) => changesRequestedHold(pr) !== undefined,
     blocker: "escalated",
@@ -11552,7 +11568,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     when: checksGreenReviewSuccess,
     blocker: "awaiting-arm",
     // W1-T6595: a plan PR is never armed (W1-T5615), so its row says what the sweep does instead.
-    reason: (pr) => (pr.changedFiles ?? []).some((f) => f.startsWith("plan/"))
+    reason: (pr) => mergesDirectlyAsPlanPr(pr)
       ? MERGEABLE_PLAN_PR_REASON
       : "review success, required checks green — arming auto-merge",
   },
@@ -12134,11 +12150,13 @@ export function scannerBlockerAmbiguity(pr: OpenPrView, policy: Pick<SweepPolicy
   return undefined;
 }
 
-/** The human CHANGES_REQUESTED holds standing on an armed, green, `blocked` PR, read at this head. */
+/** The human CHANGES_REQUESTED holds standing on a green, `blocked` PR that is armed or is a plan PR the fleet
+ *  merges directly ({@link isHumanHoldCandidate}), read at this head. An unarmed plan PR is never armed, so
+ *  an armed-only test left its hold unread and the direct merge refused every pass with nothing said. */
 export function changesRequestedHold(pr: OpenPrView): ChangesRequestedHold[] | undefined {
   const blocker = pr.scannerBlocker;
   if (blocker === undefined || blocker.kind !== "changes-requested") return undefined;
-  if (blocker.headSha !== pr.headSha || !isScannerBlockerCandidate(pr)) return undefined;
+  if (blocker.headSha !== pr.headSha || !isHumanHoldCandidate(pr)) return undefined;
   return blocker.holds;
 }
 
@@ -12149,9 +12167,10 @@ export function changesRequestedReason(pr: OpenPrView): string {
     const at = hold.commitId === pr.headSha ? "this head" : `${hold.commitId.slice(0, 9)}, before head ${pr.headSha.slice(0, 9)}`;
     return `${hold.login} (review ${hold.reviewId}, at ${at})`;
   });
-  return `armed, checks green and review success, but mergeable_state is blocked by a CHANGES_REQUESTED review from ` +
-    `${holds.join(", ")} — no re-arm, branch refresh or repair can clear a person's hold; it needs that reviewer's ` +
-    `re-review (or the review dismissed), so escalating instead of waiting silently`;
+  const path = pr.autoMergeArmed === true ? "armed" : "an unarmed plan PR the fleet merges directly";
+  return `${path}, checks green and review success, but mergeable_state is blocked by a CHANGES_REQUESTED review from ` +
+    `${holds.join(", ")} — no re-arm, direct merge, branch refresh or repair can clear a person's hold; it needs that ` +
+    `reviewer's re-review (or the review dismissed), so escalating instead of waiting silently`;
 }
 
 /** W1-T3980 — the repair worker's only input, rendered through the ci-log fix mode's fenced,
@@ -13950,6 +13969,8 @@ export interface SweepDeps {
   readTaskContractRevision?: (taskId: string) => string | undefined;
   readTaskSemanticRevision?: (taskId: string) => string | undefined;
   headContractRefreshFor?: (pr: OpenPrView) => SweepDeps["updateBranch"];
+  /** Complete scoped hold evidence only for the selected light-pass contract capability. */
+  headContractHoldEvidenceFor?: (pr: OpenPrView) => readonly Record<string, unknown>[] | undefined;
   readHeadContractRefreshHistory?: () => Promise<{ complete: boolean; lines: readonly Record<string, unknown>[] }>;
   headRehome?: HeadRehomePorts;
   /** The already-listed peers retained when the light pass reconciles one PR at a time. */
@@ -15530,6 +15551,24 @@ function priorActionsFromLedger(
     absentRepushes,
     missingTaskTrailerRepairs,
   };
+}
+
+/** W1-T10608 — the disposed-line field naming the ONE main adoption a terminal design hold may spend per PR. */
+export const DESIGN_HOLD_MAIN_ADOPTION_FIELD = "design_hold_main_adoption";
+
+/**
+ * W1-T10608 — A DESIGN HOLD ON A HEAD BEHIND MAIN TAKES MAIN ONCE BEFORE A PERSON IS ASKED. PR #13416 sat 39.6 h at
+ * "fix needs design at this exact head" until an operator merged main into it: the hold keys on the head, which only
+ * a person moved. Due while main holds commits the head lacks, and only if no earlier pass on this PR spent the
+ * adoption — read back from `sweep.disposed`, which rotation retains — so a refused or futile refresh escalates as before.
+ */
+export function designHoldMainAdoptionDue(
+  pr: Pick<OpenPrView, "prNumber">, lines: ReadonlyArray<Record<string, unknown>>,
+  behindMainBy: number | undefined, mainTipSha: string | undefined, canUpdateBranch: boolean,
+): boolean {
+  if (!canUpdateBranch || mainTipSha === undefined || behindMainBy === undefined || behindMainBy <= 0) return false;
+  return !lines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+    typeof row[DESIGN_HOLD_MAIN_ADOPTION_FIELD] === "string");
 }
 
 export type TerminalFixDesignHandoff =
@@ -17415,6 +17454,8 @@ export async function runSweep(
   deps.markPrelude?.("armed_body_guard");
   const ledgerLines = readLedger(deps.ledgerPath);
   let contractHoldRefreshSpent = false;
+  // W1-T10608: at most one design-hold main adoption per pass, so a main fix never fans out update-branch.
+  let designMainAdoptionSpent = false;
   // An unreadable contract is an unreadable witness (undefined → judged afresh, never reused); it must not
   // abort the PR's disposition, which still owes the fix rung its dispatch.
   const readWitnessContractRevision = (taskId: string): string | undefined => {
@@ -19774,7 +19815,7 @@ export async function runSweep(
         `proof-repair rounds refused twice at this head (${pr.repeatedFixRefusal}) — no strike spent — ` +
         `the plan-shard flag is the next rung`;
     }
-    let terminalDesignHold: { amended: boolean; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string } | undefined;
+    let terminalDesignHold: { amended: boolean; mainAdoption?: true; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string } | undefined;
     // W1-T10339: a PR with no task trailer is judged on its BODY, so the body is an input a stand-down read.
     const standDownBodySha = carriesTaskTrailer(pr) ? undefined : prBodyDigest(pr.body);
     let designReleasedByBody = false;
@@ -19813,11 +19854,18 @@ export async function runSweep(
             ? { standingOn: semanticStandingOn, observed: semanticCurrent } : undefined;
           const amended = current !== undefined && standingOn !== undefined &&
             (current !== standingOn || semantic !== undefined && semantic.standingOn !== semantic.observed);
-          terminalDesignHold = { amended, revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
-          disposition = amended ? "blocked-fixable" : "refused-escalate";
+          const behindBy = deps.behindMainByPr?.get(pr.prNumber);
+          const mainAdoption = !amended && !designMainAdoptionSpent &&
+            designHoldMainAdoptionDue(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
+          terminalDesignHold = { amended, ...(mainAdoption ? { mainAdoption: true as const } : {}),
+            revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
+          disposition = amended || mainAdoption ? "blocked-fixable" : "refused-escalate";
           reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
+            : mainAdoption ? `fix needs design at this exact head (round ${handoff.roundId}), which is ${behindBy} commit(s) ` +
+              `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
             : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
-          if (!amended) ruleBlockerByIndex.set(prIndex, "escalated");
+          if (mainAdoption) designMainAdoptionSpent = true;
+          if (!amended && !mainAdoption) ruleBlockerByIndex.set(prIndex, "escalated");
         }
       } else if (handoff.kind === "unavailable") {
         disposition = "wait";
@@ -20084,7 +20132,7 @@ export async function runSweep(
           !metadataRedRuledOut(ledgerLines, pr);
         // W1-T9999: the seed's own rung decides, never an earlier rung's; an earlier run's seed with no rung row is settled.
         const seedRead = dispatchedThisHead ? fixSeedRead(ledgerLines, pr, deps.runId) : undefined;
-        alreadyDone = terminalDesignHold?.amended === true || designReleasedByBody || metadataRed || emptyDiffReviewFailure(pr)
+        alreadyDone = terminalDesignHold?.amended === true || terminalDesignHold?.mainAdoption === true || designReleasedByBody || metadataRed || emptyDiffReviewFailure(pr)
           ? false
           : dispatchedThisHead && (seedRead?.kind ?? "live") === "live"; // no read: a taskless PR's key (W1-T9955)
         if (seedRead?.kind === "orphaned" && !deps.dryRun) {
@@ -20240,6 +20288,24 @@ export async function runSweep(
     if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true, needs_design_round_id: terminalDesignHold.roundId,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),
       ...(terminalDesignHold.semantic === undefined ? {} : { progress_task_semantic_revision: terminalDesignHold.semantic.standingOn }) };
+    const selectedContractRefresh = async (
+      revision: string, action: () => Promise<string | undefined>,
+    ): Promise<string | undefined> => {
+      if (contractHoldRefreshSpent || headContractRefreshInFlight) return "another head-contract amendment owns the refresh";
+      headContractRefreshInFlight = true;
+      try {
+        const history = await headContractRefreshHistory(deps);
+        if (!history.complete || headContractRefreshAttempted([...history.lines, ...ledgerLines], pr, revision)) {
+          return history.complete ? "head-contract amendment refresh already attempted — awaiting new evidence"
+            : "head-contract refresh history unreadable — no refresh or fix admitted";
+        }
+        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: fixLedgerTaskIdFor(pr),
+          step: HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
+          contract_revision: revision });
+        contractHoldRefreshSpent = true;
+        return await action();
+      } finally { headContractRefreshInFlight = false; }
+    };
     const refreshAmendedContract = async (
       latched: readonly Record<string, unknown>[], inputKey?: string, observedRevision?: string,
       semantic?: { standingOn: string; observed: string },
@@ -20598,49 +20664,52 @@ export async function runSweep(
                 standDownReason = amended ?? "task contract changed during design-handoff observation — no fix admitted";
                 break;
               }
-              const headContractHold = refusedHeadContract(ledgerLines, pr);
+              if (terminalDesignHold?.mainAdoption && deps.updateBranch) {
+                let outcome: string;
+                recordForcedRefresh(deps, pr, "design-hold-main");
+                try { outcome = await deps.updateBranch(pr); }
+                catch (error) { outcome = `error: ${String(error)}`; }
+                extraDisposedFields = { ...extraDisposedFields, [DESIGN_HOLD_MAIN_ADOPTION_FIELD]: outcome };
+                acted = outcome === "updated" || outcome === "head-moved";
+                spent = false;
+                standDownReason = acted
+                  ? `design hold at a head behind main — took main into the branch (${outcome}), so the next round works on main`
+                  : `design hold at a head behind main — branch refresh ${outcome}; the next pass escalates the design question`;
+                break;
+              }
+              const contractHoldLines = deps.headContractHoldEvidenceFor?.(pr) ?? ledgerLines;
+              const headContractHold = refusedHeadContract(contractHoldLines, pr);
               const currentHoldContract = headContractHold && pr.taskId !== undefined
                 ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
               if (headContractHold && currentHoldContract !== undefined && currentHoldContract !== headContractHold.contract_revision) {
                 acted = false;
                 spent = false;
-                if (contractHoldRefreshSpent || headContractRefreshInFlight) {
-                  standDownReason = "another head-contract amendment owns the refresh";
-                  break;
-                }
                 const refresh = deps.updateBranch ?? deps.headContractRefreshFor?.(pr);
                 if (!refresh) {
                   standDownReason = "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
                   break;
                 }
-                headContractRefreshInFlight = true;
-                try {
-                  const history = await headContractRefreshHistory(deps);
-                  if (!history.complete || headContractRefreshAttempted([...history.lines, ...ledgerLines], pr, currentHoldContract)) {
-                    standDownReason = history.complete ? "head-contract amendment refresh already attempted — awaiting new evidence"
-                      : "head-contract refresh history unreadable — no refresh or fix admitted";
-                    break;
-                  }
-                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: fixLedgerTaskIdFor(pr),
-                    step: HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
-                    contract_revision: currentHoldContract });
-                  contractHoldRefreshSpent = true;
-                  standDownReason = await refreshAmendedContract([{ progress_contract_revision: headContractHold.contract_revision }],
-                    undefined, currentHoldContract, undefined, refresh) ?? "head contract changed during amendment observation — no fix admitted";
-                } finally { headContractRefreshInFlight = false; }
+                standDownReason = await selectedContractRefresh(currentHoldContract, () =>
+                  refreshAmendedContract([{ progress_contract_revision: headContractHold.contract_revision }],
+                    undefined, currentHoldContract, undefined, refresh)) ?? "head contract changed during amendment observation — no fix admitted";
                 break;
               }
-              const scopeHold = scopeEscalationStandDown(ledgerLines, pr);
+              const scopeHold = scopeEscalationStandDown(contractHoldLines, pr);
               if (scopeHold?.kind === "unfiled") { acted = false; spent = false; standDownReason = scopeHold.reason; break; }
               // #13317: the operator's answer (an amended contract) takes main in once, releasing an instrument/workflow hold.
               if (scopeHold) {
                 acted = false;
                 spent = false;
                 extraDisposedFields = { ...extraDisposedFields, operator_scope_hold: scopeHold.kind };
-                standDownReason = await refreshAmendedContract([
+                const refresh = deps.updateBranch ?? deps.headContractRefreshFor?.(pr);
+                const revision = pr.taskId === undefined ? undefined : deps.readTaskContractRevision?.(pr.taskId);
+                const action = () => refreshAmendedContract([
                   ...(scopeHold.contractRevision !== undefined ? [{ progress_contract_revision: scopeHold.contractRevision }] : []),
                   ...ledgerLines.filter((line) => line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
-                    line.head_sha === pr.headSha && line.operator_scope_hold === scopeHold.kind)]) ?? scopeHold.reason;
+                    line.head_sha === pr.headSha && line.operator_scope_hold === scopeHold.kind)],
+                  undefined, revision, undefined, refresh);
+                standDownReason = await (deps.updateBranch === undefined && refresh !== undefined && revision !== undefined
+                  ? selectedContractRefresh(revision, action) : action()) ?? scopeHold.reason;
                 break;
               }
               const preflightEscalation = preflightEscalations.get(pr.prNumber);
