@@ -188,3 +188,24 @@ test("W1-T10026: an amendment that throws is a named refusal", async () => {
     f.cleanup();
   }
 });
+
+
+test("a committed source larger than the Git pipe buffer still asks for its exact missing companion", async () => {
+  const f = fixture();
+  try {
+    const asked: ScopeAmendmentRequest[] = [];
+    const largeImporter = "/* " + "é".repeat(600_000) + " */\n" + IMPORTING["src/lib/task-linter.ts"];
+    assert.ok(Buffer.byteLength(largeImporter, "utf8") > 1024 * 1024, "the real Git read crosses Node's default byte buffer");
+    const { result, created } = await dispatch(f, { ...IMPORTING, "src/lib/task-linter.ts": largeImporter }, request => {
+      asked.push(request);
+      return { kind: "created", amendmentUrl: "https://github.com/acme/remudero/pull/7", amendmentNumber: 7 };
+    });
+    assert.equal(asked.length, 1);
+    assert.deepEqual(asked[0]!.paths, [LEFT_OUT]);
+    assert.ok(asked[0]!.importers?.[LEFT_OUT]?.includes("src/lib/task-linter.ts"));
+    assert.equal(created.length, 0, "the undeclared source is never published without normal scope qualification");
+    assert.equal(result.verdict, "no_pr");
+  } finally {
+    f.cleanup();
+  }
+});
