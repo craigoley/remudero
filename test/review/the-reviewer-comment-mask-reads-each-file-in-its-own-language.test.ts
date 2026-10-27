@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { validateProofAmendmentProposal } from "#src/lib/proof-amendment.js";
 import { judgeReview, matchedLinesAreAllComments, YAML_BLOCK_SCALAR_HEADER_RE } from "#src/lib/review.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
@@ -65,6 +66,24 @@ test("W1-T10372: a YAML hash comment and a TS block comment are still comments",
     matchedLinesAreAllComments(["3:  MUTANT inside a block comment"], { pattern: "MUTANT", fileText: ts, path: "src/lib/block.ts" }),
     true,
   );
+});
+
+test("W1-T10372: the amendment validator reads a policy.yaml-shaped value line in YAML grammar too", () => {
+  const baseYaml = POLICY_SHAPED_YAML.replace("  mode: act", "  mode: shadow");
+  withFixtureCheckout({ "plan/policy.yaml": POLICY_SHAPED_YAML }, (head) => {
+    withFixtureCheckout({ "plan/policy.yaml": baseYaml }, (base) => {
+      const claim = "escalation triage is set to act";
+      const oldProof = "grep: OPERATOR 2026-10-21: act in plan/policy.yaml";
+      const input = { headCwd: head, baseCwd: base, currentHeadSha: "h", pinnedHeadSha: "h", planShardPaths: new Set<string>() };
+      const evidence = { proofs: [{ claim, proof: oldProof, proofExec: "executed_stale" as const }] };
+      const validate = (newProof: string) => validateProofAmendmentProposal([{ claim, oldProof, newProof }], evidence, input);
+      const value = validate("grep: mode: act in plan/policy.yaml");
+      assert.equal(value.ok, true, JSON.stringify(value));
+      const comment = validate("grep: OPERATOR 2026-10-21: act in plan/policy.yaml");
+      assert.equal(comment.ok, false);
+      if (!comment.ok) assert.match(comment.refusal.detail, /only comment lines/);
+    });
+  });
 });
 
 test("a YAML hash inside a quoted scalar or a block scalar is not a comment", () => {

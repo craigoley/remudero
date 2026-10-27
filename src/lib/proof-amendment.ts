@@ -145,10 +145,10 @@ function targetsPlanShard(whitelisted: WhitelistedProof, planShardPaths: Readonl
 
 /** The reviewer's comment-only downgrade reads the grep pattern against the target file's text (review.ts
  *  `matchedLineCommentContext`); the same context here keeps a validated replacement from being capped again. */
-function grepCommentContext(parsed: WhitelistedProof, cwd: string): { pattern: string; fileText: string } | undefined {
+function grepCommentContext(parsed: WhitelistedProof, cwd: string): { pattern: string; fileText: string; path: string } | undefined {
   const dialect = parsed.authorSelectedArgv !== true && parsed.args.length === 4 && parsed.args[0] === "-arn" && parsed.args[1] === "--";
   const path = dialect ? join(cwd, parsed.args[3]!) : undefined;
-  return path !== undefined && existsSync(path) ? { pattern: parsed.args[2]!, fileText: readFileSync(path, "utf8") } : undefined;
+  return path !== undefined && existsSync(path) ? { pattern: parsed.args[2]!, fileText: readFileSync(path, "utf8"), path: parsed.args[3]! } : undefined;
 }
 
 export interface ProofAmendmentValidationInput {
