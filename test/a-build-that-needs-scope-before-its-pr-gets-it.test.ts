@@ -334,7 +334,7 @@ test("scope recovery never reads a companion through a replaced ancestor or leaf
       if (args.includes("--name-only")) return "src/consumer.ts\0";
       const output = args.find(arg => arg.startsWith("--output="));
       if (output) writeFileSync(output.slice("--output=".length), "saved patch");
-      return "";
+      return output ? "" : "saved patch";
     },
     // The real descriptor-relative reader, run right after the path is swapped: no check-then-open window is left to win.
     io: { run: (script, input) => { swap(); return execFileSync("python3", ["-I", "-c", script], { input, encoding: "utf8" }); } },
