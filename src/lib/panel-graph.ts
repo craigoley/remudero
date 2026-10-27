@@ -307,14 +307,16 @@ export function proposeHandRouteFeedback(
     merged = github.listMergedHeadBranches?.();
     if (github.readFailed?.()) return unknown("merged_snapshot_unavailable");
   } catch {
-    return unknown("merged_snapshot_read_failed");
+    const reason = "merged_snapshot_read_failed";
+    return unknown(reason);
   }
   if (!merged) return unknown("merged_snapshot_unavailable");
   let queued: ReturnType<typeof readQueuedFeedbackRecords>;
   try {
     queued = readQueuedFeedbackRecords(land.stateRoot);
   } catch {
-    return unknown("landing_queue_unreadable");
+    const reason = "landing_queue_unreadable";
+    return unknown(reason);
   }
   const marker = /^Resolves feedback `(?<id>fb-[0-9]{13}-[0-9a-f]{6})`[ \t]*\r?$/;
   const candidates = new Map<string, PrRef[]>();
@@ -341,7 +343,8 @@ export function proposeHandRouteFeedback(
       if (!current || current.url !== pr.url || current.number !== pr.number || current.state !== "MERGED" || current.headRefOid !== pr.headRefOid || current.body !== pr.body) return uncertain("merged_snapshot_identity_changed");
       evidence = github.changedFileEvidence?.(pr.url) ?? { status: "unknown", reason: "qualified_cache_unavailable" };
     } catch {
-      return uncertain("source_evidence_read_failed");
+      const reason = "source_evidence_read_failed";
+    return uncertain(reason);
     }
     if (evidence.status !== "complete") return uncertain(evidence.reason);
     if (evidence.repository !== repository || evidence.prNumber !== pr.number || evidence.headRefOid !== pr.headRefOid || evidence.prState !== "MERGED" || evidence.complete !== true || evidence.source !== "github_rest_pull_files_paginated" || evidence.freshness !== "immutable_merged_head" || !Number.isFinite(evidence.observedAt)) return uncertain("source_evidence_binding_mismatch");
