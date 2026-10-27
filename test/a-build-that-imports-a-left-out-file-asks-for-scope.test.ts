@@ -202,7 +202,7 @@ test("a committed source larger than the Git pipe buffer still asks for its exac
     });
     assert.equal(asked.length, 1);
     assert.deepEqual(asked[0]!.paths, [LEFT_OUT]);
-    assert.ok(asked[0]!.importers?.[LEFT_OUT]?.includes("src/lib/task-linter.ts"));
+    assert.ok(asked[0]!.importers?.includes("src/lib/task-linter.ts"));
     assert.equal(created.length, 0, "the undeclared source is never published without normal scope qualification");
     assert.equal(result.verdict, "no_pr");
   } finally {
