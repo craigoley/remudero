@@ -3,7 +3,7 @@ import { ownedFixtureDir, type FixtureScope } from "#test/helpers/owned-fixture-
 
 export type ReadModelFixtureScope = FixtureScope;
 type Fixture = ReturnType<typeof ownedFixtureDir>;
-type Disposal = Parameters<FixtureScope["after"]>[0];
+type Disposal = () => unknown;
 type Group = { closers: Array<() => unknown>; disposals: Disposal[]; fixtures: Fixture[] };
 const groups = new WeakMap<FixtureScope, Group>();
 
@@ -12,7 +12,7 @@ function group(scope: FixtureScope): Group {
   if (existing) return existing;
   const value: Group = { closers: [], disposals: [], fixtures: [] };
   groups.set(scope, value);
-  scope.after(async (context) => {
+  scope.after(async () => {
     const errors: unknown[] = [];
     for (const close of value.closers) {
       try { await close(); } catch (error) { errors.push(error); }
@@ -22,7 +22,7 @@ function group(scope: FixtureScope): Group {
       for (const fixture of value.fixtures) fixture.retain("read-model fixture writer closure or transaction flush failed");
       throw new AggregateError(errors, "read-model fixture cleanup could not verify writer closure");
     }
-    for (const dispose of value.disposals) await dispose(context);
+    for (const dispose of value.disposals) await dispose();
   });
   return value;
 }
@@ -30,7 +30,9 @@ function group(scope: FixtureScope): Group {
 /** Test-owned roots share one teardown: close every writer, flush its diagnostic publications, then remove roots. */
 export function readModelFixtureDir(scope: FixtureScope, kind: string): string {
   const owned = group(scope);
-  const fixture = ownedFixtureDir({ after(dispose) { owned.disposals.push(dispose); } }, kind);
+  // ownedFixtureDir registers a zero-argument disposal; keep it for the group teardown above.
+  const inner = { after(dispose?: Disposal) { if (dispose) owned.disposals.push(dispose); } };
+  const fixture = ownedFixtureDir(inner as unknown as FixtureScope, kind);
   owned.fixtures.push(fixture);
   return fixture.dir;
 }
