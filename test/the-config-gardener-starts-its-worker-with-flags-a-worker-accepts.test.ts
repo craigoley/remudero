@@ -6,8 +6,8 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
-import { measurementWorkerOptions } from "../src/lib/config-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { measurementWorkerOptions } from "#src/lib/config-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // W1-T5725 (#9111): garden-registry starts each gardener child with --max-old-space-size=<mb>, and the
 // config gardener handed that execArgv to `new Worker`, which refuses V8 heap flags — so most config

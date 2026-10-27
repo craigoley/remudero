@@ -11,11 +11,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { rotateLedger } from "../src/lib/ledger.js";
-import { pruneCarriedRows, PR_TERMINAL_STEP } from "../src/lib/ledger-carry.js";
-import { closedPrLookup, runPrTerminalReconcile } from "../src/lib/sweep.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { rotateLedger } from "#src/lib/ledger.js";
+import { pruneCarriedRows, PR_TERMINAL_STEP } from "#src/lib/ledger-carry.js";
+import { closedPrLookup, runPrTerminalReconcile } from "#src/lib/sweep.js";
 
 const url = (n: number): string => `https://github.com/o/r/pull/${n}`;
 const at = (offsetMs: number): string => new Date(Date.now() - 60_000 + offsetMs).toISOString();

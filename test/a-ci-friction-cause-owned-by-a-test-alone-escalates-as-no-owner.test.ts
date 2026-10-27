@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { ciFrictionLadder, ciFrictionRecordVerdict, ciFrictionShardStem, ciFrictionShardYaml, gitCiFrictionOwnerSearch } from "../src/lib/ci-friction-gardener.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { ciFrictionLadder, ciFrictionRecordVerdict, ciFrictionShardStem, ciFrictionShardYaml, gitCiFrictionOwnerSearch } from "#src/lib/ci-friction-gardener.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const TEST = "test/census-reads-files.test.ts";
 const SOURCE = "src/lib/dispatch-governor.ts";
@@ -41,7 +41,7 @@ test("W1-T9503: a cause owned by a test alone escalates as no-owner", t => {
 });
 
 test("W1-T9503: a source-owned cause still drafts a record lint-plan admits", t => {
-  const f = fixture(t, 'import { govern } from "../src/lib/dispatch-governor.js";\nexport const ok = govern();\n');
+  const f = fixture(t, 'import { govern } from "#src/lib/dispatch-governor.js";\nexport const ok = govern();\n');
   const { next } = f.ladder();
   assert.equal(next?.decision.kind, "draft");
   const owner = next?.decision.kind === "draft" ? next.decision.owner : undefined;

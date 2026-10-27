@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { ciFrictionRoundsFromLedger, gitCiFrictionOwnerSearch, withoutBirthRounds } from "../src/lib/ci-friction-gardener.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { ciFrictionRoundsFromLedger, gitCiFrictionOwnerSearch, withoutBirthRounds } from "#src/lib/ci-friction-gardener.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const FILE = "test/x.test.ts";
 const dispatch = (head: string, run: string, ts: string, ci_failures: Array<{ check: string; signature?: string }>): LedgerRecord =>

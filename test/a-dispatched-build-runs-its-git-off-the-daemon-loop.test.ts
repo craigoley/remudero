@@ -16,13 +16,13 @@ import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 
-import { affectedSelectionOrFullAsync, readAffectedListings, readAffectedListingsAsync } from "../src/lib/affected-suites.js";
-import { gitPushRunBranchAsync, PushFailedError } from "../src/lib/git-push.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { startReadPlaneTelemetry } from "../src/lib/read-plane.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { worktreeAdd } from "../src/lib/worker.js";
-import { pinnedConfigValue, pinnedConfigValueAsync, pinWorktreeGit } from "../src/lib/worktree-git.js";
+import { affectedSelectionOrFullAsync, readAffectedListings, readAffectedListingsAsync } from "#src/lib/affected-suites.js";
+import { gitPushRunBranchAsync, PushFailedError } from "#src/lib/git-push.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { startReadPlaneTelemetry } from "#src/lib/read-plane.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { worktreeAdd } from "#src/lib/worker.js";
+import { pinnedConfigValue, pinnedConfigValueAsync, pinWorktreeGit } from "#src/lib/worktree-git.js";
 import {
   checkFixCensusSnapshot,
   checkFixCensusSnapshotAsync,
@@ -33,8 +33,8 @@ import {
   readDispatchFilingSnapshotAsync,
   spawnCensusChild,
   type CoverageRunResult,
-} from "../src/run-task.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+} from "#src/run-task.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 const SYNC_PRIMITIVES = ["execFileSync", "spawnSync", "execSync"] as const;
 
@@ -99,7 +99,7 @@ function lane(): { wt: string; remote: string; branch: string } {
   mkdirSync(join(wt, "src"));
   mkdirSync(join(wt, "test"));
   writeFileSync(join(wt, "src", "feature.ts"), "export const feature = 1;\n");
-  writeFileSync(join(wt, "test", "feature.test.ts"), 'import { feature } from "../src/feature.js";\nvoid feature;\n');
+  writeFileSync(join(wt, "test", "feature.test.ts"), 'import { feature } from "#src/feature.js";\nvoid feature;\n');
   spawnSync("git", ["-C", wt, "add", "src", "test"]);
   spawnSync("git", ["-C", wt, "-c", "core.hooksPath=/dev/null", "-c", `user.email=${GIT_REPO_FIXTURE_IDENTITY.email}`, "-c",
     `user.name=${GIT_REPO_FIXTURE_IDENTITY.name}`, "commit", "-q", "-m", "feat: a feature"]);

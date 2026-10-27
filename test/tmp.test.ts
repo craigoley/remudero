@@ -8,15 +8,15 @@ import fsDefault from "node:fs";
 import { test } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Task } from "../src/lib/plan.js";
-import { deriveStatus, readLedgerLines, type GitHub, type LedgerFsDeps, type PrRef } from "../src/lib/status.js";
+import type { Task } from "#src/lib/plan.js";
+import { deriveStatus, readLedgerLines, type GitHub, type LedgerFsDeps, type PrRef } from "#src/lib/status.js";
 import {
   DEFAULT_TEMP_SWEEP_MAX_AGE_MS,
   RMD_TMP_PREFIX,
   makeTempDir,
   sweepStaleTempDirs,
   withTempDir,
-} from "../src/lib/tmp.js";
+} from "#src/lib/tmp.js";
 
 // ── withTempDir: the fix for the rmd-review- leak (W1-T115) ────────────────
 // "a completed rmd invocation leaves zero temp dirs" — proof: the temp dir is

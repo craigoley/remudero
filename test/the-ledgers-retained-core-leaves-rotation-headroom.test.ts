@@ -3,18 +3,18 @@ import { test } from "node:test";
 import { readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
-import * as ledger from "../src/lib/ledger.js";
-import { decideArmFromLedgerVerdict, lastReviewDecisionTerminal, priorReviewVerdictFromLedger } from "../src/lib/review.js";
+import * as ledger from "#src/lib/ledger.js";
+import { decideArmFromLedgerVerdict, lastReviewDecisionTerminal, priorReviewVerdictFromLedger } from "#src/lib/review.js";
 import {
   DEFAULT_SWEEP_POLICY,
   dueRepairFilings,
   lastBaseCausedTipFromLedger,
   lastKnownMergeStateFromLedger,
   repeatDispositionStreaksFromLedger,
-} from "../src/lib/sweep.js";
-import { priorBlockersFromLedger } from "../src/lib/pr-blocker.js";
-import { buildLedgerIndex } from "../src/lib/status.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#src/lib/sweep.js";
+import { priorBlockersFromLedger } from "#src/lib/pr-blocker.js";
+import { buildLedgerIndex } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 // W1-T5517. MEASURED 2026-10-03 ~21:06Z: the carried core was 4,016,449 B, 95.8% of the 4 MiB
 // ceiling. review.posted was 907,746 B (200 rows of ~4.5 KB), sweep.disposed 789,276 B (1,255 rows).

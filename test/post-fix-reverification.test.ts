@@ -13,11 +13,11 @@ import {
   type OpenPrView,
   type PostFixReverificationDeps,
   type RedriveResult,
-} from "./helpers/sweep-test.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type SweepDeps } from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { sweepPostFixReverification } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { sweepPostFixReverification } from "#src/run-task.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { rmSync } from "node:fs";
 

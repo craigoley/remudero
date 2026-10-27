@@ -4,9 +4,9 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { pendingPrActions } from "../src/lib/fleet-control.js";
-import { buildPrActionRoute } from "../src/lib/panel-actions.js";
-import { createConfirmNonceStore, createService, makeConfirmNonceRoute, type IdentityProvider } from "../src/lib/service.js";
+import { pendingPrActions } from "#src/lib/fleet-control.js";
+import { buildPrActionRoute } from "#src/lib/panel-actions.js";
+import { createConfirmNonceStore, createService, makeConfirmNonceRoute, type IdentityProvider } from "#src/lib/service.js";
 
 const OPERATOR_HEADER = "x-test-operator";
 const HIGH_OPERATOR: IdentityProvider = {

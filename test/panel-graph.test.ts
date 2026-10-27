@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
+import { createService } from "#src/lib/service.js";
 import {
   buildClearDailyCostCeilingRoute,
   buildDrainPreviewRoute,
@@ -22,10 +22,10 @@ import {
   reconcileFeedbackEntries,
   type PanelGraphDeps,
   type RatifyCliGateway,
-} from "../src/lib/panel-graph.js";
-import { refreshInboxClassification } from "../src/lib/inbox-view.js";
-import { plainTemplate, servePlainOptions } from "../src/lib/inbox-plain.js";
-import { bearerTokenId } from "../src/lib/panel-actions.js";
+} from "#src/lib/panel-graph.js";
+import { refreshInboxClassification } from "#src/lib/inbox-view.js";
+import { plainTemplate, servePlainOptions } from "#src/lib/inbox-plain.js";
+import { bearerTokenId } from "#src/lib/panel-actions.js";
 import {
   captureFeedback,
   feedbackDir,
@@ -37,12 +37,12 @@ import {
   type FeedbackEntry,
   type FeedbackExpanderDeps,
   type FeedbackExpansion,
-} from "../src/lib/feedback.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
-import type { GitHub } from "../src/lib/status.js";
-import { dailyCostCeilingOverridePath, loadDefaultPolicy, resolveDailyCostCeiling, type Policy } from "../src/lib/policy.js";
-import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
+} from "#src/lib/feedback.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import type { TraceGithub, TracePrView } from "#src/lib/trace.js";
+import type { GitHub } from "#src/lib/status.js";
+import { dailyCostCeilingOverridePath, loadDefaultPolicy, resolveDailyCostCeiling, type Policy } from "#src/lib/policy.js";
+import { landQueuedFeedback } from "#test/helpers/land-queued-feedback.js";
 import {
   decideTriage,
   diffCitesFeedback,
@@ -50,7 +50,7 @@ import {
   parseTriageVerdict,
   triageCommitMessage,
   triagePrompt,
-} from "../src/lib/triage.js";
+} from "#src/lib/triage.js";
 
 // ── W3-T6: the plan→task→PR graph + interactive plan adjustment (MASTER-PLAN §7B) ──────────
 //
@@ -1003,7 +1003,7 @@ test("GET /v1/trace?id=<feedback-id>: FORWARD chain -- feedback -> proposal PR -
   const ledgerPath = ledgerPathFor(root);
   const deps: PanelGraphDeps = { root, inboxRoot: root, planPath, ledgerPath, github, statusGithub: fakeStatusGithub(), ratify: fakeRatifyGateway() };
   // seed the run's ledger lines directly (mirrors test/board.test.ts's convention).
-  const { appendLedger } = await import("../src/lib/ledger.js");
+  const { appendLedger } = await import("#src/lib/ledger.js");
   appendLedger(ledgerPath, { run_id: "W9-T1-1000", task_id: "W9-T1", step: "pr.opened", pr_url: "https://github.com/o/r/pull/51" });
 
   await withService(deps, async (base) => {

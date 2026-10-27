@@ -4,9 +4,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 
 const NOW = Date.now();
 const INTERVAL = 60_000;
@@ -124,8 +124,8 @@ test("the contradictory escalation backoff survives a restart", async (t) => {
     }
     const before = dispositions(f.ledgerPath).length;
     const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
-    import { runSweep, DEFAULT_SWEEP_POLICY } from './src/lib/sweep.ts';
-    import { readLedgerLines } from './src/lib/status.ts';
+    import { runSweep, DEFAULT_SWEEP_POLICY } from '#test/src/lib/sweep.ts';
+    import { readLedgerLines } from '#test/src/lib/status.ts';
     let escalations = 0;
     const pr = ${JSON.stringify(f.pr)};
     await runSweep([pr], {

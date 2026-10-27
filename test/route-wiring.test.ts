@@ -5,18 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { declaredConsoleRoutes } from "./helpers/declared-routes.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { OPERATOR_SESSION_HEADER } from "../src/lib/service.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import { drainNowFilePath, kickFilePath, pauseFilePath, pendingPrActions, quietHoursFilePath, stopFilePath } from "../src/lib/fleet-control.js";
-import type { Plan } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
-import { dailyCostCeilingOverridePath } from "../src/lib/policy.js";
+import { declaredConsoleRoutes } from "#test/helpers/declared-routes.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { OPERATOR_SESSION_HEADER } from "#src/lib/service.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import { drainNowFilePath, kickFilePath, pauseFilePath, pendingPrActions, quietHoursFilePath, stopFilePath } from "#src/lib/fleet-control.js";
+import type { Plan } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
+import { dailyCostCeilingOverridePath } from "#src/lib/policy.js";
 
 // ── WHAT THIS SUITE ADDS, AND WHY IT IS NOT test/route-registration.test.ts AGAIN.
 //

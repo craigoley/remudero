@@ -4,8 +4,8 @@ import { test } from "node:test";
 import {
   adaptLiveAnalyticsMetrics,
   type LiveAnalyticsMetrics,
-} from "../src/lib/analytics-live-metrics.js";
-import { buildAnalyticsRoute, deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
+} from "#src/lib/analytics-live-metrics.js";
+import { buildAnalyticsRoute, deriveAnalyticsSnapshot } from "#src/lib/analytics-route.js";
 
 function responseCapture(): { response: ServerResponse; status: () => number; body: () => unknown } {
   let code = 0;

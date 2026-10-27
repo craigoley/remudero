@@ -11,10 +11,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { GARDEN_LOG, GARDEN_MAX_ACTIONS_PER_PASS, runGardenPass, type GardenWorkspace } from "../src/lib/knowledge-gardener.js";
-import { learningUsagePath } from "../src/lib/knowledge-value.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { GARDEN_LOG, GARDEN_MAX_ACTIONS_PER_PASS, runGardenPass, type GardenWorkspace } from "#src/lib/knowledge-gardener.js";
+import { learningUsagePath } from "#src/lib/knowledge-value.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 type Usage = { offered: number; used: number };
 

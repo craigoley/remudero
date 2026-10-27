@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { GhPaceFloorStandDownError } from "../src/lib/open-prs-rest.js";
+import { GhPaceFloorStandDownError } from "#src/lib/open-prs-rest.js";
 import {
   DEFAULT_SWEEP_POLICY, drainInFlightReviews, inFlightReviewCount, runSweepLightPass,
   type OpenPrView, type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 // Measured 2026-10-10 on the core daemon: light passes ran 5-12 min apart and a review took a median
 // 2.2 min, so a lane a pass freed sat empty until the next pass while armed, green PRs waited on an

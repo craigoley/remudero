@@ -18,13 +18,13 @@ import {
   buildAssistantControlReceiptRoute,
   buildAssistantControlRoute,
   type AssistantControlOptions,
-} from "../src/lib/panel-actions.js";
-import { readAssistantActionDiscovery, type AssistantActionDiscovery } from "../src/lib/assistant-action-discovery.js";
-import { instanceRouteSet, mountUnderInstance } from "../src/lib/instance-gateway.js";
-import { createService, type Route, type Scope } from "../src/lib/service.js";
-import { isPaused, isStopped } from "../src/lib/fleet-control.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { clockFromMillisFn, systemClock } from "../src/lib/clock.js";
+} from "#src/lib/panel-actions.js";
+import { readAssistantActionDiscovery, type AssistantActionDiscovery } from "#src/lib/assistant-action-discovery.js";
+import { instanceRouteSet, mountUnderInstance } from "#src/lib/instance-gateway.js";
+import { createService, type Route, type Scope } from "#src/lib/service.js";
+import { isPaused, isStopped } from "#src/lib/fleet-control.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { clockFromMillisFn, systemClock } from "#src/lib/clock.js";
 
 const DISCOVERY = "/v1/control/assistant-action/discovery";
 const ACTION = "/v1/control/assistant-action";
@@ -85,8 +85,8 @@ function routes(deps: AssistantControlOptions): Route[] {
 }
 
 const childServer = `
-import { createService } from "./src/lib/service.ts";
-import { buildAssistantControlRoute, buildAssistantControlReceiptRoute, buildAssistantActionDiscoveryRoute } from "./src/lib/panel-actions.ts";
+import { createService } from "#test/src/lib/service.ts";
+import { buildAssistantControlRoute, buildAssistantControlReceiptRoute, buildAssistantActionDiscoveryRoute } from "#test/src/lib/panel-actions.ts";
 import { join } from "node:path";
 const root = process.env.RMD_TEST_CONTROL_ROOT;
 const interrupt = process.env.RMD_TEST_INTERRUPT;
@@ -513,7 +513,7 @@ test("assistant discovery refuses a real claim named pipe without waiting for a 
   assert.deepEqual((await readAssistantActionDiscovery(request)).pending.map(row => row.actionId), [actionId], "regular claim is the positive control");
   rmSync(path); execFileSync("mkfifo", [path]);
   const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval",
-    `import { readAssistantActionDiscovery } from "./src/lib/assistant-action-discovery.ts";
+    `import { readAssistantActionDiscovery } from "#test/src/lib/assistant-action-discovery.ts";
      console.log(JSON.stringify(await readAssistantActionDiscovery(${JSON.stringify(request)})));`],
     { cwd: process.cwd(), encoding: "utf8", timeout: 5000 });
   assert.equal(child.error, undefined, "nonregular claim must not block in open before stat can reject it");

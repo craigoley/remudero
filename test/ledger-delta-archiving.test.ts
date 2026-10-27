@@ -17,10 +17,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gunzipSync } from "node:zlib";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { compactRotations, compactedArchiveName, ledgerCarriedPrefixPath, rotateLedger } from "../src/lib/ledger.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { compactRotations, compactedArchiveName, ledgerCarriedPrefixPath, rotateLedger } from "#src/lib/ledger.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const T0 = Date.parse("2026-09-23T10:00:00.000Z");
 

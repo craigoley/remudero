@@ -4,10 +4,10 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger, ledgerExceedsRotationCeiling, rotateLedger, type LedgerLine } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, requeuedCheckKeysFromLedger } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger, ledgerExceedsRotationCeiling, rotateLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, requeuedCheckKeysFromLedger } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // W1-T5935. requeuedCheckKeysFromLedger (src/lib/sweep.ts) enforces W1-T1223's one requeue per
 // (head, check) by reading `sweep.check_requeued` rows back from the LIVE ledger. That step was not

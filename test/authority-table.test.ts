@@ -16,10 +16,10 @@ import {
   buildAuthorityReport,
   loadRatificationPins,
   renderAuthorityReport,
-} from "../src/lib/authority.js";
-import { authorityCommand } from "../src/run-task.js";
-import type { LedgerUnionResult } from "../src/lib/ledger-grep.js";
-import type { Policy } from "../src/lib/policy.js";
+} from "#src/lib/authority.js";
+import { authorityCommand } from "#src/run-task.js";
+import type { LedgerUnionResult } from "#src/lib/ledger-grep.js";
+import type { Policy } from "#src/lib/policy.js";
 
 function fakeLedger(matches: string[], ok = true): LedgerUnionResult {
   return {

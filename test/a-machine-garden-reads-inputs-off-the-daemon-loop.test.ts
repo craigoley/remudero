@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import * as machine from "../src/lib/machine-filing-judge.js";
-import * as registry from "../src/lib/garden-registry.js";
+import { fixedClock } from "#src/lib/clock.js";
+import * as machine from "#src/lib/machine-filing-judge.js";
+import * as registry from "#src/lib/garden-registry.js";
 
 function api() { assert.equal(typeof machine.machineJudgeInputsAsync, "function"); assert.equal(typeof registry.gardenPacingDueAsync, "function"); }
 

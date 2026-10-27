@@ -3,13 +3,13 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { buildOpenPrViews, buildOpenPrViewsAsync, createTickReadProducer } from "../src/run-task.js";
-import { createGhCallPacer, createPlanFilingFileCache, type GhCallPacer } from "../src/lib/open-prs-rest.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import type { CiFailure } from "../src/lib/sweep.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { readRequiredStatusCheckContextsAsync } from "../src/lib/status.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { buildOpenPrViews, buildOpenPrViewsAsync, createTickReadProducer } from "#src/run-task.js";
+import { createGhCallPacer, createPlanFilingFileCache, type GhCallPacer } from "#src/lib/open-prs-rest.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import type { CiFailure } from "#src/lib/sweep.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { readRequiredStatusCheckContextsAsync } from "#src/lib/status.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // W1-T6591: the 2026-10-08 CPU profile caught buildOpenPrViews holding the daemon thread for 18.5 s
 // on synchronous `gh` (open-prs-rest → ghJson) and git (fetchCiFailures → runStepsSync) children.

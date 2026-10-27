@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { headShaRestArgs, prUrlTarget, readHeadShaRest, realArmDeps } from "../src/run-task.js";
+import { headShaRestArgs, prUrlTarget, readHeadShaRest, realArmDeps } from "#src/run-task.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");

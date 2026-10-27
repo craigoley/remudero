@@ -3,9 +3,9 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { bodyCreditedMergeTimes, readCiFrictionPlanTasks } from "../src/lib/ci-friction-gardener.js";
-import { FLOW_LADDER, readLadderPlan } from "../src/lib/flow-remedy-gardener.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { bodyCreditedMergeTimes, readCiFrictionPlanTasks } from "#src/lib/ci-friction-gardener.js";
+import { FLOW_LADDER, readLadderPlan } from "#src/lib/flow-remedy-gardener.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 // A GitHub squash body carries `Remudero-Task:` mid-body, where git's `%(trailers)` never looks. Read that way the
 // ladders saw almost no merged remedy, so no remedy's effect was ever measured.

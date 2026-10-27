@@ -3,10 +3,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import * as registry from "../src/lib/garden-registry.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import * as runTask from "../src/run-task.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import * as registry from "#src/lib/garden-registry.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import * as runTask from "#src/run-task.js";
 
 // W1-T5361. MEASURED 2026-10-02: the machine-filing judge was the one gardener still started in-process.
 // Its synchronous git fetch, worktree add and commit held the daemon's thread for 85-241 s per failed

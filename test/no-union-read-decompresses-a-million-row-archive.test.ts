@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
 
-import * as ledgerCompactModule from "../src/lib/ledger-compact.js";
+import * as ledgerCompactModule from "#src/lib/ledger-compact.js";
 import {
   ledgerCompactCommand,
   selectLedgerCompactionSources,
   type LedgerCompactFs,
-} from "../src/lib/ledger-compact.js";
-import { compactedArchiveName } from "../src/lib/ledger.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { resolveLedgerUnion } from "../src/lib/ledger-union.js";
+} from "#src/lib/ledger-compact.js";
+import { compactedArchiveName } from "#src/lib/ledger.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { resolveLedgerUnion } from "#src/lib/ledger-union.js";
 
 const STATE_DIR = "/state";
 const NOW = new Date("2026-09-10T00:00:00.000Z");

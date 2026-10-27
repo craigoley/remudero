@@ -31,7 +31,7 @@ import {
   realArmDepsAsync,
   type ArmAttemptResult,
   type ArmDeps,
-} from "../src/lib/arm-auto-merge.js";
+} from "#src/lib/arm-auto-merge.js";
 import {
   defaultGitCaptureAsync,
   defaultPushExecAsync,
@@ -43,13 +43,13 @@ import {
   runStepsSync,
   step,
   type PushRunBranchOpts,
-} from "../src/lib/git-push.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { addLaneWorktree, createDaemonLaneWorktree, createFixRungWorktree, pushFixRound } from "../src/run-task.js";
-import { worktreeAddAsync } from "../src/lib/worker.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/git-push.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { addLaneWorktree, createDaemonLaneWorktree, createFixRungWorktree, pushFixRound } from "#src/run-task.js";
+import { worktreeAddAsync } from "#src/lib/worker.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 
 type Log = (step: string, extra?: Record<string, unknown>) => void;
 

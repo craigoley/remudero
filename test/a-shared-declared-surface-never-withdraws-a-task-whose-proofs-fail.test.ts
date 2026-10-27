@@ -9,12 +9,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { backlogInventory, type BacklogSources } from "../src/lib/backlog-gardener.js";
-import { fixedClock } from "../src/lib/clock.js";
-import type { MainCommit } from "../src/lib/hot-file-gardener.js";
-import type { PlanInventory } from "../src/lib/plan-gardener.js";
-import type { Task } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { backlogInventory, type BacklogSources } from "#src/lib/backlog-gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { MainCommit } from "#src/lib/hot-file-gardener.js";
+import type { PlanInventory } from "#src/lib/plan-gardener.js";
+import type { Task } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = new Date("2026-10-10T20:00:00.000Z");
 const SELECTOR = "src/lib/affected-suites.ts";

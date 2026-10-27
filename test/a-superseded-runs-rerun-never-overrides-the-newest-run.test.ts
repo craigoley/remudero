@@ -3,9 +3,9 @@ import test from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rollupFor, rollupForAsync, rollupFromRest } from "../src/lib/open-prs-rest.js";
-import type { Config } from "../src/lib/config.js";
-import type { Plan } from "../src/lib/plan.js";
+import { rollupFor, rollupForAsync, rollupFromRest } from "#src/lib/open-prs-rest.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan } from "#src/lib/plan.js";
 import {
   buildSweepEffects, cancelledRequiredCheckNames, checkJobId, checksStateFromRollup,
   classifyRollupSupersession, dedupeRollupByLatestAttempt, redQualityGateNames,

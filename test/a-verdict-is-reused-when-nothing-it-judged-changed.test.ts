@@ -37,13 +37,13 @@ import {
   type OpenPrView,
   type ReviewReuseInputs,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { priorReviewVerdictFromLedger, reviewLedgerLegibilityFields } from "../src/lib/review.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { buildSweepEffects } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { priorReviewVerdictFromLedger, reviewLedgerLegibilityFields } from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { buildSweepEffects } from "#src/run-task.js";
 
 const NOW = Date.parse("2026-09-16T19:00:00Z");
 const RECENT = "2026-09-16T18:50:00Z";

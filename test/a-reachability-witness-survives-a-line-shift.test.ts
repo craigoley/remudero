@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { callSiteKey, enclosingTestTitle, numberCallSites } from "./helpers/test-call-site-key.js";
+import { callSiteKey, enclosingTestTitle, numberCallSites } from "#test/helpers/test-call-site-key.js";
 
 // ── W1-T5622: the operator-gated reachability census keys a witness by its enclosing TEST TITLE ──
 //
@@ -16,7 +16,7 @@ import { callSiteKey, enclosingTestTitle, numberCallSites } from "./helpers/test
 // change under the shift below.
 
 const FIXTURE = [
-  'import { armIfVerdictPermits } from "../src/lib/arm-auto-merge.ts";',
+  'import { armIfVerdictPermits } from "#src/lib/arm-auto-merge.ts";',
   "",
   'test("a passing verdict arms the PR", () => {',
   "  const outcome = armIfVerdictPermits(verdict, ctx, { arm });",

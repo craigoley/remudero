@@ -11,17 +11,17 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 
-import { compactedArchiveName } from "../src/lib/ledger.js";
-import { ledgerCompactCommand, selectLedgerCompactionSources } from "../src/lib/ledger-compact.js";
+import { compactedArchiveName } from "#src/lib/ledger.js";
+import { ledgerCompactCommand, selectLedgerCompactionSources } from "#src/lib/ledger-compact.js";
 import {
   decideLedgerCompaction,
   DEFAULT_LEDGER_COMPACTION_TRIGGER,
   ledgerCompactionIntervalMs,
   ledgerCompactionProtectedHours,
   readLedgerCorpusPressure,
-} from "../src/lib/ledger-compaction-rung.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { daemonLedgerCompactArgs } from "../src/run-task.js";
+} from "#src/lib/ledger-compaction-rung.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { daemonLedgerCompactArgs } from "#src/run-task.js";
 
 const NOW = new Date("2026-09-23T12:00:00.000Z");
 const HOUR = 60 * 60 * 1000;

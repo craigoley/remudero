@@ -20,7 +20,7 @@ import {
   GH_APP_INSTALLATION_ID_ENV,
   GH_APP_PRIVATE_KEY_PATH_ENV,
   startInstallationTokenRefresh,
-} from "../src/lib/github-app.js";
+} from "#src/lib/github-app.js";
 
 const CONFIGURED_ENV = {
   [GH_APP_ID_ENV]: "1",

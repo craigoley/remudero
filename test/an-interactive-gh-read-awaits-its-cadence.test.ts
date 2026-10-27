@@ -14,8 +14,8 @@ import {
   resetGhCadenceAdvisoryForTest,
   routeInteractiveGhRead,
   stampGhRead,
-} from "../src/lib/github-transport.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/github-transport.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 function cache() {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-interactive-cadence-`));

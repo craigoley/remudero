@@ -6,9 +6,9 @@ import {
   isQualitySuspect,
   outputContractLines,
   renderAnchorBlock,
-} from "../src/lib/compaction.js";
-import { renderImplementPrompt, renderReconPrompt } from "../src/run-task.js";
-import type { Task } from "../src/lib/plan.js";
+} from "#src/lib/compaction.js";
+import { renderImplementPrompt, renderReconPrompt } from "#src/run-task.js";
+import type { Task } from "#src/lib/plan.js";
 
 function task(over: Partial<Task> = {}): Task {
   return {

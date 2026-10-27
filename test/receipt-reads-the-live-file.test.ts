@@ -6,8 +6,8 @@ import {
   resolveReceiptLedgerLines,
   type ReceiptField,
   type ReceiptLedgerLine,
-} from "../src/lib/receipt.js";
-import type { LedgerGrepFsDeps } from "../src/lib/ledger-grep.js";
+} from "#src/lib/receipt.js";
+import type { LedgerGrepFsDeps } from "#src/lib/ledger-grep.js";
 
 // ── W1-T2257 ─────────────────────────────────────────────────────────────────────────────────
 // `receiptCommand` used to hand `buildReceipt` the LIVE `ledger.ndjson` alone — exactly the slice
@@ -123,7 +123,7 @@ test("a zero-archive union refuses rather than resolving as zero lines found", (
 });
 
 test("receiptCommand exits non-zero and prints no receipt when the ledger union is refused", async () => {
-  const { receiptCommand } = await import("../src/run-task.js");
+  const { receiptCommand } = await import("#src/run-task.js");
   const logs: string[] = [];
   const errors: string[] = [];
   const realLog = console.log;
