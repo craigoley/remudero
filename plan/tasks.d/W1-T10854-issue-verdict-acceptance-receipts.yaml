@@ -20,13 +20,13 @@
     - test/the-issue-revalidation-garden-re-judges-every-open-issue.test.ts
   acceptance:
     - claim: "Default composition records the exact final consumed attempt and actual parser state after one model call and one parse"
-      proof: "unit test: issue revalidation verdict receipts identify the final consumed judge attempt without another call or parse"
+      proof: "unit test: W1-T10854: verdict receipt uses the final judge attempt once"
     - claim: "Fallback and unknown provenance cannot manufacture a consumed-attempt acceptance"
-      proof: "unit test: issue revalidation verdict receipts refuse missing foreign conflicting and superseded identities"
+      proof: "unit test: W1-T10854: verdict receipt refuses unavailable or superseded identity"
     - claim: "Legacy deterministic cached and unjudged cases retain their behavior and remain separate from paid model judgments"
-      proof: "unit test: issue revalidation verdict receipts preserve legacy deterministic cached and unjudged outcomes"
+      proof: "unit test: W1-T10854: legacy and unjudged verdicts remain separate"
     - claim: "Receipt construction preserves verdict actions original failures and canonical monetary receipts"
-      proof: "unit test: issue revalidation verdict receipts preserve decisions failures and monetary accounting"
+      proof: "unit test: W1-T10854: receipt metadata preserves failures and money"
   rationale: |
     The existing judge composition retains immutable selection-assignment identity in its monetary attempt receipt before returning text. The issue verdict producer records the issue and final verdict but not that consumed-attempt identity or an original parser-state receipt. A bounded passive sample positively contains both producer shapes; it does not prove model failure, semantic quality, a representative rate or invoice savings. Exact accepted-output attribution stays unknown. Existing monetary-receipt work concerns money before parsing and must not be rebuilt or reinterpreted.
     Current source and every captured open advertised head tree were inspected for the subject.
