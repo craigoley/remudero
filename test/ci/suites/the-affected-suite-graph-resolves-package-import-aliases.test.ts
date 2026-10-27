@@ -17,11 +17,13 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const ALIASES = { "#src/*": "./src/*", "#scripts/*": "./scripts/*", "#test/*": "./test/*" };
 const CODE = /\.(?:ts|mts|mjs|js|cjs)$/;
+// A fixture's location-relative import, built so this file's own text carries none (W1-T9864).
+const imp = (name: string, spec: string): string => `import { ${name} } from ${JSON.stringify(spec)};`;
 
 const fixture = (extra: Record<string, string> = {}) => new Map<string, string>(Object.entries({
   "src/run-task.ts": "export const run = 1;",
   "test/alias.test.ts": 'import { run } from "#src/run-task.js";\nrun;',
-  "test/relative.test.ts": 'import { run } from "../src/run-task.js";\nrun;',
+  "test/relative.test.ts": `${imp("run", "../src/run-task.js")}\nrun;`,
   ...extra,
 }));
 
@@ -77,7 +79,7 @@ test("W1-T10820: #scripts and #test specifiers resolve like #src", () => {
   assert.deepEqual([...graph.directImports.get("test/s.test.ts")!].sort(), ["scripts/tool.mjs", "src/m.ts", "test/helpers/h.ts"]);
   assert.deepEqual([...graph.directImports.get("test/none.test.ts")!], [], "an unmatched # specifier, or one naming no file, gives no edge");
   // A tree that names no # specifier never reads a map, so even a missing one cannot fail it.
-  assert.doesNotThrow(() => buildAffectedSuitesGraph(new Map([["src/a.ts", 'import "./b.js";'], ["src/b.ts", ""]]), [], { root: join(REPO_ROOT, "no-such-root") }));
+  assert.doesNotThrow(() => buildAffectedSuitesGraph(new Map([["src/a.ts", `import ${JSON.stringify("./b.js")};`], ["src/b.ts", ""]]), [], { root: join(REPO_ROOT, "no-such-root") }));
 });
 
 test("W1-T10820: an imports target the resolver does not model is a named full run", (t) => {
@@ -109,7 +111,7 @@ test("W1-T10820: coverage-narrow lists a #src importer as a direct importer", as
   const repo = gitRepo({ scope: t, kind: "w10820-coverage-narrow" });
   mkdirSync(join(repo.dir, "test"), { recursive: true });
   writeFileSync(join(repo.dir, "test", "by-alias.test.ts"), 'import { small } from "#src/lib/small.js";\nsmall();\n');
-  writeFileSync(join(repo.dir, "test", "by-path.test.ts"), 'import { small } from "../src/lib/small.js";\nsmall();\n');
+  writeFileSync(join(repo.dir, "test", "by-path.test.ts"), `${imp("small", "../src/lib/small.js")}\nsmall();\n`);
   writeFileSync(join(repo.dir, "test", "unrelated.test.ts"), 'import { other } from "#src/lib/other.js";\nother();\n');
   repo.git("add", "-A");
   repo.git("commit", "-q", "-m", "tree");
