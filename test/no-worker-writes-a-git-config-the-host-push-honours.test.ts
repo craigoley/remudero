@@ -396,10 +396,11 @@ async function runCodex(cwd: string, child: ReturnType<typeof codexChild>, extra
   const pending = provider.spawnCodexWorker({
     workerHome: mkdtempSync(join(root, "codex-home-")), cwd, prompt: "implement the task",
     settingsFile: join(process.cwd(), "settings", "worker.json"), tools: ["Read", "Write", "Edit", "Bash"], ...extra,
-    containment: { spawn: (o) => { args = o.args; return { process: child.proc as never, pid: 61_480 }; }, teardown: () => {} },
+    // The writer's async Git probe runs before this spawn: finish the child only once it exists, or its `exit` has no listener.
+    containment: { spawn: (o) => { args = o.args; child.finish(); return { process: child.proc as never, pid: 61_480 }; }, teardown: () => {} },
   }, { claudeBin: "/unused", root: configRoot, workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome: join(root, "codex-home") } } as never);
-  child.finish();
-  return { args, result: (await pending) as unknown as Record<string, unknown> };
+  const result = (await pending) as unknown as Record<string, unknown>;
+  return { args, result };
 }
 
 describe("W1-T6148: the codex lane has no gitdir grant and the harness commits for it", () => {

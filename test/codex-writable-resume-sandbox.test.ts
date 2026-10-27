@@ -59,6 +59,9 @@ async function captureArgs(root: string, cwd: string, tools: string[], resumeSes
       containment: {
         spawn: (options) => {
           captured = options;
+          // The writer's async Git probe runs before this spawn, so the child may only finish once it exists:
+          // an `exit` emitted earlier has no listener and the worker would wait forever.
+          child.finish();
           return { process: child.process as never, pid: 37_920 };
         },
         teardown: () => {},
@@ -66,7 +69,6 @@ async function captureArgs(root: string, cwd: string, tools: string[], resumeSes
     },
     config(root),
   );
-  child.finish();
   await result;
   assert.ok(captured, "the containment adapter must receive the Codex argv");
   return captured.args;

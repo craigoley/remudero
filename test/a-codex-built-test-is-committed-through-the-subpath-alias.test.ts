@@ -41,10 +41,13 @@ test("W1-T10084: a Codex-built test is committed through the subpath alias", asy
   try {
     const stdout = new PassThrough();
     const proc = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout });
+    // The writer's async Git probe runs BEFORE the containment spawn: the child may only exit once it exists.
+    let spawned!: () => void;
+    const hasSpawned = new Promise<void>((resolve) => { spawned = resolve; });
     const run = spawnCodexWorker({
       workerHome: home, cwd: wt.dir, prompt: "add a test", settingsFile: join(process.cwd(), "settings/worker.json"),
       runId: "W1-T10084-run", taskId: "W1-T10084",
-      containment: { spawn: () => ({ process: proc as never, pid: 10084 }), teardown: () => { proc.emit("exit", null); } },
+      containment: { spawn: () => { spawned(); return { process: proc as never, pid: 10084 }; }, teardown: () => { proc.emit("exit", null); } },
     }, { claudeBin: "/unused", root: home, workerProviders: { codexBin: "/bin/sh", codexModel: "gpt-6-luna" } });
     void run.catch(() => undefined);
     // The Codex writer adds a test that imports `../src`, then ends its turn.
@@ -52,6 +55,7 @@ test("W1-T10084: a Codex-built test is committed through the subpath alias", asy
     stdout.write('{"type":"thread.started","thread_id":"t10084"}\n{"type":"turn.started"}\n');
     stdout.write(`${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "done\nCOMMIT_MESSAGE: test: add a" } })}\n`);
     stdout.end('{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}\n');
+    await hasSpawned;
     proc.emit("exit", 0);
     const result = await run;
 

@@ -44,6 +44,14 @@ async function captureSpawn(
       containment: {
         spawn: (options) => {
           captured = options;
+          // A writer's async Git probe runs before this spawn: finish the child only once it exists, or its
+          // `exit` is emitted with no listener and the worker waits forever.
+          stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: "codex-review-thread" })}\n`);
+          stdout.write(`${JSON.stringify({ type: "turn.started" })}\n`);
+          stdout.write(`${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "review complete" } })}\n`);
+          stdout.write(`${JSON.stringify({ type: "turn.completed", usage: {} })}\n`);
+          stdout.end();
+          queueMicrotask(() => child.emit("exit", 0));
           return { process: child as never, pid: 31_274 };
         },
         teardown: () => {},
@@ -51,13 +59,6 @@ async function captureSpawn(
     },
     config(root),
   );
-
-  stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: "codex-review-thread" })}\n`);
-  stdout.write(`${JSON.stringify({ type: "turn.started" })}\n`);
-  stdout.write(`${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "review complete" } })}\n`);
-  stdout.write(`${JSON.stringify({ type: "turn.completed", usage: {} })}\n`);
-  stdout.end();
-  queueMicrotask(() => child.emit("exit", 0));
 
   const result = await resultPromise;
   assert.ok(captured, "the containment adapter must receive the Codex spawn");
