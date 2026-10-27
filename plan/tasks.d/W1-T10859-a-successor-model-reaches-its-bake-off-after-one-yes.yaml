@@ -1,0 +1,92 @@
+- id: W1-T10859
+  title: "A SUCCESSOR MODEL REACHES ITS BAKE-OFF AFTER ONE OPERATOR YES — the successor watch reads Azure's public price feed, recognises vendor families (DeepSeek-V*, Kimi-K*) beside gpt-*, raises ONE proposal carrying the exact az create command and a cost estimate, and after the yes smoke-tests the new deployment and machine-files its readiness task so the cadence bake-off runs it"
+  repo: remudero
+  depends_on: [W1-T10856]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling, Craig 2026-10-27: \"Lean into automation and self improvement\" — every step after the operator's yes is automated; GPT-6.1 Terra (2026-10-26) and the open-weight sweep each took a session of hand work from announcement to bake-off"
+  plan_refs: [W1-T4079, W1-T4080, W1-T10837, W1-T10839, W1-T10840, W1-T10841, W1-T10855, W1-T10856]
+  files:
+    - src/lib/model-availability.ts
+    - src/lib/azure-retail-prices.ts
+    - src/lib/config-schema.ts
+    - src/run-task.ts
+    - docs/model-routing.md
+    - test/routing/a-successor-model-reaches-its-bake-off-after-one-yes.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED ON origin/main 742487eb2 (2026-10-27). WHAT EXISTS: W1-T4080's `watchSuccessorModels`
+    (src/lib/model-availability.ts) runs on the daily measurement cadence (src/run-task.ts), reads the cash data-plane
+    model list and the Codex account catalog, and `classifySuccessors` reports a higher generation in a ROUTED family
+    as announced, deployed-unpriced or ready. Each new state raises one escalation issue (`buildSuccessorAlertHandler`)
+    whose next step is prose: "deploy <model> on the Azure cash lane" or "add <model> to the cash pricing,
+    temperature, and context tables". W1-T4079 lets a deployed, priced model lead once rows exist. W1-T10840 (open PR
+    #14838) runs the bake-off for any newly ready deployment.
+    THE GAP, measured on the two arrivals of 2026-10-26/27:
+    - FAMILY. `GENERATIONAL_MODEL` matches only `gpt-<N>-<family>`. DeepSeek-V4.1-Flash (successor of
+      DeepSeek-V4-Flash) and any Kimi-K2.x are invisible, and a predecessor must be ROUTED in a ladder, so a
+      deployment that is ready but held for its bake-off (W1-T10855's arms) has no successors at all.
+    - PRICE. Readiness needs a price row, and the watcher never reads one. Azure publishes them in the public,
+      unauthenticated Retail Prices API (serviceName "Foundry Models"); the 2026-10-27 sweep read every row it needed
+      there (39,157 items), including meters dated before the models were deployable.
+    - THE ASK. The alert names no command. Getting from "announced" to a deployment took the operator's session the
+      exact `az cognitiveservices account deployment create` flags (model name, version, format, SKU, capacity) read
+      from `az cognitiveservices account list-models` and its help text, plus a cost estimate, every time.
+    - AFTER THE YES, NOTHING MOVES. A deployed model sits at "deployed-unpriced" until someone hand-files the rows
+      task (W1-T10839 for Terra, W1-T10855 for the open-weight arms), and nobody notices a too-small quota until a
+      request fails (W1-T10856).
+    The daemon holds data-plane keys only, so creating a deployment stays the operator's act; that is the one yes.
+  design: |
+    (i) PRICE FEED (new src/lib/azure-retail-prices.ts). Read the Retail Prices API for serviceName "Foundry Models",
+    following NextPageLink under a bounded page count, and return per model its Global Standard input, output and
+    cached-input meters with effective dates. A failed or partial read refuses the measurement the way a failed
+    catalog read already does (never "the model is gone").
+    (ii) FAMILIES. Generalise `classifySuccessors`: a model's family is its id with its first version number removed
+    (gpt-*-terra, DeepSeek-V*-Flash, Kimi-K*), its generation that number; the predecessor set is the routed models
+    PLUS every deployment `openWeightDeploymentReady` admits. Existing gpt-* behaviour and every W1-T4080 test hold.
+    Human-gated families stay report-only.
+    (iii) ONE PROPOSAL PER ANNOUNCED SUCCESSOR, written to the inbox once per model and state (the existing dedup
+    file), replacing the prose alert for actionable cash successors. Its body is the exact
+    `az cognitiveservices account deployment create` command: account name from the configured cash endpoint's host,
+    resource group from a new optional config field, model name, version and format from the data-plane listing
+    where it carries them (otherwise the proposal names the missing field and gives the `list-models` read that
+    supplies it), SKU GlobalStandard, and capacity sized from the predecessor's lanes' OBSERVED largest request plus
+    OPENWEIGHT_MAX_COMPLETION_TOKENS (never a constant). Beside it: a cost estimate (the predecessor's observed 30-day
+    token volume at the feed's price against its current price) and the price meters' effective dates.
+    (iv) AFTER THE YES. When the operator accepts, the cadence smoke-tests the named deployment through the adapter's
+    own route under the shared cash allowance (one bounded tool call at temperature 0, one json_object request),
+    learns its per-minute ceiling (W1-T10856), and when it answers, machine-files ONE readiness-rows task (the
+    existing machine-filing renderer) carrying the measured facts and their sources: feed prices and dates, tools,
+    temperature, json_object, learned ceiling, and the context window marked "source required" when no machine-readable
+    source exists. A deployment that does not answer is retried on later cadence fires until it answers or the
+    operator dismisses the proposal; every attempt is ledgered.
+    (v) THEN THE EXISTING MACHINERY. Once the fleet merges the rows task the deployment is ready, W1-T10840's cadence
+    bake-off trials it, and that bake-off's proposal is the re-lead proposal. A successor found only in the Codex
+    catalog never gets a cash re-lead proposal; its proposal says a Codex re-lead waits for a pre-registered controlled
+    trial (W1-T10841).
+    (vi) Ledger steps: model.successor.proposed, model.successor.smoked, model.successor.filed.
+    ORDERING: W1-T10837 (open PR #14838) also edits src/lib/model-availability.ts (the multi-endpoint catalog); build
+    after it where possible.
+  acceptance:
+    - claim: "A vendor-family successor of a ready deployment is recognised, and gpt-* behaviour is unchanged"
+      proof: 'grep: test("W1-T10859: a vendor-family successor of a ready deployment is recognised" in test/routing/a-successor-model-reaches-its-bake-off-after-one-yes.test.ts'
+    - claim: "An announced cash successor raises one proposal with the exact az create command, a derived capacity and a cost estimate"
+      proof: 'grep: test("W1-T10859: an announced successor raises one proposal with the exact az command and a cost estimate" in test/routing/a-successor-model-reaches-its-bake-off-after-one-yes.test.ts'
+    - claim: "After the yes, a deployment that answers its smoke test gets exactly one machine-filed readiness task"
+      proof: 'grep: test("W1-T10859: after the yes a deployment that answers its smoke files one readiness task" in test/routing/a-successor-model-reaches-its-bake-off-after-one-yes.test.ts'
+    - claim: "A Codex-only successor is never proposed as a cash re-lead and its proposal names the controlled trial"
+      proof: 'grep: test("W1-T10859: a Codex successor re-lead waits for a controlled trial" in test/routing/a-successor-model-reaches-its-bake-off-after-one-yes.test.ts'
+    - claim: "The public price feed has a reader"
+      proof: 'grep: export async function readAzureRetailModelPrices in src/lib/azure-retail-prices.ts'
+    - claim: "The successor watch calls the price-feed reader"
+      proof: 'grep: readAzureRetailModelPrices( in src/lib/model-availability.ts'
+  falsifier: |
+    Size the proposed capacity from a constant; treat a partial price-feed read as a model's absence; file a readiness
+    task before the deployment answers its smoke test; write price rows into source from core instead of filing a task;
+    or propose a Codex row's re-lead without a controlled trial.
