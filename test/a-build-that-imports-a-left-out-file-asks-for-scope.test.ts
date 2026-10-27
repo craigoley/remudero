@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { runTask } from "#src/run-task.js";
+import { requiredCompanions, runTask } from "#src/run-task.js";
 import type { ScopeAmendmentOutcome, ScopeAmendmentRequest } from "#src/lib/proof-amendment.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -208,4 +208,40 @@ test("a committed source larger than the Git pipe buffer still asks for its exac
   } finally {
     f.cleanup();
   }
+});
+
+
+test("companion blob recovery refuses unreadable immutable size evidence", () => {
+  for (const size of ["", "-1", "12x", "9007199254740992"]) {
+    let retried = false;
+    const git: Parameters<typeof requiredCompanions>[2] = (args, options) => {
+      if (args[0] === "diff-tree") return "src/lib/task-linter.ts\0";
+      if (args[0] === "show" && options === undefined) throw Object.assign(new Error("fixture pipe full"), { code: "ENOBUFS" });
+      if (args[0] === "cat-file") return size;
+      retried = true;
+      throw new Error("no blob read is allowed without a measured size");
+    };
+    assert.throws(() => requiredCompanions("fixture-sha", [LEFT_OUT], git), /unreadable blob size/);
+    assert.equal(retried, false);
+  }
+});
+
+test("companion blob recovery preserves byte mismatches and unrelated Git failures", () => {
+  const git: Parameters<typeof requiredCompanions>[2] = (args, options) => {
+    if (args[0] === "diff-tree") return "src/lib/task-linter.ts\0";
+    if (args[0] === "show" && options === undefined) throw Object.assign(new Error("fixture pipe full"), { code: "ENOBUFS" });
+    if (args[0] === "cat-file") return "100";
+    assert.deepEqual(options, { maxBuffer: 100 });
+    return "short";
+  };
+  assert.throws(() => requiredCompanions("fixture-sha", [LEFT_OUT], git), /does not match its immutable blob size/);
+  const original = Object.assign(new Error("fixture unreadable Git object"), { code: "ENOENT" });
+  let metadataReads = 0;
+  const unread: Parameters<typeof requiredCompanions>[2] = args => {
+    if (args[0] === "diff-tree") return "src/lib/task-linter.ts\0";
+    if (args[0] === "cat-file") metadataReads += 1;
+    throw original;
+  };
+  assert.throws(() => requiredCompanions("fixture-sha", [LEFT_OUT], unread), error => error === original);
+  assert.equal(metadataReads, 0);
 });
