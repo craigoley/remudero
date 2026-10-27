@@ -154,6 +154,7 @@ test("W1-T3101: malformed when-paths metadata fails closed and selection records
     budget_omitted_names: [],
     budget_chars: 10_000,
     zero_selection: true,
+    skill_digests: {},
   });
 });
 
@@ -322,6 +323,8 @@ test("W1-T3379 criterion 1: every observation carries the approved denominator, 
     budget_omitted_names: ["omitted"],
     budget_chars: 10,
     zero_selection: false,
+    // sha256 of each eligible body, first 12 hex digits (computed independently).
+    skill_digests: { fits: "81db8ebbbbc6", omitted: "d4fc1db66544" },
   });
   const zero = observeSkillSelection([], "implement", 10);
   assert.deepEqual(zero.observation, {
@@ -332,6 +335,7 @@ test("W1-T3379 criterion 1: every observation carries the approved denominator, 
     budget_omitted_names: [],
     budget_chars: 10,
     zero_selection: true,
+    skill_digests: {},
   });
   assert.equal(skillsInjectedEvent(zero.selected, "implement", 10), undefined,
     "the existing compatibility event still omits a zero row; the new observation supplies it");

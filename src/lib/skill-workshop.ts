@@ -740,6 +740,15 @@ export interface SkillSelectionObservation extends Record<string, unknown> {
   zero_selection: boolean;
   /** Present only when the caller randomized: eligible skills withheld from this run by assignment. */
   withheld_names?: string[];
+  /** Each eligible skill's {@link skillContentDigest}: the version a selected run read and a withheld run did
+   *  not, so effectiveness evidence can be told apart across edits of one skill. */
+  skill_digests: Record<string, string>;
+}
+
+/** A skill version's identity: its body, the text a worker reads, hashed. An edit to the body is a new
+ *  version; frontmatter that only scopes eligibility is not. */
+export function skillContentDigest(skill: Pick<InjectableSkill, "body">): string {
+  return createHash("sha256").update(skill.body).digest("hex").slice(0, 12);
 }
 
 export interface ObservedSkillSelection {
@@ -792,6 +801,7 @@ export function observeSkillSelection(
       budget_chars: budgetChars,
       zero_selection: selected.length === 0,
       ...(withhold ? { withheld_names: withheld.map((s) => s.name) } : {}),
+      skill_digests: Object.fromEntries(eligible.map((s) => [s.name, skillContentDigest(s)])),
     },
   };
 }
@@ -861,6 +871,15 @@ export interface SkillEffectivenessReport {
   /** `randomized`: arms by seeded assignment, `selected` meaning not withheld (intent to treat).
    *  `observational`: legacy rows only, where the control is whatever the budget omitted. */
   assignment: "randomized" | "observational";
+  /** Terminal compared runs per skill version, in first-seen order; `digest: null` is a row written before
+   *  versions were recorded. The comparison above pools every version listed here. */
+  versions: SkillEffectivenessVersion[];
+}
+
+export interface SkillEffectivenessVersion {
+  digest: string | null;
+  selected_terminal_runs: number;
+  control_terminal_runs: number;
 }
 
 type SkillLedgerRow = Record<string, unknown>;
@@ -901,7 +920,7 @@ export function buildSkillEffectivenessReport(
 ): SkillEffectivenessReport {
   const terminalVerdictByRun = new Map<string, { verdict: string; prKey: string | undefined }>();
   const mergedPrKeys = new Set<string>();
-  const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean }>();
+  const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean; digest: string | null }>();
 
   for (const row of rows) {
     if (isMergedLedgerRow(row)) {
@@ -919,9 +938,12 @@ export function buildSkillEffectivenessReport(
     ) continue;
     const eligible = stringArray(row.approved_eligible_names);
     if (!eligible.includes(skillName)) continue;
+    const digests = row.skill_digests;
+    const digest = digests !== null && typeof digests === "object" ? (digests as Record<string, unknown>)[skillName] : undefined;
     selectionByRun.set(row.run_id, {
       selected: stringArray(row.selected_names).includes(skillName),
       ...(Array.isArray(row.withheld_names) ? { withheld: stringArray(row.withheld_names).includes(skillName) } : {}),
+      digest: typeof digest === "string" ? digest : null,
     });
   }
 
@@ -957,6 +979,18 @@ export function buildSkillEffectivenessReport(
 
   const selected = buildCohort(true);
   const control = buildCohort(false);
+  const versionByDigest = new Map<string | null, SkillEffectivenessVersion>();
+  for (const [runId, observation] of selectionByRun) {
+    const treated = inArm(observation, true);
+    if ((!treated && !inArm(observation, false)) || terminalOutcome(runId) === undefined) continue;
+    let version = versionByDigest.get(observation.digest);
+    if (version === undefined) {
+      version = { digest: observation.digest, selected_terminal_runs: 0, control_terminal_runs: 0 };
+      versionByDigest.set(observation.digest, version);
+    }
+    if (treated) version.selected_terminal_runs++;
+    else version.control_terminal_runs++;
+  }
   const zeroSelectionAtHorizon =
     selected.observed_eligible_runs === 0 && control.terminal_runs >= SKILL_EFFECTIVENESS_HORIZON;
   const belowComparisonHorizon =
@@ -999,6 +1033,7 @@ export function buildSkillEffectivenessReport(
     control,
     harm_outcomes: SKILL_EFFECTIVENESS_HARM_OUTCOMES,
     assignment: randomized ? "randomized" : "observational",
+    versions: [...versionByDigest.values()],
   };
 }
 
@@ -1030,7 +1065,17 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
     report.assignment === "randomized"
       ? "interpretation: a randomized comparison at a small horizon is evidence, not proof; this report does not modify a skill."
       : "interpretation: descriptive selection/outcome evidence only; this report does not prove causation or modify a skill.",
+    `skill versions: ${renderSkillVersions(report.versions)}`,
   ].join("\n");
+}
+
+/** Each version's terminal runs per arm, and a warning when the pooled comparison spans recorded edits. */
+function renderSkillVersions(versions: readonly SkillEffectivenessVersion[]): string {
+  if (versions.length === 0) return "none compared";
+  const listed = versions.map((v) =>
+    `${v.digest ?? "unrecorded"} selected=${v.selected_terminal_runs} control=${v.control_terminal_runs}`).join("; ");
+  const recorded = versions.filter((v) => v.digest !== null).length;
+  return recorded > 1 ? `${listed} — the comparison pools ${recorded} recorded versions` : listed;
 }
 
 export const SKILL_LIFECYCLE_PROPOSAL_PREFIX = "skill-lifecycle:";
@@ -1105,6 +1150,7 @@ function renderSkillLifecycleSummary(report: SkillEffectivenessReport, action: S
     `Control: observed=${report.control.observed_eligible_runs}; terminal=${report.control.terminal_runs}; ` +
       `merged=${report.control.merged_runs}; harmful=${report.control.harmful_terminal_runs}; ` +
       `outcomes=${renderOutcomes(report.control.outcomes)}`,
+    `Versions: ${renderSkillVersions(report.versions)}`,
     `Approving this proposal opens a reviewed PR that deletes only ${action.skillPath}; staging this proposal deletes nothing.`,
   ].join("\n");
 }
