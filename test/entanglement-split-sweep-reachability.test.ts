@@ -26,6 +26,7 @@ import {
   type SweepDeps,
 } from "./helpers/sweep-test.js";
 import { reviewInputDigest } from "../src/lib/review.js";
+import { judgeReview, reviewLedgerLegibilityFields } from "#src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
@@ -372,4 +373,33 @@ test("the former strike ceiling routes the split case to a progress judgment", (
   } finally {
     cleanup();
   }
+});
+
+
+test("a current advisory review reaches cold repair for its real unmet criterion without inventing a split refusal", () => {
+  const verdict = judgeReview([{ claim: "the implementation is present", proof: "widget implemented" }], {
+    diff: "diff --git a/scripts/coverage-ratchet.mjs b/scripts/coverage-ratchet.mjs\n+++ b/scripts/coverage-ratchet.mjs\n@@\n+measurement\ndiff --git a/src/lib/worker-provider.ts b/src/lib/worker-provider.ts\n+++ b/src/lib/worker-provider.ts\n@@\n+implementation",
+    report: "REPORT\nNo implementation supplied.",
+  });
+  assert.equal(verdict.state, "failure");
+  assert.equal(verdict.instrumentEntangled, true);
+  const fields = reviewLedgerLegibilityFields(verdict);
+  assert.equal(fields.failure_class, "unmet_criteria");
+  const { view, cleanup } = boardView([reviewRow({ ...fields, decision_verdict: verdict,
+    unmet_criteria: verdict.criteria.filter(c => !c.met).map(c => c.claim), reasons: verdict.criteria.filter(c => !c.met).map(c => c.reason) })]);
+  try {
+    assert.equal(view.instrumentEntangled, undefined);
+    assert.equal(view.unmetCriteria.length, 1);
+    assert.equal(view.unmetCriteria[0]!.claim, verdict.criteria[0]!.claim);
+    assert.equal(view.unmetCriteria[0]!.proof, verdict.criteria[0]!.proof);
+    assert.equal(view.unmetCriteria[0]!.reason, verdict.criteria[0]!.reason);
+    const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
+    assert.equal(disposition.disposition, "blocked-fixable");
+    assert.doesNotMatch(disposition.reason, /prerequisite|W1-T2436/);
+    const args = coldArgs(view, { unmetCriteria: view.unmetCriteria });
+    assert.equal(args.initialReview.instrumentEntangled, undefined);
+    assert.equal(args.initialReview.criteria.length, 1);
+    assert.equal(args.initialReview.criteria[0]!.met, false);
+    assert.deepEqual(args.initialReview.criteria, view.unmetCriteria);
+  } finally { cleanup(); }
 });

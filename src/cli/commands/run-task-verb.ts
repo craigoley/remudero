@@ -94,7 +94,8 @@ import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExe
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, LEARNING_PROPENSITY_DRAWS, parseRuleBodyPointer, parseRuleHeadlines, projectLearningsHome, renderHeadlineOnlyIndex, retrieveRuleBodyOrDegrade } from "../../lib/learnings.js";
 import type { RuleHeadline } from "../../lib/learnings.js";
 import { assertProvenance, citation } from "../../lib/provenance.js";
-import { loadOperatorNotesForTask, renderOperatorNotes } from "../../lib/operator-notes.js";
+import { loadOperatorNotesForTask, operatorNoteStore, renderOperatorNotes } from "../../lib/operator-notes.js";
+
 import { computeMatchedLearningsForArm, resolveWipeTestArmPermission } from "../../lib/wipe-test.js";
 import { loadPlanIndex, renderPlanIndex } from "../../lib/plan-index.js";
 import { bodyContradictsDiff, cappedOverrideFromLedger, decideAutoMergeArm, decideArmFromLedgerVerdict, isTddStrict, judgeRubric, resolveAutoMergeArm, reviewerOutcome, reviewDecisionDigest, type PlanCriteriaAtHeadResult, parseWhitelistedProof, execWhitelistedProof, execWhitelistedProofAsync, type ReviewVerdict, type ReviewEvaluatorProvenance } from "../../lib/review.js";
@@ -1218,6 +1219,10 @@ class ManagedCheckoutNotRefreshedError extends WorktreeNodeModulesRefusedError {
     super(refused.packageName, refused.worktreePath, refused.nodeModulesSource);
     this.message += `; the managed checkout was not fast-forwarded: ${notRefreshed}`;
   }
+}
+
+export function readNativeOperatorNotes(config: Config, repository: string, legacyRoot: string, taskId: string) {
+  return loadOperatorNotesForTask(operatorNoteStore({ stateDir: join(config.root, "state"), repository, legacyRoot }), taskId);
 }
 
 export function createProbeVerdictCache(): ProbeVerdictCache {
@@ -5955,7 +5960,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // store (`repoRoot`, the SAME root worker.ts's question store reads/writes), scoped strictly
     // to THIS task's id (never another task's), and rendered ONCE so the identical block injects
     // into both the recon prompt below and the implement prompt further down.
-    const operatorNotes = loadOperatorNotesForTask(repoRoot, task.id);
+    const operatorNotes = readNativeOperatorNotes(config, `${owner}/${task.repo}`, repoRoot, task.id);
     const operatorNotesBlock = renderOperatorNotes(operatorNotes);
     log("operator_notes.injected", { count: operatorNotes.length });
     // W1-T2632: HOISTED from further below (was computed only after recon returned, "since

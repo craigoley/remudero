@@ -1,9 +1,11 @@
 - **Grep the ledger with `rmd ledger-grep <pat>`; by hand, `zgrep` THREE globs —
   `state/ledger.*.ndjson.gz state/ledger.*.ndjson state/ledger.ndjson` — with a file count PER
-  FORM as the control, and never delete an archive: each holds history no other file has.**
+  FORM as the control, and never delete an archive.**
   `rmd ledger-grep` (`resolveLedgerUnion`, `src/lib/ledger-union.ts`) reads both rotation forms
   (`ledgerRotationEntries`: `.ndjson.gz` and plain `.ndjson`) plus the live file, deduplicates, and
   exits non-zero when it read ZERO archives instead of answering from the live file alone.
+
+  *(Headline folded 2026-10-27: its closing reason "each holds history no other file has" moved here; the instruction to never delete an archive is unchanged.)*
 
   *(Index lines merged 2026-10-11: the three W1-T3323 bullets below stated this instruction across three headlines, the first ending on a colon with its globs in the body. They are kept verbatim; their ids resolve here through `doctrine/merged-rules.json`.)*
 

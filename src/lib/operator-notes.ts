@@ -8,12 +8,9 @@
  * (W1-T19): every rendered line carries a citation, and only a note stamped with both an
  * `author` and a `ts` is ever eligible to render.
  *
- * STORE: a separate, durable, append-only ndjson file — `plan/operator-notes.ndjson` — never
- * `plan/tasks.yaml` itself (the design's explicit "NOT worker-editable tasks.yaml"; tasks.yaml
- * is git-synced from `origin/main` every run, W1-T60, so a note written there would race the
- * next fetch). Mirrors `worker.ts`'s `plan/questions.ndjson`: one JSON object per line, gitignored
- * runtime exhaust the daemon/panel read+write from the SAME `repoRoot` the daemon's own
- * `questionsRoot` already names (`serve.ts`'s `ServeDeps.questionsRoot`).
+ * STORE: configured callers share an explicit repository-scoped store in the instance's existing
+ * state directory. Code generations never select it. An explicitly bound current legacy root's
+ * `plan/operator-notes.ndjson` remains readable without migration or replay (W1-T10772).
  *
  * PROVENANCE IS ENFORCED TWICE (belt-and-braces, same "fail loud before any write" doctrine as
  * panel-actions.ts): {@link appendOperatorNote} refuses to WRITE an unstamped entry, and
@@ -26,8 +23,8 @@
  * never surface in task B's rendered prompt.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import type { IncomingMessage } from "node:http";
 import { citation } from "./provenance.js";
 import type { Route } from "./service.js";
@@ -66,15 +63,69 @@ function storePath(repoRoot: string): string {
   return join(repoRoot, "plan", "operator-notes.ndjson");
 }
 
+/** A configured instance's existing state directory and exact repository, independent of code generations. */
+export interface OperatorNoteStore {
+  readonly stateDir: string;
+  readonly repository: string;
+  readonly legacyRoot?: string;
+}
+
+const verifiedStores = new WeakMap<OperatorNoteStore, { dev: number; ino: number }>();
+
+export function operatorNoteStore(context: OperatorNoteStore | undefined): OperatorNoteStore | undefined {
+  if (!context || typeof context.stateDir !== "string" || !isAbsolute(context.stateDir) ||
+      !/^[\w-][\w.-]*\/[\w-][\w.-]*$/.test(context.repository) ||
+      (context.legacyRoot !== undefined && (typeof context.legacyRoot !== "string" || !isAbsolute(context.legacyRoot)))) return undefined;
+  try {
+    const stateDir = realpathSync(context.stateDir);
+    const stat = statSync(stateDir);
+    if (!stat.isDirectory()) return undefined;
+    const store = Object.freeze({ ...context, stateDir });
+    verifiedStores.set(store, { dev: stat.dev, ino: stat.ino });
+    return store;
+  } catch (error) {
+    // Missing or inaccessible state is unverified; never create a replacement in the code tree.
+    return undefined;
+  }
+}
+
+function verifiedStore(store: OperatorNoteStore | undefined): store is OperatorNoteStore {
+  if (!store) return false;
+  const identity = verifiedStores.get(store);
+  if (!identity) return false;
+  try {
+    const stat = statSync(store.stateDir);
+    return stat.isDirectory() && stat.dev === identity.dev && stat.ino === identity.ino;
+  } catch (error) {
+    return false; // A removed or inaccessible binding is no longer verified.
+  }
+}
+
+function durablePath(store: OperatorNoteStore): string {
+  return join(store.stateDir, "operator-notes", `${encodeURIComponent(store.repository)}.ndjson`);
+}
+
 /**
  * Append a stamped operator note to the durable store. Refuses (returns `false`, writes
  * nothing) if `entry` is not fully provenance-stamped — the write-side half of the provenance
  * rule. Non-blocking by the same contract as `worker.ts`'s `appendQuestion`: a filesystem
  * failure is caught and reported as `false`, never thrown.
  */
-export function appendOperatorNote(repoRoot: string, entry: OperatorNoteEntry): boolean {
+export function appendOperatorNote(repoRoot: string | OperatorNoteStore | undefined, entry: OperatorNoteEntry): boolean {
   if (!isStamped(entry)) return false;
   try {
+    if (typeof repoRoot !== "string") {
+      if (!verifiedStore(repoRoot)) return false;
+      mkdirSync(join(repoRoot.stateDir, "operator-notes"), { recursive: true });
+      const fd = openSync(durablePath(repoRoot), "a");
+      try {
+        appendFileSync(fd, JSON.stringify({ ...entry, repository: repoRoot.repository }) + "\n");
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      return true;
+    }
     const dir = join(repoRoot, "plan");
     mkdirSync(dir, { recursive: true });
     appendFileSync(storePath(repoRoot), JSON.stringify(entry) + "\n");
@@ -91,24 +142,46 @@ export function appendOperatorNote(repoRoot: string, entry: OperatorNoteEntry): 
  * (the read-side half of the provenance rule). Missing store file ⇒ `[]`, never a throw (a fresh
  * checkout with no notes yet is the common case, not an error).
  */
-export function loadOperatorNotesForTask(repoRoot: string, taskId: string): OperatorNoteEntry[] {
-  const path = storePath(repoRoot);
+export function loadOperatorNotesForTask(repoRoot: string | OperatorNoteStore | undefined, taskId: string): OperatorNoteEntry[] {
+  return loadOperatorNotes(repoRoot).filter(entry => entry.taskId === taskId);
+}
+
+export function loadOperatorNotes(repoRoot: string | OperatorNoteStore | undefined, strict = false): OperatorNoteEntry[] {
+  return loadOperatorNoteRows(repoRoot, strict)
+    .filter((entry): entry is Record<string, unknown> & OperatorNoteEntry => isStamped(entry))
+    .map(entry => ({ ts: entry.ts, taskId: entry.taskId, author: entry.author, note: entry.note }))
+    .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+}
+
+/** Docket history keeps its existing row contract; prompt readers independently require stamps. */
+export function loadOperatorNoteRows(repoRoot: string | OperatorNoteStore | undefined, strict = false): Array<Record<string, unknown>> {
+  if (typeof repoRoot === "string") return readNoteRows(storePath(repoRoot), undefined, strict);
+  if (!verifiedStore(repoRoot)) {
+    if (strict) throw new Error("operator note store is unverified");
+    return [];
+  }
+  const legacy = repoRoot.legacyRoot ? readNoteRows(storePath(repoRoot.legacyRoot), undefined, strict) : [];
+  return [...legacy, ...readNoteRows(durablePath(repoRoot), repoRoot.repository, strict)];
+}
+
+function readNoteRows(path: string, repository?: string, strict = false): Array<Record<string, unknown>> {
   if (!existsSync(path)) return [];
   const lines = readFileSync(path, "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
-  const entries: OperatorNoteEntry[] = [];
+  const entries: Array<Record<string, unknown>> = [];
   for (const line of lines) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
-    } catch {
+    } catch (error) {
+      if (strict) throw error;
       continue; // a corrupt line is skipped, never crashes the read
     }
-    if (!isStamped(parsed)) continue;
-    const entry = parsed as OperatorNoteEntry;
-    if (entry.taskId !== taskId) continue; // scoped strictly to THIS task — never another's
-    entries.push(entry);
+    if (strict && !isStamped(parsed)) throw new Error("operator note is unstamped or unreadable");
+    if (!isRecord(parsed)) continue;
+    if (repository !== undefined && parsed.repository !== repository) continue;
+    entries.push(parsed);
   }
-  return entries.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  return entries;
 }
 
 /** One note as a provenance-tagged CONTEXT bullet — same shape as `learnings.ts`'s `renderLearningLine`. */
@@ -145,8 +218,9 @@ function validateAddOperatorNote(body: unknown): { error: string } | AddOperator
 }
 
 export interface OperatorNoteRouteDeps {
-  /** `repoRoot` — the SAME root `worker.ts`'s question store reads/writes (`serve.ts`'s `questionsRoot`). */
+  /** Legacy caller metadata; routes never use it as a fallback write store. */
   root: string;
+  store?: OperatorNoteStore;
   ledgerPath: string;
 }
 
@@ -169,7 +243,7 @@ export function buildAddOperatorNoteRoute(deps: OperatorNoteRouteDeps): Route {
     handler: jsonAction(validateAddOperatorNote, (input, req, res) => {
       const ts = new Date().toISOString();
       const entry: OperatorNoteEntry = { ts, taskId: input.taskId, author: input.author, note: input.note };
-      const written = appendOperatorNote(deps.root, entry);
+      const written = appendOperatorNote(deps.store, entry);
       if (!written) {
         sendJson(res, 500, { error: "write_failed" });
         return;
@@ -191,7 +265,7 @@ export function buildAddOperatorNoteRoute(deps: OperatorNoteRouteDeps): Route {
  * repo-wide dump — this route is deliberately task-scoped ONLY, the same discipline that keeps
  * the write side from ever leaking a note across tasks.
  */
-export function buildListOperatorNotesRoute(deps: Pick<OperatorNoteRouteDeps, "root">): Route {
+export function buildListOperatorNotesRoute(deps: Pick<OperatorNoteRouteDeps, "root" | "store">): Route {
   return {
     method: "GET",
     path: "/v1/operator-notes",
@@ -202,7 +276,7 @@ export function buildListOperatorNotesRoute(deps: Pick<OperatorNoteRouteDeps, "r
         sendJson(res, 400, { error: "invalid_request", detail: "taskId query param is required" });
         return;
       }
-      const notes = loadOperatorNotesForTask(deps.root, taskId);
+      const notes = loadOperatorNotesForTask(deps.store, taskId);
       sendJson(res, 200, { taskId, notes });
     },
   };

@@ -1,14 +1,14 @@
 /**
  * A CENSUS CHILD TIMEOUT ON A LOADED HOST DOES NOT REFUSE THE AUTHOR RUN — W1-T9919.
  *
- * census-precheck's census suite child has a 60 s BACKSTOP. At load 11-14 it fired on healthy trees, and
+ * census-precheck's census suite child had a 60 s BACKSTOP (120 s since 2026-10-27). At load 11-14 it fired on healthy trees, and
  * preflight-author refused the whole run on that exit 2, while pre-push already reads exit 2 as not measured.
  * census-precheck now names a backstop stop as its own NOT MEASURED line (elapsed ms, bound, suite count,
  * 1-minute load at start and end), and preflight-author goes on past that line ALONE; CI runs the suites.
  * Every other unmeasured census still refuses before the expensive validation.
  *
  * The census side drives runCensusSuitesViaChild with an injected `run` that returns a timed-out spawn, so
- * nothing waits 60 s. The author side runs preflight-author over a fixture tree whose census-precheck prints
+ * nothing waits for the bound. The author side runs preflight-author over a fixture tree whose census-precheck prints
  * the lines the REAL census main() printed for that case, so the two sides are joined by observed output.
  */
 import assert from "node:assert/strict";
@@ -32,16 +32,16 @@ const OTHER: Member = { testFile: "test/other-census.test.ts", script: "", walks
 const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 const NO_PRIORITY ={ priority: "none", wrap: (file: string, args: string[]) => ({ file, args: [...args] }) };
 
-/** A spawn that the 60 s backstop stopped, in each shape a child runner reports it. */
+/** A spawn that the 120 s backstop stopped, in each shape a child runner reports it. */
 const TIMED_OUT: SpawnResult[] = [
   { status: null, signal: "SIGTERM", error: Object.assign(new Error("spawnSync /usr/bin/ionice ETIMEDOUT"), { code: "ETIMEDOUT" }) },
-  { status: null, signal: null, error: Object.assign(new Error("native step exceeded 60000 ms"), { code: "ERR_AUTHOR_STEP_TIMEOUT" }) },
+  { status: null, signal: null, error: Object.assign(new Error("native step exceeded 120000 ms"), { code: "ERR_AUTHOR_STEP_TIMEOUT" }) },
 ];
 
-/** runCensusSuitesViaChild over `result`, with a clock that reads 60 234 ms elapsed and a load of 11.5 then 13.25. */
+/** runCensusSuitesViaChild over `result`, with a clock that reads 120 234 ms elapsed and a load of 11.5 then 13.25. */
 function timedChild(root: string, files: string[], result: SpawnResult): () => string[] {
   return () => {
-    const clock = [1_000, 61_234];
+    const clock = [1_000, 121_234];
     const loads = [11.5, 13.25];
     return census.runCensusSuitesViaChild({ root, files, priority: NO_PRIORITY, run: () => result,
       now: () => clock.shift(), load1: () => loads.shift() }) as string[];
@@ -130,7 +130,7 @@ test("W1-T9919: a timed-out census child names its elapsed time, bound, suite co
     assert.throws(timedChild("/repo", [MEMBER.testFile, OTHER.testFile], result), (e: Error & { censusTimeBound?: boolean }) => {
       assert.match(e.message, /could not run to completion: /);
       assert.ok(e.message.includes(result.error!.message), e.message);
-      assert.match(e.message, /time bound: 60234 ms elapsed of the 60000 ms bound, 2 suite\(s\), 1-minute load 11\.50 at start and 13\.25 at end$/);
+      assert.match(e.message, /time bound: 120234 ms elapsed of the 120000 ms bound, 2 suite\(s\), 1-minute load 11\.50 at start and 13\.25 at end$/);
       assert.equal(e.censusTimeBound, true);
       return true;
     });
@@ -146,7 +146,7 @@ test("W1-T9919: a timed-out census child names its elapsed time, bound, suite co
   const lines = timeBoundCensusLines(t);
   const line = lines.find((l) => l.startsWith(`census-precheck: ${census.CENSUS_TIME_BOUND_LABEL} - `));
   assert.ok(line, lines.join("\n"));
-  assert.match(line, /60234 ms elapsed of the 60000 ms bound, 1 suite\(s\), 1-minute load 11\.50 at start and 13\.25 at end$/);
+  assert.match(line, /120234 ms elapsed of the 120000 ms bound, 1 suite\(s\), 1-minute load 11\.50 at start and 13\.25 at end$/);
   assert.ok(!lines.some((l) => / NOT MEASURED - /.test(l)), lines.join("\n"));
 });
 
