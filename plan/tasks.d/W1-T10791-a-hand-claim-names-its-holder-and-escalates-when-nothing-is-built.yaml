@@ -1,0 +1,145 @@
+- id: W1-T10791
+  title: "A HAND CLAIM NAMES ITS HOLDER AND ESCALATES WHEN NOTHING IS BUILT — refs/rmd-dispatch/W1-T10573 was renewed for 46 h by nine short-lived holder processes and built nothing; the anchor names only `<pid>@<host>`, the commits carry the shared git identity, and no surface could say whose claim it was, so dispatch of a priority-1.5 task was blocked with no escalation"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern, a hand claim must be attributable and must surface when it builds nothing. Spans the anchor (dispatch-claim.ts), the claim verb (run-task.ts), client detection (actor-evidence.ts) and one daemon tick pass. It never drops, reclaims or releases a claim
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-26: refs/rmd-dispatch/W1-T10573 blocked dispatch for days with no visible holder; the operator later attributed it to a Codex thread run under the separate craigoley macOS user, which no recorded field could have shown"
+  plan_refs: [W1-T5859, W1-T9432, W1-T2784, W1-T8616, W1-T1268]
+  files:
+    - src/lib/dispatch-claim.ts
+    - src/lib/actor-evidence.ts
+    - src/run-task.ts
+    - src/cli/commands/daemon.ts
+    - docs/cli-reference.md
+    - test/dispatch/a-hand-claim-names-its-holder-and-escalates-when-nothing-is-built.test.ts
+  rationale: |
+    READ 2026-10-27 on origin/main a4fafe47d, by symbol. The claim refs and their anchor chains were read from the Mac
+    with `git ls-remote` plus a fetch of each anchor. Core's ledger on the Azure host was read read-only: every
+    rotation since 10-24 plus the live file.
+
+    THE INCIDENT, MEASURED. refs/rmd-dispatch/W1-T10573 is a chain of 166 commits. Its root is
+    `rmd-dispatch claim 60796@Craigs-Mac-mini 2026-10-25T03:11:48.264Z`, and each child is one `renewed <pid>@<host>
+    <iso>` line.
+    - 60796 renewed 68 times, 03:16Z to 08:51Z. A 4.7 h lapse followed.
+    - Seven more pids then renewed exactly 12 times each, at 5-minute intervals, 13:32Z to 21:00Z: 67071, 6838,
+      9151, 78011, 72174, 51692 and 70709. Pid 8485 renewed once, at 21:07Z.
+    - A 26.8 h lapse followed. Then pid 53798 renewed 12 times, 2026-10-26T23:56Z to 2026-10-27T00:51Z.
+    - Every commit's author and committer is the shared git identity. No `run-W1-T10573-*` branch and no PR exists.
+    - The operator attributes the claim to a Codex thread run under the separate craigoley macOS user. That fits the
+      pattern: one tool call re-ran `rmd claim --hold` until its command timeout (about an hour, 12 renewals), and
+      then a fresh call adopted the claim (`takeOrAdoptClaim` adopts any same-host claim). Nothing in the anchor
+      could show that.
+
+    THE SAME SHAPE IS LIVE NOW. 22 claims are on origin, and 16 were minted on the Mac.
+    - refs/rmd-dispatch/W1-T10562 is another adopted chain: 473 commits since 2026-10-25T09:04Z, three holder
+      generations (302, 145 and 26 renewals) and lapses of 25 and 42 min. It was still renewing at 02:01Z, and the
+      task has no run branch.
+    - Fourteen more Mac claims were minted once (10-15 to 10-23) and never renewed.
+
+    WHY NOTHING SAID SO.
+    - (a) The anchor is `rmd-dispatch claim <pid>@<host> <iso>` (`claimAnchorMessage`, src/lib/dispatch-claim.ts).
+      Renewal keeps only that first line (`claimRenewalMessage`). There is no user, no client, no session, no
+      reason and no branch.
+    - (b) Core's ledger names W1-T10573 in 45 `dispatch.claim_released` rows, from 42 daemon boots on 10 container
+      ids. Each one has `surface: boot-sweep`, `arm: operator` and `release: false`: the boot sweep
+      (`releaseReplacedContainerClaims`, src/cli/commands/daemon.ts) leaves it, correctly, and says so once per boot.
+      No row is a dispatch attempt, so W1-T9432's silence judge (`reclaimSilentDispatchClaim`, which runs only in
+      runTask's `taken` arm) never ran. It would also have counted every renewal as a sign of life.
+    - The only stale-claim escalation, `staleDispatchClaimEscalations`, uses a fixed 24 h
+      `DISPATCH_CLAIM_STALE_THRESHOLD_MS`. It renders only into the status board's needs-me section and never
+      reaches `escalate`.
+    - (c) `rmd claim` has `--drop`, `--renew` and `--hold`, but no way to read who holds a claim, how old it is,
+      or whether its holder is alive.
+    - `gatherActorEvidence` (src/lib/actor-evidence.ts) already records the OS user, the Claude Code session and
+      the caller class for other writers. It has no Codex marker, and its parent-process walk reads /proc, which
+      does not exist on the Mac.
+
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d on origin/main for claim attribution, `claim --status`, hand-claim
+    escalation and stale-by-evidence. W1-T9432 (merged) reclaims a SILENT claim at dispatch time. W1-T8616 releases
+    a MERGED task's claim. W1-T2784 and W1-T5047 judge dead claimants of this instance. None judges a claim that is
+    renewed but builds nothing. 23 open PR heads were fetched, and none adds claim attribution or status (8 touch
+    src/run-task.ts elsewhere).
+  design: |
+    1. THE ANCHOR SAYS WHO AND WHY (a).
+       - The root anchor keeps its first line byte-for-byte, so `parseClaimAnchorMessage` and every older anchor
+         still parse. After it come attribution lines:
+         - `client <claude-code|codex|human-shell|fleet|unknown>`
+         - `os-user <name>`
+         - `session <id|unknown>`
+         - `via <rmd claim|rmd claim --hold|run-task>`
+         - `reason <text>`, from a new optional `--reason`
+         - `branch <name>`, from a new optional `--branch`. A fleet lane records its own run branch.
+       - The client and session come from `gatherActorEvidence`, extended with:
+         - a Codex marker set and its thread id;
+         - a parent-process walk that works on macOS (`ps -o ppid=,comm=`) as well as on /proc.
+       - Before coding, the implementer pins Codex's variable NAMES by probing a Codex thread's environment for
+         names only, never values. A client it cannot tell is recorded as `unknown`, never guessed.
+       - A renewal copies the root's attribution lines forward unchanged, and its own line becomes
+         `renewed <pid>@<host> <iso> client <c> session <s>`. `parseClaimRenewal` still parses the older line
+         shape. So an adopting process from another client, user or session is visible in the chain itself.
+    2. STALE BY EVIDENCE, NEVER BY A CONSTANT (b). Each daemon tick, beside `releaseLandedDispatchClaims`, judges
+       every held claim that this instance's fleet did not mint (`findClaimMintRow` finds no row). It reads three
+       things:
+       - THE CLAIM'S OWN HISTORY. Walk the chain from tip to root. This gives every renewal's time and holder, the
+         claim's own cadence C (the median gap between renewals), its lapses (gaps longer than 2C, plus a silence
+         now longer than 2C) and its holder generations.
+       - BUILD PROGRESS. Any commit on an origin `run-<id>-*` branch (`readRunBranchActivity`) or an open PR for
+         the task that is newer than the mint.
+       - W, the instance's measured p90 claim-to-verdict time (`claimSilenceWindow`).
+       A claim with no progress is stale-by-evidence when its own history shows a lapse with nothing built across
+       it, or when its no-progress life exceeds W. Both bounds come from measurement. Any input it cannot read
+       gives no verdict, and nothing is raised.
+    3. ONE ATTRIBUTABLE ESCALATION. A stale-by-evidence claim raises one MANUAL escalation per root anchor sha, using
+       the `DispatchClaimEscalation` shape and `escalateAsync`, and ledgers `dispatch.claim_stale_by_evidence` once.
+       - The escalation names the attribution lines, the age, C, the lapses, the generations (for example "nine
+         holder processes, about 12 renewals each"), and the progress surfaces read with what each returned.
+       - Its option is the operator-only leased release command.
+       - It never drops, reclaims or releases a claim. A later renewal or a lapse on an already-escalated root raises
+         nothing new. Progress after the escalation ledgers `dispatch.claim_progress_seen` and closes nothing.
+       - The board's 24 h backstop is unchanged.
+    4. `rmd claim --status <id>` (c) is read-only, needs no plan membership, and prints:
+       - the tip sha, the minter `<pid>@<host>` and its mint time;
+       - the attribution lines, or `unrecorded (anchor predates W1-T10791)`;
+       - the age, the renewal count, C, the last renewal (holder and how long ago), the lapses and the generations;
+       - the progress surfaces;
+       - whether the newest renewer is alive on THIS host (`pidIsPresent`). When the renewer's host is another host,
+         it prints `undecidable from here` instead.
+       It exits 0 when the claim is held, 1 when it is not held, and 2 when origin or the chain is unreadable.
+       docs/cli-reference.md documents it, together with `--reason` and `--branch`.
+    5. TESTS go in test/dispatch/ (the folder `rmd test-place` computes for dispatch-claim importers). They run
+       against a real bare remote, the way test/a-hand-build-takes-the-dispatch-claim-the-fleet-honours.test.ts
+       does, with the fixture's git identity set. One case replays the W1-T10573 chain shape: 12-renewal
+       generations at 5-minute cadence, a lapse, and no run branch.
+  acceptance:
+    - claim: "a claim anchor records its client, OS user, session, reason and intended branch, an older anchor still parses, and every renewal carries the attribution forward and names its own client and session"
+      proof: 'grep: test("W1-T10791: a claim anchor records who holds it and why, and every renewal carries it" in test/dispatch/a-hand-claim-names-its-holder-and-escalates-when-nothing-is-built.test.ts'
+    - claim: "a hand claim with no build progress whose own renewal chain shows a lapse, or whose no-progress life exceeds W, raises exactly one attributable MANUAL escalation and releases nothing"
+      proof: 'grep: test("W1-T10791: a renewed hand claim that builds nothing raises one attributable escalation" in test/dispatch/a-hand-claim-names-its-holder-and-escalates-when-nothing-is-built.test.ts'
+    - claim: "a hand claim with a pushed run branch commit, a claim this instance's fleet minted, or an unreadable chain raises nothing"
+      proof: 'grep: test("W1-T10791: progress, a fleet claim or an unreadable chain raises nothing" in test/dispatch/a-hand-claim-names-its-holder-and-escalates-when-nothing-is-built.test.ts'
+    - claim: "rmd claim --status prints the holder and its attribution, its age, its renewal cadence and lapses, and whether the holder process is alive on this host"
+      proof: 'grep: test("W1-T10791: rmd claim --status names the holder, its age, its cadence and its liveness" in test/dispatch/a-hand-claim-names-its-holder-and-escalates-when-nothing-is-built.test.ts'
+  falsifier: |
+    At base all four cases fail. The anchor has one line, no tick pass judges an unmerged hand claim, and
+    `--status` is an unknown flag.
+    - Keep `claimRenewalMessage` copying only the first line: the attribution is gone after one renewal, and the
+      first case fails.
+    - Count a renewal as progress: the W1-T10573 replay raises nothing, and the second case fails.
+    - Judge with a fixed age: the lapse arm fires on a fresh claim, or misses a 4.7 h lapse, and the second case
+      fails.
+    - Escalate on every tick: the once-per-root assertion fails.
+    - Treat an unreadable chain as "no progress": the third case fails.
+    - Report another host's pid as dead: the fourth case fails.
+    GUARDS that held at base and must still hold:
+    - test/a-dispatch-claim-holds-only-while-its-holder-renews-it.test.ts
+    - test/a-hand-build-takes-the-dispatch-claim-the-fleet-honours.test.ts
+    - test/dispatch-claim-age.test.ts
+    - test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts

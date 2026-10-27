@@ -225,6 +225,537 @@ components:
         stale: {type: boolean}
         sources: {type: array, items: {$ref: "#/components/schemas/ViewSource"}}
         data: {$ref: "#/components/schemas/DailyProgressReport"}
+    ImprovementThreadRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - repository
+        - opportunityId
+        - snapshotId
+        - goal
+        - idempotencyKey
+      properties:
+        repository:
+          type: string
+          maxLength: 140
+          pattern: ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$
+        opportunityId:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        snapshotId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        goal:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        constraints:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 1000
+          maxItems: 16
+        idempotencyKey:
+          type: string
+          pattern: ^[A-Za-z0-9._:-]{16,128}$
+        instance:
+          type: string
+          pattern: ^[A-Za-z0-9._-]{1,128}$
+    ImprovementFailure:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - reason
+      properties:
+        state:
+          type: string
+          enum:
+            - invalid_request
+            - source_unavailable
+            - source_stale
+            - conflict
+            - busy
+            - uncertain
+        reason:
+          type: string
+        requestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+    ImprovementSavedResult:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - version
+        - requestId
+        - threadId
+        - proposalId
+        - repository
+        - instance
+        - snapshotId
+        - opportunityId
+        - reused
+        - planning
+        - execution
+      properties:
+        state:
+          type: string
+          enum:
+            - saved
+        version:
+          type: string
+          enum:
+            - improvement-thread-v1
+        requestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        threadId:
+          type: string
+        proposalId:
+          type: string
+        repository:
+          type: string
+        instance:
+          type: string
+        snapshotId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        opportunityId:
+          type: string
+        reused:
+          type: boolean
+        planning:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
+        execution:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
+    ImprovementPlanReceipt:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - prUrl
+        - branch
+        - taskIds
+        - taskIdsState
+        - recordedAt
+        - nativeReceiptId
+      properties:
+        state:
+          type: string
+          enum:
+            - plan_pr_opened
+        prUrl:
+          type: string
+          format: uri
+        branch:
+          type: string
+        taskIds:
+          type: array
+          items:
+            type: string
+        taskIdsState:
+          type: string
+          enum:
+            - observed
+            - unavailable
+        recordedAt:
+          type: string
+          format: date-time
+        nativeReceiptId:
+          type: string
+    ImprovementNativeMessage:
+      type: object
+      additionalProperties: false
+      required:
+        - threadId
+        - role
+        - body
+        - seq
+        - ts
+      properties:
+        threadId:
+          type: string
+        role:
+          type: string
+          enum:
+            - escalation
+            - reply
+        body:
+          type: string
+        seq:
+          type: integer
+          minimum: 1
+        ts:
+          type: integer
+        extra:
+          type: object
+          additionalProperties: true
+          description: Native Inbox message metadata. Source context and operator audit are facts; they grant no
+            execution authority.
+    ImprovementThreadView:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - version
+        - requestId
+        - threadId
+        - proposalId
+        - repository
+        - instance
+        - snapshotId
+        - opportunityId
+        - currentRequestId
+        - goal
+        - constraints
+        - goalDigest
+        - source
+        - correspondence
+        - messages
+        - messageCount
+        - messagesPartial
+        - nextBeforeSeq
+        - drafting
+        - filing
+        - execution
+      properties:
+        state:
+          type: string
+          enum:
+            - saved
+        version:
+          type: string
+          enum:
+            - improvement-thread-v1
+        requestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        threadId:
+          type: string
+        proposalId:
+          type: string
+        repository:
+          type: string
+        instance:
+          type: string
+        snapshotId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        opportunityId:
+          type: string
+        currentRequestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        goal:
+          type: string
+        constraints:
+          type: array
+          items:
+            type: string
+        goalDigest:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        source:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+            - reason
+          properties:
+            state:
+              type: string
+              enum:
+                - current
+                - stale
+                - unavailable
+            reason:
+              anyOf:
+                - type: string
+                - type: "null"
+        correspondence:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+            - pendingInputs
+            - pendingWork
+          properties:
+            state:
+              type: string
+              enum:
+                - linked
+                - unknown
+            pendingInputs:
+              anyOf:
+                - type: integer
+                  minimum: 0
+                - type: "null"
+            pendingWork:
+              anyOf:
+                - type: integer
+                  minimum: 0
+                - type: "null"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImprovementNativeMessage"
+          maxItems: 100
+          description: At most 512 KiB of native messages. Use nextBeforeSeq to read earlier messages.
+        messageCount:
+          type: integer
+          minimum: 0
+        messagesPartial:
+          type: boolean
+        nextBeforeSeq:
+          anyOf:
+            - type: integer
+              minimum: 1
+            - type: "null"
+        drafting:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+            - digest
+            - fragmentYaml
+            - reason
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
+                - requested
+                - ready
+                - unavailable
+                - refused
+            digest:
+              anyOf:
+                - type: string
+                  pattern: ^[a-f0-9]{64}$
+                - type: "null"
+            fragmentYaml:
+              anyOf:
+                - type: string
+                - type: "null"
+            reason:
+              anyOf:
+                - type: string
+                - type: "null"
+            operationId:
+              type: string
+              pattern: ^[a-f0-9]{64}$
+            sourceRequestId:
+              type: string
+              pattern: ^[a-f0-9]{64}$
+        filing:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
+                - requested
+                - plan_pr_opened
+                - refused
+                - uncertain
+            operationId:
+              type: string
+              pattern: ^[a-f0-9]{64}$
+            sourceRequestId:
+              type: string
+              pattern: ^[a-f0-9]{64}$
+            receipt:
+              $ref: "#/components/schemas/ImprovementPlanReceipt"
+            reason:
+              anyOf:
+                - type: string
+                - type: "null"
+        execution:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
+    ImprovementDraftRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - goalDigest
+        - idempotencyKey
+      properties:
+        requestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        goalDigest:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        idempotencyKey:
+          type: string
+          pattern: ^[A-Za-z0-9._:-]{16,128}$
+    ImprovementFileRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - goalDigest
+        - idempotencyKey
+        - draftDigest
+      properties:
+        requestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        goalDigest:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        idempotencyKey:
+          type: string
+          pattern: ^[A-Za-z0-9._:-]{16,128}$
+        draftDigest:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+    ImprovementAction:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - operationId
+        - kind
+        - requestId
+        - proposalId
+        - actorId
+        - payloadHash
+        - goalDigest
+        - draftDigest
+        - requestedAt
+        - state
+        - reason
+        - receipt
+      properties:
+        version:
+          type: string
+          enum:
+            - improvement-action-v1
+        operationId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        kind:
+          type: string
+          enum:
+            - draft
+            - file
+        requestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        proposalId:
+          type: string
+        actorId:
+          type: string
+        payloadHash:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        goalDigest:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        draftDigest:
+          anyOf:
+            - type: string
+              pattern: ^[a-f0-9]{64}$
+            - type: "null"
+        requestedAt:
+          type: string
+          format: date-time
+        state:
+          type: string
+          enum:
+            - prepared
+            - requested
+            - waiting
+            - completed
+            - refused
+            - uncertain
+        reason:
+          anyOf:
+            - type: string
+            - type: "null"
+        receipt:
+          anyOf:
+            - $ref: "#/components/schemas/ImprovementPlanReceipt"
+            - type: "null"
+    ImprovementActionRequested:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - operation
+        - execution
+      properties:
+        state:
+          type: string
+          enum:
+            - requested
+        operation:
+          $ref: "#/components/schemas/ImprovementAction"
+        execution:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
+    ImprovementActionObserved:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - operation
+        - execution
+      properties:
+        state:
+          type: string
+          enum:
+            - observed
+        operation:
+          $ref: "#/components/schemas/ImprovementAction"
+        execution:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
     ProductId:
       type: string
       minLength: 36
@@ -641,6 +1172,81 @@ components:
         error:
           type: string
           enum: [invalid_identity, invalid_input, not_found, project_not_found, repository_required, repository_mismatch, team_mismatch, project_conflict, idempotency_conflict, stale_revision, capacity, creation_denied, not_configured, busy, corrupt, unavailable, provider_unreadable, outcome_unknown, recovery_required, request_too_large]
+    ProductBuildCommand:
+      type: object
+      additionalProperties: false
+      description: >
+        At most 4096 raw request bytes. Names one task the target repository's own plan filed for the
+        product's approved plan evidence. Reusing requestId with the same command replays its receipt;
+        a changed command conflicts. Ownership comes only from verifiedActor.
+      required: [version, requestId, productId, planEvidenceId, taskId, expectedRevision, expectedObjectiveRevision]
+      properties:
+        version: { type: string, enum: [product-build-v1] }
+        requestId: { $ref: "#/components/schemas/ProductRequestId" }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        planEvidenceId: { type: string, minLength: 1, maxLength: 128 }
+        taskId: { type: string, minLength: 1, maxLength: 64 }
+        expectedRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        expectedObjectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+    ProductBuildEvidence:
+      type: object
+      additionalProperties: false
+      required: [outcome, observedAt]
+      properties:
+        outcome: { type: string, enum: [queued, admitted, running] }
+        observedAt: { type: string, format: date-time }
+    ProductBuildReceipt:
+      type: object
+      additionalProperties: false
+      description: outcome is the furthest independently recorded phase; queued is never reported as running.
+      required: [operationId, productId, taskId, planEvidenceId, outcome, repository, objectiveRevision, payloadDigest, queuedAt, evidence]
+      properties:
+        operationId: { type: string, minLength: 71, maxLength: 71, pattern: '^pbuild_[a-f0-9]{64}$' }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        taskId: { type: string, minLength: 1, maxLength: 64 }
+        planEvidenceId: { type: string, minLength: 1, maxLength: 128 }
+        outcome: { type: string, enum: [queued, admitted, running] }
+        repository:
+          type: object
+          additionalProperties: false
+          required: [id, owner, name]
+          properties:
+            id: { type: integer, minimum: 1, maximum: 9007199254740991 }
+            owner: { type: string, minLength: 1, maxLength: 39 }
+            name: { type: string, minLength: 1, maxLength: 100 }
+        objectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        payloadDigest: { type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$' }
+        queuedAt: { type: string, format: date-time }
+        evidence:
+          type: array
+          maxItems: 3
+          items: { $ref: "#/components/schemas/ProductBuildEvidence" }
+    ProductBuildResponse:
+      type: object
+      additionalProperties: false
+      required: [version, receipt, replayed]
+      properties:
+        version: { type: string, enum: [product-build-v1] }
+        receipt: { $ref: "#/components/schemas/ProductBuildReceipt" }
+        replayed: { type: boolean }
+    ProductBuildError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-build-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, request_too_large, repository_missing, repository_not_found, repository_conflict, provider_unreadable, plan_not_approved, target_not_enrolled, target_unreadable, target_daemon_missing, runner_missing, bootstrap_unverified, task_not_found, task_unreadable, task_stale, task_claimed, task_merged, budget_exceeded, fleet_halted, kick_failed]
+    ProductBuildAccessError:
+      type: object
+      additionalProperties: false
+      description: The service's scope, tier or confirmation gate refused access before the build handler.
+      required: [error]
+      properties:
+        error: { type: string, enum: [unauthorized, forbidden, confirm_nonce_required] }
+        required_scope: { type: string, enum: [write] }
+        required_tier: { type: string, enum: [high] }
     OperatorAgentAnswer:
       type: object
       description: Bounded read-only answer-v1; missing evidence is explicit and citations are dated.
@@ -14721,6 +15327,314 @@ components:
 # DECISIONS feed, escalation inbox, question backlog, cost meter) describes is explicit
 # follow-on work, not added here.
 paths:
+  /v1/improvements/threads:
+    post:
+      summary: Save a planning conversation for a verified finding.
+      description: "Resolves repository, fleet instance and immutable evidence on the server. Retries reuse native
+        Inbox messages. Saving this goal requests no model draft, filing, dispatch, merge or deployment.
+        Questions use the existing native Inbox reply path and never approve or file from prose. Write tier:
+        LOW. All existing authentication, admission, ownership, reservation and review guards remain in force."
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImprovementThreadRequest"
+      responses:
+        "200":
+          description: A durable saved receipt. Read its state; acceptance does not mean completion, merged tasks or
+            execution.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementSavedResult"
+        "400":
+          description: The request is invalid.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ImprovementFailure"
+                  - $ref: "#/components/schemas/Error"
+        "401":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The source, goal, draft, request identity or writer changed. Review the stated reason.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+        "500":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The source or saved outcome cannot currently be verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+  /v1/improvements/thread:
+    get:
+      summary: Read a saved improvement conversation and its current receipts.
+      security:
+        - bearerRead: []
+      description: Provide exactly one of requestId or the native Inbox threadId. Both reopen the same server-owned
+        conversation without changing its goal.
+      parameters:
+        - name: requestId
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: ^[a-f0-9]{64}$
+        - name: threadId
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 256
+        - name: beforeSeq
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: Saved native messages, current goal, source freshness, actual draft readiness and filing receipt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementThreadView"
+        "400":
+          description: The request is invalid.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ImprovementFailure"
+                  - $ref: "#/components/schemas/Error"
+        "401":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The source, goal, draft, request identity or writer changed. Review the stated reason.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+        "500":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The source or saved outcome cannot currently be verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+  /v1/improvements/threads/draft:
+    post:
+      summary: Request plan task drafts for this saved goal.
+      description: "Persists the explicit decision and requests the existing bounded repository drafting lane. A
+        pending request is not a completed draft. No tasks are filed. Write tier: MIDDLE. All existing
+        authentication, admission, ownership, reservation and review guards remain in force."
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImprovementDraftRequest"
+      responses:
+        "202":
+          description: A durable saved receipt. Read its state; acceptance does not mean completion, merged tasks or
+            execution.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementActionRequested"
+        "400":
+          description: The request is invalid.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ImprovementFailure"
+                  - $ref: "#/components/schemas/Error"
+        "401":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The source, goal, draft, request identity or writer changed. Review the stated reason.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+        "500":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The source or saved outcome cannot currently be verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+  /v1/improvements/threads/file:
+    post:
+      summary: Review and file the exact completed task draft.
+      description: "Binds the current goal and reviewed draft digest. The owned fresh-source CLI revalidates both
+        and uses the existing governed plan filing path. A plan pull request is not merged tasks or execution.
+        Write tier: HIGH. All existing authentication, admission, ownership, reservation and review guards
+        remain in force."
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImprovementFileRequest"
+      responses:
+        "202":
+          description: A durable saved receipt. Read its state; acceptance does not mean completion, merged tasks or
+            execution.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementActionRequested"
+        "400":
+          description: The request is invalid.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ImprovementFailure"
+                  - $ref: "#/components/schemas/Error"
+        "401":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
+        "409":
+          description: The source, goal, draft, request identity or writer changed. Review the stated reason.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+        "500":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The source or saved outcome cannot currently be verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+  /v1/improvements/action:
+    get:
+      summary: Read an improvement action receipt.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: operationId
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: ^[a-f0-9]{64}$
+      responses:
+        "200":
+          description: The saved decision and its observed native outcome. Unknown outcomes remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementActionObserved"
+        "400":
+          description: The request is invalid.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ImprovementFailure"
+                  - $ref: "#/components/schemas/Error"
+        "401":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The source, goal, draft, request identity or writer changed. Review the stated reason.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+        "500":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The source or saved outcome cannot currently be verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
   /v1/products:
     parameters:
       - name: x-rmd-operator-session
@@ -15062,6 +15976,81 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductDeploymentError" }
+  /v1/products/build:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Browser owner fields, actor headers and
+          shared bearers cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema: { type: string, minLength: 1 }
+      - name: x-confirm-nonce
+        in: header
+        required: true
+        description: Server-issued HIGH-tier confirmation bound to this exact method, path and body.
+        schema: { type: string, minLength: 1 }
+    post:
+      summary: Start one approved product task through the existing guarded target-repository path.
+      description: >
+        Requires the verified operator, the write scope and the high tier with a bound confirmation.
+        Immediately before acting the service re-verifies repository identity and head, the approved
+        plan evidence, target enrollment, the registered acceptance runner, README-only bootstrap
+        receipts at the exact head, task provenance, claims, merged credit and the inherited budget.
+        It writes only the existing repo-scoped kick marker, under the config root of the one live
+        registry instance that drives the target, and that daemon's own admission still decides.
+        The receipt reports queued until admitted (a held dispatch claim) or running (a claim or run
+        branch with a sign of life inside two renewal intervals) is independently observed. A refusal
+        writes nothing. Responses use Cache-Control private, no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductBuildCommand" }
+      responses:
+        "200":
+          description: The durable receipt, or the same original receipt on an identical retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildResponse" }
+        "400":
+          description: Malformed JSON or an invalid command.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildAccessError" }
+        "403":
+          description: The verified operator identity, write grant, high tier or confirmation is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductBuildError"
+                  - $ref: "#/components/schemas/ProductBuildAccessError"
+        "404":
+          description: The product, repository or task does not exist for this operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
+        "409":
+          description: A refused precondition - stale revision or ownership, unapproved plan, missing runner, target daemon or bootstrap, claimed or merged task, budget, or halted fleet.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
+        "413":
+          description: The raw request exceeds 4096 bytes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
+        "503":
+          description: busy, corrupt, unavailable or an unreadable provider, target or task; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
   /v1/analytics:
     get:
       summary: Read the internal benchmark evidence-quality or routing-pool projection.

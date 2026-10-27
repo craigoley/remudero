@@ -866,7 +866,8 @@ export function hydrateMergeStates(
 }
 
 /** W1-T3980 — REST-only scanner-blocker read for an armed, green, `blocked` PR; its safety case is documented on
- *  `repairableCodeqlBlocker` (sweep.ts). Every failed or truncated read is a named `unreadable`, never absence. */
+ *  `repairableCodeqlBlocker` (sweep.ts). Every failed or truncated read is a named `unreadable`, never absence.
+ *  An unarmed plan PR in the same green `blocked` state shares the cap for its review-hold read alone. */
 export const SCANNER_BLOCKER_HYDRATION_CAP = 3; // BACKSTOP: above the one-at-a-time population (#1579, #7495); up to 4 REST reads each
 export const SCANNER_DIAGNOSTIC_MAX_CHARS = 400; // PRIMARY CONTROL: sizes the untrusted scanner text a repair prompt carries
 const SCANNER_PAGE_SIZE = 100; // one full REST page; a response this long may be truncated, so reads as unreadable
@@ -881,15 +882,38 @@ export interface ScannerBlockerCandidateInput {
   mergeableState?: string;
 }
 
-export function isScannerBlockerCandidate(pr: ScannerBlockerCandidateInput): boolean {
+function greenReviewedButBlocked(pr: ScannerBlockerCandidateInput): boolean {
   return (
-    pr.autoMergeArmed === true &&
     pr.isDraft !== true &&
     pr.checksState === "green" &&
     pr.reviewState === "success" &&
     pr.mergeable === true &&
     pr.mergeableState === "blocked"
   );
+}
+
+/** The scanner-REPAIR population: armed, green, reviewed, mergeable and raw `blocked`. */
+export function isScannerBlockerCandidate(pr: ScannerBlockerCandidateInput): boolean {
+  return pr.autoMergeArmed === true && greenReviewedButBlocked(pr);
+}
+
+/** W1-T6595 — the sweep's plan-PR test: a plan filing, or a PR whose observed files reach `plan/`, is
+ *  never armed (W1-T5615); the fleet merges it directly. An emitter-ledger filing carries no observed
+ *  files (its file read is skipped), so `isPlanFiling` is read too. Unobserved files read false. */
+export function mergesDirectlyAsPlanPr(pr: { isPlanFiling?: boolean; changedFiles?: readonly string[] }): boolean {
+  return pr.isPlanFiling === true || (pr.changedFiles ?? []).some((f) => f.startsWith("plan/"));
+}
+
+export interface HumanHoldCandidateInput extends ScannerBlockerCandidateInput {
+  isPlanFiling?: boolean;
+  changedFiles?: readonly string[];
+}
+
+/** The population whose only blocker can be a person's CHANGES_REQUESTED hold: the scanner population,
+ *  plus an unarmed plan PR the fleet merges directly, which is never armed and so never in it. Its
+ *  review hold is read; scanner repair still requires {@link isScannerBlockerCandidate}. */
+export function isHumanHoldCandidate(pr: HumanHoldCandidateInput): boolean {
+  return (pr.autoMergeArmed === true || mergesDirectlyAsPlanPr(pr)) && greenReviewedButBlocked(pr);
 }
 
 export interface ScannerAlertIdentity {
@@ -975,6 +999,8 @@ export interface ScannerBlockerCandidate {
   number: number;
   headSha: string;
   merge?: MergeStateObservation;
+  /** An unarmed plan PR ({@link isHumanHoldCandidate} only): its review hold is the one read taken. */
+  holdOnly?: true;
 }
 
 function ambiguousScanner(cause: ScannerBlockerAmbiguity, detail: string): ScannerBlockerObservation {
@@ -1091,6 +1117,23 @@ export function observeScannerBlocker(
   return runGhReadSteps(observeScannerBlockerSteps(owner, repo, candidate, fetch));
 }
 
+/** One review read: the standing human hold, a named `unreadable`, or `undefined` when none stands. */
+function* observeChangesRequestedSteps(
+  owner: string,
+  repo: string,
+  candidate: ScannerBlockerCandidate,
+  fetch: GhApiFetcher,
+): GhReadSteps<ScannerBlockerObservation | undefined> {
+  let reviews: unknown;
+  try {
+    reviews = yield* ghRead(fetch, pullReviewsRestArgs(owner, repo, candidate.number));
+  } catch {
+    const reason = "the pull request review read failed";
+    return ambiguousScanner("unreadable", reason);
+  }
+  return classifyChangesRequested(candidate, reviews);
+}
+
 function* observeScannerBlockerSteps(
   owner: string,
   repo: string,
@@ -1099,14 +1142,7 @@ function* observeScannerBlockerSteps(
 ): GhReadSteps<ScannerBlockerObservation> {
   // A human hold blocks the merge whatever main, the scanner or a branch refresh does, so it is read
   // first: neither a refresh nor a scanner repair can clear it.
-  let reviews: unknown;
-  try {
-    reviews = yield* ghRead(fetch, pullReviewsRestArgs(owner, repo, candidate.number));
-  } catch {
-    const reason = "the pull request review read failed";
-    return ambiguousScanner("unreadable", reason);
-  }
-  const hold = classifyChangesRequested(candidate, reviews);
+  const hold = yield* observeChangesRequestedSteps(owner, repo, candidate, fetch);
   if (hold !== undefined) return hold;
   let behindBy: unknown;
   try {
@@ -1155,8 +1191,14 @@ export function* hydrateScannerBlockerObservationsSteps(
   cap: number = SCANNER_BLOCKER_HYDRATION_CAP,
 ): GhReadSteps<Map<number, ScannerBlockerObservation>> {
   const out = new Map<number, ScannerBlockerObservation>();
-  for (const candidate of candidates.slice(0, cap)) {
-    out.set(candidate.number, yield* observeScannerBlockerSteps(owner, repo, candidate, fetch));
+  // Armed candidates take the cap first, so a hold-only plan PR never displaces a scanner read; a
+  // hold-only read is one REST call, and one with no standing hold leaves the PR absent.
+  const ordered = [...candidates.filter((c) => c.holdOnly !== true), ...candidates.filter((c) => c.holdOnly === true)];
+  for (const candidate of ordered.slice(0, cap)) {
+    const observation = candidate.holdOnly === true
+      ? yield* observeChangesRequestedSteps(owner, repo, candidate, fetch)
+      : yield* observeScannerBlockerSteps(owner, repo, candidate, fetch);
+    if (observation !== undefined) out.set(candidate.number, observation);
   }
   return out;
 }

@@ -5,6 +5,7 @@ import * as precheck from "../scripts/census-precheck.mjs";
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as shapes from "../scripts/lib/git-spawn-shapes.mjs";
 
+const SKILL = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 const CENSUS = "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts";
 const SOURCE = "src/lib/sweep-plan.ts";
 const BASE = 'export function status(dir: string) {\n  return dir;\n}\n';
@@ -19,7 +20,10 @@ function joined(head: string, base: string = BASE, changed: string[] = [SOURCE])
     runSuites: (files: string[]) => { runs.push(files); return []; },
   });
   assert.equal(result.unmeasured, null);
-  return runs.flat();
+  const selected = runs.flat();
+  assert.equal(selected.filter((file) => file === SKILL).length, changed.length > 0 ? 1 : 0,
+    "the mandatory skill census is selected independently of git-spawn detection");
+  return selected.filter((file) => file !== SKILL);
 }
 
 test("unit test: test/the-local-precheck-runs-the-git-leaf-suite-on-any-git-spawn.test.ts — joins an unlisted positional -C, a cwd-option spawn and a run(\"git\") helper; nothing for a diff with no git spawn", () => {

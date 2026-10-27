@@ -8,6 +8,7 @@ import { gitRepo } from "./helpers/git-repo.js";
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
 
+const SKILL = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 const LEDGER = "test/ledger-rotation.test.ts";
 const UNION = "test/a-union-read-of-an-unretained-step-is-refused.test.ts";
 const SPEND = "test/spend-is-counted-once-at-its-producer.test.ts";
@@ -26,7 +27,10 @@ function evaluate(head: string | null, base: string | null = "", changed = [SOUR
     loadMembers: () => [],
     runSuites: (files: string[]) => { runs.push(files); return fail; },
   });
-  return { result, runs, reads };
+  assert.equal(runs.flat().filter((file) => file === SKILL).length, changed.length > 0 ? 1 : 0,
+    "the mandatory skill census runs exactly once for a nonempty diff");
+  const subjectRuns = runs.map((files) => files.filter((file) => file !== SKILL)).filter((files) => files.length > 0);
+  return { result, runs: subjectRuns, reads };
 }
 
 test("test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts: the #9041-shaped step diff runs and refuses ledger and spend; env additions run; no new literal starts no triggered child", () => {
@@ -84,7 +88,7 @@ test("W1-T5692: triggered and admitted suites share one deduplicated child; unre
     runSuites: (files: string[]) => { runs.push(files); return []; },
   };
   assert.deepEqual(precheck.evaluateAdmittedCensusSuites(input), { violations: [], unmeasured: null });
-  assert.deepEqual(runs, [[...STEPS, ENV, ERROR]]);
+  assert.deepEqual(runs, [[...STEPS, ENV, ERROR, SKILL]]);
   const unread = precheck.evaluateAdmittedCensusSuites({ ...input, readHead: () => { throw new Error("cannot read head"); } });
   assert.deepEqual(unread, { violations: [], unmeasured: "cannot read head" });
   const failed = precheck.evaluateAdmittedCensusSuites({ ...input, runSuites: () => { throw new Error("child timed out"); } });
@@ -145,7 +149,7 @@ test("W1-T5692: the CLI supplies head and merge-base readers to the triggered su
         return [];
       },
     }), 1);
-    assert.deepEqual(runs, [STEPS, [SPEND]]);
+    assert.deepEqual(runs, [[...STEPS, SKILL], [SPEND]]);
     assert.ok(errors.some((line) => line.includes("census:spend; declare SPEND_STEP_ROLES in src/lib/spend-rows.ts")));
   } finally {
     repo.cleanup();
