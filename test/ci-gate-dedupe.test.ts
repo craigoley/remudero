@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // ── W1-T123: ci-gate dedupes check-runs BY NAME, evaluates only the LATEST attempt ──────────
 //
@@ -138,4 +139,36 @@ test("ci-gate-dedupe: a required check absent from the deduped list is still wai
   assert.match(out, /- missing-check/);
   assert.doesNotMatch(out, /merge may proceed\./);
   assert.doesNotMatch(out, /required check\(s\) FAILED/);
+});
+
+
+test("ci-gate reads all retained attempts before deduping posted gate verdicts", async () => {
+  const script = await loadAggregateScript();
+  const clonedJob = { id: 30, name: "light-gates", status: "completed", conclusion: "success",
+    started_at: "2026-10-27T01:44:04Z", external_id: "copied-job-attempt-three" };
+  for (const conclusion of ["success", "failure", "absent"] as const) {
+    const oldPost = { id: 10, name: "rule-checks", status: "completed", conclusion: "failure",
+      started_at: "2026-10-27T01:55:32Z", external_id: "run:40434301641:1:job:121959187138" };
+    const latestPost = { ...oldPost, id: 20, conclusion, started_at: "2026-10-27T03:22:57Z" };
+    const pages = conclusion === "absent" ? [{ check_runs: [clonedJob] }]
+      : [{ check_runs: [clonedJob, oldPost] }, { check_runs: [latestPost] }];
+    const shim = ghShim([
+      { when: "filter=all", stdout: JSON.stringify(pages) },
+      { when: "/check-runs?", stdout: JSON.stringify([{ check_runs: [clonedJob] }]) },
+    ], { kind: "retained-posted-attempts" });
+    try {
+      const result = spawnSync("bash", ["-c", script], { env: { ...process.env,
+        PATH: `${shim.dir}:${process.env.PATH}`, GH_TOKEN: "fixture", REPO: "example/example",
+        SHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", REQUIRED: '["rule-checks"]', IGNORE: "[]",
+        GRACE_WINDOW_SECONDS: "0", GRACE_POLL_INTERVAL_SECONDS: "1", WAIT_CAP_SECONDS: "0" },
+        encoding: "utf8", timeout: 10_000 });
+      const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+      assert.equal(result.status, conclusion === "success" ? 0 : 1, `${conclusion}: ${output}`);
+      if (conclusion === "failure") assert.match(output, /required check\(s\) FAILED/);
+      if (conclusion === "absent") assert.match(output, /TIMED OUT waiting for required check/);
+      assert.ok(shim.calls().length > 0);
+      assert.ok(shim.calls().every(call => call.includes("filter=all") && call.includes("--paginate") && call.includes("--slurp")),
+        "every inventory must include all retained attempts and all pages before local producer-aware dedupe");
+    } finally { await rm(shim.dir, { recursive: true, force: true }); }
+  }
 });
