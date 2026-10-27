@@ -17534,6 +17534,16 @@ export async function runSweep(
         /(?:MERGED|CLOSED)/.test(standDownReason ?? "")) return;
     const belongs = (row: Record<string, unknown>) => row.pr_number === pr.prNumber || row.pr_url === pr.prUrl ||
       (row.pr_number === undefined && row.pr_url === undefined && pr.taskId !== undefined && row.task_id === pr.taskId);
+    // A pass that works from an older open-PR view must not page anyone about a PR that has since merged or
+    // closed: #14898 merged at 18:28 and its stall issue opened at 19:06. A failed read reports as before. Read
+    // before the stage history below, so two overlapping passes still dedupe on the ledger without an await between.
+    let live: LiveStateResult | undefined;
+    try { live = await deps.readLiveState?.(pr); } catch { live = { ok: false }; } // a thrown read is an unread one: escalate as before
+    const terminal = live?.ok === true ? terminalStateReason(live.state) : undefined;
+    if (terminal !== undefined) {
+      record("pr.stuck.not_open", { blocker: fields.blocker, blocker_since: fields.blocker_since, reason: terminal });
+      return;
+    }
     const since = Date.parse(fields.blocker_since);
     let currentRows = ledgerLines;
     let stageHistoryError: string | undefined;
