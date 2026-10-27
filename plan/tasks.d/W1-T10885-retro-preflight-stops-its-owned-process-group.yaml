@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   band_meaning: span
   priority: 3
@@ -42,3 +42,13 @@
     Use literal fixed/deleted/restored controls with the same committed physical suite; test real descendants including one with private stdio and an unrelated sibling control. Verify the original ordinary-completion, silence, total and output limits and spawn-error regressions. Run caller/census and mapped changed-source coverage, normal full hosted/native/protected automatic merge, then natural source adoption/effect. No manual restart, retro, release, kill, marker/cap/routing change or waived gates.
   falsifier: |
     With exactly the same assertions and fixture files, remove group ownership/signaling and restore the original child-only termination: the known descendant must survive long enough to fail the post-result write control. Restore the entire fixed tree for zero failures. Refused admission, missing summaries, empty child starts, unknown process identity or unchanged-bound timeouts are not discrimination. If the real nested replay does not distinguish the original behavior, stop rather than ship a speculative cleanup.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared files are one source module (src/lib/retro-preflight.ts) and its test. The description says the change is a source-only repair of the watchdog's process-group termination, so it does not touch secrets, auth, merge/deploy policy, or data deletion."
+      - "The plan record states that no production retries, signals, caps, policies or paid probes are authorized, and that the existing gates stay pinned. Both acceptance criteria are verifiable by named unit tests, and the sibling-protection and spawn-failure cases are explicitly covered."
+      - "The task signals descendants only within a command-owned group, not unrelated work, so it stays within the escalation rule's LOW scope. The family has no track record (0 merged), but nothing in the description or gates state is concerning, and CI and review still apply."
+    judged_at: "2026-10-27T21:45:30.406Z"
+    pin: "ee6606ac2beb80fff74510958cf3f9370808391090eaf52a683334a65f8fc4fe"
