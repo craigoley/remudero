@@ -39,8 +39,12 @@ async function readyWithin(profiler: { ready(): Promise<boolean> }, timeoutMs = 
   }
 }
 
+let observedProfilerStart: Int32Array | undefined;
+let prematureNamedCalls = 0;
+
 /** The frame the stall runs: what the profile row must name. */
 function serveBusyFrame(): number {
+  if (observedProfilerStart && Atomics.load(observedProfilerStart, 0) !== 1) prematureNamedCalls++;
   let x = 0;
   for (let i = 0; i < 2e5; i++) x += (i * 31) % 7;
   return x;
@@ -56,7 +60,9 @@ function stallTheLoop(ms: number, profiling?: Int32Array): void {
   while (end === undefined || performance.now() < end) {
     if (end === undefined && profiling && Atomics.load(profiling, 0) === 1) end = performance.now() + ms;
     if (end === undefined && performance.now() > deadline) throw new Error("the real profiler never acknowledged sampling");
-    Array.from({ length: 50 }, serveBusyFrame);
+    // V8 can credit a frame OSR-compiled before Profiler.start to its caller. Keep the
+    // sampled target cold during startup and during the disabled-profiler control.
+    if (profiling && end !== undefined) Array.from({ length: 50 }, serveBusyFrame);
   }
 }
 
@@ -115,6 +121,8 @@ test("W1-T10074: a failing inspector disables serve's watchdog and says why", as
 // LAST: a profile enables V8's Profiler domain, whose disconnect resets this process's precise coverage.
 async function verifyProfiledStall(startDelayMs: number): Promise<Frame> {
   const profiling = new Int32Array(new SharedArrayBuffer(4));
+  observedProfilerStart = profiling;
+  prematureNamedCalls = 0;
   const { tick, stop, written } = armServeMonitor({
     spawn: (source, workerData) => new Worker(`
 const profilerTestFlag = new Int32Array(process.getBuiltinModule("node:worker_threads").workerData.profilerTestFlag);
@@ -142,6 +150,7 @@ ${source}`, { eval: true, execArgv: [], workerData: { ...workerData, profilerTes
     await sleep(boundMs);
     stallTheLoop(1500, profiling);
     const row = await waitFor(() => written.find((line) => line.step === "runtime.loop_stall_profile"));
+    assert.equal(prematureNamedCalls, 0, "the named workload stays cold until the real profiler start");
     const frames = row.top_frames as Frame[];
     assert.match(frames[0]!.url, /serves-main-loop-stalls-are-profiled-and-named\.test\.ts/);
     assert.ok(frames[0]!.self_ms > 0);
@@ -152,6 +161,7 @@ ${source}`, { eval: true, execArgv: [], workerData: { ...workerData, profilerTes
     assert.equal(written.filter((line) => line.step === "runtime.loop_stall_profile_failed").length, 0);
     return frames[0]!;
   } finally {
+    observedProfilerStart = undefined;
     v8.takeCoverage();
     stop();
   }
