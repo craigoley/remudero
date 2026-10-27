@@ -74,7 +74,7 @@ attachments:
   - https://github.com/craigoley/remudero/blob/550128607f3bd5c860e0dcaa25c06ac3e84b8605/src/lib/operator-notes.ts
   - https://github.com/craigoley/remudero/blob/550128607f3bd5c860e0dcaa25c06ac3e84b8605/src/lib/panel-actions.ts
 origin: repair#console-operator-guidance-generation-store
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/14599
 summary:
