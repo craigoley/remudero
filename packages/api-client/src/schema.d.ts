@@ -377,6 +377,52 @@ export interface components {
       version: "product-deployment-v1";
       error: "invalid_identity" | "invalid_input" | "not_found" | "project_not_found" | "repository_required" | "repository_mismatch" | "team_mismatch" | "project_conflict" | "idempotency_conflict" | "stale_revision" | "capacity" | "creation_denied" | "not_configured" | "busy" | "corrupt" | "unavailable" | "provider_unreadable" | "outcome_unknown" | "recovery_required" | "request_too_large";
     };
+    /** At most 4096 raw request bytes. Names one task the target repository's own plan filed for the product's approved plan evidence. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
+    ProductBuildCommand: {
+      version: "product-build-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      planEvidenceId: string;
+      taskId: string;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+    };
+    ProductBuildEvidence: {
+      outcome: "queued" | "admitted" | "running";
+      observedAt: string;
+    };
+    /** outcome is the furthest independently recorded phase; queued is never reported as running. */
+    ProductBuildReceipt: {
+      operationId: string;
+      productId: ProductId;
+      taskId: string;
+      planEvidenceId: string;
+      outcome: "queued" | "admitted" | "running";
+      repository: {
+        id: number;
+        owner: string;
+        name: string;
+      };
+      objectiveRevision: number;
+      payloadDigest: string;
+      queuedAt: string;
+      evidence: (ProductBuildEvidence)[];
+    };
+    ProductBuildResponse: {
+      version: "product-build-v1";
+      receipt: ProductBuildReceipt;
+      replayed: boolean;
+    };
+    ProductBuildError: {
+      version: "product-build-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "fleet_halted" | "kick_failed";
+    };
+    /** The service's scope, tier or confirmation gate refused access before the build handler. */
+    ProductBuildAccessError: {
+      error: "unauthorized" | "forbidden" | "confirm_nonce_required";
+      required_scope?: "write";
+      required_tier?: "high";
+    };
     /** Bounded read-only answer-v1; missing evidence is explicit and citations are dated. */
     OperatorAgentAnswer: {
       version: "answer-v1";
@@ -6369,6 +6415,20 @@ export interface paths {
           "409": ProductDeploymentError;
           "413": ProductDeploymentError;
           "503": ProductDeploymentError;
+        };
+    };
+  };
+  "/v1/products/build": {
+    post: {
+      responses: {
+          "200": ProductBuildResponse;
+          "400": ProductBuildError;
+          "401": ProductBuildAccessError;
+          "403": (ProductBuildError) | (ProductBuildAccessError);
+          "404": ProductBuildError;
+          "409": ProductBuildError;
+          "413": ProductBuildError;
+          "503": ProductBuildError;
         };
     };
   };

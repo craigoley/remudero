@@ -1293,6 +1293,15 @@ export type ReviewAdmissionGate = (() => boolean) & {
   workerAdmissionHold?: (kind?: "review") => string | undefined;
 };
 
+/** One pending "run this task now" kick. `repo` is set for a repo-scoped marker (W1-T429) and absent for a
+ *  legacy/unscoped one; the binding hands this daemon only the kicks addressed to its own target (W1-T10615). */
+export interface DaemonKick { taskId: string; origin: string; repo?: string }
+
+/** A repo-scoped kick's ledger rows name its repo; an unscoped kick's rows stay byte-identical to before W1-T10615. */
+function kickRepoField(kick: DaemonKick): { repo?: string } {
+  return kick.repo === undefined ? {} : { repo: kick.repo };
+}
+
 export interface DaemonDeps {
   repositoryMaintenance?: (context: { activeLanes: number; disk: "healthy" | "low" | "unknown"; queueBusy: boolean }) => Promise<void>;
   /** Only a supervised dedicated daemon may exit into the shell's 30-minute zero-token probe. */
@@ -1582,9 +1591,10 @@ export interface DaemonDeps {
   /** Peek the pending "run this queued task now" kick markers, oldest first — a pure injection, no filesystem here.
    * The daemon gates each through {@link assertRunnable} and the merged projection and clears it as it dispatches or
    * refuses it, so a runnable kick it cannot service this cycle survives to the next (fb-1784988460437-9daa9b). */
-  pendingKicks?: () => Array<{ taskId: string; origin: string }>;
-  /** Delete one kick marker (consumed-once) after the daemon dispatches or refuses it. */
-  clearKick?: (taskId: string) => void;
+  pendingKicks?: () => Array<DaemonKick>;
+  /** Delete one kick marker (consumed-once) after the daemon dispatches or refuses it. W1-T10615: `repo` is the
+   *  SAME repo the pending kick carried, so the clear names that exact marker, never a sibling repo's. */
+  clearKick?: (taskId: string, repo?: string) => void;
   /** Read and delete the "drain now" marker, consumed once; a defined return means the operator
    *  asked for one immediate dispatch cycle. */
   consumeDrainNow?: () => { origin: string } | null;
@@ -6573,12 +6583,12 @@ export async function runDaemon(
       });
     }
     let forcedNext: Task | undefined;
-    let forcedKick: { taskId: string; origin: string } | undefined;
+    let forcedKick: DaemonKick | undefined;
     if (deps.pendingKicks) {
       for (const kick of deps.pendingKicks()) {
         const refuse = (reason: string) => {
-          deps.clearKick?.(kick.taskId);
-          log("console.kick_refused", { task: kick.taskId, origin: kick.origin, reason });
+          deps.clearKick?.(kick.taskId, kick.repo);
+          log("console.kick_refused", { task: kick.taskId, origin: kick.origin, reason, ...kickRepoField(kick) });
         };
         const task = planForBatch.byId.get(kick.taskId);
         if (!task) { refuse("unknown task id"); continue; }
@@ -7476,9 +7486,9 @@ export async function runDaemon(
       noteBootFirstDispatch({ startedAtMs: daemonClock.now(), admitted: admitted.length });
       if (forcedKick?.taskId === task.id) {
         const kick = forcedKick;
-        deps.clearKick?.(task.id);
+        deps.clearKick?.(task.id, kick.repo);
         forcedKick = undefined;
-        log("console.kick_dispatched", { task: task.id, origin: kick.origin });
+        log("console.kick_dispatched", { task: task.id, origin: kick.origin, ...kickRepoField(kick) });
       }
       if (isRefill) log("dispatch.lane_refilled", { lane, finished_task: refill!.finishedTaskId, next_task: task.id,
         ...(restartDecided ? { restart_decided: true } : {}) });
