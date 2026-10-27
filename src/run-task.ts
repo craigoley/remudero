@@ -6458,6 +6458,13 @@ export function ensureTaskTrailer(
     const body = view.body ?? "";
     if (body.includes(trailer)) return;
     const newBody = body.trim().length > 0 ? `${body.trimEnd()}\n\n${trailer}\n` : `${trailer}\n`;
+    // GitHub's PR PATCH has no compare-and-swap, so re-read right before writing: a body edited after the read
+    // above (2026-10-13, #11216: a human edit overwritten by this stamp) is left alone, and the next pass stamps it.
+    const live = (read(["pr", "view", prUrl, "--json", "body"]) as { body?: string }).body ?? "";
+    if (live !== body) {
+      log("trailer_stamp.raced", { task_id: taskId, pr_url: prUrl });
+      return;
+    }
     phase = "write";
     // W1-T2948: the SHARED builder, so this stamp cannot retain its own copy of the failing
     // transport. An unresolvable URL throws here and lands in the catch below with phase "write" —
@@ -11707,7 +11714,7 @@ export function normalizeRunPrAcceptanceFromPlan(
   // The SAME two leaves (and the same defaults) repairRetroAcceptanceBlock injects — reused from its
   // own signature rather than a second inline copy; its retro-only `diff` input is omitted here.
   deps: Omit<NonNullable<Parameters<typeof repairRetroAcceptanceBlock>[2]>, "diff"> = {},
-): "rewritten" | "healthy" | "no-block" | "error" {
+): "rewritten" | "healthy" | "no-block" | "raced" | "error" {
   return runTaskCommandHelpers(runTaskCommandHost()).normalizeRunPrAcceptanceFromPlan(prUrl, taskId, planCriteria, log, deps);
 }
 
