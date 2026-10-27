@@ -530,7 +530,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if (!decision.fits) throw new Error(`runtime deadline does not fit admitted ${decision.workers}-worker pool: need ${decision.requiredMs}ms, have ${decision.availableMs}ms; expensive phase not started`);
           };
           admitRuntime('before-static', undefined, partial ? partial.suites : receipt.suites);
-          const staticCapacity = admitHost('static-preflight');
+          const staticCapacity = admitHost('static-preflight', { selection: receipt.selection, workers: 1 });
           if (staticCapacity) (receipt.hostCapacity ??= []).push(staticCapacity);
           const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
             join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
@@ -614,7 +614,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             } else if (!notRun) {
             const testsName = receipt.tiered ? 'affected-tests-subset' : 'affected-tests';
             admitRuntime('before-tests', 0, ranSuites, executionWorkers);
-            const testCapacity = admitHost('affected-tests');
+            // An over-capacity subset is sized by the arm it was cut from: a narrow arm's subset is narrower still.
+            const testCapacity = admitHost('affected-tests', { selection: receipt.selectedArm ?? receipt.selection, workers: executionWorkers });
             if (testCapacity) (receipt.hostCapacity ??= []).push(testCapacity);
             // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
             // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
