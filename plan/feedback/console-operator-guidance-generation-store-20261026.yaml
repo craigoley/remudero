@@ -76,8 +76,26 @@ attachments:
 origin: repair#console-operator-guidance-generation-store
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/14599
+summary:
+  headline: Propose a bounded guidance persistence and delivery correction
+  what_happened: A note was accepted and stored in one inactive serving
+    generation, but it was absent from the active generation and the daemon’s
+    parsed note file. Source inspection shows these components can use different
+    storage roots, while an answer route can report success even when saving
+    fails; current prompt consumers and shared storage remain unverified.
+  decision: Run the required ownership, namespace, storage, and risk checks, then
+    file the smallest governed proposal that distinguishes recorded guidance
+    from delivered guidance and preserves existing notes and approval rules.
+  options:
+    - label: File a bounded proposal
+      consequence: Qualify real producer and consumer paths first, then prove shared
+        persistence and honest delivery status with private fixtures.
+      intent: approve
+    - label: Keep the finding queued
+      consequence: Make no source or runtime changes; retain the observation until
+        ownership and storage boundaries are verified.
+      intent: keep
 expansion: null
 submission_key: console-followup:60b3a8c5-270c-4f69-a6c8-3484f2f8f45c
 thread_id: null
