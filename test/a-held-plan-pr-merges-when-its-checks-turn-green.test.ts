@@ -222,3 +222,24 @@ test("W1-T9212: heldPlanPrFromLedger names the trigger and the first hold at thi
   assert.equal(heldPlanPrFromLedger([heldRow(pr, { mergeable_state: "dirty", remedy: "retry-later" })], pr), undefined,
     "a conflicting hold is not a checks-green or settled-unknown hold");
 });
+
+
+test("a genuine current-head review hold reaches the existing serial plan merge selection", () => {
+  const held = { ...planPr(14828), headSha: "275ac3e9515e21507a2c69c066c101e1230c776f" };
+  const row = {
+    ts: "2026-10-27T13:33:03.932Z", step: "automerge.arm_skipped", lane: "review",
+    outcome: "plan-pr-held", head_sha: held.headSha, pr_number: held.prNumber, pr_url: held.prUrl,
+    plan_touch: "touched", mergeable_state: "blocked", remedy: "retry-later",
+  };
+  const at = Date.parse(row.ts);
+  assert.deepEqual(heldPlanPrFromLedger([row], held), { heldAtMs: at, trigger: "checks-green" });
+  const never = planPr(14824);
+  assert.deepEqual(selectLightPassPlanMerges([never, held], DEFAULT_SWEEP_POLICY, at + 60_000, [row])
+    .map(pr => pr.prNumber), [14828], "the actual review hold wins the existing claim; never-held work retains its limit");
+  for (const bad of [
+    { ...row, outcome: "skipped" }, { ...row, plan_touch: "unknown" },
+    { ...row, head_sha: "older-head" }, { ...row, head_sha: undefined },
+    { ...row, pr_number: 14829 }, { ...row, pr_url: "https://github.com/craigoley/remudero/pull/14829" },
+    { ...row, ts: "unreadable" }, { ...row, mergeable_state: "dirty" },
+  ]) assert.equal(heldPlanPrFromLedger([bad], held), undefined, "incomplete, conflicting or foreign evidence grants no held priority");
+});
