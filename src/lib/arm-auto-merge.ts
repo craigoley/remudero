@@ -2126,26 +2126,36 @@ export function logArmAttribution(
   }
 }
 
-export function armIfVerdictPermits(
+/** The context {@link armIfVerdictPermits} and {@link armIfVerdictPermitsAsync} share. */
+type VerdictArmCtx = {
+  prUrl: string;
+  taskId: string;
+  headSha: string;
+  ledgerPath: string;
+  headRefName?: string;
+  // W1-T3551: `OpenPrView.isDraft`, POSITIVE match only — `undefined`/`false` change nothing.
+  // Lets a manual `rmd review <pr>` (this function's own call site — see authority.ts) hold a
+  // draft the exact same way the sweep's `held-draft` disposition does, without ever reaching
+  // `deps.arm` below.
+  isDraft?: boolean;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+};
+
+/** The injectable effector and ledger read of a review arm, parameterised by what the effector returns. Named
+ *  without a `Deps`/`Seams` suffix and used instead of a second inline object-literal parameter type, which the
+ *  deps-interface census counts. */
+type VerdictArmInjection<R> = {
+  arm?: (prUrl: string, taskId: string) => R;
+  ledgerLines?: () => Array<Record<string, unknown>>;
+};
+
+/** The gates both review arms run BEFORE the effector, in one order: the dependabot and draft
+ *  stand-downs, then {@link decideAutoMergeArm}. `skipped` is already ledgered; a decision arms. */
+function verdictArmGate(
   verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
-  ctx: {
-    prUrl: string;
-    taskId: string;
-    headSha: string;
-    ledgerPath: string;
-    headRefName?: string;
-    // W1-T3551: `OpenPrView.isDraft`, POSITIVE match only — `undefined`/`false` change nothing.
-    // Lets a manual `rmd review <pr>` (this function's own call site — see authority.ts) hold a
-    // draft the exact same way the sweep's `held-draft` disposition does, without ever reaching
-    // `deps.arm` below.
-    isDraft?: boolean;
-    log: (step: string, extra?: Record<string, unknown>) => void;
-  },
-  deps: {
-    arm?: (prUrl: string, taskId: string) => ArmOutcome | ArmAttemptResult;
-    ledgerLines?: () => Array<Record<string, unknown>>;
-  } = {},
-): ArmOutcome | "skipped" {
+  ctx: VerdictArmCtx,
+  ledgerLines: () => Array<Record<string, unknown>>,
+): "skipped" | { reason: string } {
   if (ctx.headRefName?.startsWith("dependabot/")) {
     ctx.log("automerge.arm_skipped", { reason: "dependabot PR — the dep-review lane owns arming for these", head_sha: ctx.headSha });
     return "skipped";
@@ -2162,7 +2172,7 @@ export function armIfVerdictPermits(
   }
   const override = verdict.capped
     ? cappedOverrideFromLedger(
-        (deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))(),
+        ledgerLines(),
         ctx.taskId,
         ctx.headSha,
         ctx.prUrl,
@@ -2179,9 +2189,11 @@ export function armIfVerdictPermits(
     });
     return "skipped";
   }
-  // W1-T230's own gate still applies inside: it re-reads the live head and refuses a stale
-  // verdict. Its OUTCOME is read (impl-BC) rather than discarded, so a refusal is visible.
-  const result = (deps.arm ?? armAutoMergeDetailed)(ctx.prUrl, ctx.taskId);
+  return { reason: decision.reason };
+}
+
+/** Ledgers the effector's result the way both review arms do: its OUTCOME is read (impl-BC), never discarded. */
+function logVerdictArmResult(ctx: VerdictArmCtx, decisionReason: string, result: ArmOutcome | ArmAttemptResult): ArmOutcome {
   const outcome = typeof result === "string" ? result : result.outcome;
   const error = typeof result === "string" ? undefined : result.error;
   const rateLimit = typeof result === "string" ? undefined : result.rateLimit;
@@ -2194,8 +2206,8 @@ export function armIfVerdictPermits(
     "review",
     {
       outcome,
-      reason: armOutcomeReason(outcome, decision.reason),
-      decision_reason: decision.reason,
+      reason: armOutcomeReason(outcome, decisionReason),
+      decision_reason: decisionReason,
       head_sha: ctx.headSha,
       ...(error !== undefined ? { error } : {}),
     },
@@ -2204,6 +2216,37 @@ export function armIfVerdictPermits(
     typeof result === "string" ? undefined : result.ratchetJudge,
   );
   return outcome;
+}
+
+/** The synchronous review arm, for a caller that cannot await. `runReview` (the daemon's review and a
+ *  hand-run `rmd review <pr>` alike) awaits {@link armIfVerdictPermitsAsync}: the same gates and rows. */
+export function armIfVerdictPermits(
+  verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
+  ctx: VerdictArmCtx,
+  deps: {
+    arm?: (prUrl: string, taskId: string) => ArmOutcome | ArmAttemptResult;
+    ledgerLines?: () => Array<Record<string, unknown>>;
+  } = {},
+): ArmOutcome | "skipped" {
+  const gate = verdictArmGate(verdict, ctx, deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)));
+  if (gate === "skipped") return "skipped";
+  // W1-T230's own gate still applies inside: it re-reads the live head and refuses a stale
+  // verdict. Its OUTCOME is read (impl-BC) rather than discarded, so a refusal is visible.
+  return logVerdictArmResult(ctx, gate.reason, (deps.arm ?? armAutoMergeDetailed)(ctx.prUrl, ctx.taskId));
+}
+
+/** W1-T9549 — {@link armIfVerdictPermits} with its effector AWAITED. The default arm is
+ *  {@link armAutoMergeDetailedAsync} over {@link realArmDepsAsync}, so the auto-merge enable, the plan
+ *  merge-safety git and the direct REST merge leave the daemon loop free. Same gates, same rows. */
+export async function armIfVerdictPermitsAsync(
+  verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
+  ctx: VerdictArmCtx,
+  deps: VerdictArmInjection<ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult>> = {},
+): Promise<ArmOutcome | "skipped"> {
+  const gate = verdictArmGate(verdict, ctx, deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)));
+  if (gate === "skipped") return "skipped";
+  const arm = deps.arm ?? ((prUrl: string, taskId: string) => armAutoMergeDetailedAsync(prUrl, taskId));
+  return logVerdictArmResult(ctx, gate.reason, await arm(ctx.prUrl, ctx.taskId));
 }
 
 /**
