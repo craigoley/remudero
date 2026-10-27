@@ -246,6 +246,12 @@ test("retro backoff formats the last supported Date and refuses only the next mi
     { eligible: false, streak: 1, nextEligibleAt: null, mergesFloor: 3744, nextEligibleAtState: "outside-date-range" });
 });
 
+test("retro backoff does not disguise an invalid timestamp as a distant valid deadline", () => {
+  const attempt = { retroAttemptAt: "not-a-date", markerTs: "2026-10-06T10:45:50.161Z", mergesSinceMarker: 3719, streak: 30 };
+  assert.throws(() => evaluateRetroBackoff(attempt, 3719, attempt.markerTs,
+    new Date("2026-10-26T23:10:51.722Z"), defaultRetroBackoffPolicy()), RangeError);
+});
+
 test("retro trigger reports an unrepresentable deadline without inventing a timestamp", (t) => {
   const { config, markerPath } = fixtureRoot();
   t.after(() => fsDefault.rmSync(config.root, { recursive: true, force: true }));

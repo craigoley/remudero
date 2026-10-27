@@ -4652,7 +4652,7 @@ export function evaluateRetroBackoff(
   // The default six-hour delay reaches beyond Date at streak30 (and can overflow Number later).
   // Eligibility above still compares the ORIGINAL deadline and merge floor; never clamp it
   // to a fabricated date or let formatting turn a valid refusal into a trigger exception.
-  if (!Number.isFinite(nextEligibleAtMs) || Math.abs(nextEligibleAtMs) > MAX_FORMATTABLE_DATE_MS) {
+  if (Math.abs(nextEligibleAtMs) > MAX_FORMATTABLE_DATE_MS) {
     return { eligible: false, streak: lastAttempt.streak, nextEligibleAt: null, mergesFloor,
       nextEligibleAtState: "outside-date-range" };
   }
