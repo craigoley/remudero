@@ -1,0 +1,64 @@
+id: console-inbox-shadow-key-population-20261027
+ts: 2026-10-27T06:00:32.171Z
+raw: >-
+  OBSERVED bounded Inbox readiness population mismatch, not permission to change
+  a cutover gate: native read-only SQLite census2026-10-27T05:56:43Z streamed
+  all876050shadow_key rows and matched SQL count exactly in3.54seconds. The
+  current committed Inbox body set contained156keys/one snapshot;
+  before-and-after keyset fingerprints were identical and every body had a valid
+  snapshot. Only156sampledkeys matched that currently published set,875894did
+  not. Of876041cursor keys,875209round-tripped through the native inbox-page-v1
+  encoder across6706snapshot identities;147matched the current
+  snapshot,875062named another snapshot,832older/opaque cursor strings remain
+  explicitly unclassified. No per-key timestamp exists, so this does not date
+  keys or prove their full activity history.
+  Counters:2357535streaksamples,876050keys, cadence floor1261512000. No
+  reset/deletion/cohort/readiness/threshold/policy/service change was made.
+
+
+  The maintained source stores each sampled key until a real-difference reset,
+  while inboxViewBodies includes the snapshot identity in non-first-page cursor
+  keys and the producer drops keys it no longer publishes. shadowReadiness
+  multiplies all retained keys by1440. These facts support a bounded
+  population-accounting follow-up; they do not prove a new statistical
+  independence unit or justify applying old pooled samples to a smaller cohort.
+  Agent readiness is a separate30-key guard and was signed-in ready; do not
+  conflate the two.
+
+
+  First reconcile current main and every open PR head, other feedback and
+  existing owners before filing a duplicate. CI infrastructure, validation
+  fixtures and Azure memory are owned by other chats. This chat owns the
+  Inbox/read-model product follow-up; the CI owner explicitly reported no
+  view-shadow/inbox-view source edit. Preserve the entire measured counter
+  history and every snapshot/request fence. Prepare an observation-led, bounded
+  task to reproduce healthy snapshot churn in private deterministic fixtures,
+  report retained versus currently comparable key populations and the
+  readiness-floor trajectory, and recommend an evidence-preserving qualification
+  design with discriminating failure controls. Current-published-key membership
+  alone is NOT sufficient evidence to discard history or activate service. Do
+  not collapse keys, reset a streak, lower a floor, change
+  cadence/freshness/permissions/providers/budgets, declare readiness, or alter
+  serving/admission without a separately reviewed and explicitly authorized
+  policy decision. Preserve legacy/unknown cursor evidence and genuine
+  real-difference refusal.
+
+
+  No live full-history ledger scan, induced gardener/model pass, restart, claim
+  clearing, answer replay or live feedback cleanup is needed. Any eventual
+  runtime repair must retain normal task judgment, ownership, source-positive
+  tests/proofs, governed review, hosted CI, protected merge and separately
+  authorized deployment/live acceptance. Queuing this observation is not a filed
+  task, implementation or solved reliability claim.
+attachments:
+  - https://github.com/craigoley/remudero/blob/e2e63b75b17bb05071a24a1ce558ebbde6d21088/src/lib/view-shadow-store.ts
+  - https://github.com/craigoley/remudero/blob/e2e63b75b17bb05071a24a1ce558ebbde6d21088/src/lib/view-shadow.ts
+  - https://github.com/craigoley/remudero/blob/e2e63b75b17bb05071a24a1ce558ebbde6d21088/src/lib/inbox-view.ts
+origin: repair#console-inbox-shadow-key-population
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: console-followup:inbox-shadow-current-membership-20261027-v1
+thread_id: null
