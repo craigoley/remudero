@@ -29,9 +29,13 @@ import { createRepositoriesReadModelView, createRepositoriesSourcePublisher } fr
 import { repositoriesSources, type ServeDeps } from "../src/lib/serve.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
+import { collectDailyProgress } from "#src/lib/daily-progress-collector.js";
+import { createDailyProgressView } from "#src/lib/daily-progress-view.js";
+import { acquireLease, flushReadModelTransactions, openReadModel } from "#src/lib/read-model-db.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
-type TestCtx = { after: (fn: () => void) => void };
+type TestCtx = { after: (fn: () => void | Promise<void>) => void };
 
 function clockAt(ms: number): Clock {
   return { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
@@ -47,9 +51,9 @@ function plan(): Plan {
 }
 
 /** Core with a merge, a running task, spend and a heartbeat, every view switched to `serve`. */
-function fixture(t: TestCtx): { root: string; stateDir: string } {
+async function fixture(t: TestCtx): Promise<{ root: string; stateDir: string }> {
   const root = makeTempDir("view-etags-deterministic");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(async () => { await flushReadModelTransactions(); rmSync(root, { recursive: true, force: true }); });
   const stateDir = join(root, "state");
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
   mkdirSync(join(root, ".remudero"), { recursive: true });
@@ -65,9 +69,20 @@ function fixture(t: TestCtx): { root: string; stateDir: string } {
     { ts: iso(60_000), step: "daemon.tick" },
   ];
   writeFileSync(join(stateDir, "ledger.ndjson"), rows.map((r) => `${JSON.stringify({ host: "h1", ...r })}\n`).join(""));
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", analytics: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", analytics: "serve", "daily-progress": "serve" } }));
   const ledgerPath = join(stateDir, "ledger.ndjson");
-  createRepositoriesSourcePublisher({ stateDir, instances: () => repositoriesSources({ ledgerPath, fleetControlRoot: root, questionsRoot: root, panelGraph: { planPath: join(root, "plan", "tasks.yaml") }, instances: { stateBase: join(root, "instances") } } as unknown as ServeDeps) })();
+  createRepositoriesSourcePublisher({ stateDir, instances: () => repositoriesSources({ ledgerPath, fleetControlRoot: root, questionsRoot: root, assistantRepository: "craigoley/remudero", panelGraph: { planPath: join(root, "plan", "tasks.yaml") }, instances: { stateBase: join(root, "instances") } } as unknown as ServeDeps) })();
+  const clock = clockAt(T0), cache = createBoardSnapshotCache(root, "craigoley", "remudero", { clock });
+  cache.recordClosedAttempt!({ ok: true, persisted: cache.commitClosed([{ number: 1, url: "https://github.com/craigoley/remudero/pull/1", state: "MERGED",
+    headRefName: "run-W1-T1-1234567890123", headRefOid: "a".repeat(40), body: "Remudero-Task: W1-T1", title: "Repair",
+    autoMergeRequest: null, updatedAt: iso(0), mergedAt: iso(4 * 3_600_000) }]) });
+  const db = openReadModel({ stateDir, instance: "daily-fixture", schemaVersion: 1 });
+  try {
+    const lease = acquireLease(db, { clock }); assert.ok(lease.ok);
+    const collected = await collectDailyProgress({ stateDir, instances: [{ name: "core", repository: "craigoley/remudero", root, stateDir }] }, clock);
+    assert.ok(collected);
+    collected.commit(db, lease.lease);
+  } finally { db.close(); }
   return { root, stateDir };
 }
 
@@ -81,7 +96,7 @@ function materialize(root: string, stateDir: string, at: number, holder: string)
   });
   const posted: ReadModelWorkerMessage[] = [];
   // A RESTART re-imports the worker, so every view's in-memory state starts empty: build them afresh.
-  const views = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), createAnalyticsView(), readModelStatusView];
+  const views = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), createAnalyticsView(), createDailyProgressView({ stateDir }), readModelStatusView];
   assert.deepEqual(views.map((v) => v.name), READ_MODEL_VIEWS.map((v) => v.name), "the same views the worker registers");
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...views, now, createInstancesView({ instances: [{ name: "core", ledgerDir: stateDir }], repoPath: daemonInstanceRegistryPath(root), ledgerSource })], clock, holder, post: (m) => void posted.push(m) });
   try {
@@ -107,11 +122,14 @@ function differingPaths(a: unknown, b: unknown, at = ""): string[] {
   return JSON.stringify(a) === JSON.stringify(b) ? [] : [at];
 }
 
-test("every read-model view materializes the same etag after a serve restart", (t) => {
-  const { root, stateDir } = fixture(t);
+test("every read-model view materializes the same etag after a serve restart", async (t) => {
+  const { root, stateDir } = await fixture(t);
   const first = materialize(root, stateDir, T0, "serve-a");
   // CORPUS CONTROL: every registered view materialized, so none passes by being absent on both sides.
-  assert.deepEqual([...new Set([...first.values()].map((b) => b.view))].sort(), ["analytics", "instances", "nav-badge", "now", "read-model", "repositories"]);
+  assert.deepEqual([...new Set([...first.values()].map((b) => b.view))].sort(), ["analytics", "daily-progress", "instances", "nav-badge", "now", "read-model", "repositories"]);
+  const daily = [...first.values()].find(b => b.view === "daily-progress")!.body.data as { totals: { mergedChanges: { value: number } }; events: unknown[] };
+  assert.equal(daily.totals.mergedChanges.value, 1, "the persisted Daily report is populated");
+  assert.ok(daily.events.length > 0);
 
   const repos = first.get("repositories\u0000")!.body.data as { instances: Array<{ summary?: { repos: unknown[] } }> };
   assert.equal(repos.instances[0]?.summary?.repos.length, 1, `control: a real repositories summary, not an error body: ${JSON.stringify(repos)}`);
@@ -124,8 +142,8 @@ test("every read-model view materializes the same etag after a serve restart", (
   assert.deepEqual(Object.fromEntries(warm.bodies.map((b) => [`${b.view}\u0000${b.key}`, b.etag])), etags(first), "the bodies a restarted serve warm-loads carry the same versions");
 });
 
-test("a later restart gives every view the same etag when only the clock moved", (t) => {
-  const { root, stateDir } = fixture(t);
+test("a later restart gives every view the same etag when only the clock moved", async (t) => {
+  const { root, stateDir } = await fixture(t);
   const first = materialize(root, stateDir, T0, "serve-a");
   const later = materialize(root, stateDir, T0 + 90_000, "serve-b");
   // CORPUS CONTROL: the clock-sensitive views are really compared, not absent on both sides.
@@ -141,8 +159,8 @@ test("a later restart gives every view the same etag when only the clock moved",
   assert.notEqual(later.get("now\u0000instance=core")!.body.generatedAt, first.get("now\u0000instance=core")!.body.generatedAt);
 });
 
-test("a re-materialize over unchanged content posts no new body and a real change posts a new etag", (t) => {
-  const { root, stateDir } = fixture(t);
+test("a re-materialize over unchanged content posts no new body and a real change posts a new etag", async (t) => {
+  const { root, stateDir } = await fixture(t);
   const clock = { at: T0 };
   const now = createNowView({
     instances: [{ name: "core", ledgerDir: stateDir, repo: "craigoley/remudero", feedbackRoot: root }],

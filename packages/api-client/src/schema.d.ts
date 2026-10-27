@@ -5,6 +5,98 @@
 
 export interface components {
   schemas: {
+    DailyProgressCount: ({
+      precision: "unavailable";
+      value: null;
+    }) | ({
+      precision: "exact" | "at_least";
+      value: number;
+    });
+    ExpectedDailyProgressSource: {
+      id: string;
+      repository: string;
+      kind: "pull_requests" | "ledger_activity" | "deployments";
+      instanceId: string | null;
+      required: boolean;
+    };
+    DailyProgressSource: {
+      id: string;
+      repository: string;
+      kind: "pull_requests" | "ledger_activity" | "deployments";
+      instanceId: string | null;
+      required: boolean;
+      state: "complete" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized";
+      lastAttemptAt: string | null;
+      lastSuccessAt: string | null;
+      coverageStart: string | null;
+      coverageThrough: string | null;
+      nextDueAt: string | null;
+      reason: string | null;
+    };
+    DailyProgressEvent: {
+      id: string;
+      repository: string;
+      kind: "merged" | "activity" | "deployment";
+      sourceId: string;
+      occurredAt: string;
+      observedAt: string;
+      fleetAttribution: "confirmed" | "unknown" | "non_fleet";
+      taskIds: (string)[];
+      title: string;
+      url: string | null;
+    };
+    /** daily-progress-v1. Counts use the retained population, independently of this bounded evidence page. Missing evidence is unavailable, not a measured zero. Merges, observed activity, independent deployment evidence and present open work retain separate meanings and clocks. */
+    DailyProgressReport: {
+      version: "daily-progress-v1";
+      scope: ({
+        kind: "all";
+      }) | ({
+        kind: "repository";
+        repository: string;
+      });
+      reportDate: string;
+      timeZone: string;
+      windowStart: string;
+      windowEnd: string;
+      revision: number;
+      correctionReason: string | null;
+      generatedAt: string;
+      phase: "provisional" | "finalizing" | "complete" | "corrected";
+      coverage: {
+        state: "complete" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized";
+        expectedRepositories: (string)[];
+        includedRepositories: (string)[];
+        expectedSources: (ExpectedDailyProgressSource)[];
+        sources: (DailyProgressSource)[];
+      };
+      totals: {
+        mergedChanges: DailyProgressCount;
+        completedTasks: DailyProgressCount;
+      };
+      events: (DailyProgressEvent)[];
+      page: {
+        totalEvents: number;
+        nextCursor: string | null;
+      };
+      currentWork: {
+        asOf: string;
+        items: ({
+          repository: string;
+          id: string;
+          title: string;
+          url: string | null;
+        })[];
+      } | null;
+    };
+    DailyProgressView: {
+      view: "daily-progress";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: DailyProgressReport;
+    };
     ImprovementThreadRequest: {
       repository: string;
       opportunityId: string;
@@ -7658,6 +7750,19 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+        };
+    };
+  };
+  "/v1/views/daily-progress": {
+    get: {
+      responses: {
+          "200": DailyProgressView;
+          "304": undefined;
+          "400": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+          "503": undefined;
         };
     };
   };
