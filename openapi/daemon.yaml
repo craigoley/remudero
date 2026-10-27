@@ -1265,6 +1265,152 @@ components:
         error:
           type: string
           enum: [invalid_identity, invalid_input, not_found, project_not_found, repository_required, repository_mismatch, team_mismatch, project_conflict, idempotency_conflict, stale_revision, capacity, creation_denied, not_configured, busy, corrupt, unavailable, provider_unreadable, outcome_unknown, recovery_required, request_too_large]
+    ProductEvaluationVersions:
+      type: object
+      additionalProperties: false
+      required: [objectiveVersion, evaluatorVersion]
+      properties:
+        objectiveVersion: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' }
+        evaluatorVersion: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' }
+    ProductEvaluationHoldout:
+      type: object
+      additionalProperties: false
+      description: One held-out cell. A null score is a missing measurement and stays unknown; it is never read as zero or as a pass.
+      required: [kind, id, baseline, candidate]
+      properties:
+        kind: { type: string, enum: [geography, device] }
+        id: { type: string, minLength: 1, maxLength: 64 }
+        baseline: { type: [number, "null"], minimum: 0, maximum: 1 }
+        candidate: { type: [number, "null"], minimum: 0, maximum: 1 }
+    ProductEvaluationEvidence:
+      type: object
+      additionalProperties: false
+      required: [channel, reference]
+      properties:
+        channel: { type: string, enum: [replay, bot, device] }
+        reference: { type: string, format: uri, maxLength: 2048, pattern: '^https://' }
+    ProductEvaluationProposalCommand:
+      type: object
+      additionalProperties: false
+      required: [summary, pullRequests, costUsd]
+      properties:
+        summary: { type: string, minLength: 1, maxLength: 500 }
+        pullRequests: { type: integer, minimum: 0, maximum: 3 }
+        costUsd: { type: number, minimum: 0, maximum: 10000 }
+    ProductEvaluationCommand:
+      type: object
+      additionalProperties: false
+      description: >
+        At most 16384 raw request bytes. objective names the held-out objective and evaluator version
+        once; baseline and candidate must both have been measured against exactly it, or the comparison
+        is refused as objective_changed. Every holdout cell is judged separately; a candidate below its
+        baseline refuses the comparison as holdout_failed. Reusing requestId with the same command
+        replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor.
+        The proposal can request no authority: spend above the product's own resource envelope is refused.
+      required: [version, requestId, productId, expectedRevision, expectedObjectiveRevision, objective, baseline, candidate, holdouts, evidence, proposal]
+      properties:
+        version: { type: string, enum: [product-evaluation-v1] }
+        requestId: { $ref: "#/components/schemas/ProductRequestId" }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        expectedRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        expectedObjectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        objective: { $ref: "#/components/schemas/ProductEvaluationVersions" }
+        baseline: { $ref: "#/components/schemas/ProductEvaluationVersions" }
+        candidate: { $ref: "#/components/schemas/ProductEvaluationVersions" }
+        holdouts:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items: { $ref: "#/components/schemas/ProductEvaluationHoldout" }
+        evidence:
+          type: array
+          maxItems: 16
+          items: { $ref: "#/components/schemas/ProductEvaluationEvidence" }
+        proposal: { $ref: "#/components/schemas/ProductEvaluationProposalCommand" }
+    ProductEvaluationHoldoutResult:
+      type: object
+      additionalProperties: false
+      required: [kind, id, baseline, candidate, outcome]
+      properties:
+        kind: { type: string, enum: [geography, device] }
+        id: { type: string, minLength: 1, maxLength: 64 }
+        baseline: { type: [number, "null"], minimum: 0, maximum: 1 }
+        candidate: { type: [number, "null"], minimum: 0, maximum: 1 }
+        outcome: { type: string, enum: [held, regressed, unknown] }
+    ProductEvaluationCoverage:
+      type: object
+      additionalProperties: false
+      required: [geography, device]
+      properties:
+        geography: { type: string, enum: [held, regressed, unknown] }
+        device: { type: string, enum: [held, regressed, unknown] }
+    ProductEvaluationProposal:
+      type: object
+      additionalProperties: false
+      required: [summary, pullRequests, costUsd, state]
+      properties:
+        summary: { type: string, minLength: 1, maxLength: 500 }
+        pullRequests: { type: integer, minimum: 0, maximum: 3 }
+        costUsd: { type: number, minimum: 0, maximum: 10000 }
+        state: { type: string, enum: [proposed] }
+    ProductEvaluationAcceptance:
+      type: object
+      additionalProperties: false
+      description: Bots and replays prove geometry and rule invariants only; each human or physical judgement stays its own unverified field.
+      required: [humanFun, recognizableGeography, originality, physicalDevice]
+      properties:
+        humanFun: { type: string, enum: [unverified] }
+        recognizableGeography: { type: string, enum: [unverified] }
+        originality: { type: string, enum: [unverified] }
+        physicalDevice: { type: string, enum: [unverified] }
+    ProductEvaluationReceipt:
+      type: object
+      additionalProperties: false
+      required: [operationId, productId, objectiveRevision, objective, baseline, candidate, holdouts, coverage, confidence, verdict, evidence, proposal, acceptance, executionAuthority, autoDeploy, deployed, recordedAt, payloadDigest]
+      properties:
+        operationId: { type: string, minLength: 70, maxLength: 70, pattern: '^peval_[a-f0-9]{64}$' }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        objectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        objective: { $ref: "#/components/schemas/ProductEvaluationVersions" }
+        baseline: { $ref: "#/components/schemas/ProductEvaluationVersions" }
+        candidate: { $ref: "#/components/schemas/ProductEvaluationVersions" }
+        holdouts:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items: { $ref: "#/components/schemas/ProductEvaluationHoldoutResult" }
+        coverage: { $ref: "#/components/schemas/ProductEvaluationCoverage" }
+        confidence: { type: number, minimum: 0, maximum: 1, description: The fraction of held-out cells that were actually measured. }
+        verdict: { type: string, enum: [reviewable, unknown, refused] }
+        refusal: { type: string, enum: [objective_changed, holdout_failed] }
+        evidence:
+          type: array
+          maxItems: 16
+          items: { $ref: "#/components/schemas/ProductEvaluationEvidence" }
+        proposal: { $ref: "#/components/schemas/ProductEvaluationProposal" }
+        acceptance: { $ref: "#/components/schemas/ProductEvaluationAcceptance" }
+        executionAuthority: { type: string, enum: [none] }
+        autoDeploy: { type: boolean, enum: [false] }
+        deployed: { type: boolean, enum: [false] }
+        recordedAt: { type: string, format: date-time }
+        payloadDigest: { type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$' }
+    ProductEvaluationResponse:
+      type: object
+      additionalProperties: false
+      required: [version, receipt, replayed]
+      properties:
+        version: { type: string, enum: [product-evaluation-v1] }
+        receipt: { $ref: "#/components/schemas/ProductEvaluationReceipt" }
+        replayed: { type: boolean }
+    ProductEvaluationError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-evaluation-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, objective_changed, holdout_failed, budget_exceeded, request_too_large]
     ProductCaseImport:
       type: object
       additionalProperties: false
@@ -16424,6 +16570,77 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductDeploymentError" }
+  /v1/products/evaluation:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Browser owner fields, actor headers and
+          shared bearers cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema: { type: string, minLength: 1 }
+    post:
+      summary: Record a bounded improvement proposal against an unchanged held-out objective.
+      description: >
+        Requires the verified operator, the write scope and the middle tier. The comparison, its
+        objective and evaluator versions and every held-out geography and device cell are journaled
+        durably, and the proposal is appended to the product's own stage evidence for the existing
+        review; this grants no execution authority. A comparison whose baseline or candidate was
+        measured against a different objective or evaluator is refused as objective_changed, and one
+        with any regressed held-out cell as holdout_failed. Both refusals are recorded in the history
+        rather than erased, and an identical retry replays the same refusal. A missing measurement, or a
+        kind with no held-out cell, stays unknown and blocks promotion; it is never read as a pass.
+        Proposed spend above the product's resource envelope is refused as budget_exceeded and records
+        nothing. Nothing is built, spent or deployed. Responses use Cache-Control private, no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductEvaluationCommand" }
+      responses:
+        "200":
+          description: The durable proposal receipt (verdict reviewable or unknown), or the same original receipt on an identical retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductEvaluationResponse" }
+        "400":
+          description: Malformed JSON or an invalid command, including any field that would widen authority.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductEvaluationError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAccessError" }
+        "403":
+          description: The verified operator identity or write grant is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductEvaluationError"
+                  - $ref: "#/components/schemas/ProductAccessError"
+        "404":
+          description: The product does not exist for this operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductEvaluationError" }
+        "409":
+          description: objective_changed, holdout_failed, budget_exceeded, idempotency_conflict, stale_revision or the journal capacity is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductEvaluationError" }
+        "413":
+          description: The raw request exceeds 16384 bytes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductEvaluationError" }
+        "503":
+          description: busy, corrupt, unavailable, outcome_unknown or recovery_required; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductEvaluationError" }
   /v1/products/case:
     parameters:
       - name: x-rmd-operator-session
