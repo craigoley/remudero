@@ -1,0 +1,72 @@
+- id: W1-T10867
+  title: "A signed-in operator records an attested physical-phone browser observation against a recorded product deployment, iOS and Android kept apart"
+  repo: remudero
+  depends_on:
+    - W1-T10866
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs:
+    - W1-T10618
+    - W1-T10865
+    - W1-T10866
+  files:
+    - src/lib/product-case.ts
+    - src/lib/product-routes.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/plan/product-case-device-observations.test.ts
+  status: queued
+  attempts: 0
+  rationale: >-
+    Filed for issue #14864 by plan-only run PLAN-clarify-1793116565507. This is step 3 of 3 of the product-case
+    receipt producer sequence. It needs a deploy receipt (W1-T10866) to reference, and a human observer, so it has
+    different prerequisites. OBSERVED at main 13037885: no maintained path records a physical-device observation.
+    ProductEvaluationService (src/lib/product-evaluation.ts) accepts a "device" evidence URL but fixes
+    acceptance.physicalDevice "unverified" and grants no execution authority. ProductDeploymentService fixes
+    physicalDevice "unverified". FeedbackEntry (src/lib/feedback.ts) holds raw text and attachments with no actor,
+    product, deployment or outcome field. The case "mobile" channel has no producer. Settled by lookup: is this
+    already filed or already decided? -> no. No shard, DECISIONS.md, LEARNINGS.md or MASTER-PLAN.md entry gives a
+    trusted phone-observation path. Settled by lookup: can a route tell a signed-in human from a machine credential
+    without access changes? -> yes. operatorSessionIdentityProvider grants the actor operator:<sub>
+    (src/lib/service.ts), and verifiedActor exposes it to routes. Settled by lookup: React web or React Native? ->
+    React mobile web, per the operator request on issue #14864.
+  design: >-
+    Add ONE typed observation member to the existing case command union. It is not a generic evidence writer. Its
+    input is productId, the expected revisions, the id of a current-objective succeeded "deploy" receipt (from
+    W1-T10866), platform (ios or android), browser and device model (bounded text), scenario id, outcome (passed,
+    failed or blocked), and observedAt. (1) Observer. Accept it only from a verified actor that the existing operator
+    session granted (the operator: prefix). First confirm, by reading service.ts, that no other grantor can mint that
+    prefix. If one can, refuse every observation rather than editing authentication or access configuration. Bearer,
+    worker, bot and service actors are refused. (2) Reference. The deploy receipt must belong to this product, its
+    current objective and its repository. Copy its deployment id, target, commit and URL into the receipt; never take
+    them from the client. (3) Honesty. The receipt is labelled operator-attested in its reference labels and in the
+    projection. A desktop platform, an attachment, a screenshot, a browser-emulation flag or an automated actor
+    never makes a mobile pass. iOS and Android coverage are projected separately, and an absent platform stays
+    unverified rather than being inferred from the other. A later failed observation stays stored beside an earlier
+    pass. (4) Durability. Use W1-T10865's typed outcome, deterministic id, replay, restart, two-instance and
+    concurrent-revision rules. Declare the member and its failure codes in openapi/daemon.yaml and the route status
+    map, then regenerate the client. Out of scope: running gameplay, buying or provisioning a device, scanning,
+    access or credential changes, OleyArcade catalog edits, and the eventual live iPhone evidence itself. First
+    gameplay stays signed-in Console C4. TEST. One whole file at test/plan/product-case-device-observations.test.ts.
+    Confirm it with rmd test-place from the actual imports, and use aliases. Drive buildProductCaseRoutes' default
+    handler over a real product store with a real operator-session-verified request and a bearer-verified control.
+  acceptance:
+    - claim: "an operator-session observation through the served case route records an operator-attested mobile receipt bound to the actor, product, objective, repository, scenario, platform and the referenced deploy receipt's deployment and commit"
+      proof: "unit test: test/plan/product-case-device-observations.test.ts"
+    - claim: "a bearer or machine actor, a desktop platform, a missing, foreign, stale or non-succeeded deploy reference, and an attachment-only submission are refused, and iOS coverage never satisfies Android"
+      proof: "unit test: test/plan/product-case-device-observations.test.ts"
+    - claim: "replay after response loss, restart and a concurrent product revision change converge on one observation receipt and keep earlier failed observations"
+      proof: "unit test: test/plan/product-case-device-observations.test.ts"
+  falsifier: >-
+    Remove each mechanism on its own: the operator-session actor gate, the deploy-receipt ownership and objective
+    check, the desktop refusal, and the per-platform split. Each removal must make a named test in
+    test/plan/product-case-device-observations.test.ts fail against the same real-file fixture, and the test must
+    pass once that piece is restored. A fixture observation never stands in for the operator's real iPhone or
+    Android evidence.

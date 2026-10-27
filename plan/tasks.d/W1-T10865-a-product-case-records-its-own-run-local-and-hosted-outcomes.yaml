@@ -1,0 +1,114 @@
+- id: W1-T10865
+  title: "A product case records the local and hosted outcome of its own correlated native run, failures included, at the exact source head"
+  repo: remudero
+  depends_on:
+    - W1-T10618
+    - W1-T10799
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs:
+    - W1-T10615
+    - W1-T10618
+    - W1-T10799
+    - W1-T10866
+    - W1-T10867
+  files:
+    - src/lib/product-case.ts
+    - src/lib/product-build.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/plan/product-case-run-receipts.test.ts
+  status: queued
+  attempts: 0
+  rationale: >-
+    Filed for issue #14864 by plan-only run PLAN-clarify-1793116565507. This is step 1 of 3 of the product-case
+    receipt producer sequence. W1-T10866 covers deployment and W1-T10867 covers the physical phone. The run edits no
+    source, releases no hold, and alters neither the reviewed W1-T10823 claims (PR14824) nor any owner, cap or
+    failed receipt. OBSERVED at main 13037885: ProductCaseService.recordEvidence (src/lib/product-case.ts) writes
+    only outcome "succeeded". Its only callers are test/plan/wreckterra-product-case.test.ts. buildProductCaseRoutes
+    (src/lib/product-routes.ts) constructs the service and calls execute only. ProductResearchService.recordEvidence
+    (src/lib/product-research.ts) is a separate private method. It is a positive control and does not close this gap.
+    The existing durable product-job association is ProductBuildService's operationId (pbuild_<digest>) plus the kick
+    origin productBuildKickOrigin(productId, operationId). readTargetExecution (src/lib/product-build.ts) correlates
+    that origin to the console.kick_dispatched row and that run's run.start/verdict/run.error rows over the complete
+    rotated-plus-live union (readLedgerUnionRecordsSync, refuseIncomplete). The run writer (src/cli/commands/run-task-verb.ts)
+    logs pr.opened with pr_url and head_sha, pr.checks red with head_sha, pr.opened_with_failing_proof and one
+    terminal verdict. Settled by lookup: is this already filed or already decided? -> no. No shard, DECISIONS.md,
+    LEARNINGS.md or MASTER-PLAN.md entry names a production caller of case evidence. W1-T10618's rationale keeps the
+    collectors in its scope, but its source is credited (test/plan/wreckterra-product-case.test.ts,
+    test/console-api/serve/product-routes.test.ts), and this observation cannot re-admit it. W1-T10823 (PR14824)
+    expressly excludes production collectors. W1-T10799 excludes "evidence collectors (W1-T10618)". Settled by
+    lookup: does a durable product-to-run identity already exist, or must one be invented? -> it exists. It is the
+    operationId plus kick origin, which the daemon's own kick row carries (src/lib/product-build.ts
+    productBuildKickOrigin, readTargetExecution). Settled by lookup: can stored evidence express non-success? -> yes.
+    stageEvidence.outcome already admits queued/admitted/running/succeeded/failed/unknown/blocked
+    (src/lib/product-intent.ts). Only recordEvidence and the case projection narrow it to succeeded. Settled by
+    lookup: is there an existing required-check read? -> yes. Branch-protection required_status_checks is read
+    through the bounded gh transport in src/lib/head-rehome.ts and src/lib/sweep.ts. Settled by lookup: why depend
+    on W1-T10799? -> it changes which daemon root (and therefore which ledger) a daemonless Wreckterra kick lands in,
+    and it edits src/lib/product-build.ts. Settled by lookup: is the case reply contract fixed? -> yes.
+    ProductCaseResponse local/hosted items are {id, reference} with additionalProperties false (openapi/daemon.yaml),
+    so showing an outcome needs a contract change.
+  design: >-
+    Wire the FIRST live producer bridge: the existing case "build" action, replayed with the same command, is the
+    reconciler boundary. It adds no new route, no evidence-writing command, no UI toggle and no client-supplied
+    outcome. (1) Identity. ProductBuildService hands back, internally, the ExecutionRead its own replay already
+    computes (runId, the daemon state root it read, and the operationId/origin). Do not re-derive a daemon root in
+    product-case.ts. Never infer a run from matching task text or branch names. (2) Local channel. For an ended or
+    silent run, read only THAT run's rows from the same complete rotated-plus-live union reader, scoped by
+    ledgerRunBelongsToTask and the runId. Map the run's own terminal verdict through ONE explicit, exhaustive table
+    to succeeded/failed/blocked/unknown. An unlisted verdict, a missing verdict, pr.opened_with_failing_proof, or an
+    unreadable/incomplete/absent ledger stays unknown or failed, never succeeded. running stays running. The receipt
+    carries actor, productId, objectiveRevision, repository id, taskId, operationId, runId and the head_sha the run
+    itself logged. (3) Hosted channel. This channel is separate from local. Use the run's own pr_url and head_sha
+    and the existing bounded gh transport. Read the PR (base repository id must equal the product repository id; the
+    live head must equal the logged head, otherwise the receipt is stale/unknown), the base branch's required
+    status checks (the existing branch-protection read), the check runs and statuses at that exact head, and the
+    latest review per reviewer at that head. succeeded requires EVERY required context to conclude success at that
+    head and a current approval with no outstanding changes-requested. One arbitrary green context is not enough.
+    Pending is running. A failed, cancelled or timed-out required context is failed, with the context and
+    conclusion in the reference label. An unreadable or truncated page (100 or more items), or an empty or
+    unreadable required set, is unknown. (4) Contract. Extend recordEvidence minimally to take a typed outcome from
+    the stored enum. Keep it trusted and unreachable from the HTTP command union. Add an outcome to ONLY the local
+    and hosted projection items, and to their openapi/daemon.yaml schema, then regenerate
+    packages/api-client/src/schema.d.ts with the maintained generator. Earlier failed attempts and
+    other-head/other-objective receipts stay stored, and never project as current success. (5) Idempotency and
+    concurrency. Derive the evidence id and the store requestId deterministically from (productId,
+    objectiveRevision, channel, operationId, runId, head, outcome). Then replay after response loss, duplicated
+    completion, two service instances and a process restart all converge on one receipt. Write with the read
+    revision. On stale_revision, re-read and retry once. Record nothing as current success when the objective
+    changed in between. A full product evidence store (128) is an explicit capacity refusal and never evicts a
+    receipt. Bound the ledger read to the run's requestedAt window and the gh reads to the existing limits. Plan
+    review, plan merge, job admission and queued/admitted/running are never local or hosted test completion. Out of
+    scope: deployment (W1-T10866), the physical phone (W1-T10867), native review, author qualification, source
+    merge, runtime adoption, OleyArcade catalog edits, live Wreckterra receipts, and first gameplay. First gameplay
+    stays signed-in Console C4. Holds, caps, budgets, claims and Console148/149/150 and W1-T10823 ownership are
+    unchanged. TEST. One whole file at test/plan/product-case-run-receipts.test.ts, placed beside
+    test/plan/wreckterra-product-case.test.ts, whose import set it shares. Confirm the placement with rmd test-place
+    from the actual imports before writing it, and use the #src/#test aliases. Drive buildProductCaseRoutes'
+    handler with the default ProductCaseService and ProductBuildService over a real ProductIntentStore directory,
+    real rotated-plus-live ledger files, and a controlled gh subprocess shim at the transport boundary. A fake
+    injected recordEvidence is not a proof.
+  acceptance:
+    - claim: "replaying the product build through the served case route records a local and a hosted receipt bound to the actor, product, objective, repository, task, operation, native run and exact head, reading only that run's ledger rows and that head's required checks and reviews"
+      proof: "unit test: test/plan/product-case-run-receipts.test.ts"
+    - claim: "failed, cancelled, pending, stale-head, foreign-repository, foreign-run, rotated-but-incomplete and unreadable inputs record an explicit failed, running or unknown outcome, never succeeded, and an earlier failed receipt stays stored beside a later success"
+      proof: "unit test: test/plan/product-case-run-receipts.test.ts"
+    - claim: "replay after response loss, a second service instance, a process restart and a concurrent product revision change converge on one receipt per run and head without overwriting the concurrent edit"
+      proof: "unit test: test/plan/product-case-run-receipts.test.ts"
+    - claim: "the served case reply and its regenerated contract show the outcome of each local and hosted item, while the HTTP command union still accepts no evidence writer"
+      proof: "unit test: test/plan/product-case-run-receipts.test.ts"
+  falsifier: >-
+    Remove each new mechanism on its own: the runId-scoped row filter, the exhaustive verdict table's unknown
+    default, the exact-head equality, the every-required-context rule, the deterministic evidence id, and the
+    stale-revision re-read. Each removal must make a named test in test/plan/product-case-run-receipts.test.ts fail
+    against the same real-file fixture, and the test must pass once that piece is restored. A whole pre-existing
+    passing file, a zero-test wrapper or a fake-only recordEvidence call never counts. Fixture receipts never stand
+    in for live Wreckterra evidence.
