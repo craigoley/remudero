@@ -349,3 +349,11 @@ test("an absent authority store grants no extra scope", async (t) => {
   const state = ownedFixtureDir(t, "absent-scope-authority").dir;
   assert.deepEqual(await readFixScopeHistory(join(state, "absent", "ledger.ndjson"), PR), []);
 });
+
+test("an unread live ledger cannot certify an archived operator scope grant", async (t) => {
+  const state = ownedFixtureDir(t, "unread-live-scope-authority").dir;
+  writeFileSync(join(state, "ledger.2026-10-26T00-00-00-000Z.ndjson"),
+    [held(), answered()].map(row => JSON.stringify(row)).join("\n") + "\n");
+  mkdirSync(join(state, "ledger.ndjson"));
+  await assert.rejects(readFixScopeHistory(join(state, "ledger.ndjson"), PR), /scope authority history is incomplete/);
+});
