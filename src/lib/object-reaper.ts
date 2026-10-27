@@ -570,8 +570,21 @@ export function fleetPruneInputs(inflightDir: string, scratchDir: string = tmpdi
       const at = await startOf(join(inflightDir, name));
       if (at !== undefined) inputs.push({ source: `inflight:${name}`, at });
     }
+    // A borrower clone sits at the scratch dir itself (ci-parity's `rmd-stale-red-merge-*`) or one level below it
+    // (review's `rmd-review-*/checkout`, synthetic-tasks' `rmd-synthetic-task-*/candidate`), as a work tree or a bare dir.
+    const cloneRoots: Array<{ label: string; root: string }> = [];
     for (const name of (await names(scratchDir)).filter((n) => n.startsWith(RMD_TMP_PREFIX))) {
-      for (const alternates of [join(scratchDir, name, ".git", "objects", "info", "alternates"), join(scratchDir, name, "objects", "info", "alternates")]) {
+      cloneRoots.push({ label: name, root: join(scratchDir, name) });
+      let children: string[] = [];
+      try {
+        children = await readdir(join(scratchDir, name));
+      } catch (err) {
+        if (!["ENOENT", "ENOTDIR"].includes((err as NodeJS.ErrnoException).code ?? "")) throw err;
+      }
+      for (const child of children) cloneRoots.push({ label: `${name}/${child}`, root: join(scratchDir, name, child) });
+    }
+    for (const { label, root } of cloneRoots) {
+      for (const alternates of [join(root, ".git", "objects", "info", "alternates"), join(root, "objects", "info", "alternates")]) {
         let text: string;
         try {
           text = await readFile(alternates, "utf8");
@@ -580,7 +593,7 @@ export function fleetPruneInputs(inflightDir: string, scratchDir: string = tmpdi
           throw err;
         }
         if (!text.split("\n").includes(join(gitDir, "objects"))) continue;
-        inputs.push({ source: `borrower:${name}`, at: (await stat(alternates)).mtimeMs });
+        inputs.push({ source: `borrower:${label}`, at: (await stat(alternates)).mtimeMs });
       }
     }
     return inputs;

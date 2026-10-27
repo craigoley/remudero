@@ -152,9 +152,16 @@ test("W1-T10750: the gc prune window is derived from the fleet live state", asyn
   const scratch = join(store.dir, "scratch");
   plant(join(scratch, "rmd-borrower", ".git", "objects", "info", "alternates"), `${join(store.dir, ".git", "objects")}\n`, new Date(t(7)));
   plant(join(scratch, "rmd-other", ".git", "objects", "info", "alternates"), "/some/other/store/objects\n", new Date(t(1)));
+  // The two nested layouts the real borrowers use: review.ts:260 (`rmd-review-X/checkout`) and synthetic-tasks.ts:124 (`rmd-synthetic-task-X/candidate`).
+  const objectsOfStore = `${join(store.dir, ".git", "objects")}\n`;
+  plant(join(scratch, "rmd-review-abc", "checkout", ".git", "objects", "info", "alternates"), objectsOfStore, new Date(t(5)));
+  plant(join(scratch, "rmd-synthetic-task-xyz", "candidate", ".git", "objects", "info", "alternates"), objectsOfStore, new Date(t(3)));
+  plant(join(scratch, "rmd-review-other", "checkout", ".git", "objects", "info", "alternates"), "/some/other/store/objects\n", new Date(t(0)));
+  plant(join(scratch, "rmd-plain-file.json"), "{}");
   const read = await maintenance.fleetPruneInputs(inflight, scratch)(store.dir);
-  assert.deepEqual(read.map((i) => i.source).sort(), ["borrower:rmd-borrower", "inflight:W1-T1.lock", "worktree:lane"]);
-  assert.equal(Math.min(...read.map((i) => i.at)), t(7));
+  assert.deepEqual(read.map((i) => i.source).sort(), ["borrower:rmd-borrower", "borrower:rmd-review-abc/checkout",
+    "borrower:rmd-synthetic-task-xyz/candidate", "inflight:W1-T1.lock", "worktree:lane"]);
+  assert.equal(Math.min(...read.map((i) => i.at)), t(3), "a nested borrower's start bounds the window");
   await assert.rejects(maintenance.fleetPruneInputs(inflight, scratch)(join(store.dir, "missing")), /unreadable/);
 
   // Real git accepts the argv, and the expiry is the one that decides what a gc may delete.
