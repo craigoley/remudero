@@ -33,6 +33,7 @@
     - test/console-api/serve/product-routes.test.ts
     - test/route-wiring.test.ts
     - src/lib/panel-graph.ts
+    - test/plan/wreckterra-product-case.test.ts
   status: queued
   attempts: 0
   rationale: >
@@ -96,6 +97,24 @@
     amendment merges, then rerun test-place on the final imports and preserve red/green diagnostics.
     No source implementation, model retry, dispatch-claim mutation, hold release or live
     product/gameplay acceptance is granted by this plan PR.
+
+
+
+    LEGACY FIXTURE PARITY: qualification of retained C3 source
+    0b9a40c9f26dba1b52374075435ed1215a67f597 ran the two physically verified existing caller suites
+    (product-build and wreckterra-product-case): 18 tests, 13 pass, 5 fail, no cancelled or skipped
+    tests. All five failures are the older case suite's plan_not_approved expectations:
+    configurePlan supplies a GitHub APPROVED review but no trusted native remudero-review status.
+    The shared C3 rule deliberately requires that native protocol; do not relax it. The 61 focused
+    C3 cases and twelve guard-removal controls separately qualified at that source. Add only the
+    existing test/plan/wreckterra-product-case.test.ts to this task's declared scope so its fixture
+    can represent the current trusted native status/COMMENTED shape and its negative cases can
+    retain their intended discrimination. Keep original Core18 claims and history untouched; no
+    retrospective acceptance credit. Preserve every C3 acceptance claim and literal proof, all
+    dependencies, USD30 budget, risk, holds, production paths, owner and original task branch. No
+    new implementation worker, retry allowance, runtime/configuration change or gameplay admission
+    is granted. Apply the fixture correction only after normal review, hosted checks and protected
+    merge of this plan amendment. No test, guard or instrument may be waived or weakened.
   design: >-
     One versioned operation that is natively owned and recoverable. It is not a new launcher. (1)
     Request. Add one versioned plan-proposal action to the existing served product case union in

@@ -1,7 +1,7 @@
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { boundChildByLoopTime, execFileLoopBounded } from "./loop-bounded-child.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
+import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { refreshInstallationToken, type RefreshOptions } from "./github-app.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -10637,8 +10637,15 @@ export interface PostReviewStatusRetryOpts {
   backoffMs?: (failedAttempt: number) => number;
   /** Injectable sleep (tests skip real waiting). Default: a real `setTimeout`. */
   sleep?: (ms: number) => Promise<void>;
-  /** Injectable `gh` invocation — the "gh gateway" a unit test simulates without shelling out. Defaults to the real `ghExec(...)` POST below. */
-  exec?: (args: string[], env: NodeJS.ProcessEnv) => void;
+  /** Injectable `gh` invocation — the "gh gateway" a unit test simulates without shelling out. Defaults to the
+   *  awaited {@link execGhStatusPostAsync} POST below (W1-T9549). */
+  exec?: (args: string[], env: NodeJS.ProcessEnv) => void | Promise<void>;
+}
+
+/** W1-T9549 — the status POST {@link postReviewStatus} and the repair lease make by default, AWAITED over
+ *  {@link ghTextAsync} with the poster's own env (the reviewer token), so a daemon review's post leaves the loop free. */
+export async function execGhStatusPostAsync(args: string[], env: NodeJS.ProcessEnv): Promise<void> {
+  await ghTextAsync(args, { env });
 }
 
 /** Exported, not just internal, so a unit test can PATH-stub `gh` and drive this exact real invocation directly — the
@@ -10694,11 +10701,11 @@ export async function postReviewStatus(
   const maxAttempts = retryOpts.maxAttempts ?? POST_REVIEW_STATUS_MAX_ATTEMPTS;
   const backoffMs = retryOpts.backoffMs ?? ((failedAttempt) => POST_REVIEW_STATUS_BASE_DELAY_MS * 2 ** (failedAttempt - 1));
   const sleep = retryOpts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const exec = retryOpts.exec ?? execGhStatusPost;
+  const exec = retryOpts.exec ?? execGhStatusPostAsync;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      exec(args, env);
+      await exec(args, env);
       return;
     } catch (e) {
       const transient = classifyFailure({ text: ghErrorText(e) }) === "transient";
@@ -10899,10 +10906,25 @@ export function fetchPrLifecycle(
         "back to `gh pr view --json state`, whose GraphQL budget exhaustion is the defect this read was moved off",
     );
   }
+  return prLifecycleFromRow(fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow, engineRevision);
+}
+
+/** W1-T9549 — {@link fetchPrLifecycle} with its REST read AWAITED over {@link ghJsonAsync}: the same request and
+ *  the same fold, so a daemon review's lifecycle read before its status post leaves the loop free. */
+export async function fetchPrLifecycleAsync(
+  prUrl: string,
+  fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+  engineRevision: string = REVIEW_ENGINE_REVISION,
+): Promise<PrLifecycleState> {
+  const target = prLifecycleUrlTarget(prUrl);
+  if (!target) throw new Error(`fetchPrLifecycleAsync: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)}`);
+  return prLifecycleFromRow(await fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow, engineRevision);
+}
+
+function prLifecycleFromRow(row: RestPullRow, engineRevision: string): PrLifecycleState {
   // W1-T2793: retain the head and body identity from this SAME response before folding lifecycle. This adds no GitHub
   // call and stores or logs neither body nor transcript. The optional spread keeps malformed or legacy fixtures on
   // their historical lifecycle-only contract.
-  const row = fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow;
   const state = prStateFromRest(row);
   const headSha = row.head?.sha;
   const baseRef = (row.base as { ref?: unknown } | undefined)?.ref;
@@ -10925,7 +10947,7 @@ export function fetchPrLifecycle(
 async function readReviewLifecycle(fetch: PostReviewStatusGuardedOpts["fetchLifecycle"]): Promise<PrLifecycleState> {
   for (let attempt = 1; ; attempt++) {
     try {
-      return fetch();
+      return await fetch();
     } catch (error) {
       const waitMs = POST_REVIEW_STATUS_BASE_DELAY_MS * 2 ** (attempt - 1);
       // Pacing and longer server-requested waits retain their existing outer recovery owner.
@@ -11287,7 +11309,7 @@ export interface PostReviewStatusGuardedOpts {
   reviewerCodeFreshness?: ReviewerCodeFreshness;
   /** Fresh lifecycle read for THIS attempt — real callers pass `() => fetchPrLifecycle(prUrl)`,
    * tests inject a fake. Called INSIDE the lock, never before (see the module doc above). */
-  fetchLifecycle: () => PrLifecycleState;
+  fetchLifecycle: () => PrLifecycleState | Promise<PrLifecycleState>;
   /** Latest GitHub commit status for this context, read inside the lock on a decision replay.
    * A later pending claim can replace the status even though the ledger's terminal decision remains final. */
   fetchCurrentStatus?: () => PostableReviewState | ReviewStatusEntry | undefined;
@@ -11598,7 +11620,7 @@ export interface PostReviewPendingOpts {
   prUrl?: string;
   reviewInputDigest?: string;
   reviewEngineRevision?: string;
-  fetchLifecycle: () => PrLifecycleState;
+  fetchLifecycle: () => PrLifecycleState | Promise<PrLifecycleState>;
   /** Combined commit-status reader; the default observes claims from every host. */
   fetchStatus?: GhApiFetcher;
   /** Injected raw poster (tests) — forwarded to {@link postReviewStatusGuarded} unchanged. */
@@ -11847,7 +11869,7 @@ export interface PostRepairLeaseOpts {
   runId: string;
   ledgerPath: string;
   /** Injected raw poster (tests). Defaults to a real `gh api` status POST under {@link
-   *  REPAIR_LEASE_CONTEXT}, reusing {@link execGhStatusPost} unchanged. */
+   *  REPAIR_LEASE_CONTEXT}, through the awaited {@link execGhStatusPostAsync} (W1-T9549). */
   post?: (o: { owner: string; repo: string; sha: string; description?: string }) => void | Promise<void>;
 }
 
@@ -11905,5 +11927,5 @@ async function defaultPostRepairLeaseStatus(o: { owner: string; repo: string; sh
     "state=success",
   ];
   if (o.description) args.push("-f", `description=${o.description.slice(0, 140)}`);
-  execGhStatusPost(args, process.env);
+  await execGhStatusPostAsync(args, process.env);
 }

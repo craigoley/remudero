@@ -1,0 +1,39 @@
+- id: W1-T10880
+  title: "An Inbox read mark (POST /v1/inbox/threads/<id>/read) classifies through the same maintained inboxRead slow-lane path as GET detail instead of synchronously reclassifying proposals on the serving loop"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "buildInboxThreadReadRoute uses jsonAction -> operatorThreadItems(deps), whose default invokes
+    classifyAllProposalsMemo and ignores inboxFromSlowLane, while ordinary GET thread routes already await
+    inboxRead, which consumes the maintained slow-lane snapshot when configured. A 2026-10-26 runtime.loop_stall_profile
+    (187510ms lag, 66s sync spawn, inbox.ts caller and gitGrepAnchorTrue) overlapped 5s upstream timeouts. The source
+    path is a plausible trigger, not a proved identity join to the profiled request. Subject checks (all open Core heads,
+    PR14363 adjacent-only) found no equivalent task."
+  design: |
+    Route the read mark through the maintained inboxRead path when a slow lane is configured; keep the legacy
+    classification path as default otherwise. Missing or invalid maintained evidence refuses explicitly without writing;
+    it never reclassifies synchronously on the serving loop and never manufactures readiness.
+    PRESERVE: plan-source refusal, exact thread membership, scope, seq bounds and monotonic marks, corrupt-store
+    failures, authorization tiers, durable audit/history, W1-T10431 ownership policy, and PR14363's adjacent guards.
+    TESTS drive the real HTTP route against a private persisted Inbox fixture: slow-lane read mark succeeds with no
+    classifier/Git dependency invoked; absent evidence refuses without writing; retired/foreign/missing threads and
+    seq-ahead still refuse; same/current seq idempotent; legacy behaviour unchanged. Prove source-removal produces the
+    classifier-call failure, then restore. No timing-only sleeps.
+    NOT IN SCOPE: restart, deployment, model/provider/budget/permission/threshold/guard changes, CI infra, Azure memory,
+    board-snapshot-cache stalls, broad Inbox decisions."
+  acceptance:
+    - claim: "a read mark with a configured slow lane succeeds without invoking any classifier or Git dependency"
+      proof: "unit test: read marks use the configured maintained Inbox snapshot without classification"
+    - claim: "absent maintained evidence refuses the read mark without writing, and membership, seq and legacy behaviour are preserved"
+      proof: "unit test: read marks refuse unavailable maintained evidence and preserve legacy safeguards"
+  risk: medium
+  origin: feedback#fb-1793088336384-533ec6
+  plan_refs: ["§7B"]
+  files: [src/lib/panel-graph.ts, test/an-inbox-item-is-a-conversation.test.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from console-inbox-read-mark-snapshot-20261026 / fb-1793052066234-d58154 / this entry. Owner coordination
+    (Codex Console follow-ups chat) is factual only; W1-T10782 and other foreign reservations are untouched."

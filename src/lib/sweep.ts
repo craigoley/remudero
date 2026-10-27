@@ -58,6 +58,7 @@ import {
   disarmAutoMerge,
   logArmAttribution,
   mergeDirectViaRestAsync,
+  assertOperatorMergeUnheld,
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
   readMergeQueueMembership,
@@ -2969,7 +2970,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
         mergeDirect: async (prUrl) => {
           assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
-          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha, selectedModeQualification);
+          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha, selectedModeQualification,
+            () => assertOperatorMergeUnheld(prUrl, { ledgerLines: () => readLedgerLines(ledgerPath), say: (message) => console.log(message) })); // ledger-read-intent: live
         },
       } : undefined;
       let attemptError: string | undefined;
@@ -16688,8 +16690,6 @@ export interface FixAdmissionCharge {
   admissionRung: FixAdmissionRung;
 }
 
-/** W1-T10596: how long a repair may wait before a live fix tree stops blocking its typical-peak admission. */
-export const FIX_STARVATION_MS = 2 * 60 * 60 * 1000;
 export type FixAdmissionRung = "fits" | "typical" | "nothing-live" | "none";
 
 /**
@@ -16796,7 +16796,6 @@ export function createSweepFixAdmissionController(input: {
   let pressure: FixHostPressure | undefined;
   let charge: FixAdmissionCharge | undefined;
   let available = 0;
-  let starved = false; // W1-T10596: the claim being judged has waited past FIX_STARVATION_MS.
   const estimate = (workerClass: FixAdmissionClass): LearnedEstimate =>
     input.readEstimate?.(workerClass) ?? { estimateMib: DEFAULT_ESTIMATE_MIB[workerClass], samples: 0 };
   const readResidents = (): FixAdmissionResidents => {
@@ -16853,8 +16852,7 @@ export function createSweepFixAdmissionController(input: {
       return;
     }
     const live = reservations === 0 ? liveTrees() : undefined;
-    // W1-T10596: a repair starved past FIX_STARVATION_MS no longer yields to a live fix tree; the typical peak must still fit.
-    if (live && (live.fix.length === 0 || starved) && left >= charge.fixTypicalMib) charge.admissionRung = "typical";
+    if (live && live.fix.length === 0 && left >= charge.fixTypicalMib) charge.admissionRung = "typical";
     else if (live && live.fix.length + live.review.length === 0 && activeWorkers === 0 &&
       charge.headroomMib > 0 && charge.fixTypicalMib > charge.headroomMib) charge.admissionRung = "nothing-live";
     if (charge.admissionRung !== "none") available = 1;
@@ -16937,7 +16935,6 @@ export function createSweepFixAdmissionController(input: {
     claim: (pr) => {
       const since = input.reviewQueue && input.waitSinceMs ? input.waitSinceMs(pr) : undefined;
       ahead = since === undefined ? undefined : kept().filter((review) => review.sinceMs <= since);
-      starved = since !== undefined && systemClock.now() - since >= FIX_STARVATION_MS;
       const order = (): Record<string, unknown> | undefined => since === undefined ? undefined : {
         pr_number: pr.prNumber, blocker_since: clockFromMillisFn(() => since).iso(),
         ordered_ahead: ahead!.map((review) => review.prNumber), overtaken_reviews: [...overtaken],
@@ -17539,6 +17536,16 @@ export async function runSweep(
         /(?:MERGED|CLOSED)/.test(standDownReason ?? "")) return;
     const belongs = (row: Record<string, unknown>) => row.pr_number === pr.prNumber || row.pr_url === pr.prUrl ||
       (row.pr_number === undefined && row.pr_url === undefined && pr.taskId !== undefined && row.task_id === pr.taskId);
+    // A pass that works from an older open-PR view must not page anyone about a PR that has since merged or
+    // closed: #14898 merged at 18:28 and its stall issue opened at 19:06. A failed read reports as before. Read
+    // before the stage history below, so two overlapping passes still dedupe on the ledger without an await between.
+    let live: LiveStateResult | undefined;
+    try { live = await deps.readLiveState?.(pr); } catch { live = { ok: false }; } // a thrown read is an unread one: escalate as before
+    const terminal = live?.ok === true ? terminalStateReason(live.state) : undefined;
+    if (terminal !== undefined) {
+      record("pr.stuck.not_open", { blocker: fields.blocker, blocker_since: fields.blocker_since, reason: terminal });
+      return;
+    }
     const since = Date.parse(fields.blocker_since);
     let currentRows = ledgerLines;
     let stageHistoryError: string | undefined;

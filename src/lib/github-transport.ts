@@ -189,12 +189,12 @@ function ghBrokerExecError(args: readonly string[], result: GhBrokerResult): Err
 }
 
 /** The ASYNC read through a live broker: its stdout, or `undefined` when no broker took the read. */
-async function ghBrokeredAsync(args: readonly string[], readOpts: GhJsonReadOptions = {}): Promise<string | undefined> {
-  const socket = ghBrokerSocketFor(args, undefined);
+async function ghBrokeredAsync(args: readonly string[], readOpts: GhJsonReadOptions = {}, env?: NodeJS.ProcessEnv): Promise<string | undefined> {
+  const socket = ghBrokerSocketFor(args, env);
   if (socket === undefined) return undefined;
   let result: GhBrokerResult;
   try {
-    result = await brokerGhRead(socket, args, { class: ghBrokerClassOf(undefined), ...(readOpts.fresh === true ? { fresh: true } : {}) });
+    result = await brokerGhRead(socket, args, { class: ghBrokerClassOf(env), ...(readOpts.fresh === true ? { fresh: true } : {}) });
   } catch {
     // The broker went away between the liveness read and the request: take the direct path, paced
     // by the floor as before, rather than fail a read the direct path could still make.
@@ -259,7 +259,7 @@ export function ghJson(
 const execFileAsync = (
   file: string,
   args: readonly string[],
-  opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number },
+  opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number; env?: NodeJS.ProcessEnv },
 ): Promise<{ stdout: string; stderr: string }> => execFileLoopBounded(file, args, opts);
 
 export type GhAsyncExecutor = typeof execFileAsync;
@@ -418,28 +418,31 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
 
 /** Bounded, paced async `gh` transport for endpoints whose response is plain text (for example
  * Actions job logs). Unlike {@link ghJsonAsync}, this deliberately preserves the response as text
- * and never attempts JSON parsing. */
+ * and never attempts JSON parsing. `env` (W1-T9549) is the child's environment, as {@link ghExec}'s
+ * `opts.env` is; a call that names one never shares another caller's in-flight read. */
 export async function ghTextAsync(
   args: string[],
-  opts: { maxBuffer?: number; timeout?: number } = {},
+  opts: { maxBuffer?: number; timeout?: number; env?: NodeJS.ProcessEnv } = {},
   execAsync: GhAsyncExecutor = execFileAsync,
 ): Promise<string> {
   const maxBuffer = opts.maxBuffer ?? DEFAULT_GH_MAX_BUFFER;
   const timeout = opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS;
+  const env = opts.env;
   const read = async (): Promise<string> => {
-    const { stdout } = await withGhKillEscalation(execAsync("gh", args, { encoding: "utf8", maxBuffer, timeout }), args, timeout);
+    const execOpts = { encoding: "utf8" as const, maxBuffer, timeout, ...(env === undefined ? {} : { env }) };
+    const { stdout } = await withGhKillEscalation(execAsync("gh", args, execOpts), args, timeout);
     return stdout;
   };
 
   // An injected executor is an offline seam; only the real `gh` process spends cadence and joins
   // same-request reads. Prefix the key so a concurrent JSON reader can never receive raw text.
   if (execAsync !== execFileAsync) return read();
-  const key = ghArgsAreCoalescibleRead(args) ? `text:${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
+  const key = env === undefined && ghArgsAreCoalescibleRead(args) ? `text:${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
-    refuseSentinelGhToken("gh", args, undefined);
-    const brokered = await ghBrokeredAsync(args);
+    refuseSentinelGhToken("gh", args, env);
+    const brokered = await ghBrokeredAsync(args, {}, env);
     if (brokered !== undefined) return brokered;
     await applyGhReadCadenceAsync(args);
     return read();

@@ -20,7 +20,7 @@ import type { Proposal } from "#src/lib/inbox.js";
 import { navBadgeView } from "#src/lib/nav-badge-view.js";
 import { inboxThreadListSources, peekSlowLaneClassification } from "#src/lib/panel-graph.js";
 import { listThreadViews } from "#src/lib/inbox-responder.js";
-import { backfillRecommendations, readRecommendationStore, recommendationFor, recommendationStorePath } from "#src/lib/inbox-recommendation.js";
+import { backfillRecommendations, readRecommendationSource, readRecommendationStore, recommendationFor, recommendationSourcePath, recommendationStorePath, type RecommendationEvidence } from "#src/lib/inbox-recommendation.js";
 import { buildInboxThreadRoute } from "#src/lib/panel-graph.js";
 import { createInboxThreadView, INBOX_THREAD_VIEW_NAME, inboxThreadViewKey } from "#src/lib/inbox-thread-view.js";
 import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
@@ -49,6 +49,13 @@ function world(t: Ctx, count = 80) {
   const at = Date.now() - 1000;
   const refresh = () => refreshInboxClassification(deps, {}, fixedClock(at));
   return { root, deps, at, registry, proposals, write, refresh };
+}
+/** Evidence over one pinned pass of `repository`'s main, with the shard tasks and monolith tasks it holds. */
+function pinnedEvidence(repository: string, tasks: Record<string, string> = {}, monolith: string[] = []): RecommendationEvidence {
+  const base: RecommendationEvidence = { shards: async () => new Map(Object.entries(tasks).map(([id, blob]) => [id, { path: `plan/tasks.d/${id}-x.yaml`, blob }])),
+    shardText: async () => undefined, taskHistory: async () => [], resolve: async () => undefined };
+  const commit = "a".repeat(40);
+  return { ...base, pin: async () => ({ ...base, repository, commit, qualification: async () => ({ repository, commit, tasks, monolith }), assertUnchanged: async () => undefined }) };
 }
 async function served(t: Ctx, w: ReturnType<typeof world>, initial: InboxRefresh,
   options: { deps?: Partial<PanelGraphDeps>; mode?: "serve" | "off"; boundInbox?: boolean; emptyNative?: boolean; withWrites?: boolean } = {}) {
@@ -102,7 +109,7 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
   const original=readFileSync(store,"utf8"),first=await w.refresh(),s=await served(t,w,first,{withWrites:true});
   const recommendationCalls: string[] = [];
   const recommend = () => backfillRecommendations({ stateDir: join(w.root, "state"), readProposals: () => [w.proposals[0]!],
-    evidence: { shards: async () => new Map(), shardText: async () => undefined, taskHistory: async () => [], resolve: async () => undefined },
+    evidence: pinnedEvidence("owner/core"),
     summarize: async ({ context }) => { recommendationCalls.push(context); return { action: "reply", text: "Which policy should apply?",
       why: "The age finding now carries an unanswered policy question.", evidence: [], obsolete: false }; } }, 1);
   assert.equal((await recommend()).written, 0);
@@ -158,7 +165,7 @@ test("W1-T10431: age-information classification agrees across badges lanes and t
   assert.equal(recommendationCalls.length, 1);
   const recommendationStore = readRecommendationStore(recommendationStorePath(join(w.root, "state")));
   const capturedQuestion = readPersistedInbox(join(w.root, "state"))!.classifications.find(c => c.proposalId === ageId)!;
-  assert.equal(recommendationFor(w.proposals[0]!, "notReady", recommendationStore, capturedQuestion)?.action, "reply");
+  assert.equal(recommendationFor(w.proposals[0]!, "notReady", recommendationStore, capturedQuestion, readRecommendationSource(join(w.root, "state")))?.action, "reply");
   s.put(await w.refresh());
   const current=await s.get("/v1/views/inbox?section=needsYou"),afterBadge=await badge();assert.ok(!("error" in afterBadge));
   assert.equal(current.status,200);
@@ -868,4 +875,63 @@ test("a real scoped HTTP reply clears durable keep and invalidates both thread l
   const rows = readFileSync(w.deps.ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
   assert.equal(rows.filter(row => row.step === "inbox.thread_replied" && row.thread_id === threadId).length, 1);
   assert.equal(s.reads() + restarted.reads(), 0, "HTTP reads never reclassify or load the mutable plan");
+});
+
+test("every inbox page shares independently qualified recommendation evidence", async (t) => {
+  const w = world(t, 40), stateDir = join(w.root, "state");
+  await w.refresh(); // positive control for the capture: the classification snapshot names every lane
+  const calls: string[] = [];
+  const written = await backfillRecommendations({ stateDir, readProposals: () => w.proposals, evidence: pinnedEvidence("owner/core"),
+    summarize: async ({ context }) => { calls.push(context); return { action: "keep", text: "Leave it.", why: "Nothing changed.", evidence: [], obsolete: false }; } }, w.proposals.length);
+  assert.equal(written.written, w.proposals.length, "positive control: every item has advice stamped with its repository");
+  const storeBytes = readFileSync(recommendationStorePath(stateDir), "utf8");
+  const s = await served(t, w, await w.refresh());
+  const recommended = async () => {
+    const seen = new Map<string, string | undefined>();
+    const pages = ["/v1/views/inbox?section=notReady"];
+    for (let path = pages[0]!; ;) {
+      const page = await s.get(path);
+      assert.equal(page.status, 200);
+      for (const item of page.body.data.items) seen.set(item.proposalId, item.recommendation?.action);
+      if (page.body.data.page.next === undefined) break;
+      path = `/v1/views/inbox?section=notReady&cursor=${encodeURIComponent(page.body.data.page.next)}`;
+      pages.push(path);
+    }
+    const legacy = await s.get("/v1/inbox?section=notReady&limit=100");
+    const legacyActions = new Set(((legacy.body.notReady ?? []) as any[]).map((item) => item.recommendation?.action));
+    assert.ok(legacy.body.notReady.length > 0, "positive control: the legacy page lists items");
+    return { seen, pages: pages.length, legacyActions };
+  };
+  const current = await recommended();
+  assert.ok(current.pages > 1, "the continuation page path is exercised");
+  assert.deepEqual([...new Set(current.seen.values())], ["keep"], "materialized first and continuation pages all carry the qualified advice");
+  assert.deepEqual([...current.legacyActions], ["keep"], "the legacy page carries the same advice");
+
+  // A genuine failed refresh revokes qualification, preserving the historical advice on every reader path.
+  await assert.rejects(backfillRecommendations({ stateDir, readProposals: () => w.proposals,
+    evidence: { ...pinnedEvidence("owner/core"), pin: async () => { throw new Error("selected source is unreadable"); } } }, 0), /selected source is unreadable/);
+  s.put(await w.refresh());
+  const failed = await recommended();
+  assert.deepEqual([...new Set(failed.seen.values())], [undefined], "a failed source pin cannot leave old advice actionable");
+  assert.deepEqual([...failed.legacyActions], [undefined]);
+  assert.equal(readRecommendationSource(stateDir), undefined);
+  assert.equal(readFileSync(recommendationStorePath(stateDir), "utf8"), storeBytes);
+  await backfillRecommendations({ stateDir, readProposals: () => w.proposals, evidence: pinnedEvidence("owner/core") }, 0);
+  s.put(await w.refresh());
+  assert.deepEqual([...new Set((await recommended()).seen.values())], ["keep"], "independent source recovery restores matching advice without another model call");
+
+  // The same stored advice, read against a source captured for another repository, is omitted on every path.
+  writeFileSync(recommendationSourcePath(stateDir), JSON.stringify({ repository: "owner/console", commit: "b".repeat(40), tasks: {}, monolith: [] }));
+  s.put(await w.refresh());
+  const foreign = await recommended();
+  assert.deepEqual([...new Set(foreign.seen.values())], [undefined], "no page presents foreign-source advice as current");
+  assert.deepEqual([...foreign.legacyActions], [undefined]);
+
+  // An unreadable source is no evidence, not a safe zero; the raw store is untouched and no model or git ran.
+  writeFileSync(recommendationSourcePath(stateDir), "{ unreadable");
+  s.put(await w.refresh());
+  assert.deepEqual([...new Set((await recommended()).seen.values())], [undefined]);
+  assert.equal(readFileSync(recommendationStorePath(stateDir), "utf8"), storeBytes, "historical advice is preserved byte for byte");
+  assert.equal(calls.length, w.proposals.length, "no request or refresh asked the model again");
+  assert.equal(s.reads(), 0, "no page read loaded a mutable plan");
 });
