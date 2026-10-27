@@ -3653,7 +3653,16 @@ export class OpenWeightAllowanceExhaustedError extends RmdError {
   readonly capUsd: number;
   readonly wantUsd: number;
   readonly resetAt: string;
-  constructor(detail: { committedUsd: number; capUsd: number; wantUsd: number; utcDay: string }) {
+  /** W1-T10384: which limit refused. `fleet` is the shared dailyCapUsd; `foundry-claude` is the
+   *  Foundry Claude sub-cap, which binds below the fleet cap and is the one a Luna rung can outlive. */
+  readonly limit: CashAllowanceLimitName;
+  readonly squeezed: boolean;
+  constructor(detail: { committedUsd: number; capUsd: number; wantUsd: number; utcDay: string; limit?: CashAllowanceLimitName; squeezed?: boolean }) {
+    const limit = detail.limit ?? "fleet";
+    const posture = detail.squeezed === true ? "squeezed" : "normal";
+    const bound = limit === "foundry-claude"
+      ? `foundry-claude cap (FOUNDRY_CLAUDE_DAILY_CAP_USD.${posture}, ${posture} posture)`
+      : `dailyCapUsd (fleet limit, ${posture} posture)`;
     // Kind "usage", the same discriminant `GhReadCadenceRefusal` carries: both are a LIMIT refusing
     // a call that was otherwise well-formed, not a malformed request. Adopting the shared envelope
     // rather than extending `Error` directly is what `test/error-subclass-census.test.ts` asks a new
@@ -3662,16 +3671,21 @@ export class OpenWeightAllowanceExhaustedError extends RmdError {
       "usage",
       1,
       `openweight daily allowance exhausted for ${detail.utcDay}: committed $${detail.committedUsd.toFixed(6)} + ` +
-        `$${detail.wantUsd.toFixed(6)} would exceed the $${detail.capUsd.toFixed(2)} dailyCapUsd`,
-      { committedUsd: detail.committedUsd, capUsd: detail.capUsd, wantUsd: detail.wantUsd, utcDay: detail.utcDay },
+        `$${detail.wantUsd.toFixed(6)} would exceed the $${detail.capUsd.toFixed(2)} ${bound}`,
+      { committedUsd: detail.committedUsd, capUsd: detail.capUsd, wantUsd: detail.wantUsd, utcDay: detail.utcDay, limit, posture },
     );
     this.name = "OpenWeightAllowanceExhaustedError";
     this.committedUsd = detail.committedUsd;
     this.capUsd = detail.capUsd;
     this.wantUsd = detail.wantUsd;
     this.resetAt = openWeightAllowanceReset(detail.utcDay);
+    this.limit = limit;
+    this.squeezed = detail.squeezed === true;
   }
 }
+
+/** The two limits a cash reservation is checked against. */
+export type CashAllowanceLimitName = "fleet" | "foundry-claude";
 
 function openWeightAllowanceReset(day: string): string {
   return fixedClock(Date.parse(`${day}T00:00:00.000Z`) + 24 * 60 * 60 * 1000).iso();
@@ -3712,12 +3726,13 @@ function configuredCashCap(config: Config, squeezed?: boolean): number {
 }
 
 function cashAllowanceLimits(state: OpenWeightAllowanceState, cap: number, deployment: string, squeezed?: boolean) {
-  const limits = [{ committedUsd: openWeightCommittedUsd(state), capUsd: Math.min(cap, state.fleetCapUsd ?? Infinity) }];
+  const limits: { committedUsd: number; capUsd: number; limit: CashAllowanceLimitName }[] =
+    [{ committedUsd: openWeightCommittedUsd(state), capUsd: Math.min(cap, state.fleetCapUsd ?? Infinity), limit: "fleet" }];
   if (isFoundryClaudeDeployment(deployment)) {
     const reservations = Object.fromEntries(Object.entries(state.reservations)
       .filter(([, row]) => row.deployment !== undefined && isFoundryClaudeDeployment(row.deployment)));
     limits.push({ committedUsd: openWeightCommittedUsd({ utcDay: state.utcDay, reservations }),
-      capUsd: squeezed ? FOUNDRY_CLAUDE_DAILY_CAP_USD.squeezed : FOUNDRY_CLAUDE_DAILY_CAP_USD.normal });
+      capUsd: squeezed ? FOUNDRY_CLAUDE_DAILY_CAP_USD.squeezed : FOUNDRY_CLAUDE_DAILY_CAP_USD.normal, limit: "foundry-claude" });
   }
   return limits;
 }
@@ -3857,7 +3872,7 @@ export function reserveOpenWeightBudget(
     }
     for (const limit of limits) {
       if (limit.committedUsd + wantUsd > limit.capUsd)
-        throw new OpenWeightAllowanceExhaustedError({ ...limit, wantUsd, utcDay });
+        throw new OpenWeightAllowanceExhaustedError({ ...limit, wantUsd, utcDay, squeezed: input.squeezed === true });
     }
     return {
       next: { ...state, reservations: { ...state.reservations, [input.requestId]: { reservedUsd: wantUsd, settledUsd: null, deployment: input.deployment } } },
@@ -4025,6 +4040,8 @@ export interface OpenWeightWorkerResult {
   budgetSettledUsd: number;
   budgetRefused: boolean;
   cashAllowanceResetAt?: string;
+  /** W1-T10384: the limit that refused, when `budgetRefused`. */
+  cashAllowanceLimit?: CashAllowanceLimitName;
   externalEffect?: ExternalEffectResult;
 }
 
@@ -4891,7 +4908,7 @@ function openWeightResult(input: {
     budgetReservedUsd: input.budgetReservedUsd ?? 0,
     budgetSettledUsd: input.budgetSettledUsd ?? 0,
     budgetRefused: input.budgetRefused ?? false,
-    ...(input.error instanceof OpenWeightAllowanceExhaustedError ? { cashAllowanceResetAt: input.error.resetAt } : {}),
+    ...(input.error instanceof OpenWeightAllowanceExhaustedError ? { cashAllowanceResetAt: input.error.resetAt, cashAllowanceLimit: input.error.limit } : {}),
     ...(input.deploymentAbsent ? { openWeightDeploymentAbsent: input.deploymentAbsent } : {}),
     webSearchAttempted: input.webSearchAttempted ?? 0,
     webSearchAccepted: input.webSearchAccepted ?? 0,
