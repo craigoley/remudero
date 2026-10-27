@@ -20,6 +20,8 @@ import { evaluateCensusPrecheck, main } from "../scripts/census-precheck.mjs";
 type Tree = Record<string, string>;
 
 const BASELINE = "scripts/deps-interface-baseline.json";
+const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
+const SKILL_CENSUS_STUB = 'import { test } from "node:test"; test("healthy mandatory fixture census", () => {});\n';
 const ceilings = (depsInterfaceCount: number, inlineSeamCount: number, aliasedSeamCount: number): string =>
   JSON.stringify({ _comment: "x", depsInterfaceCount, inlineSeamCount, aliasedSeamCount });
 
@@ -122,7 +124,8 @@ function build(base: Tree, change: Tree): string {
       writeFileSync(join(repo.dir, path), text);
     }
   };
-  write(base);
+  // The mandatory skill census runs on every nonempty diff, so the base carries a healthy stand-in.
+  write({ ...base, [SKILL_CENSUS]: SKILL_CENSUS_STUB });
   repo.git("add", "-A");
   repo.git("commit", "--quiet", "-m", "the base");
   repo.git("switch", "--quiet", "-c", "work");

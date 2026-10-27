@@ -20,6 +20,7 @@ import { sameTestFile } from "./test-path-resolver.js";
 import { collectCiFailureCorpus, rollupAtSha, type CiFailurePair, type CorpusCommit } from "./ci-failure-corpus.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { checkRunsRestArgs, combinedStatusRestArgs } from "./open-prs-rest.js";
+import { actionsJobIdOf, type CheckRunRef } from "./fix-lane-gardener.js";
 import { failingRuleSuitesFromCiFailures, RULE_CHECKS_CHECK } from "./base-reproduction.js";
 import { commentCompressionOrigin, nextCommentCompression, readGateFollowupOrigins, type CommentCompressionFinding } from "./comment-compression.js";
 
@@ -274,7 +275,25 @@ function recoveredGateRepairPatch(file: GateRepairDiffFile, raw: string, pair: C
   return lines.slice(firstHunk).join("\n");
 }
 
-export async function loadGateRepairObservations(rules: readonly GateRepairRule[], sources: GateDefuseSources = {}): Promise<GateRepairObservation[]> {
+interface GateRepairCompare {
+  files?: GateRepairDiffFile[];
+  base_commit?: { sha?: string; commit?: { tree?: { sha?: string } } };
+  merge_base_commit?: { sha?: string };
+  commits?: Array<{ sha?: string; commit?: { tree?: { sha?: string } } }>;
+}
+
+function sameTreeWithoutCodeRemedy(diff: GateRepairCompare, pair: CiFailurePair): boolean {
+  const head = Array.isArray(diff.commits) ? diff.commits.at(-1) : undefined;
+  const base = diff.base_commit;
+  const tree = base?.commit?.tree?.sha;
+  return Array.isArray(diff.files) && diff.files.length === 0 &&
+    base?.sha === pair.redSha && diff.merge_base_commit?.sha === pair.redSha && head?.sha === pair.greenSha &&
+    /^[0-9a-f]{40}$/.test(pair.redSha) && /^[0-9a-f]{40}$/.test(pair.greenSha ?? "") &&
+    typeof tree === "string" && /^[0-9a-f]{40}$/.test(tree) && tree === head?.commit?.tree?.sha;
+}
+
+export async function loadGateRepairObservations(rules: readonly GateRepairRule[], sources: GateDefuseSources = {},
+  log: GardenerDeps["log"] = () => {}): Promise<GateRepairObservation[]> {
   const readJsonAsync = sources.ghJson ?? ((args: string[]) => ghJsonAsync(args));
   const readTextAsync = sources.ghText ?? ((args: string[]) => ghTextAsync(args));
   const repo = await readJsonAsync(["repo", "view", "--json", "nameWithOwner"]) as { nameWithOwner: string };
@@ -284,7 +303,7 @@ export async function loadGateRepairObservations(rules: readonly GateRepairRule[
   const observations: GateRepairObservation[] = [];
   for (const pr of prs) {
     const commits = await readJsonAsync(["api", `${api}/pulls/${pr.number}/commits?per_page=100`]) as Array<{ sha: string }>;
-    const runs = new Map<string, { check_runs: Array<{ id: number; name: string; conclusion: string }> }>();
+    const runs = new Map<string, { check_runs: Array<CheckRunRef & { name: string; conclusion: string }> }>();
     const corpusCommits: CorpusCommit[] = [];
     for (const { sha } of commits) {
       const [checkRuns, statuses] = await Promise.allSettled([
@@ -292,7 +311,7 @@ export async function loadGateRepairObservations(rules: readonly GateRepairRule[
       // An unreadable rollup stays `undefined`, never green: collectCiFailureCorpus names the sha.
       let rollup: CorpusCommit["rollup"];
       if (checkRuns.status === "fulfilled" && statuses.status === "fulfilled") {
-        runs.set(sha, checkRuns.value as { check_runs: Array<{ id: number; name: string; conclusion: string }> });
+        runs.set(sha, checkRuns.value as { check_runs: Array<CheckRunRef & { name: string; conclusion: string }> });
         rollup = rollupAtSha(owner, name, sha, (args) => args[1]?.includes("/check-runs") ? checkRuns.value : statuses.value);
       }
       corpusCommits.push({ sha, rollup });
@@ -300,17 +319,30 @@ export async function loadGateRepairObservations(rules: readonly GateRepairRule[
     const corpus = collectCiFailureCorpus({ prs: [{ number: pr.number, commits: corpusCommits }] });
     for (const pair of corpus.pairs.filter((pair) => pair.state === "repaired")) {
       const comparePath = `${api}/compare/${pair.redSha}...${pair.greenSha}`;
-      const diff = await readJsonAsync(["api", comparePath]) as { files: GateRepairDiffFile[] };
+      const diff = await readJsonAsync(["api", comparePath]) as GateRepairCompare;
+      const unavailable = (reason: string): void => log("gate.repair_evidence_unavailable", {
+        pr_number: pr.number, gate: pair.gate, red_sha: pair.redSha, green_sha: pair.greenSha,
+        reason, evidence_state: "unknown",
+      });
       const files = diff.files ?? [];
-      if (files.length === 0) throw new Error(`gate repair diff unreadable for PR #${pr.number}`);
+      if (files.length === 0) {
+        if (!sameTreeWithoutCodeRemedy(diff, pair)) throw new Error(`gate repair diff unreadable for PR #${pr.number}`);
+        unavailable("same-tree-no-code-remedy");
+        continue;
+      }
       const raw = files.some(file => typeof file.patch !== "string")
         ? await readTextAsync(["api", comparePath, "-H", "Accept: application/vnd.github.diff"]) : "";
       const repairDiff = files.map(file => `diff --git a/${file.filename} b/${file.filename}\n${
         typeof file.patch === "string" ? file.patch : recoveredGateRepairPatch(file, raw, pair)}`).join("\n");
       const direct = rules.filter((rule) => rule.gate === pair.gate);
       const failed = runs.get(pair.redSha)?.check_runs.find((check) => check.name === pair.gate && check.conclusion === "failure");
-      const log = direct.length || !failed ? "" : await readTextAsync(["run", "view", "--job", String(failed.id), "--log-failed"]);
-      const failedSuites = failedSuitesInLog(log);
+      let failedLog = "";
+      if (!direct.length) {
+        const jobId = failed && actionsJobIdOf(failed);
+        if (jobId === undefined) { unavailable("no-actions-job"); continue; }
+        failedLog = await readTextAsync(["run", "view", "--job", jobId, "--log-failed"]);
+      }
+      const failedSuites = failedSuitesInLog(failedLog);
       const implicated = direct.length ? direct : rules.filter((rule) => failedSuites.has(rule.gate));
       for (const rule of implicated) {
         const before = await readJsonAsync(["api", `${api}/compare/${pr.base.sha}...${pair.redSha}`]) as { merge_base_commit: { sha: string }; files: Array<{ filename: string }> };
@@ -372,7 +404,7 @@ function falsePositiveInventory(deps: GardenerDeps, probes: GateProbes, sources:
 async function falsePositiveInventoryAsync(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources): Promise<{ actions: GateGardenAction[]; tally: Outcome }> {
   if (!repairsAreWorthReading(deps, sources)) return NO_REPAIRS();
   const rules = falsePositiveRules(probes, sources);
-  const observations = sources.repairObservations?.() ?? await loadGateRepairObservations(rules, sources);
+  const observations = sources.repairObservations?.() ?? await loadGateRepairObservations(rules, sources, deps.log);
   if (!observations.length) return falsePositiveActions(deps, rules, observations, []);
   const open = sources.openOrigins?.() ??
     ((await (sources.ghJson ?? ((args: string[]) => ghJsonAsync(args)))(["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"])) as Array<{ body: string }>)

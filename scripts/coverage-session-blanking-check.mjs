@@ -193,10 +193,9 @@ export function listTrackedTestFiles(repoRoot) {
     .filter((f) => f.endsWith(".ts"));
 }
 
-/** Scans every tracked `test/**​/*.ts` file under `repoRoot`. Returns `{ defects, suspects,
- *  filesScanned }`. */
-export function scanRepo(repoRoot) {
-  const files = listTrackedTestFiles(repoRoot);
+/** Scans tracked tests by default; authors can supply their changed test paths before admission.
+ *  Returns `{ defects, suspects, filesScanned }`. */
+export function scanRepo(repoRoot, files = listTrackedTestFiles(repoRoot)) {
   const defects = [];
   const suspects = [];
   for (const rel of files) {

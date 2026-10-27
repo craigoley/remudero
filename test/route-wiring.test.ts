@@ -305,12 +305,18 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([
+  // Assembled HTTP, distinct stores and durable decisions: test/console-api/serve/improvement-thread-route.test.ts.
+  "POST /v1/improvements/threads",
+  "POST /v1/improvements/threads/draft",
+  "POST /v1/improvements/threads/file",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts, W1-T10612 identity/mount test.
   "POST /v1/products",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts and the production-assembly test below (W1-T10613).
   "POST /v1/products/repository",
   // Assembled HTTP proof over the real default Vercel transport: test/console-api/serve/product-routes.test.ts (W1-T10616).
   "POST /v1/products/deployment",
+  // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts and the production-assembly test below (W1-T10615).
+  "POST /v1/products/build",
   "POST /v1/control/assistant-action",
   "POST /v1/control/stop",
   "POST /v1/control/resume",
@@ -582,6 +588,30 @@ test("W1-T10726: GET /v1/products/repository-preview is verified-operator read-o
       assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "preview preserves the ledger");
     }, true);
   } finally { process.env.PATH = originalPath; }
+});
+
+test("W1-T10615: POST /v1/products/build is high tier, confirmed, and reads the product from the fleet root", async () => {
+  await withProductionServer(async (h) => {
+    const headers: Record<string, string> = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json",
+      [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+    const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify({ version: "product-intent-v1",
+      requestId: "wiring-product-0003", expectedRevision: 0, brief: { idea: "private build wiring fixture" } }) });
+    const { receipt } = await saved.json() as { receipt: { productId: string } };
+    const payload = JSON.stringify({ version: "product-build-v1", requestId: "wiring-build-000001", productId: receipt.productId,
+      planEvidenceId: "plan-approved-1", taskId: "W9-T1", expectedRevision: 1, expectedObjectiveRevision: 1 });
+    const refused = await fetch(`${h.base}/v1/products/build`, { method: "POST", headers, body: payload });
+    assert.equal(refused.status, 403);
+    assert.equal((await refused.json()).error, "confirm_nonce_required");
+    const confirmed = await fetch(`${h.base}/v1/confirm`, { method: "POST", headers,
+      body: JSON.stringify({ method: "POST", path: "/v1/products/build", payload }) });
+    assert.equal(confirmed.status, 200);
+    const { nonce } = await confirmed.json() as { nonce: string };
+    const started = await fetch(`${h.base}/v1/products/build`, { method: "POST", headers: { ...headers, "x-confirm-nonce": nonce }, body: payload });
+    assert.equal(started.status, 409, "the production handler found the product under the fleet root and refused: no repository yet");
+    assert.equal((await started.json()).error, "repository_missing");
+    assert.ok(!existsSync(join(h.fleetRoot, "state", "KICK_REQUESTED-wreckterra:W9-T1")), "a refusal writes no marker");
+    assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "a refused build preserves the ledger");
+  }, true, true);
 });
 
 test("POST /v1/control/assistant-action binds a verified operator to the fleet root and ledger", async () => {

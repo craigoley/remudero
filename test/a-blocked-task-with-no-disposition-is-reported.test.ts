@@ -20,8 +20,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { loadPlanFromYaml, RETIREMENT_REASONS, type Plan, type Task } from "../src/lib/plan.js";
-import { blockedWithoutDispositionViolations, lintPlan, type LintViolation } from "../src/lib/task-linter.js";
+import { loadPlanFromYaml, RETIREMENT_REASONS, type Plan, type Task } from "#src/lib/plan.js";
+import { blockedWithoutDispositionViolations, lintPlan, type LintViolation } from "#src/lib/task-linter.js";
 
 // ── shared fixtures (pure, in-memory — no I/O, mirrors the W1-T2634 suite this one sits beside) ─
 

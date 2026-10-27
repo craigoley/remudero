@@ -12,6 +12,7 @@ const DEPLOYER = "test/a-busy-primary-reaches-its-image-recycle.test.ts";
 const TRIGGER = "test/acr-build-trigger.test.ts";
 const BAKED = [SUPERVISOR, DEPLOYER, TRIGGER].sort();
 const PROOF = "test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts";
+const SKILL_CONFORMANCE_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 const LEDGER = "src/lib/ledger.ts";
 const SUPERVISOR_SEED = "src/lib/serve-supervisor-main.ts";
 const DEPLOYER_SEED = "src/lib/deployer.ts";
@@ -161,6 +162,6 @@ test("W1-T9806: unchanged import sets never read the baked closures to select su
       runSuites: (files: string[]) => { asked.push(...files); return []; },
     });
     assert.deepEqual(result, { violations: [], unmeasured: null });
-    assert.deepEqual(asked, []);
+    assert.deepEqual(asked, [SKILL_CONFORMANCE_CENSUS], "the skill census runs while unchanged imports still avoid baked-closure reads");
   }
 });

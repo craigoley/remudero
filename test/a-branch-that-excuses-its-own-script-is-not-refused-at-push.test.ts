@@ -8,6 +8,7 @@ import { evaluateInstrumentSurface, main } from "../scripts/census-precheck.mjs"
 
 const SCRIPT = "scripts/branch-helper.mjs";
 const OTHER = "scripts/another-helper.mjs";
+const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 
 function branch(declaration: string, scripts = [SCRIPT], baseDeclaration?: string) {
   const repo = gitRepo({ kind: "branch-instrument-exclusion" });
@@ -17,6 +18,8 @@ function branch(declaration: string, scripts = [SCRIPT], baseDeclaration?: strin
   };
   put("package.json", JSON.stringify({ scripts: { old: "node scripts/old-ratchet.mjs" } }));
   put("scripts/old-ratchet.mjs", "export {};\n");
+  // The always-on skill census joins every nonempty diff, so the base carries a healthy stand-in for it.
+  put(SKILL_CENSUS, 'import { test } from "node:test";\ntest("skill census stand-in", () => undefined);\n');
   if (baseDeclaration !== undefined) put("src/lib/review.ts", baseDeclaration);
   repo.git("add", "-A");
   repo.git("commit", "-qm", "seed census candidates");
