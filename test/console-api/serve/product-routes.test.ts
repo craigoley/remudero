@@ -33,7 +33,7 @@ const identity: IdentityProvider = {
   },
 };
 
-function assembled(root: string, extra: Partial<ServeDeps> = {}, prefix = "/v1/products") {
+function assembled(root: string, prefix = "/v1/products", extra: Partial<ServeDeps> = {}) {
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan"), { recursive: true });
   const ledgerPath = join(root, "state/ledger.ndjson");
@@ -45,8 +45,7 @@ function assembled(root: string, extra: Partial<ServeDeps> = {}, prefix = "/v1/p
     panelGraph: { root, planPath, ledgerPath, github: { prView: () => null }, statusGithub: fakeGitHub(),
       ratify: { approve: () => {}, reframe: () => {} } },
     ledgerPath, issues: { close: () => {} }, fleetControlRoot: root, questionsRoot: root,
-    tokens: { read: "fixture-read", write: "fixture-write" },
-    ...extra,
+    tokens: { read: "fixture-read", write: "fixture-write" }, ...extra,
   };
   const before = readdirSync(root, { recursive: true });
   const routes = buildServeRoutes(deps).filter((route) => route.path === prefix || (prefix === "/v1/products" && route.path === "/v1/products/research"));
@@ -60,7 +59,7 @@ function assembled(root: string, extra: Partial<ServeDeps> = {}, prefix = "/v1/p
 async function server(t: TestContext, options: { mount?: boolean; missingRoot?: boolean; enforcement?: boolean; deps?: Partial<ServeDeps> } = {}) {
   const root = ownedFixtureDir(t, "product-http").dir;
   const log: unknown[] = [];
-  const routes = options.mount ? assembled(root, options.deps) : buildProductRoutes({ root: options.missingRoot ? undefined : root });
+  const routes = options.mount ? assembled(root, "/v1/products", options.deps) : buildProductRoutes({ root: options.missingRoot ? undefined : root });
   const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity,
     routes, enforceWriteTiers: options.enforcement, enforceReadSensitivity: options.enforcement,
     log: (step, extra) => { log.push({ step, extra }); } });
@@ -370,7 +369,7 @@ test("W1-T10613: the served product repository operation matches the authenticat
   t.after(() => { process.env.PATH = originalPath; });
   const root = ownedFixtureDir(t, "product-repository-http").dir;
   const products = assembled(root);
-  const mounted = assembled(root, {}, "/v1/products/repository");
+  const mounted = assembled(root, "/v1/products/repository");
   assert.equal(mounted[0]?.tier, "high", "creating a repository is a high-tier action");
   assert.equal(mounted[0]?.scope, "write");
   const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes: [...products, ...mounted] });
@@ -419,7 +418,7 @@ test("W1-T10726: served preview matches the public product contract", async (t) 
   t.after(() => { process.env.PATH = originalPath; });
   const root = ownedFixtureDir(t, "product-preview-http").dir;
   const products = assembled(root);
-  const preview = assembled(root, {}, "/v1/products/repository-preview");
+  const preview = assembled(root, "/v1/products/repository-preview");
   assert.equal(preview[0]?.scope, "read", "a preview is a read");
   assert.equal(preview[0]?.sensitivity, "sensitive");
   const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes: [...products, ...preview] });
@@ -460,6 +459,92 @@ test("W1-T10726: served preview matches the public product contract", async (t) 
   } finally { await new Promise<void>((resolve, reject) => instance.close((error) => error ? reject(error) : resolve())); }
 });
 
+test("W1-T10615: the served product build operation matches the authenticated API contract", async (t) => {
+  const HEAD = "c".repeat(40);
+  const shim = ghShim([
+    { when: "commits/main", stdout: JSON.stringify({ sha: HEAD }) },
+    { when: `contents?ref=${HEAD}`, stdout: JSON.stringify([{ name: "src" }, { name: "README.md" }]) },
+    { when: "contents/plan/tasks.d?ref=main", stdout: JSON.stringify([{ name: "W9-T1-first.yaml" }]) },
+    { when: "contents/plan/tasks.d/W9-T1-first.yaml", stdout: "PLACEHOLDER" },
+    { when: "matching-refs/rmd-dispatch/W9-T1", stdout: JSON.stringify([{ ref: "refs/rmd-dispatch/W9-T1", object: { sha: "1".repeat(40) } }]) },
+    { when: "matching-refs/heads/run-W9-T1-", stdout: JSON.stringify([{ ref: "refs/heads/run-W9-T1-17", object: { sha: "2".repeat(40) } }]) },
+    { when: "search/issues", stdout: JSON.stringify({ total_count: 0 }) },
+    { when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra",
+      owner: { login: "craigoley" }, private: false, default_branch: "main" }) },
+  ]);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  t.after(() => { process.env.PATH = originalPath; });
+  const root = ownedFixtureDir(t, "product-build-http").dir;
+  mkdirSync(join(root, ".remudero"), { recursive: true });
+  writeFileSync(join(root, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
+  // The repo-tracked instance registry names Wreckterra's own daemon; its config root is mounted under the state base.
+  const registry = join(root, ".remudero", "daemon-instances.yaml");
+  const daemonState = join(root, "instances", "wreckterra", "state");
+  mkdirSync(daemonState, { recursive: true });
+  writeFileSync(registry, "instances:\n  core:\n    github_repo: craigoley/remudero\n");
+  const store = new ProductIntentStore({ root });
+  const saved = store.write("clerk:alice", command);
+  assert.ok(saved.ok);
+  const productId = saved.value.receipt.productId;
+  assert.ok(store.transition("clerk:alice", { version: "product-intent-v1", requestId: "route-build-seed-01", id: productId, expectedRevision: 1, expectedObjectiveRevision: 1,
+    repository: { provider: "github", id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public", verifiedAt: "2026-10-26T00:00:00.000Z" },
+    stageEvidence: [{ id: "plan-approved-1", stage: "plan", outcome: "succeeded", objectiveRevision: 1, observedAt: "2026-10-26T00:00:01.000Z", references: [] }] }).ok);
+  const shard = `- id: W9-T1\n  origin: product-plan#${productId}/plan-approved-1\n  status: queued\n  budget_usd: 10\n`;
+  shim.addRoute({ when: "contents/plan/tasks.d/W9-T1-first.yaml", stdout: shard });
+  const products = assembled(root);
+  const mounted = assembled(root, "/v1/products/build", { instances: { stateBase: join(root, "instances") } });
+  assert.equal(mounted[0]?.tier, "high", "starting a build is a high-tier action");
+  assert.equal(mounted[0]?.scope, "write");
+  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes: [...products, ...mounted] });
+  await new Promise<void>((resolve) => instance.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(instance.address() as AddressInfo).port}`;
+  const build = { version: "product-build-v1", requestId: "route-build-000001", productId, planEvidenceId: "plan-approved-1", taskId: "W9-T1",
+    expectedRevision: 2, expectedObjectiveRevision: 1 };
+  const send = async (session: "alice" | "bob" | undefined, body: unknown, raw?: string) => {
+    const result = await fetch(`${base}/v1/products/build`, { method: "POST", headers: { authorization: "Bearer fixture-write",
+      "content-type": "application/json", ...(session ? { "x-test-session": session } : {}) }, body: raw ?? JSON.stringify(body) });
+    const reply = await result.json() as { version: string; error?: string; replayed?: boolean; receipt?: { outcome: string; evidence: unknown[] } };
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/build", "POST", result.status)), [],
+      `the real build response (${result.status}) must match its declared contract`);
+    assert.match(result.headers.get("cache-control") ?? "", /no-store/);
+    return { status: result.status, body: reply };
+  };
+  try {
+    assert.equal((await send(undefined, build)).status, 403);
+    assert.equal((await send("alice", { ...build, extra: true })).status, 400);
+    assert.equal((await send("alice", undefined, "{broken")).status, 400);
+    assert.equal((await send("alice", undefined, JSON.stringify({ padding: "x".repeat(5000) }))).status, 413);
+    assert.equal((await send("bob", build)).status, 404);
+    assert.equal((await send("alice", { ...build, planEvidenceId: "unapproved" })).status, 409);
+    assert.equal(shim.calls().length, 1, "only the unapproved plan reached the transport, and only for the repository identity read");
+    // No live daemon instance drives the target yet: there is nowhere the kick could be delivered.
+    const undriven = await send("alice", build);
+    assert.equal(undriven.status, 409);
+    assert.equal(undriven.body.error, "target_daemon_missing");
+    writeFileSync(registry, "instances:\n  core:\n    github_repo: craigoley/remudero\n  wreckterra:\n    github_repo: craigoley/wreckterra\n");
+    // The task is already claimed by another lane, so the assembled operation refuses it explicitly.
+    const claimed = await send("alice", build);
+    assert.equal(claimed.status, 409);
+    assert.equal(claimed.body.error, "task_claimed");
+    assert.ok(!existsSync(join(daemonState, "KICK_REQUESTED-wreckterra:W9-T1")), "a refused start writes no marker");
+    // Free the claim: the real default target and kick now start the build, recorded as queued.
+    shim.addRoute({ when: "matching-refs/rmd-dispatch/W9-T1", stdout: JSON.stringify([]) });
+    const started = await send("alice", { ...build, requestId: "route-build-000002" });
+    assert.equal(started.status, 200);
+    assert.equal(started.body.receipt?.outcome, "queued");
+    assert.equal(started.body.replayed, false);
+    assert.ok(existsSync(join(daemonState, "KICK_REQUESTED-wreckterra:W9-T1")), "the repo-scoped kick marker sits under Wreckterra's own daemon root");
+    assert.ok(!existsSync(join(root, "state", "KICK_REQUESTED-wreckterra:W9-T1")), "the core root, which no Wreckterra daemon reads, gets none");
+    assert.ok(!shim.calls().some((call) => call.includes("-X POST")), "starting a build makes no provider write");
+    // A worker's fresh claim and run branch appear, but Wreckterra's own daemon ledger shows no run: admitted, never running.
+    shim.addRoute({ when: "matching-refs/rmd-dispatch/W9-T1", stdout: JSON.stringify([{ ref: "refs/rmd-dispatch/W9-T1", object: { sha: "1".repeat(40) } }]) });
+    const replayed = await send("alice", { ...build, requestId: "route-build-000002" });
+    assert.equal(replayed.body.replayed, true);
+    assert.equal(replayed.body.receipt?.outcome, "admitted");
+  } finally { await new Promise<void>((resolve, reject) => instance.close((error) => error ? reject(error) : resolve())); }
+});
+
 const TEAM_ID = "team_oleyarcade";
 const deploy = (productId: string, over: Record<string, unknown> = {}) => ({ version: "product-deployment-v1", requestId: "route-deploy-000001",
   productId, action: "create", teamId: TEAM_ID, projectName: "wreckterra", repository: { id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra" },
@@ -493,7 +578,7 @@ test("W1-T10616: the served product deployment operation matches the authenticat
   process.env.VERCEL_API_URL = `http://127.0.0.1:${(vercel.address() as AddressInfo).port}`;
   const root = ownedFixtureDir(t, "product-deployment-http").dir;
   const products = assembled(root);
-  const mounted = assembled(root, {}, "/v1/products/deployment");
+  const mounted = assembled(root, "/v1/products/deployment");
   assert.equal(mounted[0]?.scope, "write");
   assert.equal(mounted[0]?.tier, "middle", "binding a project is middle tier: it never deploys or spends");
   const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes: [...products, ...mounted] });

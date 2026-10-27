@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.75
   status: queued
@@ -21,10 +21,10 @@
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
   risk_ruling:
-    verdict: "high"
-    action: escalate
+    verdict: "rule-3-low-privilege"
+    action: proceed
     confidence: 1
     reasons:
-      - "deterministic backstop: it declares test/scout-automerge-plan-pr-mergeability-unknown-escalated.test.ts, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-10-15T00:53:46.763Z"
-    pin: "b67cbe87e55f174565b0f2769603c5506060cc44643a82557d67c686bc7bf97d"
+      - "rule 3 (live and low-privilege): the symptom is live, 15 occurrence(s) across 7 day(s), last seen 2026-10-26T02:59:26.436Z, and the record declares no privileged path"
+    judged_at: "2026-10-27T05:40:05.137Z"
+    pin: "8bbd43e22f1f5c0fa498cda36b586e7e3d444d7ff00d73c0d5e931895e8370a8"

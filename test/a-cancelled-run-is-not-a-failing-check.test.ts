@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { cancelledRunCheckOutcome } from "../src/lib/sweep.js";
+import { cancelledRunCheckOutcome } from "#src/lib/sweep.js";
 
 // ── W1-T3652 — A CHECK KILLED BY ITS OWN SUCCESSOR REPORTS `failure`, INDISTINGUISHABLE FROM A
 //    REAL ONE ─────────────────────────────────────────────────────────────────────────────────

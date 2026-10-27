@@ -7,6 +7,9 @@
  * a 29 GB root disk (ENOSPC); a donor whose `node_modules/.bin` was EMPTY gave hard-linked worktrees
  * no tsc/tsx; and each builder hand-checked origin for a `run-<id>-*` branch or a merged trailer.
  *
+ * The tracked files are materialized by `addCowWorktree` (W1-T10257): unchanged files are cloned
+ * copy-on-write from the checkout where the volume supports it, a normal checkout otherwise.
+ *
  * node_modules is HARD-LINKED (`cp -al`), never symlinked. `linkWorktreeNodeModules` (worker.ts)
  * symlinks for workers, and `ensureInstallFresh` refuses `npm ci` through that link
  * (`SymlinkInstallRefusal`) because an install's clear phase empties the shared tree. A hard-linked
@@ -17,6 +20,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statfsSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
+import { addCowWorktree, type CowWorktreeResult } from "./cow-worktree.js";
 import { configuredDependencySeedRoot, materializeDependencySeed, type SeedMethod } from "./dependency-seeds.js";
 
 export function defaultHandWorktreeParent(
@@ -58,7 +62,7 @@ export type NodeModulesOutcome =
 
 export type HandWorktreeResult =
   | { status: "refused"; reason: string }
-  | { status: "created"; path: string; branch: string; freeBytes: number; nodeModules: NodeModulesOutcome };
+  | { status: "created"; path: string; branch: string; freeBytes: number; nodeModules: NodeModulesOutcome; cow?: CowWorktreeResult };
 
 interface Ran {
   ok: boolean;
@@ -169,8 +173,12 @@ export function createHandWorktree(req: HandWorktreeRequest): HandWorktreeResult
   const branch = `run-${taskId}-${(req.clock ?? systemClock).now()}`;
   const path = join(parent, branch);
   if (existsSync(path)) return { status: "refused", reason: `${path} already exists` };
-  const added = run("git", ["-C", repoDir, "worktree", "add", "--quiet", "--no-track", "-b", branch, path, "origin/main"]);
-  if (!added.ok) return { status: "refused", reason: `git worktree add failed: ${added.detail}` };
+  let cow: CowWorktreeResult;
+  try {
+    cow = addCowWorktree({ repoDir, dir: path, branch, base: "origin/main", donorDir: repoDir });
+  } catch (error) {
+    return { status: "refused", reason: `git worktree add failed: ${(error as Error).message}` };
+  }
   const donor = findDonor(repoDir, path, req.npmCommand);
   let nodeModules: NodeModulesOutcome;
   const root = configuredDependencySeedRoot();
@@ -182,7 +190,7 @@ export function createHandWorktree(req: HandWorktreeRequest): HandWorktreeResult
         : { kind: "npm-ci-needed", reasons: ["dependency destination is already occupied"] };
     } catch (error) { nodeModules = { kind: "npm-ci-needed", reasons: [`dependency seed refused: ${(error as Error).message}`] }; }
   } else nodeModules = { kind: "npm-ci-needed", reasons: donor.reasons };
-  return { status: "created", path, branch, freeBytes: freeBytesAt(parent), nodeModules };
+  return { status: "created", path, branch, freeBytes: freeBytesAt(parent), nodeModules, cow };
 }
 
 /** The operator-facing lines for a created worktree. */
@@ -196,6 +204,8 @@ export function renderHandWorktree(result: Extract<HandWorktreeResult, { status:
     lines.push(`node_modules: none linked — next step: \`npm ci\` in ${result.path} (~850 MB; ${formatGiB(result.freeBytes)} free)`);
     for (const reason of result.nodeModules.reasons) lines.push(`  no donor: ${reason}`);
   }
+  const cow = result.cow;
+  if (cow !== undefined) lines.push(`files:  ${cow.method === "clone" ? `${cow.cloned} cloned copy-on-write, ${cow.written} written by git` : `normal checkout (${cow.fallbackReason})`}`);
   lines.push(`free:   ${formatGiB(result.freeBytes)} on the target filesystem`);
   return lines.join("\n");
 }

@@ -28,3 +28,11 @@
     - PR #11949: 14.50 PR-hours — a FIXED push 678ffb270 is still red on the next sweep — worker saw: state/runs/DAEMON-1792042718195-fix1-1792048627631.tail
     Previous remedy W1-T10520: src/lib/fix-lane-gardener.ts, test/gardeners/fix-lane-fixed-still-red.test.ts; did not fall: share of PR-hours 1.9% (9.410033888888892/483.90462611111116) before, 2.5% (12.19897388888889/492.2841458333331) after, over 1 day(s) each side. Take a structurally different remedy.
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The record supplies recurring outcomes and aggregate PR-hours, but no verified root cause or concrete replacement mechanism; it requests a structurally different remedy after the previous remedy failed its effect measurement.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for test text, not demonstrated recovery behavior. The supplied evidence therefore cannot verify the proposed remedy, meeting the gates state's explicit escalation condition."
+    judged_at: "2026-10-27T01:27:05.161Z"
+    pin: "ad8d9fe7a907a3d15876f7400f222db6c15380448f841eee40ba8ec1269f363d"

@@ -12,6 +12,20 @@ const REVISION = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const PIN_FILES = ["package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"];
 const CRITICAL_STATE = [LEDGER_FILENAME, "inbox-proposals.json"];
 
+export function engineTreePath(rel: string): string | undefined {
+  return /^(engines\/[0-9a-f]{64})(?:\/|$)/.exec(rel)?.[1];
+}
+
+export function isEngineEvidenceName(name: string): boolean {
+  return name === "engine.json" || name === "node_modules" || PIN_FILES.includes(name);
+}
+
+/** A dangling link still exists: only a removed directory entry excuses ENOENT. */
+export function stateEntryVanished(error: unknown, path: string): boolean {
+  return (error as NodeJS.ErrnoException).code === "ENOENT" &&
+    lstatSync(path, { throwIfNoEntry: false }) === undefined;
+}
+
 interface EngineDependencyLink {
   path: string;
   target: string;
@@ -38,12 +52,12 @@ export function isEngineDependencyLinkPath(rel: string): boolean {
 /** One descriptor answers both "is it a regular file?" and "what are its bytes?", so no path is checked and then
  *  re-opened (CodeQL js/file-system-race). O_NOFOLLOW refuses a link (ELOOP, thrown), O_NONBLOCK keeps a FIFO from
  *  hanging the open. Absent is `undefined`; a directory or other non-regular file is `"non-regular"`. */
-function readRegular(file: string): Buffer | "non-regular" | undefined {
+function readRegular(file: string, listed = false): Buffer | "non-regular" | undefined {
   let fd: number;
   try {
     fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if (!listed && stateEntryVanished(error, file)) return undefined;
     throw error;
   }
   try {
@@ -60,19 +74,27 @@ function objectJson(bytes: Buffer, path: string): Record<string, unknown> {
 }
 
 /** Read only the engine's own regular evidence files; never its dependency target. */
-function linkEvidence(root: string, path: string): EngineDependencyLink {
+function linkEvidence(root: string, path: string, listed?: readonly string[], onVanished?: () => void): EngineDependencyLink {
   const sourceHash = LINK_PATH.exec(path)?.[1];
   if (!sourceHash) refuse(`invalid link path ${path}`);
   const engine = dirname(path);
+  const touch = <T>(rel: string, read: () => T): T => {
+    try {
+      return read();
+    } catch (error) {
+      if (onVanished && stateEntryVanished(error, join(root, rel))) onVanished();
+      throw error;
+    }
+  };
   for (const rel of ["engines", engine]) {
-    if (!lstatSync(join(root, rel)).isDirectory()) refuse(`non-directory engine parent ${rel}`);
+    if (!touch(rel, () => lstatSync(join(root, rel))).isDirectory()) refuse(`non-directory engine parent ${rel}`);
   }
   const link = join(root, path);
-  if (!lstatSync(link).isSymbolicLink()) refuse(`expected a symbolic link at ${path}`);
+  if (!touch(path, () => lstatSync(link)).isSymbolicLink()) refuse(`expected a symbolic link at ${path}`);
   const identities: Record<string, string> = {};
   const evidence = (name: string): Buffer | undefined => {
     const file = join(root, engine, name);
-    const bytes = readRegular(file);
+    const bytes = touch(`${engine}/${name}`, () => readRegular(file, listed?.includes(`${engine}/${name}`)));
     if (bytes === undefined) return undefined;
     if (bytes === "non-regular") refuse(`expected regular reconstruction evidence at ${file}`);
     if (bytes.length === 0) refuse(`empty reconstruction evidence at ${file}`);
@@ -96,22 +118,33 @@ function linkEvidence(root: string, path: string): EngineDependencyLink {
       }
     }
   }
-  return { path, target: readlinkSync(link), sourceHash, revision: record.sha, identities };
+  return { path, target: touch(path, () => readlinkSync(link)), sourceHash, revision: record.sha, identities };
 }
 
 /** Staged metadata contains identities and link text, never dependency payloads. */
-export function preserveEngineDependencyLinks(root: string, staged: string, entries: readonly string[]): EngineLinkManifest | undefined {
+export function preserveEngineDependencyLinks(root: string, staged: string, entries: readonly string[], vanished: string[] = []): EngineLinkManifest | undefined {
   if (lstatSync(join(root, ENGINE_LINK_MANIFEST), { throwIfNoEntry: false })) {
     refuse(`reserved archive metadata exists in live state: ${ENGINE_LINK_MANIFEST}`);
   }
-  const paths = entries.filter((rel) => isEngineDependencyLinkPath(rel) && lstatSync(join(root, rel)).isSymbolicLink());
-  if (paths.length === 0) return undefined;
   try {
+    const links: EngineDependencyLink[] = [];
+    for (const rel of entries.filter(isEngineDependencyLinkPath)) {
+      let reaped = false;
+      try {
+        if (lstatSync(join(root, rel)).isSymbolicLink()) {
+          links.push(linkEvidence(root, rel, entries, () => { reaped = true; }));
+        }
+      } catch (error) {
+        if (!reaped && !stateEntryVanished(error, join(root, rel))) throw error;
+        vanished.push(dirname(rel));
+      }
+    }
+    if (links.length === 0) return undefined;
     const manifest: EngineLinkManifest = {
       version: 1,
       status: "requires-engine-dependency-reconstruction",
       criticalState: CRITICAL_STATE.filter((rel) => entries.includes(rel)),
-      links: paths.map((rel) => linkEvidence(root, rel)),
+      links,
     };
     restoreEngineDependencyLinks(staged, manifest);
     writeFileSync(join(staged, ENGINE_LINK_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
@@ -119,6 +152,22 @@ export function preserveEngineDependencyLinks(root: string, staged: string, entr
   } catch (error) {
     throw new Error(`engine dependency reconstruction: cannot preserve links: ${(error as Error).message}`, { cause: error });
   }
+}
+
+/** Omit an incomplete engine as one unit, touching staging only. */
+export function omitVanishedEngines(staged: string, vanished: string[], manifest?: EngineLinkManifest): EngineLinkManifest | undefined {
+  const paths = [...new Set(vanished.map((rel) => engineTreePath(rel) ?? rel))];
+  vanished.splice(0, vanished.length, ...paths);
+  const engines = new Set(paths.filter((rel) => engineTreePath(rel) === rel));
+  for (const engine of engines) rmSync(join(staged, engine), { recursive: true, force: true });
+  if (!manifest || !manifest.links.some((link) => engines.has(dirname(link.path)))) return manifest;
+  manifest = { ...manifest, links: manifest.links.filter((link) => !engines.has(dirname(link.path))) };
+  if (manifest.links.length === 0) {
+    rmSync(join(staged, ENGINE_LINK_MANIFEST), { force: true });
+    return undefined;
+  }
+  writeFileSync(join(staged, ENGINE_LINK_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  return manifest;
 }
 
 /** Validate disk evidence before publication or any restore destination write. */
