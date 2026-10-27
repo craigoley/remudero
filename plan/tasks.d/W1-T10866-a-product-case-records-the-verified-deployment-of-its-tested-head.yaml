@@ -79,11 +79,11 @@
     outcome proof. Existing budgets, claims, holds and source owners are unchanged.
   acceptance:
     - claim: "an observation through the served case route records a deploy receipt only from the persisted verified binding and the provider's own deployment read, bound to the product repository, a hosted-tested head, and a served URL that answered"
-      proof: "unit test: test/plan/product-case-deploy-receipts.test.ts"
+      proof: "unit test: W1-T10866: served deployment observation verifies the bound project tested source and answering URL"
     - claim: "preview and production deployments stay distinct, and a foreign project, team or repository, an untested or stale commit, a protected, building, errored or cancelled deployment, and missing config or an unreadable provider each record an explicit non-success outcome or refusal"
-      proof: "unit test: test/plan/product-case-deploy-receipts.test.ts"
+      proof: "unit test: W1-T10866: preview production and non-success deployment outcomes stay distinct"
     - claim: "replay after response loss, restart and a concurrent product revision change converge on one deploy receipt per deployment and keep earlier failed receipts"
-      proof: "unit test: test/plan/product-case-deploy-receipts.test.ts"
+      proof: "unit test: W1-T10866: replay restart and concurrent revisions retain one deployment receipt and earlier failures"
   falsifier: >-
     Remove each mechanism on its own: the binding re-read, the repository-id equality, the hosted-tested-head
     equality, the readiness probe's 2xx requirement, and the preview/production split. Each removal must make a named

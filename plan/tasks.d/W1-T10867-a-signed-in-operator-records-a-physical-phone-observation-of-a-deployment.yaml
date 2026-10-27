@@ -68,11 +68,11 @@
     outcome proof. Existing budgets, claims, holds and source owners are unchanged.
   acceptance:
     - claim: "an operator-session observation through the served case route records an operator-attested mobile receipt bound to the actor, product, objective, repository, scenario, platform and the referenced deploy receipt's deployment and commit"
-      proof: "unit test: test/plan/product-case-device-observations.test.ts"
+      proof: "unit test: W1-T10867: a real operator-session phone observation is bound to its product deployment and scenario"
     - claim: "a bearer or machine actor, a desktop platform, a missing, foreign, stale or non-succeeded deploy reference, and an attachment-only submission are refused, and iOS coverage never satisfies Android"
-      proof: "unit test: test/plan/product-case-device-observations.test.ts"
+      proof: "unit test: W1-T10867: foreign stale desktop and machine observations refuse and iOS never satisfies Android"
     - claim: "replay after response loss, restart and a concurrent product revision change converge on one observation receipt and keep earlier failed observations"
-      proof: "unit test: test/plan/product-case-device-observations.test.ts"
+      proof: "unit test: W1-T10867: replay restart and concurrent revisions retain one phone observation and earlier failures"
   falsifier: >-
     Remove each mechanism on its own: the operator-session actor gate, the deploy-receipt ownership and objective
     check, the desktop refusal, and the per-platform split. Each removal must make a named test in
