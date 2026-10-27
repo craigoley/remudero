@@ -6,7 +6,7 @@ import { readFile, readdir, rm, stat } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { OpenFileProbe } from "./clone-reaper.js";
-import { type Clock, systemClock } from "./clock.js";
+import { type Clock, clockFromMillisFn, systemClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, readFileIfExists } from "./fs-race-safe.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
@@ -464,7 +464,7 @@ export async function reclaimOwnerGoneLeftovers(repo: string, deps: ObjectReapDe
       const { mtimeMs } = await stat(join(gitDir, rel));
       if (!(mtimeMs < boot)) {
         result.kept.push({ path: rel, owner: "unproven",
-          reason: `mtime ${new Date(mtimeMs).toISOString()} does not predate boot ${new Date(boot).toISOString()}` });
+          reason: `mtime ${isoOf(mtimeMs)} does not predate boot ${isoOf(boot)}` });
         continue;
       }
       await rm(join(gitDir, rel), { force: true });
@@ -572,9 +572,14 @@ export function fleetPruneInputs(inflightDir: string, scratchDir: string = tmpdi
   };
 }
 
+/** An epoch-millisecond instant as ISO-8601, read through the Clock port. */
+function isoOf(ms: number): string {
+  return clockFromMillisFn(() => ms).iso();
+}
+
 /** The `gc.pruneExpire` value for an instant: second resolution, rounded EARLIER so it is never narrower than the evidence. */
 export function pruneExpireFor(ms: number): string {
-  return new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(/\.000Z$/, "Z");
+  return isoOf(Math.floor(ms / 1000) * 1000).replace(/\.000Z$/, "Z");
 }
 
 /**
@@ -1150,7 +1155,7 @@ export async function runRepositoryMaintenance(
         const inputs = await deps.pruneInputs(repo);
         const oldest = inputs.reduce((min, i) => Math.min(min, i.at), Number.POSITIVE_INFINITY);
         prune = { expire: inputs.length === 0 ? undefined : pruneExpireFor(oldest),
-          inputs: inputs.map((i) => `${i.source}@${new Date(i.at).toISOString()}`) };
+          inputs: inputs.map((i) => `${i.source}@${isoOf(i.at)}`) };
       } catch (error) {
         prune = { inputs: [`unreadable: ${String((error as Error)?.message ?? error)}`] };
       }

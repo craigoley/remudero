@@ -8,6 +8,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadMessage } from "./inbox-thread.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
+import { clockFromMillisFn } from "./clock.js";
 import {
   checkOperatorMessage,
   operatorMessageFooter,
@@ -406,7 +407,7 @@ export function maintenanceOperatorChannel(issues: AsyncIssueGateway): {
         "Repository maintenance exhausted its automatic retries. It keeps re-surveying this store on a growing backoff,",
         "and this issue closes itself on the first verified success.", "",
         `**Last failure:** ${note.lastReason}`,
-        `**Next re-survey:** ${new Date(note.nextSurveyAt).toISOString()}`,
+        `**Next re-survey:** ${clockFromMillisFn(() => note.nextSurveyAt).iso()}`,
         "**Kept leftovers:**", ...kept, ""].join("\n");
       return issues.create(`repository maintenance escalated: ${note.repo}`, body, [NEEDS_HUMAN_LABEL]);
     },
