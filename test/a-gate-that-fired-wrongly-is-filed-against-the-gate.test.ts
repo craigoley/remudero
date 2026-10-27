@@ -537,6 +537,7 @@ function gateRepairIdentityFixture(first: { name: string; details_url?: string; 
   const ghJson = async (args: string[]): Promise<unknown> => {
     const path = args[1] ?? "";
     if (args[0] === "repo") return { nameWithOwner: "o/r" };
+    if (args[0] === "pr") return [];
     if (path.includes("/pulls?")) return [1, 2].map(number => ({ number, base: { sha: "base" } }));
     if (path.includes("/pulls/1/commits")) return [{ sha: red }, { sha: green }];
     if (path.includes("/pulls/2/commits")) return [{ sha: "red2" }, { sha: "green2" }];
@@ -550,7 +551,7 @@ function gateRepairIdentityFixture(first: { name: string; details_url?: string; 
     if (path.includes("/compare/")) return { files: [{ filename: baseline, patch: "@@\n-1\n+2" }] };
     throw new Error(`unexpected gate identity read: ${args.join(" ")}`);
   };
-  return { red, green, compare, events, logs,
+  return { red, green, compare, events, logs, ghJson,
     run: () => loadGateRepairObservations([{ ...rule, gate: "test/example.test.ts", trigger: () => true }], { ghJson, ghText: async args => {
       logs.push(args);
       assert.deepEqual(args, ["run", "view", "--job", "91", "--log-failed"]);
@@ -599,4 +600,21 @@ test("empty or contradictory compare evidence never acquires the same-tree excep
     { ...f.compare, commits: [{ sha: f.green, commit: { tree: { sha: "d".repeat(40) } } }] },
     { ...f.compare, commits: [{ sha: f.green, commit: { tree: { sha: "unknown" } } }] },
   ]) await assert.rejects(gateRepairIdentityFixture({ name: "census", compare }).run(), /repair diff unreadable/);
+});
+
+
+test("the real async gate inventory retains unknown evidence and continues qualified maintenance", async t => {
+  const f = await inventoryFixture(t);
+  const evidence = gateRepairIdentityFixture({ name: "CodeQL", app: { slug: "github-advanced-security" },
+    details_url: "https://github.com/craigoley/remudero/runs/121865015049" });
+  f.put("state/gate-fire-rates.json", JSON.stringify({ status: "measured", prsScanned: 2,
+    neverFired: [], alwaysFired: [], gates: [{ gate: "test/example.test.ts", repaired: 1,
+      refusals: 1, overridden: 0, prs: 2, runs: 2, redRuns: 1, redPrs: 1, minutes: 1, redMinutes: 1 }] }));
+  const spec = gateGardenSpec(f.deps, f.probes, { repairRules: [{ ...rule, gate: "test/example.test.ts", trigger: () => true }],
+    ghJson: evidence.ghJson, ghText: async () => { throw new Error("external check has no Actions log"); } });
+  const inv = await spec.inventoryAsync!();
+  assert.equal(f.rows.filter(row => row.step === "gate.repair_evidence_unavailable").length, 1);
+  assert.equal(f.rows.find(row => row.step === "gate.repair_evidence_unavailable")!.extra?.evidence_state, "unknown");
+  assert.deepEqual(spec.metric!(inv, "false-positive"), { trials: 1, successes: 0 });
+  assert.equal(inv.candidates.filter(row => row.class === "false-positive").length, 1);
 });
