@@ -260,6 +260,58 @@ export interface components {
       required_tier?: "middle";
       required_sensitivity?: "sensitive";
     };
+    ProductResearchRequest: {
+      version: "product-research-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      expectedObjectiveRevision: number;
+      answers?: ({
+        questionId: string;
+        answer: string;
+      })[];
+    };
+    /** One durable research run. executionAuthority is always none; provider is the configured one or null. */
+    ProductResearchRun: {
+      id: string;
+      objectiveRevision: ProductRevision;
+      productRevision: ProductRevision;
+      outcome: "completed" | "unavailable" | "failed";
+      failure?: "provider_error" | "invalid_output" | "over_budget";
+      provider: string | null;
+      budgetUsd: number;
+      spendUsd: number;
+      sources: ({
+        label: string;
+        url: string;
+        disposition: "data";
+      })[];
+      summary?: string;
+      executionAuthority: "none";
+      startedAt: string;
+      finishedAt: string;
+    };
+    ProductResearchResponse: {
+      version: "product-research-v1";
+      productId: ProductId;
+      objectiveRevision: ProductRevision;
+      replayed: boolean;
+      run: (ProductResearchRun) | (null);
+      open: ({
+        id: string;
+        text: string;
+        origin: "catalog" | "provider";
+      })[];
+      accepted: ({
+        questionId: string;
+        text: string;
+        answer: string;
+        answeredAt: string;
+      })[];
+    };
+    ProductResearchError: {
+      version: "product-research-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "already_answered";
+    };
     /** At most 4096 raw request bytes. action adopt requires the exact provider repositoryId and never creates; action create must not carry repositoryId. owner and name must match the product's requestedRepository when it has one. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
     ProductRepositoryCommand: {
       version: "product-repository-v1";
@@ -6462,6 +6514,20 @@ export interface paths {
           "409": ProductError;
           "413": ProductError;
           "503": ProductError;
+        };
+    };
+  };
+  "/v1/products/research": {
+    post: {
+      responses: {
+          "200": ProductResearchResponse;
+          "400": ProductResearchError;
+          "401": ProductAccessError;
+          "403": (ProductResearchError) | (ProductAccessError);
+          "404": ProductResearchError;
+          "409": ProductResearchError;
+          "413": ProductResearchError;
+          "503": ProductResearchError;
         };
     };
   };

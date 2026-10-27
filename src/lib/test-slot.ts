@@ -629,8 +629,19 @@ export function testSlotHasAncestor(pid: number, childPid = process.pid, factsFo
 
 function inheritedTestSlot(dir: string, requirePrivate = false): { lease?: TestSlotLease; rejected?: string } {
   const raw = process.env[TEST_SLOT_PARENT_ENV];
-  if (!raw || process.env.NODE_TEST_CONTEXT) return {};
+  if (!raw) return {};
+  // A `node --test` file (NODE_TEST_CONTEXT) inherits only a claim on its OWN `RMD_TEST_SLOT_DIR` that passes every
+  // check in parentTestSlotClaim (W1-T10762); any other claim stays silent there, exactly as before, so a fixture never
+  // adopts a real author's lease (#10197).
+  const ownDir = process.env.NODE_TEST_CONTEXT ? process.env[TEST_SLOT_DIR_ENV] ?? "" : undefined;
+  const inherited = parentTestSlotClaim(raw, dir, requirePrivate, ownDir);
+  return ownDir === undefined || inherited.lease ? inherited : {};
+}
+
+/** A parent claim's live-ancestor checks; a defined `ownDir` (a test file's) must also be `dir` itself. */
+function parentTestSlotClaim(raw: string, dir: string, requirePrivate: boolean, ownDir: string | undefined): { lease?: TestSlotLease; rejected?: string } {
   try {
+    if (ownDir !== undefined && (!ownDir || realpathSync(ownDir) !== realpathSync(dir))) return { rejected: "not-own-slot-directory" };
     const claim = JSON.parse(raw);
     if (!claim || typeof claim.path !== "string" || typeof claim.nonce !== "string" ||
         !Number.isSafeInteger(claim.pid) || typeof claim.start !== "string" || !Number.isSafeInteger(claim.concurrency) ||

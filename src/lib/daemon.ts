@@ -27,6 +27,7 @@ import { startGarden, type GardenerDeps, type PrState } from "./gardener.js";
 import { knowledgeGardenSpec, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
 import { startLivenessPulse } from "./liveness-pulse.js";
+import { installSpawnHelper, startSpawnHelper } from "./spawn-helper.js";
 
 
 import type {
@@ -1328,7 +1329,8 @@ export interface DaemonDeps {
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
     sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number;
-      by_caller?: unknown[]; unnamed_ms?: number }; // W1-T9577: the interval's callers by total, and the rest
+      by_caller?: unknown[]; unnamed_ms?: number; // W1-T9577: the interval's callers by total, and the rest
+      async_spawn_sync_ms?: number; async_by_caller?: unknown[] }; // W1-T9754: the async spawns' fork time
     /** W1-T7746: each tick's lag, the history the loop-stall profiler's bound is a quantile of. */
     observeLoopLag?: (reading: { lagMs: number; intervalMs: number }, log: (step: string, extra?: Record<string, unknown>) => void) => void };
   /** W1-T6782: flat, payload-free memory fields (`sampleDaemonMemory`, daemon-memory-telemetry.ts)
@@ -2210,12 +2212,14 @@ function startMemoryReadAfterRow(deps: Pick<DaemonDeps, "readMemoryTelemetry">, 
 
 /** W1-T7745: what the spawns of THIS consumer's own interval were, read and closed so the next row starts clean.
  *  Spread into a `reportLoopLag` sample; a daemon without the sampler contributes neither field. */
-function takeSyncSpawn(deps: Pick<DaemonDeps, "readLoopTelemetry">, consumer: string):
-  { syncSpawnTop?: unknown; syncSpawnMs?: number; syncSpawnByCaller?: unknown[]; syncSpawnUnnamedMs?: number } {
+export function takeSyncSpawn(deps: Pick<DaemonDeps, "readLoopTelemetry">, consumer: string):
+  { syncSpawnTop?: unknown; syncSpawnMs?: number; syncSpawnByCaller?: unknown[]; syncSpawnUnnamedMs?: number;
+    asyncSpawnSyncMs?: number; asyncSpawnByCaller?: unknown[] } {
   try {
     const taken = deps.readLoopTelemetry?.takeLagInterval?.(consumer);
     return taken === undefined ? {} : { syncSpawnTop: taken.top, syncSpawnMs: taken.sync_spawn_ms,
-      syncSpawnByCaller: taken.by_caller, syncSpawnUnnamedMs: taken.unnamed_ms };
+      syncSpawnByCaller: taken.by_caller, syncSpawnUnnamedMs: taken.unnamed_ms,
+      asyncSpawnSyncMs: taken.async_spawn_sync_ms, asyncSpawnByCaller: taken.async_by_caller };
   } catch { return {}; /* Reason: observability only. */ }
 }
 
@@ -2256,7 +2260,9 @@ export function reportLoopLag(
     /** W1-T5718: the longest synchronous spawn of the interval this lag closes (W1-T7745: its own interval's). */
     syncSpawnTop?: unknown;
     /** W1-T7745: the synchronous spawn time of that same interval, so a row says how much of its lag was spawn. */
-    syncSpawnMs?: number; syncSpawnByCaller?: unknown[]; syncSpawnUnnamedMs?: number }, // W1-T9577
+    syncSpawnMs?: number; syncSpawnByCaller?: unknown[]; syncSpawnUnnamedMs?: number; // W1-T9577
+    /** W1-T9754: the same interval's async spawns: the time each held the loop inside its own spawn call. */
+    asyncSpawnSyncMs?: number; asyncSpawnByCaller?: unknown[] },
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   try {
@@ -2272,6 +2278,8 @@ export function reportLoopLag(
       ...(sample.syncSpawnMs === undefined ? {} : { sync_spawn_ms: sample.syncSpawnMs }),
       ...(sample.syncSpawnByCaller === undefined ? {} : { sync_spawn_by_caller: sample.syncSpawnByCaller }),
       ...(sample.syncSpawnUnnamedMs === undefined ? {} : { sync_spawn_unnamed_ms: sample.syncSpawnUnnamedMs }),
+      ...(sample.asyncSpawnSyncMs === undefined ? {} : { async_spawn_sync_ms: sample.asyncSpawnSyncMs }),
+      ...(sample.asyncSpawnByCaller === undefined ? {} : { async_spawn_sync_by_caller: sample.asyncSpawnByCaller }),
     });
   } catch {
     // Reason: a throwing logger must cost the reading, never the tick.
@@ -3166,6 +3174,9 @@ export function detectDaemonCrashLoop(
   };
 }
 
+/** W1-T9754: the environment switch that starts the spawn helper at boot. Its default, off, is an operator decision. */
+export const SPAWN_HELPER_SWITCH = "RMD_SPAWN_HELPER";
+
 /** The daemon's startup routine (W1-T12b): the clean-env boot assertion, run once before the scheduler loop starts.
  * Takes the log sink and the env as injectable inputs, so it is provable in-process with a fake env and no real
  * launchd load. Every optional dependency below follows one shape: injected rather than imported, because this module
@@ -3229,6 +3240,13 @@ export async function daemonBoot(
     ...(bootHeadSha ? { head_sha: bootHeadSha } : {}),
     ...(checkoutDepth ? { checkout_shallow: checkoutDepth.shallow, checkout_commit_count: checkoutDepth.commitCount } : {}),
   });
+  // W1-T9754: the spawn helper starts here, while this process is still small, so a later routed spawn forks from
+  // it and not from a 1.5-2 GB daemon. Whether it starts is the operator's switch, off unless set to "on".
+  if (env[SPAWN_HELPER_SWITCH] === "on") {
+    const helper = startSpawnHelper({ log });
+    installSpawnHelper(helper);
+    log("daemon.spawn_helper", { started: true, pid: helper.pid, switch: SPAWN_HELPER_SWITCH });
+  }
   // The boot-rate invariant: the shape-not-cause check. Logged either way, so the invariant's own
   // pass or fail is part of the boot record, not only its breaches (W1-T215).
   if (crashLoopCheck) {

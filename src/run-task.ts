@@ -662,6 +662,7 @@ import {
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
 import { createDaemonClient, type DaemonClient } from "../packages/api-client/src/client.js";
 import { newTriagePass, parseEscalationTriagePolicy } from "./lib/escalation-triage.js";
+import { realProductResearchProvider, type ProductResearchProvider } from "./lib/product-research.js";
 import { escalationClassSignal } from "./lib/escalation-precision.js";
 import {
   deliversRealtime,
@@ -718,6 +719,7 @@ import {
   prStateFromRest,
   rollupFor,
   rollupForAsync,
+  runsForHeadRestArgs,
   singlePrRestArgs,
   // review-reuse-producer: the ONE producer of the review-reuse pair, called from both sides of the comparison
   // — the review records it, a later sweep pass asks what is true now. See its own header doc for
@@ -6563,21 +6565,36 @@ const yieldingSleep = (ms: number): Promise<void> => new Promise((resolve) => se
 // W1-T463's fix (see this file's block above `yieldingSleep`): the loops would once again hold
 // the daemon's event loop for the duration of every `gh` call, for the whole of a CI wait. So the
 // REST reads happen for real over `read` — the SAME async, non-blocking seam `ghJsonAsync` already
-// fills — and `rollupFor` is handed a synchronous stand-in that replays the two already-resolved
-// responses in the exact order `rollupFor`'s own body requests them (check-runs, then
-// combined-status — unchanged, tested source). The composed result is byte-identical to calling
-// `rollupFor` with a truly synchronous fetch; only the I/O is non-blocking.
+// fills. Use the shared asynchronous composition rather than replaying a fixed pair of
+// responses: its optional workflow-identity read must reach the real reader too. Otherwise
+// two independent ci-gate producers collapse and a later green hides the failed CI aggregate.
 async function restRollupFor(
   owner: string,
   repo: string,
   sha: string,
   read: (args: string[]) => Promise<unknown>,
 ): Promise<RestRollupEntry[]> {
-  const runs = await read(checkRunsRestArgs(owner, repo, sha));
-  const combined = await read(combinedStatusRestArgs(owner, repo, sha));
-  const resolved: unknown[] = [runs, combined];
-  let next = 0;
-  return attachPostedGateIds(rollupFor(owner, repo, sha, () => resolved[next++]), runs);
+  let runs: unknown;
+  const checkPath = checkRunsRestArgs(owner, repo, sha)[1];
+  const workflowPath = runsForHeadRestArgs(owner, repo, sha)[1];
+  const rollup = await rollupForAsync(owner, repo, sha, async args => {
+    const value = await read(args);
+    if (args[1] === checkPath) runs = value;
+    if (args[1] === workflowPath && (value === null || typeof value !== "object" ||
+        !Array.isArray((value as { workflow_runs?: unknown }).workflow_runs))) {
+      throw new Error("workflow producer identity response unavailable");
+    }
+    return value;
+  });
+  const named = new Map<string, RestRollupEntry[]>();
+  for (const entry of rollup) if (entry.name) named.set(entry.name, [...(named.get(entry.name) ?? []), entry]);
+  for (const entries of named.values()) {
+    const runIds = new Set(entries.flatMap(entry => entry.workflowRunId === undefined ? [] : [entry.workflowRunId]));
+    if (runIds.size > 1 && entries.some(entry => !Number.isSafeInteger(entry.workflowId) || (entry.workflowId ?? 0) <= 0)) {
+      throw new Error("workflow producer identity incomplete for independent check runs");
+    }
+  }
+  return attachPostedGateIds(rollup, runs);
 }
 
 export function fetchOpenPrsWithPostedIds(owner: string, repo: string, fetch: GhApiFetcher): OpenPrRest[] {
@@ -28957,6 +28974,29 @@ export async function serveCommand(
     log("serve.feedback_expander_unavailable", { error: String((e as Error)?.message ?? e) });
   }
 
+  // Product research uses the already configured triage synthesis mount and the same
+  // ledgered, contained worker transport. A failed mount/settings resolution leaves the
+  // HTTP operation explicitly unavailable; it never invents another provider.
+  let productResearchProvider: ProductResearchProvider | undefined;
+  try {
+    const mountsTable = (deps.loadMounts ?? loadMounts)(mountsPath(repoRoot));
+    const mount = mountsTable.synthesis.triage;
+    if (!mount) throw new Error("triage synthesis mount unavailable");
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", `serve-research-settings-${runId}.json`),
+    });
+    validateWorkerSettingsFile(settingsFile);
+    productResearchProvider = realProductResearchProvider({
+      mount, config, cwd: repoRoot, settingsFile,
+      spawn: deps.spawn,
+    });
+    log("serve.product_research_resolved", { provider: productResearchProvider.id, budget_usd: DEFAULT_BUDGET_USD });
+  } catch (error) {
+    log("serve.product_research_unavailable", { reason: String((error as Error)?.message ?? error) });
+  }
+
   // `inflightHolder` wires deriveStatus's THIRD liveness disjunct (lib/status.ts) to the real
   // lock directory — the same `<config.root>/state/inflight` path `acquireInflightLock` writes
   // and the sweep rung reaps, never a second notion of where locks live. Without this the
@@ -29041,6 +29081,8 @@ export async function serveCommand(
     // differ: fleet-control flag files must match what `rmd daemon`/`rmd drain` check
     // (config.root); plan/questions.ndjson must match where `appendQuestion` writes (repoRoot).
     fleetControlRoot: config.root,
+    productResearchProvider,
+    productResearchBudgetUsd: productResearchProvider ? DEFAULT_BUDGET_USD : undefined,
     assistantRepository: `${self.owner}/${self.repo}`,
     questionsRoot: repoRoot,
     tokens,

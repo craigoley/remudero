@@ -15,6 +15,7 @@ import {
   type ProductBuildCode, type ProductBuildOptions,
 } from "./product-build.js";
 import { PRODUCT_INTENT_LIMITS, PRODUCT_INTENT_VERSION, type ProductStoreCode } from "./product-intent.js";
+import { PRODUCT_RESEARCH_LIMITS, PRODUCT_RESEARCH_VERSION, ProductResearchService, type ProductResearchCode, type ProductResearchProvider } from "./product-research.js";
 
 const status: Record<ProductStoreCode, number> = {
   invalid_identity: 403, invalid_input: 400, not_found: 404, stale_revision: 409,
@@ -62,6 +63,32 @@ export function buildProductRoutes(options: { root?: string }): Route[] {
       const result = store.write(actor, command);
       if (!result.ok) { sendJson(res, status[result.code], { version: PRODUCT_INTENT_VERSION, error: result.code }); return; }
       sendJson(res, 200, { version: PRODUCT_INTENT_VERSION, ...result.value });
+    } },
+  ];
+}
+
+const researchStatus: Record<ProductResearchCode, number> = { ...status, already_answered: 409 };
+
+/** Bounded research and clarification for the verified operator's own product; grants no provider or spending authority. */
+export function buildProductResearchRoutes(options: { root?: string; provider?: ProductResearchProvider; budgetUsd?: number }): Route[] {
+  const service = new ProductResearchService(options);
+  return [
+    { method: "POST", path: "/v1/products/research", scope: "write", tier: "middle", async handler(req, res) {
+      res.setHeader("Cache-Control", "private, no-store");
+      const fail = (code: number, error: string) => sendJson(res, code, { version: PRODUCT_RESEARCH_VERSION, error });
+      const actor = verifiedActor(req);
+      if (!actor) { fail(403, "invalid_identity"); return; }
+      let command: unknown;
+      try { command = JSON.parse(await readBoundedRawBody(req, PRODUCT_RESEARCH_LIMITS.requestBytes)); }
+      catch (error) {
+        // An oversize body and malformed JSON are distinct refusals: 413 request_too_large vs 400 invalid_input.
+        const tooLarge = error instanceof RawBodyTooLargeError;
+        fail(tooLarge ? 413 : 400, tooLarge ? "request_too_large" : "invalid_input");
+        return;
+      }
+      const result = await service.run(actor, command);
+      if (!result.ok) { fail(researchStatus[result.code], result.code); return; }
+      sendJson(res, 200, result.value);
     } },
   ];
 }
