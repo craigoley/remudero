@@ -81,6 +81,28 @@ test("saved improvement pump names its active handoff and starts no second targe
   } finally { p.stop(); release(); await p.settled(); }
 });
 
+test("saved improvement pump logs a failed handoff, clears it, and goes on to the next target", async () => {
+  const starts: string[] = [], rows: { step: string; extra?: Record<string, unknown> }[] = [];
+  const p = daemon.startImprovementActionPump({
+    pendingImprovementActions: async function* () { yield target("i"); yield target("j"); },
+    handOffImprovementAction: async (request: ReturnType<typeof target>) => {
+      starts.push(request.operationId);
+      if (request.operationId === target("i").operationId) throw new Error("gateway refused");
+      return { outcome: "drafted" };
+    },
+  }, 5, (step, extra) => rows.push({ step, extra }));
+  try {
+    for (let i = 0; i < 100 && starts.length < 2; i++) await turn();
+    p.stop(); await p.settled();
+    assert.deepEqual(starts.slice(0, 2), [target("i").operationId, target("j").operationId], "a failed handoff never stops the pass");
+    assert.deepEqual(rows.slice(0, 4).map(r => r.step), [
+      "improvement.action_started", "improvement.action_handoff_failed", "improvement.action_started", "improvement.action_handoff_settled",
+    ]);
+    assert.deepEqual(rows[1]!.extra, { operation_id: target("i").operationId, error: "Error: gateway refused" });
+    assert.equal(p.activeOperation(), undefined, "the failed handoff is no longer named active");
+  } finally { p.stop(); await p.settled(); }
+});
+
 type Row = { step: string; fields: Record<string, unknown> };
 async function until(done: () => boolean, what: string): Promise<void> {
   for (let i = 0; i < 2000 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 1));
