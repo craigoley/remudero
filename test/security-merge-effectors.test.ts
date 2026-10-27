@@ -120,6 +120,8 @@ for(const route of ['auto','queue-auto','direct','queue-enqueue','quota','quota-
     reason:'hold arrived during trusted metadata',pr_number:11468})+'\n'}});
   let attempts=0;
   const deps={...real,ledgerLines:()=>[],say:()=>{},contributorAdmission:async()=>{},
+   stackPrerequisite:async()=>({state:'unstacked' as const,parentNumbers:[]}),
+   closingReferences:async()=>({state:'clean' as const,defused:[]}),
    mergeQueue:async()=>route.startsWith('queue'),readPlanTouch:async()=> 'untouched' as const,
    readMergedRatchets:undefined,readMergeFacts:async()=>({mergeable:'MERGEABLE' as const,mergeableState:'clean',behindBy:0}),
    updateBranch:async()=>({ok:true}),isMerged:async()=>false,
@@ -133,6 +135,7 @@ for(const route of ['auto','queue-auto','direct','queue-enqueue','quota','quota-
    const result=await attemptArmAsync(url,deps);
    assert.equal(result.outcome,'hold-refused');
   });
+  assert.ok(shim.calls().some(call=>call.includes('/check-runs?')),'the actual metadata-to-write interval was reached');
   assert.equal(shim.calls().some(call=>call.startsWith('pr merge ')||call.includes('PUT')),false);
  });
 }
