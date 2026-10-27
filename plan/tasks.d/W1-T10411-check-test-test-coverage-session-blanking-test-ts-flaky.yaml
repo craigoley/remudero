@@ -80,3 +80,11 @@
     Missing/unreadable changed-test evidence must refuse, not certify a clean scan.
     Native repair retains source ownership; normal ruling, hosted tests, coverage,
     security and semantic qualification remain required. No remedy credit before effect.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.93
+    reasons:
+      - "high-risk verdict at confidence 0.93 — on the change's description/files alone, no diff was read — The cited failures report concrete scanner findings in tracked tests; the supplied evidence does not establish that these failures are flaky.; on the change's description/files alone, no diff was read — The filing proposes implementation changes to the scanner and author preflight without describing a preventive mechanism. Its sole acceptance proof checks for test-title text, leaving the claimed prevention unverifiable from what is shown."
+    judged_at: "2026-10-27T01:26:42.829Z"
+    pin: "7b99dd05697c7837c165af0f52a96e0a57b001e3d97dcc81a77b9dad362b8cb1"

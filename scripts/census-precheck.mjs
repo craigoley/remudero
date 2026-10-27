@@ -1631,16 +1631,31 @@ function runSnapshotSuites(snapshot, files, root) {
   return { failing, notMeasured };
 }
 
+/** Snapshot-only controller work: source-reader policies that require Git stay explicitly unmeasured.
+ * Static structural Git-free suites each get head/base children; the joined group and reach do too.
+ * The controller needs its own setup allowance plus those existing bounded children. */
+export function snapshotControllerBudget() {
+  const structural = new Set([...PRECHECK_TRIGGERED_SUITES, ...PRECHECK_PATH_TRIGGERED_SUITES]
+    .filter(member => member.gitFree === true && member.structural === true).map(member => member.testFile));
+  const stages = { setup: 1, admission: 1, reach: 2, joinedGitFree: 2, structuralGitFree: structural.size * 2 };
+  return { version: 1, childTimeBoundMs: CENSUS_SUITE_CHILD_TIME_BOUND_MS, stages,
+    timeoutMs: Object.values(stages).reduce((sum, count) => sum + count, 0) * CENSUS_SUITE_CHILD_TIME_BOUND_MS };
+}
+
 export function main(argv, { measure = measureViaChild, admitted = listAdmittedCensusMembers, runSuites = runCensusSuitesViaChild } = {}) {
   let values;
   try {
     ({ values } = parseArgs({
       args: argv,
-      options: { root: { type: "string", default: "." }, base: { type: "string", default: "origin/main" } },
+      options: { root: { type: "string", default: "." }, base: { type: "string", default: "origin/main" }, "snapshot-budget": { type: "boolean", default: false } },
     }));
   } catch (e) {
     console.error(`census-precheck: could not measure — ${String(e.message ?? e)}`);
     return 2;
+  }
+  if (values["snapshot-budget"]) {
+    console.log(JSON.stringify(snapshotControllerBudget()));
+    return 0;
   }
   const root = resolve(values.root);
   let violations;
