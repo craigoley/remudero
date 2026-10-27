@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -316,7 +316,25 @@ test("W1-T9950: a queue that cannot be used degrades to unqueued polling and say
   assert.equal(a.lease?.outcome, "acquired", "an unusable queue never blocks admission");
   assert.equal(rows(a.lines, "test_slot.acquired")[0]!.ticketed, false);
   a.lease!.release();
-  // (2) A read-only parent is deliberately not driven: a mode-bit denial binds only for a non-root uid.
+  // (2) A read-only parent is deliberately not driven: a mode-bit denial binds only for a non-root uid. The
+  // root-proof denial: the queue path is a SYMLINK to a real empty dir. Listing follows it (nobody ahead) and the
+  // recursive mkdir accepts it, but the O_DIRECTORY|O_NOFOLLOW open refuses it, so JOINING the queue throws.
+  const linked = slotDir(t, "queue-link"), target = slotDir(t, "queue-target");
+  symlinkSync(target, testSlotQueueDir(linked));
+  const occupant = acquireTestSlot("holder", { ...opts(linked), clock: time.clock, pid: PID.holder, log: () => {}, say: () => {} });
+  assert.equal(occupant.outcome, "acquired");
+  const b = s.arrive(time.now - time.start, "B", { ...opts(linked), pid: PID.b, pollMs: 1_000 });
+  s.runUntil(time.now - time.start);
+  const refused = rows(b.lines, "test_slot.queue_unavailable");
+  assert.equal(refused.length, 1, b.lines.join("\n"));
+  assert.match(String(refused[0]!.error), /ENOTDIR|ELOOP/);
+  assert.deepEqual(readdirSync(target), [], "a refused join writes no ticket through the link");
+  assert.equal(reports(b.lines).length, 0, "a waiter that could not join claims no position");
+  occupant.release();
+  s.runUntil(time.now - time.start + 1_000);
+  assert.equal(b.lease?.outcome, "acquired", "a queue that cannot be joined never blocks admission");
+  assert.equal(rows(b.lines, "test_slot.acquired")[0]!.ticketed, false);
+  b.lease!.release();
   // (3) Unparseable ticket bytes are reaped by name; an unreadable history is an unknown ETA, and a release
   // that cannot record its hold logs it.
   const broken = slotDir(t, "broken");

@@ -185,7 +185,7 @@ function writeWhole(path: string, body: string): void {
  * dir swapped for a link after the check can never redirect a world-writable chmod (CodeQL js/file-system-race).
  */
 function widenOwnDir(dir: string): void {
-  const fd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  const fd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW, 0o600);
   try {
     const st = fstatSync(fd);
     if ((st.mode & 0o777) !== 0o777 && st.uid === process.getuid?.()) fchmodSync(fd, 0o777);
