@@ -107,7 +107,9 @@ test('final merge fences refuse unreadable configuration and torn hold evidence'
  await withLiveWritesAllowed(async()=>{
   assert.throws(()=>realArmDeps(()=>{throw Error('fixture config unavailable');}).armAuto(url),/fixture config unavailable/);
   writeFileSync(shim.ledger,'{torn-hold');
-  await assert.rejects(()=>realArmDepsAsync(()=>({root:shim.root} as Config)).armAuto(url),/hold evidence is torn/);
+  await assert.rejects(()=>realArmDepsAsync(()=>({root:shim.root} as Config)).armAuto(url),/hold evidence is unavailable or torn/);
+  rmSync(shim.ledger);
+  await assert.rejects(()=>realArmDepsAsync(()=>({root:shim.root} as Config)).armAuto(url),/hold evidence is unavailable or torn/);
  });
  assert.equal(shim.calls().some(call=>call.startsWith('pr merge ')||call.includes('PUT')),false);
 });

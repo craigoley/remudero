@@ -1492,7 +1492,10 @@ export function assertOperatorMergeUnheld(
   deps: Pick<ArmDeps<true>, "say" | "ledgerLines">,
 ): void {
   const lines = deps.ledgerLines();
-  if ((lines as { torn?: number }).torn) throw new Error("operator hold evidence is torn — merge withheld");
+  const evidence = lines as { present?: boolean; torn?: number };
+  if (evidence.present !== true || evidence.torn !== 0) {
+    throw new Error("operator hold evidence is unavailable or torn — merge withheld");
+  }
   if (operatorHoldRefusal(prUrl, { ...deps, ledgerLines: () => lines })) {
     throw new OperatorMergeHoldWriteRefused("operator merge hold stands — write withheld");
   }
