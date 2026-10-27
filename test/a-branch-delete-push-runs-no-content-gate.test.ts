@@ -136,13 +136,21 @@ test("a real dispatch-claim push runs no source-content gate", () => {
   assert.equal(renewal.error, undefined);
   assert.equal(renewal.status, 0, renewal.stderr);
   assert.match(renewal.stderr, /dispatch-claim-only/);
+  assert.equal(existsSync(log), false);
+  // Git omits an already-refused stale ref from hook stdin. Let the recording gates
+  // pass in this fixture so Git's own lease refusal, rather than a gate, decides it.
+  for (const gate of GATES) {
+    const path = join(dir, "scripts", gate);
+    writeFileSync(path, readFileSync(path, "utf8").replace("process.exit(1);", "process.exit(0);"));
+  }
   const stale = leasedPush(head);
   assert.equal(stale.error, undefined);
   assert.notEqual(stale.status, 0, "skipping content gates cannot relax Git's exact lease");
   assert.match(stale.stderr, /stale info/);
   assert.equal(execFileSync("git", ["--git-dir", remote, "rev-parse", "refs/rmd-dispatch/W1-T10760"],
     { encoding: "utf8" }).trim(), renewed, "a stale keeper cannot overwrite the current claim anchor");
-  assert.equal(existsSync(log), false);
+  const staleGates = readFileSync(log, "utf8").split("\n").filter(Boolean);
+  for (const gate of GATES) assert.ok(names(staleGates).includes(gate), `unknown stdin retains ${gate}`);
 });
 
 test("dispatch claims and deletions together have no source content to judge", () => {
