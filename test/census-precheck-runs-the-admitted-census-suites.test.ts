@@ -291,3 +291,33 @@ test("W1-T5617: every admitted suite is run by census-precheck under its own npm
     assert.ok(!baseline.includes(m.testFile), `${m.testFile} is run, so it is not CI-only`);
   }
 });
+
+
+test("a census process exit is unmeasured rather than an attributable assertion failure", () => {
+  const wrapper = TAP_HEAD + `# Subtest: ${BOUNDS.testFile}\nnot ok 1 - ${BOUNDS.testFile}\n  ---\n  location: '/repo/${BOUNDS.testFile}:1:1'\n  failureType: 'testCodeFailure'\n  exitCode: 1\n  signal: ~\n  error: 'test failed'\n  code: 'ERR_TEST_FAILURE'\n  ...\n` + tapSummary(1, 1);
+  assert.throws(() => viaChild({ status: 1, stdout: wrapper }, [BOUNDS.testFile]).failing(),
+    /census suite process.*did not complete its assertions/);
+  const assertion = TAP_HEAD + notOk(1, "the population rejects an invalid member", `/repo/${BOUNDS.testFile}`) + tapSummary(1, 1);
+  assert.deepEqual(viaChild({ status: 1, stdout: assertion }, [BOUNDS.testFile]).failing(), [BOUNDS.testFile],
+    "a genuine completed assertion failure remains attributable and refuses a caused regression");
+});
+
+test("the same broken census loader on both real trees cannot become a clean comparison", (t) => {
+  const repo = gitRepo({ kind: "census-loader-unknown" });
+  const write = (path: string, text: string) => {
+    mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
+    writeFileSync(join(repo.dir, path), text);
+  };
+  write(FIXTURE_MEMBER.testFile, 'throw new Error("the census fixture loader is unavailable");\n');
+  write(SKILL, 'import { test } from "node:test"; test("healthy mandatory fixture census", () => {});\n');
+  write("lib/bounds.ts", DECLARED);
+  repo.git("add", "-A");
+  repo.git("commit", "--quiet", "-m", "base carries an unexecutable census");
+  repo.git("switch", "--quiet", "-c", "work");
+  write("lib/joining.ts", "export {};\n");
+  repo.git("add", "-A");
+  repo.git("commit", "--quiet", "-m", "join the population without repairing its loader");
+  const output = capture(t);
+  assert.equal(precheck.main(["--root", repo.dir, "--base", "main"], { admitted: () => [FIXTURE_MEMBER] }), 2);
+  assert.ok(output.err.some((line) => /NOT MEASURED.*census suite process.*did not complete its assertions/.test(line)), output.err.join("\n"));
+});
