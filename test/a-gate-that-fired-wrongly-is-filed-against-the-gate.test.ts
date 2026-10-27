@@ -527,3 +527,76 @@ test("omitted repair patches use the maintained default full-diff transport", as
   assert.deepEqual(shim.calls(), [command]);
   assert.equal(captured.reads.length, 0);
 });
+
+function gateRepairIdentityFixture(first: { name: string; details_url?: string; app?: { slug: string }; compare?: Record<string, unknown> }) {
+  const red = "a".repeat(40), green = "b".repeat(40), tree = "c".repeat(40);
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const logs: string[][] = [];
+  const compare = { files: [], base_commit: { sha: red, commit: { tree: { sha: tree } } },
+    merge_base_commit: { sha: red }, commits: [{ sha: green, commit: { tree: { sha: tree } } }] };
+  const ghJson = async (args: string[]): Promise<unknown> => {
+    const path = args[1] ?? "";
+    if (args[0] === "repo") return { nameWithOwner: "o/r" };
+    if (path.includes("/pulls?")) return [1, 2].map(number => ({ number, base: { sha: "base" } }));
+    if (path.includes("/pulls/1/commits")) return [{ sha: red }, { sha: green }];
+    if (path.includes("/pulls/2/commits")) return [{ sha: "red2" }, { sha: "green2" }];
+    if (path.includes("/check-runs")) return { check_runs: [{ id: 121865015049,
+      name: path.includes("red2") || path.includes("green2") ? "census" : first.name,
+      details_url: first.details_url, app: first.app, status: "completed",
+      conclusion: path.includes(`/commits/${red}/`) || path.includes("/commits/red2/") ? "failure" : "success" }] };
+    if (path.endsWith("/status")) return { statuses: [] };
+    if (path.includes(`/compare/${red}...${green}`) && first.compare) return first.compare;
+    if (path.includes("/compare/base...")) return { merge_base_commit: { sha: "base" }, files: [] };
+    if (path.includes("/compare/")) return { files: [{ filename: baseline, patch: "@@\n-1\n+2" }] };
+    throw new Error(`unexpected gate identity read: ${args.join(" ")}`);
+  };
+  return { red, green, compare, events, logs,
+    run: () => loadGateRepairObservations([{ ...rule, trigger: () => true }], { ghJson, ghText: async args => {
+      logs.push(args);
+      assert.deepEqual(args, ["run", "view", "--job", "91", "--log-failed"]);
+      return "rule-checks: failed suites: census";
+    } }, (step, extra) => events.push({ step, extra })) };
+}
+
+test("an external check with no Actions job stays unknown without blocking other gate observations", async () => {
+  const f = gateRepairIdentityFixture({ name: "CodeQL", app: { slug: "github-advanced-security" },
+    details_url: "https://github.com/craigoley/remudero/runs/121865015049" });
+  const observed = await f.run();
+  assert.deepEqual(observed.map(row => row.pair.pr), [2]);
+  assert.deepEqual(f.logs, []);
+  assert.equal(f.events.length, 1);
+  assert.equal(f.events[0]!.step, "gate.repair_evidence_unavailable");
+  assert.equal(f.events[0]!.extra?.reason, "no-actions-job");
+  assert.equal(f.events[0]!.extra?.pr_number, 1);
+  assert.equal(f.events[0]!.extra?.evidence_state, "unknown");
+});
+
+test("the gate gardener reads the actual Actions job instead of its check-run identity", async () => {
+  const f = gateRepairIdentityFixture({ name: "rule-checks", app: { slug: "github-actions" },
+    details_url: "https://github.com/o/r/actions/runs/90/job/91" });
+  assert.deepEqual((await f.run()).map(row => row.pair.pr), [1, 2]);
+  assert.equal(f.logs.length, 1);
+  assert.deepEqual(f.events, []);
+});
+
+test("an exact same-tree check transition has no attributed code remedy and leaves the garden running", async () => {
+  const f = gateRepairIdentityFixture({ name: "census" });
+  const qualified = gateRepairIdentityFixture({ name: "census", compare: f.compare });
+  assert.deepEqual((await qualified.run()).map(row => row.pair.pr), [2]);
+  assert.equal(qualified.events[0]!.extra?.reason, "same-tree-no-code-remedy");
+  assert.equal(qualified.events[0]!.extra?.evidence_state, "unknown");
+  assert.deepEqual(qualified.logs, []);
+});
+
+test("empty or contradictory compare evidence never acquires the same-tree exception", async () => {
+  const f = gateRepairIdentityFixture({ name: "census" });
+  for (const compare of [
+    { files: [] },
+    { ...f.compare, files: undefined },
+    { ...f.compare, base_commit: { sha: f.green, commit: { tree: { sha: "c".repeat(40) } } } },
+    { ...f.compare, merge_base_commit: { sha: f.green } },
+    { ...f.compare, commits: [{ sha: f.red, commit: { tree: { sha: "c".repeat(40) } } }] },
+    { ...f.compare, commits: [{ sha: f.green, commit: { tree: { sha: "d".repeat(40) } } }] },
+    { ...f.compare, commits: [{ sha: f.green, commit: { tree: { sha: "unknown" } } }] },
+  ]) await assert.rejects(gateRepairIdentityFixture({ name: "census", compare }).run(), /repair diff unreadable/);
+});
