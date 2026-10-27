@@ -1215,7 +1215,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
   const fixedSlots = opts.slots ?? configuredTestSlots();
   const measured = fixedSlots === undefined;
   const slots = fixedSlots ?? testSlotCeiling(load().cores);
-  const pool = measured ? "measured" : opts.slots !== undefined ? `fixed at ${fixedSlots}` : `${TEST_SLOTS_ENV}=${fixedSlots}`;
+  const pool = measured ? "measured pool" : opts.slots !== undefined ? `fixed pool of ${fixedSlots}` : `${TEST_SLOTS_ENV}=${fixedSlots} pool`;
   /** Live tickets behind this waiter: the runs a measured grant is shared with. */
   let behind = 0;
   /** The last memory reading this acquisition took, so the note names it without another read. */
@@ -1339,7 +1339,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
   const describeAdmission = (a: Record<string, unknown>): string => {
     const memory = !headroomRead ? "memory not consulted (no peak named)"
       : typeof a.memoryHeadroomBytes === "number" ? `memory headroom ${mib(a.memoryHeadroomBytes)} MiB` : "memory headroom unread";
-    return `admitted by ${String(a.pool)} pool: ${String(a.cores)} cores less ${String(a.headroomCores)} headroom, ` +
+    return `admitted by ${String(a.pool)}: ${String(a.cores)} cores less ${String(a.headroomCores)} headroom, ` +
       `${String(a.grantedToHolders)} worker(s) granted to ${String(a.holders)} holder(s), non-test load ${String(a.nonTestLoad)}, ` +
       `${memory}, named peaks ${mib(Number(a.namedPeaksBytes))} MiB`;
   };
