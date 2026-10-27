@@ -379,3 +379,54 @@ test("W1-T10339: a hold is released by a new head and a changed contract, and le
   assert.equal(fixSeedRead([seedRow, dispatchRow, standDown()], pr, RUN)?.kind, "ended", "no current inputs: today's reading");
   assert.equal(read([standDown(), { step: "proof_amendment.requested", task_id: TASKLESS, outcome: "refused", reason: "shard-not-found" }])?.kind, "held");
 });
+
+
+const CONFLICT_HANDOFF = 'merge state is dirty (mergeable === false or mergeable_state === "dirty") — a conflicted PR registers no new check runs, so a strike buys no information; standing down for the sweep\'s own conflicted disposition rather than retrying blindly';
+function conflictHandoffFixture(reason = CONFLICT_HANDOFF) {
+  const taskId = "W1-T10617";
+  const rows = [seedRow, { ...dispatchRow, task_id: taskId, mode: "ci-log" },
+    standDown({ task_id: taskId, site: "rung.strike", reason, read_contract_revision: "contract-A" })];
+  const f = holdFixture(rows);
+  f.deps.readTaskContractRevision = () => "contract-A";
+  const pr = view({ taskId, headRefName: `run-${taskId}-1792987422525`, mergeState: "dirty",
+    mergeConflict: { files: [{ path: "src/lib/product-routes.ts", oursDeleted: 0, theirsDeleted: 0 }],
+      oursLog: "branch feature", theirsLog: "main feature" } });
+  return { ...f, rows, pr, taskId };
+}
+
+test("a dirty-state CI deferral reaches the captured conflict repair without changing the head or contract", async () => {
+  const f = conflictHandoffFixture();
+  const evidence: FixDispatchEvidence[] = [];
+  f.deps.dispatchFix = (_pr, facts) => {
+    f.state.dispatched++; evidence.push(facts);
+    f.rows.push({ ...dispatchRow, task_id: f.taskId, mode: "merge-conflict", ts: new Date(NOW).toISOString() });
+  };
+  const first = await runSweep([f.pr], f.deps);
+  assert.equal(first.actions[0]!.disposition, "conflicted");
+  assert.deepEqual([f.state.dispatched, f.state.admissions, f.state.escalated], [1, 1, 0]);
+  assert.deepEqual(evidence[0]?.mergeConflict, f.pr.mergeConflict, "the existing conflict worker receives the actual captured paths");
+  await runSweep([f.pr], f.deps);
+  assert.equal(f.state.dispatched, 1, "the newly dispatched conflict round remains owned and deduplicated");
+});
+
+test("a conflict handoff cannot release a design refusal or dispatch without an owned captured conflict", async () => {
+  const changes: Array<(f: ReturnType<typeof conflictHandoffFixture>) => void> = [
+    f => { f.rows[2]!.reason = REASON; },
+    f => { f.rows[2]!.site = "rung.needs_design"; },
+    f => { f.pr.mergeConflict = undefined; },
+    f => { f.pr.mergeConflict = { files: [], oursLog: "", theirsLog: "" }; },
+    f => { f.pr.mergeState = "clean"; },
+    f => { f.pr.headRefName = "human-feature"; },
+  ];
+  for (const change of changes) {
+    const f = conflictHandoffFixture(); change(f);
+    await runSweep([f.pr], f.deps);
+    assert.equal(f.state.dispatched, 0);
+    assert.equal(f.state.admissions, 0);
+  }
+  const f = conflictHandoffFixture();
+  f.deps.claimFixAdmission = () => { f.state.admissions++; return { admitted: false, reason: "fixture capacity refusal" }; };
+  await runSweep([f.pr], f.deps);
+  assert.equal(f.state.admissions, 1);
+  assert.equal(f.state.dispatched, 0, "normal resource admission still refuses the conflict repair");
+});

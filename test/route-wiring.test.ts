@@ -312,6 +312,8 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/products/research",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts and the production-assembly test below (W1-T10613).
   "POST /v1/products/repository",
+  // Assembled HTTP proof over the real default Vercel transport: test/console-api/serve/product-routes.test.ts (W1-T10616).
+  "POST /v1/products/deployment",
   "POST /v1/control/assistant-action",
   "POST /v1/control/stop",
   "POST /v1/control/resume",

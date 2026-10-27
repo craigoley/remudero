@@ -1,0 +1,25 @@
+- id: W1-T10740
+  title: The changed-symbol lexer reads a generator whose parameters carry function types, so a src/run-task.ts diff stops forcing the full 4069-suite author run
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 20
+  risk: medium
+  band_meaning: blast-radius
+  origin: operator-request#vm-resize-health-review-2026-10-26
+  files:
+    - src/lib/test-impact-map.ts
+    - test/ci/suites/a-generator-with-function-typed-parameters-lexes.test.ts
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: run-W1-T10733-1793035320662 -> run-unfiled-1793035320662
+  rationale: "OBSERVED 2026-10-26 (author preflight for W1-T10734, base 3c0e6a00d): 'author selection: full-fallback, 4069 suite(s) ... full-fallback because: full run: the selector could not read its input — changed-symbols \"src/run-task.ts\": lexical context unknown at line 10834 after )'. The line is the return-type annotation `): Steps<string | undefined> {` of `function* writeFixCensusSnapshotSteps(` (origin/main src/run-task.ts around line 10814), whose parameter list carries function types: `log: (step: string, extra?: Record<string, unknown>) => void` and `runGit: (...) => string | Promise<string>`. The same text is on main, so EVERY diff touching src/run-task.ts (the repository's largest hub) makes the author preflight select all 4069 suites instead of the affected set. On this host that run takes hours under the heavy-run admission. HYPOTHESIS, unverified: the conservative scanner in src/lib/test-impact-map.ts (scanCode) reads the `=>` of a parameter's TYPE annotation as an expression arrow, then sets functionBody state, so the `:` after the closing `)` throws `unknown()`."
+  design: "Make stripComments/maskLiterals in conservative mode lex a function or generator declaration whose parameter list contains TypeScript function-type annotations, including the multi-line form above, without throwing. Keep the scanner conservative: a genuinely ambiguous regex-versus-division context must still throw `lexical context unknown`. Diagnose the actual cause before changing the state machine; the rationale's hypothesis is unverified. Positive control: the CURRENT origin/main src/run-task.ts lexes end to end in conservative mode without throwing."
+  acceptance:
+    - claim: a generator whose parameters carry function types lexes in conservative mode, the current src/run-task.ts lexes end to end, and an ambiguous regex-versus-division context still throws
+      proof: "unit test: test/ci/suites/a-generator-with-function-typed-parameters-lexes.test.ts"

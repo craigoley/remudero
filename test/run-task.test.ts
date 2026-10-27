@@ -7874,7 +7874,7 @@ if (args[0] === "label" && args[1] === "create") {
       ],
     } as never;
 
-    withLiveWritesAllowed(() => effects.escalate(pr, "checks are red with no single nameable unmet criterion", question));
+    await withLiveWritesAllowed(() => effects.escalate(pr, "checks are red with no single nameable unmet criterion", question));
 
     const calls: string[][] = readFileSync(callsFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
     const createCall = calls.find((c) => c[0] === "issue" && c[1] === "create");
