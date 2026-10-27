@@ -344,3 +344,8 @@ test("a neighboring PR's archived answer grants no paths to this PR", async (t) 
   writeFileSync(join(state, "ledger.ndjson"), "");
   assert.deepEqual(await readFixScopeHistory(join(state, "ledger.ndjson"), PR), []);
 });
+
+test("an absent authority store grants no extra scope", async (t) => {
+  const state = ownedFixtureDir(t, "absent-scope-authority").dir;
+  assert.deepEqual(await readFixScopeHistory(join(state, "absent", "ledger.ndjson"), PR), []);
+});
