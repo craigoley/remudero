@@ -79,17 +79,17 @@ function buildHarness(): void {
   s("lib/git", `import { spawnSync } from "node:child_process";\n` +
     `export function gitOrThrow(args) { const r = spawnSync("git", args, { encoding: "utf8" });\n` +
     `  if (r.status !== 0) throw new Error("git " + args.join(" ") + ": " + r.stderr); return r.stdout; }\n`);
-  s("rule15-precheck", `import { existsSync } from "node:fs";\nimport { record } from "#test/lib/record.mjs";\nrecord("rule15-precheck");\n` +
+  s("rule15-precheck", `import { existsSync } from "node:fs";\nimport { record } from "./lib/record.mjs";\nrecord("rule15-precheck");\n` +
     `if (existsSync("refuse.rule15")) { console.error("rule15-precheck: a plan record rides with code"); process.exit(1); }\n`);
   for (const name of ["rule25-precheck", "test-tier-manifest", "head-identity-gate", "worker-branch-shape", "lint-plan-precheck"]) {
-    s(name, `import { record } from "#test/lib/record.mjs";\nrecord(${JSON.stringify(name)});\n` +
+    s(name, `import { record } from "./lib/record.mjs";\nrecord(${JSON.stringify(name)});\n` +
       "export const evaluateHeadIdentityGate = () => ({ ok: true });\n");
   }
-  s("ci-control-plane-precheck", `import { record } from "#test/lib/record.mjs";\n` +
+  s("ci-control-plane-precheck", `import { record } from "./lib/record.mjs";\n` +
     `export const affectedCapabilitySnapshot = (files) => files.includes("capability.input");\n` +
     `export function runCiControlPlanePrecheck({ readChangedFiles }) {\n` +
     `  record("ci-control-plane-precheck", { files: readChangedFiles("origin/main") }); return 0; }\n`);
-  s("census-precheck", `import { record } from "#test/lib/record.mjs";\n` +
+  s("census-precheck", `import { record } from "./lib/record.mjs";\n` +
     `export function listAdmittedCensusMembers(root) {\n` +
     `  record("census-table", { root }); return [{ testFile: "test/census.test.ts", script: "census:x", walks: ["src/"] }]; }\n` +
     `export function main(argv, { admitted, runSuites }) {\n` +

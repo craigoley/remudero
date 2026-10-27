@@ -289,7 +289,7 @@ test("the wiring adds no readability, length or vocabulary metric — the standa
 
 test("the checker the board wires in is the presence check itself — the board holds no second, hand-rolled copy of the parts list", () => {
   const source = readFileSync(new URL("../src/lib/status-board.ts", import.meta.url), "utf8");
-  assert.ok(source.includes('from "#test/operator-message.js"'));
+  assert.ok(source.includes('from "./operator-message.js"'));
   assert.ok(source.includes("checkOperatorMessage"));
   // A local re-declaration of the vocabulary would let the two drift silently.
   assert.ok(!source.includes("OPERATOR_MESSAGE_PARTS ="));

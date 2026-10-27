@@ -159,7 +159,7 @@ function makeSpawningTree(t: { after: (fn: () => void) => void }): string {
     'import { isMainThread, parentPort, workerData } from "node:worker_threads";',
     `import { runsBundled, startWorker } from ${JSON.stringify(HELPER)};`,
     `import { trackWorkerThreads } from ${JSON.stringify(HEAPS)};`,
-    'import { spawn as sibling } from "#test/fixture-sibling.js";',
+    'import { spawn as sibling } from "./fixture-sibling.js";',
     "function spawn() {",
     "  return startWorker(import.meta.url, { workerData: { lane: true } });",
     "}",

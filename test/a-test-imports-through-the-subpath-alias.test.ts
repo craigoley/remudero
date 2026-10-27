@@ -194,6 +194,26 @@ test("W1-T9864: the codemod rewrites relative specifiers to the aliases", () => 
   assert.equal(aliasFor("package.json"), null);
 });
 
+test("W1-T9866: the codemod rewrites code but leaves import-like text inside a string or template literal as written", () => {
+  // Source a test writes to a scratch dir, hands to --eval or feeds a recognizer resolves from where THAT code
+  // runs; rewriting it to `#test/...` broke the harness pre-push fixture and the --eval children.
+  const file = "test/nested/deep/thing.test.ts";
+  const data = imp("./lib/record.mjs", "record");
+  const lines = (spec: string, helper: string): string[] => [
+    `const single = '${data}';`,
+    "const tpl = `" + data + "\n" + data + "`;",
+    "const sub = `${" + dyn(spec) + "}`;",
+    "const re = /[\"']/;",
+    imp(helper),
+    "",
+  ];
+  const out = rewriteSource(lines("../../../src/lib/config.js", "../../helpers/git-repo.js").join("\n"), file);
+  assert.equal(out.text, lines("#src/lib/config.js", "#test/helpers/git-repo.js").join("\n"));
+  assert.equal(out.rewritten, 2, "the substitution's import and the real import are code");
+  assert.equal(out.unresolved.length, 3, "each string-embedded specifier is listed, never guessed");
+  assert.ok(out.unresolved.every((item) => /inside a string or template literal/.test(item)));
+});
+
 test("W1-T9864: the codemod writes a file in place, and --folder degrades when the placement table is absent", () => {
   const root = aliasFixtureRoot();
   const out = process.stdout.write.bind(process.stdout);

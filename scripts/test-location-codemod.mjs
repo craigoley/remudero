@@ -12,7 +12,8 @@
 //   ./helpers/z.js, ./sibling.js, ../test/q.js -> #test/<path from test/>
 //   a FIRST LINE `// test/<own-name>.test.ts` self-path comment is removed (it is false after a move).
 // WHAT IT LISTS AND NEVER GUESSES: a relative specifier that leaves src/scripts/test (package.json, bin,
-// packages), a runtime read of ./fixtures, `import.meta.url`/`__dirname` path math, and a read of another
+// packages), import-like text INSIDE a string or template literal (source a test writes to a scratch file, hands
+// to `--eval` or feeds a recognizer: it resolves from where that code runs, not from the test's folder), a runtime read of ./fixtures, `import.meta.url`/`__dirname` path math, and a read of another
 // test by its `test/<name>` path. The repoRoot()/resolveTestPath helper (W1-T9860) is on main, but the codemod
 // does not yet rewrite those reads: most `test/<name>` hits are string literals in test data, not file reads, so
 // they stay reported for the batch task to judge.
@@ -67,6 +68,75 @@ const RUNTIME_SHAPES = [
 ];
 
 /**
+ * A mask over `text`: 1 where a character sits inside a string literal or the text part of a template literal,
+ * 0 in code and comments. A `from "../x"` there is DATA — source a test writes to a scratch file, hands to
+ * `--eval`, or feeds a recognizer — and resolves from wherever that code runs, never from the test's folder,
+ * so the codemod must not rewrite it. Template `${…}` substitutions are code again; a regex literal is skipped
+ * whole so a quote inside it does not open a string.
+ */
+export function stringLiteralMask(text) {
+  const n = text.length;
+  const mask = new Uint8Array(n);
+  let i = 0;
+  const mark = (from, to) => mask.fill(1, from, Math.min(to, n));
+  function quoted(q) {
+    const start = i;
+    i += 1;
+    while (i < n && text[i] !== q && text[i] !== "\n") i += text[i] === "\\" ? 2 : 1;
+    i = Math.min(i + 1, n);
+    mark(start, i);
+  }
+  function template() {
+    while (i < n) {
+      const c = text[i];
+      if (c === "\\") { mark(i, i + 2); i += 2; continue; }
+      if (c === "`") { i += 1; return; }
+      if (c === "$" && text[i + 1] === "{") { i += 2; code(true); i += 1; continue; }
+      mark(i, i + 1);
+      i += 1;
+    }
+  }
+  function regex() {
+    let inClass = false;
+    i += 1;
+    while (i < n && text[i] !== "\n") {
+      const c = text[i];
+      if (c === "\\") { i += 2; continue; }
+      if (c === "[") inClass = true;
+      else if (c === "]") inClass = false;
+      else if (c === "/" && !inClass) { i += 1; break; }
+      i += 1;
+    }
+    while (i < n && /[a-z]/i.test(text[i])) i += 1;
+  }
+  function code(untilBrace) {
+    let depth = 0;
+    let prev = "";
+    while (i < n) {
+      const c = text[i];
+      const d = text[i + 1];
+      if (c === "/" && d === "/") { while (i < n && text[i] !== "\n") i += 1; continue; }
+      if (c === "/" && d === "*") { const end = text.indexOf("*/", i + 2); i = end < 0 ? n : end + 2; continue; }
+      if (c === '"' || c === "'") { quoted(c); prev = c; continue; }
+      if (c === "`") { i += 1; template(); prev = "`"; continue; }
+      if (c === "/" && (prev === "" || "(,=:[!&|?{};<>+-*%~^".includes(prev) || /\b(return|typeof|case|in|of|delete|void|throw|new|else|do)\s*$/.test(text.slice(Math.max(0, i - 12), i)))) {
+        regex();
+        prev = "/";
+        continue;
+      }
+      if (untilBrace) {
+        if (c === "{") depth += 1;
+        else if (c === "}") { if (depth === 0) return; depth -= 1; }
+      }
+      if (!/\s/.test(c)) prev = c;
+      i += 1;
+    }
+  }
+  code(false);
+  return mask;
+}
+
+/**
  * Rewrite one test file's content.
  * @param {string} text   the file's source
  * @param {string} file   repo-relative posix path of the file (its depth decides what each specifier resolves to)
@@ -76,7 +146,12 @@ export function rewriteSource(text, file) {
   const dir = posix.dirname(file);
   const unresolved = [];
   let rewritten = 0;
-  const out = text.replace(SPECIFIER_RE, (whole, lead, quote, spec) => {
+  const inString = stringLiteralMask(text);
+  const out = text.replace(SPECIFIER_RE, (whole, lead, quote, spec, offset) => {
+    if (inString[offset] === 1) {
+      unresolved.push(`${spec} (import-like text inside a string or template literal — data, left as written)`);
+      return whole;
+    }
     const alias = aliasFor(posix.normalize(posix.join(dir, spec)));
     if (alias === null) {
       unresolved.push(`${spec} (leaves src/, scripts/ and test/)`);

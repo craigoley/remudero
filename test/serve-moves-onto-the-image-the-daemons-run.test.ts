@@ -199,7 +199,7 @@ test("the default image seam shells out and reports docker failures as unknown",
   writeFileSync(docker, `#!/bin/sh\ncase "$2" in\nremudero-serve) echo '${OLD}';;\ncustom-primary) echo '${CURRENT}';;\nesac\n`);
   chmodSync(docker, 0o755);
   const run = () => execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
-    `import { realServePolicyDeps } from '#test/src/lib/serve-policy-convergence.ts';
+    `import { realServePolicyDeps } from '#src/lib/serve-policy-convergence.ts';
      console.log(JSON.stringify(realServePolicyDeps(${JSON.stringify(f)}).serveImageDrift()));`],
     { cwd: join(import.meta.dirname, ".."), encoding: "utf8", env: { ...process.env, PATH: `${f.root}:${process.env.PATH}` } });
   assert.deepEqual(JSON.parse(run()), DRIFT);

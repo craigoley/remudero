@@ -159,11 +159,11 @@ test("all four async holders reuse their versioned digests in a new process", as
       let archiveReads = 0;
       fs.createReadStream = (...args) => { archiveReads++; return original(...args); };
       syncBuiltinESMExports();
-      const { setLedgerMemoRetentionContext } = await import("#test/src/lib/ledger-union.ts");
-      const { buildActionResultsRoute } = await import("#test/src/lib/action-results.ts");
-      const { readReportedAnomalies } = await import("#test/src/lib/cost-anomaly.ts");
-      const { createFollowUpHistoryReader } = await import("#test/src/lib/follow-up-policy.ts");
-      const { createLatestMeasurementReader } = await import("#test/src/lib/measurement-cadence.ts");
+      const { setLedgerMemoRetentionContext } = await import("#src/lib/ledger-union.ts");
+      const { buildActionResultsRoute } = await import("#src/lib/action-results.ts");
+      const { readReportedAnomalies } = await import("#src/lib/cost-anomaly.ts");
+      const { createFollowUpHistoryReader } = await import("#src/lib/follow-up-policy.ts");
+      const { createLatestMeasurementReader } = await import("#src/lib/measurement-cadence.ts");
       const dir = process.argv[1];
       const retention = [];
       setLedgerMemoRetentionContext({ thread: "child", instances: [], log: (_step, row) => retention.push(row) });

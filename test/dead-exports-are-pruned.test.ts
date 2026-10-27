@@ -86,7 +86,7 @@ function harness(repo: GitRepo) {
 }
 
 test("W1-T4117: an export reported unreferenced twice is deleted in a small batch", () => {
-  const repo = repoWith({ "src/lib/dead.ts": deadFile(DEAD), "src/lib/user.ts": `import { used } from "#test/dead.js";\n\nexport const who = used();\n` });
+  const repo = repoWith({ "src/lib/dead.ts": deadFile(DEAD), "src/lib/user.ts": `import { used } from "./dead.js";\n\nexport const who = used();\n` });
   const h = harness(repo);
   const reported = DEAD.map((n): [string, string] => ["src/lib/dead.ts", n]);
 
