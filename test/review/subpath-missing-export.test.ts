@@ -207,4 +207,6 @@ test("an aliased proof root attributes real Node output only inside its canonica
   const foreign = realpathSync(f.base) + "-outside/test/probe.test.ts";
   const escaped = `# ${foreign}:1\n# SyntaxError: The requested module '#src/a.js' does not provide an export named 'added'\n`;
   assert.equal(await baseLacksPrAddedExports(escaped, baseAlias, headAlias), undefined);
+  rmSync(baseAlias); symlinkSync(baseAlias, baseAlias);
+  assert.equal(await baseLacksPrAddedExports(base.stdout + base.stderr, baseAlias, headAlias), undefined, "an unresolvable trusted root stays unknown");
 });
