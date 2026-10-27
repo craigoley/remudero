@@ -1,0 +1,250 @@
+- id: W1-T10878
+  title: "THE PUBLIC FIELD-TRIALS PAGE'S PER-MODEL GUIDANCE IS HAND-TYPED AND GOES STALE — the site's router notes are a hard-coded array an owner edits, unconnected to what the router leads or measures; core generates a model-guidance-v1 candidate from the routing config, the guardrail table and the attributable ledger, under the closed public vocabulary and bucketed numbers (disclosure level B), and it rides in the ONE owner-reviewed site import PR"
+  repo: remudero
+  depends_on: [W1-T10875, W1-T10877, W1-T10832]  # attributable outcomes, the vocabulary and guardrail family, and the one site import PR
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high  # public data and public copy: a leaked internal token, an unbucketed count or a ranking claim is a disclosure
+  band_meaning: blast-radius
+  origin: "operator ruling, Craig 2026-10-27: per-model guidance on remudero.com/field-trials at disclosure level B (cards from a closed public vocabulary, bucketed numbers, Wilson intervals, cells under 10 suppressed, a funnel plot instead of a ranking); CC BY 4.0 downloads; contract ~/Remudero-notes/field-trials/model-guidance-contract-v1.md (restated in design below)"
+  plan_refs: [W1-T10831, W1-T10832, W1-T10843, W1-T10875, W1-T10876, W1-T10877, PORTAL-T41, PORTAL-T42, PORTAL-T48]
+  files:
+    - src/lib/field-trials-model-guidance.ts
+    - src/lib/field-trials-site-import.ts
+    - src/lib/field-trials-flow.ts
+    - test/fixtures/field-trials/model-guidance-v1.golden.json
+    - test/routing/core-generates-model-guidance-for-the-site.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-10-27. remudero-site main 06ec0e1: app/field-trials/page.tsx renders "What each model is for, so
+    far" from `routerNotes`, a hard-coded array of 7 models (role, fit, limit) a person edits, and its tests
+    (tests/unit/field-trials-model-guide.test.ts, PORTAL-T40) forbid ranking language and numeric model claims
+    in that copy. Core's routing (.remudero/mounts.yaml capabilities and routes; FALLBACK_OPENWEIGHT_MODELS in
+    src/lib/worker-provider.ts) and the ledger already hold what the cards should say: which model leads which
+    work, which guardrails each needs, and how each fares. The site side of this contract (a model-guidance-v1
+    validator, cards, charts and downloads) is filed in craigoley/remudero-site PR #205 as PORTAL-T42..T49: T42
+    is the model-guidance-v1 validator, T48 makes the importer stage data/model-guidance.json in the same
+    PORTAL-T41 import PR. A depends_on cannot cross repos, so ORDER is stated in design step 6.
+  design: |
+    THE CONTRACT (binding; the site validator enforces the same rules and fails closed to null).
+    Envelope, exact keys: schema "model-guidance-v1"; releaseId (^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$); status
+    "published"; publicationScope "public-opt-in"; evidence "operating-judgment" (never "controlled");
+    windowStart < windowEnd <= asOf <= attestation <= publishedAt, ISO with milliseconds; exactly one
+    attestation pair, stagedBy "field-trials-collector" + stagedAt (core writes this one; core NEVER writes
+    reviewedBy or reviewedAt: the owner's merge of the site PR is the review); consentRegistryRevision equal to
+    the site registry's; sourceRepos bare names, each active aggregate-public in the site registry;
+    routerRevision and sourceDigest as 64-hex sha256; license "CC-BY-4.0"; models (1-16); changes (0-24).
+    Closed vocabularies: PUBLIC_CATEGORIES and PUBLIC_GUARDRAIL_CLASSES from W1-T10877.
+    models[] exact keys: modelId, displayName, vendor, status (routed | measuring | fallback | retired), role
+    (at most 140 chars), suitedCategories (1-6, unique), guardrails (1-6, unique), cautions (1-3, each at most
+    200 chars), cells (0-6, at most one per category), suppressedCells (int >= 0), guardrailFires (0-10),
+    evidenceRef (a published releaseId or null).
+    cells[] exact keys: category; nBucket "10-49" | "50-199" | "200-999" | "1000+"; attributableSuccessPct,
+    ciLowerPct, ciUpperPct integers 0-100 with ciLower <= rate <= ciUpper after rounding; interval "wilson-95";
+    latencyP50Bucket "<10s" | "10-60s" | "1-5m" | "5-20m" | ">20m"; costPerAcceptedBucket "<$0.01" |
+    "$0.01-0.10" | "$0.10-1" | "$1-5" | ">$5" | null.
+    guardrailFires[] keys: guardrailClass; rateBucket "rare" (under one percent) | "occasional" (one to five
+    percent) | "frequent" (over five percent).
+    changes[] keys: date (YYYY-MM-DD), modelId, category, change (now-leads | no-longer-leads | added | retired).
+    FREE TEXT (role, cautions, vendor): no digit; no comparative or ranking word (best, worst, beats, winner,
+    outperforms, faster than, cheaper than, better than, worse than, #1, top); no internal token (RMD_, mounts,
+    .yaml, W1-T, PORTAL-T, the internal lane names, ladder, auction, propensity, prompt). displayName MAY contain
+    digits (model names carry versions) but still rejects `%`, the ranking words and the internal tokens. This
+    matches the site validator (PORTAL-T42) exactly; lintPublicCopy applies the same split before emit.
+
+    1. GENERATOR. New src/lib/field-trials-model-guidance.ts exports buildModelGuidance(input) and the
+       `rmd field-trials --guidance` path in src/lib/field-trials-flow.ts calls it after a good refresh.
+       - status and suitedCategories: from lead and backup positions in the routing config, through
+         publicCategoryOfLane (W1-T10877). routed = leads at least one public category; fallback = backs up
+         only; measuring = a bake-off or randomized arm with no lead; retired = has cells in the window but no
+         routing position.
+       - guardrails: from the per-model mechanism table in code mapped through publicGuardrailClassOf, at most
+         six, ordered by observed fire rate then contract order.
+       - cells: one per public category with n >= 10 model-attributable units (attributeAttemptOutcome,
+         W1-T10875); fewer is counted in suppressedCells, never emitted. For repository-change the unit is a
+         TASK (the model of its last run-task handoff, success = merged by the exact `Remudero-Task: <id>`
+         trailer on main); every other category's unit is a CALL. Rate and Wilson-95 bounds are computed from
+         exact counts IN CORE and rounded to integers; only the bucket and the rounded numbers leave core. Cost
+         is the observed (invoiced-basis) cost of attributable units over accepted units; a notional or
+         unobserved cost makes the bucket null.
+       - guardrailFires: from W1-T10877's family, bucketed; a class with fewer than ten opportunities is omitted.
+       - changes: the routing file's git history over the window, diffed for lead changes per public category.
+       - routerRevision: sha256 of the routing config bytes the cards were derived from.
+       - consent and identity: exactly the --consent rules W1-T10831 applies (no consent file, no candidate).
+    2. COPY (role, cautions). The source of truth is the copy the owner already published: the generator reads
+       the site's current data/model-guidance.json from a fresh checkout of site main. A model keeps its
+       published copy unless it is new or its status or suitedCategories changed since that release; then a
+       cheap model drafts new copy through an existing cash drafting path, bounded to one draft per changed
+       model per pass. Every drafted or carried string passes lintPublicCopy (the free-text rules above); a
+       failure withholds that model's card (counted in the outcome row) and never fails the release. No copy
+       file is committed in core.
+    3. STALENESS. The site PR body lists, per model, "copy carried", "copy redrafted (status or categories
+       changed)" or "card withheld (copy failed lint)", so the owner reviews exactly what moved.
+    4. DELIVERY. syncFieldNoteSiteImport (W1-T10832) also passes the guidance candidate to the site's stage
+       mode, so the ONE open site import PR carries data/model-guidance.json beside the field note. Never a
+       second PR.
+    5. GOLDEN FIXTURE. Commit test/fixtures/field-trials/model-guidance-v1.golden.json byte for byte as the
+       text between the BEGIN and END markers below, dedented, with one trailing newline; its sha256 is
+       c4647c828f7843f5567c70a1fcdb27f2a96228cd7de64998d05a91fde438bd65. The site commits the identical bytes.
+       The contract test pins that sha256 and asserts that buildModelGuidance, over fixture inputs the builder
+       constructs (routing config, ledger rows, prior published copy), emits exactly the fixture. A schema
+       change bumps the version and the fixture in both repos.
+       BEGIN model-guidance-v1.golden.json
+       {
+         "schema": "model-guidance-v1",
+         "releaseId": "model-guidance-golden-fixture",
+         "status": "published",
+         "publicationScope": "public-opt-in",
+         "evidence": "operating-judgment",
+         "windowStart": "2026-09-27T00:00:00.000Z",
+         "windowEnd": "2026-10-27T00:00:00.000Z",
+         "asOf": "2026-10-27T00:00:00.000Z",
+         "stagedBy": "field-trials-collector",
+         "stagedAt": "2026-10-27T06:00:00.000Z",
+         "publishedAt": "2026-10-27T06:00:00.000Z",
+         "consentRegistryRevision": "owner-2026-09-25-v1",
+         "sourceRepos": [
+           "remudero",
+           "remudero-console",
+           "remudero-site"
+         ],
+         "routerRevision": "e85c8a624b519fc28b926eb179e3a958b493f0a994356842f83f902a7197b941",
+         "sourceDigest": "8e20ed67e29a75cd3c8a94400436074df43a4a5e2a991126070e1d14e7b635b1",
+         "license": "CC-BY-4.0",
+         "models": [
+           {
+             "modelId": "gpt-6.1-sol",
+             "displayName": "GPT-6.1 Sol",
+             "vendor": "OpenAI",
+             "status": "routed",
+             "role": "Takes multi-step repository changes and review-heavy work.",
+             "suitedCategories": [
+               "repository-change",
+               "code-review"
+             ],
+             "guardrails": [
+               "independent-model-review",
+               "executable-acceptance-checks",
+               "output-cap-truncation-check",
+               "served-model-verification"
+             ],
+             "cautions": [
+               "Long runs need an output cap and a check that the expected model served the request."
+             ],
+             "cells": [
+               {
+                 "category": "repository-change",
+                 "nBucket": "200-999",
+                 "attributableSuccessPct": 95,
+                 "ciLowerPct": 92,
+                 "ciUpperPct": 97,
+                 "interval": "wilson-95",
+                 "latencyP50Bucket": "1-5m",
+                 "costPerAcceptedBucket": "$0.10-1"
+               },
+               {
+                 "category": "code-review",
+                 "nBucket": "1000+",
+                 "attributableSuccessPct": 96,
+                 "ciLowerPct": 95,
+                 "ciUpperPct": 97,
+                 "interval": "wilson-95",
+                 "latencyP50Bucket": "1-5m",
+                 "costPerAcceptedBucket": null
+               }
+             ],
+             "suppressedCells": 1,
+             "guardrailFires": [
+               {
+                 "guardrailClass": "output-cap-truncation-check",
+                 "rateBucket": "rare"
+               },
+               {
+                 "guardrailClass": "served-model-verification",
+                 "rateBucket": "occasional"
+               }
+             ],
+             "evidenceRef": null
+           },
+           {
+             "modelId": "claude-sonnet-5.5",
+             "displayName": "Claude Sonnet 5.5",
+             "vendor": "Anthropic",
+             "status": "routed",
+             "role": "General-purpose implementer and reviewer for everyday repository work.",
+             "suitedCategories": [
+               "repository-change",
+               "code-review",
+               "diagnosis-triage"
+             ],
+             "guardrails": [
+               "independent-model-review",
+               "executable-acceptance-checks",
+               "output-cap-truncation-check"
+             ],
+             "cautions": [
+               "Confirm a reply was not cut off before treating it as complete."
+             ],
+             "cells": [
+               {
+                 "category": "repository-change",
+                 "nBucket": "200-999",
+                 "attributableSuccessPct": 92,
+                 "ciLowerPct": 89,
+                 "ciUpperPct": 95,
+                 "interval": "wilson-95",
+                 "latencyP50Bucket": "10-60s",
+                 "costPerAcceptedBucket": "$0.10-1"
+               }
+             ],
+             "suppressedCells": 0,
+             "guardrailFires": [
+               {
+                 "guardrailClass": "output-cap-truncation-check",
+                 "rateBucket": "rare"
+               }
+             ],
+             "evidenceRef": null
+           }
+         ],
+         "changes": [
+           {
+             "date": "2026-10-27",
+             "modelId": "gpt-6.1-sol",
+             "category": "code-review",
+             "change": "now-leads"
+           }
+         ]
+       }
+       END model-guidance-v1.golden.json
+    6. ORDER ACROSS REPOS. The site-PR step for guidance runs only after PORTAL-T42 (the model-guidance-v1
+       validator) and PORTAL-T48 (the importer stages model-guidance.json in the one import PR) have merged on
+       site main. Until then the pass builds the
+       candidate, records `site-guidance-stage-unavailable` in the field-trials.refresh row, and the field note
+       proceeds alone.
+  acceptance:
+    - claim: "the committed golden fixture has the contract sha256 and the generator reproduces it byte for byte from fixture inputs"
+      proof: 'grep: test("W1-T10878: the generator reproduces the golden model-guidance fixture" in test/routing/core-generates-model-guidance-for-the-site.test.ts'
+    - claim: "a category with fewer than ten attributable units is suppressed and counted, and no exact count leaves core"
+      proof: 'grep: test("W1-T10878: a small cell is suppressed and only buckets leave core" in test/routing/core-generates-model-guidance-for-the-site.test.ts'
+    - claim: "copy with a digit, a comparative word or an internal token withholds that card without failing the release"
+      proof: 'grep: test("W1-T10878: copy that fails the public lint withholds only its card" in test/routing/core-generates-model-guidance-for-the-site.test.ts'
+    - claim: "published copy is carried unless the model is new or its status or categories changed, and the PR body says which"
+      proof: 'grep: test("W1-T10878: published copy is carried unless the routing moved" in test/routing/core-generates-model-guidance-for-the-site.test.ts'
+    - claim: "core stamps no review fields on the guidance and it rides in the one site import PR"
+      proof: 'grep: test("W1-T10878: guidance rides in the one import PR and core stamps no review" in test/routing/core-generates-model-guidance-for-the-site.test.ts'
+    - claim: "the field-trials command builds the guidance candidate"
+      proof: 'grep: buildModelGuidance( in src/lib/field-trials-flow.ts'
+  falsifier: |
+    At base no generator exists, so every case fails.
+    - Emit exact counts or an unsuppressed small cell: the small-cell case fails.
+    - Skip lintPublicCopy, or let a lint failure fail the release: the copy-lint case fails one way or the other.
+    - Redraft every model's copy on every pass: the carried-copy case fails.
+    - Write reviewedBy, or open a second site PR for guidance: the one-PR case fails.
+    - Change one byte of the fixture: the sha256 pin fails.
+    GUARD that held at base and must still hold: test/field-trials-flow.test.ts (withheld without consent,
+    revocation, refusal on a private join key) passes with the guidance path added.
