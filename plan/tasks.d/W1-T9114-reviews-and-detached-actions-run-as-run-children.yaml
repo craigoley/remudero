@@ -17,6 +17,9 @@
     - src/run-task.ts
     - test/reviews-and-detached-actions-run-as-run-children.test.ts
     - "src/run-child-main.ts"
+  # refusal-amendment (W1-T9114, run DAEMON-1793124401411@cf7bde8fb7653d0ecf428a66f21d8a94fa773723, 2026-10-27T20:45:15.210Z): the worker refused criterion 5 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The remedy is to rewrite criterion 5's claim to name only review children, and to point its proof at a real test title. Both edits are criteria text in `plan/`. That is Architect-only under standing rule 15, and it is outside this task's declared scope.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 1.5  # operator ruling 2026-10-13 (a); review drain is the largest restart-idle phase W1-T9086 leaves behind
   attempts: 0
