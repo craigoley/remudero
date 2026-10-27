@@ -1,7 +1,7 @@
 import { rmSync } from "node:fs";
 import { proposeHandRouteFeedback, projectReconciledFeedback } from "#src/lib/panel-graph.js";
 import { feedbackEntryRepoPath } from "#src/lib/feedback.js";
-import { readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
+import { readQueuedFeedbackRecords, queuedFeedbackDir } from "#src/lib/feedback-landing.js";
 import type { ChangedFileEvidence } from "#src/lib/changed-files-cache.js";
 import type { PrRef } from "#src/lib/status.js";
 import assert from "node:assert/strict";
@@ -1876,6 +1876,12 @@ test("unqualified hand-route evidence never accepts a feedback entry", (t) => {
     { name: "malformed marker", change: (w) => { w.pr.body = "Resolves feedback " + w.entry.id; } },
     { name: "no explicit marker", change: (w) => { w.pr.body = "This mentions " + w.entry.id + " in prose"; } },
     { name: "unreadable merged snapshot", change: (w) => { w.setMerged(null); } },
+    { name: "throwing merged snapshot", change: (w) => { w.github.listMergedHeadBranches = () => { throw new Error("listing failed"); }; } },
+    { name: "throwing failure state", change: (w) => { w.github.readFailed = () => { throw new Error("read state failed"); }; } },
+    { name: "throwing current PR", change: (w) => { w.github.prByRef = () => { throw new Error("PR read failed"); }; } },
+    { name: "throwing source evidence", change: (w) => { w.github.changedFileEvidence = () => { throw new Error("evidence read failed"); }; } },
+    { name: "missing source qualification", change: (w) => { w.github.changedFileEvidence = undefined; } },
+    { name: "missing merged head", change: (w) => { w.pr.headRefOid = undefined; } },
     { name: "unreadable evidence", change: (w) => { w.setEvidence({ status: "unknown", reason: "unbound_legacy_entry" }); } },
     { name: "different merged head", change: (w) => { w.pr.headRefOid = "b".repeat(40); } },
     { name: "different evidence repository", change: (w) => { w.setEvidence({ ...w.github.changedFileEvidence!(w.pr.url), repository: "other/r" } as ChangedFileEvidence); } },
@@ -1932,4 +1938,30 @@ test("hand-route queue failure remains unknown and does not claim a proposal", (
   assert.equal(result[0]?.outcome, "unknown");
   assert.match(result[0]!.reason, /landing|queue/);
   assert.equal(readFeedbackEntry(w.root, w.entry.id).status, "new");
+});
+
+test("hand-route unreadable pending feedback is unknown and never replaced", (t) => {
+  const w = handRouteWorld(t);
+  const dir = queuedFeedbackDir(w.stateRoot);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, w.entry.id + ".yaml");
+  writeFileSync(file, "status: [\n");
+  const before = readFileSync(file, "utf8");
+  assert.equal(w.run()[0]?.outcome, "unknown");
+  assert.equal(w.run()[0]?.reason, "landing_queue_unreadable");
+  assert.equal(readFileSync(file, "utf8"), before);
+});
+
+test("hand-route pending operator decisions and summary bounds are preserved", (t) => {
+  const w = handRouteWorld(t);
+  setFeedbackStatus(w.root, w.entry.id, "answered", { land: { stateRoot: w.stateRoot }, answeredBy: "fb-1792859760649-99e381" });
+  const before = readQueuedFeedbackRecords(w.stateRoot);
+  assert.equal(w.run()[0]?.outcome, "already_queued");
+  assert.deepEqual(readQueuedFeedbackRecords(w.stateRoot), before);
+  const other = handRouteWorld(t);
+  setFeedbackStatus(other.root, other.entry.id, "new", { summary: { headline: "Keep the original question", what_happened: "x".repeat(600), decision: "Keep this context.", options: [{ label: "Keep", consequence: "Keep it." }, { label: "Review", consequence: "Review it." }] } });
+  const original = readFeedbackEntry(other.root, other.entry.id);
+  assert.equal(other.run()[0]?.outcome, "refused");
+  assert.deepEqual(readFeedbackEntry(other.root, other.entry.id), original);
+  assert.equal(readQueuedFeedbackRecords(other.stateRoot).size, 0);
 });

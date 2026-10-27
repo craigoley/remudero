@@ -360,12 +360,8 @@ export function proposeHandRouteFeedback(
       ],
     });
     if (!summary) return refuse("source_receipt_exceeds_existing_summary_contract");
-    try {
-      const result = landFeedbackStatusContent(root, relPath, stringifyYaml({ ...entry, status: "accepted", proposal_pr: pr.url, summary }), land);
-      if (result.error || !result.queued?.includes(relPath)) return uncertain("landing_queue_not_confirmed: " + (result.error ?? "no queue acknowledgement"));
-    } catch {
-      return uncertain("landing_queue_write_failed");
-    }
+    const result = landFeedbackStatusContent(root, relPath, stringifyYaml({ ...entry, status: "accepted", proposal_pr: pr.url, summary }), land);
+    if (result.error || !result.queued?.includes(relPath)) return uncertain("landing_queue_not_confirmed: " + (result.error ?? "no queue acknowledgement"));
     return { id: entry.id, outcome: "proposed", reason: "verified_source_queued_for_review", evidence: receipt };
   });
 }
