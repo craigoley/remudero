@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import { appendOperatorNote, loadOperatorNotesForTask } from "../src/lib/operator-notes.js";
+import { appendOperatorNote, loadOperatorNotesForTask, operatorNoteStore } from "#src/lib/operator-notes.js";
 import type { Plan } from "../src/lib/plan.js";
 import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -32,6 +32,9 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
 function fixture(t: { after: (fn: () => void) => void }, compare: () => unknown = () => ({ merge_base_commit: { sha: "old-main" } })) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}strike-ladder-merge-base-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "state"));
+  const store = operatorNoteStore({ stateDir: join(root, "state"), repository: "acme/remudero", legacyRoot: root });
+  assert.ok(store);
   const rows: Record<string, unknown>[] = [
     { step: "fix.dispatch", task_id: "W1-T5532", head_sha: "old-head", ts: stamp(-2000), strike: 1 },
     { step: "fix.commit_refused", task_id: "W1-T5532", head_sha: "old-head", reason: "the worker changed nothing", strike: 1 },
@@ -75,9 +78,9 @@ function fixture(t: { after: (fn: () => void) => void }, compare: () => unknown 
     readLedger: () => rows, appendLine: (_path, row) => { rows.push({ ts: stamp(), ...row }); }, now: () => NOW,
   };
   const spend = (n: number) => {
-    for (let i = 0; i < n; i++) assert.equal(appendOperatorNote(root, { taskId: "W1-T5532", author: "strike-ladder", ts: stamp(), note: `prior rebuild ${i}` }), true);
+    for (let i = 0; i < n; i++) assert.equal(appendOperatorNote(store, { taskId: "W1-T5532", author: "strike-ladder", ts: stamp(), note: `prior rebuild ${i}` }), true);
   };
-  return { root, rows, calls, reads, open, deps, spend, sweep: (prs: OpenPrView[] = [pr()]) => runSweep(prs, deps) };
+  return { root, store, rows, calls, reads, open, deps, spend, sweep: (prs: OpenPrView[] = [pr()]) => runSweep(prs, deps) };
 }
 
 test("W1-T5635: a ladder-due PR without a hydrated merge base reads one compare and refreshes", async (t) => {
@@ -114,7 +117,7 @@ test("W1-T5635: a refresh that conflicts climbs to close-and-requeue in the same
   assert.match(result.actions[0].reason, /strike ladder rebuild 1\/2/);
   assert.ok(f.rows.some(r => r.step === "sweep.strike_ladder.held" && r.refresh_outcome === "conflict" && r.main_sha === MAIN.sha));
   assert.ok(f.rows.some(r => r.step === "sweep.strike_ladder.requeued" && r.rebuild === 1));
-  assert.equal(loadOperatorNotesForTask(f.root, "W1-T5532").length, 1);
+  assert.equal(loadOperatorNotesForTask(f.store, "W1-T5532").length, 1);
   assert.equal(f.rows.some(r => r.step === "sweep.strike_ladder.refreshed"), false);
 });
 

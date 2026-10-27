@@ -18,18 +18,63 @@
  * the plan was never in.
  */
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { loadOperatorNotesForTask } from "../src/lib/operator-notes.js";
 import { fixedClock } from "../src/lib/clock.js";
+import { configuredOperatorNoteStore, noteCommand, runFeedbackDocketRung } from "#src/run-task.js";
+import { readNativeOperatorNotes } from "#src/cli/commands/run-task-verb.js";
+import { buildSweepEffects } from "#src/lib/sweep.js";
+import type { Config } from "#src/lib/config.js";
 
 function storeLines(root: string): Array<Record<string, unknown>> {
   const p = join(root, "plan", "operator-notes.ndjson");
   if (!existsSync(p)) return [];
   return readFileSync(p, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
 }
+
+test("W1-T10772: default readers share the durable guidance store", async t => {
+  const root = makeTempDir("durable-note-defaults");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const generationA = join(root, "generation-a"), generationB = join(root, "generation-b");
+  for (const path of [join(root, "state"), generationA, generationB]) mkdirSync(path);
+  const config = { root, claudeBin: "/bin/true" } as Config;
+  const storeA = configuredOperatorNoteStore(config, "acme/remudero", generationA)!;
+  const storeB = configuredOperatorNoteStore(config, "acme/remudero", generationB)!;
+  assert.ok(storeA);
+  assert.ok(storeB);
+  const now = new Date();
+  assert.equal(await noteCommand(["W1-T10772", "keep guidance durable"], {
+    config, repository: "acme/remudero", clock: fixedClock(now.getTime() - 1000), log: () => {},
+  }), 0);
+  const native = readNativeOperatorNotes(config, "acme/remudero", generationB, "W1-T10772");
+  assert.equal(native.length, 1);
+  assert.equal(native[0].note, "keep guidance durable");
+  const fix = buildSweepEffects({
+    owner: "acme", repo: "remudero", repoRoot: generationB, config,
+    ledgerPath: join(root, "state", "ledger.ndjson"), runId: "guidance-defaults",
+    plan: { tasks: [], byId: new Map() }, log: () => {},
+  }).strikeLadder!;
+  assert.deepEqual(await fix.readNotes("W1-T10772"), native);
+  assert.equal(await fix.appendNote({ ...native[0], note: "fix lane annotation" }), true);
+  assert.equal(readNativeOperatorNotes(config, "acme/remudero", generationA, "W1-T10772").length, 2);
+  let captured: string[] = [];
+  const logged: Array<{ step: string; extra: unknown }> = [];
+  runFeedbackDocketRung(config, join(root, "state", "ledger.ndjson"), "guidance-defaults", (step, extra) => logged.push({ step, extra }), {
+    root: generationB, repository: "acme/remudero", now: () => now,
+    synthesize: docket => {
+      captured = docket.items.filter(item => item.source === "operator_note").map(item => item.verbatim);
+      return { kind: "empty" };
+    },
+  });
+  assert.equal(captured.length, 2, JSON.stringify(logged));
+  assert.ok(captured.some(text => text.includes("keep guidance durable")));
+  assert.ok(captured.some(text => text.includes("fix lane annotation")));
+  assert.equal(storeLines(generationA).length, 0);
+  assert.equal(storeLines(generationB).length, 0);
+});
 
 test("W1-T3351: `rmd note <id> <text...>` writes one stamped note the docket's surface can read", async () => {
   const { noteCommand } = await import("../src/run-task.js");

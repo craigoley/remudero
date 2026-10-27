@@ -32,7 +32,7 @@ test("source-reader calibration prices that reader including startup, not seven 
     run: (_f: string, _a: string[], options: { timeout: number }) => {
       bounds.push(options.timeout); return { status: 0, stdout: PASS };
     } }), []);
-  assert.deepEqual(bounds, [60000, 36000]);
+  assert.deepEqual(bounds, [120000, 36000]);
   assert.equal(time.length, 0);
 });
 
@@ -41,27 +41,27 @@ test("source-reader runtime refuses absent stale malformed and other-context cal
   assert.equal(censusReaderBudget(good, "head-A", POLICY, 10001), 36000);
   for (const bad of [null, {}, { ...good, context: "head-B" }, { ...good, complete: false }, { ...good, passed: false },
     { ...good, tests: 0 }, { ...good, elapsedMs: NaN }, { ...good, elapsedMs: 0 }, { ...good, finishedMs: 10002 },
-    { ...good, finishedMs: -60000 }]) assert.throws(() => censusReaderBudget(bad, "head-A", POLICY, 10001), /UNKNOWN/);
+    { ...good, finishedMs: -120000 }]) assert.throws(() => censusReaderBudget(bad, "head-A", POLICY, 10001), /UNKNOWN/);
   for (const policy of [null, {}, { floorMs: 0, multiple: 4 }, { floorMs: 1000, multiple: NaN }]) {
     assert.throws(() => censusReaderBudget(good, "head-A", policy, 10001), /UNKNOWN/);
   }
   assert.equal(censusReaderBudget(good, "head-A", POLICY, 10001, 1.1), 39600);
   for (const margin of [0.9, NaN, Infinity]) assert.throws(() => censusReaderBudget(good, "head-A", POLICY, 10001, margin), /UNKNOWN/);
-  assert.equal(censusReaderBudget({ ...good, elapsedMs: 16000 }, "head-A", POLICY, 10001), 60000);
-  assert.throws(() => censusReaderBudget({ ...good, elapsedMs: 60001 }, "head-A", POLICY, 10001), /exceeded.*backstop/);
+  assert.equal(censusReaderBudget({ ...good, elapsedMs: 31000 }, "head-A", POLICY, 10001), 120000);
+  assert.throws(() => censusReaderBudget({ ...good, elapsedMs: 120001 }, "head-A", POLICY, 10001), /exceeded.*backstop/);
   assert.throws(() => censusReaderBudget(good, "head-A", { floorMs: Number.MAX_VALUE, multiple: 4 }, 10001), /UNKNOWN/);
 });
 
 test("source-reader calibration caps its budget rather than rejecting a healthy reader", (t) => {
-  const repo = fixture(t), time = [0, 18000, 18001, 18002, 36002], bounds: number[] = [];
+  const repo = fixture(t), time = [0, 36000, 36001, 36002, 72002], bounds: number[] = [];
   assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
     now: () => time.shift()!, readContext: () => "same-runtime-input", run: (_f: string, _a: string[], options: { timeout: number }) => {
       bounds.push(options.timeout); return { status: 0, stdout: PASS };
     } }), []);
-  assert.deepEqual(bounds, [60000, 60000]);
-  const overrun = [0, 18000, 18001, 18002, 79003, 79004, 140005];
+  assert.deepEqual(bounds, [120000, 120000]);
+  const overrun = [0, 36000, 36001, 36002, 157003, 157004, 278005];
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
-    now: () => overrun.shift()!, readContext: () => "same-runtime-input", run: () => ({ status: 0, stdout: PASS }) }), /exceeded.*60000ms/);
+    now: () => overrun.shift()!, readContext: () => "same-runtime-input", run: () => ({ status: 0, stdout: PASS }) }), /exceeded.*120000ms/);
 });
 
 test("source-reader calibration never retries a failed assertion or learns incomplete output", (t) => {
@@ -104,7 +104,7 @@ test("source-reader qualification re-measures one overrun and passes a re-measur
         bounds.push(options.timeout);
         return bounds.length === 2 && first === "stopped" ? OVERRAN : { status: 0, stdout: PASS };
       } }), []);
-    assert.deepEqual(bounds, [60000, 4000, 4400]);
+    assert.deepEqual(bounds, [120000, 4000, 4400]);
     const runtime = JSON.parse(lines.filter((line) => line.startsWith("census-reader-runtime: ")).at(-1)!.slice(23));
     assert.equal(runtime.budgetMs, 4400);
     assert.equal(runtime.measuredMs, 4300);

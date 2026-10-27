@@ -3,8 +3,9 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
-  risk: low
+  verify: human
+  risk: high  # Rule 19 span: widened to fix, prompt-render, sweep by a scope amendment for #14806
+  band_meaning: span
   priority: 1.09
   status: queued
   attempts: 0
@@ -13,6 +14,8 @@
   files:
     - src/lib/prompt-render.ts
     - test/worker/check-gate-fix.test.ts
+    - "src/cli/commands/fix.ts"
+    - "src/lib/sweep.ts"
   acceptance:
     - claim: "the harness no longer spends a fix round on check:gate-fix"
       proof: "grep: test(\"W1-T10574: check:gate-fix is prevented, not retried\" in test/worker/check-gate-fix.test.ts"
@@ -37,11 +40,3 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
-  risk_ruling:
-    verdict: "rule-3-low-privilege"
-    action: proceed
-    confidence: 1
-    reasons:
-      - "rule 3 (live and low-privilege): the symptom is live, 3 occurrence(s) across 7 day(s), last seen 2026-10-24T12:12:39.226Z, and the record declares no privileged path"
-    judged_at: "2026-10-27T05:40:05.137Z"
-    pin: "6fd678b58691ae79ec456455163d525aab7744594003ade4581ddc6a9c12b3e6"

@@ -151,13 +151,13 @@ import { buildPanelSkillsRoutes } from "./panel-skills.js";
 import { buildPanelSkillRunRoutes } from "./panel-skill-run.js";
 import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
 import { buildTaskCardRoute } from "./task-card.js";
-import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
+import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute, type OperatorNoteStore } from "./operator-notes.js";
 import { buildRecordJudgeLabelRoute, fileJudgeLabelStore } from "./judge-calibration.js";
 import { createOperatorAgentRowsSource } from "./operator-agent-read-model.js";
 import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, prewarmOperatorAgentReads, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
 import type { ProductResearchProvider } from "./product-research.js";
-import { buildProductBuildRoutes, buildProductDeploymentRoutes, buildProductRepositoryRoutes, buildProductResearchRoutes, buildProductRoutes } from "./product-routes.js";
+import { buildProductCaseRoutes, buildProductBuildRoutes, buildProductDeploymentRoutes, buildProductEvaluationRoutes, buildProductRepositoryRoutes, buildProductResearchRoutes, buildProductRoutes } from "./product-routes.js";
 import { automationTriggerLedgerJournal, buildAutomationTriggerRoutes, createAutomationTriggerRegistry, submitAutomationTrigger, type AutomationTriggerRegistry } from "./automation-trigger.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import {
@@ -394,6 +394,7 @@ export interface ServeDeps {
   assistantRepository?: string;
   /** `plan/questions.ndjson` root — MUST equal the `repoRoot` `appendQuestion` writes into (see module header). */
   questionsRoot: string;
+  operatorNoteStore?: OperatorNoteStore;
   tokens: ServiceTokens;
   /** Board SSE poll pace; defaults to board.ts's own `DEFAULT_POLL_MS` (250ms, the W3-T2 2s acceptance bar). */
   pollMs?: number;
@@ -2794,6 +2795,7 @@ function assembleServeRoutes(
   readModel?: ReadModelWorkerHandle,
   memory?: ServeMemoryRegistry,
 ): ServeRoutesAssembly {
+  const noteStore = deps.operatorNoteStore?.repository === deps.assistantRepository ? deps.operatorNoteStore : undefined;
   const selectedRegistryObserver = createSelectedRegistryObserver(deps.selectedRegistryObservation);
   const instanceAnalyticsCaches: AnalyticsSnapshotCache[] = [];
   const badgeScopes: NavBadgeScope[] = [];
@@ -2973,9 +2975,13 @@ function assembleServeRoutes(
     ...buildProductResearchRoutes({ root: deps.fleetControlRoot, provider: deps.productResearchProvider, budgetUsd: deps.productResearchBudgetUsd }),
     ...buildProductRepositoryRoutes({ root: deps.fleetControlRoot }),
     ...buildProductDeploymentRoutes({ root: deps.fleetControlRoot }),
+    ...buildProductEvaluationRoutes({ root: deps.fleetControlRoot }),
     // W1-T10615: the kick marker lands under the target's OWN daemon root, resolved through the same
     // registry, state base and core instance this serve's instance gateway mounts.
     ...buildProductBuildRoutes({ root: deps.fleetControlRoot, repoRoot: deps.panelGraph.root, instances: {
+      registryPath: deps.registry?.repoRegistryPath ?? deps.instances?.registryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
+      stateBase: deps.instances?.stateBase, coreInstance: deps.instances?.coreInstance, readText: deps.instances?.readText } }),
+    ...buildProductCaseRoutes({ root: deps.fleetControlRoot, repoRoot: deps.panelGraph.root, instances: {
       registryPath: deps.registry?.repoRegistryPath ?? deps.instances?.registryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
       stateBase: deps.instances?.stateBase, coreInstance: deps.instances?.coreInstance, readText: deps.instances?.readText } }),
     withStatusNeedsYou(withFleetRuntimeHealth(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), readRuntimeHealth), needsYouGates),
@@ -3035,10 +3041,9 @@ function assembleServeRoutes(
     // because iMessage previews a URL it sends, which would otherwise burn every link unclicked.
     ...escalationLinkRoutes(fleetControlDeps, deps.fleetControlRoot, linkRefusals),
     // W1-T164: operator guidance notes — console-editable, provenance-stamped, task-scoped.
-    // Rooted at `questionsRoot` (repoRoot) — the SAME durable, gitignored `plan/` store
-    // worker.ts's question channel already reads/writes (see operator-notes.ts's module doc).
-    buildAddOperatorNoteRoute({ root: deps.questionsRoot, ledgerPath: deps.ledgerPath }),
-    buildListOperatorNotesRoute({ root: deps.questionsRoot }),
+    // The explicit store is shared across code generations and bound to the serving repository.
+    buildAddOperatorNoteRoute({ root: deps.questionsRoot, store: noteStore, ledgerPath: deps.ledgerPath }),
+    buildListOperatorNotesRoute({ root: deps.questionsRoot, store: noteStore }),
     // W1-T4634: the store analytics reads (state dir = dirname(ledgerPath)); the queue is its last draw.
     buildRecordJudgeLabelRoute(fileJudgeLabelStore(dirname(deps.ledgerPath)), deps.ledgerPath, () => currentAnalyticsSnapshot().judgeCalibration?.sample),
     // Console UP NEXT write-actions (fb-1784988460437-9daa9b): Run a queued task, Drain now.

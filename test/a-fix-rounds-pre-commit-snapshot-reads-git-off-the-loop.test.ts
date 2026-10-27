@@ -140,13 +140,13 @@ test("the snapshot controller reports its nested deadline budget without running
   assert.equal(lines.length, 1);
   const budget = JSON.parse(lines[0]!);
   assert.equal(budget.version, 1);
-  assert.equal(budget.childTimeBoundMs, 60_000);
+  assert.equal(budget.childTimeBoundMs, 120_000);
   assert.ok(budget.timeoutMs > budget.childTimeBoundMs);
   assert.equal(budget.timeoutMs, Object.values(budget.stages).reduce((sum: number, value) => sum + Number(value), 0) * budget.childTimeBoundMs);
 });
 
-const nestedBudget = { version: 1, childTimeBoundMs: 60_000,
-  stages: { setup: 1, admission: 1, reach: 2, joinedGitFree: 2, structuralGitFree: 4 }, timeoutMs: 600_000 };
+const nestedBudget = { version: 1, childTimeBoundMs: 120_000,
+  stages: { setup: 1, admission: 1, reach: 2, joinedGitFree: 2, structuralGitFree: 4 }, timeoutMs: 1_200_000 };
 
 test("the native snapshot controller can collect bounded child outcomes without inheriting their single-child deadline", async () => {
   const calls: Array<{ args: string[]; timeout: number | undefined }> = [];
@@ -154,7 +154,7 @@ test("the native snapshot controller can collect bounded child outcomes without 
     calls.push({ args, timeout: opts.timeout });
     if (args.includes("--snapshot-budget")) return { status: 0, signal: null, stdout: JSON.stringify(nestedBudget), stderr: "" };
     if (args[0]!.endsWith("census-precheck.mjs")) {
-      if ((opts.timeout ?? 0) <= 61_000) return { status: null, signal: "SIGTERM" as NodeJS.Signals, stdout: "partial child progress", stderr: "" };
+      if ((opts.timeout ?? 0) <= 121_000) return { status: null, signal: "SIGTERM" as NodeJS.Signals, stdout: "partial child progress", stderr: "" };
       return { status: 2, signal: null, stdout: "census-precheck: retained source-reader capability UNKNOWN", stderr: "" };
     }
     return { status: 0, signal: null, stdout: "# tests 1\n# pass 1\n# fail 0\n", stderr: "" };
@@ -163,14 +163,14 @@ test("the native snapshot controller can collect bounded child outcomes without 
   assert.match(checked?.unmeasured ?? "", /capability UNKNOWN/);
   assert.equal(calls.length, 3);
   assert.ok(calls[0]!.args.includes("--snapshot-budget"));
-  assert.equal(calls[0]!.timeout, 60_000);
+  assert.equal(calls[0]!.timeout, 120_000);
   assert.equal(calls[1]!.timeout, nestedBudget.timeoutMs);
-  assert.equal(calls[2]!.timeout, 60_000, "the independent reach child retains its original bound");
+  assert.equal(calls[2]!.timeout, 120_000, "the independent reach child retains its original bound");
 });
 
 test("an unreadable snapshot deadline budget refuses before running the controller", async () => {
   for (const stdout of ["not-json", "{}", JSON.stringify({ ...nestedBudget, version: 2 }),
-    JSON.stringify({ ...nestedBudget, timeoutMs: 0 }), JSON.stringify({ ...nestedBudget, timeoutMs: 600_001 }),
+    JSON.stringify({ ...nestedBudget, timeoutMs: 0 }), JSON.stringify({ ...nestedBudget, timeoutMs: 1_200_001 }),
     JSON.stringify({ ...nestedBudget, stages: { ...nestedBudget.stages, structuralGitFree: -1 } }),
     JSON.stringify({ ...nestedBudget, stages: { ...nestedBudget.stages, extra: 1 } })]) {
     let calls = 0;

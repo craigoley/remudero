@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.07
+  # refusal-amendment (W1-T10550, run W1-T10550-1793097508248, 2026-10-27T11:26:43.514Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The observed failures originate in `.github/workflows/ci.yml:221`, which typechecks all source and tests; preventing their dispatch requires changes outside the declared renderer and new test file.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine

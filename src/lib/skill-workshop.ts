@@ -828,8 +828,12 @@ export const SKILL_EFFECTIVENESS_TASK_TYPE = "implement";
 export const SKILL_FIX_TASK_TYPE = "fix";
 /** Predeclared before observing any result, so the report cannot lower it after the fact. */
 export const SKILL_EFFECTIVENESS_HORIZON = 10;
-/** A terminal worker failure is the named harm signal for this descriptive pilot. */
+/** A terminal worker failure is the named harm outcome; harm decides only through {@link harmExcessPValue}. */
 export const SKILL_EFFECTIVENESS_HARM_OUTCOMES = ["failed"] as const;
+/** Predeclared, as the horizon is: harm alone makes a skill a retire candidate only when the selected arm's harm
+ *  rate exceeds the control's at this one-sided significance. Any failed selected run used to suffice, which made
+ *  a skill whose selected runs failed LESS often than its controls a retire candidate. */
+export const SKILL_EFFECTIVENESS_HARM_ALPHA = 0.05;
 /** The steps {@link buildSkillEffectivenessReport} reads; every caller passes exactly this as its union read's
  *  step filter. W1-T10764: a filter without the merge rows hands the report no merge, so both arms read
  *  `merged_runs=0` by construction and only the harm signal can ever decide. Both merge-row steps
@@ -845,6 +849,30 @@ export interface SkillEffectivenessCohort {
   merged_runs: number;
   harmful_terminal_runs: number;
   outcomes: Record<string, number>;
+}
+
+/** One-sided Fisher exact p-value that the selected arm's harm rate exceeds the control's: with each arm's terminal
+ *  runs and the total harm fixed, the chance that the selected arm holds at least the harm it shows. 1 when either
+ *  arm has no terminal run, since nothing is compared. */
+export function harmExcessPValue(selected: SkillEffectivenessCohort, control: SkillEffectivenessCohort): number {
+  const runs = selected.terminal_runs, total = runs + control.terminal_runs;
+  if (runs === 0 || control.terminal_runs === 0) return 1;
+  const harm = selected.harmful_terminal_runs + control.harmful_terminal_runs;
+  const lnFactorial = [0];
+  for (let i = 1; i <= total; i++) lnFactorial.push(lnFactorial[i - 1]! + Math.log(i));
+  const lnChoose = (n: number, k: number): number => lnFactorial[n]! - lnFactorial[k]! - lnFactorial[n - k]!;
+  let p = 0;
+  for (let x = selected.harmful_terminal_runs; x <= Math.min(harm, runs); x++) {
+    p += Math.exp(lnChoose(harm, x) + lnChoose(total - harm, runs - x) - lnChoose(total, runs));
+  }
+  return Math.min(1, p);
+}
+
+/** The harm comparison a report's reader and a retirement proposal both show, so a verdict names its evidence. */
+function renderHarmComparison(report: SkillEffectivenessReport): string {
+  return `selected ${report.selected.harmful_terminal_runs}/${report.selected.terminal_runs}, ` +
+    `control ${report.control.harmful_terminal_runs}/${report.control.terminal_runs}; one-sided exact ` +
+    `p=${harmExcessPValue(report.selected, report.control).toFixed(3)}; harm alone retires below p=${SKILL_EFFECTIVENESS_HARM_ALPHA}`;
 }
 
 export type SkillEffectivenessStatus = "INSUFFICIENT EVIDENCE" | "RETIRE-CANDIDATE" | "REVIEW-CANDIDATE";
@@ -975,7 +1003,7 @@ export function buildSkillEffectivenessReport(
   } else if (belowComparisonHorizon) {
     status = "INSUFFICIENT EVIDENCE";
     basis = "below-horizon";
-  } else if (selected.harmful_terminal_runs > 0) {
+  } else if (harmExcessPValue(selected, control) < SKILL_EFFECTIVENESS_HARM_ALPHA) {
     status = "RETIRE-CANDIDATE";
     basis = "named-harm-signal";
   } else if (selectedMergeUpper <= controlMergeRate) {
@@ -1022,6 +1050,7 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
     renderCohort("selected", report.selected),
     renderCohort("control", report.control),
     `named harm outcomes: ${report.harm_outcomes.join(", ")}`,
+    `harm comparison: ${renderHarmComparison(report)}`,
     "shipment comparison: best/worst-case bounds over handed_off and blocked_ci runs; overlapping possibilities are insufficient evidence. These are not confidence intervals or deployment/live-benefit claims.",
     report.assignment === "randomized"
       ? `assignment: randomized — control is eligible runs that withheld the skill (share ${SKILL_WITHHOLDING_SHARE}); ` +
@@ -1099,6 +1128,7 @@ function renderSkillLifecycleSummary(report: SkillEffectivenessReport, action: S
     `Evidence fingerprint: ${action.evidenceFingerprint}`,
     `Status: ${report.status}`,
     `Basis: ${report.basis}`,
+    `Harm: ${renderHarmComparison(report)}`,
     `Selected: observed=${report.selected.observed_eligible_runs}; terminal=${report.selected.terminal_runs}; ` +
       `merged=${report.selected.merged_runs}; harmful=${report.selected.harmful_terminal_runs}; ` +
       `outcomes=${renderOutcomes(report.selected.outcomes)}`,
