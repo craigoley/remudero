@@ -211,7 +211,7 @@ test("W1-T9866: the codemod rewrites code but leaves import-like text inside a s
   assert.equal(out.text, lines("#src/lib/config.js", "#test/helpers/git-repo.js").join("\n"));
   assert.equal(out.rewritten, 2, "the substitution's import and the real import are code");
   assert.equal(out.unresolved.length, 3, "each string-embedded specifier is listed, never guessed");
-  assert.ok(out.unresolved.every((item) => /inside a string or template literal/.test(item)));
+  assert.ok(out.unresolved.every((item: string) => /inside a string or template literal/.test(item)));
 });
 
 test("W1-T9864: the codemod writes a file in place, and --folder degrades when the placement table is absent", () => {
