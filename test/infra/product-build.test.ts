@@ -7,6 +7,7 @@ import {
   type BuildObservation, type BuildTask, type ProductBuildOptions, type ProductBuildTarget, type TargetInspection, type TaskRead,
 } from "#src/lib/product-build.js";
 import { fixedClock } from "#src/lib/clock.js";
+import { CLAIM_SILENCE_FLOOR_MS } from "#src/lib/dispatch-claim.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -243,13 +244,23 @@ test("W1-T10615: the default target reads the real managed set, runner registry 
   writeFileSync(join(repoRoot, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
   const repo = { id: ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main" };
   const shard = "- id: W9-T1\n  origin: product-plan#prd_x/plan-approved-1\n  status: queued\n  budget_usd: 10\n";
+  const NOW = Date.parse("2026-10-26T12:00:00.000Z");
+  const ANCHOR = "1".repeat(40);
+  const TIP = "2".repeat(40);
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const anchorAt = (mintedMs: number, renewedMs?: number) =>
+    `rmd-dispatch claim 4242@fleet-host ${iso(mintedMs)}${renewedMs === undefined ? "" : `\nrenewed 4242@fleet-host ${iso(renewedMs)}`}`;
+  const commit = (message: string, dateMs: number) => JSON.stringify({ sha: "c".repeat(40), message, committer: { date: iso(dateMs) } });
+  const claimRef = JSON.stringify([{ ref: "refs/rmd-dispatch/W9-T1", object: { sha: ANCHOR } }]);
   const routes: { when: string; stdout: string }[] = [
+    { when: `git/commits/${ANCHOR}`, stdout: commit(anchorAt(NOW - 60_000), NOW - 60_000) },
+    { when: `git/commits/${TIP}`, stdout: commit("wip", NOW - 30_000) },
     { when: "commits/main", stdout: JSON.stringify({ sha: HEAD }) },
     { when: `contents?ref=${HEAD}`, stdout: JSON.stringify([{ name: "README.md" }, { name: "LICENSE" }]) },
     { when: "contents/plan/tasks.d/W9-T1-first.yaml", stdout: shard },
     { when: "contents/plan/tasks.d?ref=main", stdout: JSON.stringify([{ name: "W9-T1-first.yaml" }]) },
     { when: "matching-refs/rmd-dispatch/W9-T1", stdout: JSON.stringify([]) },
-    { when: "matching-refs/heads/run-W9-T1-", stdout: JSON.stringify([{ ref: "refs/heads/run-W9-T1-17" }]) },
+    { when: "matching-refs/heads/run-W9-T1-", stdout: JSON.stringify([{ ref: "refs/heads/run-W9-T1-17", object: { sha: TIP } }]) },
     { when: "search/issues", stdout: JSON.stringify({ total_count: 0 }) },
   ];
   const answer = async (args: string[]) => {
@@ -259,7 +270,7 @@ test("W1-T10615: the default target reads the real managed set, runner registry 
     return route.stdout;
   };
   const override = (when: string, stdout: string) => { routes.unshift({ when, stdout }); };
-  const target = ghProductBuildTarget({ repoRoot, text: answer });
+  const target = ghProductBuildTarget({ repoRoot, text: answer, clock: fixedClock(NOW) });
   // One call over the real default transport proves the production seam is not only ever faked.
   const shim = ghShim([{ when: "commits/main", stdout: JSON.stringify({ sha: HEAD }) }, { when: "contents?ref=", stdout: JSON.stringify([{ name: "src" }]) }]);
   const original = process.env.PATH;
@@ -273,15 +284,42 @@ test("W1-T10615: the default target reads the real managed set, runner registry 
   assert.deepEqual(await target.task(repo, "W9-T1"), { state: "found", task: { id: "W9-T1", origin: "product-plan#prd_x/plan-approved-1", status: "queued", budgetUsd: 10, claimed: false, merged: false } });
   assert.deepEqual(await target.task(repo, "W9-T2"), { state: "absent" });
   assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "none" });
-  override("matching-refs/rmd-dispatch/W9-T1", JSON.stringify([{ ref: "refs/rmd-dispatch/W9-T1" }]));
+  // `matching-refs` is a prefix match: a sibling task's claim is neither this task's claim nor its admission.
+  override("matching-refs/rmd-dispatch/W9-T1", JSON.stringify([{ ref: "refs/rmd-dispatch/W9-T10", object: { sha: ANCHOR } }]));
+  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "none" });
+  const sibling = await target.task(repo, "W9-T1");
+  assert.ok(sibling.state === "found" && !sibling.task.claimed, "W9-T10's claim never reads as W9-T1's");
+  // A claim minted a minute ago with its run branch published is running.
+  override("matching-refs/rmd-dispatch/W9-T1", claimRef);
   assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "running", url: "https://github.com/craigoley/wreckterra/tree/run-W9-T1-17" });
-  override("matching-refs/heads/run-W9-T1-", JSON.stringify([]));
-  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted" });
   const claimed = await target.task(repo, "W9-T1");
   assert.ok(claimed.state === "found" && claimed.task.claimed, "a held dispatch claim is read as claimed");
   override("search/issues", JSON.stringify({ total_count: 1 }));
   const merged = await target.task(repo, "W9-T1");
   assert.ok(merged.state === "found" && merged.task.merged, "merged credit is read from the trailer search");
+  // The run ended and its refs remain: an old mint and renewal and an old branch commit are admission, not execution.
+  override(`git/commits/${ANCHOR}`, commit(anchorAt(NOW - 3 * 3_600_000, NOW - 2 * 3_600_000), NOW - 2 * 3_600_000));
+  override(`git/commits/${TIP}`, commit("last worker commit", NOW - 2 * 3_600_000));
+  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted" }, "leftover refs after the run ended never read as running");
+  // Silence of exactly the two-renewal floor is already past what a live holder allows.
+  override(`git/commits/${TIP}`, commit("last worker commit", NOW - CLAIM_SILENCE_FLOOR_MS));
+  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted" });
+  // A fresh run-branch commit, or a fresh renewal on an old claim, is a live holder's sign of life.
+  override(`git/commits/${TIP}`, commit("fresh worker commit", NOW - CLAIM_SILENCE_FLOOR_MS + 1));
+  assert.equal((await target.observe(repo, "W9-T1")).state, "running");
+  override(`git/commits/${TIP}`, commit("last worker commit", NOW - 2 * 3_600_000));
+  override(`git/commits/${ANCHOR}`, commit(anchorAt(NOW - 3 * 3_600_000, NOW - 60_000), NOW - 60_000));
+  assert.equal((await target.observe(repo, "W9-T1")).state, "running");
+  // Alive but no exact published run branch to link: admitted, never running.
+  override("matching-refs/heads/run-W9-T1-", JSON.stringify([{ ref: "refs/heads/run-W9-T1-17-retry", object: { sha: TIP } }, { ref: "refs/heads/run-W9-T1-18" }]));
+  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted" });
+  override("matching-refs/heads/run-W9-T1-", JSON.stringify([]));
+  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted" });
+  // A claim whose anchor carries no decodable identity, or no object, still proves only admission.
+  override(`git/commits/${ANCHOR}`, commit("not a claim anchor", NOW));
+  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted" });
+  override("matching-refs/rmd-dispatch/W9-T1", JSON.stringify([{ ref: "refs/rmd-dispatch/W9-T1" }]));
+  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted" });
   // A shard that holds no such task is absent, never a guess.
   override("contents/plan/tasks.d/W9-T1-first.yaml", "- id: W9-T7\n  status: queued\n");
   assert.deepEqual(await target.task(repo, "W9-T1"), { state: "absent" });

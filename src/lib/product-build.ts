@@ -3,8 +3,9 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { systemClock, type Clock } from "./clock.js";
+import { CLAIM_SILENCE_FLOOR_MS, claimLastSignOfLife, dispatchClaimRef, parseClaimAnchorMessage, type RunBranchCommit } from "./dispatch-claim.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { isPaused, isSafeRepoName, isSafeTaskId, isStopped, requestKick } from "./fleet-control.js";
+import { isPaused, isSafeTaskId, isStopped, requestKick } from "./fleet-control.js";
 import { ghTextAsync } from "./github-transport.js";
 import { loadManagedRepos } from "./managed-repos.js";
 import { ProductIntentStore } from "./product-intent-store.js";
@@ -86,8 +87,9 @@ type GhText = (args: string[], opts?: { maxBuffer?: number; timeout?: number }) 
 const sha = /^[a-f0-9]{40}$/;
 
 /** The production target port: the existing bounded `gh` transport, the reviewed managed set and the closed suite registry. */
-export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText } = {}): ProductBuildTarget {
+export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText; clock?: Clock } = {}): ProductBuildTarget {
   const text = options.text ?? ghTextAsync;
+  const clock = options.clock ?? systemClock;
   const limits = { maxBuffer: 1024 * 1024, timeout: 20_000 };
   const api = async (path: string, raw = false): Promise<string> =>
     text(["api", ...(raw ? ["-H", "Accept: application/vnd.github.raw"] : []), path], limits);
@@ -95,6 +97,23 @@ export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText
   // A target's shard directory is repository-relative; the one layout resolver names it, never a repeated literal.
   const layout = resolveRepoLayout(sep, () => undefined);
   const shardDirectory = relative(layout.root, join(layout.planDir, "tasks.d")).split(sep).join("/");
+  const refs = z.array(z.object({ ref: z.string(), object: z.object({ sha: z.string().regex(sha) }).optional() }).passthrough());
+  // `matching-refs` is a PREFIX match (W9-T1 also lists W9-T10's claim), so only the exact ref is this task's claim.
+  const claimOf = async (repo: BuildRepository, taskId: string) =>
+    refs.parse(JSON.parse(await api(`${slug(repo)}/git/matching-refs/rmd-dispatch/${taskId}`))).find((entry) => entry.ref === dispatchClaimRef(taskId));
+  const commitOf = async (repo: BuildRepository, commit: string) =>
+    z.object({ message: z.string(), committer: z.object({ date: z.string() }) }).passthrough().parse(JSON.parse(await api(`${slug(repo)}/git/commits/${commit}`)));
+  /** The newest commit on any exact `run-<taskId>-<epochMs>` branch: the worker's own published progress. */
+  const newestRunBranch = async (repo: BuildRepository, taskId: string): Promise<RunBranchCommit | undefined> => {
+    const prefix = `refs/heads/run-${taskId}-`;
+    let newest: RunBranchCommit | undefined;
+    for (const branch of refs.parse(JSON.parse(await api(`${slug(repo)}/git/matching-refs/heads/run-${taskId}-`)))) {
+      if (!branch.ref.startsWith(prefix) || !/^\d+$/.test(branch.ref.slice(prefix.length)) || !branch.object) continue;
+      const atMs = Date.parse((await commitOf(repo, branch.object.sha)).committer.date);
+      if (Number.isFinite(atMs) && (newest === undefined || atMs > newest.atMs)) newest = { atMs, atIso: new Date(atMs).toISOString(), ref: branch.ref };
+    }
+    return newest;
+  };
   return {
     async inspect(repo) {
       let enrolled: boolean | undefined;
@@ -127,10 +146,10 @@ export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText
           .parse(parseYaml(await api(`${slug(repo)}/contents/${shardDirectory}/${shard.name}?ref=${repo.defaultBranch}`, true)));
         const task = parsed.find((entry) => entry.id === taskId);
         if (!task) return { state: "absent" };
-        const claims = z.array(z.unknown()).parse(JSON.parse(await api(`${slug(repo)}/git/matching-refs/rmd-dispatch/${taskId}`)));
+        const claim = await claimOf(repo, taskId);
         const credit = z.object({ total_count: z.number() }).parse(JSON.parse(await api(
           `search/issues?q=${encodeURIComponent(`repo:${repo.owner}/${repo.name} is:pr is:merged "Remudero-Task: ${taskId}"`)}`)));
-        return { state: "found", task: { id: taskId, origin: task.origin, status: task.status, budgetUsd: task.budget_usd, claimed: claims.length > 0, merged: credit.total_count > 0 } };
+        return { state: "found", task: { id: taskId, origin: task.origin, status: task.status, budgetUsd: task.budget_usd, claimed: claim !== undefined, merged: credit.total_count > 0 } };
       } catch (error) {
         // Unreadable is its own state: a claim or credit that cannot be read is never "free".
         void error; return { state: "unreadable" };
@@ -138,11 +157,20 @@ export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText
     },
     async observe(repo, taskId) {
       try {
-        const claims = z.array(z.unknown()).parse(JSON.parse(await api(`${slug(repo)}/git/matching-refs/rmd-dispatch/${taskId}`)));
-        if (claims.length === 0) return { state: "none" };
-        const branches = z.array(z.object({ ref: z.string() })).parse(JSON.parse(await api(`${slug(repo)}/git/matching-refs/heads/run-${taskId}-`)));
-        const branch = branches[0]?.ref.replace(/^refs\/heads\//, "");
-        return branch ? { state: "running", url: `https://github.com/${repo.owner}/${repo.name}/tree/${branch}` } : { state: "admitted" };
+        const claim = await claimOf(repo, taskId);
+        if (!claim) return { state: "none" };
+        // A held claim proves a lane admitted the task (it is taken before any spend). It never proves the lane is
+        // still executing: a finished, crashed or recycled run leaves its claim and its branch behind.
+        if (!claim.object) return { state: "admitted" };
+        const tip = await commitOf(repo, claim.object.sha);
+        const anchor = parseClaimAnchorMessage(tip.message);
+        if (!anchor) return { state: "admitted" };
+        const branch = await newestRunBranch(repo, taskId);
+        // Running needs execution evidence: the holder's mint, its renewal or its newest run-branch commit inside the
+        // two-renewal floor a live holder is never silent past, plus a published branch to link.
+        const silentMs = Math.max(0, clock.now() - claimLastSignOfLife(anchor, tip.message, branch).atMs);
+        if (branch === undefined || !(silentMs < CLAIM_SILENCE_FLOOR_MS)) return { state: "admitted" };
+        return { state: "running", url: `https://github.com/${repo.owner}/${repo.name}/tree/${branch.ref.replace(/^refs\/heads\//, "")}` };
       } catch (error) {
         // Not observed is not "running": the caller records nothing beyond what it did itself.
         void error; return { state: "unknown" };
@@ -166,10 +194,10 @@ export class ProductBuildService {
 
   constructor(private readonly options: ProductBuildOptions) {
     this.provider = options.provider ?? ghProductRepositoryProvider();
-    this.target = options.target ?? ghProductBuildTarget({ repoRoot: options.repoRoot });
+    this.clock = options.clock ?? systemClock;
+    this.target = options.target ?? ghProductBuildTarget({ repoRoot: options.repoRoot, clock: this.clock });
     this.store = options.store ?? new ProductIntentStore({ root: options.root });
     this.kick = options.kick ?? ((root, taskId, origin, repo) => { requestKick(root, taskId, origin, repo); });
-    this.clock = options.clock ?? systemClock;
   }
 
   async execute(actor: string, command: unknown): Promise<ProductBuildResult> {
