@@ -19,10 +19,11 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { systemClock, type Clock } from "./clock.js";
-import { SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
+import { loadProposalRegistry, SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { TASK_TYPES, type Task } from "./plan.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
+import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import {
   mineTranscriptWorkflows,
   renderTranscriptWorkflowSteps,
@@ -740,6 +741,15 @@ export interface SkillSelectionObservation extends Record<string, unknown> {
   zero_selection: boolean;
   /** Present only when the caller randomized: eligible skills withheld from this run by assignment. */
   withheld_names?: string[];
+  /** Each eligible skill's {@link skillContentDigest}: the version a selected run read and a withheld run did
+   *  not, so effectiveness evidence can be told apart across edits of one skill. */
+  skill_digests: Record<string, string>;
+}
+
+/** A skill version's identity: its body, the text a worker reads, hashed. An edit to the body is a new
+ *  version; frontmatter that only scopes eligibility is not. */
+export function skillContentDigest(skill: Pick<InjectableSkill, "body">): string {
+  return createHash("sha256").update(skill.body).digest("hex").slice(0, 12);
 }
 
 export interface ObservedSkillSelection {
@@ -792,6 +802,7 @@ export function observeSkillSelection(
       budget_chars: budgetChars,
       zero_selection: selected.length === 0,
       ...(withhold ? { withheld_names: withheld.map((s) => s.name) } : {}),
+      skill_digests: Object.fromEntries(eligible.map((s) => [s.name, skillContentDigest(s)])),
     },
   };
 }
@@ -889,6 +900,15 @@ export interface SkillEffectivenessReport {
   /** `randomized`: arms by seeded assignment, `selected` meaning not withheld (intent to treat).
    *  `observational`: legacy rows only, where the control is whatever the budget omitted. */
   assignment: "randomized" | "observational";
+  /** Terminal compared runs per skill version, in first-seen order; `digest: null` is a row written before
+   *  versions were recorded. The comparison above pools every version listed here. */
+  versions: SkillEffectivenessVersion[];
+}
+
+export interface SkillEffectivenessVersion {
+  digest: string | null;
+  selected_terminal_runs: number;
+  control_terminal_runs: number;
 }
 
 type SkillLedgerRow = Record<string, unknown>;
@@ -929,7 +949,7 @@ export function buildSkillEffectivenessReport(
 ): SkillEffectivenessReport {
   const terminalVerdictByRun = new Map<string, { verdict: string; prKey: string | undefined }>();
   const mergedPrKeys = new Set<string>();
-  const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean }>();
+  const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean; digest: string | null }>();
 
   for (const row of rows) {
     if (isMergedLedgerRow(row)) {
@@ -947,9 +967,12 @@ export function buildSkillEffectivenessReport(
     ) continue;
     const eligible = stringArray(row.approved_eligible_names);
     if (!eligible.includes(skillName)) continue;
+    const digests = row.skill_digests;
+    const digest = digests !== null && typeof digests === "object" ? (digests as Record<string, unknown>)[skillName] : undefined;
     selectionByRun.set(row.run_id, {
       selected: stringArray(row.selected_names).includes(skillName),
       ...(Array.isArray(row.withheld_names) ? { withheld: stringArray(row.withheld_names).includes(skillName) } : {}),
+      digest: typeof digest === "string" ? digest : null,
     });
   }
 
@@ -985,6 +1008,18 @@ export function buildSkillEffectivenessReport(
 
   const selected = buildCohort(true);
   const control = buildCohort(false);
+  const versionByDigest = new Map<string | null, SkillEffectivenessVersion>();
+  for (const [runId, observation] of selectionByRun) {
+    const treated = inArm(observation, true);
+    if ((!treated && !inArm(observation, false)) || terminalOutcome(runId) === undefined) continue;
+    let version = versionByDigest.get(observation.digest);
+    if (version === undefined) {
+      version = { digest: observation.digest, selected_terminal_runs: 0, control_terminal_runs: 0 };
+      versionByDigest.set(observation.digest, version);
+    }
+    if (treated) version.selected_terminal_runs++;
+    else version.control_terminal_runs++;
+  }
   const zeroSelectionAtHorizon =
     selected.observed_eligible_runs === 0 && control.terminal_runs >= SKILL_EFFECTIVENESS_HORIZON;
   const belowComparisonHorizon =
@@ -1027,6 +1062,7 @@ export function buildSkillEffectivenessReport(
     control,
     harm_outcomes: SKILL_EFFECTIVENESS_HARM_OUTCOMES,
     assignment: randomized ? "randomized" : "observational",
+    versions: [...versionByDigest.values()],
   };
 }
 
@@ -1059,7 +1095,17 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
     report.assignment === "randomized"
       ? "interpretation: a randomized comparison at a small horizon is evidence, not proof; this report does not modify a skill."
       : "interpretation: descriptive selection/outcome evidence only; this report does not prove causation or modify a skill.",
+    `skill versions: ${renderSkillVersions(report.versions)}`,
   ].join("\n");
+}
+
+/** Each version's terminal runs per arm, and a warning when the pooled comparison spans recorded edits. */
+function renderSkillVersions(versions: readonly SkillEffectivenessVersion[]): string {
+  if (versions.length === 0) return "none compared";
+  const listed = versions.map((v) =>
+    `${v.digest ?? "unrecorded"} selected=${v.selected_terminal_runs} control=${v.control_terminal_runs}`).join("; ");
+  const recorded = versions.filter((v) => v.digest !== null).length;
+  return recorded > 1 ? `${listed} — the comparison pools ${recorded} recorded versions` : listed;
 }
 
 export const SKILL_LIFECYCLE_PROPOSAL_PREFIX = "skill-lifecycle:";
@@ -1073,6 +1119,8 @@ export interface StageSkillLifecycleProposalResult {
   staged: boolean;
   refreshed: boolean;
   alreadyStaged: boolean;
+  /** A refused report removed this skill's staged retirement: the evidence it was staged on no longer qualifies. */
+  withdrawn: boolean;
   proposalId?: string;
   evidenceFingerprint?: string;
   reason?: string;
@@ -1106,6 +1154,12 @@ function skillLifecycleRefusal(report: SkillEffectivenessReport, approvedSkillsD
   if (!approved) {
     return `skill '${report.skill_name}' is not approved and opted in under ${approvedSkillsDir}`;
   }
+  return skillLifecycleEvidenceRefusal(report);
+}
+
+/** Why a report's evidence does not support a retirement, or undefined when it does. Staging and approval both
+ *  judge with this one rule, so approval never accepts evidence staging would refuse. */
+function skillLifecycleEvidenceRefusal(report: SkillEffectivenessReport): string | undefined {
   if (report.status === "INSUFFICIENT EVIDENCE") {
     if (report.basis === "pending-shipment") {
       return `pending shipment: selected=${report.selected.pending_merge_runs}, control=${report.control.pending_merge_runs}; merge-rate bounds overlap`;
@@ -1135,6 +1189,7 @@ function renderSkillLifecycleSummary(report: SkillEffectivenessReport, action: S
     `Control: observed=${report.control.observed_eligible_runs}; terminal=${report.control.terminal_runs}; ` +
       `merged=${report.control.merged_runs}; harmful=${report.control.harmful_terminal_runs}; ` +
       `outcomes=${renderOutcomes(report.control.outcomes)}`,
+    `Versions: ${renderSkillVersions(report.versions)}`,
     `Approving this proposal opens a reviewed PR that deletes only ${action.skillPath}; staging this proposal deletes nothing.`,
   ].join("\n");
 }
@@ -1170,7 +1225,10 @@ export function stageSkillLifecycleProposal(
   opts: UpdateProposalRegistryOpts = {},
 ): StageSkillLifecycleProposalResult {
   const built = skillLifecycleProposalForReport(report, approvedSkillsDir);
-  if (!built.ok) return { refused: true, staged: false, refreshed: false, alreadyStaged: false, reason: built.reason };
+  if (!built.ok) {
+    const withdrawn = withdrawSkillLifecycleProposal(registryPath, skillLifecycleProposalId(report.skill_name), opts);
+    return { refused: true, staged: false, refreshed: false, alreadyStaged: false, withdrawn, reason: built.reason };
+  }
   const proposal = built.proposal;
   let staged = false;
   let refreshed = false;
@@ -1202,10 +1260,59 @@ export function stageSkillLifecycleProposal(
     staged,
     refreshed,
     alreadyStaged,
+    withdrawn: false,
     proposalId: proposal.id,
     evidenceFingerprint: proposal.lifecycleAction?.evidenceFingerprint,
     reason: alreadyStaged ? "already staged with identical evidence" : undefined,
   };
+}
+
+/** Remove a staged retirement the evidence no longer supports. Approval deletes a skill on the staged proposal, so
+ *  one the ledger has turned against must not stay READY in the inbox. Reads before it locks, so a registry with
+ *  nothing to withdraw is never written. True when a proposal was removed. */
+export function withdrawSkillLifecycleProposal(registryPath: string, proposalId: string, opts: UpdateProposalRegistryOpts = {}): boolean {
+  const staged = (p: Proposal): boolean => p.id === proposalId && p.lifecycleAction !== undefined;
+  if (!loadProposalRegistry(registryPath).some(staged)) return false;
+  let withdrawn = false;
+  updateProposalRegistry(
+    registryPath,
+    (current) => {
+      const next = current.filter((p) => !staged(p));
+      withdrawn = next.length !== current.length;
+      return withdrawn ? next : null;
+    },
+    opts,
+  );
+  return withdrawn;
+}
+
+/** Approval re-judges a staged retirement: `stale` names evidence that no longer qualifies, and `unverifiable` a
+ *  ledger that could not be read whole. Neither is a pass, and only `stale` is grounds to withdraw the proposal. */
+export type SkillRetirementRecheck =
+  | { verdict: "qualifies" }
+  | { verdict: "stale"; reason: string }
+  | { verdict: "unverifiable"; reason: string };
+
+/** A retirement is staged on the ledger as it stood then; more runs, or a corrected reducer, can since have turned
+ *  the evidence. Re-judge with the reducer and rule staging used, over a COMPLETE union read. */
+export function recheckSkillRetirement(
+  stateDir: string,
+  action: SkillLifecycleAction,
+  read: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+): SkillRetirementRecheck {
+  let union: ReturnType<typeof readLedgerUnionRecordsSync>;
+  try {
+    union = read(stateDir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS, refuseIncomplete: true });
+  } catch (error) {
+    return { verdict: "unverifiable", reason: `unreadable ledger union under ${stateDir}: ${String(error)}` };
+  }
+  if (!union.ok) {
+    return { verdict: "unverifiable", reason: `incomplete ledger union under ${stateDir}: ${union.unread.length} unread rotation(s)` };
+  }
+  const report = buildSkillEffectivenessReport(union.rows, action.skillName);
+  const refusal = skillLifecycleEvidenceRefusal(report);
+  if (refusal === undefined) return { verdict: "qualifies" };
+  return { verdict: "stale", reason: `the evidence no longer supports retiring '${action.skillName}': ${report.status} (${report.basis}); ${refusal}` };
 }
 
 /**

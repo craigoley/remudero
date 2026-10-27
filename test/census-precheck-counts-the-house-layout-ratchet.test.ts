@@ -292,3 +292,49 @@ test("W1-T9332 structural split: shared qualifier and real pre-push agree, and a
   assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
   assert.match(refused.stderr, /house-layout: MASTER-PLAN\.md now in 2 non-test src files, up from 1/);
 });
+
+
+// Immutable reachable Git data keeps this recovery test independent of future sweep edits.
+let restorationSource: string | undefined;
+function sweepCommentRestorationFixture() {
+  if (restorationSource === undefined) {
+    const result = spawnSync("git", ["cat-file", "blob", "d2020dd4ec625147aacabda55b99564081873362"], { cwd: REPO_ROOT, encoding: "utf8" });
+    assert.equal(result.status, 0, `the recorded source blob must be available: ${result.stderr}`);
+    restorationSource = result.stdout;
+  }
+  const before = restorationSource;
+  const after = before.replace(
+    "// try/catch inside the rung; never mutates the target's mounts configuration itself.",
+    "// try/catch inside the rung; never mutates `.remudero/mounts.yaml` itself.",
+  );
+  const base = new Map([["src/run-task.ts", "// .remudero/ owner"], ["src/cli/commands/sweep.ts", before]]);
+  const current = new Map(base); current.set("src/cli/commands/sweep.ts", after);
+  return { base, current };
+}
+
+test("the exact approved sweep comment restoration changes no other source and qualifies one physical duplicate", () => {
+  const f = sweepCommentRestorationFixture();
+  assert.deepEqual(qualifiedRunTaskLayoutSplit(f.base, f.current), { ".remudero/": 1 });
+  assert.deepEqual(evaluate(Object.fromEntries(f.current), Object.fromEntries(f.base)), []);
+  assert.equal(houseLiteralCounts([...f.current.values()])[".remudero/"] - houseLiteralCounts([...f.base.values()])[".remudero/"], 1);
+});
+
+test("sweep comment recovery refuses extra bytes owners missing evidence and an already restored base", () => {
+  const changedModule = sweepCommentRestorationFixture();
+  changedModule.current.set("src/cli/commands/sweep.ts", changedModule.current.get("src/cli/commands/sweep.ts")! + "\nexport const hiddenChange = 1;\n");
+  const changedOwner = sweepCommentRestorationFixture(); changedOwner.current.set("src/run-task.ts", "// .remudero/ another");
+  const extraOwner = sweepCommentRestorationFixture(); extraOwner.current.set("src/extra.ts", "// .remudero/ another");
+  const missing = sweepCommentRestorationFixture(); missing.base.delete("src/run-task.ts");
+  const restored = sweepCommentRestorationFixture(); restored.base = new Map(restored.current);
+  for (const f of [changedModule, changedOwner, extraOwner, missing, restored]) {
+    assert.deepEqual(qualifiedRunTaskLayoutSplit(f.base, f.current), {});
+  }
+});
+
+
+test("the committed sweep module restores the exact operator-approved mounts comment", () => {
+  const actual = spawnSync("git", ["cat-file", "blob", "HEAD:src/cli/commands/sweep.ts"], { cwd: REPO_ROOT, encoding: "utf8" });
+  assert.equal(actual.status, 0, `the committed sweep module must be readable: ${actual.stderr}`);
+  assert.ok(actual.stdout.split("\n").some(line => line.trim() ===
+    "// try/catch inside the rung; never mutates `.remudero/mounts.yaml` itself."));
+});

@@ -1,0 +1,100 @@
+- id: W1-T10843
+  title: "BUILD THE CONTROLLED FIELD-TRIALS RELEASE — emit the site's field-trials-v1 artifact from a registered randomized epoch, first the Sol 6.1 x Sonnet 5.5 per-task A/B already in the ledger, then Terra vs Sol: evidence controlled, assignmentAudit pass only when the audit passes, exactly two arms with task-bootstrap intervals, first-pass and repair-round secondaries, never published automatically"
+  repo: remudero
+  depends_on: []  # amended 2026-10-27: the first release reads the sol61-vs-sonnet55 epoch that already ran; Terra vs Sol (W1-T10842) is a later input, not a prerequisite
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling, Craig 2026-10-27: field trials go live now as observational; controlled charts replace them when the Terra 6.1 vs Sol 6.1 A/B (the first controlled field trial) reports; nothing public auto-merges"
+  plan_refs: [W1-T100001, W1-T10841, W1-T10842, W1-T10876, W1-T10878, PORTAL-T43]
+  files:
+    - src/lib/field-trials-controlled-release.ts
+    - src/lib/field-trials-flow.ts
+    - test/routing/controlled-field-trials-release.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED 2026-10-27. Core's `buildFieldTrialsRelease` (src/lib/field-trials-flow.ts, origin/main 07dbdcc77) emits
+    only an OBSERVATIONAL candidate (status "candidate-unreviewed", observational true, causalClaims none,
+    causalEffect "observational-only-no-randomized-allocation"). The site's parser,
+    craigoley/remudero-site lib/field-trials-release.ts `parseFieldTrialsRelease` (read at site main b80fbbb), accepts
+    ONLY a controlled release with exactly these keys: schema "field-trials-v1", releaseId, status "published",
+    publicationScope "public-opt-in", publishedAt (ISO with milliseconds, Z), evidence "controlled",
+    randomizationUnit "task", metric "verified_completion", intervalMethod "bootstrap-95-task", corpusRevision,
+    harnessRevision, scorerRevision, assignmentAudit "pass", sourceRepos (consent-registry allowed),
+    consentRegistryRevision, and arms = EXACTLY TWO {modelId, assigned, observed, successes, ciLower, ciUpper} with
+    distinct modelIds, 0 < observed <= assigned, 0 <= successes <= observed and ciLower <= rate <= ciUpper within
+    [0, 1]. Ids match ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$. Its `publishedFieldTrialsRelease` is null: no release exists.
+  design: |
+    (i) BUILDER. A new module builds the release from the W1-T10842 trial's intention-to-treat rows and W1-T10841's
+    registered protocol: one arm per assigned model (gpt-6.1-sol, gpt-6.1-terra), assigned = tasks assigned,
+    observed = tasks that reached the outcome window, successes = verified completions, and a 95% bootstrap interval
+    resampling TASKS. Revisions come from the protocol's pinned stack; sourceRepos and consentRegistryRevision from the
+    existing consent file path.
+    (ii) REFUSALS, each named, emitting no artifact: the assignment audit (assigned arm vs served model, missingness,
+    balance) does not pass; the trial has not reached its pre-registered stopping horizon; a source repo lacks consent;
+    any field would fail the site parser.
+    (iii) CONTRACT TEST. The test vendors the site's parser at site commit b80fbbb (cited) and asserts every built
+    release parses, and every refusal case is either refused here or rejected there.
+    (v) CALL SITE. The new module exports buildControlledFieldTrialsRelease, called from the existing field-trials
+    flow in src/lib/field-trials-flow.ts beside the observational builder.
+    (vi) AMENDED 2026-10-27 (Craig's ruling: publish the Sol 6.1 x Sonnet 5.5 randomized A/B as the first controlled
+    result once first-pass success and repair rounds are added, so it does not rest on merge alone). The builder is
+    epoch-generic: it takes a registered randomized epoch (arms, randomization unit, draw method, window) and emits
+    one release per epoch. FIRST INPUT: the sol61-vs-sonnet55 auction (per-task draw, p 0.5, recorded through
+    selectionPropensity / ROUTING_DRAW_METHOD), window 2026-09-27..2026-10-24.
+    PRE-REGISTERED ANALYSIS (fixed here, before any secondary number is computed; the primary merge rate was
+    already observed by a read-only census on 2026-10-27 at ITT 251/265 vs 260/274, so it is reported as observed,
+    not as a pre-registered test):
+    - Unit and analysis: the run-task TASK, intention to treat by FIRST assignment; a task served by the other
+      arm stays in its assigned arm.
+    - Primary: verified_completion = merged on main by the exact `Remudero-Task: <id>` trailer within the
+      outcome window; a 72 h censoring margin after the window's end before any outcome is read.
+    - Secondary 1, first_pass_success: merged with zero fix-lane rounds.
+    - Secondary 2, repair_rounds_mean: fix-lane rounds per assigned task (zero for tasks with none), one decimal.
+    - Intervals: bootstrap resampling TASKS, 95 percent, fixed seed recorded in the release candidate's
+      private sidecar.
+    - Adherence: crossover = assignments served by the other arm over all assignments in the window, bucketed
+      as the site's crossoverPctBucket ("<5%", "5-15%", "15-30%", ">30%"); analysis "intent-to-treat". The
+      census measured 1,386 of 6,115 assignments crossed over.
+    - Reporting rule: "no detectable difference" when the primary interval of the difference spans zero; never a
+      ranking word.
+    EXACT COUNTS: the arms keep the site's existing field-trials-v1 shape with EXACT assigned, observed and
+    successes per arm, on the page and in the download (Craig, 2026-10-27: a randomized trial publishes exact n
+    and successes as trials normally do; only observational data is bucketed). No nBucket on arms.
+    SITE SHAPE: emit the contract's optional `adherence` {crossoverPctBucket, analysis} and `secondary` (up to
+    three {metric first_pass_success | repair_rounds_mean, arms [{arm, value, ciLower, ciUpper}], intervalMethod
+    bootstrap-95-task}) keys, per ~/Remudero-notes/field-trials/model-guidance-contract-v1.md. ORDER ACROSS REPOS:
+    the site parser accepts those keys only after PORTAL-T43 (remudero-site PR #205: field-trials-v1 adherence and
+    secondary) merges on site main; until then the builder WITHHOLDS the release with the named refusal
+    `site-secondary-unavailable` and never emits a merge-only release. The contract test vendors the site parser
+    at the commit that accepts the extension.
+    REPAIR ROUNDS read the fix lane's rows by task; the model that repaired (W1-T10876) is reported in the private
+    sidecar only and does not change the arm.
+    (iv) NEVER AUTO-PUBLISHED. The builder writes a candidate file for the existing field-trials import flow; the site
+    PR it feeds stays behind Craig's review and nothing public auto-merges. The observational artifact is unchanged.
+  acceptance:
+    - claim: "A built release has exactly the site's field-trials-v1 keys and values (evidence controlled, randomizationUnit task, metric verified_completion, intervalMethod bootstrap-95-task) and passes the vendored site parser"
+      proof: 'grep: test("W1-T10843: the controlled release passes the site field-trials-v1 parser" in test/routing/controlled-field-trials-release.test.ts'
+    - claim: "A failing or incomplete assignment audit, an unreached stopping horizon or a source repo without consent emits no release"
+      proof: 'grep: test("W1-T10843: a failing assignment audit or an unreached horizon emits no release" in test/routing/controlled-field-trials-release.test.ts'
+    - claim: "Each of the two arms' counts and task-bootstrap interval come from the trial's task-level outcomes"
+      proof: 'grep: test("W1-T10843: arm counts and intervals come from task-level outcomes" in test/routing/controlled-field-trials-release.test.ts'
+    - claim: "The builder only writes a candidate for the reviewed import flow and never publishes or merges anything"
+      proof: 'grep: test("W1-T10843: the controlled release is a candidate and is never published automatically" in test/routing/controlled-field-trials-release.test.ts'
+    - claim: "The existing field-trials flow calls the controlled release builder"
+      proof: 'grep: buildControlledFieldTrialsRelease( in src/lib/field-trials-flow.ts'
+    - claim: "the first release reads the sol61-vs-sonnet55 epoch by first assignment, publishes exact per-arm counts, and carries first-pass and repair-round secondaries with task-bootstrap intervals and a bucketed crossover"
+      proof: 'grep: test("W1-T10843: the Sol x Sonnet release carries pre-registered secondaries and adherence" in test/routing/controlled-field-trials-release.test.ts'
+    - claim: "until the site parser accepts the secondary and adherence keys the builder withholds the release and never emits a merge-only one"
+      proof: 'grep: test("W1-T10843: no merge-only release before the site accepts secondaries" in test/routing/controlled-field-trials-release.test.ts'
+  falsifier: |
+    Emit assignmentAudit "pass" unconditionally: the failing-audit test sees a release and fails.
+    Analyse by served model instead of first assignment: the secondaries case fails on its crossover fixture.
+    Emit the base shape without secondaries when the vendored parser lacks them: the no-merge-only case fails.
+    CLOSE IF core already
+    builds a controlled field-trials-v1 release on origin/main.

@@ -1,0 +1,68 @@
+- id: W1-T10858
+  title: "AN OPEN-WEIGHT ARM CANNOT LEAD A CASH ROW ON A LIST PRICE — reconcile one UTC day's metered tokens x list price against Azure's actual-cost export per deployment and meter, take the noise band from the same day's undisputed Azure OpenAI deployments, and mark the bake-off proposal's arm not eligible to lead until it reconciles inside that band"
+  repo: remudero
+  depends_on: [W1-T10857]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling, Craig 2026-10-27 (open-weight arms); the DeepSeek billing dispute W1-T3695 recorded"
+  plan_refs: [W1-T3695, W1-T10855, W1-T10857]
+  files:
+    - src/lib/cash-invoice-reconcile.ts
+    - src/lib/bakeoff-trigger.ts
+    - src/run-task.ts
+    - docs/operator-guide.md
+    - test/routing/an-open-weight-lead-waits-for-a-reconciled-invoice.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED ON origin/main 742487eb2 (2026-10-27). The fleet prices every cash request from OPENWEIGHT_PRICES and
+    never compares that estimate with what Azure bills: `git grep` finds "invoice" in src only as disclaimers
+    ("worker-result-estimate-not-invoice" in src/lib/benchmark-paid-pilot.ts, "not an invoice" in
+    src/lib/analytics-route.ts). For Azure OpenAI deployments that has been safe. For DeepSeek it is not:
+    W1-T3695's comment above `openWeightEndpoint` (src/lib/worker-provider.ts) records Microsoft Q&A reports of
+    ~357x billing on cached tokens and 4.5x on V4 Pro, and the one Q&A thread the 2026-10-27 sweep read
+    (answers/12798567) contradicts itself on caching with no official resolution. Azure has since published separate
+    cached-input meters (DeepSeek-V4-Flash $0.028 per 1M, effective 2026-08-01), which may settle it, but only an
+    observed bill can. W1-T10855 makes the arms ready with a conservative reservation; nothing stops a bake-off win
+    from being proposed as a lead on the list price alone.
+    The daemon holds data-plane keys only, so it cannot call the Cost Management API itself; the bill reaches it as
+    an Azure Cost Management actual-cost export file.
+  design: |
+    (i) RECONCILE (new src/lib/cash-invoice-reconcile.ts, pure over its inputs). Given one UTC day, the cash receipts
+    for that day from the ledger union (per deployment: uncached input, cached input and output tokens, as the
+    adapter recorded them) and an actual-cost export CSV for the same day, compute per deployment and per meter
+    (input, cached input, output) the metered cost (tokens x the OPENWEIGHT_PRICES row) and the billed cost (the
+    export's rows for that account resource and meter), and their relative divergence.
+    (ii) NOISE FROM CONTROLS, NOT A CONSTANT. The acceptable band for a day is the largest divergence among that same
+    day's deployments whose billing is undisputed (rows carrying `unbilledAzureOpenAi429`, the Azure OpenAI family).
+    A day with no control deployment carrying traffic is `unreconcilable: no control` and decides nothing.
+    (iii) VERDICT. Each open-weight deployment gets `reconciled` (inside the band), `diverged` (outside it, naming
+    meter, metered, billed and band) or `unreconcilable` (no traffic, no control, or no export rows for it), ledgered
+    as one `cash.invoice.reconciled` row per deployment and day. A deployment with no traffic stays unreconciled; a
+    reconciliation never spends money to create traffic.
+    (iv) LEAD ELIGIBILITY. The deployment bake-off proposal (src/lib/bakeoff-trigger.ts) marks an open-weight arm
+    (a row without `unbilledAzureOpenAi429`) "not eligible to lead" unless its newest verdict is `reconciled`, and
+    states the verdict and figures; ranking and routing are otherwise unchanged.
+    (v) INPUT. `rmd cash-reconcile --day <YYYY-MM-DD> --export <csv>` runs it on demand, and the measurement cadence
+    reconciles the newest export file found under the state root's cost-exports directory, once per day and file.
+    docs/operator-guide.md gives the operator's one-time setup of a daily actual-cost export (the exact az command)
+    and where the file lands. Automating the export's delivery to the host is NOT in this task.
+  acceptance:
+    - claim: "A day's metered cost is reconciled per deployment and meter against the export"
+      proof: 'grep: test("W1-T10858: a day is reconciled per deployment and meter against the actual-cost export" in test/routing/an-open-weight-lead-waits-for-a-reconciled-invoice.test.ts'
+    - claim: "The band comes from the same day's undisputed deployments, and a day with no control decides nothing"
+      proof: 'grep: test("W1-T10858: the noise band comes from the same day controls and no control decides nothing" in test/routing/an-open-weight-lead-waits-for-a-reconciled-invoice.test.ts'
+    - claim: "An unreconciled or diverged open-weight arm is marked not eligible to lead in the bake-off proposal"
+      proof: 'grep: test("W1-T10858: an unreconciled open-weight arm is not eligible to lead" in test/routing/an-open-weight-lead-waits-for-a-reconciled-invoice.test.ts'
+    - claim: "The reconciler exists as a named function"
+      proof: 'grep: export function reconcileCashInvoice in src/lib/cash-invoice-reconcile.ts'
+    - claim: "The rmd verb and the measurement cadence call the reconciler"
+      proof: 'grep: reconcileCashInvoice( in src/run-task.ts'
+  falsifier: |
+    Hard-code a tolerance; reconcile an open-weight deployment on a day with no control traffic; let a deployment with no
+    traffic read as reconciled; or let the proposal call an unreconciled open-weight arm eligible to lead.

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "./config.js";
 import { enabledWorkerProviders } from "./config.js";
+import { cashConfiguredAccounts } from "./config-schema.js";
 import { systemClock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { humanGatedFamily } from "./model-gate.js";
@@ -188,20 +189,64 @@ function cashModelsEndpoint(rawEndpoint: string): string {
   return new URL("openai/models?api-version=2024-10-21", base).toString();
 }
 
-/** Read Azure's data-plane catalog without persisting the account key. */
+/** W1-T10837: one configured Azure account this catalog read could not read. Carries the
+ *  account's own identity (never its key) so the caller can name the failure instead of letting it
+ *  collapse into the union it did not affect. */
+export interface CashCatalogAccountFailure {
+  endpoint: string;
+  keyEnv: string;
+  reason: string;
+}
+
+/**
+ * Read Azure's data-plane catalog without persisting any account key.
+ *
+ * W1-T10837: reads EVERY distinct account {@link cashConfiguredAccounts} names -- the default
+ * `cashEndpoint`/`openweightEndpoint` account plus every account a `cashDeploymentEndpoints` entry
+ * points at -- each with ITS OWN key, and returns the union. One account that fails to read is
+ * named (via `onAccountFailure`, never thrown away silently) WITHOUT hiding another account's
+ * listing, so a deployment on a second account still counts as "listed by cash" in
+ * {@link classifySuccessors}. Only refuses outright when NO configured account could be read at
+ * all -- the same behaviour an unmapped host (exactly one account) already had.
+ */
 export async function readCashModelCatalog(
   config: Config,
   fetchImpl: typeof fetch = fetch,
   env: NodeJS.ProcessEnv = process.env,
+  onAccountFailure?: (failure: CashCatalogAccountFailure) => void,
 ): Promise<string[]> {
-  const endpoint = config.workerProviders?.cashEndpoint ?? config.workerProviders?.openweightEndpoint;
-  if (typeof endpoint !== "string" || endpoint.trim() === "") throw new Error("cash model catalog requires workerProviders.cashEndpoint");
-  const key = env[OPENWEIGHT_API_KEY_ENV];
-  if (!key) throw new Error(`cash model catalog requires ${OPENWEIGHT_API_KEY_ENV}`);
-  const response = await fetchImpl(cashModelsEndpoint(endpoint), { headers: { "api-key": key } });
-  if (!response.ok) throw new Error(`cash model catalog failed with HTTP ${response.status}`);
-  const payload = await response.json() as { data?: Array<{ id?: unknown; model?: unknown }> };
-  return modelIds((payload.data ?? []).flatMap((row) => [row.id, row.model].filter((value): value is string => typeof value === "string")));
+  const accounts = cashConfiguredAccounts(config);
+  if (accounts.length === 0) throw new Error("cash model catalog requires workerProviders.cashEndpoint");
+  const models = new Set<string>();
+  const failures: CashCatalogAccountFailure[] = [];
+  for (const account of accounts) {
+    const key = env[account.keyEnv];
+    if (!key) {
+      const reason = account.keyEnv === OPENWEIGHT_API_KEY_ENV
+        ? `cash model catalog requires ${OPENWEIGHT_API_KEY_ENV}`
+        : `cash model catalog requires ${account.keyEnv} for ${account.endpoint}`;
+      failures.push({ endpoint: account.endpoint, keyEnv: account.keyEnv, reason });
+      onAccountFailure?.({ endpoint: account.endpoint, keyEnv: account.keyEnv, reason });
+      continue;
+    }
+    try {
+      const response = await fetchImpl(cashModelsEndpoint(account.endpoint), { headers: { "api-key": key } });
+      if (!response.ok) throw new Error(`cash model catalog failed with HTTP ${response.status}`);
+      const payload = await response.json() as { data?: Array<{ id?: unknown; model?: unknown }> };
+      for (const id of (payload.data ?? []).flatMap((row) => [row.id, row.model].filter((value): value is string => typeof value === "string"))) {
+        models.add(id);
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      failures.push({ endpoint: account.endpoint, keyEnv: account.keyEnv, reason });
+      onAccountFailure?.({ endpoint: account.endpoint, keyEnv: account.keyEnv, reason });
+    }
+  }
+  // Every configured account failed: nothing to union, so refuse naming every reason rather than
+  // silently returning an empty catalog that would read as "cash lists nothing" instead of "cash
+  // was unreadable".
+  if (models.size === 0 && failures.length > 0) throw new Error(failures.map((failure) => failure.reason).join("; "));
+  return modelIds([...models]);
 }
 
 /** Read Codex's account catalog through the same bounded app-server exchange as routing. */
@@ -220,7 +265,11 @@ export async function watchSuccessorModels(opts: SuccessorWatchOptions): Promise
   const now = opts.now ?? (() => systemClock.date());
   const statePath = opts.statePath ?? join(opts.config.root, "state", STATE_FILENAME);
   const providers = enabledWorkerProviders(opts.config);
-  const cashReader = opts.readCash ?? (providers.includes("cash") ? () => readCashModelCatalog(opts.config) : undefined);
+  // W1-T10837: a per-account read failure is named on the ledger instead of disappearing into the
+  // union it did not affect -- "one unreadable account is reported by name and does not hide the
+  // other account's listing" (design ii).
+  const cashReader = opts.readCash ?? (providers.includes("cash") ? () => readCashModelCatalog(opts.config, undefined, undefined,
+    (failure) => opts.ledger?.({ step: "model.successor.catalog_account_unreadable", source: "cash", endpoint: failure.endpoint, keyEnv: failure.keyEnv, reason: failure.reason })) : undefined);
   const codexReader = opts.readCodex ?? (providers.includes("codex") ? () => readCodexModelCatalog(opts.config) : undefined);
   if (!cashReader && !codexReader) {
     opts.ledger?.({ step: "model.successor.read", successor_count: 0, reason: "no catalog providers enabled" });

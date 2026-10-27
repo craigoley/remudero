@@ -42,6 +42,12 @@ export interface ModelApproval {
   expiresAt?: string;
 }
 
+/** W1-T10837: one entry of `workerProviders.cashDeploymentEndpoints` — see that field's own doc. */
+export interface CashDeploymentEndpoint {
+  endpoint: string;
+  keyEnv: string;
+}
+
 /** Configuration owns this data-only contract; it must not import an effect consumer. */
 export interface SelectedModeSettings {
   mode: "shadow";
@@ -130,6 +136,16 @@ export interface Config {
      * intentionally environment-only and is never a config field.
      * W1-T3607: canonical field — read before the deprecated {@link openweightEndpoint} alias. */
     cashEndpoint?: string;
+    /** W1-T10837: a deployment id named here is sent to its OWN endpoint with the key read from its
+     *  OWN `keyEnv`, instead of {@link cashEndpoint} (then {@link openweightEndpoint}) and
+     *  {@link DEFAULT_CASH_KEY_ENV}. A deployment this map does not name is byte-identical to a host
+     *  with no map at all. Every reader resolves a deployment's target through
+     *  {@link cashDeploymentTarget} (or its endpoint-only sibling {@link cashDeploymentEndpoint}),
+     *  never a second inline `cashEndpoint ?? openweightEndpoint` read. Refused at config load
+     *  (`validateConfigShape`) when a `keyEnv` is outside the cash-key shape or an `endpoint` is not
+     *  an https Azure Cognitive Services / Azure OpenAI URL (design iii) — a config-named env var is
+     *  a way to send ANY daemon secret to a URL, so this is checked before the map is ever trusted. */
+    cashDeploymentEndpoints?: Record<string, CashDeploymentEndpoint>;
     /** Host-shared, pre-migrated cash allowance JSON. All cash instances must use the same path. */
     fleetCashAllowancePath?: string;
     /** DEPRECATED (W1-T3607): the pre-rename spelling of {@link cashEndpoint}, read as a fallback so an
@@ -175,7 +191,11 @@ type ValueSchema =
   | { kind: "enum"; values: readonly string[] }
   | { kind: "nullable"; value: ValueSchema }
   | { kind: "array"; element: ValueSchema }
-  | { kind: "object"; fields: readonly ConfigFieldSchema[] };
+  | { kind: "object"; fields: readonly ConfigFieldSchema[] }
+  /** W1-T10837: an arbitrary-keyed map (`Record<string, V>`), unlike `"object"`'s fixed field list —
+   *  every key is validated against the SAME `value` shape, so `cashDeploymentEndpoints`'s
+   *  deployment ids need no closed enum. */
+  | { kind: "record"; value: ValueSchema };
 
 export interface ConfigFieldSchema {
   name: string;
@@ -237,6 +257,24 @@ const workerProvidersShape: ValueSchema = {
     configField("codexModel", "string", true, undefined, "config.json", "Hard Codex model override.", stringShape),
     configField("codexModels", "object", true, undefined, "config.json", "Codex model preferences per mount tier.", codexModelsShape),
     configField("cashEndpoint", "string", true, undefined, "config.json", "Azure OpenAI-compatible endpoint for the cash (non-subscription) worker adapter.", stringShape),
+    configField(
+      "cashDeploymentEndpoints",
+      "Record<string, { endpoint: string; keyEnv: string }>",
+      true,
+      undefined,
+      "config.json",
+      "W1-T10837: per-deployment {endpoint, keyEnv} overrides, for a deployment on a second Azure account. Absent for a deployment keeps cashEndpoint/openweightEndpoint and RMD_OPENWEIGHT_API_KEY.",
+      {
+        kind: "record",
+        value: {
+          kind: "object",
+          fields: [
+            configField("endpoint", "string", false, undefined, "config.json", "This deployment's own Azure endpoint.", stringShape),
+            configField("keyEnv", "string", false, undefined, "config.json", "The env var carrying this deployment's own API key.", stringShape),
+          ],
+        },
+      },
+    ),
     configField("fleetCashAllowancePath", "string", true, undefined, "config.json", "Absolute path to the pre-migrated, host-shared cash allowance JSON used by every cash daemon.", stringShape),
     configField(
       "harnessCommitsImplement",
@@ -527,6 +565,8 @@ function describeExpected(schema: ValueSchema): string {
       return `${describeExpected(schema.element)}[]`;
     case "object":
       return "object";
+    case "record":
+      return `map of string to ${describeExpected(schema.value)}`;
   }
 }
 
@@ -569,6 +609,15 @@ function validateValue(value: unknown, schema: ValueSchema, path: string, issues
       }
       validateObject(value, schema.fields, path, issues);
       return;
+    case "record":
+      if (!isPlainRecord(value)) {
+        issues.push({ path, message: `expected ${describeExpected(schema)}` });
+        return;
+      }
+      for (const key of Object.keys(value)) {
+        validateValue(value[key], schema.value, `${path}.${key}`, issues);
+      }
+      return;
   }
 }
 
@@ -598,9 +647,157 @@ function validateObject(
   }
 }
 
+/** W1-T10837: the default (unmapped) cash key env — the one `src/lib/worker-provider.ts`'s
+ *  `OPENWEIGHT_API_KEY_ENV` also names. Kept as its own literal here (never imported from
+ *  worker-provider.ts, which imports FROM this module) rather than risk a cycle; `ENV_REGISTRY`
+ *  below already carries the same literal a second time for the same reason. */
+export const DEFAULT_CASH_KEY_ENV = "RMD_OPENWEIGHT_API_KEY";
+
+/** The cash-key env shape a `cashDeploymentEndpoints` entry's `keyEnv` must satisfy when it is not
+ *  {@link DEFAULT_CASH_KEY_ENV} — `RMD_CASH_<NAME>_API_KEY` (design iii). */
+const CASH_DEPLOYMENT_KEY_ENV_PATTERN = /^RMD_CASH_[A-Z0-9]+(?:_[A-Z0-9]+)*_API_KEY$/;
+
+/** Whether `keyEnv` is a safe name for a `cashDeploymentEndpoints` entry to carry (design iii): a
+ *  config-named env var is a way to send ANY daemon secret to a URL, so only the default cash key
+ *  or the cash-key shape is accepted — never an arbitrary operator-chosen name. */
+export function isAllowedCashDeploymentKeyEnv(keyEnv: string): boolean {
+  return keyEnv === DEFAULT_CASH_KEY_ENV || CASH_DEPLOYMENT_KEY_ENV_PATTERN.test(keyEnv);
+}
+
+/** The two Azure hostname families a cash endpoint may use — the same shape
+ *  `unbilledAzureOpenAi429Policy` (src/lib/worker-provider.ts) already checks. Duplicated rather
+ *  than imported: worker-provider.ts imports types FROM config-schema.ts, so the reverse edge
+ *  would be a cycle. */
+const AZURE_COGNITIVE_HOST_SUFFIXES = [".openai.azure.com", ".cognitiveservices.azure.com"] as const;
+
+/** `undefined` when `raw` is an https Azure Cognitive Services / Azure OpenAI URL, else the issue
+ *  message to report — carrying the URL parser's OWN reason when `raw` could not even be parsed,
+ *  rather than erasing that detail into the same generic message a wrong host gets. */
+function azureCognitiveEndpointIssue(raw: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return `must be an https Azure Cognitive Services or Azure OpenAI URL, got ${JSON.stringify(raw)} (${reason})`;
+  }
+  if (url.protocol === "https:" && AZURE_COGNITIVE_HOST_SUFFIXES.some((suffix) => url.hostname.endsWith(suffix))) return undefined;
+  return `must be an https Azure Cognitive Services or Azure OpenAI URL, got ${JSON.stringify(raw)}`;
+}
+
+/**
+ * W1-T10837 design (iii): refuse `workerProviders.cashDeploymentEndpoints` BY NAME at config load
+ * when an entry's `keyEnv` is outside {@link isAllowedCashDeploymentKeyEnv} or its `endpoint` is
+ * not an https Azure Cognitive Services / Azure OpenAI URL ({@link azureCognitiveEndpointIssue}) —
+ * run only once the generic shape pass above has confirmed the map and its entries are plain
+ * records, so this never re-reports a shape issue the caller already raised a second way.
+ */
+function validateCashDeploymentEndpoints(raw: Record<string, unknown>, issues: ConfigShapeIssue[]): void {
+  const workerProviders = raw.workerProviders;
+  if (!isPlainRecord(workerProviders)) return;
+  const map = workerProviders.cashDeploymentEndpoints;
+  if (map === undefined || map === null || !isPlainRecord(map)) return;
+  for (const [deployment, entry] of Object.entries(map)) {
+    if (!isPlainRecord(entry)) continue;
+    const path = `workerProviders.cashDeploymentEndpoints.${deployment}`;
+    const { endpoint, keyEnv } = entry as { endpoint?: unknown; keyEnv?: unknown };
+    if (typeof keyEnv === "string" && !isAllowedCashDeploymentKeyEnv(keyEnv)) {
+      issues.push({
+        path: `${path}.keyEnv`,
+        message: `must be ${DEFAULT_CASH_KEY_ENV} or match RMD_CASH_<NAME>_API_KEY, got ${JSON.stringify(keyEnv)}`,
+      });
+    }
+    if (typeof endpoint === "string") {
+      const endpointIssue = azureCognitiveEndpointIssue(endpoint);
+      if (endpointIssue) issues.push({ path: `${path}.endpoint`, message: endpointIssue });
+    }
+  }
+}
+
 export function validateConfigShape(raw: unknown, source: string): Config {
   const issues: ConfigShapeIssue[] = [];
   validateObject(raw, CONFIG_SCHEMA, "<root>", issues);
+  if (isPlainRecord(raw)) validateCashDeploymentEndpoints(raw, issues);
   if (issues.length > 0) throw new ConfigShapeError(source, issues);
   return raw as Config;
+}
+
+/** W1-T10837: this deployment's endpoint ONLY — the mapped entry's `endpoint` when
+ *  `workerProviders.cashDeploymentEndpoints` names `deployment`, else the default
+ *  {@link Config.workerProviders}'s `cashEndpoint` (falling back to the deprecated
+ *  `openweightEndpoint`, W1-T3607). Never touches the key or the environment, so a caller that
+ *  must not require a key present (the replay-harness fingerprint, a pre-flight URL build) uses
+ *  this instead of {@link cashDeploymentTarget}. THE one place every cash endpoint reader resolves
+ *  a deployment's endpoint from now on. */
+export function cashDeploymentEndpoint(config: Pick<Config, "workerProviders">, deployment: string): string | undefined {
+  return config.workerProviders?.cashDeploymentEndpoints?.[deployment]?.endpoint
+    ?? config.workerProviders?.cashEndpoint
+    ?? config.workerProviders?.openweightEndpoint;
+}
+
+/** W1-T10837: the env var carrying `deployment`'s key — the mapped entry's `keyEnv` when the map
+ *  names it, else {@link DEFAULT_CASH_KEY_ENV}. */
+export function cashDeploymentKeyEnv(config: Pick<Config, "workerProviders">, deployment: string): string {
+  return config.workerProviders?.cashDeploymentEndpoints?.[deployment]?.keyEnv ?? DEFAULT_CASH_KEY_ENV;
+}
+
+/** A deployment's resolved {endpoint, key, keyEnv}, or why it could not be resolved. `mapped` is
+ *  true exactly when `deployment` is named in `workerProviders.cashDeploymentEndpoints` — a reader
+ *  that borrows the default key for a mapped-but-unready deployment would bill it to the WRONG
+ *  account (design iii), so `reason: "no-key"` carries `mapped` for callers that must refuse rather
+ *  than fall back. */
+export type CashDeploymentTargetResult =
+  | { ok: true; endpoint: string; key: string; keyEnv: string; mapped: boolean }
+  | { ok: false; reason: "no-endpoint" }
+  | { ok: false; reason: "no-key"; keyEnv: string; mapped: boolean };
+
+/**
+ * THE ONE RESOLVER (W1-T10837 design ii) every cash endpoint reader that also needs a key resolves
+ * a deployment through: a deployment named in `workerProviders.cashDeploymentEndpoints` is sent to
+ * its OWN endpoint with the key read from its OWN `keyEnv`; a deployment the map does not name
+ * keeps the default `cashEndpoint` (then the deprecated `openweightEndpoint`) and
+ * {@link DEFAULT_CASH_KEY_ENV} — byte-identical to a host with no map at all. A MAPPED deployment
+ * whose `keyEnv` is unset in the daemon environment is NOT READY: this never falls back to the
+ * default key, which belongs to a different account (design iii) — it returns `reason: "no-key"`,
+ * `mapped: true` instead.
+ */
+export function cashDeploymentTarget(
+  config: Pick<Config, "workerProviders">,
+  deployment: string,
+  env: NodeJS.ProcessEnv = process.env,
+): CashDeploymentTargetResult {
+  const endpoint = cashDeploymentEndpoint(config, deployment);
+  if (typeof endpoint !== "string" || endpoint.trim() === "") return { ok: false, reason: "no-endpoint" };
+  const mapped = config.workerProviders?.cashDeploymentEndpoints?.[deployment] !== undefined;
+  const keyEnv = cashDeploymentKeyEnv(config, deployment);
+  const key = env[keyEnv];
+  if (!key) return { ok: false, reason: "no-key", keyEnv, mapped };
+  return { ok: true, endpoint, key, keyEnv, mapped };
+}
+
+/** One Azure account this host is configured to read from: the default `cashEndpoint` (then
+ *  `openweightEndpoint`) account, plus every distinct endpoint named in
+ *  `workerProviders.cashDeploymentEndpoints` — deduped by endpoint, since several deployment ids
+ *  may share one account. The cash model catalog ({@link readCashModelCatalog} in
+ *  src/lib/model-availability.ts) reads every one of these WITH ITS OWN KEY and unions the result,
+ *  so a deployment on a second account counts as "listed by cash" (W1-T10837 design ii). */
+export interface CashAccount {
+  endpoint: string;
+  keyEnv: string;
+}
+
+export function cashConfiguredAccounts(config: Pick<Config, "workerProviders">): CashAccount[] {
+  const accounts: CashAccount[] = [];
+  const seen = new Set<string>();
+  const defaultEndpoint = config.workerProviders?.cashEndpoint ?? config.workerProviders?.openweightEndpoint;
+  if (typeof defaultEndpoint === "string" && defaultEndpoint.trim() !== "") {
+    accounts.push({ endpoint: defaultEndpoint, keyEnv: DEFAULT_CASH_KEY_ENV });
+    seen.add(defaultEndpoint);
+  }
+  for (const entry of Object.values(config.workerProviders?.cashDeploymentEndpoints ?? {})) {
+    if (seen.has(entry.endpoint)) continue;
+    seen.add(entry.endpoint);
+    accounts.push({ endpoint: entry.endpoint, keyEnv: entry.keyEnv });
+  }
+  return accounts;
 }

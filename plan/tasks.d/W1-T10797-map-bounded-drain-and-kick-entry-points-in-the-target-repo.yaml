@@ -12,16 +12,33 @@
   # backlog gardener: placed=2026-10-27T09:32:13.549Z
   attempts: 0
   rationale: >-
-    From the 2026-10-26 follow-up on W1-T10615-1793034698650, ratified via rmd approve:
-  
-    One read-only mapping of the drain, daemon and runner entry points. Its acceptance asserts a
-    single cross-file invariant that cannot be satisfied piecewise, so it is risk high by span and
-    not by blast radius.
+    From the 2026-10-26 follow-up on W1-T10615-1793034698650, ratified via rmd
+    approve:
+
+    One read-only mapping of the drain, daemon and runner entry points. Its
+    acceptance asserts a single cross-file invariant that cannot be satisfied
+    piecewise, so it is risk high by span and not by blast radius. The retained
+    read-only report is source PR14809 at008f13c21. Its mapping test genuinely
+    passes at both source head and merge-base because it describes existing
+    production call sites; hosted proof-discrimination refused that as evidence
+    of a newly delivered report. This plan-only correction keeps the exact
+    report claim and real mapping/marker tests, declares the actual report file,
+    and binds delivery to a physical line added by that report. The real grep
+    executor must hit that new artifact at head and miss at the base. No
+    production behavior, stale-proof allowance, criterion kind, budget,
+    dependency, task identity or delivery hold changes. Native source review and
+    full hosted tests still assess the mapping itself.
   files:
     - src/lib/drain.ts
     - src/lib/daemon.ts
     - src/run-task.ts
+    - test/daemon/bounded-drain-and-kick-entry-points.test.ts
   acceptance:
-    - claim: "The recon report identifies the target-repo bounded drain/kick entry points and exact production call sites, distinguishing the caller from the implementation and recording the relevant bounds and admission gates."
-      proof: "unit test: bounded drain and kick entry points are mapped to exact production call sites"
+    - claim: "The recon report identifies the target-repo bounded drain/kick entry
+        points and exact production call sites, distinguishing the caller from
+        the implementation and recording the relevant bounds and admission
+        gates."
+      proof: "grep: test(\"W1-T10797: bounded drain and kick entry points are mapped
+        to exact production call sites\" in
+        test/daemon/bounded-drain-and-kick-entry-points.test.ts"
   origin: "followup:W1-T10615-1793034698650:2026-10-26T17:17:46.305Z"

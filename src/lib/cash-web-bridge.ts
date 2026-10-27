@@ -94,7 +94,14 @@ export function cashWebSearchEnabled(config: {
 }
 
 /** Build the Responses-API URL. Deliberately separate from the chat-completions endpoint builder:
- *  a different API version and a different path, on the same account. */
+ *  a different API version and a different path, on the same account.
+ *
+ *  W1-T10837: `rawEndpoint` is the CALLER's resolved value, already read through the one
+ *  per-deployment resolver (`cashDeploymentEndpoint`, src/lib/config-schema.ts) for `model` — this
+ *  function builds and validates the URL shape only, never a second `cashEndpoint ??
+ *  openweightEndpoint` read of its own. The search CREDENTIAL stays the daemon's single shared
+ *  {@link CASH_WEB_SEARCH_KEY_ENV} regardless of which account `rawEndpoint` names — see that
+ *  const's own doc for why the two grants are split. */
 export function cashWebSearchEndpoint(rawEndpoint: string, model: string): string {
   if (typeof rawEndpoint !== "string" || rawEndpoint.trim() === "") {
     throw new Error("cash web search requires workerProviders.cashEndpoint");

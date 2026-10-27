@@ -68,9 +68,14 @@ export function servedTrialCohorts(rows: readonly TrialCohortRow[], asOf: string
     if (assignment.conflict || terminal?.conflict) { refuse("conflicting-assignment-or-attempt"); continue; }
     if (terminal === undefined) { refuse("terminal-attempt-unavailable"); continue; }
     const attempt = terminal.row;
+    // The assignment is the authority for the selected provider; an attempt that reports none
+    // (the production worker.attempt shape) joins on identity alone. An attempt that DOES report
+    // a provider, and it contradicts the assignment's, still refuses as a genuine mismatch.
     if ([row.host, row.runId, row.taskId].some((value) => value === null)
       || row.host !== attempt.host || row.runId !== attempt.runId || row.taskId !== attempt.taskId
-      || row.provider == null || row.provider !== attempt.provider) { refuse("attempt-identity-mismatch"); continue; }
+      || row.provider == null || (attempt.provider != null && attempt.provider !== row.provider)) {
+      refuse("attempt-identity-mismatch"); continue;
+    }
     if (row.ts === null || attempt.ts === null || ![row.ts, attempt.ts, asOf].every((ts) => Number.isFinite(Date.parse(ts)))
       || Date.parse(attempt.ts) < Date.parse(row.ts) || Date.parse(attempt.ts) > Date.parse(asOf)) {
       refuse("attempt-time-unavailable-or-outside-window"); continue;

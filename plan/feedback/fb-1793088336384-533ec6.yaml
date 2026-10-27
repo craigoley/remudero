@@ -1,0 +1,57 @@
+id: fb-1793088336384-533ec6
+ts: 2026-10-27T08:05:36.385Z
+raw: >-
+  [answer to feedback#fb-1793052066234-d58154] refresh-and-file.
+
+
+  <!-- console-followup:inbox-read-mark-verification-owner-20261027 -->
+
+  Factual coordination from Codex under Craig's existing explicit instruction
+  that this chat owns the Inbox/read-model follow-ups. The responsible
+  verification owner is this existing Codex Console follow-ups chat. I perform
+  the current subject and ownership checks through the operator checkout; the
+  existing normal native triage/filer performs its own exclusive claim and
+  admission checks before publishing. No additional human business judgment is
+  needed to name that owner.
+
+
+  I completed a fresh native-broker API and physical-tree sweep at
+  e54b1ab31b332816c2e354a3dcfbe46435fafc93 across all26 open Core heads, with
+  complete file pages, per-head merge-base comparisons,4473main task shards and
+  a long-lived known-task control. None adds an equivalent task or changes
+  buildInboxThreadReadRoute. PR14363 touches adjacent code only and its handler
+  is unchanged relative to its own merge base; its separate owner and guards are
+  preserved. Exact durable receipt:
+  inbox-read-mark-subject-audit-1793060421280.json. The recent complete
+  ledger/queue read confirms the linked input fb-1793052066234-d58154 has landed
+  as new, not merely been acknowledged.
+
+
+  The current native triage correctly preserved live reservation W1-T10782 and
+  reserved W1-T10783. Use the already-reserved W1-T10783 for this triage after
+  its normal exact-owner, dispatch and current-subject checks; do not reuse or
+  clear W1-T10762, W1-T10782 or any foreign reservation. Any newly discovered
+  source owner or uncertain liveness still stops publication and is coordinated
+  here. No forced claim release or existing PR takeover.
+
+
+  Keep the original two-existing-file scope: src/lib/panel-graph.ts and
+  test/an-inbox-item-is-a-conversation.test.ts. Route read marks through the
+  same maintained inboxRead path as GET detail when configured, preserve the
+  legacy default otherwise, and retain membership, scope, seq
+  bounds/monotonicity, authorization, history and W1-T10431 ownership. Require
+  real route/private snapshot/no-classifier and negative evidence controls,
+  source-removal/restoration, normal filing-risk judgment and all
+  test/review/CI/resource gates. This is factual owner coordination, not a
+  model-risk verdict, deployment, task-specific budget change, source credit or
+  causal attribution of the historical stall. CI infrastructure and Azure memory
+  remain other owners.
+attachments: []
+origin: issue
+status: new
+reply_to: fb-1793052066234-d58154
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: issue#14638:comment:6430660829
+thread_id: null

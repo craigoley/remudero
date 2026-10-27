@@ -1,0 +1,63 @@
+- id: W1-T10842
+  title: "CODEX BALANCED LOW/MEDIUM RANDOMIZES TERRA 6.1 AGAINST SOL 6.1 — a Codex-vs-Codex routing-experiment epoch with task-unit assignment, active only under a registered protocol with a passing A/A, and Sol stays the lead"
+  repo: remudero
+  depends_on: [W1-T10841]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling, Craig 2026-10-27: \"Codex balanced low/medium becomes a randomized Terra 6.1 vs Sol 6.1 A/B, as the FIRST CONTROLLED field trial ... keep Sol as the lead until the trial says otherwise.\""
+  plan_refs: [W1-T10841, W1-T10843, W1-T4625]
+  files:
+    - src/lib/routing-experiments.ts
+    - src/lib/worker-provider.ts
+    - test/routing/codex-model-experiment-epoch.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED ON origin/main 07dbdcc77 (2026-10-27). `ROUTING_EXPERIMENTS` (src/lib/routing-experiments.ts) holds only
+    CLAUDE-VS-CODEX epochs: each `RoutingExperiment` has one `claudeModel` and one `codexModel` regex and arms
+    {claude, codex} (sonnet vs sol, sol61-vs-sonnet55/5, haiku55 vs luna6); `evaluateRoutingExperiment` looks for the
+    claude candidate among those considered. There is no way to compare two concrete Codex models. The Codex rows in
+    .remudero/mounts.yaml (balanced low/medium/high = [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]) and
+    `FALLBACK_CODEX_MODELS` lead with Sol 6.1, and test/frontier-work-prefers-opus-and-gpt-6-leads-codex.test.ts
+    asserts "Terra is in no Codex row" — which this task keeps TRUE: the trial assigns per task, it does not edit a row.
+  design: |
+    (i) EPOCH SHAPE. Extend RoutingExperiment with a Codex-vs-Codex kind: two arms that both name provider codex, each
+    with a concrete model regex (^gpt-6\.1-sol$ control, ^gpt-6\.1-terra$ treatment), the tier (balanced) and the
+    efforts (low, medium) it covers. An alias that changes models starts another epoch, as now. The existing
+    claude-vs-codex epochs and their reports are unchanged.
+    (ii) ASSIGNMENT. The draw reuses `experimentDrawSeed` / `experimentArmForTask` keyed by `experimentTaskIdentity`, so a
+    task keeps its arm across retries and restarts; the probability comes from the registered protocol (W1-T10841),
+    not a constant here. Assignment applies only when the router has already chosen codex balanced at low or medium;
+    the treatment arm moves only that one selection to gpt-6.1-terra and leaves the rest of the row as fallback.
+    (iii) ACTIVE ONLY WHEN REGISTERED. With no registered protocol, an A/A receipt that fails or has aged out, or a
+    stopping rule or guardrail that has fired, the epoch assigns nothing and Sol 6.1 leads exactly as today.
+    (iv) AUDIT. Every assignment writes an intention-to-treat row with the assigned arm, the probability, the seed, and
+    later the SERVED model, so an assignment audit can compare assigned with served and the release builder
+    (W1-T10843) can refuse when they diverge.
+    (vi) CALL SITE. The Codex model selection in src/lib/worker-provider.ts calls a new routing-experiments export,
+    codexExperimentArmForTask, which reads the registration W1-T10841 writes (src/lib/codex-balanced-trial.ts).
+    (v) NO AUTOMATIC RE-LEAD. The trial's result is reported; changing a Codex row's lead is a separate operator
+    decision (a proposal), never done by this code.
+  acceptance:
+    - claim: "A routing experiment can compare two concrete Codex models, and the existing claude-vs-codex epochs are unchanged"
+      proof: 'grep: test("W1-T10842: a Codex-vs-Codex epoch compares two concrete Codex models" in test/routing/codex-model-experiment-epoch.test.ts'
+    - claim: "Assignment is by task and stable across retries and restarts"
+      proof: 'grep: test("W1-T10842: assignment is by task and stable across retries" in test/routing/codex-model-experiment-epoch.test.ts'
+    - claim: "Only codex balanced low and medium selections enter the trial; frontier, economy, high effort, cash and Claude selections are untouched"
+      proof: 'grep: test("W1-T10842: only codex balanced low and medium selections enter the trial" in test/routing/codex-model-experiment-epoch.test.ts'
+    - claim: "Without a registered protocol and a passing in-age A/A receipt, or after its stopping rule or a guardrail fires, nothing is assigned and Sol 6.1 leads"
+      proof: 'grep: test("W1-T10842: the trial assigns nothing until registered and Sol leads otherwise" in test/routing/codex-model-experiment-epoch.test.ts'
+    - claim: "Every assignment writes an intention-to-treat row with arm, probability, seed and the served model"
+      proof: 'grep: test("W1-T10842: intention-to-treat rows record the assigned arm and the served model" in test/routing/codex-model-experiment-epoch.test.ts'
+    - claim: "The trial never changes a Codex row's lead by itself"
+      proof: 'grep: test("W1-T10842: the trial never re-leads a Codex row by itself" in test/routing/codex-model-experiment-epoch.test.ts'
+    - claim: "The Codex model selection consults the Codex-vs-Codex experiment"
+      proof: 'grep: codexExperimentArmForTask( in src/lib/worker-provider.ts'
+  falsifier: |
+    Drop the registration check: Terra is assigned with no protocol and the inactive-trial test fails. CLOSE IF
+    origin/main's ROUTING_EXPERIMENTS already holds a Codex-vs-Codex epoch for gpt-6.1-terra and gpt-6.1-sol.
