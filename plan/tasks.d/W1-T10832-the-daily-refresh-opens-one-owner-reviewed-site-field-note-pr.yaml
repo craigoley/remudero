@@ -12,7 +12,7 @@
   status: queued
   attempts: 0
   origin: "filing agent F20, 2026-10-27, on Craig's 2026-10-27 field-trials ask; consent file approved by Craig at ~13:45Z the same day (receipt owner-2026-10-27-craig-oley)"
-  plan_refs: [W1-T4574, W1-T10830, W1-T10831, W1-T10756, W1-T136, PORTAL-T41]
+  plan_refs: [W1-T4574, W1-T10830, W1-T10831, W1-T10756, W1-T136, PORTAL-T41, W1-T10878]
   files:
     - deploy/field-trials-refresh.sh
     - src/lib/field-trials-site-import.ts
@@ -89,6 +89,11 @@
        the field-trials.refresh row. Prove the App installation can push a branch and open a PR on
        remudero-site under the SERVICE identity before relying on it; if it cannot, the row says so and the
        PR reports the exact grant the operator must add.
+    6. ONE PR, MORE THAN ONE DATA FILE (amended 2026-10-27). W1-T10878 adds a second candidate,
+       data/model-guidance.json, to this same pass. syncFieldNoteSiteImport must not assume the PR holds only the
+       field note: it carries whatever data files the site's stage mode staged, still as ONE open import PR,
+       and its body is the stage mode's summary. This task ships the field note only; W1-T10878 wires the
+       second file.
   acceptance:
     - claim: "the refresh passes the core private consent file as --consent only when it is an owner-only regular file, and its absence leaves the other steps running with a withheld release"
       proof: 'grep: test("W1-T10832: the refresh passes the private consent file only when it is owner-only" in test/deploy/the-field-trials-refresh-passes-the-host-consent-file.test.ts'

@@ -1,7 +1,7 @@
 - id: W1-T10831
   title: "NOTHING IN CORE PRODUCES THE SITE'S model-field-note-v1 — the site shipped a reviewed importer for observational per-model x task-class coverage (PORTAL-T37, remudero-site #178 and #181), but no core command writes that shape, so the public Field Trials page has never carried a release (data/model-field-note.json is null and its history is empty)"
   repo: remudero
-  depends_on: []  # reads the field-trials-flow-v1 snapshot shape that already exists; W1-T10830 makes a fresh one, W1-T10833 fixes the served-trial join this does not use
+  depends_on: [W1-T10875]  # amended 2026-10-27: the note's call-outcome counts use the shared attribution, so a ladder refusal never publishes as a model failure; reads the field-trials-flow-v1 snapshot shape that already exists; W1-T10830 makes a fresh one, W1-T10833 fixes the served-trial join this does not use
   type: implement
   verify: auto
   principles: { tdd: strict }
@@ -12,7 +12,7 @@
   status: queued
   attempts: 0
   origin: "filing agent F20, 2026-10-27, on Craig's 2026-10-27 field-trials ask; the site contract read from craigoley/remudero-site main b80fbbb"
-  plan_refs: [W1-T4574, W1-T100001, W1-T10830, W1-T10832, W1-T10833, PORTAL-T41]
+  plan_refs: [W1-T4574, W1-T100001, W1-T10830, W1-T10832, W1-T10833, PORTAL-T41, W1-T10875]
   files:
     - src/lib/field-trials-field-note.ts
     - src/lib/field-trials-flow.ts
