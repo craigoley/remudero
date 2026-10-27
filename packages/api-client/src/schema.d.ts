@@ -5,6 +5,143 @@
 
 export interface components {
   schemas: {
+    ImprovementThreadRequest: {
+      repository: string;
+      opportunityId: string;
+      snapshotId: string;
+      goal: string;
+      constraints?: (string)[];
+      idempotencyKey: string;
+      instance?: string;
+    };
+    ImprovementFailure: {
+      state: "invalid_request" | "source_unavailable" | "source_stale" | "conflict" | "busy" | "uncertain";
+      reason: string;
+      requestId?: string;
+    };
+    ImprovementSavedResult: {
+      state: "saved";
+      version: "improvement-thread-v1";
+      requestId: string;
+      threadId: string;
+      proposalId: string;
+      repository: string;
+      instance: string;
+      snapshotId: string;
+      opportunityId: string;
+      reused: boolean;
+      planning: {
+        state: "not_requested";
+      };
+      execution: {
+        state: "not_requested";
+      };
+    };
+    ImprovementPlanReceipt: {
+      state: "plan_pr_opened";
+      prUrl: string;
+      branch: string;
+      taskIds: (string)[];
+      taskIdsState: "observed" | "unavailable";
+      recordedAt: string;
+      nativeReceiptId: string;
+    };
+    ImprovementNativeMessage: {
+      threadId: string;
+      role: "escalation" | "reply";
+      body: string;
+      seq: number;
+      ts: number;
+      /** Native Inbox message metadata. Source context and operator audit are facts; they grant no execution authority. */
+      extra?: Record<string, never>;
+    };
+    ImprovementThreadView: {
+      state: "saved";
+      version: "improvement-thread-v1";
+      requestId: string;
+      threadId: string;
+      proposalId: string;
+      repository: string;
+      instance: string;
+      snapshotId: string;
+      opportunityId: string;
+      currentRequestId: string;
+      goal: string;
+      constraints: (string)[];
+      goalDigest: string;
+      source: {
+        state: "current" | "stale" | "unavailable";
+        reason: unknown;
+      };
+      correspondence: {
+        state: "linked" | "unknown";
+        pendingInputs: unknown;
+        pendingWork: unknown;
+      };
+      /** At most 512 KiB of native messages. Use nextBeforeSeq to read earlier messages. */
+      messages: (ImprovementNativeMessage)[];
+      messageCount: number;
+      messagesPartial: boolean;
+      nextBeforeSeq: unknown;
+      drafting: {
+        state: "not_requested" | "requested" | "ready" | "unavailable" | "refused";
+        digest: unknown;
+        fragmentYaml: unknown;
+        reason: unknown;
+        operationId?: string;
+        sourceRequestId?: string;
+      };
+      filing: {
+        state: "not_requested" | "requested" | "plan_pr_opened" | "refused" | "uncertain";
+        operationId?: string;
+        sourceRequestId?: string;
+        receipt?: ImprovementPlanReceipt;
+        reason?: unknown;
+      };
+      execution: {
+        state: "not_requested";
+      };
+    };
+    ImprovementDraftRequest: {
+      requestId: string;
+      goalDigest: string;
+      idempotencyKey: string;
+    };
+    ImprovementFileRequest: {
+      requestId: string;
+      goalDigest: string;
+      idempotencyKey: string;
+      draftDigest: string;
+    };
+    ImprovementAction: {
+      version: "improvement-action-v1";
+      operationId: string;
+      kind: "draft" | "file";
+      requestId: string;
+      proposalId: string;
+      actorId: string;
+      payloadHash: string;
+      goalDigest: string;
+      draftDigest: unknown;
+      requestedAt: string;
+      state: "prepared" | "requested" | "waiting" | "completed" | "refused" | "uncertain";
+      reason: unknown;
+      receipt: unknown;
+    };
+    ImprovementActionRequested: {
+      state: "requested";
+      operation: ImprovementAction;
+      execution: {
+        state: "not_requested";
+      };
+    };
+    ImprovementActionObserved: {
+      state: "observed";
+      operation: ImprovementAction;
+      execution: {
+        state: "not_requested";
+      };
+    };
     ProductId: string;
     ProductRequestId: string;
     ProductRevision: number;
@@ -6106,6 +6243,71 @@ export interface components {
 }
 
 export interface paths {
+  "/v1/improvements/threads": {
+    post: {
+      responses: {
+          "200": ImprovementSavedResult;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/thread": {
+    get: {
+      responses: {
+          "200": ImprovementThreadView;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/threads/draft": {
+    post: {
+      responses: {
+          "202": ImprovementActionRequested;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/threads/file": {
+    post: {
+      responses: {
+          "202": ImprovementActionRequested;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": HighTierRefusal;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/action": {
+    get: {
+      responses: {
+          "200": ImprovementActionObserved;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
   "/v1/products": {
     get: {
       responses: {
