@@ -1,0 +1,79 @@
+- id: W1-T10838
+  title: "THE DAEMON CARRIES THE EASTUS CASH KEY — RMD_CASH_EASTUS_API_KEY joins the runtime env var list and reaches the container from a durable mode-0600 host secret at boot and at recycle, by name only, never printed"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling, Craig 2026-10-27: \"Second account in eastus now\" — the eastus Foundry account synthwatch-foundry-eus has its own key, which Craig adds to the host env"
+  plan_refs: [W1-T1069, W1-T3603, W1-T10837, W1-T10839]
+  files:
+    - deploy/runtime-env-vars.sh
+    - deploy/recycle-container.sh
+    - deploy/host-update.sh
+    - deploy/install-host-units.sh
+    - src/lib/config-schema.ts
+    - docs/operator-guide.md
+    - test/deploy/the-daemon-carries-the-eastus-cash-key.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED ON origin/main 07dbdcc77 AND READ-ONLY ON THE HOST (2026-10-27). A host env var reaches the
+    remudero-daemon container by exactly two paths, and both name each variable explicitly:
+    (a) BOOT/RELAUNCH: the launcher /home/craigoleyagent/rmd-relaunch.sh is rendered by
+    deploy/install-host-units.sh; its `render_cash_boot_secrets` block reads one mode-0600, single-line file per
+    credential from CASH_SECRET_DIR (default /home/<service user>/.local/share/remudero/secrets) into the
+    launcher's own environment and passes only the NAME to docker (`-e RMD_OPENWEIGHT_API_KEY`). The watchdog tick
+    re-renders and converges the launcher itself (`install-host-units.sh --install` under `sudo -n` when drifted).
+    (b) RECYCLE: deploy/recycle-container.sh captures every name in RMD_DAEMON_RUNTIME_ENV_VARS
+    (deploy/runtime-env-vars.sh, with inline fallback copies in recycle-container.sh and host-update.sh that a test
+    keeps identical) off the live container, and for RMD_OPENWEIGHT_API_KEY alone reads the durable host secret
+    (RMD_OPENWEIGHT_API_KEY_PATH, source "durable-host-secret").
+    On the host today the secrets directory holds openweight-api-key, foundry-claude-api-key and
+    foundry-claude-endpoint (all 0600, owner craigoleyagent). Nothing names a second account's key, so a key
+    written there today reaches no container. The memory note runtime-env-vars-array-holds-names-only applies:
+    the test whitespace-splits the array body, so no comment may sit inside RMD_DAEMON_RUNTIME_ENV_VARS (W1-T3603).
+  design: |
+    (i) NAME. The new variable is RMD_CASH_EASTUS_API_KEY (the RMD_CASH_<NAME>_API_KEY shape W1-T10837 admits as a
+    keyEnv). Add it to RMD_DAEMON_RUNTIME_ENV_VARS in deploy/runtime-env-vars.sh AND to both inline fallback copies,
+    names only, no comment inside any array. Add its path variable RMD_CASH_EASTUS_API_KEY_PATH defaulting to
+    ${HOME}/.local/share/remudero/secrets/cash-eastus-api-key beside RMD_OPENWEIGHT_API_KEY_PATH, and an envEntry in
+    src/lib/config-schema.ts naming src/lib/worker-provider.ts as its reader.
+    (ii) BOOT. `render_cash_boot_secrets` reads $CASH_SECRET_DIR/cash-eastus-api-key through the existing
+    `read_cash_boot_secret` guard (regular file, not a link, mode 600, exactly one non-empty line) when the variable is
+    unset, warns by name when it is missing ("eastus cash key unavailable; that deployment stays unavailable"),
+    exports it, and the docker run passes `-e RMD_CASH_EASTUS_API_KEY` by name. A missing file never blocks boot.
+    (iii) RECYCLE. When the outgoing container does not carry the variable (true on the first recycle after this
+    ships), recycle-container.sh reads the durable secret with the same one-line 0600 checks and records source
+    "durable-host-secret". Unlike RMD_OPENWEIGHT_API_KEY it is NOT required: an absent or unsafe file leaves only
+    that deployment unavailable and refuses nothing.
+    (iv) NEVER PRINTED. The value enters neither docker argv, a unit file, the launcher's output, the recycle report
+    nor `host-update.sh --print-daemon-run`, which prints the passthrough name only.
+    (v) OPERATOR STEP, documented in docs/operator-guide.md beside the existing durable-secret paragraph. Craig runs
+    it from a machine where `az` is logged in to the subscription; the key goes from az straight into the host file
+    over ssh and is never echoed. It refuses (and leaves any existing file untouched) unless exactly one key line
+    arrived, so a failed `az` call writes nothing:
+      az cognitiveservices account keys list -g synthwatch-rg -n synthwatch-foundry-eus --query key1 -o tsv | ssh remudero 'set -e; umask 077; d="$HOME/.local/share/remudero/secrets"; t="$d/.cash-eastus-api-key.tmp"; cat > "$t"; [ "$(awk "NF{n++} END{print n+0}" "$t")" = 1 ] || { rm -f "$t"; echo "refused: expected exactly one key line" >&2; exit 1; }; chmod 600 "$t"; mv "$t" "$d/cash-eastus-api-key"; stat -c "%a %s %n" "$d/cash-eastus-api-key"'
+    It prints only mode, byte size and path. Dry-run 2026-10-27 against a private HOME with a fake key: one line
+    wrote a 0600 file; empty input refused with exit 1 and left the earlier file intact. Writing the file before this
+    task ships is harmless (nothing reads it). After this task ships, the watchdog converges the launcher and the
+    next relaunch or recycle carries the variable; verify it by NAME only, e.g.
+    `docker exec remudero-daemon sh -c 'test -n "$RMD_CASH_EASTUS_API_KEY" && echo set || echo unset'`.
+  acceptance:
+    - claim: "RMD_CASH_EASTUS_API_KEY is a declared daemon runtime variable in deploy/runtime-env-vars.sh and in both inline fallback copies, names only"
+      proof: 'grep: RMD_CASH_EASTUS_API_KEY in deploy/runtime-env-vars.sh'
+    - claim: "The rendered boot launcher reads the key from the durable cash-eastus-api-key secret through the one-line mode-0600 guard, warns by name when absent and still boots"
+      proof: 'grep: test("W1-T10838: the boot launcher reads the eastus cash key from its durable secret" in test/deploy/the-daemon-carries-the-eastus-cash-key.test.ts'
+    - claim: "A recycle carries the key from the durable secret when the outgoing container lacks it, and an absent or unsafe secret refuses nothing"
+      proof: 'grep: test("W1-T10838: a recycle carries the eastus key from its durable secret and an absent one refuses nothing" in test/deploy/the-daemon-carries-the-eastus-cash-key.test.ts'
+    - claim: "The key value never reaches docker argv, a unit file, the launcher output, the recycle report or the printed daemon run"
+      proof: 'grep: test("W1-T10838: the eastus key value never reaches argv, a unit file or output" in test/deploy/the-daemon-carries-the-eastus-cash-key.test.ts'
+    - claim: "The operator guide names the durable secret file and the exact key-write command"
+      proof: 'grep: cash-eastus-api-key in docs/operator-guide.md'
+  falsifier: |
+    Drop the name from the runtime list: a recycle no longer carries the key and the recycle test fails. CLOSE IF
+    origin/main already carries a second cash key into the daemon container.
