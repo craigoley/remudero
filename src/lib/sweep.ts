@@ -101,7 +101,7 @@ import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflight
 import { reclaimStaleLock } from "./fs-race-safe.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger, isRealStrike, type LedgerLine } from "./ledger.js";
-import { appendOperatorNote, loadOperatorNotes, operatorNoteStore, type OperatorNoteEntry } from "./operator-notes.js";
+import { appendOperatorNote, loadOperatorNoteRows, loadOperatorNotesForTask, operatorNoteStore, type OperatorNoteEntry } from "./operator-notes.js";
 import {
   capStrikeLadderNote, decideStrikeLadderRung, firstFailingTestTitle, hasUnspentLadderRefresh,
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
@@ -2573,7 +2573,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     });
   const repoRoot = entrypointRepoRoot;
-  const noteStore = operatorNoteStore({ stateDir: join(config.root, "state"), repository: `${owner}/${repo}`, legacyRoot: repoDir });
+  // W1-T10772: resolved per call (the store verifies its state directory's identity), never cached.
+  const ladderNoteStore = () => operatorNoteStore({ stateDir: join(config.root, "state"), repository: `${owner}/${repo}`, legacyRoot: repoRoot });
   // W1-T7096: ONE judge serves both the sweep's own next-round decision and the rung it dispatches.
   // Never the fix-worker spawn seam: a judge must not run through a writer's spawn (a fixture's fake commits).
   const effectsProgressJudge = deps.productionProgressJudge ? productionFixProgressJudge({ cwd: repoRoot,
@@ -3563,8 +3564,32 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // `escalate()` purely as the notification TRANSPORT, carrying the SAME two
     // candidate resolutions as its options — never a generic needs-human.
     strikeLadder: {
-      readNotes: (taskId) => loadOperatorNotes(noteStore, true).filter(entry => entry.taskId === taskId),
-      appendNote: (entry) => appendOperatorNote(noteStore, entry),
+      readNotes: (taskId) => {
+        // W1-T10772: guidance lives in the instance's durable repository-scoped store (the legacy
+        // `plan/operator-notes.ndjson` stays readable through `legacyRoot`); a missing state
+        // directory falls back to the legacy file alone. Strict reads refuse an unstamped note.
+        const store = ladderNoteStore();
+        if (store) {
+          loadOperatorNoteRows(store, true);
+          return loadOperatorNotesForTask(store, taskId);
+        }
+        let raw: string;
+        try {
+          raw = readFileSync(join(repoRoot, "plan", "operator-notes.ndjson"), "utf8");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+          throw error;
+        }
+        for (const line of raw.split("\n").filter(line => line.trim())) {
+          const entry = JSON.parse(line) as Partial<OperatorNoteEntry> | null;
+          if (typeof entry?.author !== "string" || !entry.author.trim() || typeof entry.taskId !== "string" || !entry.taskId.trim() ||
+              typeof entry.note !== "string" || !entry.note.trim() || typeof entry.ts !== "string" || !Number.isFinite(Date.parse(entry.ts))) {
+            throw new Error("operator note is unstamped or unreadable");
+          }
+        }
+        return loadOperatorNotesForTask(repoRoot, taskId);
+      },
+      appendNote: (entry) => appendOperatorNote(ladderNoteStore() ?? repoRoot, entry),
       readAuthor: async (pr) => {
         const row = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { user?: { login?: string } } | undefined;
         return row?.user?.login;
@@ -5810,6 +5835,9 @@ export type CiInfrastructureFailureSignature =
 const FINALIZE_TRANSPORT_RESET_LINE =
   /Failed to FinalizeArtifact: Unable to make request:\s*(?:ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|socket hang up)\b/;
 
+/** W1-T10816: the upload step's success line, as actions/upload-artifact really prints it, or W1-T3194's wording. */
+const ARTIFACT_UPLOADED_LINE = /Finished uploading artifact content to blob storage!|artifact upload completed successfully/i;
+
 /** The classified error line itself, at most 200 chars, for the requeue row. */
 export function ciInfrastructureMatchedError(logTail: string): string | undefined {
   return logTail.split("\n").find((line) => line.includes("Failed to FinalizeArtifact"))?.trim().slice(0, 200);
@@ -5826,7 +5854,7 @@ function finalizeResetAfterPassingSummary(text: string): boolean {
   if ([...text.matchAll(/(\d+)\/(\d+) file\(s\) reported/g)].some((m) => m[1] !== m[2])) return false;
   const tests = [...text.matchAll(/^\s*# tests (\d+)\s*$/gm)].at(-1);
   if (!tests || Number(tests[1]) <= 0 || !/^\s*# fail 0\s*$/m.test(text)) return false;
-  const uploadedAt = text.search(/Finished uploading artifact content to blob storage!|artifact upload completed successfully/i);
+  const uploadedAt = text.search(ARTIFACT_UPLOADED_LINE);
   const finalizingAt = text.search(/finalizing artifact upload/i);
   return tests.index! < uploadedAt && uploadedAt < finalizingAt && finalizingAt < text.search(FINALIZE_TRANSPORT_RESET_LINE);
 }
@@ -5843,7 +5871,7 @@ export function classifyCiInfrastructureFailure(
   ) {
     return undefined;
   }
-  const uploadedAt = text.search(/artifact upload completed successfully/i);
+  const uploadedAt = text.search(ARTIFACT_UPLOADED_LINE);
   const finalizingAt = text.search(/finalizing artifact upload/i);
   const failedAt = text.search(
     /Failed to FinalizeArtifact[^\n]*(?:403[^\n]*Forbidden|Forbidden[^\n]*403)[^\n]*Error from intermediary/i,
@@ -8988,7 +9016,10 @@ export function fixRungRepeatsIdenticalFailure(pr: OpenPrView): boolean {
  *  excluded ENTIRELY rather than flagged, because a worker acting on the wrong one of several named
  *  options misattributes a ratified ruling. Reads NOTHING about `failure_class`. */
 export function actionableGateFailuresFromReasons(reasons: readonly string[]): ActionableGateFailure[] {
-  return reasons.length === 1 ? [{ reason: reasons[0] }] : [];
+  // W1-T10574: a Standing rule 15 (PR split) or rule 25 (entanglement) reason cannot be repaired in
+  // place, so it is never actionable — dropping it HERE stops the sweep and the fix rung dispatching
+  // (and striking) a round on it. Mirrors `isUnfixableInPlaceGateFailure` (lib/prompt-render.ts).
+  return reasons.length === 1 && !/Standing rule 15|entangled: instrument path\(s\)/i.test(reasons[0]) ? [{ reason: reasons[0] }] : [];
 }
 
 /** W1-T527 — WHY a PR is red, which {@link isBlockedCi} deliberately does not ask. Four causes
@@ -16801,6 +16832,8 @@ export interface FixAdmissionCharge {
   admissionRung: FixAdmissionRung;
 }
 
+/** W1-T10596: how long a repair may wait before a live fix tree stops blocking its typical-peak admission. */
+export const FIX_STARVATION_MS = 2 * 60 * 60 * 1000;
 export type FixAdmissionRung = "fits" | "typical" | "nothing-live" | "none";
 
 /**
@@ -16907,6 +16940,7 @@ export function createSweepFixAdmissionController(input: {
   let pressure: FixHostPressure | undefined;
   let charge: FixAdmissionCharge | undefined;
   let available = 0;
+  let starved = false; // W1-T10596: the claim being judged has waited past FIX_STARVATION_MS.
   const estimate = (workerClass: FixAdmissionClass): LearnedEstimate =>
     input.readEstimate?.(workerClass) ?? { estimateMib: DEFAULT_ESTIMATE_MIB[workerClass], samples: 0 };
   const readResidents = (): FixAdmissionResidents => {
@@ -16963,7 +16997,8 @@ export function createSweepFixAdmissionController(input: {
       return;
     }
     const live = reservations === 0 ? liveTrees() : undefined;
-    if (live && live.fix.length === 0 && left >= charge.fixTypicalMib) charge.admissionRung = "typical";
+    // W1-T10596: a repair starved past FIX_STARVATION_MS no longer yields to a live fix tree; the typical peak must still fit.
+    if (live && (live.fix.length === 0 || starved) && left >= charge.fixTypicalMib) charge.admissionRung = "typical";
     else if (live && live.fix.length + live.review.length === 0 && activeWorkers === 0 &&
       charge.headroomMib > 0 && charge.fixTypicalMib > charge.headroomMib) charge.admissionRung = "nothing-live";
     if (charge.admissionRung !== "none") available = 1;
@@ -17046,6 +17081,7 @@ export function createSweepFixAdmissionController(input: {
     claim: (pr) => {
       const since = input.reviewQueue && input.waitSinceMs ? input.waitSinceMs(pr) : undefined;
       ahead = since === undefined ? undefined : kept().filter((review) => review.sinceMs <= since);
+      starved = since !== undefined && systemClock.now() - since >= FIX_STARVATION_MS;
       const order = (): Record<string, unknown> | undefined => since === undefined ? undefined : {
         pr_number: pr.prNumber, blocker_since: clockFromMillisFn(() => since).iso(),
         ordered_ahead: ahead!.map((review) => review.prNumber), overtaken_reviews: [...overtaken],
@@ -19153,7 +19189,7 @@ export async function runSweep(
         priorPlanRepairStrikesFromLedger(pr, ledgerLines) < MAX_PLAN_REPAIR_STRIKES);
     const blockerRow = {
       ...blockerFields(blocker, priorBlockerByPr.get(pr.prNumber), now, planRepairCapable,
-        blocker.startsWith("security-") ? securityText : policyCause),
+        blocker.startsWith("security-") ? securityText : policyCause, pr.headSha),
       ...(blockerReadFailure ? { blocker_read_error: blockerReadFailure.reason } : {}),
     };
     if (armOutcome !== "armed" && armOutcome !== "direct-merged" && !gardenRecordRefusals.has(pr.prNumber)) {
@@ -19580,7 +19616,7 @@ export async function runSweep(
       selectDispositionRule(dispositionView, policy, now, dispositionFacts).rule?.when === isFixStrikeJudgedExhausted;
     // W1-T5690: a blocked-ambiguous PR whose blocker is older than its SLO and still has an untaken
     // rung takes it, even when the strike rule did not match (owner NONE, awaiting-ci, conflict ...).
-    const sloBlocker = blockerFields(derived.blocker, priorBlockerByPr.get(pr.prNumber), now);
+    const sloBlocker = blockerFields(derived.blocker, priorBlockerByPr.get(pr.prNumber), now, false, undefined, pr.headSha);
     const sloContext: SloContext = {
       blocker: derived.blocker, owner: sloBlocker.blocker_owner, ageMs: sloBlocker.blocker_age_ms,
       noOp: derived.blocker === "strikes-exhausted" && pr.repeatedFixRefusal !== undefined,

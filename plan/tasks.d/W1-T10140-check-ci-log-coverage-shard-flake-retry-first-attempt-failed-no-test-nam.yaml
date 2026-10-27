@@ -6,7 +6,8 @@
   verify: auto
   risk: low
   priority: 1.28
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:coverage-shard:flake-retry-first-attempt-failed-no-test-name-parsed-from-ou"
@@ -49,3 +50,15 @@
       - "No bounded view of the actual change was supplied, so I cannot see its size or shape. The declared scope is small and bounded."
     judged_at: "2026-10-18T12:29:40.886Z"
     pin: "0e8260787b5f1ebb03e2abd7cd6f3ff5a164d5b44466af8dbe480274129badbc"
+  amendment: |
+    Disposition proposal: withdraw this unsupported cause contract; claim no remedy credit.
+    Preserve every original criterion, proof, observation, declared path and ruling as history.
+    The class name records a missing test-name parse in a retry reporter. The retained rounds
+    identify distinct review-at-head, worktree dependency and unreadable-storage failures;
+    the three later hand-fix rows are pass-median proxies, not measured repairs of this class.
+    None establishes one causal defect in src/lib/affected-suites.ts. The current PR #14923
+    changes only a test that pins formatFlakeLabel output. It does not prevent a failure or
+    avoid any fix round, so its title-only grep cannot establish the acceptance claim.
+    Any future repair requires a bounded causal diagnosis and an executable counterfactual
+    for the observed owner path. Keep healthy failure reporting, normal gates and UNKNOWN
+    evidence intact. Do not treat withdrawal or closure as repair credit.

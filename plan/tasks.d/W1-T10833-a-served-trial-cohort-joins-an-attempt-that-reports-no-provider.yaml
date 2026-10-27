@@ -1,0 +1,73 @@
+- id: W1-T10833
+  title: "EVERY SERVED-TRIAL COHORT IS EMPTY BECAUSE THE JOIN COMPARES A FIELD THE ATTEMPT NEVER WRITES — servedTrialCohorts refuses an assignment as attempt-identity-mismatch when the assignment's provider differs from the worker.attempt row's, and worker.attempt rows carry no provider; 24,502 of 26,298 assignments were refused on 2026-10-18 and zero qualified"
+  repo: remudero
+  depends_on: []  # W1-T10315, W1-T10318 and W1-T9109 repair per-lane cost and served-model receipts; none touches this join
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern, the assignment-to-attempt identity check in one function; a too-loose join would merge unrelated attempts into a cohort
+  band_meaning: span
+  priority: 1  # the field note (W1-T10831) reports served-model coverage per model x task class from this join; with it broken every row reads zero served
+  status: queued
+  attempts: 0
+  origin: "filing agent F20, 2026-10-27, on Craig's 2026-10-27 field-trials ask; verified read-only on the Azure host 13:20-13:45Z at origin/main 07dbdcc77"
+  plan_refs: [W1-T4574, W1-T100001, W1-T10315, W1-T10318, W1-T9109]
+  files:
+    - src/lib/field-trials-cohorts.ts
+    - src/lib/field-trials-flow.ts
+    - test/routing/a-served-trial-cohort-joins-an-attempt-that-reports-no-provider.test.ts
+  rationale: |
+    VERIFIED 2026-10-27 on the 2026-10-18 snapshot and the host ledger, read-only.
+
+    THE COUNTS. field-trials-flow-v1.json (asOf 2026-10-18T04:24:50.981Z), servedTrialCohorts[].evidence:
+    - core: denominator 24,742; attempt-identity-mismatch 23,334; terminal-attempt-unavailable 1,359;
+      conflicting-assignment-or-attempt 49; qualifiedAssignments 0.
+    - site: denominator 214; mismatch 153; terminal unavailable 60; conflicting 1; qualified 0.
+    - console: denominator 1,342; mismatch 1,015; terminal unavailable 279; conflicting 48; qualified 0.
+    Sum: 24,502 mismatches of 26,298 assignments, and no qualified assignment anywhere.
+
+    THE JOIN (src/lib/field-trials-cohorts.ts, servedTrialCohorts). After pairing a worker.assignment with
+    the worker.attempt carrying the same assignment id, it refuses `attempt-identity-mismatch` when host,
+    run or task differ, or when `row.provider == null || row.provider !== attempt.provider`. projectFlowRow
+    (src/lib/field-trials-flow.ts) sets provider from the row's top-level `provider` or, failing that,
+    worker_assignment.selected.provider. An assignment has the latter; a worker.attempt row has neither.
+    HOST SAMPLE, ledger.2026-10-01T23-59-54-541Z: 701 assignments, 696 paired with an attempt by
+    selection_assignment_id. Of the 696: host, run_id and task_id equal in all 696; the attempt's provider
+    is null in all 696; the assignment's provider is null in none. Recent attempts (ledger.2026-10-2x) have
+    the same key set: no provider field.
+    WHY THE SUITE NEVER SAW IT. The cohort fixture in test/field-trials-flow.test.ts (controlledRows, added
+    with the join in #9865) stamps `provider: "codex"` on its worker.attempt rows, a shape the production
+    writer (the worker.attempt log calls in src/run-task.ts) never emits. The suite compares against rows
+    production does not write, so it stayed green while the live join qualified nothing.
+
+    NOT COVERED ELSEWHERE. W1-T10315 (feedback-summary), W1-T10318 (containment) and W1-T9109 (ci-judge)
+    are queued per-lane repairs of missing cost and served-model RECEIPTS at the wrapper; none of them reads
+    or changes this join, and fixing all three would leave every pair above still refused. Swept plan/ and
+    the 15 open PR heads: no task or PR names attempt-identity-mismatch or servedTrialCohorts.
+  design: |
+    The assignment is the authority for the selected provider; the attempt is the authority for the served
+    model and the outcome. An attempt that reports no provider is not a mismatch: join on assignment id,
+    host, run and task, and take the cohort's provider from the assignment. An attempt that DOES report a
+    provider different from its assignment's still refuses as attempt-identity-mismatch. Keep every other
+    refusal and its order (conflicting rows, missing terminal, time window, served model, outcome, context,
+    immutable pins, the cohort output bound). Optionally also stamp provider on new worker.attempt rows at the
+    writer, but the join must work for the historical rows that lack it; never rewrite ledger rows.
+    An assignment that itself has no provider still refuses (the existing legacy-provider case). The new test
+    builds its attempt rows in the key set production writes (no provider field), not from controlledRows.
+    Report in the implementation PR the exclusion breakdown before and after over a fixture shaped like the
+    10-18 host rows (assignment provider set, attempt provider absent).
+  acceptance:
+    - claim: "an assignment whose terminal attempt reports no provider joins on assignment id, host, run and task, and counts in a served-trial cohort under the assignment's provider"
+      proof: 'grep: test("W1-T10833: an attempt with no provider joins its assignment" in test/routing/a-served-trial-cohort-joins-an-attempt-that-reports-no-provider.test.ts'
+    - claim: "an attempt that reports a different provider, host, run or task from its assignment is still refused as attempt-identity-mismatch"
+      proof: 'grep: test("W1-T10833: a contradicting attempt identity still refuses" in test/routing/a-served-trial-cohort-joins-an-attempt-that-reports-no-provider.test.ts'
+  falsifier: |
+    At base the first case fails: the pair is refused as attempt-identity-mismatch and qualifiedAssignments is 0.
+    - Drop the provider comparison entirely: the contradicting-provider half of the second case fails.
+    - Take the provider from the attempt when present and the assignment otherwise, without comparing: the
+      second case fails.
+    GUARDS that held at base and must still hold:
+    - test/field-trials-flow.test.ts (served-trial cohort refusals, cohort output bound, immutable pins).
+    Each guard's existing case must fail when its production branch is removed, and pass again with zero
+    failures once it is restored.

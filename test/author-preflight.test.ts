@@ -169,7 +169,7 @@ test('author static priority wrapping retains failure and never starts affected 
   assert.match(receipt.affectedTestsNotRunReason, /static-preflight did not succeed/);
 });
 
-test('author static admission holds one real slot from static preflight through affected tests', (t) => {
+test('author static preflight runs unslotted and one real slot holds the affected tests (W1-T9951)', (t) => {
   // This fixture starts its OWN author: the enclosing real author's admission is
   // not the fixture's cheap census or its private test-slot directory.
   const keys = ['RMD_TEST_SLOT_PARENT', 'RMD_TEST_SLOT_DIR'] as const;
@@ -189,27 +189,24 @@ test('author static admission holds one real slot from static preflight through 
   writeFileSync(join(f.root, 'src/run-task.ts'), `
     import assert from 'node:assert/strict';
     import { readFileSync, writeFileSync } from 'node:fs';
-    import { acquireTestSlot } from ${JSON.stringify(slotModule)};
-    const claim=JSON.parse(process.env.RMD_TEST_SLOT_PARENT ?? 'null');
-    assert.ok(claim, 'static preflight must already hold a parent slot');
-    const before=readFileSync(claim.path,'utf8');
-    const nested=acquireTestSlot('real-static-nested-check',{waitBoundMs:0});
-    assert.match(nested.note,/inherited live parent test slot/);
-    nested.refresh(); nested.release();
-    assert.equal(readFileSync(claim.path,'utf8'),before);
-    writeFileSync('coverage/slot-owner.json',JSON.stringify(claim));
+    import { admitStaticWork } from ${JSON.stringify(slotModule)};
+    assert.equal(process.env.RMD_TEST_SLOT_PARENT, undefined, 'static preflight runs before any suite slot is admitted');
+    const nested=admitStaticWork('real-static-nested-check',{memoryBytes:1});
+    assert.equal(nested.outcome,'inherited',nested.note);
+    nested.release();
+    writeFileSync('coverage/static-ran.json','{}');
   `);
   writeFileSync(join(f.root, 'test/leaf.test.ts'), `
     import { test } from 'node:test';
     import assert from 'node:assert/strict';
-    import { existsSync, readFileSync } from 'node:fs';
+    import { existsSync, writeFileSync } from 'node:fs';
     import { dirname } from 'node:path';
     import { acquireTestSlot } from ${JSON.stringify(slotModule)};
     test('affected child retains the admitted owner',()=>{
-      const claim=JSON.parse(readFileSync('coverage/slot-owner.json','utf8'));
-      assert.ok(existsSync(claim.path),'the same owner remains held during affected execution');
-      assert.equal(process.env.RMD_TEST_SLOT_PARENT, JSON.stringify(claim),
-        'the covered child carries the owner marker for quiescence checks');
+      assert.ok(existsSync('coverage/static-ran.json'),'static preflight ran first');
+      const claim=JSON.parse(process.env.RMD_TEST_SLOT_PARENT ?? 'null');
+      assert.ok(claim && existsSync(claim.path),'the admitted owner remains held during affected execution');
+      writeFileSync('coverage/slot-owner.json',JSON.stringify(claim));
       const nested=acquireTestSlot('affected-test-child',{dir:dirname(claim.path),slots:1,waitBoundMs:0,
         load:()=>({cores:8,load1:0}),log:()=>{}});
       assert.equal(nested.outcome,'wait_bound_exceeded',
@@ -222,19 +219,16 @@ test('author static admission holds one real slot from static preflight through 
   assert.equal(receipt.verdict, 'passed');
   assert.deepEqual(receipt.steps.map((row: { name: string }) => row.name), ['census-precheck', 'static-preflight', 'affected-tests']);
   assert.equal(receipt.testSlot.outcome, 'acquired');
+  assert.equal(receipt.suiteQueue.outcome, 'admitted');
   const claim = JSON.parse(readFileSync(join(f.root, 'coverage/slot-owner.json'), 'utf8'));
   assert.equal(existsSync(claim.path), false, 'the author releases only its own slot at the terminal');
 });
 
-test('author static admission releases its real parent after a failed static gate', () => {
+test('author static admission takes no suite slot for a failed static gate (W1-T9951)', () => {
   const f = fixture();
   writeFileSync(join(f.root, 'src/run-task.ts'), `
     import assert from 'node:assert/strict';
-    import { readFileSync, writeFileSync } from 'node:fs';
-    const claim=JSON.parse(process.env.RMD_TEST_SLOT_PARENT ?? 'null');
-    assert.ok(claim,'failed static work was admitted first');
-    assert.ok(readFileSync(claim.path,'utf8'));
-    writeFileSync('coverage/failed-static-owner.json',JSON.stringify(claim));
+    assert.equal(process.env.RMD_TEST_SLOT_PARENT, undefined, 'failed static work never held a suite slot');
     process.exitCode=7;
   `);
   f.git('add', '.'); f.git('commit', '-m', 'test: failed admitted static gate');
@@ -244,8 +238,8 @@ test('author static admission releases its real parent after a failed static gat
   assert.equal(receipt.steps[1].exitCode, 7);
   assert.equal(receipt.steps.length, 2);
   assert.match(receipt.affectedTestsNotRunReason, /static-preflight did not succeed/);
-  const claim = JSON.parse(readFileSync(join(f.root, 'coverage/failed-static-owner.json'), 'utf8'));
-  assert.equal(existsSync(claim.path), false);
+  assert.equal(receipt.testSlot, undefined);
+  assert.equal(receipt.suiteQueue.outcome, 'cancelled');
 });
 
 test('author preflight refuses shared bare configuration before a real split-config migration can poison sibling worktrees', (t) => {

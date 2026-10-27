@@ -1,0 +1,64 @@
+- id: W1-T10857
+  title: "THE OPEN-WEIGHT ARMS JOIN THE DEPLOYMENT BAKE-OFF WITH THINKING ON AND OFF — each cash candidate is trialed with no reasoning_effort and at every effort its row admits, an arm whose learned per-minute ceiling cannot hold the lane's observed prompts is skipped as capacity_shortfall (not scored, not marked trialed), and a completion-cap truncation is its own outcome"
+  repo: remudero
+  depends_on: [W1-T10855, W1-T10856]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling, Craig 2026-10-27: set up DeepSeek-V4-Flash, DeepSeek-V4.1-Flash and Kimi-K2.6 as bake-off arms"
+  note: "also builds on W1-T10840 (filed in open PR #14838, not yet on main when this was filed): add it to depends_on once #14838 merges, and build after it either way"
+  plan_refs: [W1-T3570, W1-T4926, W1-T10840, W1-T10855, W1-T10856]
+  files:
+    - src/lib/bakeoff-trigger.ts
+    - src/lib/inbox-bakeoff.ts
+    - test/routing/open-weight-arms-join-the-bake-off-thinking-on-and-off.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED ON origin/main 742487eb2 (2026-10-27). W1-T4926 built `findUntrialedModels`, `deploymentCandidates` and
+    `runDeploymentBakeoff` (src/lib/bakeoff-trigger.ts); W1-T10840 (open PR #14838) wires them into the daily
+    measurement cadence for every deployment `openWeightDeploymentReady` admits, at the efforts each cash model
+    declares. W1-T10855 makes the three open-weight deployments ready, so W1-T10840 alone would trial them, but two
+    measured facts make that trial wrong for these arms:
+    - THINKING IS OFF BY OMISSION ON AZURE. Measured 2026-10-27: DeepSeek-V4-Flash and V4.1-Flash return no
+      `reasoning_content` when the body carries no `reasoning_effort`, and think when it carries "high". So
+      "every thinking level the model accepts" (W1-T4926's design) must include the NO-FIELD arm, which is the cheap
+      arm the inbox lane most needs, and the efforts arms, which risk OPENWEIGHT_MAX_COMPLETION_TOKENS (8,000).
+    - CAPACITY. All three deployments report `x-ratelimit-limit-tokens: 20000`, and Azure refuses a request above
+      that at once (429, measured). inbox_draft sends ~205K-259K tokens, so every arm would score 0 clean drafts and
+      be marked trialed, burying a model that never ran. W1-T10856 learns the limit; nothing in the bake-off reads it.
+    The live replay corpus is the eight real proposals of the W1-T3570 harness (docs/recon/openweight-inbox-draft-trial.md),
+    where gpt-oss-120b drafted 3/8 clean at $0.045 and Sonnet 5.5 7/8 at ~60x. From the operator's 30-day Azure Monitor
+    read, Haiku 5.5 carried inbox_draft at ~205K input tokens per request (~$0.11 at its long-context rate);
+    DeepSeek-V4-Flash at list price would be ~$0.041.
+  design: |
+    (i) EFFORT AXIS. For each untrialed cash candidate, `deploymentCandidates` yields one arm with no reasoning effort
+    plus one arm per effort the deployment's W1-T10855 reasoning-effort row admits; a deployment with no row yields
+    only the no-field arm. Each row of the ranked table names its arm ("thinking off" or the effort).
+    (ii) CAPACITY BEFORE SPEND. Before an arm spends, compare the lane's OBSERVED need (the replay corpus's own prompt
+    estimates, plus OPENWEIGHT_MAX_COMPLETION_TOKENS) with the deployment's learned per-minute limit through
+    W1-T10856's readiness seam. An arm that cannot hold it is recorded as `capacity_shortfall` with the need and the
+    limit, is listed in the proposal under "not run", is NOT scored and is NOT marked trialed; a later change in the
+    learned limit (the operator's quota raise) makes it untrialed again. A deployment with no learned limit runs, and
+    its first 429 teaches the limit (W1-T10856).
+    (iii) TRUNCATION. A draft whose completion stops at the completion cap (`finish_reason: length`) is counted as
+    `truncated` beside clean drafts and contract errors, never folded into contract errors, so a thinking arm's
+    failure mode is visible.
+    (iv) NEVER RE-ROUTES, as W1-T4926: one proposal, ranked table, routing untouched. An open-weight arm's lead is
+    additionally conditioned on W1-T10858.
+  acceptance:
+    - claim: "A deployment with an admitted effort row is trialed with no reasoning effort and at each admitted effort"
+      proof: 'grep: test("W1-T10857: a candidate is trialed thinking off and at each admitted effort" in test/routing/open-weight-arms-join-the-bake-off-thinking-on-and-off.test.ts'
+    - claim: "An arm whose learned ceiling cannot hold the lane's prompts is skipped as capacity_shortfall, unscored and untrialed"
+      proof: 'grep: test("W1-T10857: a capacity shortfall skips the arm without scoring or marking it trialed" in test/routing/open-weight-arms-join-the-bake-off-thinking-on-and-off.test.ts'
+    - claim: "A completion stopped at the cap is counted as truncated"
+      proof: 'grep: test("W1-T10857: a draft stopped at the completion cap is counted as truncated" in test/routing/open-weight-arms-join-the-bake-off-thinking-on-and-off.test.ts'
+    - claim: "The bake-off trigger records a capacity shortfall"
+      proof: 'grep: capacity_shortfall in src/lib/bakeoff-trigger.ts'
+  falsifier: |
+    Score a capacity-short arm as zero clean drafts, or mark it trialed; drop the no-field (thinking off) arm for a
+    deployment that has an effort row; or count a cap truncation as a contract error.

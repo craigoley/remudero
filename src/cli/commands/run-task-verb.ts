@@ -31,6 +31,7 @@ import { buildPromptManifest } from "../../lib/prompt-manifest.js";
 import { billingMode, readBinaryPin, type BillingMode } from "../../lib/env.js";
 import { renderAnchorBlock } from "../../lib/compaction.js";
 import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "../../lib/unfinished-checkpoint.js";
+import { hashInstallInputs } from "../../lib/install-hash.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "../../lib/preopen-gate.js";
 import { implementPromptParts, renderDiagnosePrompt, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts, renderReconPrompt, scopeGuardOutOfScopeFiles, type PriorPartialWork } from "../../lib/prompt-render.js";
 import type { RunResult } from "../../lib/run-result.js";
@@ -57,7 +58,7 @@ import { decideGatePosture, type GatePostureDecision, type GatePostureFinding, t
 import { refusalReason } from "../../lib/inbox.js";
 import { gatherRuns, parseLedger } from "../../lib/retro.js";
 import type { ChildEntryStoreOptions } from "../../lib/child-entry-argv.js";
-import { bodyWithFailingProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, readOtherOpenPrForTask, recordRefusedPrOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
+import { bodyWithFailingProofAtOpen, bodyWithInconclusiveProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, readOtherOpenPrForTask, recordRefusedPrOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, requestScopeAmendment, readBuildScopeRecovery, saveBuildScopeRecovery, restoreBuildScopeRecovery, type ScopeAmendmentOutcome, type ScopeAmendmentRequest, type ProofAmendmentWritePorts } from "../../lib/proof-amendment.js";
 import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
@@ -104,7 +105,7 @@ import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { buildBatchedGithub, classifyGhFailure, deriveStatus, dispatchesWithoutNewOwnedPr, ghGateway, ghRequiredStatusCheckContexts, projectPlan, readLedgerLines, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type StatusProjection, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "../../lib/status.js";
 import { dedupeRollupByLatestAttempt, buildFixProgressInput, terminalStateReason, type ActionableGateFailure, type CiFailure, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MergeConflictEvidence, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type RedBaseRefreshFacts, type SweepDeps, type RegistrationChange, trackRepairLadder, type FixRoundBranchClaim } from "../../lib/sweep.js";
 import { classifyNoPrShape } from "../../lib/fix-rung-classify.js";
-import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation } from "../../lib/worker.js";
+import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, reprovisionWorktreeDependencies, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation } from "../../lib/worker.js";
 import { QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions, runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge } from "../../lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "../../lib/worker-provider.js";
 import { type AddedTestAliasRewrite, type TestAliasRewriter } from "../../lib/added-test-alias-rewrite.js";
@@ -652,9 +653,10 @@ export type PrCreateDiagnostic = { step: string; extra: Record<string, unknown> 
 
 export type PrCreateCommand = { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" }; diagnostics?: PrCreateDiagnostic[] };
 
+/** W1-T10752: a restore ends on main (never the checkpoint's own stale base). `reconciled: "merge"` means main's merge into
+ *  the checkpoint is open in the worktree (MERGE_HEAD is `mainSha`), `mainConflicts` naming the paths a worker must resolve. */
 export type BoundaryCheckpointRestore =
-  (| { base: "main"; headSha: string; dropped?: true }
-  | { base: "checkpoint"; headSha: string; mainConflicts: string[]; reason?: string }) & { sourceBranchAbsent?: true };
+  { base: "main"; headSha: string; dropped?: true; reconciled?: "merge"; mainSha?: string; mainConflicts?: string[]; reason?: string } & { sourceBranchAbsent?: true };
 
 export type AddedTestsAtHead = { kind: "read"; files: readonly string[] } | { kind: "unreadable"; reason: string };
 
@@ -1782,14 +1784,26 @@ async function ghPrCreateFillCommandAsync(
   try {
     checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync ?? ((proof, base, root, target) => defaultProofRunnerAsync(proof, base, root, target, { store: childStore })), { owner, repo });
   } catch (err) {
-    if (!openOnFailingProof || !(err instanceof PrOpenRefusedError) || err.failingProof === undefined) throw err;
-    const opened: PrCreateDiagnostic = {
-      step: "pr.opened_with_failing_proof",
-      extra: { branch, proof: err.failingProof.proof, refusal_class: err.refusalClass },
+    if (!openOnFailingProof || !(err instanceof PrOpenRefusedError)) throw err;
+    if (err.failingProof !== undefined) {
+      const opened: PrCreateDiagnostic = {
+        step: "pr.opened_with_failing_proof",
+        extra: { branch, proof: err.failingProof.proof, refusal_class: err.refusalClass },
+      };
+      return withDiagnostics(
+        prCreateArgv(worktreePath, owner, repo, branch, draft.title, bodyWithFailingProofAtOpen(err.failingProof)),
+        [...draft.diagnostics, opened],
+      );
+    }
+    // W1-T10742: a proof that reached no verdict (even re-run) opens the PR as a conclusively failing one does.
+    if (err.inconclusiveProof === undefined) throw err;
+    const inconclusive: PrCreateDiagnostic = {
+      step: "pr.opened_with_inconclusive_proof",
+      extra: { branch, proof: err.inconclusiveProof.proof, attempts: err.inconclusiveProof.attempts },
     };
     return withDiagnostics(
-      prCreateArgv(worktreePath, owner, repo, branch, draft.title, bodyWithFailingProofAtOpen(err.failingProof)),
-      [...draft.diagnostics, opened],
+      prCreateArgv(worktreePath, owner, repo, branch, draft.title, bodyWithInconclusiveProofAtOpen(err.inconclusiveProof)),
+      [...draft.diagnostics, inconclusive],
     );
   }
   return withDiagnostics(prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody), draft.diagnostics);
@@ -1827,6 +1841,56 @@ function branchPrTitle(helperHost: Pick<RunTaskHelperHost, "lastCommitSubject">,
     const tip = lastCommitSubject(worktreePath);
     return (task && prTitleForTask(tip ? [tip] : [], task)) || tip;
   }
+}
+
+/** W1-T10752: why a checkpoint adds nothing main lacks, or `undefined` when it is live work. By evidence only, never by age
+ *  or commit count: the merge of the two is main's own tree; every path the checkpoint changed already holds main's blob; or
+ *  a main commit dated after the checkpoint's head carries this task's `Remudero-Task:` merge credit. */
+async function checkpointSupersededBy(
+  checkpoint: { headSha: string },
+  taskId: string,
+  mainSha: string,
+  mergeBase: string,
+  mergedTree: string | undefined,
+  git: (args: string[]) => Promise<string>,
+): Promise<{ kind: "tree-equal" | "blobs-equal" | "task-credited"; creditSha?: string } | undefined> {
+  // A checkpoint that changed nothing carries nothing for main to already hold, so only task credit can supersede it.
+  const changed = (await git(["diff", "--name-only", "--no-renames", mergeBase, checkpoint.headSha])).split("\n").filter(Boolean);
+  if (changed.length > 0) {
+    if (mergedTree !== undefined && mergedTree === (await git(["rev-parse", `${mainSha}^{tree}`])).trim()) return { kind: "tree-equal" };
+    const blob = async (rev: string, path: string): Promise<string> => git(["rev-parse", "--verify", "--quiet", `${rev}:${path}`]).then(
+      (id) => id.trim(),
+      (error) => {
+        void error; // an absent path has no blob; two absences are equal
+        return "";
+      },
+    );
+    let equal = true;
+    for (const path of changed) {
+      if (!equal) break;
+      equal = (await blob(checkpoint.headSha, path)) === (await blob(mainSha, path));
+    }
+    if (equal) return { kind: "blobs-equal" };
+  }
+  const headTime = Number((await git(["log", "-1", "--format=%ct", checkpoint.headSha])).trim());
+  const escaped = taskId.replace(/[.*[\]\\^$]/g, "\\$&");
+  const credited = (await git(["log", mainSha, `--grep=^Remudero-Task: ${escaped}$`, "--format=%H %ct"])).split("\n").filter(Boolean)
+    .map((line) => line.split(" ")).find(([, time]) => Number(time) > headTime);
+  return credited ? { kind: "task-credited", creditSha: credited[0] } : undefined;
+}
+
+/** W1-T10752: the conflicted paths of an open main merge that still hold unmerged index entries or conflict markers. */
+function unresolvedMainConflicts(worktreePath: string, paths: readonly string[]): string[] {
+  const unmerged = new Set(hostWorktreeGit(worktreePath, ["diff", "--name-only", "--diff-filter=U"]).split("\n").map((p) => p.trim()).filter(Boolean));
+  return paths.filter((path) => {
+    if (unmerged.has(path)) return true;
+    try {
+      return /^(<{7}|>{7})( |$)|^={7}$/m.test(readFileSync(join(worktreePath, path), "utf8"));
+    } catch (error) {
+      void error; // a path the worker deleted has no markers left to resolve
+      return false;
+    }
+  });
 }
 
 async function restoreBoundaryCheckpoint(
@@ -1881,9 +1945,28 @@ async function restoreBoundaryCheckpoint(
       return { status, stdout: typeof failed.stdout === "string" ? failed.stdout : "" };
     }
   } });
+  const evidence = await checkpointSupersededBy(checkpoint, taskId, mainSha, base, probe.verdict === "clean" ? probe.tree : undefined, git);
+  if (evidence !== undefined) {
+    log("implement.checkpoint_dropped", { task_id: taskId, source_branch: checkpoint.branch, head_sha: checkpoint.headSha,
+      reason: "superseded", evidence: evidence.kind, main_sha: mainSha, ...(evidence.creditSha ? { credit_sha: evidence.creditSha } : {}) });
+    return { base: "main", headSha: mainSha, dropped: true, ...absence };
+  }
   if (probe.verdict !== "clean") {
+    // W1-T10752: never resume on the checkpoint's own stale base. Merge main for real and leave the conflict in the tree.
     await git(["reset", "--hard", "--quiet", checkpoint.headSha]);
-    return { base: "checkpoint", headSha: checkpoint.headSha, mainConflicts: probe.verdict === "conflict" ? probe.paths : [],
+    try {
+      await git(["merge", "--no-ff", "--no-commit", mainSha]);
+    } catch (error) {
+      // A conflicted merge exits 1 with MERGE_HEAD set, which is the intended state; any other failure has no MERGE_HEAD.
+      const open = await git(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).then((head) => head.trim(), (inner) => {
+        void inner; // no MERGE_HEAD is the answer, not an error: the merge never started
+        return "";
+      });
+      if (open !== mainSha) throw error;
+    }
+    const unmerged = (await git(["diff", "--name-only", "--diff-filter=U"])).split("\n").map((p) => p.trim()).filter(Boolean);
+    const paths = unmerged.length > 0 ? unmerged : probe.verdict === "conflict" ? probe.paths : [];
+    return { base: "main", headSha: checkpoint.headSha, reconciled: "merge", mainSha, mainConflicts: paths,
       ...(probe.verdict === "unreadable" ? { reason: probe.reason } : {}), ...absence };
   }
   const merged = (await git(["commit-tree", probe.tree, "-p", checkpoint.headSha, "-p", mainSha, "-m",
@@ -3743,13 +3826,31 @@ async function resumeForMissingCommitLine(
 function requiredCompanions(
   sha: string,
   leftOut: readonly string[],
-  git: (args: string[]) => string,
+  git: (args: string[], options?: Pick<HostWorktreeGitOptions, "maxBuffer">) => string,
 ): RequiredCompanion[] {
   if (leftOut.length === 0) return [];
   const paths = (args: string[]) => git(args).split("\0").filter(Boolean);
   const committed = paths(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--diff-filter=d", sha])
     .filter((path) => /\.(?:ts|mts|mjs|js|cjs)$/.test(path));
-  const files = new Map(committed.map((path) => [path, git(["show", `${sha}:${path}`])]));
+  const readSource = (path: string): string => {
+    const object = `${sha}:${path}`;
+    try { return git(["show", object]); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOBUFS") throw error;
+      // The immutable blob supplies its exact byte budget; metadata and all other Git reads keep their existing limits.
+      const raw = git(["cat-file", "-s", object]).trim();
+      const bytes = Number(raw);
+      if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(bytes)) {
+        throw new Error(`required companion source ${object} has an unreadable blob size`);
+      }
+      const source = git(["show", object], { maxBuffer: bytes });
+      if (Buffer.byteLength(source, "utf8") !== bytes) {
+        throw new Error(`required companion source ${object} does not match its immutable blob size`);
+      }
+      return source;
+    }
+  };
+  const files = new Map(committed.map((path) => [path, readSource(path)]));
   const { directImports } = buildAffectedSuitesGraph(files, [...paths(["ls-tree", "-r", "--name-only", "-z", sha]), ...leftOut]);
   const left = new Set(leftOut);
   const importers = new Map<string, string[]>();
@@ -3773,7 +3874,7 @@ async function askScopeForLeftOutImports(input: {
   taskId: string;
   branch: string;
   commit: { sha: string; undeclared: readonly string[] } | undefined;
-  git: (args: string[]) => string;
+  git: (args: string[], options?: Pick<HostWorktreeGitOptions, "maxBuffer">) => string;
   amend: (request: ScopeAmendmentRequest) => ScopeAmendmentOutcome | Promise<ScopeAmendmentOutcome>;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }): Promise<{ companions: RequiredCompanion[]; amendment: ScopeAmendmentOutcome } | undefined> {
@@ -5380,11 +5481,36 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
   // W1-T8676: the boundary checkpoint this run restored, which `failOnWorkerError` keeps through a worker error.
   let restoredCheckpoint: { branch: string; headSha: string } | undefined;
+  /** W1-T10752: main's merge into the restored checkpoint, open in the worktree; its paths gate the pre-open check. */
+  let restoredReconcile: { mainSha: string; paths: string[] } | undefined;
+  let reconcilePrompt = "";
+  /** W1-T10752: the install-input hash `node_modules` was last provisioned for. Set once the worktree exists. */
+  let provisionedInstallHash: string | undefined;
+  /** Relink `node_modules` to the tree this checkout's own lockfile keys, when `package.json`/`package-lock.json` moved since
+   *  the last provisioning (a checkpoint restore, or a worker edit). A failure is ledgered by the call itself. */
+  const reprovisionInstallIfDrifted = (reason: string): void => {
+    const current = hashInstallInputs(worktreePath);
+    if (provisionedInstallHash === undefined || current === provisionedInstallHash) return;
+    provisionedInstallHash = current;
+    reprovisionWorktreeDependencies(repoDir, worktreePath, reason, { ...opts.worktreeBaseDeps, log });
+  };
   /** W1-T8676/W1-T9786: the restored checkpoint a failed exit keeps, unless this run pushed its own branch (the newer
    *  checkpoint, W1-T7837). Read while the worktree stands; only a proven absence (exit 1) keeps it. */
   const checkpointToKeep = (): { branch: string; headSha: string } | undefined => restoredCheckpoint !== undefined &&
     hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).status === 1
     ? restoredCheckpoint : undefined;
+  /** W1-T10752: the head a RETURNED failed verdict of a restored run keeps, read while the worktree stands: this run's own pushed
+   *  tip when origin holds it and it differs from the restored head (the newer work), else the restored checkpoint. A run that
+   *  restored nothing keeps nothing. Written after the verdict, which consumed the receipt, so the next run resumes the head. */
+  const keptHeadOfFailedRun = (): { branch: string; headSha: string } | undefined => {
+    if (restoredCheckpoint === undefined) return undefined;
+    const remote = hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]);
+    const pushed = remote.status === 0 ? remote.stdout.trim() : "";
+    return /^[0-9a-f]{40}$/.test(pushed) && pushed !== restoredCheckpoint.headSha ? { branch, headSha: pushed } : restoredCheckpoint;
+  };
+  const keepFailedRunHead = (kept: { branch: string; headSha: string } | undefined, stage: string): void => {
+    if (kept) log("implement.checkpoint_kept", { task_id: taskId, source_branch: kept.branch, head_sha: kept.headSha, failed_stage: stage });
+  };
   /**
    * A worker returned an ERROR envelope (max_turns, max_budget_usd, execution
    * error). Turn it into a terminal verdict: clean the worktree so no debris
@@ -5912,6 +6038,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
   const claimLease = holdDispatchClaim(task.id, claimReserver, claimAnchor, { log });
   try {
+    provisionedInstallHash = hashInstallInputs(worktreePath);
     const checkpoint = pendingWorkerBoundaryHandoffs(readLedgerRawLines(ledgerPath)).get(taskId);
     if (checkpoint) {
       try {
@@ -5921,7 +6048,16 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
             base: restored.base, restored_head_sha: restored.headSha,
             ...(restored.sourceBranchAbsent ? { source_branch_absent: true } : {}),
-            ...(restored.base === "checkpoint" ? { main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
+            ...(restored.reconciled ? { reconciled: restored.reconciled, main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
+          if (restored.reconciled && restored.mainSha) {
+            restoredReconcile = { mainSha: restored.mainSha, paths: restored.mainConflicts ?? [] };
+            if (restoredReconcile.paths.length > 0) {
+              reconcilePrompt = `\nThis task's restored checkpoint ${checkpoint.headSha} was merged with current main ${restored.mainSha}, and the merge is open in your worktree ` +
+                `with conflicts in: ${restoredReconcile.paths.join(", ")}. Resolving them is part of this task: edit each file to the intended result with no conflict markers` +
+                `${harnessOwnsGit ? "; the harness completes the merge commit." : ", stage them and complete the merge commit."}\n`;
+            }
+          }
+          reprovisionInstallIfDrifted("checkpoint_restored");
         }
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_restore_failed", branch,
@@ -6317,7 +6453,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     const ruleToolPointer = ruleLookup
       ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
       : "";
-    const prompt = `${renderedImplementPrompt}${scopeRecoveryPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
+    const prompt = `${renderedImplementPrompt}${reconcilePrompt}${scopeRecoveryPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -6755,10 +6891,19 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     }
 
     // The harness runs the fast gate itself before opening the PR; a failing step goes back to the worker once.
-    const preopenGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path));
+    const baseGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path));
+    // W1-T10752: while main's merge into the restored checkpoint is open, the gate also refuses a tree that still holds unmerged
+    // index entries or conflict markers in a conflicted path, as an ordinary repair round naming each path.
+    const reconcilePaths = restoredReconcile?.paths ?? [];
+    const preopenGate = reconcilePaths.length === 0 ? baseGate : async (path: string): Promise<PreopenGateResult> => {
+      const unresolved = unresolvedMainConflicts(path, reconcilePaths);
+      if (unresolved.length > 0) return { kind: "fail", failedSteps: unresolved.map((p) => `main-merge-conflict: ${p} still has unresolved conflict markers or unmerged entries`), durationMs: 0 };
+      return baseGate ? baseGate(path) : { kind: "pass", durationMs: 0 };
+    };
     if (preopenGate !== undefined && !parseReport(fullText(impl))?.prUrl) {
       const workerYield = await yieldAtWorkerBoundary("worker", "preopen_gate");
       if (workerYield) return workerYield;
+      reprovisionInstallIfDrifted("preopen_gate");
       const gate = await preopenGate(worktreePath);
       log(PREOPEN_GATE_STEP, { result: gate.kind, failed: gate.kind === "fail" ? gate.failedSteps : [], duration_ms: gate.durationMs,
         ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}), ...preopenGateLedgerFields(gate) });
@@ -6795,6 +6940,17 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           failed: repairedGate.kind === "fail" ? repairedGate.failedSteps : [], duration_ms: repairedGate.durationMs,
           ...(repairedGate.kind === "unmeasured" ? { reason: repairedGate.reason } : {}), ...preopenGateLedgerFields(repairedGate) });
         updatePreopenGateAlert({ stateDir: dirname(ledgerPath), readRows: () => readLedgerLines(ledgerPath), log });
+        // W1-T10752: a run never opens a PR over an unresolved merge. The worktree stays as evidence and the restored head is kept.
+        const stillConflicted = reconcilePaths.length === 0 ? [] : unresolvedMainConflicts(worktreePath, reconcilePaths);
+        if (stillConflicted.length > 0) {
+          const keptHead = keptHeadOfFailedRun();
+          log("verdict", { verdict: "failed", reason: `main merge conflicts left unresolved after a repair round: ${stillConflicted.join(", ")}`,
+            stage: "reconcile.unresolved", branch, cost_usd: costUsd, billing_mode: billingMode(impl.childEnvKeys),
+            account_label: impl.accountLabel, ...terminalVerdictFields(impl) });
+          keepFailedRunHead(keptHead, "reconcile.unresolved");
+          say(`verdict: failed — main merge conflicts unresolved (${stillConflicted.join(", ")}); worktree kept: ${worktreePath}`);
+          return { taskId, runId, merged: false, costUsd, verdict: "failed" };
+        }
       }
     }
 
@@ -6915,7 +7071,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
     // W1-T10026: a commit whose own files import a path it left out never opens bare; it asks for that scope.
     const scopeNeeded = await askScopeForLeftOutImports({
-      taskId, branch, commit: harnessCommitted, log, git: (args) => hostWorktreeGit(worktreePath, args),
+      taskId, branch, commit: harnessCommitted, log, git: (args, options) => hostWorktreeGit(worktreePath, args, options),
       amend: opts.implementScopeAmendment ?? ((request) => requestScopeAmendment(request, buildProofAmendmentWritePorts({
         taskId, worktreePath: repoDir, config, owner, repo: task.repo, prNumber: request.prNumber, ledgerLinesNow: [], log,
         gitOps: buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
@@ -7251,6 +7407,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     }
     if (!prUrl) {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
+      reprovisionInstallIfDrifted("pr_open");
       try {
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop. W1-T7952: titled after the task.
         prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log });
@@ -7259,6 +7416,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
         const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
         const issues = opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo);
+        const keptHead = keptHeadOfFailedRun();
         const changedFiles = refusedBranchChangedFiles(worktreePath);
         const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha, changedFiles, declaredFiles: task.files }, log, { issues, ledgerPath, runId });
         reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
@@ -7270,12 +7428,15 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           branch,
           head_sha: headSha,
           refusal_class: err.refusalClass,
+          // W1-T10742: the strike classifiers read this as the harness's outcome, never the worker's miss.
+          ...(err.inconclusiveProof ? { proof_exec: "exec_error" } : {}),
           ...(issueUrl ? { issue_url: issueUrl } : {}),
           cost_usd: costUsd,
           billing_mode: billingMode(impl.childEnvKeys),
           account_label: impl.accountLabel,
           ...terminalVerdictFields(impl),
         });
+        keepFailedRunHead(keptHead, "pr_open.refused");
         say(`verdict: failed — PR open refused (${err.refusalClass}); branch ${branch} kept on origin at ${headSha}`);
         return { taskId, runId, merged: false, costUsd, verdict: "failed" };
       }
@@ -7290,6 +7451,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       if (prUrl) normalizeRunPrAcceptanceFromPlan(prUrl, taskId, task.acceptance ?? [], log);
     }
     if (!prUrl) {
+      const keptHead = keptHeadOfFailedRun();
       log("verdict", {
         verdict: "failed",
         reason: "no PR opened",
@@ -7298,6 +7460,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         account_label: impl.accountLabel,
         ...terminalVerdictFields(impl),
       });
+      keepFailedRunHead(keptHead, "no_pr_opened");
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
     // RUN-OWNERSHIP GUARD (W1-T62) — before ANY side effect touches this PR, assert

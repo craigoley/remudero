@@ -1,0 +1,201 @@
+- id: W1-T10823
+  title: "A saved product brief reaches one natively reviewed target plan through the existing rmd
+    plan verb, and case and build share one plan-verification rule"
+  repo: remudero
+  depends_on:
+    - W1-T10615
+    - W1-T10618
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs:
+    - W1-T10612
+    - W1-T10615
+    - W1-T10618
+    - W1-T10621
+    - W1-T10799
+  files:
+    - src/lib/product-plan-operation.ts
+    - src/lib/product-case.ts
+    - src/lib/product-build.ts
+    - src/lib/product-routes.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/dispatch/product-plan-operation.test.ts
+    - test/plan/product-plan-verification.test.ts
+    - test/console-api/serve/product-routes.test.ts
+    - test/route-wiring.test.ts
+    - src/lib/panel-graph.ts
+  status: queued
+  attempts: 0
+  rationale: >
+    Core18 C3 is the step from a saved product brief to a native target plan. This is a narrow
+    follow-up to the already merged W1-T10618 source. It depends on that actual source and does not
+    retroactively alter or re-admit the merged task. This is a plan-only filing (run
+    PLAN-clarify-1793103032747). It edits no source and releases no hold. OBSERVED CODE (worktree
+    base): the plan action in ProductCaseService (src/lib/product-case.ts) only calls verifyPlan on
+    a pull request the caller supplies. Nothing produces or reconciles a target plan. verifyPlan
+    requires a latest GitHub APPROVED review at the PR head. It also requires task.origin ===
+    productPlanOrigin(...). ProductBuildService.start repeats that strict origin comparison on its
+    own (src/lib/product-build.ts, the task_stale check). So two consumers each hand-code the plan
+    rule. The real Wreckterra plan PR1 (head 84d3f549, merge 1e55f963) carries native COMMENTED
+    reviews, a remudero-review PASS 7/7 and a changed-plan lint of 6/0, but no GitHub APPROVED
+    review. WRECK-T1's origin is operator-request#wreckterra-console-product-2026-10-25, so today's
+    rule can never accept that legitimate held frontier. productBriefSchema already has an optional
+    resourceEnvelope {budgetUsd, maxConcurrentBuilds, existingSetupOnly}
+    (src/lib/product-intent.ts). Nothing requires or enforces it before a build. Settled by lookup:
+    is this already filed or already decided? -> partly. The W1-T10618 rationale kept "the C3 plan
+    producer, the native-review protocol and the evidence collectors" in W1-T10618. No other shard,
+    DECISIONS.md, LEARNINGS.md or MASTER-PLAN.md entry files them. The producer and protocol are now
+    this task, and the evidence collectors stay in W1-T10618 (plan/tasks.d/W1-T10618-*.yaml).
+    Settled by lookup: is W1-T10619 or W1-T10799 a plan producer? -> no. W1-T10619 is evaluation
+    proposals and W1-T10799 is bounded target execution (plan/tasks.d/W1-T10619-*.yaml,
+    plan/tasks.d/W1-T10799-*.yaml). Settled by lookup: is there an existing native plan workflow
+    that can target another repository? -> yes. The global --repo-root flag sets repoRoot
+    (resolveRepoRoot, src/lib/repo-location.ts). planCommand (src/run-task.ts) resolves owner/repo,
+    the managed clone under repos/<repo>, the history-aware task-ID mint and the remote ID-block
+    reservation, lint-plan relint, the plan-only PR guards and reviewCommand from that root. Settled
+    by lookup: is there an existing served path that hands a CLI verb to a child process without
+    importing CLI code? -> yes. ratifyCliGateway's handOff (src/lib/panel-graph.ts) runs bin/rmd
+    from a fetched origin/main tree and records cli_started/cli_exited ledger rows.
+    improvement-action already uses it. Settled by lookup: is there an existing trusted reader for
+    the native review status? -> yes. resolveReviewProvenance (src/lib/review.ts) resolves a
+    remudero-review status by its poster. isHumanHoldCandidate (src/lib/open-prs-rest.ts) recognises
+    a standing human hold. Settled by lookup: do WRECK-T1..6 or Console149/150 need re-filing or
+    hold changes? -> no. They live in their own plans with their holds, original budget 30 and the
+    reserved 7..9 roadmap. This task associates a product plan with them and releases nothing
+    (plan/feedback/fb-1793059243092-5bfa75.yaml). SUBJECT SWEEP: the operator's audit
+    (/tmp/product-c3-subject-sweep.json, 2026-10-27T12:07:56Z) read main 5d693800 and 10 open heads
+    and found zero added subject lines. At this filing the public open-PR list showed at least 13
+    open PRs, so the inventory has changed. Every visible title was on another subject (#14814
+    #14813 #14810 #14809 #14808 #14806 #14800 #14795 #14793 #14789 #14788 #14620). This pass has no
+    git or gh tool, so head trees were not re-grepped. The ordinary PR lint and duplicate checks
+    still apply. Operator draft review: GitHub independently confirms Core18 merged as
+    ed6b5c4c02533dd6008901aacf14585d2acc99c7; a new dependency on its already-credited record cannot
+    establish completion of a live case. This proposal therefore changes only the new follow-up
+    record and preserves the historical Core18 shard. Production evidence collectors remain a
+    separately tracked unimplemented live-case obligation, not source credit granted by this filing.
+    Refresh the complete all-open-head tree subject audit at actual filing; the earlier architect
+    title sweep is not sufficient.
+
+    Operator qualification of the retained source e3973ac7: the actual maintained rmd test-place
+    command over the written tests reports product-plan-operation.test.ts -> dispatch (medium
+    confidence, inflight-lock signal) and product-plan-verification.test.ts -> plan (low confidence,
+    infra-only signal yields to plan). The original native draft declared both under infra. This
+    amendment changes only those two declared paths; keep every acceptance claim and literal test
+    proof, budget, dependency, hold, declared production path and instrument unchanged. The
+    operation regression now checks the actual maintained filesystem lock; do not remove that
+    control or edit placement scoring to fit the old grant. Move the test files only after this
+    amendment merges, then rerun test-place on the final imports and preserve red/green diagnostics.
+    No source implementation, model retry, dispatch-claim mutation, hold release or live
+    product/gameplay acceptance is granted by this plan PR.
+  design: >-
+    One versioned operation that is natively owned and recoverable. It is not a new launcher. (1)
+    Request. Add one versioned plan-proposal action to the existing served product case union in
+    product-routes.ts and serve.ts. Its input is productId, expectedRevision and
+    expectedObjectiveRevision, plus a requestId. It never accepts a caller-supplied PR, brief text
+    or budget. The operation reads the durable saved product. It refuses with an explicit code in
+    each of these cases: no verified repository binding; target enrollment, head or onboarding
+    (bootstrapConfirmed) that does not verify against the live target; no resourceEnvelope on the
+    brief (no default is invented); a stale revision. It freezes the exact product revision, the
+    brief digest and the verified target head in its durable record. (2) Hand-off. Extend the
+    maintained RatifyCliGateway with one typed, bounded product-plan operation in
+    src/lib/panel-graph.ts and pass that public port from the served composition. Its current public
+    methods are approve, reframe and improvement; the private handOff closure cannot be invoked
+    externally as if it were an existing public plan API. Reuse its existing fresh-source runner and
+    owned child lifetime; never duplicate a launcher. The operation then runs the existing rmd plan
+    verb ONCE, as a child process from the fetched origin/main tree. The child runs with --repo-root
+    set to the verified managed target checkout. Use --mode=clarify when the target plan at the
+    verified head already holds a legitimate frontier, which reconciles it, and --mode=create only
+    when it holds none. The brief argument is productCasePlanText(brief), the constraints, the
+    resource envelope and the operation id, within the existing request byte limits. Library code
+    never imports planCommand or any src/cli or run-task internals. No browser shell, detached
+    fallback, unit or persistent service is added. Spending, architect-tier, the task-ID block
+    reservation, relint, plan-only and PR-ownership guards all stay inside the existing verb,
+    unchanged. (3) Durability. Key the operation by product id, frozen revision, brief digest and
+    target head. Persist a bounded private product plan-operation journal record BEFORE the hand-off
+    and expose only its supported stageEvidence projection. Repeated requests, reloads, lost
+    responses and a daemon restart all read the same record, so they cause no second model spend, ID
+    block or task. Recovery reads only the durable record and the correlated core-ledger rows
+    (ratify.cli_started and the correlated native plan run, pr.opened, review and merge). It never
+    infers recovery from a branch name or a marker. A child that exits without a correlated
+    pr.opened row stays refused or unknown and is never retried silently. If the brief revision or
+    the target head changes, the operation reports changed-brief or stale-target. It never reuses
+    the old plan. A queued or open proposal is never reported as approved or merged. (4) One
+    verification rule. Replace the hand-coded checks with ONE exported verifyProductPlanEvidence.
+    Both ProductCaseService and ProductBuildService.start call it. It requires all of the following:
+    the PR is merged into the target default branch of the verified repository id; a trusted
+    remudero-review success status sits at the exact PR head, resolved through
+    resolveReviewProvenance rather than a generic green badge or comment wording; the existing
+    native plan-only review and lint verdict record covers that PR and head; no standing
+    CHANGES_REQUESTED review or human hold exists (isHumanHoldCandidate); the task content is the
+    same at the reviewed head, the merge and the current target head (digest), so any post-review
+    drift refuses; the design carries productCasePlanText(brief) and the envelope; the task
+    budget_usd does not exceed envelope.budgetUsd. It does NOT require a GitHub APPROVED review when
+    the native contract holds. It refuses foreign, stale, missing or ambiguous receipts. (5)
+    Provenance for an existing frontier. A task whose origin equals productPlanOrigin passes as it
+    does today. A legitimate pre-existing task (WRECK-T1) keeps its original id, history and origin.
+    It passes only when its reviewed design carries the productPlanOrigin token, and the product
+    record holds an explicit association entry naming the task id, its original origin and the exact
+    PR/head/merge. Never rewrite origin. (6) Enforcement. Before admission,
+    ProductBuildService.start refuses a build whose verified plan budget exceeds the envelope, or
+    that would exceed envelope.maxConcurrentBuilds active builds for the product. Showing the
+    envelope is not enforcement. Out of scope: Console UI saving or freezing screens beyond this
+    request, W1-T10618's evidence collectors and its acceptance instrument, the W1-T10799 execution
+    path, any change to the rmd plan verb's gates, hold releases, cap or budget increases, access or
+    runtime config changes, and the first gameplay build. That build is admitted only through the
+    signed-in Console C4 UI. Declare the new action's authenticated request, response and failure
+    schemas in openapi/daemon.yaml. Regenerate packages/api-client/src/schema.d.ts with the
+    maintained generator. Prove the served operation through the real default transport and the
+    verified-actor guard in test/console-api/serve/product-routes.test.ts, and register it in
+    test/route-wiring.test.ts. Operator precision: plan.start currently records
+    mode/brief/architect/effort/worker, with normal native actor/run identity, not an invented
+    operationId field. Correlate the real ratify.cli_started child PID and lifetime with the native
+    plan run and actual PR/review/merge rows, binding the durable operation identity before handoff.
+    If an existing public port or structured field is insufficient, use only explicitly declared
+    source paths and qualified tests; never infer correlation from arbitrary matching text. Persist
+    a bounded per-actor plan-operation record through the maintained private product
+    operation/journal pattern, freezing exact command, brief digest/revision and target identity
+    before dispatch. Product stageEvidence is the supported bounded projection, not a place to hide
+    packed command data in labels or URLs. The HTTP operation must return a truthful durable
+    pending/queued observation promptly while the existing owner retains the child lifetime through
+    completion; it must not wait synchronously for a multi-minute plan child or claim queued merely
+    because a function was called. Exercise the real added public gateway and process/ledger handoff
+    from the new literal served-operation test. Keep task budget and maxConcurrentBuilds enforcement
+    load-bearing in the shared verification/build tests.
+  acceptance:
+    - claim: "a saved, verified product brief reaches exactly one native rmd plan child against the
+        managed target checkout. Repeated requests, reloads, lost responses and a restart replay the
+        same durable operation without a second spend, ID block or task, and pending, refused,
+        unknown, changed-brief and stale-target stay distinct"
+      proof: "unit test: W1-T10823: a saved product reaches one native plan operation across replay and
+        restart"
+    - claim: "the shared rule accepts the merged WRECK plan's native COMMENTED review shape with a trusted
+        exact-head remudero-review success and no GitHub APPROVED review. It records a WRECK-T1
+        association that keeps the original origin and id, and it refuses foreign, stale or missing
+        receipts, post-review drift, a standing human hold and an over-envelope budget"
+      proof: "unit test: W1-T10823: shared plan verification accepts native review and preserves original
+        task origin"
+    - claim: "the product build consumer calls the same verification rule"
+      proof: "grep: verifyProductPlanEvidence( in src/lib/product-build.ts"
+    - claim: "the product case consumer calls the same verification rule"
+      proof: "grep: verifyProductPlanEvidence( in src/lib/product-case.ts"
+    - claim: "the served plan-proposal operation matches its authenticated API contract through the real
+        default transport"
+      proof: "unit test: W1-T10823: the served plan proposal reaches the maintained native handoff"
+  falsifier: >-
+    Remove each of these independently: the durable operation key, the exact-head trusted-status
+    check, the reviewed/merged/current digest comparison, the human-hold refusal, the association
+    check (forging origin instead) and the envelope enforcement. Each corresponding test must fail
+    against the same real-durable-file fixture and pass once the piece is restored. The hand-off
+    test must spawn a real child executable through the default gateway and read the real ledger
+    rows that child writes. The GitHub reads must go through the default ghTextAsync transport.
+    Fakes alone never prove the default path. Fixture receipts never count as live Wreckterra plan,
+    review or merge evidence.

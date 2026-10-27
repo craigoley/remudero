@@ -1153,3 +1153,24 @@ exceeded the standard's 12-line function-doc limit and was compacted with it.
   // as {@link extractCredentialExpiryMs}'s own contract.
 ```
 
+## Native addons in Codex writer tools
+
+Codex writers whose working directory the hardened Git adapter verifies as a Git worktree
+(`rev-parse --is-inside-work-tree` answers `true`) use the daemon user's canonical
+`~/.cache/remudero/swc-native` directory for native addons. The harness checks its
+ancestors and requires a private directory owned by the current user before granting that
+directory to the writer. Existing permissions and symlinks are never repaired
+automatically. A writer in an unverified repository, or whose Git probe is unavailable
+(`git` absent, pointer refused, timeout), receives no cache setting, no write grant and no
+new namespace; the probe fails closed.
+
+The writer's HOME remains isolated. Core-only shell inheritance and credential
+exclusions remain in force; only `SWC_NATIVE_BINDING_CACHE` is explicitly set for
+tools. Read-only and disposable-review workers receive no new write grant. SWC still
+checks ownership, ancestors and addon integrity, as described in its
+[native carrier guide](https://github.com/swc-project/swc/blob/main/docs/native-addon-carriers.md).
+
+An untrusted directory stops the spawn and names the path. Inspect its ownership and
+permissions through the normal repair process. After a source repair merges, verify
+the running executable and a newly admitted worker before resuming held work.
+

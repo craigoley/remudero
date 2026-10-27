@@ -1,0 +1,106 @@
+- id: W1-T10831
+  title: "NOTHING IN CORE PRODUCES THE SITE'S model-field-note-v1 — the site shipped a reviewed importer for observational per-model x task-class coverage (PORTAL-T37, remudero-site #178 and #181), but no core command writes that shape, so the public Field Trials page has never carried a release (data/model-field-note.json is null and its history is empty)"
+  repo: remudero
+  depends_on: [W1-T10875]  # amended 2026-10-27: the note's call-outcome counts use the shared attribution, so a ladder refusal never publishes as a model failure; reads the field-trials-flow-v1 snapshot shape that already exists; W1-T10830 makes a fresh one, W1-T10833 fixes the served-trial join this does not use
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 40.00
+  risk: high  # public data: a mis-sized cell or a private identifier in the candidate is a disclosure; the owner review in W1-T10832 is the last gate, not the only one
+  band_meaning: blast-radius
+  priority: 1  # Craig 2026-10-27: field trials live on the site; this is the missing producer between the private snapshot and the site's importer
+  status: queued
+  attempts: 0
+  origin: "filing agent F20, 2026-10-27, on Craig's 2026-10-27 field-trials ask; the site contract read from craigoley/remudero-site main b80fbbb"
+  plan_refs: [W1-T4574, W1-T100001, W1-T10830, W1-T10832, W1-T10833, PORTAL-T41, W1-T10875]
+  files:
+    - src/lib/field-trials-field-note.ts
+    - src/lib/field-trials-flow.ts
+    - src/run-task.ts
+    - test/routing/the-field-note-exporter-writes-a-site-candidate.test.ts
+  rationale: |
+    READ 2026-10-27: remudero-site main b80fbbb, core origin/main 07dbdcc77, and the host's private
+    field-trials directory (read-only).
+
+    THE SITE CONTRACT (lib/model-field-note.ts, parseModelFieldNote / validRow; the importer is
+    scripts/import-model-field-note.mjs, importModelFieldNote). Exact top-level keys: schema
+    "model-field-note-v1", releaseId, status "published", publicationScope "public-opt-in", evidence
+    "observational", reviewedBy "owner", reviewedAt, publishedAt, windowStart, windowEnd, asOf, sourceDigest
+    (sha256 hex), sourceRepos, consentRegistryRevision, rows. Timestamps are ms-precision ISO with
+    windowStart < windowEnd <= asOf <= reviewedAt <= publishedAt <= now. Every source repo must be `active`
+    with scope `aggregate-public` in the site's consent registry (lib/field-trials-consent.ts, revision
+    owner-2026-09-25-v1: remudero, remudero-console, remudero-site). 1 to 24 rows, unique per modelId x
+    taskClass, each with exact keys modelId, taskClass, assigned, servedObserved, callOutcomeObserved,
+    verified; assigned at least twice the site's minimum cell, and every count and its complement either 0 or
+    at least that cell (publishableCount). verified is { state: unavailable, reason: no-verified-outcome-join
+    | followup-window-open } or observed outcomes/successes under the same rule. The importer refuses unknown
+    keys and a window that is not whole UTC days or overlaps an earlier release for a shared contributor
+    (modelFieldNoteAdmission), and chains each release into data/model-field-note-history.json. The page
+    labels a note historical once asOf is more than 72 h old.
+    PORTAL-T37 (site plan shard, still `status: queued` though #178 and #181 merged) designed the importer
+    and says a daily scheduler "may open a candidate PR only after the core exporter is proven". The site's
+    data/model-field-note.json is `null` and its history has no releases.
+
+    CORE TODAY. `rmd field-trials` (fieldTrialsCommand, src/lib/field-trials-flow.ts) writes the private
+    field-trials-flow-v1 snapshot and, only with --consent, a pseudonymised candidate release in its own
+    shape (buildFieldTrialsRelease, SMALL_CELL_MIN = 5). The snapshot's adoption family joins each
+    worker.assignment to its call by assignment id and tallies requested, selected and served models per
+    source, host, day and task class, but not served-known per selected model. The daily refresh passes no
+    --consent and the host has no consent file: the 10-18 log reads `release: withheld (no-consent-receipt)`.
+    Craig approved a consent file on 2026-10-27 (aggregate-opt-in for the three repos, receipt
+    owner-2026-10-27-craig-oley); W1-T10832 wires its host path into the refresh.
+    Swept plan/ and the 15 open PR heads: no task or PR names model-field-note or a field-note exporter.
+  design: |
+    buildModelFieldNoteCandidate in the new src/lib/field-trials-field-note.ts does the work; add
+    `rmd field-trials --field-note <out>` (a mode of the existing command, sharing its parsing,
+    output directory and salt) that reads the latest field-trials-flow-v1 snapshot and writes a CANDIDATE
+    for the site, never a published note:
+    - The file is an envelope with state `candidate-unreviewed`, the withheld-cell count and reasons, the
+      served-model gap summary, and `note`: a model-field-note-v1 body that leaves reviewedBy, reviewedAt and
+      publishedAt to the site's stage mode (PORTAL-T41). Core never stamps them, and the owner's merge of
+      the import PR is the review. The note body must pass the site's validator once those fields are
+      stamped; the candidate state lives outside it because the site schema admits no extra keys.
+    - Rows are per selected model x task class over whole UTC days ending at the last whole day the
+      snapshot covers, starting where the previous core-recorded field-note window ended (never overlapping
+      it). Each row reports assigned, servedObserved (served model known on the joined call) and
+      callOutcomeObserved (a boolean worker outcome on the joined call). verified is `unavailable` with
+      reason no-verified-outcome-join unless a verified-outcome join exists for that cell. The served-model
+      gap is stated per row as servedObserved against assigned. If the snapshot's cells cannot give the
+      joint selected-model x served-known counts, add that cross-tab to the snapshot's adoption cells rather
+      than re-reading the ledger.
+    - Disclosure: apply the site's own rule (assigned at least twice the minimum cell; each count and its
+      complement 0 or at least the cell) as a pinned contract with a fixture copied from the site validator,
+      not core's SMALL_CELL_MIN. Withhold failing cells and count them. Keep at most the site's row limit,
+      chosen deterministically, and report the rest as withheld.
+    - Consent and identity: keep the --consent path's rules. A source contributes only with a live
+      aggregate-opt-in receipt in the core consent file AND an active aggregate-public entry in the site
+      registry revision the operator pins, mapping core's owner/repo to the site's bare repo name; a
+      revoked receipt withdraws it. No host, instance, task id,
+      assignment id, account label, path or prompt enters the note; any source label in the envelope uses
+      the salted pseudonym. No consent file means a `withheld (no-consent-receipt)` result, never a
+      candidate.
+    - sourceDigest is the sha256 of the snapshot inputs the rows came from; the command also writes a
+      private record of the window it exported, for the next window's start.
+  acceptance:
+    - claim: "from a fixture snapshot the exporter writes a candidate-unreviewed envelope whose note, once owner review fields are stamped, passes a copy of the site's model-field-note-v1 validator with assigned, served-known and call-outcome-known counts per model x task class"
+      proof: 'grep: test("W1-T10831: the field-note candidate passes the site validator once reviewed" in test/routing/the-field-note-exporter-writes-a-site-candidate.test.ts'
+    - claim: "a cell under the site's disclosure rule, or one whose complement is, is withheld and counted, and more than the site's row limit keeps a deterministic subset"
+      proof: 'grep: test("W1-T10831: small cells and complements are withheld from the field note" in test/routing/the-field-note-exporter-writes-a-site-candidate.test.ts'
+    - claim: "without a live aggregate-opt-in receipt the exporter writes no candidate and reports withheld, and no private identifier appears in any candidate"
+      proof: 'grep: test("W1-T10831: the field note honours the consent receipts and carries no private ids" in test/routing/the-field-note-exporter-writes-a-site-candidate.test.ts'
+    - claim: "a second export starts its whole-UTC-day window where the previous exported window ended"
+      proof: 'grep: test("W1-T10831: consecutive field-note windows never overlap" in test/routing/the-field-note-exporter-writes-a-site-candidate.test.ts'
+    - claim: "the field-trials command's --field-note mode builds the candidate through the new module"
+      proof: 'grep: buildModelFieldNoteCandidate( in src/lib/field-trials-flow.ts'
+  falsifier: |
+    At base every case fails: no --field-note mode exists.
+    - Use SMALL_CELL_MIN instead of the site's rule: a 6-assignment cell survives and the small-cell case fails.
+    - Check each count but not its complement: the complement half fails.
+    - Stamp reviewedBy owner and reviewedAt in the exporter: the envelope-state assertion fails.
+    - Count an assignment with no joined call as served-known: the served-known assertion fails.
+    - Start each window at a fixed lookback instead of the last exported end: the window case fails.
+    GUARDS that held at base and must still hold:
+    - test/field-trials-flow.test.ts (the --consent release path: withholding, pseudonyms, refusal on a
+      private join key, revocation).
+    Each guard's existing case must fail when its production branch is removed, and pass again with zero
+    failures once it is restored.
