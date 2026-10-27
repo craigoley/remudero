@@ -9,6 +9,7 @@
 //   (3) a non-rate-limit failure never reaches the fallback at all.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mergeDirectViaRestAsync } from "#src/lib/arm-auto-merge.js";
 import { stripComments } from "./helpers/daemon-loop-walk.js";
 
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -280,4 +281,25 @@ test("the real mergeDirect dep delegates to the REST write once the live-write g
 test("the real mergeDirect dep is still REFUSED outright when live writes are not permitted", () => {
   const d = realArmDeps();
   assert.throws(() => d.mergeDirect(PR), /live write|LiveWriteBlocked|gh-pr-merge/i);
+});
+
+
+test("a direct REST port without its final operator-hold guard refuses every write", () => {
+  let writes = 0;
+  const read = (path: string) => path.includes('/files?') ? [{ filename: 'docs/rest.md' }] : {
+    state: 'open', head: { sha: 'a'.repeat(40) },
+    base: { sha: 'b'.repeat(40), ref: 'main', repo: { full_name: 'craigoley/remudero' } }, changed_files: 1,
+  };
+  assert.throws(() => mergeDirectViaRest(PR, () => { writes++; }, read), /requires an operator-hold write guard/);
+  assert.equal(writes, 0);
+});
+
+test("an async direct REST port without its final operator-hold guard refuses every write", async () => {
+  let writes = 0;
+  const read = async (path: string) => path.includes('/files?') ? [{ filename: 'docs/rest.md' }] : {
+    state: 'open', head: { sha: 'a'.repeat(40) },
+    base: { sha: 'b'.repeat(40), ref: 'main', repo: { full_name: 'craigoley/remudero' } }, changed_files: 1,
+  };
+  await assert.rejects(mergeDirectViaRestAsync(PR, async () => { writes++; }, read), /requires an operator-hold write guard/);
+  assert.equal(writes, 0);
 });

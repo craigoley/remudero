@@ -4,7 +4,7 @@ import {join} from 'node:path';
 import {makeTempDir} from '#src/lib/tmp.js';
 import type {Config} from '#src/lib/config.js';
 import {test,type TestContext} from 'node:test';
-import {armFailureAction,armFailureIsRateLimited,realArmDeps,realArmDepsAsync} from '../src/lib/arm-auto-merge.js';
+import {attemptArmAsync,armFailureAction,armFailureIsRateLimited,realArmDeps,realArmDepsAsync} from '../src/lib/arm-auto-merge.js';
 import {ghPrMergeSquash} from '../src/lib/worker.js';
 import {SecurityMergeRefused} from '../src/lib/security-merge-admission.js';
 import {withLiveWritesAllowed} from '../src/lib/live-write-guard.js';
@@ -111,3 +111,28 @@ test('final merge fences refuse unreadable configuration and torn hold evidence'
  });
  assert.equal(shim.calls().some(call=>call.startsWith('pr merge ')||call.includes('PUT')),false);
 });
+
+for(const route of ['auto','queue-auto','direct','queue-enqueue','quota','quota-retry'] as const){
+ test(`a late real-effector hold remains a named refusal through the ${route} path`,async t=>{
+  const shim=fixture(t),real=realArmDepsAsync(()=>({root:shim.root} as Config));
+  shim.addRoute({when:'/check-runs?',stdout:JSON.stringify({total_count:1,check_runs:[clean]}),writes:{path:shim.ledger,
+   content:JSON.stringify({step:'automerge.hold_engaged',authority:'console-confirmed',by:'fixture-operator',
+    reason:'hold arrived during trusted metadata',pr_number:11468})+'\n'}});
+  let attempts=0;
+  const deps={...real,ledgerLines:()=>[],say:()=>{},contributorAdmission:async()=>{},
+   mergeQueue:async()=>route.startsWith('queue'),readPlanTouch:async()=> 'untouched' as const,
+   readMergedRatchets:undefined,readMergeFacts:async()=>({mergeable:'MERGEABLE' as const,mergeableState:'clean',behindBy:0}),
+   updateBranch:async()=>({ok:true}),isMerged:async()=>false,
+   armAuto:['auto','queue-auto'].includes(route)?real.armAuto:async()=>{
+    throw Error(route.startsWith('quota')?'GraphQL: API rate limit already exceeded for user ID 4397075.':'Pull request is in clean status');
+   },mergeDirect:async(p:string)=>{
+    if(route==='quota-retry' && attempts++===0)throw Error('HTTP 405: mergeability is unsettled');
+    await real.mergeDirect(p);
+   }};
+  await withLiveWritesAllowed(async()=>{
+   const result=await attemptArmAsync(url,deps);
+   assert.equal(result.outcome,'hold-refused');
+  });
+  assert.equal(shim.calls().some(call=>call.startsWith('pr merge ')||call.includes('PUT')),false);
+ });
+}
