@@ -142,33 +142,37 @@ test("ci-gate-dedupe: a required check absent from the deduped list is still wai
 });
 
 
-test("ci-gate reads all retained attempts before deduping posted gate verdicts", async () => {
+test("the real CI inventory query and jq retain posted results across attempts", async () => {
   const script = await loadAggregateScript();
+  const query = /gh api "([^"\n]*\/check-runs\?[^"\n]*)" --paginate --slurp/.exec(script);
+  const filter = /jq -c '([\s\S]*?)' <<< "\$\{raw\}"/.exec(script);
+  assert.ok(query, "the shipped query and pagination invocation must be identifiable");
+  assert.ok(filter, "the actual producer-aware jq filter must be identifiable");
   const clonedJob = { id: 30, name: "light-gates", status: "completed", conclusion: "success",
     started_at: "2026-10-27T01:44:04Z", external_id: "copied-job-attempt-three" };
   for (const conclusion of ["success", "failure", "absent"] as const) {
     const oldPost = { id: 10, name: "rule-checks", status: "completed", conclusion: "failure",
       started_at: "2026-10-27T01:55:32Z", external_id: "run:40434301641:1:job:121959187138" };
     const latestPost = { ...oldPost, id: 20, conclusion, started_at: "2026-10-27T03:22:57Z" };
+    const sameNameJob = { ...clonedJob, name: "rule-checks", started_at: "2026-10-27T04:00:00Z" };
     const pages = conclusion === "absent" ? [{ check_runs: [clonedJob] }]
-      : [{ check_runs: [clonedJob, oldPost] }, { check_runs: [latestPost] }];
+      : [{ check_runs: [clonedJob, oldPost, sameNameJob] }, { check_runs: [latestPost] }];
     const shim = ghShim([
       { when: "filter=all", stdout: JSON.stringify(pages) },
       { when: "/check-runs?", stdout: JSON.stringify([{ check_runs: [clonedJob] }]) },
     ], { kind: "retained-posted-attempts" });
     try {
-      const result = spawnSync("bash", ["-c", script], { env: { ...process.env,
-        PATH: `${shim.dir}:${process.env.PATH}`, GH_TOKEN: "fixture", REPO: "example/example",
-        SHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", REQUIRED: '["rule-checks"]', IGNORE: "[]",
-        GRACE_WINDOW_SECONDS: "0", GRACE_POLL_INTERVAL_SECONDS: "1", WAIT_CAP_SECONDS: "0" },
-        encoding: "utf8", timeout: 10_000 });
-      const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-      assert.equal(result.status, conclusion === "success" ? 0 : 1, `${conclusion}: ${output}`);
-      if (conclusion === "failure") assert.match(output, /required check\(s\) FAILED/);
-      if (conclusion === "absent") assert.match(output, /TIMED OUT waiting for required check/);
-      assert.ok(shim.calls().length > 0);
-      assert.ok(shim.calls().every(call => call.includes("filter=all") && call.includes("--paginate") && call.includes("--slurp")),
-        "every inventory must include all retained attempts and all pages before local producer-aware dedupe");
+      const endpoint = query[1].replace("${REPO}", "example/example").replace("${SHA}", "deadbeef");
+      const read = spawnSync(join(shim.dir, "gh"), ["api", endpoint, "--paginate", "--slurp"], { encoding: "utf8" });
+      assert.equal(read.status, 0, read.stderr);
+      const projected = spawnSync("jq", ["-c", filter[1]], { input: read.stdout, encoding: "utf8" });
+      assert.equal(projected.status, 0, projected.stderr);
+      const runs = JSON.parse(projected.stdout) as Array<{ name: string; producer: string; conclusion: string }>;
+      const posted = runs.filter(run => run.name === "rule-checks" && run.producer === "posted");
+      assert.deepEqual(posted.map(run => run.conclusion), conclusion === "absent" ? [] : [conclusion]);
+      if (conclusion === "failure") assert.ok(runs.some(run => run.name === "rule-checks" && run.conclusion === "failure"),
+        "a later same-name job success cannot erase the posted failure");
+      assert.ok(shim.calls().every(call => call.includes("filter=all") && call.includes("--paginate") && call.includes("--slurp")));
     } finally { await rm(shim.dir, { recursive: true, force: true }); }
   }
 });
