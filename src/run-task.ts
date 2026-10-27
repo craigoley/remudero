@@ -31174,7 +31174,7 @@ export async function createFixRungWorktree(
   branch: string,
   deps: CheckoutFixHeadRefDeps = {},
 ): Promise<FixHeadRecovery | undefined> {
-  await hostWorktreeGitAsync(repoDir, ["fetch", "origin", "--quiet"]);
+  await fetchOriginRetryingRefLockAsync((args) => hostWorktreeGitAsync(repoDir, args));
   await hostWorktreeGitAsync(repoDir, ["worktree", "add", worktreePath, `origin/${branch}`]);
   return checkoutFixHeadRef(repoDir, worktreePath, branch, deps);
 }
