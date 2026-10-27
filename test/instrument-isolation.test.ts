@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -496,4 +496,43 @@ test("W1-T297 criteria 4/5/7: runFixRung never spends an ordinary add-the-work s
 
 test("W1-T297 criterion 7: the binding flag is computed in the review floor and CONSUMED by the run loop — wired, not dead code (Standing rule 14)", () => {
   assert.match(runTaskSrc, /review\.instrumentEntangled/, "grep proof: instrumentEntangled in src/run-task.ts");
+});
+
+
+test("a current advisory cannot mask the real review failure or force a prerequisite before an independent design hold", async t => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-advisory-route-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const verdict = judgeReview(SIMPLE_CRITERIA, {
+    planLint: CLEAN_PLAN_LINT, diff: ENTANGLED_DIFF, report: "REPORT\nNo implementation supplied.",
+  });
+  assert.equal(verdict.state, "failure");
+  assert.equal(verdict.instrumentEntangled, true);
+  assert.equal(verdict.instrumentEntanglementPolicy, "advisory");
+  assert.equal(reviewLedgerLegibilityFields(verdict).failure_class, "unmet_criteria");
+  assert.equal(reviewLedgerLegibilityFields(verdict).instrument_entangled, true);
+  const events: string[] = [];
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const head = "deadbeef";
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(), strikeCap: 2,
+    initialReview: { ...verdict, headSha: head, reviewerOutcome: "success" },
+    deps: {
+      spawn: async () => { events.push("spawn"); return result({}); },
+      waitForCiGreen: async () => "green",
+      runReview: async () => { throw new Error("an existing design hold must remain terminal"); },
+      push: () => { throw new Error("an existing design hold cannot publish"); },
+      issues: fakeIssues(issueCalls), ledgerPath: join(root, "ledger.ndjson"),
+      log: step => events.push(step), say: () => {}, account: r => r,
+      ledgerLines: () => [{ step: "fix.needs_design", task_id: "W1-TX", head_sha: head,
+        reason: "the existing contract lacks the required production companion" },
+        { step: "fix.stood_down", site: "rung.needs_design", task_id: "W1-TX", head_sha: head,
+          issue_url: "https://github.com/acme/remudero/issues/9" }],
+    },
+  });
+  assert.equal(outcome.outcome, "needs_design");
+  assert.equal(outcome.strikes, 0);
+  assert.equal(outcome.issueUrl, "https://github.com/acme/remudero/issues/9");
+  assert.equal(events.includes("spawn"), false);
+  assert.equal(events.includes("fix.instrument_entangled"), false);
+  assert.equal(issueCalls.length, 0);
 });
