@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
+import { improvementOutcomeStateDir } from "./code-health-store.js";
+import { projectGardenerOpportunityEvidence } from "./gardener-opportunity-evidence.js";
+import { closeSync, constants, fstatSync, openSync, readSync, lstatSync } from "node:fs";
 import { createBoardSnapshotReader, readBoardClosedCollectionReceipt, readOpenBoardSnapshot } from "./board-snapshot-cache.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { dailyDateAt, dailyWindow, DEFAULT_DAILY_PROGRESS_ZONE, nextDailyDue, shiftDailyDate } from "./daily-progress-calendar.js";
@@ -69,21 +71,51 @@ const activityLabel: Readonly<Record<string, string>> = {
   "fix.dispatch": "Repair attempt recorded", "pr.opened": "Pull request opened", "verdict": "Work status reported",
 };
 
-async function activity(source: DailyProgressInstance, since: string, now: number, signal?: AbortSignal): Promise<{ events: DailyProgressEvent[]; gaps: number; available: boolean }> {
+/** A native observation is activity, never task-completion or causal benefit credit. */
+function improvementActivity(row: Record<string, unknown>, repository: string, occurredAt: string, now: number): { title: string; taskIds: string[]; url: string | null } | undefined {
+  if (row.step !== "opportunity_outcome.effect_observed" || typeof row.proposal_id !== "string") return undefined;
+  const projected = projectGardenerOpportunityEvidence([{ key: row.opportunity_key, proposalId: row.proposal_id,
+    candidate: { repo: repository, key: row.proposal_id, observedAt: occurredAt }, sourceIds: [row.source_snapshot_id ?? (row.improvement_source as { snapshotId?: unknown } | undefined)?.snapshotId],
+    at: occurredAt, state: "merged", improvement: row.improvement_source, effect: row.effect }], repository, fixedClock(now));
+  if (projected.state !== "reported" || projected.improvementEffects.length !== 1) return undefined;
+  const effect = projected.improvementEffects[0]!;
+  const title = effect.verdict === "helped" ? "Improvement check reported fewer findings for this rule"
+    : effect.verdict === "hurt" ? "Improvement check reported more findings for this rule"
+    : effect.verdict === "unchanged" ? "Improvement check reported the same number of findings for this rule"
+    : "Improvement check needs more evidence";
+  return { title, taskIds: effect.taskIds, url: effect.mergePrUrls[0] ?? effect.planPrUrl };
+}
+
+async function activity(source: DailyProgressInstance, fleetStateDir: string, since: string, now: number, signal?: AbortSignal): Promise<{ events: DailyProgressEvent[]; gaps: number; available: boolean }> {
   const events: DailyProgressEvent[] = [];
   let gaps = 0, rowsRead = 0;
-  for await (const row of openLedgerUnion(source.stateDir, { since, dedupe: true, ...(signal ? { signal } : {}),
+  const roots = [source.stateDir], isolated = improvementOutcomeStateDir(fleetStateDir, source.repository, source.name);
+  try { if (!lstatSync(isolated).isDirectory()) gaps++; else roots.push(isolated); }
+  catch (error) {
+    // The optional projection has no history before its first publication. An unreadable existing
+    // namespace is a gap; absence does not imply a complete native activity corpus.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") gaps++;
+  }
+  for (const root of roots) for await (const row of openLedgerUnion(root, { since, dedupe: true, ...(signal ? { signal } : {}),
     onUnreadArchive: () => gaps++, onUnreadLive: () => gaps++, onUnreadDirectory: () => gaps++, onMalformedRow: () => gaps++ })) {
     signal?.throwIfAborted();
     rowsRead++;
-    const occurredAt = stamp(row.ts), label = typeof row.step === "string" ? activityLabel[row.step] : undefined;
-    if (!occurredAt || Date.parse(occurredAt) > now || !label) continue;
+    const occurredAt = stamp(row.ts);
+    if (!occurredAt || Date.parse(occurredAt) > now) continue;
+    const improvement = improvementActivity(row, source.repository, occurredAt, now);
+    const label = improvement?.title ?? (typeof row.step === "string" ? activityLabel[row.step] : undefined);
+    if (!label) continue;
     if (row.repository !== undefined && row.repository !== source.repository) continue;
     const task = typeof row.task_id === "string" && TASK.test(row.task_id) ? row.task_id : undefined;
-    const id = createHash("sha256").update(JSON.stringify([source.repository, row])).digest("hex");
+    // Producer metadata differs between the native and projection ledgers. Bind duplicate
+    // observations to their source/effect identity instead of the append location or actor.
+    const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable) : value && typeof value === "object"
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, child]) => [key, stable(child)])) : value;
+    const identity = improvement ? [source.repository, occurredAt, row.proposal_id, row.improvement_source, row.effect] : [source.repository, row];
+    const id = createHash("sha256").update(JSON.stringify(stable(identity))).digest("hex");
     if (events.length >= 100_000) throw new Error("Daily activity exceeds the bounded collection population; retained history is unchanged.");
     events.push({ id: `activity:${source.repository}:${id}`, repository: source.repository, kind: "activity", sourceId: `${source.repository}:ledger:${source.name}`,
-      occurredAt, observedAt: fixedClock(now).iso(), fleetAttribution: "confirmed", taskIds: task ? [task] : [], title: task ? `${label} · ${task}` : label, url: null });
+      occurredAt, observedAt: fixedClock(now).iso(), fleetAttribution: "confirmed", taskIds: improvement?.taskIds ?? (task ? [task] : []), title: improvement ? label : task ? `${label} · ${task}` : label, url: improvement?.url ?? null });
   }
   return { events, gaps, available: gaps === 0 || rowsRead > 0 };
 }
@@ -126,7 +158,7 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
       const receipt = readBoardClosedCollectionReceipt(instance.root, owner, repo, rows);
       return { instance, saved, rows, receipt, open: readOpenBoardSnapshot(instance.root, owner, repo) };
     });
-    const activities = await Promise.all(instances.map(async instance => ({ instance, ...await activity(instance, earliest, now, signal) })));
+    const activities = await Promise.all(instances.map(async instance => ({ instance, ...await activity(instance, config.stateDir, earliest, now, signal) })));
     signal?.throwIfAborted();
     let closedThrough = previousJob?.closedThrough ?? shiftDailyDate(yesterday, -1), requiredFailed = false;
     for (const reportDate of ordered) {
