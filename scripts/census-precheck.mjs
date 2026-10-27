@@ -1169,6 +1169,13 @@ export const PRECHECK_TRIGGERED_SUITES = [
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
+  // W1-T10820: the alias suite's real-tree check reddens when the resolver or the imports map it reads moves.
+  { testFile: "test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts",
+    trigger: ({ changed }) => changed.some((p) => [
+      "src/lib/affected-suites.ts", "src/lib/coverage-narrow.ts", "package.json",
+      "test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts",
+    ].includes(p)),
+    remedy: "resolve every #src/run-task.js importer to src/run-task.ts through package.json imports (src/lib/affected-suites.ts)" },
   { testFile: "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts", gitFree: true,
     trigger: ({ changed }) => changed.length > 0,
     remedy: "run the approved-skill conformance census over the current tracked-file match domain" },
