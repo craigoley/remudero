@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -137,6 +137,7 @@ function basePr(over: Partial<OpenPrView> = {}): OpenPrView {
 function fixture(t: { after: (fn: () => void) => void }, ageMin: number, extraRows: Record<string, unknown>[] = []) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}slo-rung-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "state"));
   const rows: Record<string, unknown>[] = [
     { step: "fix.dispatch", task_id: "W1-T4270", head_sha: "old-head", ts: stamp(-2000), strike: 1 },
     { step: "sweep.disposed", pr_number: 8954, blocker: "strikes-exhausted", blocker_since: stamp(-ageMin * MIN), ts: stamp(-MIN) },

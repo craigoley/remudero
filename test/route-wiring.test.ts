@@ -17,6 +17,11 @@ import { ghShim } from "#test/helpers/gh-shim.js";
 import type { TraceGithub } from "#src/lib/trace.js";
 import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
 import { dailyCostCeilingOverridePath } from "#src/lib/policy.js";
+import { operatorNoteStore } from "#src/lib/operator-notes.js";
+import { readNativeOperatorNotes } from "#src/cli/commands/run-task-verb.js";
+import { renderImplementPrompt, renderReconPrompt } from "#src/run-task.js";
+import { renderOperatorNotes } from "#src/lib/operator-notes.js";
+import type { Config } from "#src/lib/config.js";
 
 // ── WHAT THIS SUITE ADDS, AND WHY IT IS NOT test/route-registration.test.ts AGAIN.
 //
@@ -321,6 +326,10 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/products/deployment",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts and the production-assembly test below (W1-T10615).
   "POST /v1/products/build",
+  // Assembled default-transport HTTP proof: W1-T10618 in test/console-api/serve/product-routes.test.ts.
+  "POST /v1/products/case",
+  // Assembled default-transport HTTP proof: W1-T10619 in test/console-api/serve/product-routes.test.ts.
+  "POST /v1/products/evaluation",
   "POST /v1/control/assistant-action",
   "POST /v1/control/stop",
   "POST /v1/control/resume",
@@ -340,6 +349,7 @@ const COVERED: ReadonlySet<string> = new Set([
 // ── Production-shaped assembly ───────────────────────────────────────────────
 
 interface Harness {
+  deps: ServeDeps;
   base: string;
   /** `config.root` in production — fleet-control flag files and dispatch markers land here. */
   fleetRoot: string;
@@ -375,6 +385,7 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>, operator 
   const ledgerRoot = mkdtempSync(join(tmpdir(), "rmd-wiring-ledger-"));
 
   mkdirSync(join(ledgerRoot, "state"), { recursive: true });
+  mkdirSync(join(fleetRoot, "state"), { recursive: true });
   const ledgerPath = join(ledgerRoot, "state", "ledger.ndjson");
   writeFileSync(ledgerPath, "");
   mkdirSync(join(questionsRoot, "plan"), { recursive: true });
@@ -407,6 +418,8 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>, operator 
     issues,
     fleetControlRoot: fleetRoot,
     questionsRoot,
+    assistantRepository: "acme/remudero",
+    operatorNoteStore: operatorNoteStore({ stateDir: join(fleetRoot, "state"), repository: "acme/remudero", legacyRoot: questionsRoot }),
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
     // W1-T500: enforcement is on and the bearer token is pinned `low`; these routes are MIDDLE and
     // HIGH, so the request must arrive the way the operator's does — over the tailnet, whose
@@ -424,14 +437,70 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>, operator 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   try {
-    return await fn({ base: `http://127.0.0.1:${port}`, fleetRoot, questionsRoot, ledgerPath, closed, operatorSession });
+    return await fn({ deps, base: `http://127.0.0.1:${port}`, fleetRoot, questionsRoot, ledgerPath, closed, operatorSession });
   } finally {
-    server.close();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    for (const root of [fleetRoot, questionsRoot, ledgerRoot]) rmSync(root, { recursive: true, force: true });
   }
 }
 
 /** The ACL app-capability the tailnet grantor looks for. */
 const TAILNET_CAP = "remudero:console";
+
+test("W1-T10772: accepted guidance survives a serving generation switch", async () => {
+  await withProductionServer(async h => {
+    const response = await post(h.base, "/v1/operator-notes/add", {
+      taskId: "W1-T10772", author: "operator", note: "retain the explicit store", ts: "1999-01-01T00:00:00.000Z",
+    });
+    assert.equal(response.status, 200);
+    const receipt = await response.json() as { ok: boolean; ts: string };
+    assert.equal(receipt.ok, true);
+    assert.notEqual(receipt.ts, "1999-01-01T00:00:00.000Z");
+    const nextRoot = join(h.fleetRoot, "generation-b");
+    mkdirSync(nextRoot);
+    const generationRoots = [h.questionsRoot, nextRoot];
+    const generationFiles = generationRoots.map(root => readdirSync(root, { recursive: true }).sort());
+    const store = operatorNoteStore({ stateDir: join(h.fleetRoot, "state"), repository: "acme/remudero", legacyRoot: nextRoot });
+    const server = buildServeServer({ ...h.deps, questionsRoot: nextRoot, operatorNoteStore: store });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const listed = await fetch(`${base}/v1/operator-notes?taskId=W1-T10772`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+      assert.equal(listed.status, 200);
+      const notes = readNativeOperatorNotes({ root: h.fleetRoot } as Config, "acme/remudero", nextRoot, "W1-T10772");
+      assert.deepEqual((await listed.json() as { notes: unknown }).notes, notes);
+      assert.equal(notes.length, 1);
+      assert.deepEqual(notes[0], { ts: receipt.ts, taskId: "W1-T10772", author: "operator", note: "retain the explicit store" });
+      const block = renderOperatorNotes(notes);
+      assert.ok(renderReconPrompt("", block).includes("retain the explicit store"));
+      assert.ok(renderImplementPrompt({ id: "W1-T10772", title: "persist guidance" } as never, "", "generation-b", "", block).includes("retain the explicit store"));
+      assert.deepEqual(readNativeOperatorNotes({ root: h.fleetRoot } as Config, "foreign/remudero", nextRoot, "W1-T10772"), []);
+      assert.deepEqual(readNativeOperatorNotes({ root: h.fleetRoot } as Config, "acme/remudero", nextRoot, "W1-T10773"), []);
+      assert.equal(existsSync(join(nextRoot, "plan", "operator-notes.ndjson")), false);
+      assert.equal(existsSync(join(h.questionsRoot, "plan", "operator-notes.ndjson")), false);
+      assert.equal(ledgerSteps(h.ledgerPath).filter(row => row.step === "panel.operator_note_added").length, 1);
+      const foreign = buildServeServer({ ...h.deps, operatorNoteStore: operatorNoteStore({
+        stateDir: join(h.fleetRoot, "state"), repository: "foreign/remudero",
+      }) });
+      await new Promise<void>(resolve => foreign.listen(0, "127.0.0.1", resolve));
+      try {
+        const refused = await post(`http://127.0.0.1:${(foreign.address() as AddressInfo).port}`, "/v1/operator-notes/add", {
+          taskId: "W1-T10772", author: "operator", note: "wrong repository",
+        });
+        assert.equal(refused.status, 500, "a foreign store cannot be used by this serving repository");
+        assert.deepEqual(await refused.json(), { error: "write_failed" });
+        assert.equal(ledgerSteps(h.ledgerPath).filter(row => row.step === "panel.operator_note_added").length, 1);
+      } finally {
+        await new Promise<void>((resolve, reject) => foreign.close(error => error ? reject(error) : resolve()));
+      }
+      assert.deepEqual(generationRoots.map(root => readdirSync(root, { recursive: true }).sort()), generationFiles,
+        "guidance reads and refused writes must leave both code generations unchanged");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      rmSync(nextRoot, { recursive: true, force: true });
+    }
+  });
+});
 
 /** HIGH-tier routes also need the server-issued second factor — confirm, then replay with it. */
 const HIGH_TIER = new Set([
@@ -633,6 +702,33 @@ test("W1-T10615: POST /v1/products/build is high tier, confirmed, and reads the 
     assert.equal((await started.json()).error, "repository_missing");
     assert.ok(!existsSync(join(h.fleetRoot, "state", "KICK_REQUESTED-wreckterra:W9-T1")), "a refusal writes no marker");
     assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "a refused build preserves the ledger");
+  }, true, true);
+});
+
+test("W1-T10618: POST /v1/products/case requires confirmation and persists under the fleet root", async () => {
+  await withProductionServer(async (h) => {
+    const headers: Record<string, string> = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json",
+      [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+    const payload = JSON.stringify({ version: "product-case-v1", action: "import", command: { version: "product-intent-v1",
+      requestId: "wiring-case-00001", expectedRevision: 0, brief: { idea: "approved original mobile prototype" } } });
+    const send = (extra: Record<string, string> = {}) => fetch(`${h.base}/v1/products/case`, {
+      method: "POST", headers: { ...headers, ...extra }, body: payload });
+    const refused = await send();
+    assert.equal(refused.status, 403);
+    assert.equal((await refused.json()).error, "confirm_nonce_required");
+    const confirmed = await fetch(`${h.base}/v1/confirm`, { method: "POST", headers,
+      body: JSON.stringify({ method: "POST", path: "/v1/products/case", payload }) });
+    assert.equal(confirmed.status, 200);
+    const { nonce } = await confirmed.json() as { nonce: string };
+    const saved = await send({ "x-confirm-nonce": nonce });
+    assert.equal(saved.status, 200);
+    const { productId } = await saved.json() as { productId: string };
+    const own = await fetch(`${h.base}/v1/products?id=${productId}`, { headers });
+    assert.equal(own.status, 200);
+    assert.equal((await own.json()).product.brief.idea, "approved original mobile prototype");
+    assert.ok(existsSync(join(h.fleetRoot, "state/products/v1")));
+    assert.ok(!existsSync(join(h.questionsRoot, "state/products")));
+    assert.equal((await send({ "x-confirm-nonce": nonce })).status, 403, "confirmation cannot be replayed");
   }, true, true);
 });
 
